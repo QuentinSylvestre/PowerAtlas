@@ -1130,6 +1130,7 @@
   // Stop (turn active + textarea empty), Queue+Steer (turn active + textarea
   // has text). Called by setTurn() and by the promptInput input handler so
   // the correct pair is shown as the user types or clears the textarea.
+  // mirrors index.html's dashRefreshComposerControls() — keep in sync
   function refreshComposerControls() {
     var hasText = promptInput.value.trim().length > 0;
     // Send: visible when not in a turn; also disabled when no session or no WS
@@ -1878,6 +1879,7 @@
     if (key === _noAnchorKey) _noAnchorKey = null; // allow a fresh no-anchor slot next time
   }
 
+  // mirrors index.html's dashRemoveAllCrewPanels() — keep in sync
   function removeAllCrewPanels() {
     Object.keys(crews).forEach(function(k) { removeSingleCrewPanel(k); });
     crews = {};
@@ -1885,6 +1887,7 @@
     _noAnchorKey = null; // reset for the next session
   }
 
+  // mirrors index.html's dashSetCrew() — keep in sync
   function setCrew(entries, toolCallId) {
     var key = (toolCallId && toolCallId !== '') ? toolCallId : null;
 
@@ -1988,6 +1991,7 @@
       : state === 'done' ? 'done' : (entry.action || 'working…');
   }
 
+  // mirrors index.html's dashOpenSubagent() — keep in sync
   function openSubagent(sid) {
     if (!sid) return;
     subViewSid = sid;
@@ -2001,6 +2005,7 @@
     connectSubWs(sid);
   }
 
+  // mirrors index.html's dashCloseSubagentView() — keep in sync
   function closeSubagentView() {
     var wasOpen = !!subViewSid;
     subViewSid = null;
@@ -5153,6 +5158,15 @@
       _sessionCwd = '';
       sidRevealed = false;
       renderSidLabel();
+      // The agent process has exited, so any command catalogue it reported
+      // is gone too -- there is nothing left for it to describe. Mirrors
+      // index.html's own agent_died handler (dashboard/ACP feature-parity
+      // plan Phase 2), which already resets this here; missing on this page
+      // was a real behavioral asymmetry (Step 9 review, Fix 6) contradicting
+      // SC1's "works identically on both pages" text -- cheap and correct to
+      // add regardless, since the composer is fully reset immediately around
+      // it anyway.
+      resetCommandPalette();
       // Every sub-agent process went with the agent, the same as every
       // session did — the crew and any open panel are naming processes that
       // no longer exist.
@@ -5313,6 +5327,7 @@
     });
   }
 
+  // mirrors index.html's dashConnect() — keep in sync
   function connect() {
     // SC-3: cancel any pending backoff timer — prevents double-connect when the
     // user presses Reconnect while a timer is already scheduled.

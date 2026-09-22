@@ -526,7 +526,20 @@ function confirmCommandSelection() {
   cmdOnPromptChanged();
   var sid = cmdGetSessionId();
   if (!sid) return;
-  cmdSend('commands_execute', { name: name }, sid);
+  // Step 9 review, Fix 10: cmdSend()'s own return value used to go
+  // unchecked -- a failed send (while disconnected) produced no feedback
+  // beyond whatever send() itself already logs on failure (`logLine('error',
+  // 'not connected — nothing sent')`, both host pages' own send()). That
+  // line is already clear that nothing was sent, but not what was attempted
+  // -- the user chose to strengthen this logLine signal rather than add a
+  // toast (acp.html has no toast infrastructure at all), so a user scanning
+  // the debug log panel both pages already have can tell which command
+  // silently failed to execute, not just that "nothing was sent" in the
+  // abstract.
+  var sent = cmdSend('commands_execute', { name: name }, sid);
+  if (!sent) {
+    logLine('error', 'command "/' + name + '" was not executed — see the previous line');
+  }
 }
 
 /** Move the dropdown selection up or down. */

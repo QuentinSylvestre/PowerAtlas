@@ -1926,12 +1926,34 @@ function clearTranscript() {
 // acp.html's own dispatch for them is left untouched rather than routed
 // through a shared function that would gain a `replaying` parameter for no
 // caller that needs it yet.
+//
+// steer_sent (Step 9 review, Fix 2) belongs in this list by the same test
+// the header above applies to everything else: acp.html's own `steer_sent`
+// case carries an explicit "No !replaying guard" comment -- it has no
+// replaying-conditional behaviour, so it always renders the same dimmed
+// steer band whether live or replayed. It was simply missing here, which
+// meant a dashboard `history` replay (the reconnect ring-buffer replay,
+// dashHandle()'s `history` case -- not the static /api/session-transcript
+// fetch, whose translate_transcript() never emits this frame shape) silently
+// dropped any steer_sent event it carried: no band rendered at all. Fixed by
+// adding the case below, via the same addMessage() (textContent-only, see
+// its own header) both host pages already use for a live steer_sent.
+// Deliberately does NOT touch any page-lifecycle state (no composer/textarea
+// mutation) -- this module stays page-lifecycle-state-agnostic; the
+// duplicate-send detection this same fix requires lives in index.html's own
+// `history`-case code instead (dashHandle(), which already has payload.events
+// in hand), not here.
 function renderTranscriptFrame(frame) {
   var type = frame && frame.type;
   var payload = (frame && frame.payload) || {};
   if (type === 'chunk') {
     hideThinking();
     appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
+    return;
+  }
+  if (type === 'steer_sent') {
+    var steerText = payload && typeof payload.text === 'string' ? payload.text : '';
+    if (steerText) addMessage('steer', steerText);
     return;
   }
   if (type === 'rendered') {

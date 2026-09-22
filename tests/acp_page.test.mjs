@@ -7878,6 +7878,40 @@ check("steer_sent frame with empty text is no-op", (tpl) => {
   assertEqual(steerBands.length, 0, "transcript should have no .acp-msg-steer for empty text");
 });
 
+check("transcript-renderer.js: renderTranscriptFrame renders a steer_sent frame as a dimmed steer band, closing the dashboard's replay gap (Fix 2, Step 9 review)", (tpl) => {
+  // Calls the shared module's function directly, bypassing acp.html's own
+  // handle() (which intercepts steer_sent via its own explicit case before
+  // ever reaching a generic renderTranscriptFrame dispatch -- see the tests
+  // above) -- this is what dashHandle()'s `history` case now reaches via
+  // renderTranscriptHistory() during a dashboard reconnect replay, where
+  // this frame type previously had no case at all and was silently dropped.
+  const { page } = connected(tpl);
+  page.sandbox.renderTranscriptFrame({ type: "steer_sent", payload: { text: "look at foo.py" } });
+  const steerBands = page.el("acpTranscript").querySelectorAll(".acp-msg-steer");
+  assertEqual(steerBands.length, 1, "renderTranscriptFrame must render exactly one steer band");
+  const body = steerBands[0].querySelector(".acp-msg-body");
+  assert(body !== null, ".acp-msg-steer should contain .acp-msg-body");
+  assertEqual(body.textContent, "look at foo.py", "the band must contain the steered text");
+});
+
+check("transcript-renderer.js: renderTranscriptFrame ignores a steer_sent frame with empty/missing text", (tpl) => {
+  const { page } = connected(tpl);
+  const before = page.el("acpTranscript").childNodes.length;
+  page.sandbox.renderTranscriptFrame({ type: "steer_sent", payload: { text: "" } });
+  page.sandbox.renderTranscriptFrame({ type: "steer_sent", payload: {} });
+  const after = page.el("acpTranscript").childNodes.length;
+  assertEqual(after, before, "an empty/missing steer text must not append anything");
+});
+
+check("acp.html's own steer_sent handling is unaffected by renderTranscriptFrame gaining a steer_sent case (acp.html intercepts the frame type via its own handle() case first)", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "steer_sent", sessionId: live, payload: { text: "do X" } });
+  const steerBands = page.el("acpTranscript").querySelectorAll(".acp-msg-steer");
+  assertEqual(steerBands.length, 1,
+    "acp.html's own live handle() dispatch must still produce exactly one band, not two, confirming " +
+    "renderTranscriptFrame's new case is never reached for a live acp.html steer_sent frame");
+});
+
 check("error frame during steer restores textarea text", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("important steer");
@@ -9012,6 +9046,44 @@ check("dropdownEnterSendsCommandsExecute", (tpl) => {
     "Enter with dropdown open must NOT send a prompt frame");
   assert(page.el("acpCmdDropdown").hidden,
     "dropdown should be hidden after command selection");
+});
+
+// commandSendFailureLogsAttemptedCommand
+// A failed commands_execute send (the socket is disconnected) used to
+// produce no feedback beyond send()'s own generic "not connected — nothing
+// sent" logLine call. The user explicitly chose NOT to add a toast (acp.html
+// has no toast infrastructure at all) -- instead, confirmCommandSelection()
+// now checks cmdSend()'s return value and adds one more specific logLine
+// entry naming the command that failed to execute, so a user scanning the
+// debug log panel understands what didn't happen, not just that "nothing was
+// sent" in the abstract (Step 9 review, Fix 10). composer-chrome.js is
+// shared, so this is exercised once here (acp.html) rather than duplicated
+// on the dashboard side too.
+check("commandSendFailureLogsAttemptedCommand", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "tools", description: "Tools list" }] },
+  });
+  const prompt = page.el("acpPrompt");
+  prompt.value = "";
+  prompt.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assert(!page.el("acpCmdDropdown").hidden, "fixture: dropdown should be open");
+  page.socket().readyState = 3; // simulate a disconnected socket (FakeWs.OPEN === 1)
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(page.sentOf("commands_execute").length, 0,
+    "nothing should have actually reached the wire while disconnected");
+  const lines = page.el("acpLog").querySelectorAll(".acp-log-body");
+  assert(lines.length > 0, "a log line must have been added for the failed send");
+  const last = lines[lines.length - 1];
+  assert(/tools/.test(last.textContent),
+    "the log entry must name the attempted command ('tools'), not just say nothing was sent in the abstract");
+  assert(/not executed/.test(last.textContent),
+    "the log entry must make clear the command did not execute");
 });
 
 // spaceAfterCommandDismissesDropdown
@@ -10466,6 +10538,19 @@ const DASH_CONNECT_NAMES = [
 // Real source, not a hand-rewritten stand-in, for the same reason every
 // other click-dispatch region in this file is one.
 const DASH_CLOSE_BTN_NAMES = ["dashCloseBtn.addEventListener"];
+// openSessionTranscript region (Fix 3, Step 9 review): the whole function,
+// including its fetch-`.catch()` branch under test -- real source, same
+// reasoning as every other click/async-dispatch region in this file. No
+// top-level side effects (a bare function declaration), so unlike
+// connectRegion it can load unconditionally and unordered relative to the
+// other regions -- it only reads dashCloseIfAbandoned/dashCloseSubagentView/
+// dashRemoveAllCrewPanels/dashCloseSubWs/renderTranscriptHistory/fetch/
+// dashMaybeAttach as free variables AT CALL TIME, never at parse time.
+const DASH_OPEN_TRANSCRIPT_NAMES = ["function openSessionTranscript"];
+// dashRailForgetSession region (Fix 3, Step 9 review): same reasoning as
+// openSessionTranscriptRegion above -- a standalone function declaration
+// with no top-level side effects.
+const DASH_RAIL_FORGET_NAMES = ["function dashRailForgetSession"];
 
 function dashPickerSource() {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
@@ -10645,11 +10730,49 @@ function dashPickerSource() {
     }
   }
 
-  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion, connectRegion, closeBtnRegion };
+  // openSessionTranscript region (Fix 3, Step 9 review): from its own
+  // declaration through the `// ---- Phase 3: live-attach wiring` comment
+  // that immediately follows it in the real file.
+  const openTranscriptFrom = src.indexOf("function openSessionTranscript");
+  if (openTranscriptFrom < 0) throw new Error("index.html no longer defines openSessionTranscript");
+  const openTranscriptTo = src.indexOf("// ---- Phase 3: live-attach wiring", openTranscriptFrom);
+  if (openTranscriptTo < 0) throw new Error("index.html's live-attach wiring comment no longer follows openSessionTranscript");
+  const openSessionTranscriptRegion = src.slice(openTranscriptFrom, openTranscriptTo);
+  for (const name of DASH_OPEN_TRANSCRIPT_NAMES) {
+    if (!openSessionTranscriptRegion.includes(name)) {
+      throw new Error(
+        `the extracted openSessionTranscript region does not contain ${name}; it has moved`);
+    }
+  }
+
+  // dashRailForgetSession region (Fix 3, Step 9 review): from its own
+  // declaration through the start of dashDeleteSession, the function that
+  // immediately follows it in the real file.
+  const railForgetFrom = src.indexOf("function dashRailForgetSession");
+  if (railForgetFrom < 0) throw new Error("index.html no longer defines dashRailForgetSession");
+  const railForgetTo = src.indexOf("function dashDeleteSession", railForgetFrom);
+  if (railForgetTo < 0) throw new Error("index.html's dashDeleteSession no longer follows dashRailForgetSession");
+  const railForgetRegion = src.slice(railForgetFrom, railForgetTo);
+  for (const name of DASH_RAIL_FORGET_NAMES) {
+    if (!railForgetRegion.includes(name)) {
+      throw new Error(
+        `the extracted dashRailForgetSession region does not contain ${name}; it has moved`);
+    }
+  }
+
+  return {
+    composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion,
+    crewSubagentRegion, handleRegion, pickerRegion, connectRegion, closeBtnRegion,
+    openSessionTranscriptRegion, railForgetRegion,
+  };
 }
 
 function loadDashPicker(opts = {}) {
-  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion, connectRegion, closeBtnRegion } = dashPickerSource();
+  const {
+    composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion,
+    crewSubagentRegion, handleRegion, pickerRegion, connectRegion, closeBtnRegion,
+    openSessionTranscriptRegion, railForgetRegion,
+  } = dashPickerSource();
 
   // All picker-element IDs that must exist in the byId map for parse-time
   // wiring (document.getElementById calls in the picker script body) to work.
@@ -10732,6 +10855,9 @@ function loadDashPicker(opts = {}) {
   byId.set("dashSubRole", new El("span"));
   byId.set("dashSubStatus", new El("span"));
   byId.set("dashSubTranscript", new El("div"));
+  // openSessionTranscript()/dashRailForgetSession() (Fix 3, Step 9 review)
+  // both look this up by id to clear/replace the transcript panel's content.
+  byId.set("dashTranscript", new El("div"));
 
   const fetches = [];
   const sentFrames = [];
@@ -10855,6 +10981,11 @@ function loadDashPicker(opts = {}) {
         return el;
       },
       getElementById: (id) => byId.get(id) ?? null,
+      // openSessionTranscript() (Fix 3, Step 9 review) calls
+      // document.querySelectorAll('.acp-rail-row.viewing') to clear the
+      // previously-viewed row's highlight -- no rail rows are simulated in
+      // this harness, so an empty, forEach-able result is the correct stand-in.
+      querySelectorAll: () => [],
       addEventListener: (type, fn) => {
         if (!dashDocListeners.has(type)) dashDocListeners.set(type, []);
         dashDocListeners.get(type).push(fn);
@@ -10876,6 +11007,13 @@ function loadDashPicker(opts = {}) {
       // the default resolved-ok response below, which is what drives it to
       // dashReportStaleToken() instead.
       if (opts.fetchFails) return Promise.reject(new Error("network error"));
+      // opts.sessionTranscriptFails (Fix 3, Step 9 review): a failed
+      // /api/session-transcript fetch specifically -- openSessionTranscript()'s
+      // own .catch() branch under test, distinct from opts.fetchFails above
+      // (which would also break the picker's own workspace-loading fetches).
+      if (opts.sessionTranscriptFails && String(url).indexOf("/api/session-transcript") === 0) {
+        return Promise.reject(new Error("network error"));
+      }
       return Promise.resolve({
         ok: true, status: 200,
         json: () => Promise.resolve(opts.workspacesResponse ?? {
@@ -11061,6 +11199,10 @@ function loadDashPicker(opts = {}) {
     dashRailBumpGroup: () => {},
     dashRenderRail: () => {},
     dashRailGroups: [],
+    // dashRailForgetSession() (Fix 3, Step 9 review) filters these two
+    // directly -- empty by default, same reasoning as dashRailGroups above.
+    dashRailPinned: [],
+    dashRailFlat: [],
     loadFlatPage: () => {},
     // Sub-agent/crew read-only panel (SC8, dashboard/ACP feature-parity plan
     // Phase 5) -- DOM refs, pre-set exactly like dashComposerEl/dashTrayEl
@@ -11247,6 +11389,15 @@ function loadDashPicker(opts = {}) {
   // textual adjacency to dashCloseIfAbandoned in index.html.
   vm.runInContext(crewSubagentRegion, sandbox, { filename: "index.html#dash-crew-subagent" });
   vm.runInContext(handleRegion, sandbox, { filename: "index.html#dashHandle" });
+  // openSessionTranscript()/dashRailForgetSession() (Fix 3, Step 9 review) --
+  // self-contained function declarations with no top-level side effects, so
+  // (like closeBtnRegion above) they load unconditionally and their position
+  // here is not load-bearing; placed after crewSubagentRegion/handleRegion
+  // since both call functions those regions define
+  // (dashCloseSubagentView/dashRemoveAllCrewPanels/dashCloseSubWs/
+  // dashCloseIfAbandoned) at CALL time, never at this load time.
+  vm.runInContext(openSessionTranscriptRegion, sandbox, { filename: "index.html#dash-open-transcript" });
+  vm.runInContext(railForgetRegion, sandbox, { filename: "index.html#dash-rail-forget" });
   vm.runInContext(pickerRegion, sandbox, { filename: "index.html#dash-picker" });
   // WS reconnect-on-drop (SC7, dashboard/ACP feature-parity plan Phase 6) --
   // opt-in only (see connectRegion's own header comment in dashPickerSource()
@@ -12528,6 +12679,40 @@ check("steer_status frame with agent-controlled content uses textContent, never 
   assert(p.sandbox.dashSteerStatusEl.textContent.includes(malicious),
     "steer status must render the content as literal text");
   assert(!p.sandbox._dash_steer_xss, "the onerror handler must not fire -- steer status must not use innerHTML");
+});
+
+check("dashboard: a session frame (reattach) clears a stale steer status left over from before the switch (Fix 1, Step 9 review)", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "steer_status", sessionId: "sess-1",
+    payload: { status: "steering_queued", content: "look at foo.py" },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, false, "sanity check -- steer status must be visible before reattach");
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\repo", turnActive: false },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, true,
+    "a session frame (reattach) must clear any stale steer status, mirroring acp.html's own setSteerStatus('') on session-frame handling");
+  assertEqual(p.sandbox.dashSteerStatusEl.textContent, "", "the steer status text must be cleared too");
+});
+
+check("dashboard: a session frame (payload.created new-session branch) also clears a stale steer status (Fix 1, Step 9 review)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "steer_status", sessionId: "sess-1",
+    payload: { status: "steering_queued", content: "look at foo.py" },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, false, "sanity check -- steer status must be visible before the new session lands");
+  // The payload.created early branch (dashPickerCreate/dashRailQuickCreate)
+  // falls through into the same case body as a normal reattach -- confirmed
+  // by reading dashHandle()'s control flow directly.
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-2",
+    payload: { created: true, cwd: "/ws2" },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, true,
+    "creating a new session must also clear any stale steer status from the previously-viewed session");
 });
 
 check("Enter during a turn in steer mode dispatches to sendModeBtn (steer send)", () => {
@@ -13863,6 +14048,46 @@ check("dashboard: sub-agent panel — creating a new session without closing the
     "new-session creation must explicitly close and null dashSubWs, not just hide the panel");
 });
 
+check("dashboard: a failed transcript load (openSessionTranscript's fetch .catch()) still tears down an open sub-agent panel, crew state, and dashSubWs (Fix 3, Step 9 review)", async () => {
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", viewingSid: "sess-1", sessionTranscriptFails: true,
+  });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
+  assert(p.sandbox.dashSubWs !== null, "fixture: dashSubWs should be open");
+  const row = new El("div");
+  row.dataset = { sid: "sess-2", provider: "", cwd: "/ws2" };
+  p.sandbox.openSessionTranscript(row);
+  await settleStaging(); // let the rejected fetch's .catch() run
+  assertEqual(p.el("dashSubPanel").hidden, true,
+    "a failed transcript load must still close any open sub-agent panel from the previously-viewed session -- " +
+    "renderTranscriptHistory()/clearTranscript() (the chain that normally does this) is never reached on this path");
+  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0,
+    "a failed transcript load must still clear crew state from the previously-viewed session");
+  assertEqual(p.sandbox.dashSubWs, null,
+    "a failed transcript load must still explicitly close and null dashSubWs, not just hide the panel");
+});
+
+check("dashboard: deleting the currently-viewed session (dashRailForgetSession) tears down its open sub-agent panel, crew state, and dashSubWs (Fix 3, Step 9 review)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
+  assert(p.sandbox.dashSubWs !== null, "fixture: dashSubWs should be open");
+  p.sandbox.dashRailForgetSession("sess-1");
+  assertEqual(p.el("dashSubPanel").hidden, true,
+    "deleting the viewed session must close any open sub-agent panel -- there is no new session's transcript " +
+    "render here to trigger the usual clearTranscript() teardown");
+  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0, "deleting the viewed session must clear crew state");
+  assertEqual(p.sandbox.dashSubWs, null,
+    "deleting the viewed session must explicitly close and null dashSubWs, not just hide the panel");
+});
+
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
   assertEqual(typeof p.sandbox.dashHandleSub, "function");
@@ -14334,6 +14559,46 @@ check("dashboard: reconnect — a drop re-renders the image tray from the curren
   assertEqual(p.trayChips().length, 1, "the re-rendered tray must show the currently staged attachment");
 });
 
+check("dashboard: reconnect — a drop restores dashPendingAttachments back into the tray for the user to retry (Fix 9, Step 9 review)", () => {
+  // dashPendingAttachments is the Phase 4 "handed over to a send, awaiting
+  // confirmation" state -- dashRenderTray() only ever reads dashAttachments,
+  // never dashPendingAttachments, so these images were invisible in the tray
+  // the whole time a send was in flight. If the WS drops before any server
+  // response, nothing used to touch this state at all: the blob URLs leaked
+  // until an unrelated later event happened to clean them up, and the images
+  // the user just sent looked like they had simply vanished.
+  const p = loadDashPicker({
+    realConnect: true,
+    dashPendingAttachments: [{ mimeType: "image/png", data: "x", bytes: 100, url: "blob:pending-1", name: "a.png" }],
+  });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.sandbox.dashPendingAttachments.length, 0, "dashPendingAttachments must be drained");
+  assertEqual(p.sandbox.dashAttachments.length, 1,
+    "the pending attachment must be restored back into dashAttachments so the user can retry the send");
+  assertEqual(p.trayChips().length, 1, "the restored attachment must be visible in the re-rendered tray");
+  assertEqual(p.revoked().length, 0, "a restored attachment's object URL must not be revoked -- it is still in use");
+});
+
+check("dashboard: reconnect — a drop discards (and revokes) dashPendingAttachments instead of restoring them if new images were staged since the interrupted send (Fix 9, Step 9 review)", () => {
+  const p = loadDashPicker({
+    realConnect: true,
+    dashPendingAttachments: [{ mimeType: "image/png", data: "x", bytes: 100, url: "blob:pending-1", name: "a.png" }],
+    dashAttachments: [{ mimeType: "image/png", data: "y", bytes: 100, url: "blob:new-1", name: "b.png" }],
+  });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.sandbox.dashPendingAttachments.length, 0, "dashPendingAttachments must be drained");
+  assertEqual(p.sandbox.dashAttachments.length, 1, "the newly-staged attachment must take precedence, not be doubled up");
+  assertEqual(p.sandbox.dashAttachments[0].url, "blob:new-1", "the surviving attachment must be the newly-staged one");
+  assert(p.revoked().includes("blob:pending-1"),
+    "the old pending attachment (superseded by a newer one) must have its object URL revoked, not leaked");
+  const note = p.addMessageCalls.find((c) => /not restored/.test(c.text));
+  assert(note, "a note explaining the interrupted send's images were not restored must be shown");
+});
+
 check("dashboard: reconnect — a drop closes any open sub-agent panel and explicitly closes dashSubWs", () => {
   const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
   p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
@@ -14386,7 +14651,61 @@ check("dashboard: reconnect — a drop during an unconfirmed lazy-attach re-enab
     "unconditionally in this handler, and no sub-agent panel was ever open for this session");
 });
 
-check("dashboard: reconnect — the reconnect's own session/history frames tear down crew-panel timers, on reconnect specifically", () => {
+check("dashboard: an error frame with code close_in_progress during an unconfirmed lazy-attach re-enables the composer and clears the note (Fix 4, Step 9 review)", () => {
+  // The realistic trigger: a lazy-load send('load', ...) for a session the
+  // server happens to be mid-release on for an unrelated reason returns this
+  // exact code with sessionId === the sid being loaded -- dashHandle()'s
+  // `error` case used to return early for this code before ever reaching the
+  // _dashLoadingSid reset/composer re-enable, leaving the composer stuck
+  // under "Starting the agent…" with no recovery path (not even a later
+  // reconnect, since dashReconnectOnReady() only resubscribes
+  // if (_dashAttachedSid), which never gets set for a load that never
+  // completed).
+  const p = loadDashPicker({ viewingSid: "sess-x" });
+  p.sandbox._dashLoadingSid = "sess-x";
+  p.sandbox._dashPendingSend = "hello";
+  p.sandbox._dashPendingImages = [{ mimeType: "image/webp", data: "x" }];
+  p.sandbox.dashPromptInput.disabled = true;
+  const notes = [];
+  p.sandbox.dashSetComposerNote = (t) => notes.push(t);
+  p.sandbox.dashHandle({
+    type: "error", sessionId: "sess-x",
+    payload: { code: "close_in_progress", message: "closing" },
+  });
+  assertEqual(p.sandbox.dashPromptInput.disabled, false,
+    "a close_in_progress refusal for the session currently lazy-loading must re-enable the composer");
+  assertEqual(notes[notes.length - 1], "",
+    "a close_in_progress refusal during an unconfirmed lazy-attach must clear the 'Starting the agent…' note");
+  assertEqual(p.sandbox._dashLoadingSid, null, "_dashLoadingSid must be cleared");
+  assertEqual(p.sandbox._dashPendingSend, null, "_dashPendingSend must be cleared");
+  assertEqual(p.sandbox._dashPendingImages, null, "_dashPendingImages must be cleared");
+  assertEqual(p.el("dashReload").hidden, false,
+    "the same reload recovery a stale-token handshake rejection shows must appear here too -- " +
+    "nothing else will retry this specific load");
+});
+
+check("dashboard: an error frame with code close_in_progress for a session NOT currently lazy-loading does not touch the composer (Fix 4, Step 9 review)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1", dashTurnActive: false });
+  p.sandbox._dashLoadingSid = null; // no lazy-attach in flight
+  p.sandbox._dashPendingCreate = { cwd: "/y", mode: "spec" };
+  p.sandbox.dashPromptInput.disabled = false;
+  p.sandbox.dashHandle({
+    type: "error", sessionId: "sess-1",
+    payload: { code: "close_in_progress", message: "closing" },
+  });
+  // The pending-create path (this branch's real purpose) must still run
+  // unaffected by the hoisted lazy-attach guard above, which never fires here.
+  assertEqual(p.sandbox._dashLoadingSid, null, "_dashLoadingSid stays null -- nothing was in flight");
+});
+
+check("dashboard: reconnect — a drop tears down crew-panel timers immediately, not waiting for a reconnect that may never come (Fix 8, Step 9 review)", () => {
+  // Supersedes a pre-Fix-8 test with the opposite assertion ("a drop by
+  // itself must not tear down crew timers -- only a fresh session/history
+  // frame does") -- that was the bug: if reconnect never succeeds, or the
+  // user never retries, the timers ticked forever with nothing left to tick
+  // against. dashConnect()'s onclose now calls dashRemoveAllCrewPanels()
+  // directly, alongside the existing dashCloseSubagentView()/dashCloseSubWs()
+  // calls, so the timers are torn down on the drop itself.
   const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
   p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
     { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
@@ -14395,10 +14714,21 @@ check("dashboard: reconnect — the reconnect's own session/history frames tear 
   p.sandbox.dashConnect();
   p.openMain();
   p.closeMain();
-  assertEqual(p.intervals.length, 1,
-    "a drop by itself must not tear down crew timers -- only a fresh session/history frame does, matching " +
-    "acp.html's own design (dashCloseSubagentView()/dashCloseSubWs() close the panel and socket, not the " +
-    "crew rendering itself)");
+  assertEqual(p.intervals.length, 0,
+    "a drop must tear down crew-panel timers immediately, even without a subsequent session/history frame " +
+    "-- an indefinitely failed reconnect must not leave them ticking forever");
+  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0, "the drop must also clear crew state, not just the timer");
+});
+
+check("dashboard: reconnect — the reconnect's own session/history frames remain a harmless no-op for crew-panel teardown once onclose already tore it down", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.intervals.length, 0, "sanity check -- the drop itself already tore the timer down (Fix 8)");
   p.runTimers();
   p.openMain();
   p.deliverMain({
@@ -14407,9 +14737,8 @@ check("dashboard: reconnect — the reconnect's own session/history frames tear 
   });
   p.deliverMain({ type: "history", sessionId: "sess-1", payload: { events: [] } });
   assertEqual(p.intervals.length, 0,
-    "the reconnect's own history frame must tear down crew-panel timers via the existing " +
-    "dashRemoveAllCrewPanels()/dashCloseSubagentView() guards, confirmed to fire ON RECONNECT specifically " +
-    "-- not merely inferred from an unrelated new-session event");
+    "the reconnect's own history-frame teardown guards must not error or double-count against an " +
+    "already-cleared crew state");
 });
 
 check("dashboard: reconnect — a drop closes any open command palette", () => {
@@ -14446,6 +14775,80 @@ check("dashboard: reconnect — a steer in flight when the socket drops is resto
   assertEqual(p.sandbox.dashPromptInput.disabled, false, "the textarea must be re-enabled");
   assertEqual(p.sandbox.dashSendModeBtn.disabled, false, "the send-mode button must be re-enabled");
   assertEqual(p.sandbox.dashModeToggle.disabled, false, "the mode toggle must be re-enabled");
+});
+
+check("dashboard: reconnect — a landed steer_sent confirmed via the reconnect's history replay is not left in the textarea to be re-sent (Fix 2, Step 9 review)", () => {
+  // Reproduces the exact race: steer_sent is recorded into session history
+  // server-side (acp.py's _handle_steer) whether or not this connection ever
+  // received the steer_ack confirming it. onclose (tested above) restores the
+  // in-flight text into the textarea with no way yet to know whether it
+  // landed -- the reconnect's buffered `history` replay is the first place
+  // that answer becomes available.
+  const p = loadDashPicker({
+    realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1", dashSteerPending: "look at foo.py",
+  });
+  p.sandbox.dashPromptInput.disabled = true;
+  p.sandbox.dashSendModeBtn.disabled = true;
+  p.sandbox.dashModeToggle.disabled = true;
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.sandbox.dashPromptInput.value, "look at foo.py",
+    "sanity check -- onclose must have restored the in-flight steer text, unable to know yet whether it landed");
+  assertEqual(p.sandbox._dashSteerPending, null, "sanity check -- onclose already cleared _dashSteerPending");
+  p.runTimers();
+  p.openMain();
+  p.deliverMain({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "/ws", created: false, turnActive: true, contextPercent: null },
+  });
+  p.deliverMain({
+    type: "history", sessionId: "sess-1",
+    payload: { events: [
+      { type: "steer_sent", sessionId: "sess-1", payload: { text: "look at foo.py" } },
+    ] },
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "",
+    "the buffered steer_sent confirms the steer landed before the drop -- the restored text must not be left " +
+    "sitting in the textarea ready to be sent again");
+});
+
+check("dashboard: reconnect — an unrelated, non-matching steer_sent in the history replay does not clear a genuinely different still-pending steer (Fix 2, Step 9 review)", () => {
+  const p = loadDashPicker({
+    realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1", dashSteerPending: "a different steer",
+  });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.sandbox.dashPromptInput.value, "a different steer", "sanity check -- restored on drop");
+  p.runTimers();
+  p.openMain();
+  p.deliverMain({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "/ws", created: false, turnActive: true, contextPercent: null },
+  });
+  p.deliverMain({
+    type: "history", sessionId: "sess-1",
+    payload: { events: [
+      { type: "steer_sent", sessionId: "sess-1", payload: { text: "an unrelated earlier steer" } },
+    ] },
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "a different steer",
+    "a non-matching steer_sent must not clear text the user still genuinely has pending to send");
+});
+
+check("dashboard: reconnect — a history replay's steer_sent does not touch the textarea when nothing was restored (no coincidental match)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashHandle({
+    type: "history", sessionId: "sess-1",
+    payload: { events: [
+      { type: "steer_sent", sessionId: "sess-1", payload: { text: "" } },
+      { type: "steer_sent", sessionId: "sess-1", payload: {} },
+    ] },
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "",
+    "an empty/malformed steer_sent text must be ignored, not coincidentally match an empty textarea");
 });
 
 check("dashboard: reconnect — a drop clears a Stop click's in-progress flag", () => {

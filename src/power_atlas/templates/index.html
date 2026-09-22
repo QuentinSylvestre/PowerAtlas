@@ -859,6 +859,18 @@ function openSessionTranscript(row){
     dashMaybeAttach(row, sid);
   }).catch(function(){
     if(_viewingSid !== sid) return;
+    // Fix 3 (Step 9 review): a failed transcript load never reaches
+    // renderTranscriptHistory() -> clearTranscript(), which is the chain
+    // that normally triggers window.removeAllCrewPanels()/
+    // window.closeSubagentView() on a session switch (see dashCloseIfAbandoned()'s
+    // own header comment above). Without this, a sub-agent panel or crew
+    // state belonging to the session just walked away from (dashCloseIfAbandoned()
+    // above only reset turn/steer/image/context state, not crew/sub-agent
+    // state) survives underneath this error message. Mirrors the established
+    // 3-call pattern at the `created:true` branch/agent_died/session_closed.
+    dashCloseSubagentView();
+    dashRemoveAllCrewPanels();
+    dashCloseSubWs();
     el.textContent = '';
     var err = document.createElement('div');
     err.className = 'acp-system-msg';
@@ -1086,12 +1098,19 @@ function dashConnect(onReady){
     // holding a MAX_CONNECTIONS slot while the main socket is down. Reuses
     // the dashCloseSubWs() helper Phase 5's review-fix cycle already added
     // for exactly this call (Follow-up Work, "Phase 6 ready-made helper").
-    // Crew-panel setInterval timers are not touched here directly -- the
-    // reconnect's re-subscribe lands a fresh `session`/`history` frame,
-    // whose existing dashRemoveAllCrewPanels()/closeSubagentView() guards
-    // (wired live since Phase 5) tear them down the same way any other
-    // history reload already does.
     dashCloseSubagentView();
+    // Fix 8 (Step 9 review): crew-slot setInterval timers used to be left
+    // running here -- the comment this replaced claimed the reconnect's
+    // re-subscribe would tear them down via a fresh `session`/`history`
+    // frame's existing dashRemoveAllCrewPanels()/closeSubagentView() guards,
+    // which is true ONLY once reconnect actually succeeds. If it never does
+    // (an indefinitely failed reconnect, or the user never reconnects at
+    // all), those timers kept firing forever with nothing left to tick
+    // against. Called directly here instead, so they are torn down
+    // immediately on any drop rather than waiting for a reconnect that may
+    // never come; the reconnect's own guards above remain a harmless,
+    // redundant no-op once nothing is left to remove.
+    dashRemoveAllCrewPanels();
     dashCloseSubWs();
 
     // A mid-turn command palette cannot be acted on across a drop -- close
@@ -1100,9 +1119,33 @@ function dashConnect(onReady){
     // transition (e.g. meta turn:start above).
     hideCommandDropdown();
 
-    // Re-render the image tray from the current dashAttachments/
-    // dashPendingAttachments (Phase 4 state, untouched by a drop -- the
-    // staged images are locally-held blobs, still valid) -- a deliberate,
+    // Fix 9 (Step 9 review): dashPendingAttachments (the Phase 4 "handed
+    // over to a send, awaiting confirmation" state) was never touched here --
+    // if a prompt+images send raced a genuine WS drop before any server
+    // response, the pending blob URLs leaked until an unrelated later event
+    // happened to clean them up, and dashRenderTray() below only ever reads
+    // dashAttachments, never dashPendingAttachments, so those images were
+    // invisible in the tray the whole time regardless. Mirrors the `error`
+    // frame's own restore-for-retry pattern (dashHandle()'s `error` case,
+    // Phase 4): the user's typed images should not just vanish on a drop, so
+    // restore them back into dashAttachments (and the tray) for the user to
+    // retry, unless something new has been staged since -- in which case the
+    // old pending ones are discarded (revoked) with a note, exactly like the
+    // refused-send case already does.
+    if (dashPendingAttachments.length) {
+      if (dashAttachments.length) {
+        for (var _dpi = 0; _dpi < dashPendingAttachments.length; _dpi++) dashRevokeAttachment(dashPendingAttachments[_dpi]);
+        addMessage('note', 'the interrupted send’s images are not restored — others have been attached since');
+      } else {
+        dashAttachments = dashPendingAttachments;
+      }
+      dashPendingAttachments = [];
+    }
+
+    // Re-render the image tray from the current dashAttachments (Phase 4
+    // state, untouched by a drop -- the staged images are locally-held
+    // blobs, still valid; dashPendingAttachments was just folded back into
+    // dashAttachments above, if anything was restorable) -- a deliberate,
     // explicit re-render rather than an assumption the DOM already reflects
     // them, since the composer-visibility changes above may have left it
     // stale.
@@ -2826,6 +2869,14 @@ function dashHandle(frame){
     // the previous session's stale percentage on screen (review finding,
     // Phase 1 fix cycle).
     setContext(payload.contextPercent);
+    // Whatever the previous session's (or this one's stale pre-switch) steer
+    // status said has nothing to do with the session just adopted -- any live
+    // status for it will arrive fresh over its own `steer_status` frames, not
+    // by carrying this one over. Mirrors acp.html's own `session`-frame
+    // handling (acp.html's setSteerStatus('') call, same reasoning). Applies
+    // to both the normal reattach path and the payload.created branch above,
+    // which falls through into this same case body.
+    setDashSteerStatus('');
     dashSetComposerNote('');
     dashRefreshComposerControls();
     dashUpdateCloseButton();
@@ -2855,6 +2906,59 @@ function dashHandle(frame){
       renderTranscriptHistory(payload.events || []);
     } finally {
       _dashReplaying = false;
+    }
+    // Fix 2 (Step 9 review): the reconnect duplicate-send race. steer_sent is
+    // recorded into the session's history server-side (acp.py's
+    // _handle_steer) whether or not THIS connection ever received the
+    // steer_ack confirming it -- the ack is lost the instant the socket drops
+    // before it arrives. dashConnect()'s onclose unconditionally restores
+    // _dashSteerPending into the textarea on a drop, with no way to know at
+    // that point whether the steer had already landed. This buffered
+    // `history` replay (the reconnect's re-subscribe) is the first place
+    // that answer becomes available.
+    //
+    // acp.html avoids this race entirely: its own `history` case replays
+    // every buffered event through its own live handle() (`for (...) {
+    // handle(events[i]); }`), so a buffered steer_sent hits the exact same
+    // case a live one would, including its composer-mutating
+    // `promptInput.value.trim() === steerText` branch. The dashboard's
+    // `history` replay does NOT re-dispatch through dashHandle() per event --
+    // only through renderTranscriptHistory()/renderTranscriptFrame()
+    // (transcript-renderer.js), which now renders the steer band for parity
+    // but is deliberately kept page-lifecycle-state-agnostic and cannot reach
+    // dashPromptInput/_dashSteerPending/dashRefreshComposerControls itself
+    // (see that function's own header comment). So this page's own code
+    // re-scans the same payload.events this frame already carries and
+    // reproduces acp.html's exact two-branch logic directly.
+    var _steerSentEvents = payload.events || [];
+    for (var _steerEvIdx = 0; _steerEvIdx < _steerSentEvents.length; _steerEvIdx++) {
+      var _steerEv = _steerSentEvents[_steerEvIdx];
+      if (!_steerEv || _steerEv.type !== 'steer_sent') continue;
+      var _steerEvPayload = _steerEv.payload || {};
+      var _steerEvText = typeof _steerEvPayload.text === 'string' ? _steerEvPayload.text : '';
+      if (!_steerEvText) continue;
+      if (_dashSteerPending) {
+        // Very-fast-server case: a live steer round-trip completed and was
+        // buffered before this history replay was even requested. Mirrors
+        // acp.html's own steer_sent case's first branch.
+        dashPromptInput.value = '';
+        dashPromptInput.disabled = false;
+        dashSendModeBtn.disabled = false;
+        dashModeToggle.disabled = false;
+        _dashSteerPending = null;
+        dashRefreshComposerControls();
+      } else if (dashPromptInput.value.trim() === _steerEvText) {
+        // The WS dropped before steer_ack arrived; onclose restored this
+        // exact text to the textarea, unable to know whether the steer had
+        // already landed. This buffered steer_sent confirms it did -- clear
+        // the textarea so the user does not re-send it, mirroring acp.html's
+        // own "the band confirms the steer landed — clear the textarea"
+        // reasoning. An unrelated/non-matching steer_sent (different text,
+        // or the user has since typed something else) leaves the textarea
+        // alone, exactly like acp.html's own coincidental-match guard.
+        dashPromptInput.value = '';
+        dashRefreshComposerControls();
+      }
     }
     if (_dashPendingSend !== null) {
       var text = _dashPendingSend;
@@ -3044,20 +3148,30 @@ function dashHandle(frame){
     // ...) to every viewer of the session, not just the sender) -- so
     // addMessage() below stays unconditional: a steer sent from /acp or
     // another dashboard tab must still render its band here even though
-    // _dashSteerPending is (correctly) null on this client. What is dropped
-    // is the composer-mutating `else if (dashPromptInput.value.trim() ===
-    // dashSteerText)` branch acp.html carries for this same case
-    // (acp.html:4926-4932): there, it clears the textarea once a
-    // reconnect-replayed steer_sent confirms text a WS-drop's onclose
-    // restored actually landed -- a mechanism keyed on reconnect/replay,
-    // which the dashboard does not have yet (Phase 6, SC7). Without that
-    // legitimate trigger, the only way to reach "_dashSteerPending already
-    // false, but the textarea happens to match" here is a stale broadcast
-    // from an abandoned attempt (dashCloseIfAbandoned() already cleared the
-    // flag) echoing back after a reattach to the same session id --
-    // clearing the textarea then would risk wiping text the user has since
-    // typed fresh, purely by coincidental match. Dropped rather than
-    // ported until Phase 6 gives it a real trigger to guard on.
+    // _dashSteerPending is (correctly) null on this client. What is
+    // (still, deliberately) dropped here is the composer-mutating `else if
+    // (dashPromptInput.value.trim() === dashSteerText)` branch acp.html
+    // carries for this same case (acp.html:4926-4932). Phase 6 (SC7) did
+    // give the dashboard its legitimate trigger for that branch -- a WS drop
+    // whose onclose restores steer text to the textarea with no way yet to
+    // know whether the steer had already landed -- but that race is only
+    // ever resolved by the buffered `history` replay the reconnect's
+    // re-subscribe receives (a mid-flight `steer` send either landed
+    // server-side before the drop, in which case it is already in that
+    // buffer, or never reached the server at all; a fresh connection cannot
+    // receive a late live reply for a request the old, now-dead connection
+    // made). dashHandle()'s `history` case (Step 9 review, Fix 2) implements
+    // the matching-text clear directly against payload.events for exactly
+    // that reason -- this live-frame case's own trigger (a `steer_sent`
+    // arriving here, post-reconnect, matching the restored text) is never
+    // how that race actually resolves; the only way to reach "_dashSteerPending
+    // already false, but the textarea happens to match" HERE is still a
+    // stale broadcast from an abandoned attempt (dashCloseIfAbandoned()
+    // already cleared the flag) or a coincidence from /acp or another tab
+    // steering the same session -- clearing the textarea for either would
+    // risk wiping text the user has since typed fresh, purely by
+    // coincidental match. So the branch stays dropped here, deliberately,
+    // not merely deferred.
     var dashSteerText = payload && typeof payload.text === 'string' ? payload.text : '';
     if (dashSteerText) {
       if (_dashSteerPending) {
@@ -3273,17 +3387,26 @@ function dashHandle(frame){
     // Phase 5 review) -- mirrors the session_closed teardown above; there is
     // no process left on the other end for this socket to ever reconnect to.
     dashCloseSubWs();
-    // Fix 1 (Phase 5 review): dashCloseSubagentView() (just above) sets
-    // dashComposerEl.hidden = !_dashAttachedSid, which by this point is
-    // always true, since _dashAttachedSid was already cleared a few lines
-    // above -- correct when a sub-agent panel actually WAS open and is now
-    // closing onto an unattached page, but wrong here: this handler's own
-    // established design (Phase 1/3) keeps the composer VISIBLE and
-    // disabled with an explanatory note a few lines below, regardless of
-    // whether a sub-agent panel was ever open. Without this line the note
-    // set below rendered into a hidden container and was never seen --
-    // reproduced live by a reviewer's probe on a session with no sub-agent
-    // panel ever opened.
+    // Fix 1 (Phase 5 review; comment corrected Step 9 review, Fix 7):
+    // dashCloseSubagentView() (just above) no longer touches composer
+    // visibility unconditionally -- Phase 6's own Fix 1 later gated its
+    // dashComposerEl.hidden = !_dashAttachedSid line behind whether a
+    // sub-agent panel was actually open (_dashPanelWasOpen, captured before
+    // the panel closes). When a panel WAS open, that gated line still runs
+    // and still sets dashComposerEl.hidden = !_dashAttachedSid, which by
+    // this point is always true, since _dashAttachedSid was already cleared
+    // a few lines above -- correct for a panel closing onto an unattached
+    // page in general, but wrong here: this handler's own established
+    // design (Phase 1/3) keeps the composer VISIBLE and disabled with an
+    // explanatory note a few lines below, regardless of whether a sub-agent
+    // panel was ever open. When no panel was open, the gated line above is
+    // now a no-op and never touches dashComposerEl.hidden at all, so this
+    // reset is only strictly load-bearing for the panel-was-open case --
+    // kept unconditional regardless, since it is a correct no-op for the
+    // other case too. Originally reproduced live by a reviewer's probe on a
+    // session with no sub-agent panel ever opened, back when the line above
+    // was still unconditional and this reset was the only thing preventing
+    // the note set below from rendering into a hidden container.
     dashComposerEl.hidden = false;
     // Three pre-existing dashboard state variables (not introduced by this
     // plan) that could otherwise leave stale lazy-load state if the agent
@@ -3389,6 +3512,51 @@ function dashHandle(frame){
       logLine('info', 'discarded pending image attachments after a sid-less error frame');
     }
     dashRefreshComposerControls();
+    // A refusal on the lazy-load path (dashSendPrompt) never cleared the
+    // textarea to begin with -- the typed text stays visible (disabled,
+    // under the "Starting the agent…" note) for exactly this outcome, so
+    // there is nothing to restore here, only to re-enable.
+    //
+    // Fix 4 (Step 9 review): hoisted here, unconditional, ahead of the
+    // close_in_progress/turn_in_progress/not_subscribed branches below --
+    // same shape as the steer-restore/image-restore blocks above, and the
+    // same bug class Phase 4's own fix cycle already closed for the
+    // image-restore block (that fix hoisted it to the top for the identical
+    // reason: those three payload.code branches all `return` early, so a
+    // block placed after them, as this one originally was, never ran for
+    // any of them). The realistic trigger is close_in_progress specifically:
+    // a lazy-load `send('load', ...)` for a session the server happens to
+    // be mid-release on for an unrelated reason returns this exact code with
+    // sessionId === the sid being loaded, leaving _dashLoadingSid stuck
+    // non-null and the composer disabled under "Starting the agent…" with no
+    // recovery path -- not even a later successful reconnect, since
+    // dashReconnectOnReady() only resubscribes `if (_dashAttachedSid)`,
+    // which never gets set for a load that never completed. Safe to hoist
+    // unconditionally: turn_in_progress/not_subscribed below are refusals of
+    // _dashPendingCreate's own close of the already-ATTACHED session
+    // (_dashAttachedSid), a disjoint sid space from _dashLoadingSid (a
+    // session still mid-attach, by definition not yet _dashAttachedSid), so
+    // this guard can never fire for those two codes.
+    if (sid && sid === _dashLoadingSid) {
+      _dashLoadingSid = null;
+      _dashPendingSend = null;
+      _dashPendingImages = null;
+      // Phase 6 (SC7): mirrors acp.html's own reportLoadFailure()
+      // (acp.html:1272-1284) -- the socket itself is fine (no onclose here),
+      // but this specific session's load failed and nothing else will retry
+      // it. Offers the same reload recovery a stale-token handshake
+      // rejection shows, for the same underlying reason: nothing left this
+      // connection can do about it on its own.
+      dashReloadBtn.hidden = false;
+      dashPromptInput.disabled = false;
+      dashSetComposerNote('');
+      // Recomputed again below at the tail for the non-early-return path
+      // (harmless, idempotent) -- called here too so the close_in_progress/
+      // turn_in_progress/not_subscribed branches below, which return before
+      // ever reaching that tail, still leave Send/Stop/Queue+Steer's own
+      // visibility in sync with the reset above.
+      dashRefreshComposerControls();
+    }
     // close_in_progress: server is in the middle of releasing this session —
     // treat it the same as session_closed for the pending-create path.
     if (payload && payload.code === 'close_in_progress') {
@@ -3402,22 +3570,6 @@ function dashHandle(frame){
       var refuseMsg = (payload && typeof payload.message === 'string') ? payload.message : 'Could not close the session.';
       dashSetComposerNote(refuseMsg + ' Try again when the turn finishes.');
       return;
-    }
-    // A refusal on the lazy-load path (dashSendPrompt) never cleared the
-    // textarea to begin with -- the typed text stays visible (disabled,
-    // under the "Starting the agent…" note) for exactly this outcome, so
-    // there is nothing to restore here, only to re-enable.
-    if (sid && sid === _dashLoadingSid) {
-      _dashLoadingSid = null;
-      _dashPendingSend = null;
-      _dashPendingImages = null;
-      // Phase 6 (SC7): mirrors acp.html's own reportLoadFailure()
-      // (acp.html:1272-1284) -- the socket itself is fine (no onclose here),
-      // but this specific session's load failed and nothing else will retry
-      // it. Offers the same reload recovery a stale-token handshake
-      // rejection shows, for the same underlying reason: nothing left this
-      // connection can do about it on its own.
-      dashReloadBtn.hidden = false;
     }
     var errText = (payload && typeof payload.message === 'string') ? payload.message : 'The agent refused that.';
     showToast('<div class="toast toast-error">' + _escHtml(errText) + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
@@ -5112,6 +5264,16 @@ function dashRailForgetSession(sid){
   if (_viewingSid === sid) {
     _viewingSid = null;
     dashCloseIfAbandoned();
+    // Fix 3 (Step 9 review): same gap as openSessionTranscript()'s .catch()
+    // branch above -- deleting the session currently on screen never reaches
+    // renderTranscriptHistory()/clearTranscript() (there is no new session's
+    // transcript to render here), so a sub-agent panel or crew state
+    // belonging to the just-deleted session would otherwise survive
+    // underneath the "session was deleted" message. Mirrors the established
+    // 3-call pattern at the `created:true` branch/agent_died/session_closed.
+    dashCloseSubagentView();
+    dashRemoveAllCrewPanels();
+    dashCloseSubWs();
     var el = document.getElementById('dashTranscript');
     el.textContent = '';
     var msg = document.createElement('div');
