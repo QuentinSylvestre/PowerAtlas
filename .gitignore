@@ -7,3 +7,5 @@ build/
 .pytest_cache/
 
 .playwright-mcp/
+# Sub-agent review scratch reports
+.agents/
