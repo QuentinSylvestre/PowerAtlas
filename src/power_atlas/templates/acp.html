@@ -2473,6 +2473,11 @@
   // cross-session signal.
   //
   // Never fires while the tab is visible: the transcript already says it.
+  //
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the most a
+  // permission title contributes to a notification body. Matches acp.py's
+  // MAX_PERMISSION_TITLE_CHARS, which bounds the server's own desktop toast.
+  var NOTIFY_PERMISSION_TITLE_MAX = 200;
   function maybeNotify(title, body, tag) {
     // `typeof` rather than a truthiness check: the constructor is absent
     // outside a browser (the mjs test harness runs this script under Node's
@@ -4305,6 +4310,10 @@
     // to an unrelated later session otherwise.
     _applyTaskMode('kiro_default');
     _closeTaskModeMenu();
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: re-read
+    // what Default resolves to (composer-chrome.js, withWireTaskMode). The
+    // setting lives on the dashboard, so a tab left open cannot see it change.
+    refreshAcpPermissionState();
     pickerRenderKeepRow();
     pickerNote.textContent = 'loading workspaces…';
     pickerRender();
@@ -4459,8 +4468,18 @@
     // Captured before pickerClose() (which only hides the menu, not the
     // selection) so both branches below send the task mode the user actually
     // picked, not whatever the picker resets to on its next open.
-    var taskMode = pickedTaskMode;
+    var picked = pickedTaskMode;
     pickerClose();
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (SC-3):
+    // Default becomes the derived agent only while the permission profile is
+    // in effect. Resolved once, here, so the deferred close-then-create path
+    // carries the same answer the immediate path would have sent.
+    withWireTaskMode(picked, function (taskMode) {
+      pickerCreateResolved(cwd, wantsClose, taskMode);
+    });
+  }
+
+  function pickerCreateResolved(cwd, wantsClose, taskMode) {
     if (!wantsClose) {
       send('new', { cwd: cwd, mode: taskMode }, null);
       setView('chat');
@@ -5007,17 +5026,27 @@
       var _toolCall = (payload && payload.toolCall) || {};
       var _permTitle = typeof _toolCall.title === 'string' ? _toolCall.title : '';
       var _permOptions = Array.isArray(payload && payload.options) ? payload.options : [];
+      // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the
+      // allowlisted consent projection (capability, resource, ...). Optional;
+      // addPermissionRequest renders nothing extra for a missing or empty one.
+      var _permConsent = payload && payload.consent;
       if ((typeof _reqId === 'string' || typeof _reqId === 'number') && _permOptions.length) {
-        addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions);
+        addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions, _permConsent);
         // The notification takes a `!replaying` gate even though the row above
         // deliberately does not. The two want opposite things from a reload:
         // the buttons must come back (the request may still be unanswered
         // server-side), but re-announcing it would notify again every time the
         // page is refreshed while the user is deciding.
         if (!replaying && _notifyEnabled) {
+          // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the
+          // frame's title is unclamped now (Phase 2 moved the server's clamp
+          // onto its own desktop toast only), and a title can be as long as the
+          // 1 MiB inbound line. The transcript row above shows all of it; the
+          // browser notification gets the same 200-char cap the server toast
+          // does (acp.py MAX_PERMISSION_TITLE_CHARS).
           maybeNotify(
             'PowerAtlas — ' + notifyLabel(),
-            'Needs approval: ' + (_permTitle || 'a tool'),
+            'Needs approval: ' + (_permTitle.slice(0, NOTIFY_PERMISSION_TITLE_MAX) || 'a tool'),
             'pa-perm-' + _permSid);
         }
       }
@@ -5271,6 +5300,15 @@
           + 'this one.');
         logLine('error', 'create for ' + (wanted.cwd || "the agent's own folder")
           + ' abandoned — the close was refused');
+      }
+      if (payload.code === 'bad_payload') {
+        // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: one
+        // way this arrives is a create for the derived agent refused because
+        // the profile stopped being in effect after this tab last looked. The
+        // server's message (rendered below) says so; re-reading the state
+        // means the next create from this tab sends `kiro_default` instead of
+        // being refused again.
+        refreshAcpPermissionState();
       }
       var failedLoad = loadingSid !== null &&
                        (frame.sessionId || sessionId) === loadingSid;
@@ -5993,6 +6031,10 @@
     connect();
     railLoadFirstPage();
     refreshNotifyEnabled();
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: what the
+    // picker's Default resolves to. Read on the same schedule as the notify
+    // flag above, and for the same reason.
+    refreshAcpPermissionState();
     // Coming back to the tab refreshes at once, which is the moment a stale
     // dot would otherwise be believed — a phone returns to this page far more
     // often than it leaves it open for a full interval.
@@ -6004,6 +6046,7 @@
         // /acp tab left open for days from honouring a setting the user
         // changed in the meantime.
         refreshNotifyEnabled();
+        refreshAcpPermissionState();
       }
     });
     setInterval(function () {

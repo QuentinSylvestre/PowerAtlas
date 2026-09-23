@@ -608,3 +608,82 @@ function handleCommandsExecuteResult(payload) {
     addSystemMessage('Command failed.');
   }
 }
+
+// ---- new-session task mode: the permission-profile Default ----------------
+//
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (SC-3). Shared
+// by both pages' new-session pickers, and by the dashboard's quick create,
+// because the rule is the same everywhere: the picker's **Default** entry
+// resolves to PowerAtlas's derived agent when the permission profile is in
+// effect, and to `kiro_default` otherwise.
+//
+// Decided at send time, not by giving the Default option a different
+// `data-value`: no picker option ever carries the derived agent's name, so a
+// page that never learned the state can only ever send `kiro_default`. That is
+// also the server's own fallback — it refuses the derived agent unless its
+// file is `on` — so the page and the server cannot disagree in the direction
+// that fails.
+//
+// Keyed on `in_effect`, not `enabled`. `enabled && !in_effect` is the
+// on-but-not-in-effect case the settings panel reports: generation failed, the
+// server would refuse the derived agent, and the session starts as the base
+// agent (D-10's fallback). "The base agent when off" means `kiro_default` on
+// the wire: a user-named base agent is not a valid `modeId`, and off is meant
+// to be a byte-for-byte no-op over today's behaviour (SC-1).
+//
+// New globals (collision-checked against both templates, 2026-09-23):
+// DEFAULT_TASK_MODE, DERIVED_AGENT_MODE, acpPermInEffect, acpPermLoaded,
+// acpPermPending, refreshAcpPermissionState, wireTaskMode, withWireTaskMode.
+
+var DEFAULT_TASK_MODE = 'kiro_default';
+// Mirrors config.py's DERIVED_AGENT_NAME. A literal here because a static file
+// cannot import it; the server gate refuses the name if the two ever drift.
+var DERIVED_AGENT_MODE = 'poweratlas-acp';
+var acpPermInEffect = false;
+var acpPermLoaded = false;
+var acpPermPending = null;
+
+/** Re-read the permission state from `GET /api/acp-permissions`. Returns a
+ *  promise of the new `acpPermInEffect`. Concurrent calls share one request.
+ *  A failed read counts as not in effect: the create that follows then sends
+ *  `kiro_default`, which the server never refuses, rather than a derived
+ *  agent it might. */
+function refreshAcpPermissionState() {
+  if (typeof fetch !== 'function') {
+    acpPermLoaded = true;
+    return Promise.resolve(acpPermInEffect);
+  }
+  if (acpPermPending) return acpPermPending;
+  var pending = fetch('/api/acp-permissions')
+    .then(function (r) { return (r && r.ok) ? r.json() : null; })
+    .then(function (d) {
+      acpPermInEffect = !!(d && d.enabled === true && d.in_effect === true);
+    }, function () {
+      acpPermInEffect = false;
+    })
+    .then(function () {
+      acpPermLoaded = true;
+      if (acpPermPending === pending) acpPermPending = null;
+      return acpPermInEffect;
+    });
+  acpPermPending = pending;
+  return pending;
+}
+
+/** The `mode` a `new` frame should carry for the picker choice `picked`. Only
+ *  Default is ever rewritten; every vendor task mode passes through as-is. */
+function wireTaskMode(picked) {
+  return (picked === DEFAULT_TASK_MODE && acpPermInEffect) ? DERIVED_AGENT_MODE : picked;
+}
+
+/** Call `cb` with the wire mode for `picked`. Synchronous when the answer is
+ *  already known; when the state has never been read, or a read is in flight,
+ *  waits for it rather than guessing — guessing `kiro_default` while the user
+ *  has the profile on would start an ungated session that looks gated. */
+function withWireTaskMode(picked, cb) {
+  if (picked !== DEFAULT_TASK_MODE || (acpPermLoaded && !acpPermPending)) {
+    cb(wireTaskMode(picked));
+    return;
+  }
+  refreshAcpPermissionState().then(function () { cb(wireTaskMode(picked)); });
+}

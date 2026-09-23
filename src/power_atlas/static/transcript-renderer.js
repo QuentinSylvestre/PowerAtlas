@@ -1707,8 +1707,14 @@ function appendChunk(role, text) {
  *  no live connection to answer through (Phase 3 of this merge, once it
  *  exists, may change that only for a held kiro-cli-v3 session). Guarded
  *  the same way logLine is above — a missing capability degrades the
- *  button to a no-op click rather than throwing. */
-function addPermissionRequest(requestId, sid, title, options) {
+ *  button to a no-op click rather than throwing.
+ *
+ *  `consent` (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3)
+ *  is the frame's allowlisted projection of kiro-cli's consent block — what
+ *  capability is asked for, against which resource, and which rule matched.
+ *  Optional, and every field in it is optional: a frame without one, or with
+ *  `{}`, renders exactly as before. See addPermissionConsent below. */
+function addPermissionRequest(requestId, sid, title, options, consent) {
   var stick = stuckToBottom();
   var row = document.createElement('div');
   row.className = 'acp-msg acp-msg-permission';
@@ -1727,6 +1733,8 @@ function addPermissionRequest(requestId, sid, title, options) {
   question.className = 'acp-permission-question';
   question.textContent = title;
   body.appendChild(question);
+  var consentBlock = permissionConsentBlock(consent);
+  if (consentBlock) body.appendChild(consentBlock);
   var btnRow = document.createElement('div');
   btnRow.className = 'acp-permission-options';
   (options || []).forEach(function (opt) {
@@ -1752,6 +1760,62 @@ function addPermissionRequest(requestId, sid, title, options) {
   transcriptEl.appendChild(row);
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
   return row;
+}
+
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the consent
+// fields shown under a permission question, in reading order. The server
+// allowlists exactly these (acp.py `_project_consent`); anything else on the
+// object is ignored here too rather than rendered, so the two allowlists agree.
+var PERMISSION_CONSENT_FIELDS = [
+  ['capability', 'Capability'],
+  ['resource', 'Resource'],
+  ['scope', 'Scope'],
+  ['source', 'Source'],
+];
+
+/** Build the consent block for a permission question, or return null when
+ *  there is nothing to show.
+ *
+ *  SECURITY (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3):
+ *  every value here is agent-authored and unbounded — the only cap on a
+ *  `resource` is the 1 MiB inbound-line limit — so each goes in through
+ *  `textContent` alone, never innerHTML, and the CSS on
+ *  `.acp-permission-consent-value` is what contains its length (wrap anywhere,
+ *  scroll past a max height). A field that is absent or not a string is
+ *  skipped rather than stringified: `String({})` would print
+ *  "[object Object]" as if the agent had said it. */
+function permissionConsentBlock(consent) {
+  if (!consent || typeof consent !== 'object' || Array.isArray(consent)) return null;
+  var rows = [];
+  PERMISSION_CONSENT_FIELDS.forEach(function (f) {
+    var v = consent[f[0]];
+    if (typeof v === 'string' && v !== '') rows.push([f[0], f[1], v]);
+  });
+  var rule = consent.matchedRule;
+  if (rule && typeof rule === 'object' && !Array.isArray(rule)) {
+    var parts = [];
+    if (typeof rule.capability === 'string' && rule.capability !== '') parts.push(rule.capability);
+    if (typeof rule.effect === 'string' && rule.effect !== '') parts.push(rule.effect);
+    if (parts.length) rows.push(['matchedRule', 'Matched rule', parts.join(' → ')]);
+  }
+  if (!rows.length) return null;
+  var block = document.createElement('div');
+  block.className = 'acp-permission-consent';
+  rows.forEach(function (r) {
+    var line = document.createElement('div');
+    line.className = 'acp-permission-consent-row';
+    line.dataset.field = r[0];
+    var label = document.createElement('span');
+    label.className = 'acp-permission-consent-label';
+    label.textContent = r[1];
+    var value = document.createElement('span');
+    value.className = 'acp-permission-consent-value';
+    value.textContent = r[2];
+    line.appendChild(label);
+    line.appendChild(value);
+    block.appendChild(line);
+  });
+  return block;
 }
 
 /** Find the transcript row `addPermissionRequest` built for `requestId`,
