@@ -1,5 +1,6 @@
 """Peek window: hotkey-held native overlay showing the dashboard."""
 
+import json
 import logging
 import sys
 import threading
@@ -24,6 +25,19 @@ def is_available() -> bool:
 
 
 _DOUBLE_TAP_INTERVAL = 0.5  # seconds between two hotkey triggers to open the browser
+
+
+def _login_url(server_url: str) -> str:
+    """``server_url`` plus a fresh one-time login code, via `web.login_url`.
+
+    Both peek doors — the webview and the double-tap browser — need the
+    `pa_local` cookie, and the code in this URL is exchanged for it on first
+    load. Minted in-process, never over HTTP. `web` is imported lazily so this
+    module stays importable without the web app.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    from .web import login_url
+    return login_url(server_url)
 
 
 class PeekWindow:
@@ -76,9 +90,12 @@ class PeekWindow:
 
     def _run_webview(self) -> None:
         """Create and run the pywebview window."""
+        # The webview has its own cookie jar, so it gets its own code at
+        # creation. `_show` re-signs it on every show as well.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
         self._window = webview.create_window(
             "PowerAtlas",
-            self._server_url,
+            _login_url(self._server_url),
             frameless=True,
             on_top=True,
             hidden=True,
@@ -187,7 +204,8 @@ class PeekWindow:
             self._last_trigger_time = 0.0  # reset so a third tap is not a double-tap
             if self._visible:
                 self._hide()
-            webbrowser.open(self._server_url)
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+            webbrowser.open(_login_url(self._server_url))
             return
         self._last_trigger_time = now
         win = self._window  # local capture for thread safety
@@ -210,9 +228,25 @@ class PeekWindow:
             else:
                 win.show()
                 win.toggle_fullscreen()
-            # Navigate back to the dashboard root so that any /acp navigation
-            # from a previous show is cleared before refreshing content.
-            win.evaluate_js("if(location.pathname!=='/'){location.href='/';}else if(typeof doRefresh==='function'){doRefresh()}")
+            # Every show goes through a fresh login code, whose exchange
+            # redirects to `/`. That lands on the dashboard root as before
+            # (clearing any /acp navigation from a previous show) and re-signs
+            # the webview: its cookie could otherwise be dead after a
+            # local-secret rotation, and nothing else would ever renew it
+            # before a restart. The cost is a full page load per show in
+            # place of the old in-page `doRefresh()`.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+            win.evaluate_js(self._show_script())
+
+    def _show_script(self) -> str:
+        """The JS `_show` runs: navigate to a freshly minted login URL.
+
+        `json.dumps` quotes the URL as a JS string literal. A login code is
+        URL-safe base64 and cannot break out of one, but the literal does not
+        depend on that.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+        """
+        return f"location.href={json.dumps(_login_url(self._server_url))};"
 
     def _hide(self) -> None:
         win = self._window  # local capture for thread safety

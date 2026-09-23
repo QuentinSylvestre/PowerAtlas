@@ -83,6 +83,62 @@ def isolated_config(tmp_path, monkeypatch):
     return tmp_path
 
 
+# The loopback key every test runs under. `local_enabled` (Phase 4) loads the
+# same value, so a cookie minted by `signed_in_loopback` stays valid there.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+_LOCAL_TEST_SECRET = "L" * 43
+
+
+def _valid_local_cookie() -> str:
+    """A `pa_local` value that verifies under the currently loaded key."""
+    from power_atlas import web as web_mod
+    value = web_mod.make_local_cookie()
+    assert value, "no local secret is loaded"
+    return value
+
+
+@pytest.fixture(autouse=True)
+def signed_in_loopback(isolated_config, monkeypatch):
+    """Every loopback test client carries a real, valid `pa_local`.
+
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 makes every
+    loopback route default-deny, and ~90 `TestClient` constructions in this
+    file mean "the signed-in user's own browser". The gate is not weakened for
+    them: a genuine key is loaded and a genuinely signed cookie is sent, the
+    way a browser that came through a door would send it. It is attached as a
+    default header at construction, so a test passing its own ``Cookie``
+    header per request replaces it (the Phase 4 rotation tests do).
+
+    Depends on `isolated_config` explicitly, because that fixture resets the
+    key to empty and must run first. Refusal tests opt out with
+    `anonymous_client` (or `_raw_asgi(..., local_cookie=False)`).
+    """
+    from power_atlas import web as web_mod
+    monkeypatch.setattr(web_mod, "_LOCAL_SECRET", _LOCAL_TEST_SECRET)
+    cookie = f"pa_local={web_mod.make_local_cookie()}"
+    real_init = TestClient.__init__
+
+    def init_signed_in(self, *args, **kwargs):
+        headers = dict(kwargs.get("headers") or {})
+        if not any(k.lower() == "cookie" for k in headers):
+            headers["cookie"] = cookie
+        kwargs["headers"] = headers
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(TestClient, "__init__", init_signed_in)
+    return cookie
+
+
+@pytest.fixture
+def anonymous_client():
+    """A loopback client with **no** `pa_local`: what the gate must refuse.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    c = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
+    del c.headers["cookie"]
+    return c
+
+
 @pytest.fixture
 def client():
     """TestClient with default Origin header for same-origin guard.
@@ -1455,7 +1511,7 @@ _ROUTER_ONLY = AsyncExitStackMiddleware(app.router)
 
 
 def _raw_asgi(asgi_app, path: str, raw_headers: list[tuple[bytes, bytes]],
-              method: str = "GET") -> tuple[int, bytes]:
+              method: str = "GET", *, local_cookie: bool = True) -> tuple[int, bytes]:
     """Call an ASGI app with exactly the headers given, byte for byte.
 
     Both HTTP clients within reach synthesise ``Host`` from the URL they are
@@ -1467,7 +1523,16 @@ def _raw_asgi(asgi_app, path: str, raw_headers: list[tuple[bytes, bytes]],
     ``asgi_app`` selects the entry point: ``app`` runs ``same_origin_guard``,
     ``_ROUTER_ONLY`` skips it and reaches a route's own checks, which is
     the only way to tell the two apart.
+
+    ``local_cookie`` appends a valid ``pa_local`` (unless the headers already
+    carry a Cookie), because the peer is loopback and the loopback gate is the
+    outermost layer: without it every call here would be refused by the gate
+    and a Host-refusal test would pass for the wrong reason.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
     """
+    if local_cookie and not any(k.lower() == b"cookie" for k, _ in raw_headers):
+        raw_headers = [*raw_headers,
+                       (b"cookie", f"pa_local={_valid_local_cookie()}".encode())]
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -11549,10 +11614,15 @@ class TestRemoteRequestsNeedTheCookie:
                  asgi_app=RemoteAccessGuard(_sentinel))
         assert reached == ["/ws/acp"]
 
-    def test_loopback_needs_no_cookie(self, remote_enabled):
-        """The laptop's own dashboard is untouched (SC-1's second half)."""
-        status, _, _ = _peer_http("/api/last-refresh", client=("127.0.0.1", 5),
-                                  headers=[(b"host", b"127.0.0.1:4915")])
+    def test_loopback_needs_no_device_cookie(self, remote_enabled):
+        """The laptop's own dashboard never needs `pa_device` (SC-1's second
+        half). Since 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+        Phase 5 it needs `pa_local` instead — peer class selects the credential
+        (D-17) — so the loopback cookie is sent and the device cookie is not."""
+        status, _, _ = _peer_http(
+            "/api/last-refresh", client=("127.0.0.1", 5),
+            headers=[(b"host", b"127.0.0.1:4915"),
+                     (b"cookie", f"pa_local={_valid_local_cookie()}".encode())])
         assert status == 200
 
 
@@ -12639,7 +12709,9 @@ class TestBindSockets:
         source = Path(self._main().__file__).read_text(encoding="utf-8")
         assert "loopback_sock = socks[0]" in source
         assert "port = loopback_sock.getsockname()[1]" in source
-        assert 'server_url = f"http://127.0.0.1:{port}"' in source
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5: built
+        # from the canonical loopback host; `TestLoopbackDoors` pins the value.
+        assert "server_url = _server_url(port)" in source
         assert "server.servers[0].sockets[0]" not in source
 
     def test_both_bound_addresses_are_logged(self):
@@ -12653,8 +12725,10 @@ class TestBindSockets:
     def test_the_loopback_bind_keeps_its_random_port_fallback(self):
         """The app must never come up remote-only with no loopback listener."""
         source = Path(self._main().__file__).read_text(encoding="utf-8")
-        assert 'socks = [_bind("127.0.0.1", 0)]' in source
-        assert source.index('socks = [_bind("127.0.0.1", desired_port)]') < \
+        # The host is `_loopback_host()` since
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (D-17).
+        assert "socks = [_bind(_loopback_host(), 0)]" in source
+        assert source.index("socks = [_bind(_loopback_host(), desired_port)]") < \
             source.index("_bind_remote_socket(log, config, socks, port)")
 
 
@@ -13354,12 +13428,20 @@ class TestALoopbackFallbackSkipsTheRemoteBind:
 
 
 class TestGuardOrdering:
-    def test_the_remote_guard_is_outermost(self):
+    def test_the_remote_guard_is_outermost_after_the_loopback_gate(self):
         """`add_middleware` inserts at index 0 and the stack is built over
         `reversed(middleware)`, so the last registered wraps the rest. A deny
-        survives either order; the refusal body does not."""
-        from power_atlas.web import RemoteAccessGuard
-        assert app.user_middleware[0].cls is RemoteAccessGuard
+        survives either order; the refusal body does not.
+
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 puts the
+        loopback gate outside it. The two guards act on disjoint peer classes
+        and both sit outside `same_origin_guard` whichever order they are in,
+        so no single request answers differently when those two swap: the
+        order between them is pinned structurally, here, and nowhere else.
+        """
+        from power_atlas.web import LoopbackCredentialGate, RemoteAccessGuard
+        assert [m.cls for m in app.user_middleware[:2]] == [
+            LoopbackCredentialGate, RemoteAccessGuard]
 
     def test_it_rejects_before_the_host_guard_does(self, remote_enabled):
         """The refusal body is the raw-ASGI one, not `same_origin_guard`'s."""
@@ -23694,9 +23776,6 @@ class TestGenerationRunsAtStartup:
 # is gated yet (Phase 5); these pin the credential itself.
 # ---------------------------------------------------------------------------
 
-_LOCAL_TEST_SECRET = "L" * 43
-
-
 @pytest.fixture
 def local_enabled():
     """A loaded local secret and an empty code store, torn down afterwards."""
@@ -24003,7 +24082,11 @@ class TestLocalSecretFile:
         assert resp.status_code == 303
         _, value = _local_cookie_from(resp)
         assert web_mod._local_cookie_ok(_local_scope(value))
-        body = client.get("/api/settings").json()
+        # The startup replaced the key the client's default cookie was signed
+        # with, so the settings read presents the cookie the door just issued.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+        body = client.get("/api/settings",
+                          headers={"Cookie": f"pa_local={value}"}).json()
         assert body["local_secret"]["persisted"] is False
         assert "RuntimeError" in body["local_secret"]["error"]
 
@@ -24401,6 +24484,15 @@ class TestLocalSecretRotation:
             assert not [h for h in resp.headers.get_list("set-cookie")
                         if h.startswith("pa_local=")]
         assert web_mod._LOCAL_SECRET == before
+        # The loopback gate now refuses both requests above before the route
+        # runs, so the route's own check is driven past the middleware too: it
+        # must hold on its own if the gate ever stops covering this path.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+        status, _ = _raw_asgi(_ROUTER_ONLY, "/api/local-secret/rotate",
+                              [(b"host", b"127.0.0.1")], method="POST",
+                              local_cookie=False)
+        assert status == 403
+        assert web_mod._LOCAL_SECRET == before
 
     def test_failed_write_keeps_the_old_secret_and_cookie(
             self, rotation_ready, client, monkeypatch):
@@ -24455,3 +24547,497 @@ class TestLocalSecretRotation:
         assert resp.json()["ok"] is True
         assert on_loop == [True]
         assert web_mod._LOCAL_SECRET == config_mod.load_local_secret()
+
+
+# ---------------------------------------------------------------------------
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 — the
+# default-deny loopback gate (SC-5) and the doors that sign a browser in
+# (SC-6, delivery half). Refusals use `anonymous_client`, the one client here
+# without the `signed_in_loopback` cookie.
+# ---------------------------------------------------------------------------
+
+_LOOPBACK_PEER = ("127.0.0.1", 50000)
+
+
+def _is_gate_page(resp) -> bool:
+    """The gate's HTML refusal: a script-free page pointing at the tray."""
+    return (resp.status_code == 403
+            and resp.headers["content-type"].startswith("text/html")
+            and "tray" in resp.text and "<script" not in resp.text.lower())
+
+
+def _is_json_403(resp) -> bool:
+    return (resp.status_code == 403
+            and resp.headers["content-type"] == "application/json"
+            and resp.content == b'{"error":"Forbidden"}')
+
+
+def _gate_over_sentinel():
+    """`LoopbackCredentialGate` over an app that announces being reached."""
+    from power_atlas.web import LoopbackCredentialGate
+
+    async def _sentinel(scope, receive, send):
+        raise _Reached(scope["path"])
+
+    return LoopbackCredentialGate(_sentinel)
+
+
+_LOOPBACK_HOST_HEADER = (b"host", b"127.0.0.1:4915")
+
+
+class TestLoopbackGateRefusesWithoutACookie:
+    """One test per surface, not one standing for all five (exit criterion)."""
+
+    def test_dashboard_root(self, anonymous_client):
+        assert _is_gate_page(anonymous_client.get("/"))
+
+    def test_acp_page(self, anonymous_client):
+        assert _is_gate_page(anonymous_client.get("/acp"))
+
+    def test_an_api_route(self, anonymous_client):
+        assert _is_json_403(anonymous_client.get("/api/settings"))
+
+    def test_partials_launchers(self, anonymous_client):
+        assert _is_json_403(anonymous_client.get("/partials/launchers"))
+
+    def test_ws_acp_upgrade(self):
+        """Closed 1008 at the gate, before `ws_acp`'s own checks run."""
+        sent = _peer_ws("/ws/acp", [_LOOPBACK_HOST_HEADER], client=_LOOPBACK_PEER)
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+
+    def test_ws_acp_upgrade_through_a_test_client(self, anonymous_client):
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with anonymous_client.websocket_connect("/ws/acp"):
+                pass
+        assert exc.value.code == 1008
+
+    def test_remote_access_secret_route(self, anonymous_client, remote_enabled):
+        """It returns the **permanent** remote device secret (D-2)."""
+        resp = anonymous_client.get("/api/remote-access")
+        assert _is_json_403(resp)
+        assert _TEST_SECRET not in resp.text
+
+    def test_the_settings_panels_permission_read_needs_the_cookie(
+            self, anonymous_client, client):
+        """The dashboard's display-only `GET /api/acp-permissions` keeps
+        working for a signed-in browser and is refused without one."""
+        assert _is_json_403(anonymous_client.get("/api/acp-permissions"))
+        assert client.get("/api/acp-permissions").status_code == 200
+
+    def test_an_unknown_path_is_refused_not_404(self, anonymous_client):
+        """Default-deny: the gate does not reveal which paths exist."""
+        assert _is_json_403(anonymous_client.get("/no-such-route"))
+
+    @pytest.mark.parametrize("bad", ["x=1", "pa_local=", "pa_local=loopback.1.abc",
+                                     "pa_device=phone.1.abc"])
+    def test_an_invalid_or_foreign_cookie_is_refused(self, bad):
+        c = TestClient(app, base_url="http://127.0.0.1", client=_LOOPBACK_PEER,
+                       headers={"cookie": bad})
+        assert _is_json_403(c.get("/api/settings"))
+
+    def test_a_cookie_signed_under_another_key_is_refused(self, client):
+        from power_atlas import web as web_mod
+        web_mod.set_local_secret("R" * 43)
+        assert _is_json_403(client.get("/api/settings"))
+
+    def test_no_local_secret_refuses_every_cookie(self, client):
+        from power_atlas import web as web_mod
+        web_mod.set_local_secret("")
+        assert _is_json_403(client.get("/api/settings"))
+
+    def test_a_valid_cookie_passes(self, client):
+        assert client.get("/api/settings").status_code == 200
+        assert client.get("/").status_code == 200
+
+
+class TestLoopbackGateExemptions:
+    """Exactly `GET /local-auth` and `GET /static/...` (D-2)."""
+
+    def test_the_exchange_route_is_reachable(self, anonymous_client,
+                                             local_enabled):
+        web_mod = local_enabled
+        assert web_mod._LOCAL_AUTH_PATH == "/local-auth"
+        resp = anonymous_client.get(web_mod.login_path(web_mod.mint_login_code()),
+                                    follow_redirects=False)
+        assert resp.status_code == 303
+        # A malformed code reaches the route's own 400, not the gate's 403.
+        assert anonymous_client.get("/local-auth?code=x").status_code == 400
+
+    def test_static_is_reachable(self, anonymous_client):
+        resp = anonymous_client.get("/static/style.css")
+        assert resp.status_code == 200
+        assert "text/css" in resp.headers["content-type"]
+
+    @pytest.mark.parametrize("path", ["/local-auth/x", "/local-authx",
+                                      "/staticfoo", "/staticfoo/style.css",
+                                      "/api/local-auth"])
+    def test_lookalike_paths_are_not_exempt(self, anonymous_client, path):
+        assert _is_json_403(anonymous_client.get(path))
+
+    @pytest.mark.parametrize("path", ["/local-auth", "/static/style.css"])
+    def test_only_get_is_exempt(self, anonymous_client, path):
+        resp = anonymous_client.post(path, headers={"Origin": "http://127.0.0.1"})
+        assert _is_json_403(resp)
+
+    @pytest.mark.parametrize("path", ["/local-auth", "/static/style.css"])
+    def test_a_websocket_to_an_exempt_path_is_refused(self, path):
+        """Never exempt on a websocket scope: `/static` would otherwise reach
+        `StaticFiles.__call__`, which asserts an http scope."""
+        sent = _peer_ws(path, [_LOOPBACK_HOST_HEADER], client=_LOOPBACK_PEER)
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+
+    @pytest.mark.parametrize("path", ["/local-auth", "/static/style.css"])
+    def test_exempt_paths_reach_the_inner_app_without_a_cookie(self, path):
+        with pytest.raises(_Reached):
+            _peer_http(path, [_LOOPBACK_HOST_HEADER], client=_LOOPBACK_PEER,
+                       asgi_app=_gate_over_sentinel())
+
+
+class TestLoopbackGateRefusalShapes:
+    """Page GET → HTML, `/api/*` → JSON 403, websocket → 1008."""
+
+    @pytest.mark.parametrize("path", ["/", "/acp", "/remote-auth"])
+    def test_a_page_get_is_the_html_tray_page(self, anonymous_client, path):
+        resp = anonymous_client.get(path)
+        assert _is_gate_page(resp)
+        assert resp.headers["cache-control"] == "no-store"
+
+    def test_a_page_head_is_html_too(self, anonymous_client):
+        resp = anonymous_client.head("/")
+        assert resp.status_code == 403
+        assert resp.headers["content-type"].startswith("text/html")
+
+    def test_an_api_get_is_json(self, anonymous_client):
+        assert _is_json_403(anonymous_client.get("/api/launchers"))
+
+    def test_a_post_to_a_page_path_is_json(self, anonymous_client):
+        """Only a navigation gets the page; a script's POST gets JSON."""
+        assert _is_json_403(anonymous_client.post(
+            "/", headers={"Origin": "http://127.0.0.1"}))
+
+    def test_a_websocket_closes_1008(self):
+        sent = _peer_ws("/ws/acp", [_LOOPBACK_HOST_HEADER],
+                        client=_LOOPBACK_PEER, asgi_app=_gate_over_sentinel())
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+
+    def test_the_gate_answers_before_the_host_guard(self):
+        """Outside `same_origin_guard`: a bad Host with no cookie gets the
+        gate's page, not the host guard's JSON."""
+        c = TestClient(app, base_url="http://evil.com", client=_LOOPBACK_PEER)
+        del c.headers["cookie"]
+        assert _is_gate_page(c.get("/"))
+
+
+class TestPeerClassSelectsTheCredential:
+    """D-17: loopback needs `pa_local`, remote needs `pa_device`, and neither
+    peer class is asked for the other's cookie."""
+
+    def test_remote_peer_with_a_device_cookie_is_served_without_pa_local(
+            self, remote_enabled):
+        status, body, _ = _peer_http(
+            "/acp", [_cookie_header(), (b"sec-fetch-site", b"none")])
+        assert status == 200, body[:200]
+        assert b"not signed in" not in body
+
+    def test_remote_websocket_passes_the_gate_on_the_device_cookie(
+            self, remote_enabled):
+        from power_atlas.web import LoopbackCredentialGate, RemoteAccessGuard
+        reached = []
+
+        async def _sentinel(scope, receive, send):
+            reached.append(scope["path"])
+
+        _peer_ws("/ws/acp", [_cookie_header()],
+                 asgi_app=LoopbackCredentialGate(RemoteAccessGuard(_sentinel)))
+        assert reached == ["/ws/acp"]
+
+    def test_the_gate_passes_remote_scopes_through_untouched(self):
+        """Refusing a remote peer is `RemoteAccessGuard`'s job, not the gate's."""
+        with pytest.raises(_Reached):
+            _peer_http("/api/settings", asgi_app=_gate_over_sentinel())
+
+    def test_a_loopback_peer_holding_only_a_device_cookie_is_refused(
+            self, remote_enabled):
+        status, _, _ = _peer_http(
+            "/api/settings", [_LOOPBACK_HOST_HEADER, _cookie_header()],
+            client=_LOOPBACK_PEER)
+        assert status == 403
+
+
+class TestCanonicalLoopbackHost:
+    """D-17: one spelling for every door and every cookie issuance."""
+
+    def test_the_canonical_host_is_a_loopback_name(self):
+        from power_atlas import web as web_mod
+        assert web_mod.LOOPBACK_HOST == "127.0.0.1"
+        assert web_mod.LOOPBACK_HOST in web_mod._LOOPBACK_HOSTS
+
+    def test_server_url_is_built_from_it(self):
+        from power_atlas import __main__ as main_mod
+        from power_atlas import web as web_mod
+        assert main_mod._server_url(4915) == f"http://{web_mod.LOOPBACK_HOST}:4915"
+
+    def test_the_loopback_listener_binds_it(self, monkeypatch):
+        from power_atlas import __main__ as main_mod
+        from power_atlas import web as web_mod
+        from power_atlas.config import Config
+        hosts = []
+
+        class _Sock:
+            def getsockname(self):
+                return ("127.0.0.1", 4915)
+
+        def fake_bind(host, port):
+            hosts.append(host)
+            return _Sock()
+
+        monkeypatch.setattr(main_mod, "_bind", fake_bind)
+        main_mod._choose_sockets(logging.getLogger("t"), Config(), 4915)
+        assert hosts == [web_mod.LOOPBACK_HOST]
+
+    def test_a_cookie_issued_at_one_spelling_is_not_sent_to_another(
+            self, local_enabled):
+        """The cookie is host-only (no `Domain`), so a client that signed in at
+        the canonical spelling is refused at the others rather than silently
+        accepted: they get the "open from the tray" page."""
+        web_mod = local_enabled
+        c = TestClient(app, base_url="http://127.0.0.1", client=_LOOPBACK_PEER)
+        del c.headers["cookie"]
+        resp = c.get(web_mod.login_path(web_mod.mint_login_code()))
+        assert resp.status_code == 200  # 303 then `/`, signed in
+        assert c.get("http://127.0.0.1/api/settings").status_code == 200
+        # `[::1]` is the third spelling; TestClient cannot parse a bracketed
+        # host, and the jar's host-only matching is the same for it.
+        assert _is_gate_page(c.get("http://localhost/"))
+
+    def test_the_doors_use_no_other_spelling(self):
+        """No door file carries its own loopback literal or login path."""
+        src = Path(__file__).resolve().parent.parent / "src" / "power_atlas"
+        for name in ("tray.py", "peek.py", "__main__.py"):
+            text = (src / name).read_text(encoding="utf-8")
+            for literal in ('"localhost', "'localhost", '"::1', "[::1]",
+                            "/local-auth", "?code="):
+                assert literal not in text, (name, literal)
+        main_text = (src / "__main__.py").read_text(encoding="utf-8")
+        assert '"127.0.0.1"' not in main_text
+
+
+def _signs_in_in_one_navigation(url: str, server_url: str) -> None:
+    """A fresh browser opening ``url`` lands on the dashboard signed in."""
+    assert url.startswith(server_url + "/local-auth?code="), url
+    c = TestClient(app, base_url=server_url, client=_LOOPBACK_PEER)
+    del c.headers["cookie"]
+    resp = c.get(url[len(server_url):])
+    assert resp.status_code == 200
+    assert [r.status_code for r in resp.history] == [303]
+    assert str(resp.url).rstrip("/") == server_url
+    assert c.get("/api/settings").status_code == 200
+
+
+class TestLoopbackDoors:
+    """Each door yields a URL that authenticates in one navigation, built by
+    `web.login_url` (so by `login_path(mint_login_code())`), never by hand."""
+
+    _SERVER = "http://127.0.0.1:4915"
+
+    def test_login_url_is_login_path_of_a_fresh_mint(self, local_enabled,
+                                                     monkeypatch):
+        web_mod = local_enabled
+        monkeypatch.setattr(web_mod, "mint_login_code", lambda: "C" * 43)
+        assert web_mod.login_url(self._SERVER) == (
+            self._SERVER + web_mod.login_path("C" * 43))
+
+    def test_login_url_without_a_secret_is_the_bare_url(self):
+        from power_atlas import web as web_mod
+        web_mod.set_local_secret("")
+        assert web_mod.login_url(self._SERVER) == self._SERVER
+
+    def _tray_menu(self, monkeypatch):
+        """Run `run_tray` against a fake pystray and return its icon."""
+        from power_atlas import tray as tray_mod
+        from power_atlas import data as data_mod
+        from power_atlas.config import Config
+        monkeypatch.setattr(data_mod, "warmup_pinned", lambda *a, **k: None)
+
+        class _Icon:
+            def __init__(self, *args):
+                self.menu = args[3]
+                self.notified = []
+
+            def run(self):
+                pass
+
+            def notify(self, message, title=None):
+                self.notified.append((message, title))
+
+        monkeypatch.setattr(tray_mod.pystray, "MenuItem",
+                            lambda text, action, **kw: (text, action))
+        monkeypatch.setattr(tray_mod.pystray, "Menu", lambda *items: dict(items))
+        monkeypatch.setattr(tray_mod.pystray, "Icon", _Icon)
+        monkeypatch.setattr(tray_mod, "_icon_instance", None)
+        tray_mod.run_tray(self._SERVER, Config())
+        return tray_mod, tray_mod._icon_instance
+
+    def test_tray_open(self, local_enabled, monkeypatch):
+        tray_mod, icon = self._tray_menu(monkeypatch)
+        opened = []
+        monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
+        icon.menu["Open"](icon, None)
+        assert len(opened) == 1
+        _signs_in_in_one_navigation(opened[0], self._SERVER)
+
+    def test_tray_open_goes_through_login_url(self, local_enabled, monkeypatch):
+        tray_mod, icon = self._tray_menu(monkeypatch)
+        opened = []
+        monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
+        monkeypatch.setattr(local_enabled, "login_url",
+                            lambda server_url: "sentinel:" + server_url)
+        icon.menu["Open"](icon, None)
+        assert opened == ["sentinel:" + self._SERVER]
+
+    def test_tray_copy_login_link_uses_the_clipboard(self, local_enabled,
+                                                     monkeypatch):
+        tray_mod, icon = self._tray_menu(monkeypatch)
+        calls = []
+
+        class _Clip:
+            CF_UNICODETEXT = 13
+
+            def OpenClipboard(self):
+                calls.append("open")
+
+            def EmptyClipboard(self):
+                calls.append("empty")
+
+            def SetClipboardText(self, text, fmt):
+                calls.append(("set", text, fmt))
+
+            def CloseClipboard(self):
+                calls.append("close")
+
+        monkeypatch.setitem(sys.modules, "win32clipboard", _Clip())
+        monkeypatch.setattr(tray_mod.sys, "platform", "win32")
+        icon.menu["Copy login link"](icon, None)
+        assert calls[0] == "open" and calls[1] == "empty" and calls[-1] == "close"
+        _, url, fmt = calls[2]
+        assert fmt == 13
+        _signs_in_in_one_navigation(url, self._SERVER)
+        # The notification confirms the copy; it does not repeat the link.
+        assert len(icon.notified) == 1
+        assert url not in icon.notified[0][0]
+
+    def test_tray_copy_login_link_without_a_clipboard_displays_it(
+            self, local_enabled, monkeypatch):
+        tray_mod, icon = self._tray_menu(monkeypatch)
+        monkeypatch.setattr(tray_mod, "_copy_to_clipboard", lambda text: False)
+        icon.menu["Copy login link"](icon, None)
+        assert len(icon.notified) == 1
+        _signs_in_in_one_navigation(icon.notified[0][0], self._SERVER)
+
+    def test_the_login_link_is_never_logged(self, local_enabled, monkeypatch,
+                                            caplog):
+        from power_atlas import tray as tray_mod
+        monkeypatch.setattr(tray_mod, "_copy_to_clipboard", lambda text: False)
+        with caplog.at_level(logging.DEBUG):
+            url = tray_mod.copy_login_link(self._SERVER)
+        code = url.rsplit("=", 1)[1]
+        assert code not in caplog.text
+
+    def _peek(self):
+        from power_atlas import peek as peek_mod
+        pw = peek_mod.PeekWindow.__new__(peek_mod.PeekWindow)
+        pw._server_url = self._SERVER
+        pw._visible = False
+        pw._webview_ok = True
+        pw._last_trigger_time = 0.0
+        pw._window = None
+        return peek_mod, pw
+
+    def test_peek_double_tap(self, local_enabled, monkeypatch):
+        peek_mod, pw = self._peek()
+        opened = []
+        monkeypatch.setattr(peek_mod.webbrowser, "open", opened.append)
+        pw._show()
+        pw._show()
+        assert len(opened) == 1
+        _signs_in_in_one_navigation(opened[0], self._SERVER)
+
+    def test_peek_webview_at_creation(self, local_enabled, monkeypatch):
+        peek_mod, pw = self._peek()
+        created = []
+
+        class _Webview:
+            @staticmethod
+            def create_window(title, url, **kwargs):
+                created.append(url)
+                return object()
+
+            @staticmethod
+            def start(func=None, debug=False):
+                pass
+
+        monkeypatch.setattr(peek_mod, "webview", _Webview, raising=False)
+        pw._run_webview()
+        assert len(created) == 1
+        _signs_in_in_one_navigation(created[0], self._SERVER)
+
+    def _show_url(self, peek_mod, pw, monkeypatch):
+        from unittest.mock import MagicMock
+        win = MagicMock()
+        pw._window = win
+        pw._visible = False
+        pw._last_trigger_time = 0.0
+        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        pw._show()
+        (script,), _ = win.evaluate_js.call_args
+        assert script.startswith("location.href=") and script.endswith(";")
+        return json.loads(script[len("location.href="):-1])
+
+    def test_peek_show_mints_a_fresh_code_every_time(self, local_enabled,
+                                                     monkeypatch):
+        peek_mod, pw = self._peek()
+        first = self._show_url(peek_mod, pw, monkeypatch)
+        second = self._show_url(peek_mod, pw, monkeypatch)
+        assert first != second
+        _signs_in_in_one_navigation(first, self._SERVER)
+        _signs_in_in_one_navigation(second, self._SERVER)
+
+    def test_peek_survives_a_local_secret_rotation(self, local_enabled,
+                                                   monkeypatch):
+        """Phase 4 review finding 9: the webview's cookie dies with the old
+        key, and the next show must sign it in under the new one."""
+        web_mod = local_enabled
+        peek_mod, pw = self._peek()
+        old_cookie = web_mod.make_local_cookie()
+        web_mod.set_local_secret("N" * 43)  # what a rotation applies
+        with web_mod._login_codes_lock:
+            web_mod._login_codes.clear()  # and a rotation clears the codes
+        assert not web_mod._local_cookie_ok(_local_scope(old_cookie))
+        url = self._show_url(peek_mod, pw, monkeypatch)
+        _signs_in_in_one_navigation(url, self._SERVER)
+
+
+class TestLoginLinkIsNotARoute:
+    """Minting stays in-process (D-3): "Copy login link" is a tray callback."""
+
+    @pytest.mark.parametrize("path", [
+        "/login-link", "/api/login-link", "/api/login-code", "/api/mint",
+        "/api/login/mint", "/api/local-auth", "/api/local-auth/mint",
+        "/local-auth/mint", "/api/copy-login-link", "/api/local-secret/mint",
+        "/api/local-login", "/login"])
+    @pytest.mark.parametrize("method", ["GET", "POST"])
+    def test_plausible_mint_paths_do_not_exist(self, client, path, method):
+        """Sent **with** a valid cookie, so a 404/405 means the route does not
+        exist rather than that the gate refused an anonymous caller."""
+        resp = client.request(method, path,
+                              headers={"Origin": "http://127.0.0.1"})
+        assert resp.status_code in (404, 405), (method, path, resp.status_code)
+        assert "code=" not in resp.text
+
+    def test_no_route_endpoint_is_a_door_function(self):
+        from power_atlas import tray as tray_mod
+        from power_atlas import web as web_mod
+        endpoints = {getattr(r, "endpoint", None) for r in app.routes}
+        for fn in (web_mod.login_url, web_mod.mint_login_code,
+                   tray_mod.copy_login_link):
+            assert fn not in endpoints

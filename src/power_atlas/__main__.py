@@ -403,6 +403,26 @@ def _bind_remote_socket(log, config, socks: list, port: int) -> bool:
     return True
 
 
+def _loopback_host() -> str:
+    """The one loopback spelling this process binds and opens (D-17).
+
+    Read from `web.LOOPBACK_HOST` rather than restated here: `pa_local` is a
+    host-only cookie, so a door opening `localhost` while the cookie was issued
+    for `127.0.0.1` is a signed-out browser. Imported lazily, like every other
+    `web` import in this module, so importing `__main__` stays cheap.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    from .web import LOOPBACK_HOST
+    return LOOPBACK_HOST
+
+
+def _server_url(port: int) -> str:
+    """The base URL every door (tray, peek) builds its login URL from.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    return f"http://{_loopback_host()}:{port}"
+
+
 def _choose_sockets(log, config, desired_port: int) -> tuple[list, int]:
     """Bind every listener and report the port ``server_url`` must name.
 
@@ -435,7 +455,7 @@ def _choose_sockets(log, config, desired_port: int) -> tuple[list, int]:
     # whole model assumes cannot exist.
     fell_back = False
     try:
-        socks = [_bind("127.0.0.1", desired_port)]
+        socks = [_bind(_loopback_host(), desired_port)]
     except OSError as exc:
         if desired_port <= 0:
             # No fallback exists on this path: the OS was already asked for any
@@ -446,7 +466,7 @@ def _choose_sockets(log, config, desired_port: int) -> tuple[list, int]:
         log.warning("Port %d unavailable (%s), falling back to random port",
                     desired_port, exc)
         try:
-            socks = [_bind("127.0.0.1", 0)]
+            socks = [_bind(_loopback_host(), 0)]
         except OSError as fallback_exc:
             log.error("Loopback bind failed on port %d and on the random "
                       "fallback: %s", desired_port, fallback_exc)
@@ -788,7 +808,7 @@ def _run_foreground() -> None:
         _remove_pid()
         sys.exit(1)
 
-    uv_config = uvicorn.Config(app, host="127.0.0.1", port=port,
+    uv_config = uvicorn.Config(app, host=_loopback_host(), port=port,
                                log_level="warning",
                                ws_max_size=WS_MAX_SIZE_BYTES,
                                # `ProxyHeadersMiddleware` OVERWRITES
@@ -833,7 +853,7 @@ def _run_foreground() -> None:
         _remove_pid()
         sys.exit(1)
 
-    server_url = f"http://127.0.0.1:{port}"
+    server_url = _server_url(port)
     log.info("Server ready at %s", server_url)
 
     # Warmup pinned workspaces in background (non-blocking)

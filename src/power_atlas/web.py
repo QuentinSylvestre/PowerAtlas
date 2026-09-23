@@ -1543,6 +1543,119 @@ class RemoteAccessGuard:
 app.add_middleware(RemoteAccessGuard)
 
 
+# --- The loopback gate ---------------------------------------------------------
+#
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (SC-5, D-2).
+# Default-deny for loopback peers: every route needs a valid `pa_local`, with
+# exactly two exemptions — the login-code exchange, which is how a browser gets
+# the cookie in the first place, and the `/static` mount, which serves only the
+# files already in the package. Everything else, `GET /` included, is behind
+# it: `GET /` is where the page-injected token used to be scraped, and
+# `GET /api/remote-access` hands out the permanent remote device secret.
+
+# The single loopback spelling every door opens and every cookie is therefore
+# issued for (D-17). `127.0.0.1`, `localhost` and `::1` all pass the Host check
+# but do not share a browser cookie jar, and `pa_local` is host-only, so a
+# second spelling is a signed-out browser. `__main__` binds and builds
+# `server_url` from this name rather than from its own literal.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+LOOPBACK_HOST = "127.0.0.1"
+
+# HTTP paths a browser navigates to as a page. A refused GET to one of these
+# gets the "open PowerAtlas from the tray" page rather than JSON, because the
+# reader is a person looking at a browser tab. A path set rather than `Accept`
+# sniffing: deterministic, and a fragment fetch (`/partials/*`) or an API call
+# never lands a whole HTML page into a caller expecting something else.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+_LOCAL_PAGE_PATHS = frozenset({"/", _ACP_PATH, _REMOTE_AUTH_PATH})
+
+
+def _local_gate_exempt(scope) -> bool:
+    """Whether a loopback scope may pass without `pa_local`.
+
+    Scope-typed, like `_remote_path_allowed`: both exemptions are HTTP GET (and
+    HEAD) only, the only methods either route serves. A websocket upgrade to
+    `/static/x` is never exempt — it would otherwise reach
+    `StaticFiles.__call__`, which asserts an http scope. The mount is matched
+    as a directory, so `/staticfoo` is not exempt.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    if scope["type"] != "http" or scope.get("method") not in ("GET", "HEAD"):
+        return False
+    path = scope.get("path") or ""
+    if path == _LOCAL_AUTH_PATH:
+        return True
+    return path == _REMOTE_STATIC_MOUNT or path.startswith(_REMOTE_STATIC_MOUNT + "/")
+
+
+async def _refuse_local(scope, receive, send) -> None:
+    """The gate's refusal: `_refuse`, plus a page for a browser navigation.
+
+    Three shapes. A websocket closes 1008 and anything that is not a page GET
+    gets the JSON 403, both through `_refuse`. A GET (or HEAD) of a page path
+    gets the same script-free page `/local-auth` refuses with, telling the user
+    to open PowerAtlas from the tray — the only way a browser gets signed in.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    if (scope["type"] == "http" and scope.get("method") in ("GET", "HEAD")
+            and (scope.get("path") or "") in _LOCAL_PAGE_PATHS):
+        page = _local_auth_refusal("This browser is not signed in.", 403)
+        await page(scope, receive, send)
+        return
+    await _refuse(scope, send)
+
+
+class LoopbackCredentialGate:
+    """Default-deny `pa_local` check for loopback peers (SC-5, D-2, D-17).
+
+    The mirror of `RemoteAccessGuard`: that guard acts only when the peer is
+    remote, this one only when it is not, so each peer class meets exactly one
+    credential — a NetBird browser holding `pa_device` is never also asked for
+    `pa_local`. A raw ASGI class for the same reason as its sibling: it has to
+    see `websocket` scopes, which `BaseHTTPMiddleware` never does.
+
+    Registered **after** `RemoteAccessGuard`, which makes it the outermost
+    layer (`add_middleware` inserts at index 0 and the stack is built over
+    `reversed(middleware)`), so it refuses before any inner guard runs or logs.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            if not _is_remote_peer((scope.get("client") or (None,))[0]):
+                if not _local_gate_exempt(scope) and not _local_cookie_ok(scope):
+                    await _refuse_local(scope, receive, send)
+                    return
+        await self.app(scope, receive, send)
+
+
+# After `RemoteAccessGuard`'s line, so this gate is the outermost layer. Moving
+# it above that line silently inverts the order; a test pins it.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+app.add_middleware(LoopbackCredentialGate)
+
+
+def login_url(server_url: str) -> str:
+    """The URL a door opens: ``server_url`` plus a freshly minted login code.
+
+    The one builder every door uses — tray Open, "Copy login link", the peek
+    double-tap, and the peek webview at creation and on every show — so none
+    of them assembles the path by hand. ``server_url`` is built by `__main__`
+    from `LOOPBACK_HOST`. With no local secret there is no code to mint;
+    the bare URL is returned and the gate's page tells the user why.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    code = mint_login_code()
+    if not code:
+        log.error("no usable local secret; opening %s without a login code",
+                  server_url)
+        return server_url
+    return f"{server_url.rstrip('/')}{login_path(code)}"
+
+
 # Per-process, never persisted, regenerated every launch. The origin check
 # below stops a web page; it does nothing against a local non-browser process,
 # which can send any header it likes — and past the handoff `ws_acp` is an

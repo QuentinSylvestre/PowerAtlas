@@ -44,6 +44,81 @@ def _create_icon() -> Image.Image:
         return img
 
 
+def _login_url(server_url: str) -> str:
+    """``server_url`` plus a fresh one-time login code, via `web.login_url`.
+
+    Every loopback route needs the `pa_local` cookie, and a door is how a
+    browser gets one: the code in this URL is exchanged for it on first load.
+    Minted in-process — the tray and the server share one process — never
+    through an HTTP route. `web` is imported lazily, like `data` in `on_open`,
+    so importing this module does not pull in the web app.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    from .web import login_url
+    return login_url(server_url)
+
+
+def _open_in_browser(url: str) -> None:
+    try:
+        if sys.platform == "win32":
+            webbrowser.open(url)
+        else:
+            import subprocess as _sp
+            _sp.Popen(["xdg-open", url],
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    except Exception as e:
+        log.error("Failed to open browser: %s", e)
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Put ``text`` on the Windows clipboard. False when it could not.
+
+    `pywin32`'s `win32clipboard`, already a declared Windows dependency, so
+    "Copy login link" adds no package. There is no clipboard elsewhere without
+    one, and the caller displays the link instead.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+        finally:
+            win32clipboard.CloseClipboard()
+        return True
+    except Exception as e:
+        log.error("Could not copy the login link to the clipboard: %s", e)
+        return False
+
+
+def copy_login_link(server_url: str, icon=None) -> str:
+    """The "Copy login link" tray action: an in-process callback, never a route.
+
+    A network-reachable mint would hand a login to any local process that
+    asked (D-3), so this exists only as a menu item. The link opens PowerAtlas
+    in another browser, or re-enters one that lost its cookie; it works once,
+    within the login code's TTL. It is never logged: it is a live credential
+    until used. Returns the link for the caller's (and a test's) benefit.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    """
+    url = _login_url(server_url)
+    if _copy_to_clipboard(url):
+        message, title = ("Paste it into a browser within 2 minutes. It "
+                          "works once."), "Login link copied"
+    else:
+        # No clipboard: display the link for manual copy.
+        message, title = url, "PowerAtlas login link (works once, 2 minutes)"
+    if icon is not None:
+        try:
+            icon.notify(message, title)
+        except Exception as e:
+            log.error("Could not display the login link notification: %s", e)
+    return url
+
+
 def run_tray(server_url: str, config: Config) -> None:
     """Run pystray on the calling thread (blocks). Opens browser for UI."""
 
@@ -52,15 +127,12 @@ def run_tray(server_url: str, config: Config) -> None:
         from .data import warmup_pinned
         from .config import load_config as _load_config
         _t.Thread(target=warmup_pinned, args=(_load_config().pinned_folders,), daemon=True).start()
-        try:
-            if sys.platform == "win32":
-                webbrowser.open(server_url)
-            else:
-                import subprocess as _sp
-                _sp.Popen(["xdg-open", server_url],
-                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-        except Exception as e:
-            log.error("Failed to open browser: %s", e)
+        # A fresh login code per open, so the browser lands signed in.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+        _open_in_browser(_login_url(server_url))
+
+    def on_copy_login_link(icon, item):
+        copy_login_link(server_url, icon)
 
     def on_logs(icon, item):
         log_path = CONFIG_DIR / "orchestrator.log"
@@ -93,6 +165,8 @@ def run_tray(server_url: str, config: Config) -> None:
 
     menu = pystray.Menu(
         pystray.MenuItem("Open", on_open, default=True),
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+        pystray.MenuItem("Copy login link", on_copy_login_link),
         pystray.MenuItem("Logs", on_logs),
         pystray.MenuItem("Restart", on_restart),
         pystray.MenuItem("Quit", on_quit),
