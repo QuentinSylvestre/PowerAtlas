@@ -1,8 +1,8 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: In Progress — Phases 0-5 complete, reviewed, Green (deny floor removed from scope
-> entirely, user decision 2026-09-22, see § 9); Phase 6 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-6 complete, reviewed, Green (deny floor removed from scope
+> entirely, user decision 2026-09-22, see § 9); Phase 7 (live verification + docs) next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -213,7 +213,7 @@ replaces.
 | D-1 Scope | Interactive ACP sessions only | Include the unattended rule engine | User instruction 2026-09-21. An `ask` rule with nobody watching is a bounded wait, not a policy |
 | D-2 Route coverage | Default-deny on **every** route; exempt only the exchange route and `/static` | `/api/*` + `/ws/acp`; adding `/partials/*` | The credential is scraped from `GET /`, in neither narrower set. Also covers `GET /api/remote-access`, which leaks the permanent remote secret to unauthenticated loopback today |
 | D-3 Re-entry | Per-door one-time code + tray "Copy login link"; no cookie yields an "open from the tray" page | Allow any loopback caller to mint | A rogue local process is indistinguishable from a typed URL at the HTTP layer |
-| D-4 `_ACP_TOKEN` | Retire it; cookie replaces it | Keep both; sign the cookie per launch | The token adds no barrier a cookie-holder does not already pass |
+| D-4 `_ACP_TOKEN` | Retire it; cookie replaces it | Keep both; sign the cookie per launch | The token adds no barrier a cookie-holder does not already pass. *(Sharpened 2026-09-23, Phase 6 review: that holds for a local **process** — R-19. It does not hold for a **browser page** on another origin: the browser attaches the cookie to its websocket upgrade without the page reading it, whereas the token had to be read from the page. Against a same-site page on another port, `ws_acp`'s Origin check is now the sole barrier — hence Phase 6's tests pin it directly.)* |
 | D-5 Permission frame | Forward an allowlisted `consent` projection + unclamped title; clamp the toast only | Consent with the 200-clamp retained; leave as-is | A write prompt otherwise reads `"Write File"` with no path. The clamp was sized for a toast body |
 | D-6 Agent-file ownership | **PowerAtlas repo owns it**; PowerAtlas installs it | agent-playbook inventory row | agent-playbook is a personal config repo; a product feature must not depend on a personal deploy pipeline |
 | D-7 Derived-agent contents | Generated from a **configurable base agent** (default `kiro_default`) | Standalone agent; standalone with hardcoded paths | A standalone agent cannot know the user's `resources:` paths, so ACP sessions would silently lose governance |
@@ -643,14 +643,14 @@ The other order leaves every intermediate state with the ACP UI silently off.
 > a behavioural assertion plus a grep for whatever names Phase 0 recorded.
 
 **Exit criteria**:
-- [ ] `grep` for `ACP_TOKEN` across `templates/` and `static/` returns 0; `_ACP_TOKEN` across `src/` returns 0
-- [ ] `grep` for `_acp_token_ok` returns no hits, including the `acp.py` docstring
-- [ ] `grep` for the stale-token function names **recorded by Phase 0** returns no hits in either template or either static module
-- [ ] **Behavioural**: a websocket handshake rejected for a bad cookie produces no "stale token, reload" affordance anywhere in the UI — asserted by driving the rejection, not by grepping names
-- [ ] With `acp` importable, every previously `ACP_TOKEN`-gated dashboard feature still renders; with `acp` unimportable, each is hidden — both directions asserted, because only the pair catches an inverted sentinel
-- [ ] The socket opens with no `?t=` parameter and is accepted on the cookie alone
-- [ ] "Server unreachable" remains distinguishable from "rejected handshake", or § 9 records that it deliberately does not — **(sharpened, Phase 5 review, 2026-09-23)**: since Phase 5 the rejection is the loopback gate's 403; today both templates' handshake diagnostic (`acp.html`, `index.html`'s dash mirror) fetches, gets that 403, treats `!res.ok` as unreachable and says "it may still be starting". A cookie-less tab must instead say "signed out — open PowerAtlas from the tray"
-- [ ] `pytest tests/test_web.py --timeout=300` and `node tests/acp_page.test.mjs` both pass
+- [x] `grep` for `ACP_TOKEN` across `templates/` and `static/` returns 0; `_ACP_TOKEN` across `src/` returns 0 — both 0 after the review fix `e30c1a9` (the last hit, a `__main__.py` docstring outside the phase's file scope, was fixed there; `grep -rn "_ACP_TOKEN" src --include=*.py` excludes a stale `__pycache__` `.pyc`)
+- [x] `grep` for `_acp_token_ok` returns no hits, including the `acp.py` docstring
+- [x] `grep` for the stale-token function names **recorded by Phase 0** returns no hits in either template or either static module
+- [x] **Behavioural**: a websocket handshake rejected for a bad cookie produces no "stale token, reload" affordance anywhere in the UI — asserted by driving the rejection, not by grepping names
+- [x] With `acp` importable, every previously `ACP_TOKEN`-gated dashboard feature still renders; with `acp` unimportable, each is hidden — both directions asserted, because only the pair catches an inverted sentinel
+- [x] The socket opens with no `?t=` parameter and is accepted on the cookie alone
+- [x] "Server unreachable" remains distinguishable from "rejected handshake", or § 9 records that it deliberately does not — **(sharpened, Phase 5 review, 2026-09-23)**: since Phase 5 the rejection is the loopback gate's 403; today both templates' handshake diagnostic (`acp.html`, `index.html`'s dash mirror) fetches, gets that 403, treats `!res.ok` as unreachable and says "it may still be starting". A cookie-less tab must instead say "signed out — open PowerAtlas from the tray"
+- [x] `pytest tests/test_web.py --timeout=300` and `node tests/acp_page.test.mjs` both pass
 
 **Covers**: SC-7
 
@@ -760,7 +760,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | 3 | Settings and permission-prompt UI `[P:4]` | **Complete** | 10/10 exit criteria; 2 commits (`04982bf` feat, `4fc6923` review fix — server resolves Default, user decision 2026-09-23); QA PASS 13/13 over HTTP (no real browser); Green |
 | 4 | Local secret, login code, exchange `[P:3]` | **Complete** | 10/10 exit criteria; 2 commits (`6ff4b50` feat, `3a4f3b5` review fix — atomic secret writes, guarded startup); R-19 accepted by the user 2026-09-23; QA PASS 11/11; Green |
 | 5 | Default-deny gate and the three doors | **Complete** | 12/12 exit criteria; 2 commits (`d0f9296` feat, `d4bc801` review fix); live on the restarted build; QA PASS incl. R-14 measured for the webview door; Green |
-| 6 | Retire `_ACP_TOKEN`, add `ACP_AVAILABLE` | Not started | Ordered: repoint before delete |
+| 6 | Retire `_ACP_TOKEN`, add `ACP_AVAILABLE` | **Complete** | 8/8 exit criteria; 2 commits (`6e2f6ec` feat, `e30c1a9` review fix — socket auth pinned, signed-out UX); live 8/8 on the restarted build; Green |
 | 7 | Live verification and documentation | Not started | Requires a user-performed restart |
 
 ## Dependency Graph
@@ -1600,6 +1600,98 @@ WebView2 keeps `pa_local` across the 303 and presents it afterwards.
 The earlier log entry "Remote bind … failed (WinError 10049)" at 14:26 comes from an older run,
 before NetBird's interface was up. The 17:15 restart bound both sockets.
 
+### Phase 6 (2026-09-23) — retire `_ACP_TOKEN`, introduce `ACP_AVAILABLE`
+
+Implementation (2026-09-23, code: `6e2f6ec`)
+
+Phase 6 retires `_ACP_TOKEN`. Since Phase 5, the `/ws/acp` upgrade has been authenticated by the `pa_local` cookie in `LoopbackCredentialGate` for loopback peers and by `pa_device` in `RemoteAccessGuard` for remote peers. That left the page-embedded token with no work to do (D-4).
+
+The phase kept D-15's order: new sentinel first, deletion last.
+- `web.py` first gained `"acp_available": acp is not None` in the dashboard's render context.
+- `index.html` gained a boolean `var ACP_AVAILABLE`, and all seven sentinel branches were repointed to it. Phase 0 had counted six; the seventh is `dashMaybeAttach`'s guard.
+- The page harness then passed with both variables present.
+- Only then were the following deleted: `_ACP_TOKEN`, `_acp_token_ok`, the token check in `ws_acp`, both `acp_token` render keys, and both `ACP_TOKEN` JavaScript variables.
+
+Both socket URL builders now return the bare `/ws/acp` path. The socket is accepted on the cookie alone, after the origin check. Docstrings and comments in `web.py` and `acp.py` that described the token as a live control were reworded. `/acp` keeps its `no-store` header and its inline Host check; only their rationale changed.
+
+The stale-token branch is gone from both templates, along with its "reload" advice. Its functions carry new names: `explainRefusedHandshake` and `reportSignedOut` in `acp.html`, and `dashExplainRefusedHandshake` and `dashReportSignedOut` in `index.html`. After a refused handshake, the page still fetches itself, which passes through the same credential gate. The outcomes are now:
+- **403 from the gate:** the tab is signed out. The page says so in the transcript, or in the dashboard's composer note, and points the user to the tray icon. A remote `/acp` viewer is pointed to `/remote-auth` instead. Neither Reconnect nor Reload is offered, because both would resend the same missing cookie.
+- **Network failure:** the page still reads "server unreachable" and offers Reconnect.
+- **Any other answer:** the page offers Reconnect.
+
+The Reload buttons remain only for failed session loads.
+
+Tests:
+- **Page harness.** It drives the refused handshake from real source on both pages, in all directions, and asserts that no stale-token Reload affordance ever appears. It pins both socket URLs to the bare path. It asserts every one of the seven `ACP_AVAILABLE` sites both ways from real source. Four of those sites run from isolated slices of `index.html` with stubbed rail DOM helpers, because the dashboard harness does not load them.
+- **pytest.** It asserts that `ACP_AVAILABLE` renders `true` and `false`, that neither page embeds a credential, and that `/ws/acp` is accepted with the cookie and no token, and refused without the cookie.
+
+Fourteen mutations were killed, including the three required ones:
+- an inverted sentinel;
+- a leftover `?t=` on the socket URL;
+- the gate's 403 treated as unreachable.
+
+One piece of the grep criterion is deferred: a docstring mention of `_ACP_TOKEN` at `src/power_atlas/__main__.py:339`, which is outside this phase's file scope.
+
+Commit: `6e2f6ec`. Two files are left uncommitted in the working tree:
+- `plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md`: the exit-criteria ticks.
+- `tests/test_web.py`: a post-commit rewording of four test docstrings and comments that still called the token a live control.
+
+*(Orchestrator note: the deferral in the last paragraph but one was **not** routed to Phase 7. The
+review fix pass, whose scope included `__main__.py`, closed it instead, and the criterion is ticked.
+The four uncommitted docstring edits went into the same fix commit.)*
+
+**Divergences declared by the implementer:**
+- The real counts were 7 sentinel branches and 17 `ACP_TOKEN` occurrences, not Phase 0's 6 and 15.
+- The diagnostic functions were renamed, which a zero-hit grep on the Phase 0 names requires.
+- `acp.html` gained `ACP_LOCAL` so that a remote viewer is sent to `/remote-auth` and not to a tray
+  it does not have.
+- The diagnostic has three outcomes and uses `.then(ok, err)`.
+- `/acp` keeps `no-store` and its inline Host check.
+- The new socket tests set `Host: 127.0.0.1`, because Starlette's TestClient sends `testserver` for
+  websockets.
+
+D-15's intermediate state was verified in the working tree: the harness passed 694/694 with both
+variables present, before anything was deleted. It is not visible in history, because the phase
+landed as one atomic commit. That has no broken intermediate state, which is D-15's real concern.
+
+#### Step 5 review fix pass (2026-09-23, code: `e30c1a9`)
+
+These review fixes close the test gaps and UI defects left by retiring the per-launch `/ws/acp` token. Two new websocket suites pin the two refusals the socket has left. A remote peer sending a valid Host/Origin pair but no device cookie is closed 1008 and never reaches `acp.serve_socket`, through the real app and through `RemoteAccessGuard` over a sentinel, with a cookie-bearing twin that is served. A signed-in loopback browser offering a missing, `null`, other-port, `localhost` or foreign Origin is closed 1008, with a matching-Origin twin that is served. Each suite kills its mutation: the guard skipping the cookie for websocket scopes, and `ws_acp` skipping `_ws_origin_ok`. The eight deleted refusal-body assertions come back as `_ACP_PAGE_MARKER not in …`. On both pages, the refused-handshake diagnostic now bounds its GET with a 5 s timeout that aborts it and reads the silence as unreachable, ends with a catch that shows Reconnect, and drops a stale answer: one that arrives after the timeout, or after a later connect has replaced the socket (on the dashboard also once the new socket is open). On the dashboard, a signed-out refusal now also writes its message into the transcript, replacing a lone "Creating session…" placeholder, because both create paths hide the composer that holds the note. For a remote viewer, `/acp`'s 403 message now names both causes: signed out, or remote access turned off. The 5xx "any other answer" branch is now tested on both pages. Every new node check was confirmed against a mutation that fails it. Comments and docstrings that still described the token as live were reworded in `web.py`, `acp.py`, `__main__.py`, `tests/test_web.py` and the `_build_prism.mjs` header template, which brings `grep -rn "_ACP_TOKEN" src --include=*.py` to 0. The generated `static/prism.js` keeps its old header line until the next rebuild. Node: 724 passed. test_web.py: 1758 passed. Other suites: 441 passed, 2 skipped.
+
+**Divergences declared by the fix pass:**
+- `_build_prism.mjs`'s header template was edited. The committed `prism.js` still carries the old
+  line until its next rebuild; that needs `npm pack`, and so network access, which the pass did not
+  have. No test reads the header.
+- On `acp.html` the stale-answer guard uses only a concluded flag and the socket's identity, with no
+  OPEN check. Reconnect stays hidden there until the diagnosis concludes, and the harness builds its
+  fake socket already open.
+- The remote status label changed as well as the transcript text.
+- Two existing "no auto-reconnect" checks now exclude the 5 s diagnostic timer from their count.
+- The dashboard decides whether to replace or append from the transcript pane's structure, so a real
+  transcript is never wiped.
+
+#### Step 5b QA verification (2026-09-23) — PASS, 8/8, on the real build after a restart
+
+The phase heading has no `[QA]`, so QA ran through the fallback path: the phase changes templates
+and `/ws/acp`, and QA was offered to the user in advance. It ran on the restarted build at
+`e30c1a9`. The restart used the user's standing authorisation. No kiro-cli session was attached, so
+the restart killed nothing live. The peek webview signed in again on startup (log line at 18:09:20).
+
+Signed in with a `pa_local` built from the on-disk local secret, the path any same-user process has
+(R-19):
+
+- `GET /` returns 200 and renders `ACP_AVAILABLE = true`, with no `ACP_TOKEN` and no `?t=`.
+- `GET /acp` returns 200, with no token and with `ACP_LOCAL` present.
+- Without the cookie, `/acp` returns 403, which is exactly what the page's signed-out diagnostic
+  keys on.
+- `/ws/acp` with the cookie, the matching Origin and no `?t=` is accepted, and the first frame is
+  `meta` `connected: true`.
+- Without the cookie, the upgrade is refused (403).
+- With the cookie and another port's Origin, the upgrade is refused (403).
+
+Not exercised live: the diagnostic's on-screen rendering in a real browser. The Chrome extension
+was not connected. It is carried to Step 9b.
+
 ## Follow-up Work (Deferred)
 
 1. **Fail-closed on generation failure.** R-3 accepted rather than fixed: a session whose derived agent
@@ -1876,6 +1968,36 @@ Finding 3's user decision was given in this session on 2026-09-23 ("Keep it"). S
 restarted real build also measured R-14 for the webview door (§ 9 Phase 5). Cycle 2 skipped per user
 instruction ("1 qreview cycle per phase"). The fix pass's suite runs (1753 + 441 pytest) and its
 confirmed-killed mutations serve as this cycle's verification.
+
+### 2026-09-23 — Implementation Review (after Phase 6, persona: Security auditor, Senior engineer)
+
+Implementation health: Green (all fixed). 15 findings merged across the two personas: 1 High,
+5 Medium, 9 Low. Neither persona found a present hole in the code. The Security auditor's central
+point: before this phase `/ws/acp` had three independent refusals, and Phase 6 removed one. Of the
+two left, each hid the other's absence in the suite, so deleting either one still passed all 1749
+tests. Findings 1 and 2 turn that into pinned tests.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | [Security] For a remote peer the device cookie is now `/ws/acp`'s only credential, and no test pinned its websocket refusal | Fixed — real-app and sentinel tests with a valid Origin and no cookie; mutation killed (`e30c1a9`) |
+| 2 | Medium | [Security] `ws_acp`'s Origin check is now the sole cross-site websocket defence, and deleting its call passed the suite | Fixed — parametrized real-app test over 5 hostile Origins with a valid cookie; mutation killed |
+| 3 | Medium | [Security] D-4's rationale ("no barrier a cookie-holder does not pass") ignores that a browser page sends the cookie without reading it | Fixed — D-4 sharpened in § 3: true for a local process, not for a page on another origin |
+| 4 | Medium | [Senior] On both dashboard create paths the signed-out message went to a note inside the hidden composer, leaving "Creating session…" forever | Fixed — also written to the transcript, replacing a lone placeholder; visibility asserted by walking ancestors |
+| 5 | Medium | [Senior] The "any other answer" (5xx) diagnostic branch was untested on both pages; three mutations survived | Fixed — a 500 case per page; all three mutations killed |
+| 6 | Medium | [Senior] The dashboard signed-out tests stubbed the note setter, proving the text was requested, not shown | Fixed — together with finding 4 |
+| 7 | Low | Both: eight refusal-body assertions were deleted instead of repointed | Fixed — restored as `_ACP_PAGE_MARKER not in …` |
+| 8 | Low | [Senior] The diagnostic fetch had no timeout; a hung GET hid Reconnect and Reload forever | Fixed — 5 s `AbortController` timeout, read as unreachable |
+| 9 | Low | [Senior] `.then(ok, err)` missed a throw inside `ok`, leaving no button | Fixed — final `.catch` shows Reconnect |
+| 10 | Low | [Senior] A late diagnostic answer could paint over a newer live socket | Fixed — stale answers dropped by socket identity (and OPEN, on the dashboard) |
+| 11 | Low | [Security] A remote viewer whose remote access was switched off was told to sign in again | Fixed — the message names both causes |
+| 12 | Low | [Security] Comments in `web.py`, `acp.py` and `prism.js`'s header still described the token as live | Fixed — reworded; `prism.js` via `_build_prism.mjs`, the generated file updates on its next rebuild |
+| 13 | Low | [Security] A test docstring said `ws_acp` refuses a token-less upgrade on its own | Fixed — reworded |
+| 14 | Low | [Senior] The Phase 6 divergences were not in § 9 at review time | Fixed — § 9 Phase 6 written in this update (the reviewer could not see uncommitted plan edits) |
+| 15 | Low | The grep criterion's last hit, a `__main__.py` docstring, sat outside the phase's scope | Fixed — reworded in the fix pass; the criterion is now ticked, not deferred |
+
+Cycle 2 skipped per user instruction ("1 qreview cycle per phase"). The fix pass's suite runs (724
+node checks, 1758 + 441 pytest), its confirmed-killed mutations, and the 8/8 live check on the
+restarted build serve as this cycle's verification.
 
 ## Harness Improvement Opportunities
 
