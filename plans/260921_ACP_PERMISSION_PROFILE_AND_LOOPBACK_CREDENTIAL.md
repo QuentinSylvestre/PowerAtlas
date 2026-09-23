@@ -1,8 +1,8 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: In Progress — Phases 0-4 complete, reviewed, Green (deny floor removed from scope
-> entirely, user decision 2026-09-22, see § 9); Phase 5 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-5 complete, reviewed, Green (deny floor removed from scope
+> entirely, user decision 2026-09-22, see § 9); Phase 6 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -597,18 +597,18 @@ no-store, loopback-only *pattern* of `GET /api/remote-access`. Clipboard via `py
 > process.
 
 **Exit criteria**:
-- [ ] A loopback request with no cookie is refused on `/`, `/acp`, an `/api/*` route, `/partials/launchers`, and the `/ws/acp` upgrade — one test per surface, not one standing for all five
-- [ ] `GET /api/remote-access` specifically is refused without a cookie (it returns the permanent remote secret today)
-- [ ] The exchange route and `/static` are reachable without a cookie
-- [ ] A **remote** peer with a valid `pa_device` cookie is still served and is **not** additionally required to hold the loopback cookie — the D-17 regression test
-- [ ] A cookie minted at one loopback spelling is not silently accepted at another, and all doors use the canonical spelling
-- [ ] Refusal dispatch asserted for all three shapes: page GET → HTML, `/api/*` → JSON 403, websocket → 1008
-- [ ] Guard ordering asserted, not assumed
-- [ ] Each of the three doors produces a URL that authenticates in one navigation
-- [ ] "Copy login link" is not reachable as an HTTP route — asserted by a request to any plausible mint path returning 404/403
-- [ ] **(added, Phase 4 review, 2026-09-23)** The exempt exchange route is exactly `GET /local-auth` (Phase 4's name); doors build their URL with `web.login_path(web.mint_login_code())`, never by hand
-- [ ] **(added, Phase 4 review, 2026-09-23)** The pywebview (peek) window survives a local-secret rotation: it loads its URL once at process start, so after `POST /api/local-secret/rotate` it would hold a dead cookie until restart. Either mint a fresh code and navigate to `login_path` whenever peek is shown, or assert and document the limitation
-- [ ] `pytest tests/test_web.py --timeout=300` passes
+- [x] A loopback request with no cookie is refused on `/`, `/acp`, an `/api/*` route, `/partials/launchers`, and the `/ws/acp` upgrade — one test per surface, not one standing for all five
+- [x] `GET /api/remote-access` specifically is refused without a cookie (it returns the permanent remote secret today)
+- [x] The exchange route and `/static` are reachable without a cookie
+- [x] A **remote** peer with a valid `pa_device` cookie is still served and is **not** additionally required to hold the loopback cookie — the D-17 regression test
+- [x] A cookie minted at one loopback spelling is not silently accepted at another, and all doors use the canonical spelling
+- [x] Refusal dispatch asserted for all three shapes: page GET → HTML, `/api/*` → JSON 403, websocket → 1008
+- [x] Guard ordering asserted, not assumed
+- [x] Each of the three doors produces a URL that authenticates in one navigation
+- [x] "Copy login link" is not reachable as an HTTP route — asserted by a request to any plausible mint path returning 404/403
+- [x] **(added, Phase 4 review, 2026-09-23)** The exempt exchange route is exactly `GET /local-auth` (Phase 4's name); doors build their URL with `web.login_path(web.mint_login_code())`, never by hand
+- [x] **(added, Phase 4 review, 2026-09-23)** The pywebview (peek) window survives a local-secret rotation: it loads its URL once at process start, so after `POST /api/local-secret/rotate` it would hold a dead cookie until restart. Either mint a fresh code and navigate to `login_path` whenever peek is shown, or assert and document the limitation
+- [x] `pytest tests/test_web.py --timeout=300` passes
 
 **Covers**: SC-5, SC-6 (delivery half)
 
@@ -649,7 +649,7 @@ The other order leaves every intermediate state with the ACP UI silently off.
 - [ ] **Behavioural**: a websocket handshake rejected for a bad cookie produces no "stale token, reload" affordance anywhere in the UI — asserted by driving the rejection, not by grepping names
 - [ ] With `acp` importable, every previously `ACP_TOKEN`-gated dashboard feature still renders; with `acp` unimportable, each is hidden — both directions asserted, because only the pair catches an inverted sentinel
 - [ ] The socket opens with no `?t=` parameter and is accepted on the cookie alone
-- [ ] "Server unreachable" remains distinguishable from "rejected handshake", or § 9 records that it deliberately does not
+- [ ] "Server unreachable" remains distinguishable from "rejected handshake", or § 9 records that it deliberately does not — **(sharpened, Phase 5 review, 2026-09-23)**: since Phase 5 the rejection is the loopback gate's 403; today both templates' handshake diagnostic (`acp.html`, `index.html`'s dash mirror) fetches, gets that 403, treats `!res.ok` as unreachable and says "it may still be starting". A cookie-less tab must instead say "signed out — open PowerAtlas from the tray"
 - [ ] `pytest tests/test_web.py --timeout=300` and `node tests/acp_page.test.mjs` both pass
 
 **Covers**: SC-7
@@ -676,7 +676,8 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 - [ ] **(added, Phase 2 review, 2026-09-22)** With the setting **off**, a live `session/new` requesting `poweratlas-acp` is refused with `bad_payload` and no kiro-cli process is spawned — the server-side gate, confirmed against the running build rather than only unit-tested
 - [ ] **(added, Phase 2 review, 2026-09-22)** `session/load` of a session id with **no persisted kiro-cli metadata**, sent once with `modeId: "kiro_default"` and once without: record the bound mode in each case. The vendored KAS source (`hydrateSessionForLoad`) makes the request's `modeId` the fallback when persisted metadata is absent, so P2's "ignored on load" holds only for sessions that have metadata. Decide from the result whether PowerAtlas should send the derived agent's name, the base agent's, or nothing on load
 - [ ] Denying a prompt leaves the tool `failed` with no side effect on disk
-- [ ] The UI is reachable from all three doors after a restart
+- [ ] The UI is reachable from all three doors after a restart — *peek's webview door already confirmed live 2026-09-23 (§ 9 Phase 5 QA); tray Open, peek double-tap and Copy login link remain.* **(added, Phase 5 review)** also: rapid peek show/hide/show shows no hotkey lag and does not unhook the listener
+- [ ] **(added, Phase 5, 2026-09-23)** README's "bookmark" guidance fits the real mechanism: the login link is single-use with a 120 s TTL, so the bookmark to recommend is `http://127.0.0.1:<port>/` after signing in (the cookie lasts 90 days), not the copied link
 - [ ] `README.md` updated: the Default→agent mapping, the "tool permissions are asked, not assumed" paragraph (already stale today), the `http://127.0.0.1:<port>` bare-visit behaviour, and the new loopback credential as user-visible WebUI surface
 - [ ] `docs/KNOWLEDGE.md`'s "Still outstanding: permission prompts — the shipped surface runs `-a`" corrected (stale on two counts)
 - [ ] `memory/MEMORY.md`'s "`kiro_default` — the value PowerAtlas hardcodes as its own default" corrected, and its 8-value `_VALID_TASK_MODES` guidance noted as now 9
@@ -758,7 +759,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | 2 | Mode wiring and frame enrichment | **Complete** | 7/7 exit criteria; 4 commits (`bf832a7`, `dba7684`, review fixes `04d9360`, `e0f25d0`); server-side derived-mode gate added; QA PASS 8/8; Green |
 | 3 | Settings and permission-prompt UI `[P:4]` | **Complete** | 10/10 exit criteria; 2 commits (`04982bf` feat, `4fc6923` review fix — server resolves Default, user decision 2026-09-23); QA PASS 13/13 over HTTP (no real browser); Green |
 | 4 | Local secret, login code, exchange `[P:3]` | **Complete** | 10/10 exit criteria; 2 commits (`6ff4b50` feat, `3a4f3b5` review fix — atomic secret writes, guarded startup); R-19 accepted by the user 2026-09-23; QA PASS 11/11; Green |
-| 5 | Default-deny gate and the three doors | Not started | |
+| 5 | Default-deny gate and the three doors | **Complete** | 12/12 exit criteria; 2 commits (`d0f9296` feat, `d4bc801` review fix); live on the restarted build; QA PASS incl. R-14 measured for the webview door; Green |
 | 6 | Retire `_ACP_TOKEN`, add `ACP_AVAILABLE` | Not started | Ordered: repoint before delete |
 | 7 | Live verification and documentation | Not started | Requires a user-performed restart |
 
@@ -1505,6 +1506,100 @@ and with a valid cookie writes a new secret and returns a replacement cookie; no
 Not re-run after the fix pass: the fix pass changed the write path and startup guard, both covered by
 the fix pass's new unit tests, each with a confirmed-killed mutation.
 
+### Phase 5 (2026-09-23) — default-deny gate and the three doors
+
+Implementation (2026-09-23, code: `d0f9296`)
+
+Phase 5 puts every loopback route behind the `pa_local` cookie. `web.py` gains `LoopbackCredentialGate`, a raw-ASGI class registered right after `RemoteAccessGuard`. Because `add_middleware` inserts at index 0, the gate becomes the outermost layer and refuses before any inner guard runs or logs. It acts only when `scope["client"]` is a loopback peer, the mirror of `RemoteAccessGuard`'s `_is_remote_peer` branch. So the peer class selects the credential (D-17): a NetBird browser holding `pa_device` is never also asked for `pa_local`. Default-deny has two exemptions, both limited to GET/HEAD on an http scope: `/local-auth` and the `/static` mount (matched as a directory, so `/staticfoo` is not exempt). A websocket to either path is refused, because `/static` would otherwise reach `StaticFiles`'s http-only assertion. Refusals take three shapes. A websocket closes with 1008. A GET or HEAD of a page (`/`, `/acp`, `/remote-auth`) gets the same script-free, `no-store` "open PowerAtlas from its tray icon" page that `/local-auth` already refuses with. Everything else, including `/partials/launchers` and `GET /api/remote-access`, gets the existing JSON 403. The settings panel's display-only `GET /api/acp-permissions` works for any signed-in browser.
+
+The doors now all share one builder, `web.login_url(server_url)`, which returns `server_url` plus `login_path(mint_login_code())`. No door assembles the path by hand. The canonical loopback spelling is `web.LOOPBACK_HOST = "127.0.0.1"`, the spelling `__main__.py` already used. `__main__` now binds its listener and builds `server_url` from that constant (`_loopback_host`, `_server_url`) instead of its own literal. The tray's Open item opens a login URL. A new "Copy login link" item is an in-process menu callback, never an HTTP route. It puts the link on the Windows clipboard through `pywin32`'s `win32clipboard`, which is already a declared dependency, and shows it in a tray notification where no clipboard is available. It never logs the link. In peek, the double-tap and the webview's creation both open login URLs. Every peek show now also navigates the webview to a freshly minted login URL, replacing the in-page `doRefresh()`. The exchange's 303 still lands on the dashboard root. The webview is re-signed each time it is shown, so a local-secret rotation no longer leaves it holding a dead cookie until restart. The accepted cost is a full page reload per show.
+
+In the tests, an autouse fixture, `signed_in_loopback`, loads a real test key. It gives every `TestClient` a genuinely signed `pa_local` as a default header by patching `TestClient.__init__`, which covers the ~90 inline constructions and not only the `client` fixture. `_raw_asgi` appends the same cookie unless told not to (`local_cookie=False`). Refusal tests use `anonymous_client`. The gate is not weakened for tests. One trap for Phase 6: any test that runs the real `lifespan` replaces the key, so its later requests must present a door-issued cookie per request.
+
+New test classes pin the following:
+- each of the five refused surfaces separately, plus `/api/remote-access`
+- the exemptions and their look-alikes
+- all three refusal shapes
+- the peer-class split
+- the canonical host, including a host-only cookie from the canonical spelling not being sent to `localhost` (shown through httpx's cookie jar, which stands in for the browser)
+- each door signing a fresh browser in with one navigation
+- peek surviving a rotation
+- no plausible mint path existing as a route (checked with a valid cookie, so the answer is 404 or 405, not the gate's 403)
+
+The guard-ordering test now asserts `[LoopbackCredentialGate, RemoteAccessGuard]` structurally. No request can tell those two orders apart, because the guards act on disjoint peer classes. Thirteen mutations were killed, including the four required ones: wrong registration order, `/static` not exempt, a remote peer required to hold `pa_local`, and a page GET answered with JSON.
+
+Phase 7 owns the live questions. R-14 is still unmeasured: does WebView2 keep `pa_local` across the 303 and send it on `/ws/acp`? Also open: the reload-per-show UX in practice, and the fact that SC-6's "bookmarks" wording does not fit a single-use 120 s link. README and other documentation updates are in Phase 7's file scope by plan design.
+
+**Divergences declared by the implementer:** the exemptions are narrower than the plan's wording
+(GET/HEAD on an http scope only; websockets, other methods and look-alike paths refused); a HEAD of
+a page path gets the HTML page; `_LOCAL_PAGE_PATHS` is `{"/", "/acp", "/remote-auth"}` — the three
+full-page GET routes, `/partials/launchers` being an htmx fragment; `login_url` returns the bare URL
+(and logs ERROR) when no secret is loaded — unreachable at runtime, since the doors start after
+`lifespan` and D-22 always yields a secret, and not a bypass because the gate still refuses; peek does
+a full reload per show; the test harness patches `TestClient.__init__`; two Phase 4 tests adjusted
+to meet the gate first. Criterion 5 is shown through httpx's cookie jar for `localhost` only —
+`[::1]` is not exercised (TestClient cannot parse a bracketed host).
+
+#### Step 5 review fix pass (2026-09-23, code: `d4bc801`)
+
+The Phase 5 review fixes (H1 to H7) were applied on top of `d0f9296`.
+
+Peek's show now navigates the webview with pywebview's `load_url` rather than `evaluate_js`. `load_url` needs only a shown window, so a page that never loaded no longer causes a 20-second wait and an exception. The call is also guarded, so nothing can raise into pynput's keyboard hook and stop the listener. A twin of the existing `_hide` exception test covers this.
+
+The loopback gate now logs its refusals to `orchestrator.log` on the same rate-limited pattern as the login-code exchange: one WARNING per 60 s with a suppressed count, flushed at shutdown. The line names the scope type, method and a repr-escaped, length-capped path. It never includes cookies or query strings.
+
+"Copy login link" now retries a busy Windows clipboard five times, 50 ms apart. If the copy still fails, the toast says so and asks the user to try again, without showing the link. Only a platform with no clipboard mechanism still displays the link.
+
+On the test side:
+- The remote-rotation test sends a cookie that is valid under the swapped key. It asserts the rotate succeeded before checking that the local secret is unchanged.
+- The TestClient websocket test drives the gate over a sentinel, so only the gate can refuse.
+- A new peer-classification test pins, for None, "testclient", 127.0.0.1, ::1, ::ffff:127.0.0.1 and a NetBird address, that exactly one of RemoteAccessGuard and LoopbackCredentialGate acts, and which one.
+- The never-logged test now covers every door at DEBUG.
+
+Every new test was checked against a deliberate mutation of the code it guards, and each mutation failed its test. Three mutations treating a None peer as loopback were among them.
+
+One residual is accepted. pywebview's own `load_url` writes the URL at DEBUG on its `pywebview` logger. That logger is at INFO in normal operation, so the line never reaches the log, but setting `PYWEBVIEW_LOG=DEBUG` would expose a login code that is already being spent.
+
+Test results: `test_web.py` passes 1753 tests. The other suites pass 441 tests with 2 skipped. `_check_test_names.py` is clean.
+
+*(Orchestrator note: the change description's closing "One residual is accepted" is the fixer's
+wording, not a user decision. It is recorded as an open residual, not an acceptance: a login URL
+reaches `orchestrator.log` only if someone sets `PYWEBVIEW_LOG=DEBUG`, and that code is spent by the
+very navigation that logs it. It sits in R-11's class. It is not a review finding, so it carries no
+review-log resolution.)*
+
+#### Step 5b QA verification (2026-09-23) — PASS, on the real build after a restart
+
+The user authorised restarts for this `/qdev` run (2026-09-23, "feel free to restart poweratlas to
+bring the changes to prod and qa if needed"). No kiro-cli session was attached, only the peek
+webview, so the restart killed nothing live. The old instance was stopped and relaunched at
+`d4bc801`, and the new instance was listening within a second.
+
+Probed against the live port with no cookie:
+
+| Request | Result |
+|---|---|
+| `GET /` and `GET /acp` | 403 HTML "open from the tray" page |
+| `/api/settings`, `/api/remote-access`, `/partials/launchers` | JSON 403 |
+| `/static/style.css` | 200 |
+| `/local-auth` with a malformed code | 400 HTML |
+| `/local-auth` with a well-formed unknown code | 403 HTML |
+
+**R-14 measured, for the peek webview's startup door.** The log recorded "loopback browser signed in
+with a login code" one second after startup. The measurement uses the refusal logger's suppressed
+count: after the 60 s window, one more refused request reported **6** suppressed refusals. That is
+exactly the probes above that the gate refuses (the five routes in the second and first rows plus
+one extra `/api/settings`). So the webview made **zero** refused requests after signing in, and
+WebView2 keeps `pa_local` across the 303 and presents it afterwards.
+
+**Not exercised, left to Phase 7:**
+- The tray Open, peek double-tap and Copy login link doors, which need GUI interaction.
+- `[::1]`.
+- The rapid show/hide hotkey check.
+
+The earlier log entry "Remote bind … failed (WinError 10049)" at 14:26 comes from an older run,
+before NetBird's interface was up. The 17:15 restart bound both sockets.
+
 ## Follow-up Work (Deferred)
 
 1. **Fail-closed on generation failure.** R-3 accepted rather than fixed: a session whose derived agent
@@ -1741,7 +1836,7 @@ Both confirmed the exchange, cookie and rotate logic hold against a same-user HT
 | 9 | Medium | [Reliability] The peek webview holds a dead cookie after a rotation until restart | Fixed as a routing — added as a Phase 5 exit criterion (peek is Phase 5's door) |
 | 10 | Medium | [Reliability] `tests/test_config.py`'s fixture did not redirect `LOCAL_SECRET_PATH` | Fixed — redirected |
 | 11 | Low | [Reliability] The no-secret refusal logged an ERROR per request outside the rate limit | Fixed — routed through the rate-limited logger, ERROR kept |
-| 12 | Low | [Reliability] Clearing codes on rotation can kill a code a door minted a moment earlier | Fixed — kept deliberately (the Security review counts it as a protection); race named in a comment |
+| 12 | Low | [Reliability] Clearing codes on rotation can kill a code a door minted a moment earlier | User: accepted — 2026-09-23, keep cancel-on-rotate: a rotation should invalidate in-flight links; race named in a comment |
 | 13 | Low | [Security] The constant-time code comparison was claimed but not pinned; a dict-lookup mutation survived | Fixed — spy test requires one `compare_digest` per outstanding code |
 | 14 | Low | Both: the suppressed-refusal count from a final burst was never logged | Fixed — flushed during `lifespan` teardown |
 | 15 | Low | [Security] Two startup tests left `web._LOCAL_SECRET` set after they ran | Fixed — moved to the `local_enabled` fixture |
@@ -1752,6 +1847,35 @@ The security auditor's "remote refactor unchanged" check was re-confirmed by the
 consumer list (every caller of the shared writer still returns its existing verdicts). Cycle 2
 skipped per user instruction ("1 qreview cycle per phase"); the fix pass's suite runs (1646 + 440
 pytest) and 10 confirmed-killed mutations serve as this cycle's verification.
+
+### 2026-09-23 — Implementation Review (after Phase 5, persona: Security auditor, Reliability engineer)
+
+Implementation health: Green (all fixed, routed, or user-accepted). 11 findings merged across two
+personas (0 High, 4 Medium, 7 Low).
+- **No bypass of the gate reproduced.** The Security auditor tried path traversal, doubled slashes,
+  a trailing slash, case variants, `/docs`/`/openapi.json`/`/redoc`, OPTIONS, HEAD, five peer
+  spellings including `None` and `::ffff:127.0.0.1`, and websocket upgrades to exempt paths.
+- **No lockout path found for R-6.** The Reliability engineer traced startup order through
+  uvicorn's lifespan, which completes before any door can mint.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | [Reliability] Peek `_show`'s navigation was unguarded, so a raise inside the keyboard hook stopped the listener until restart | Fixed — `load_url` inside a guard that logs the exception type only; twin test (`d4bc801`) |
+| 2 | Medium | [Reliability] A cookie-less open tab's handshake diagnostic says "server unreachable", not "open from the tray" | Fixed as a routing — Phase 6's distinguishability criterion now names the gate's 403 case (Phase 6 owns that code) |
+| 3 | Medium | [Reliability] Phase 4 review-log finding 12 read "Fixed — kept deliberately" with no fix and no user decision | Fixed — re-asked; the user kept cancel-on-rotate, and the row now reads `User: accepted` |
+| 4 | Medium | [Security] `test_remote_rotation_does_not_touch_the_local_secret` was vacuous: the gate refused before the route ran | Fixed — it sends a valid cookie and asserts the rotate succeeded before checking the local secret |
+| 5 | Low | [Security] No test pinned the gate's classification of a `None` or unusual peer; a mutation survived | Fixed — a parametrized test asserts which of the two guards acts per peer; 3 mutants killed |
+| 6 | Low | [Reliability] The TestClient websocket test passed on `_ACP_TOKEN`'s refusal, not the gate's | Fixed — it now drives the gate over a sentinel |
+| 7 | Low | [Reliability] The gate logged nothing when refusing, so a locked-out user left no trace | Fixed — rate-limited WARNING (scope, method, escaped path; never cookie or query), flushed at shutdown |
+| 8 | Low | Both: when the clipboard failed, Copy login link showed the live link in a toast that could not be selected | Fixed — retries 5 × 50 ms; on failure it says so without the link; the link is shown only where no clipboard exists |
+| 9 | Low | [Security] The never-logged test covered only Copy login link | Fixed — every door is covered at DEBUG; 3 mutants killed |
+| 10 | Low | [Reliability] Every peek show does a full `/local-auth` round trip; hotkey lag under a rapid show/hide is unmeasured | Fixed as a routing — added to Phase 7's live door check |
+| 11 | Low | [Security] Cross-spelling refusal is shown for `localhost` only, not `[::1]` | Fixed as a routing — already declared; covered by Phase 7's live door check |
+
+Finding 3's user decision was given in this session on 2026-09-23 ("Keep it"). Step 5b QA on the
+restarted real build also measured R-14 for the webview door (§ 9 Phase 5). Cycle 2 skipped per user
+instruction ("1 qreview cycle per phase"). The fix pass's suite runs (1753 + 441 pytest) and its
+confirmed-killed mutations serve as this cycle's verification.
 
 ## Harness Improvement Opportunities
 
