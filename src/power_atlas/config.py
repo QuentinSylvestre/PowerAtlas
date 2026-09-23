@@ -112,8 +112,8 @@ class Config:
 # The kiro-cli agent PowerAtlas generates, named without its `.md` extension —
 # which is how kiro-cli's mode catalogue reports it and therefore how `modeId`
 # names it. Defined here rather than in `agent_profile.py` (D-20) because
-# `acp.py` imports `config` and nothing else intra-package: `_VALID_TASK_MODES`
-# can name the derived agent without acquiring a second intra-package import or
+# `acp.py` imports only `config` and `launcher` intra-package: `_VALID_TASK_MODES`
+# can name the derived agent without acquiring a new intra-package import or
 # a duplicated string literal, and `acp.py` must not import `agent_profile`.
 DERIVED_AGENT_NAME = "poweratlas-acp"
 

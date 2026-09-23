@@ -59,7 +59,7 @@ Four properties this module is built around, each measured rather than assumed
   and the failure is reported, rather than the module pretending it is gone.
 
 `acp.py` must not import this module: it states a narrow isolation boundary in
-its own header and imports exactly two intra-package names. The name it needs,
+its own header and imports three names from two intra-package modules. The name it needs,
 `DERIVED_AGENT_NAME`, lives in `config.py` for that reason (D-20).
 """
 

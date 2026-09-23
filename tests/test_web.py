@@ -6715,14 +6715,14 @@ class TestAcpSessionRecordHoldsNoDeadState:
 
 
 class TestAcpTaskModeSelection:
-    """Phase 3, plans/260911_ACP_V3_FOLLOWUP_FEATURES.md: Phase 2's live probe
+    """Phase 3, plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md: Phase 2's live probe
     confirmed ``modeId`` is a real kiro-cli task-mode activation mechanism, so
     an optional ``payload["mode"]`` on ``session/new`` is now threaded end to
     end: client picker -> ``send('new', ...)`` -> ``_handle_new`` validation
     -> ``_supervisor.new_session(cwd, mode=...)`` ->
     ``_build_kas_session_params(mode_id=...)``. Validation covers the 8-value
     set kiro-cli's own session/new response enumerates
-    (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 2 divergence 1) -- wider
+    (plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md Phase 2 divergence 1) -- wider
     than the 5 modes the UI picker itself offers, since 3 of the 8 (vibe,
     autonomous, semantic_reviewer) were only observed to exist and never
     behaviorally characterized -- **plus PowerAtlas's own derived agent**,
@@ -6793,7 +6793,7 @@ class TestAcpTaskModeSelection:
     def test_handle_new_accepts_every_valid_task_mode(
             self, acp_store, tmp_path, mode):
         """All 8 modes kiro-cli's own session/new response enumerates
-        (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 2 divergence 1) are
+        (plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md Phase 2 divergence 1) are
         accepted by the backend -- not just the 5 the UI picker itself offers
         (vibe/autonomous/semantic_reviewer are backend robustness only, per
         that plan's Phase 3 design). The derived agent, the 9th value, has its
@@ -6846,6 +6846,108 @@ class TestAcpTaskModeSelection:
         errors = [f["payload"].get("code") for f in _queued(conn)
                   if f.get("type") == "error"]
         assert not errors, errors
+
+    def _new_with_gate(self, acp_mod, tmp_path, monkeypatch, gate, mode):
+        """Drive `_handle_new` with `gate` installed as `mode_gate_hook`.
+
+        Returns `(mode passed to new_session, or "not called"; the error
+        payloads; how many times the gate ran)`. `monkeypatch` restores the
+        process-global hook afterwards.
+        """
+        calls = []
+
+        def counted():
+            calls.append(1)
+            return gate()
+
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", None)
+        acp_mod.set_mode_gate_hook(counted)
+        conn = _acp_conn(acp_mod)
+        seen = {"mode": "not called"}
+
+        async def fake_new_session(self, cwd, mode=None):
+            seen["mode"] = mode
+            return {"sessionId": "taskmode-000g", "cwd": cwd}
+
+        with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+            asyncio.run(acp_mod._handle_new(
+                conn, {"cwd": str(tmp_path), "mode": mode}))
+        errors = [f["payload"] for f in _queued(conn)
+                  if f.get("type") == "error"]
+        return seen["mode"], errors, len(calls)
+
+    def test_derived_mode_is_accepted_with_no_gate_hook(
+            self, acp_store, tmp_path, monkeypatch):
+        """`None` is permissive: acp.py on its own, and every test that does
+        not opt in, keeps accepting the derived agent."""
+        acp_mod, _store = acp_store
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", None)
+        conn = _acp_conn(acp_mod)
+        seen = {}
+
+        async def fake_new_session(self, cwd, mode=None):
+            seen["mode"] = mode
+            return {"sessionId": "taskmode-000h", "cwd": cwd}
+
+        with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+            asyncio.run(acp_mod._handle_new(
+                conn, {"cwd": str(tmp_path), "mode": acp_mod.DERIVED_AGENT_NAME}))
+        assert seen["mode"] == acp_mod.DERIVED_AGENT_NAME
+        assert not [f for f in _queued(conn) if f.get("type") == "error"]
+
+    def test_derived_mode_is_refused_while_the_gate_says_off(
+            self, acp_store, tmp_path, monkeypatch):
+        """The derived agent file is deleted while the setting is off, and
+        kiro-cli silently coerces an unknown modeId to "vibe". Refused up front
+        with the same `bad_payload` shape an unrecognised mode gets, and no
+        session is created."""
+        acp_mod, _store = acp_store
+        mode, errors, runs = self._new_with_gate(
+            acp_mod, tmp_path, monkeypatch, lambda: False,
+            acp_mod.DERIVED_AGENT_NAME)
+        assert mode == "not called"
+        assert [e["code"] for e in errors] == ["bad_payload"], errors
+        assert "not in effect" in errors[0]["message"]
+        assert runs == 1
+
+    def test_derived_mode_is_accepted_while_the_gate_says_on(
+            self, acp_store, tmp_path, monkeypatch):
+        acp_mod, _store = acp_store
+        mode, errors, runs = self._new_with_gate(
+            acp_mod, tmp_path, monkeypatch, lambda: True,
+            acp_mod.DERIVED_AGENT_NAME)
+        assert mode == acp_mod.DERIVED_AGENT_NAME
+        assert not errors, errors
+        assert runs == 1
+
+    def test_derived_mode_fails_closed_when_the_gate_raises(
+            self, acp_store, tmp_path, monkeypatch, caplog):
+        """A broken check refuses rather than letting the mode through: the
+        alternative is the silent coercion the gate exists to prevent. The
+        exception stays inside `acp` and is logged with its traceback."""
+        acp_mod, _store = acp_store
+
+        def boom():
+            raise RuntimeError("gate exploded")
+
+        with caplog.at_level("ERROR", logger=acp_mod.log.name):
+            mode, errors, _runs = self._new_with_gate(
+                acp_mod, tmp_path, monkeypatch, boom,
+                acp_mod.DERIVED_AGENT_NAME)
+        assert mode == "not called"
+        assert [e["code"] for e in errors] == ["bad_payload"], errors
+        assert "gate exploded" in caplog.text
+
+    def test_the_gate_is_not_consulted_for_any_other_mode(
+            self, acp_store, tmp_path, monkeypatch):
+        """Only the derived agent pays for the file read, and an off gate
+        does not leak into the vendor modes."""
+        acp_mod, _store = acp_store
+        mode, errors, runs = self._new_with_gate(
+            acp_mod, tmp_path, monkeypatch, lambda: False, "spec")
+        assert mode == "spec"
+        assert not errors, errors
+        assert runs == 0
 
     def test_handle_new_omitted_mode_passes_none_through(
             self, acp_store, tmp_path):
@@ -10709,10 +10811,12 @@ class TestAcpLifespanWiring:
         # a reason unrelated to the ordering this test is about.
         hooked = []
         notify_hooked = []
+        gate_hooked = []
         fake = types.SimpleNamespace(start_sweeper=start_sweeper,
                                      shutdown=shutdown,
                                      set_sessions_changed_hook=hooked.append,
-                                     set_notify_hook=notify_hooked.append)
+                                     set_notify_hook=notify_hooked.append,
+                                     set_mode_gate_hook=gate_hooked.append)
 
         async def run():
             async with web_mod.lifespan(None):
@@ -19292,7 +19396,7 @@ class TestSupervisor:
         hardcoded sentinel: `None` while the agent process is unbound
         (`_proc is None`, a fresh supervisor's real starting state), and the
         real spawned process's pid once bound. This closes D32 for v3 (see
-        plans/260911_ACP_V3_FOLLOWUP_FEATURES.md's Phase 1) -- with exactly
+        plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md's Phase 1) -- with exactly
         one supervisor and one hook post-cutover, presence.py's orphan-lock
         guard can now trust this pid to unambiguously name the current
         agent. This replaces the pre-cutover
@@ -19494,7 +19598,7 @@ class TestSupervisor:
             # already recorded into history by the SC-1 buffer-and-replay
             # path. `mode` accepted (unused) because _handle_new now always
             # calls new_session(cwd, mode=raw_mode) — Phase 3,
-            # plans/260911_ACP_V3_FOLLOWUP_FEATURES.md.
+            # plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md.
             self.sessions[sid] = {"cwd": cwd, "created": 0.0}
             self.history[sid] = acp_mod._History()
             self.history[sid].append(buffered)
@@ -21411,6 +21515,12 @@ class TestSupervisor:
                 "source": "agent-profile",
                 "matchedRule": {"capability": "fs_write", "effect": "ask"},
             }, f"got {payload['consent']!r}"
+            # The rest of the frame survives a `_meta` block alongside it.
+            assert payload["requestId"] == 11
+            assert payload["sessionId"] == sid
+            assert payload["toolCall"] == {"title": "Write File"}
+            assert payload["options"] == [
+                {"optionId": "o", "name": "n", "kind": "allow_once"}]
         finally:
             self._cleanup_registry(acp_mod)
 
@@ -21476,9 +21586,10 @@ class TestSupervisor:
         """Never raises, whatever the agent sent.
 
         `_on_permission_request` runs off `loop.call_soon_threadsafe`, where an
-        AttributeError is swallowed silently by asyncio's default handler --
-        and it would fire *after* the pending entry is stored, leaving an entry
-        nothing can answer and no frame to answer it with. Exactly the
+        AttributeError escapes to asyncio's default handler -- which logs it,
+        but nothing answers the agent -- and it would fire *after* the pending
+        entry is stored, leaving an entry nothing can answer and no frame to
+        answer it with. Exactly the
         invisible-hang class `test_on_permission_request_non_dict_params_is_
         refused_not_raised` covers for `params`, one level deeper.
         """
@@ -21489,10 +21600,20 @@ class TestSupervisor:
         assert acp_mod._project_consent(
             {"capability": "shell", "matchedRule": "ask"}) == {
                 "capability": "shell"}
-        # A non-string where a string was measured narrows to "" (the
-        # `_as_text` contract), keeping the frame's types stable.
-        assert acp_mod._project_consent({"resource": {"nested": 1}}) == {
-            "resource": ""}
+        # A non-string where a string was measured is omitted, not narrowed
+        # to "": a present-but-unusable field must not render a blank row.
+        assert acp_mod._project_consent(
+            {"resource": {"nested": 1}, "scope": 7, "source": None,
+             "capability": "shell"}) == {"capability": "shell"}
+        # The same rule one level down: a partial rule keeps only the string
+        # fields it has, never emitting "" for the missing one...
+        assert acp_mod._project_consent(
+            {"matchedRule": {"effect": "ask", "capability": ["x"]}}) == {
+                "matchedRule": {"effect": "ask"}}
+        # ...and a rule left with nothing is dropped whole.
+        assert acp_mod._project_consent({"matchedRule": {}}) == {}
+        assert acp_mod._project_consent(
+            {"matchedRule": {"capability": 1, "effect": None}}) == {}
 
     def test_permission_request_with_a_truthy_non_dict_meta_still_emits(
             self, monkeypatch):
@@ -21652,8 +21773,8 @@ class TestSupervisor:
         non-dict `params` (e.g. a JSON list) previously raised AttributeError
         straight out of `params.get(...)` -- before ever reaching the
         function's own _refuse fallback below. Since _on_permission_request
-        runs off loop.call_soon_threadsafe in production, that exception was
-        swallowed silently by asyncio's default handler and the agent's
+        runs off loop.call_soon_threadsafe in production, that exception went
+        to asyncio's default handler -- logged at ERROR, but the agent's
         request never got any reply: exactly the class of hang SC-9 exists
         to close, for this one malformed input shape. The fix is a type
         guard that routes this shape through the same _refuse path as every
@@ -21673,6 +21794,38 @@ class TestSupervisor:
         assert 55 not in sv3._pending_permission
         assert len(spawned) == 1, "a non-dict params must still be refused"
         spawned[0].close()  # never awaited -- close() avoids a RuntimeWarning
+
+    @pytest.mark.parametrize("bad_id", [
+        ["a", "list"], {"an": "object"}, True, None, 1.5])
+    def test_on_permission_request_unusable_id_is_refused_not_raised(
+            self, monkeypatch, bad_id):
+        """An unhashable JSON-RPC `id` (a list or object) raised TypeError at
+        the `_pending_permission[request_id]` store -- inside the same
+        call_soon_threadsafe callback as the non-dict `params` case above, so
+        the same hang: logged by asyncio's default handler, answered by nobody.
+        `bool` is refused although it is an `int`, and so are a missing id and
+        a float: JSON-RPC allows only strings and integers here. Every one
+        takes the `_refuse` path, and nothing is stored."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permbadid00-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        spawned = []
+        monkeypatch.setattr(acp_mod, "_spawn_task", spawned.append)
+        msg = self._permission_request_msg(
+            0, sid, title="t",
+            options=[{"optionId": "o", "name": "n", "kind": "allow_once"}])
+        msg["id"] = bad_id
+        try:
+            sv3._on_agent_request(msg)  # must not raise TypeError
+            assert sv3._pending_permission == {}, sv3._pending_permission
+            assert len(spawned) == 1, "an unusable id must still be refused"
+        finally:
+            for coro in spawned:
+                coro.close()
+            sv3.sessions.pop(sid, None)
+            sv3.history.pop(sid, None)
 
     def test_on_permission_request_unregistered_session_is_refused_not_stored(
             self, monkeypatch):
@@ -23194,7 +23347,8 @@ class TestGenerationRunsAtStartup:
         return types.SimpleNamespace(
             start_sweeper=lambda: None, shutdown=lambda: None,
             set_sessions_changed_hook=lambda h: None,
-            set_notify_hook=lambda h: None)
+            set_notify_hook=lambda h: None,
+            set_mode_gate_hook=lambda h: None)
 
     def _run_lifespan(self, web_mod, then=lambda: None):
         async def run():
@@ -23203,6 +23357,51 @@ class TestGenerationRunsAtStartup:
 
         with patch.object(web_mod, "acp", self._fake_acp()):
             return asyncio.run(run())
+
+    def _run_lifespan_capturing_gate(self, web_mod):
+        """Run lifespan with a fake `acp` that records the mode gate hook."""
+        import types
+        gates = []
+        fake = types.SimpleNamespace(
+            start_sweeper=lambda: None, shutdown=lambda: None,
+            set_sessions_changed_hook=lambda h: None,
+            set_notify_hook=lambda h: None,
+            set_mode_gate_hook=gates.append)
+
+        async def run():
+            async with web_mod.lifespan(None):
+                pass
+
+        with patch.object(web_mod, "acp", fake):
+            asyncio.run(run())
+        return gates
+
+    def test_lifespan_wires_the_mode_gate_to_the_derived_agent_state(
+            self, isolated_config):
+        """`acp` refuses the derived agent as a modeId unless it is in effect,
+        and it learns that only through the hook `web.py` installs here --
+        `acp.py` may not import `agent_profile` (D-20). Asserted through the
+        real lifespan: the hook is registered once, answers True after an on
+        startup has generated the file, and False after an off startup has
+        deleted it.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 2 review.
+        """
+        from power_atlas import config as config_mod
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_base(isolated_config)
+        _enable_in_config(isolated_config)
+        gates = self._run_lifespan_capturing_gate(web_mod)
+        assert len(gates) == 1, f"expected one registration, got {gates!r}"
+        assert ap.derived_block_state() == "on"
+        assert gates[0]() is True
+
+        cfg = config_mod.load_config()
+        cfg.acp_permissions_enabled = False
+        config_mod.save_config(cfg)
+        gates = self._run_lifespan_capturing_gate(web_mod)
+        assert ap.derived_block_state() == "absent"
+        assert gates[0]() is False
 
     def test_lifespan_generates_the_derived_agent(self, isolated_config):
         from power_atlas import web as web_mod

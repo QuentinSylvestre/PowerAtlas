@@ -489,6 +489,17 @@ async def _sync_derived_agent() -> None:
                       "the permission posture is unchanged")
 
 
+def _derived_agent_in_effect() -> bool:
+    """`acp.mode_gate_hook`: whether the derived agent may be a session's mode.
+
+    `"on"` only — the one state `agent_profile.derived_block_state` documents as
+    in effect. `"absent"` (the setting is off, or a first generation failed),
+    `"stale"` and `"unknown"` all refuse, so a user who never enabled the
+    posture cannot be handed a hand-authored file of the same name.
+    """
+    return agent_profile.derived_block_state() == "on"
+
+
 @asynccontextmanager
 async def lifespan(app_instance):
     # Before the sweeper starts and before the first request is served, so a
@@ -521,7 +532,13 @@ async def lifespan(app_instance):
         # what happened and whether anyone was attached; `_notify_from_acp`
         # owns the policy and the config read.
         acp.set_notify_hook(_notify_from_acp)
-    sweeper = acp.start_sweeper() if acp is not None else None
+        # And the third: `acp` may not import `agent_profile` either (D-20),
+        # but it must refuse the derived agent as a modeId while that agent is
+        # not in effect, or kiro-cli silently runs the session as "vibe".
+        # `acp` calls this off the loop and fails closed if it raises.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 2 review.
+        acp.set_mode_gate_hook(_derived_agent_in_effect)
+    sweeper =acp.start_sweeper() if acp is not None else None
     try:
         yield
     finally:

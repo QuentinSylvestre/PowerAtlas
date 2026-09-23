@@ -602,6 +602,11 @@ MAX_TITLE_CHARS = 200
 # now unclamped and bounded only by MAX_AGENT_LINE_BYTES, which caps the whole
 # inbound agent line this title arrived on; the renderer, not this constant, is
 # what keeps a long one from wrecking the layout.
+#
+# "The notification" means the server's desktop toast (`_notify`) only.
+# templates/acp.html also raises an in-page browser `Notification` built from
+# the frame's title, which this constant no longer reaches — that one has to be
+# clamped client-side, and the plan assigns it to Phase 3.
 MAX_PERMISSION_TITLE_CHARS = 200
 
 # What `_handle_prompt`/`_handle_close`/`_handle_cancel` answer a frame
@@ -698,7 +703,7 @@ _OVERLAY_STEERING: tuple[dict[str, str], ...] = (
 # plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md Phase 2): the
 # first 8 are that enumeration (modes.availableModes /
 # configOptions[id="mode"].options, confirmed via a disposable live probe
-# against kiro-cli 2.21.4, plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 2),
+# against kiro-cli 2.21.4, plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md Phase 2),
 # and DERIVED_AGENT_NAME is PowerAtlas's own derived agent, which kiro-cli
 # enumerates only once that file exists on disk (any file under
 # ~/.kiro/agents/ registers in the mode catalogue — probe P1).
@@ -713,14 +718,15 @@ _OVERLAY_STEERING: tuple[dict[str, str], ...] = (
 #   posture off, PowerAtlas deletes ~/.kiro/agents/poweratlas-acp.md entirely
 #   (user decision 2026-09-22, recorded in that plan's § 9 Phase 1 divergences,
 #   code `c2f324b` — absence is the only representation of off), so a client
-#   that sends this modeId anyway gets a mode kiro-cli silently coerces to
+#   that sends this modeId anyway would get a mode kiro-cli silently coerces to
 #   "vibe" — the exact failure this set exists to prevent, for this one value.
-#   Detecting it here would need `agent_profile`, which this module must not
-#   import (D-20), or config state this module does not read. Nothing in
-#   `acp.py` enforces it: the gate is upstream, in the picker's Default entry
-#   resolving to the base agent while the setting is off (SC-3).
+#   Membership here is therefore necessary but not sufficient: `_handle_new`
+#   also asks `mode_gate_hook` (below), which `web.py` backs with
+#   `agent_profile`'s own verdict on the file — an import this module must not
+#   make itself (D-20). With no hook installed the check is permissive, which
+#   is the state of every test that does not opt in.
 # - Only 5 of the 8 vendor modes are offered in the /acp UI's own picker
-#   (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 3) — the other 3 (vibe,
+#   (plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md Phase 3) — the other 3 (vibe,
 #   autonomous, semantic_reviewer) were only observed to exist, never
 #   behaviorally characterized, so they are accepted here for backend
 #   robustness but not exposed as UI options.
@@ -738,13 +744,14 @@ def _build_kas_session_params(mode_id: str = "kiro_default") -> dict[str, Any]:
     in acp-server.js. The steering list is delivered as clientSteeringDocs via
     createSessionState(..., kiroMeta?.steering ...).
 
-    ``mode_id`` only does anything on ``session/new``. Measured 2026-09-21
+    ``mode_id`` binds the mode on ``session/new``. Measured 2026-09-21
     (probe P2, kiro-cli 2.22.x,
     plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md § 1): the
     agent binds its mode — and therefore its permission posture — at
-    ``session/new`` and ignores this field on ``session/load``. A caller on the
-    load path is not choosing a posture, whatever it passes here; see
-    `load_session`'s own call site.
+    ``session/new``, and on ``session/load`` a session's own persisted mode
+    wins over this field. It is not quite dead there: the vendored KAS source
+    only falls back to it when the loaded session has no persisted metadata;
+    see `load_session`'s own call site.
     """
     return {
         "_meta": {
@@ -773,7 +780,7 @@ PROTOCOL_VERSION = 1
 # unattended session holds. Re-measured 2026-08-01 against kiro-cli 2.16.0
 # rather than carried forward: the earlier ``~254 MB`` per session was a
 # two-session reading of a build two versions back. See
-# ``plans/260731_ACP_REMOTE_CLIENT_PRODUCTIZATION.md`` for the eight-session
+# ``plans/done/260803-1103_ACP_REMOTE_CLIENT_PRODUCTIZATION.md`` for the eight-session
 # measurement this default rests on; ``plans/ROADMAP.md`` holds the cost model.
 MAX_SESSIONS = 8
 
@@ -955,6 +962,52 @@ def set_notify_hook(hook) -> None:
     """Install the notification hook. Loop-thread only, like the hook itself."""
     global notify_hook
     notify_hook = hook
+
+
+# Called with no arguments when a `new` frame asks for the derived agent
+# (DERIVED_AGENT_NAME) as its mode; returns whether that agent is actually in
+# effect right now. `None` until something wires it, and `None` means
+# **permissive** — the state of every test that does not opt in, and of this
+# module used on its own.
+#
+# A hook and not an import, for the same reason the two above are: the answer
+# lives in `agent_profile`, which classifies the file on disk (on, stale,
+# unknown, absent), and importing it here would widen the isolation boundary
+# this module's header declares (D-20). Checking file existence from here
+# instead would duplicate `KIRO_AGENTS_DIR` and would read a stale or
+# hand-authored file as "in effect". `web.py` already imports both and does the
+# wiring.
+#
+# Called through `asyncio.to_thread`, not on the loop: the answer is a file
+# read, and that is this codebase's idiom for filesystem I/O from a coroutine.
+# Only consulted for the one mode it gates, so no other session creation pays
+# for it.
+mode_gate_hook = None
+
+
+def set_mode_gate_hook(hook) -> None:
+    """Install the derived-agent gate. Loop-thread only, like the others."""
+    global mode_gate_hook
+    mode_gate_hook = hook
+
+
+async def _derived_mode_in_effect() -> bool:
+    """Whether `_handle_new` may forward DERIVED_AGENT_NAME as a modeId.
+
+    **Fails closed.** A hook that raises is treated as "not in effect" and the
+    session is refused, logged with its traceback. The alternative — letting
+    the mode through when the check itself broke — is exactly the silent
+    coercion to "vibe" the gate exists to prevent, and a refusal the user can
+    see and retry is the cheaper of the two failures.
+    """
+    hook = mode_gate_hook
+    if hook is None:
+        return True
+    try:
+        return bool(await asyncio.to_thread(hook))
+    except Exception:
+        log.exception("ACP mode gate hook failed; refusing the derived agent")
+        return False
 
 
 def _notify(event: str, session_id: str, detail: str = "") -> None:
@@ -1255,21 +1308,28 @@ def _project_consent(consent) -> dict[str, Any]:
     Accepts any input, returning ``{}`` for anything that is not a dict: this
     runs from `_on_permission_request`, which runs off
     ``loop.call_soon_threadsafe``, where an ``AttributeError`` on a truthy
-    non-dict is swallowed silently by asyncio's default handler and the agent's
-    request is left answered by nobody. A field is omitted rather than emitted
-    empty, so a prompt that carries three of the five (measured: ``web_fetch``)
-    does not render two blank rows.
+    non-dict would escape the callback. asyncio's default handler logs it at
+    ERROR, but nothing answers the agent's request, so the turn hangs.
+
+    A field is omitted rather than emitted empty, at both levels: a key that
+    is missing, or present with a non-string value, is skipped, and a
+    ``matchedRule`` left with neither of its two fields is dropped whole. So a
+    prompt that carries three of the five (measured: ``web_fetch``) does not
+    render two blank rows.
     """
     if not isinstance(consent, dict):
         return {}
     projected: dict[str, Any] = {}
     for key in _CONSENT_TEXT_FIELDS:
-        if key in consent:
-            projected[key] = _as_text(consent[key])
+        value = consent.get(key)
+        if isinstance(value, str):
+            projected[key] = value
     rule = consent.get("matchedRule")
     if isinstance(rule, dict):
-        projected["matchedRule"] = {
-            key: _as_text(rule.get(key)) for key in _CONSENT_RULE_FIELDS}
+        rebuilt = {key: rule[key] for key in _CONSENT_RULE_FIELDS
+                   if isinstance(rule.get(key), str)}
+        if rebuilt:
+            projected["matchedRule"] = rebuilt
     return projected
 
 
@@ -2786,7 +2846,7 @@ class _Supervisor:
         # finishes registering self.sessions/self.history for it — this
         # buffers such frames by session_id until new_session() replays them.
         # See the "SC-1 mechanism" Design Decisions row in
-        # plans/260908_ACP_V3_PRODUCTION_HARDENING.md.
+        # plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md.
         self._pending_early_frames: dict[str, list[dict]] = {}
         self._pending_early_frames_at: dict[str, float] = {}
         # Review fix (plan 260908_ACP_V3_PRODUCTION_HARDENING, Phase 4 review
@@ -4585,7 +4645,7 @@ class _Supervisor:
         `_handle_permission_response` needs to answer it later: keyed by
         the request's own ``id``, valued ``{"session_id": ..., "options": [...]}``
         — see the "SC-9 UI shape & pending-request tracking" Design Decisions
-        row in plans/260908_ACP_V3_PRODUCTION_HARDENING.md.
+        row in plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md.
 
         The frame carries the *unclamped* title plus an allowlisted projection
         of ``params._meta.kiro.consent`` (`_project_consent`), so a prompt can
@@ -4594,8 +4654,9 @@ class _Supervisor:
         plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
         Phase 2).
 
-        A malformed request (no ``sessionId``, no usable options, or a
-        ``sessionId`` that names no registered session) is refused via the
+        A malformed request (no ``sessionId``, no usable options, a
+        ``sessionId`` that names no registered session, or a JSON-RPC ``id``
+        that is not a string or an integer) is refused via the
         same `_refuse` path `_on_agent_request`'s own unhandled-method
         fallback uses, rather than
         silently swallowed or stored — nothing could ever answer a pending
@@ -4611,10 +4672,15 @@ class _Supervisor:
         prevent). This includes a truthy non-dict ``params`` (e.g. a JSON
         list) — without this guard, ``params.get(...)`` below raises
         ``AttributeError`` straight out of a ``call_soon_threadsafe``
-        callback, where asyncio's default exception handler swallows it
-        silently and the agent's request is left answered by nobody (review
+        callback. asyncio's default exception handler logs that at ERROR, but
+        nothing answers the agent's request, so the turn hangs (review
         finding, Security auditor: empirically reproduced, exactly the class
-        of hang SC-9 exists to close).
+        of hang SC-9 exists to close). The ``id`` check is the same class one
+        step later: an unhashable ``id`` (a JSON list or object) raises
+        ``TypeError`` at the ``_pending_permission`` store. ``bool`` is
+        excluded although it is an ``int``, and a missing ``id`` (``None``) is
+        refused too — JSON-RPC allows neither, and a request with no usable id
+        could not be answered anyway.
         """
         request_id = msg.get("id")
         params = msg.get("params") or {}
@@ -4638,12 +4704,15 @@ class _Supervisor:
                     "name": _as_text(opt.get("name")),
                     "kind": _as_text(opt.get("kind")),
                 })
-        if (not isinstance(session_id, str) or not session_id or not options
-                or session_id not in self.sessions):
+        usable_id = (isinstance(request_id, (str, int))
+                     and not isinstance(request_id, bool))
+        if (not usable_id or not isinstance(session_id, str) or not session_id
+                or not options or session_id not in self.sessions):
             log.warning(
                 "ACP: session/request_permission missing sessionId, "
-                "usable options, or names an unregistered session (id=%r, "
-                "sessionId=%r) — refusing", request_id, session_id)
+                "usable options or a string/integer id, or names an "
+                "unregistered session (id=%r, sessionId=%r) — refusing",
+                request_id, session_id)
             _spawn_task(self._refuse(request_id, msg.get("method")))
             return
         self._pending_permission[request_id] = {
@@ -4651,13 +4720,15 @@ class _Supervisor:
             "options": options,
         }
         title = _as_text(tool_call.get("title"))
-        # Every level type-guarded rather than `or {}`-chained: a truthy
-        # non-dict at any of the three (`_meta`, `kiro`, `consent`) would raise
-        # AttributeError here — past the _pending_permission store above, which
-        # would leave an entry nothing can answer and no frame to answer it
-        # with, out of a call_soon_threadsafe callback where asyncio's default
-        # handler swallows the traceback. Same failure class as the non-dict
-        # `params` guard at the top of this method.
+        # Every level type-guarded rather than `or {}`-chained. A truthy
+        # non-dict `_meta` or `kiro` would raise AttributeError on the two
+        # lines below; a truthy non-dict `consent` is guarded inside
+        # `_project_consent` instead. Any of the three raising would do so
+        # past the _pending_permission store above — an entry nothing can
+        # answer and no frame to answer it with — out of a
+        # call_soon_threadsafe callback, where asyncio's default handler logs
+        # the traceback at ERROR but nothing answers the agent. Same failure
+        # class as the non-dict `params` guard at the top of this method.
         meta = params.get("_meta")
         kiro_meta = meta.get("kiro") if isinstance(meta, dict) else None
         consent = kiro_meta.get("consent") if isinstance(kiro_meta, dict) else None
@@ -4668,8 +4739,10 @@ class _Supervisor:
             # plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
             # Phase 2): a shell prompt's title *is* the command and a write
             # prompt's path is the only thing distinguishing it from any other
-            # write, so the page gets the whole string and the toast gets the
-            # clamp its 200-character budget was sized for.
+            # write, so the page gets the whole string. The server's desktop
+            # toast (`_notify` below) keeps the 200-character clamp; the page's
+            # own in-page browser Notification, built from this frame's title
+            # in templates/acp.html, must clamp client-side (Phase 3's job).
             "toolCall": {"title": title},
             # Always present, `{}` when the agent sent none, so the frame's
             # shape does not depend on the agent's payload.
@@ -4761,7 +4834,7 @@ class _Supervisor:
         ``mode`` is an optional kiro-cli task-mode id (e.g. "spec") threaded
         into the _meta.kiro.modeId field of the session/new call; omitting it
         (or passing None) reproduces the pre-Phase-3 default of "kiro_default"
-        unchanged (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 3).
+        unchanged (plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md Phase 3).
         """
         if self.at_capacity():
             raise SessionLimit(_session_limit_message())
@@ -4890,6 +4963,18 @@ class _Supervisor:
                 # A resumed session keeps whatever posture it was created with;
                 # that is a property of kiro-cli, not a PowerAtlas choice
                 # (D-12).
+                #
+                # Read from source 2026-09-23 (the vendored KAS bundle,
+                # kiro-cli 2.22.0 through 2.23.1): `_meta.kiro.modeId` is
+                # `optional()` in the session-meta schema, and
+                # `hydrateSessionForLoad` picks
+                # `persisted ? persisted.metadata.agentMode : modeId ?? "vibe"`.
+                # So P2's "ignored" holds whenever the session has persisted
+                # metadata, as any session kiro-cli itself created does; the
+                # field is only a fallback when that metadata is missing.
+                # The key is kept rather than omitted because omitting it moves
+                # that fallback from "kiro_default" to kiro-cli's "vibe" — a
+                # posture change for a case nobody has characterized.
                 await self._request(
                     "session/load",
                     {"sessionId": session_id, "cwd": cwd, "mcpServers": [],
@@ -4964,7 +5049,7 @@ class _Supervisor:
         pid, or ``None`` before one has started, or again after it has been
         detached (``_detach`` clears ``_proc`` back to ``None`` on crash or
         close) — closing D32 for v3
-        (``plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`` Phase 1). With exactly
+        (``plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md`` Phase 1). With exactly
         one supervisor and one hook post-cutover, this pid unambiguously
         names the current agent, so the historical false-liveness concern
         (scoped to the pre-cutover dual-supervisor union, where a single
@@ -5787,6 +5872,17 @@ async def _handle_new(conn, payload):
         # the `in` check below, uncaught, since this runs before the try/
         # except further down.
         conn.send(error_frame("bad_payload", "'mode' is not a recognized task mode."))
+        return
+    # The derived agent is a member of _VALID_TASK_MODES whatever the setting
+    # says; this is the half that checks it is actually on disk and current.
+    # Forwarded while off, kiro-cli would silently run the session as "vibe".
+    if raw_mode == DERIVED_AGENT_NAME and not await _derived_mode_in_effect():
+        log.warning("ACP session/new refused: derived agent %r requested "
+                    "but not in effect", raw_mode)
+        conn.send(error_frame(
+            "bad_payload",
+            "The PowerAtlas permission profile is not in effect, so its agent "
+            "cannot be selected. Turn it on in Settings, or pick another mode."))
         return
     if _supervisor.at_capacity():
         conn.send(error_frame(SessionLimit.code, _session_limit_message()))
