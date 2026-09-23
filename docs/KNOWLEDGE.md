@@ -135,3 +135,70 @@ kiro-cli v2 stored sessions as flat files under `~/.kiro/sessions/cli/`:
 The SQLite DB at `%LOCALAPPDATA%\Kiro-Cli\data.sqlite3` (`conversations_v2` table) held a small number of "classic" sessions not otherwise stored on disk.
 
 PowerAtlas removed v2 support in this plan. The `~/.kiro/sessions/cli/` directory is not cleaned; the files remain on disk but PowerAtlas no longer reads them.
+
+
+
+---
+
+## ACP v3 protocol limitations (no-wire-close, crash detection, MCP auth)
+
+> Three structural findings about kiro-cli v3's ACP protocol. None is a to-do — they are hard limits of the current binary that constrain what PowerAtlas can do from the client side. Recorded together because they were all surface-level items in the same "ACP v3 Follow-up" roadmap section and have the same evidence pattern: a probe attempted a wire call, it returned -32601/-32603, and no alternative was found.
+
+### Session close has no wire-level confirmation — measured on every kiro-cli v3 build to date
+
+**Measured on kiro-cli 2.22.0 / KAS 0.66.0 (v3 engine), 2026-09-21.** Every close-related JSON-RPC call probed returns a method-not-found or internal-error:
+
+| Method | Result |
+|---|---|
+| `_kiro.dev/session/terminate` | `-32603 Internal error` |
+| `session/close` | `-32601 Method not found` |
+| `session/terminate` | `-32601 Method not found` |
+| `_kiro.dev/session/close` | `-32601 Method not found` |
+
+`_kiro.dev/session/terminate` **worked on the v2 engine** (kiro-cli 2.16.0, measured 2026-07-31: `{}` in ~2 ms, freed 3 processes and 172.6 MB, left the session resumable). It stopped working when the v3 engine became the sole engine (`260911_ACP_V2_TO_V3_ENGINE_CUTOVER`, 2026-09-12). No documented replacement has appeared.
+
+**Consequence for PowerAtlas.** `CLOSE_METHOD = None` in `acp.py:645`. `close_session()` (`acp.py:4911`) executes per-session local cleanup — removes from `self.sessions`, `self.history`, `self.inflight`, crew state, subscriber registry — but no wire call is made. The kiro-cli agent keeps the session's MCP server processes alive until either the whole KAS process exits or the kiro-cli process itself reaps them on an internal idle timeout (if such a timeout exists on v3 — unverified). The idle sweeper (`acp_idle_ttl_seconds`, default 1800 s) calls the same `close_session()`, so its memory-reclaim effect is limited to PowerAtlas's own tracking; the actual process overhead may persist on the agent side.
+
+**What `session/cancel` does** (distinct from close): cancels a running turn. Works as a notification (`_notify`, not a request); `stopReason: "cancelled"` arrives in ~0.11 s. Does not release session resources. Not a substitute.
+
+**Would reopen if**: kiro-cli v3 ships a documented per-session release method, or if `_kiro.dev/session/terminate` starts returning `{}` on v3 again (test probe: `{"method": "_kiro.dev/session/terminate", "params": {"sessionId": "<sid>"}}` — currently `-32603`).
+
+---
+
+### Supervisor crash detection has a blind spot on Windows — kiro-cli.exe wrapper keeps the pipe alive
+
+**Found 2026-09-19 on kiro-cli 2.22.0.** `kiro-cli.exe` is a thin Rust wrapper that spawns a `node.exe` child (the actual KAS/ACP server). `PowerAtlas.Popen` holds pipes to `kiro-cli.exe`'s stdin/stdout. The child `node.exe` **inherits the write end of the stdout pipe** from the wrapper.
+
+When `kiro-cli.exe` crashes or is killed (Task Manager, process kill), `node.exe` survives and still holds the write handle. The reader thread in `_reader_loop()` (`acp.py:3273`) calls `stream.read1(READ_BLOCK_BYTES)` in a loop; since the pipe is still open (write handle in `node.exe`), `read1()` **blocks indefinitely instead of returning `b""`** (EOF). The thread's `finally: self._post(self._on_agent_death, proc)` never fires.
+
+**Observable symptom**: attended, the next request to the agent fails with `AgentDied` when `_send()` checks `proc.poll() is not None` (`acp.py:3265`). Unattended, the session stalls silently until someone sends a request.
+
+**What already works**: the Windows job object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) ensures the whole `kiro-cli.exe` + `node.exe` tree dies when PowerAtlas itself exits, which is the intended teardown guarantee. The blind spot is specifically the case where `kiro-cli.exe` dies during a live PowerAtlas session — `node.exe` outlives it (same tree but `node.exe` was already running and holds a handle the wrapper left open).
+
+**Candidate fixes:**
+1. **Periodic `proc.poll()` watchdog** — a background asyncio task that checks `proc.poll() is not None` every N seconds and triggers `_on_agent_death` directly, without waiting for the reader thread to see EOF. Does not kill the orphaned `node.exe` but detects the failure promptly.
+2. **`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` at spawn** — spawn `kiro-cli.exe` with `lpAttributeList` that explicitly excludes the stdout pipe from inheritable handles. `node.exe` would not receive the write handle and the pipe would EOF when the wrapper exits. Requires `CreateProcessW` via `ctypes` since Python's `Popen` does not expose this attribute. More surgical but complex.
+3. **Windows job object notification** — set `JOB_OBJECT_MSG_END_OF_JOB_TIME` or `JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO` completion port on the existing job. Does not trigger on single-process exit within the job, so this does not help directly.
+
+A watchdog (option 1) is cheap and correct for the attended case. Option 2 is architecturally cleaner (node.exe would not need to be reaped separately) but requires Win32 API usage. Both options are independent and could coexist.
+
+**Stale-when**: kiro-cli changes its process model (e.g. a native single-process binary instead of a wrapper+node architecture) — re-check with `Get-Process kiro-cli | Select-Object -ExpandProperty Parent`.
+
+---
+
+### MCP OAuth flow is not buildable from confirmed signals — `authorizationUrl` never observed
+
+**Observed on kiro-cli 2.21.4 and 2.22.0.** When an MCP server requires OAuth, kiro-cli emits a `session_info_update` notification with `_meta.kiro.kind == "display_error"` carrying a human-readable error message (e.g. "Needs authentication"). PowerAtlas forwards this as an `agent_error` frame; `/acp` renders it inline in the transcript as a system message.
+
+**What is confirmed:**
+- The error message arrives and is displayed.
+- The `_kiro.dev/commands/available` notification's `mcpServers` array carries the connected server list (name, status). This data arrives but is not extracted or stored in `meta["mcpServers"]` by the current code — commands and skills are extracted, MCP server list is not.
+- No `authorizationUrl` field has ever been observed in any notification shape, on any MCP server that required auth, across all probes to date.
+
+**Why the OAuth completion flow is not currently buildable.** A "Connect" button in `/acp` would need to know the OAuth URL to open. The only candidate was `_kiro/mcp/status` from KiroCrew's source analysis — no such method exists in the v3 ACP protocol (not in `initialize`'s `extensionMethods` list, returns `-32601` if called). The `display_error` message is plain text from which the URL cannot be reliably extracted.
+
+**What remains open:**
+- Whether `_kiro.dev/commands/available`'s `mcpServers` entries carry auth status fields (e.g. `{name, status: "unauthorized", authUrl: "..."}`) — the shape has not been captured for an auth-required server during a session where MCP auth was denied. A targeted probe (start a session, deny Atlassian MCP auth, capture the raw `mcpServers` array) would settle this.
+- Whether the `/mcp` status panel functionality (which exists in kiro-cli's terminal TUI) is available as an ACP notification or method. Not probed.
+
+**Would reopen if**: a probe captures a `mcpServers` array entry with an `authorizationUrl` or equivalent field during a session where an MCP server needs auth; or a new `_kiro/mcp/*` or `_kiro.dev/mcp/*` method appears in `initialize`'s `extensionMethods` list.
