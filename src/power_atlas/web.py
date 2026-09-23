@@ -19,6 +19,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -37,7 +38,9 @@ from fastapi.templating import Jinja2Templates
 from .config import (load_config, save_config, get_active_launch_profile,
                      LaunchProfile, ensure_remote_secret, load_remote_secret,
                      rotate_remote_secret, validate_remote_bind_address,
-                     REMOTE_SECRET_MIN_LEN, REMOTE_SECRET_PATH)
+                     REMOTE_SECRET_MIN_LEN, REMOTE_SECRET_PATH,
+                     ensure_local_secret, local_secret_status,
+                     rotate_local_secret)
 from . import agent_profile, autostart, data, icons, launcher, notifications, presence
 from .status_classifier import get_semantic_status, SemanticStatus
 
@@ -508,6 +511,11 @@ async def lifespan(app_instance):
     # caller of it inherits the same "never fatal" contract.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
     await _sync_derived_agent()
+    # Before the first request, so the first door's code already exchanges for
+    # a cookie that verifies. `ensure_local_secret` never returns "" (D-22): an
+    # unwritable file degrades to an in-memory secret, reported in settings.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+    set_local_secret(await asyncio.to_thread(ensure_local_secret))
     task = asyncio.create_task(_background_refresh())
     # Guarded exactly as the teardown below is. An `acp` import failure is
     # designed to degrade to "/acp disabled" (see the import at the top of this
@@ -647,6 +655,15 @@ _ACP_PATH = "/acp"
 # the device secret for the cookie. Named once because three things must agree
 # about it — the routes, the remote path allowlist, and the cookie exemption.
 _REMOTE_AUTH_PATH = "/remote-auth"
+
+# The login-code exchange: a GET, because a door opens it as a URL in a browser
+# and the first load has to be the exchange. It is the second GET here that
+# changes state, and it needs no Origin check: it does nothing without a live
+# login code, and a code only exists by an in-process mint. Loopback-only by
+# omission — it is not in `_REMOTE_ALLOWED_PATHS`, so a remote peer never
+# reaches it. Named once because Phase 5's gate must exempt exactly this path.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_LOCAL_AUTH_PATH = "/local-auth"
 
 # The session browser's listing route. Defined up here, far from its own route,
 # for one mechanical reason: `_REMOTE_ALLOWED_PATHS` below now names it, and a
@@ -1019,6 +1036,201 @@ def _cookie_ok(scope) -> bool:
     return secrets.compare_digest(
         sig.encode("utf-8", "replace"),
         _device_cookie_sig(secret, device_id, issued_at).encode("utf-8"))
+
+
+# --- Loopback credential: the local secret and its cookie ---------------------
+#
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4. The loopback
+# twin of the device cookie above, and deliberately a *separate* cookie under a
+# *separate* key (D-17): `pa_device` is never sent to a loopback spelling, and
+# one unified cookie would let a copied login link hand out remote reach. The
+# peer class (Phase 5's gate) selects which of the two applies.
+#
+# Host-only by construction: no `Domain` attribute, a fixed name and `path="/"`,
+# none of which depends on the request's `Host`. That is what lets Phase 5 pick
+# one canonical loopback spelling for every door without touching this code.
+#
+# Nothing here gates a route yet; Phase 5 calls `_local_cookie_ok`.
+
+# Loaded at startup by `lifespan` through `set_local_secret`. Empty is the
+# fail-closed state: no cookie verifies and no code exchanges.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_LOCAL_SECRET = ""
+
+_LOCAL_COOKIE_NAME = "pa_local"
+
+# The first field of the three-field value. `pa_device` carries a user-chosen
+# device id there; the loopback cookie has no device, so the field is a constant
+# that keeps the shape — and the parser — identical to the device cookie's.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_LOCAL_COOKIE_SUBJECT = "loopback"
+
+# 90 days, the device cookie's figure. The doors mint a fresh code (and so a
+# fresh cookie) on every open, so the ceiling bounds only a browser nobody has
+# re-entered from the tray in three months.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+LOCAL_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 3600
+
+
+def set_local_secret(secret: str) -> None:
+    """Load the local secret, mirroring `set_remote_secret`.
+
+    ``""`` restores the fail-closed state. A value shorter than
+    ``REMOTE_SECRET_MIN_LEN`` is refused rather than trusted.
+    """
+    global _LOCAL_SECRET
+    value = (secret or "").strip()
+    if value and len(value) < REMOTE_SECRET_MIN_LEN:
+        log.error("local secret is shorter than %d characters; no loopback "
+                  "cookie will verify", REMOTE_SECRET_MIN_LEN)
+        value = ""
+    _LOCAL_SECRET = value
+
+
+def make_local_cookie(issued_at: int | None = None) -> str:
+    """Mint a loopback cookie value, or `""` when there is no usable secret.
+
+    `make_device_cookie`'s shape — ``subject.stamp.hmac`` — over the local key.
+    """
+    if not _LOCAL_SECRET:
+        return ""
+    stamp = str(int(time.time()) if issued_at is None else issued_at)
+    sig = _device_cookie_sig(_LOCAL_SECRET, _LOCAL_COOKIE_SUBJECT, stamp)
+    return f"{_LOCAL_COOKIE_SUBJECT}.{stamp}.{sig}"
+
+
+def _local_cookie_ok(scope) -> bool:
+    """Whether a scope carries a valid, unexpired loopback cookie.
+
+    `_cookie_ok`'s rules over `pa_local` and the local key: fails closed on
+    every path, never raises, and compares with `compare_digest` over UTF-8
+    bytes. The wall-clock stamp and its future-skew bound are inherited from the
+    device cookie on purpose (R-18): a skewed clock costs one fresh mint.
+    """
+    secret = _LOCAL_SECRET
+    if not secret or len(secret) < REMOTE_SECRET_MIN_LEN:
+        return False
+    raw = _scope_cookie(scope, _LOCAL_COOKIE_NAME)
+    if not raw or len(raw) > 160:
+        return False
+    subject, sep_a, rest = raw.partition(".")
+    issued_at, sep_b, sig = rest.partition(".")
+    if not sep_a or not sep_b or not sig:
+        return False
+    if subject != _LOCAL_COOKIE_SUBJECT:
+        return False
+    if not _ISSUED_AT_RE.fullmatch(issued_at):
+        return False
+    now = int(time.time())
+    issued = int(issued_at)
+    if issued > now + _COOKIE_FUTURE_SKEW_SECONDS:
+        return False
+    if now - issued > LOCAL_COOKIE_MAX_AGE_SECONDS:
+        return False
+    return secrets.compare_digest(
+        sig.encode("utf-8", "replace"),
+        _device_cookie_sig(secret, subject, issued_at).encode("utf-8"))
+
+
+def _set_local_cookie(response: Response) -> bool:
+    """Attach a fresh loopback cookie to ``response``. False when none minted.
+
+    One place for the attributes, because two routes set this cookie (the
+    exchange and the rotation) and they must not drift apart. No `Domain`, so
+    host-only; no `Secure`, because loopback is plain HTTP.
+    """
+    value = make_local_cookie()
+    if not value:
+        return False
+    response.set_cookie(
+        _LOCAL_COOKIE_NAME, value,
+        max_age=LOCAL_COOKIE_MAX_AGE_SECONDS,
+        httponly=True, samesite="strict", path="/")
+    return True
+
+
+# --- Login codes ---------------------------------------------------------------
+#
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 (D-21). A login
+# code is what a door puts in the URL it opens; `/local-auth` trades it, once,
+# for the cookie above. Minting is an in-process call only (D-3, SC-6): the
+# tray, peek and uvicorn share one process, and an HTTP mint would be
+# self-service login for any local process under another name.
+
+# `secrets.token_urlsafe(32)` — 43 characters of the URL-safe alphabet. Entropy
+# is load-bearing: a same-user attacker reaches the exchange directly.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_LOGIN_CODE_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+_LOGIN_CODE_TTL_SECONDS = 120.0
+# Three doors plus "Copy login link"; 64 outstanding codes is far past any real
+# use, and past it the oldest is evicted rather than the store growing.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_LOGIN_CODE_MAX_OUTSTANDING = 64
+# The clock the TTL is measured on (D-21, R-18): monotonic, because the codes
+# are process-local and wall time only adds NTP and sleep corrections. A module
+# seam so a test can move this clock without moving the event loop's.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_login_now = time.monotonic
+# code -> `_login_now()` at mint. Insertion-ordered, so the first key is oldest.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_login_codes: dict[str, float] = {}
+# The mint runs on the tray/peek threads (Phase 5) and the exchange on the loop
+# thread; purge-then-insert and find-then-pop are not single dict operations.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_login_codes_lock = threading.Lock()
+
+
+def _purge_expired_login_codes(now: float) -> None:
+    """Drop codes past their TTL. Caller holds `_login_codes_lock`."""
+    for code in [c for c, t in _login_codes.items()
+                 if now - t >= _LOGIN_CODE_TTL_SECONDS]:
+        del _login_codes[code]
+
+
+def mint_login_code() -> str:
+    """Return a fresh single-use login code. **In-process only — never a route.**
+
+    The doors (tray, peek double-tap, peek webview, "Copy login link") call
+    this and append ``?code=`` to `_LOCAL_AUTH_PATH`. Returns ``""`` when there
+    is no local secret, because a code would exchange for a cookie that
+    verifies nowhere.
+    """
+    if not _LOCAL_SECRET:
+        return ""
+    code = secrets.token_urlsafe(32)
+    with _login_codes_lock:
+        now = _login_now()
+        _purge_expired_login_codes(now)
+        while len(_login_codes) >= _LOGIN_CODE_MAX_OUTSTANDING:
+            _login_codes.pop(next(iter(_login_codes)))
+        _login_codes[code] = now
+    return code
+
+
+def login_path(code: str) -> str:
+    """The path-and-query a door opens: `_LOCAL_AUTH_PATH` plus the code."""
+    return f"{_LOCAL_AUTH_PATH}?code={code}"
+
+
+def _consume_login_code(supplied: str) -> bool:
+    """Take ``supplied`` out of the store if it is live. True exactly once.
+
+    Constant-time per candidate: every outstanding code is compared with
+    `compare_digest` rather than looked up by hash, so response timing does
+    not narrow a guess. The store is bounded, so this is bounded work.
+    """
+    probe = supplied.encode("utf-8", "replace")
+    with _login_codes_lock:
+        now = _login_now()
+        _purge_expired_login_codes(now)
+        match = None
+        for code in _login_codes:
+            if secrets.compare_digest(probe, code.encode("ascii")):
+                match = code
+        if match is None:
+            return False
+        del _login_codes[match]
+        return True
 
 
 def _is_remote_peer(peer: str | None) -> bool:
@@ -3189,13 +3401,18 @@ _EXCHANGE_FORM = """<!doctype html>
 """
 
 
-def _exchange_backoff_remaining(peer: str) -> float:
+def _exchange_backoff_remaining(peer: str, store: dict | None = None) -> float:
     """Seconds left on this peer's lockout, or 0.0.
 
     Exponential from the first failure, capped. Checked **before** the secret
     is compared, so it throttles guessing rather than merely recording it.
+
+    ``store`` defaults to the per-peer `_exchange_failures`; the login-code
+    exchange passes its per-code `_login_failures` instead (D-16,
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4).
     """
-    count, last, _ = _exchange_failures.get(peer, (0, 0.0, False))
+    store = _exchange_failures if store is None else store
+    count, last, _ = store.get(peer, (0, 0.0, False))
     if count <= 0:
         return 0.0
     delay = min(_EXCHANGE_BASE_BACKOFF_SECONDS * (2 ** min(count - 1, 8)),
@@ -3204,13 +3421,16 @@ def _exchange_backoff_remaining(peer: str) -> float:
     return remaining if remaining > 0 else 0.0
 
 
-def _record_exchange_failure(peer: str) -> None:
-    count = _exchange_failures.get(peer, (0, 0.0, False))[0]
-    if peer not in _exchange_failures and len(_exchange_failures) >= _EXCHANGE_MAX_TRACKED_PEERS:
-        _exchange_failures.pop(next(iter(_exchange_failures)), None)
+def _record_exchange_failure(peer: str, store: dict | None = None) -> None:
+    # `store`: see `_exchange_backoff_remaining`.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+    store = _exchange_failures if store is None else store
+    count = store.get(peer, (0, 0.0, False))[0]
+    if peer not in store and len(store) >= _EXCHANGE_MAX_TRACKED_PEERS:
+        store.pop(next(iter(store)), None)
     # `False`: a new failure opens a new lockout window, and the first refusal
     # inside it is worth one line.
-    _exchange_failures[peer] = (count + 1, time.monotonic(), False)
+    store[peer] = (count + 1, time.monotonic(), False)
 
 
 def _claim_throttle_warning(peer: str) -> bool:
@@ -3346,6 +3566,116 @@ async def remote_auth_exchange(request: Request):
         max_age=REMOTE_COOKIE_MAX_AGE_SECONDS,
         httponly=True, samesite="strict", path="/")
     log.info("remote device %r authorized from %s", device_id, peer)
+    return response
+
+
+# --- The login-code exchange ---------------------------------------------------
+#
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4. Mirrors
+# `remote_auth_exchange`'s hardening — bounded input before any parse,
+# `compare_digest` over bytes, a backoff consulted before the comparison, a
+# bounded tracking dict, never a 500 — with one deliberate difference (D-16):
+# the throttle is keyed **per code**, not per peer. Every loopback caller is
+# `127.0.0.1`, so a peer-keyed lockout would let one bad local process throttle
+# the real user's next door for up to five minutes.
+
+# Per-code failure records, `_exchange_failures`'s tuple shape. Keys are only
+# ever strings matching `_LOGIN_CODE_RE`, so each key is bounded, and the dict
+# is bounded by `_EXCHANGE_MAX_TRACKED_PEERS` through `_record_exchange_failure`.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_login_failures: dict[str, tuple[int, float, bool]] = {}
+
+# A refused exchange logs one WARNING per this many seconds, however many
+# arrive. Per-code windows would not bound the log: a local process can invent
+# a new code per request, and each would open a new window.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_LOGIN_WARN_INTERVAL_SECONDS = 60.0
+_login_warn_state = {"last": float("-inf"), "suppressed": 0}
+
+# The query string carries one 43-character field; 512 bytes is a >10x margin
+# and is checked before `parse_qsl` builds anything.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_LOCAL_AUTH_MAX_QUERY = 512
+
+_LOCAL_AUTH_REFUSED = """<!doctype html>
+<title>PowerAtlas</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<h1>PowerAtlas</h1>
+<p>{message}</p>
+<p>Open PowerAtlas from its tray icon to sign in again.</p>
+"""
+
+
+def _warn_login_refused(reason: str) -> None:
+    """One WARNING per `_LOGIN_WARN_INTERVAL_SECONDS`, counting the rest."""
+    now = time.monotonic()
+    state = _login_warn_state
+    if now - state["last"] < _LOGIN_WARN_INTERVAL_SECONDS:
+        state["suppressed"] += 1
+        return
+    log.warning("login-code exchange refused: %s (%d further refusals "
+                "suppressed since the last line)", reason, state["suppressed"])
+    state["last"] = now
+    state["suppressed"] = 0
+
+
+def _local_auth_refusal(message: str, status_code: int) -> HTMLResponse:
+    response = HTMLResponse(_LOCAL_AUTH_REFUSED.format(message=message),
+                            status_code=status_code)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get(_LOCAL_AUTH_PATH)
+async def local_auth_exchange(request: Request):
+    """Trade a one-time login code for the loopback cookie, then go to `/`.
+
+    Script-free and self-contained for the same reason `remote_auth_page` is.
+    A GET because a door opens it as a URL; there is no body to bound, so the
+    body and field ceilings of `remote_auth_exchange` become a query-length
+    ceiling checked before parsing.
+    """
+    query = request.scope.get("query_string", b"") or b""
+    if len(query) > _LOCAL_AUTH_MAX_QUERY:
+        _warn_login_refused("query string too long")
+        return _local_auth_refusal("That sign-in link is not valid.", 400)
+    try:
+        pairs = parse_qsl(query.decode("latin-1"), keep_blank_values=True,
+                          max_num_fields=_REMOTE_AUTH_MAX_FIELDS)
+    except ValueError:
+        _warn_login_refused("too many fields")
+        return _local_auth_refusal("That sign-in link is not valid.", 400)
+    supplied = dict(pairs).get("code", "")
+    # Shape before anything else, so a throttle key and a log line are never
+    # attacker-sized.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+    if not _LOGIN_CODE_RE.fullmatch(supplied):
+        _warn_login_refused("malformed code")
+        return _local_auth_refusal("That sign-in link is not valid.", 400)
+    remaining = _exchange_backoff_remaining(supplied, _login_failures)
+    if remaining > 0:
+        _warn_login_refused("code throttled")
+        return _local_auth_refusal(
+            f"Too many attempts with this link. Try again in "
+            f"{int(remaining) + 1}s.", 429)
+    if not _LOCAL_SECRET:
+        log.error("login-code exchange attempted with no usable local secret")
+        return _local_auth_refusal("PowerAtlas has no usable local secret.", 503)
+    if not _consume_login_code(supplied):
+        _record_exchange_failure(supplied, _login_failures)
+        _warn_login_refused("unknown, expired or already-used code")
+        return _local_auth_refusal(
+            "That sign-in link has expired or was already used.", 403)
+    _login_failures.pop(supplied, None)
+    # 303 so the browser GETs `/` and the code leaves the address bar and the
+    # history entry the user will see. `no-referrer` keeps the (now dead) code
+    # out of any Referer the landing page sends.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+    response = Response(status_code=303, headers={
+        "Location": "/", "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer"})
+    _set_local_cookie(response)
+    log.info("loopback browser signed in with a login code")
     return response
 
 
@@ -3620,6 +3950,10 @@ async def api_settings():
         # `_STARTUP_VALUES` for why that direction is the safe one.
         "in_force": dict(_STARTUP_VALUES or {}),
         "restart_pending": _restart_pending(config),
+        # Whether the loopback credential's key survives a restart (D-22). The
+        # status only, never the secret.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+        "local_secret": local_secret_status(),
     }
 
 
@@ -4097,6 +4431,49 @@ async def api_remote_access(response: Response):
         # refused, or the reverse.
         "stopped": remote_stopped(),
     }
+
+
+@app.post("/api/local-secret/rotate")
+async def api_local_secret_rotate(request: Request, response: Response):
+    """Issue a new local secret, signing every loopback browser out but this one.
+
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4. Rotation
+    invalidates every loopback cookie, the caller's included, so the caller's
+    replacement is set **in this same response** — otherwise the rotate
+    request would sign the user out of the surface they used to make it.
+
+    The replacement goes only to a caller that proved the *old* credential.
+    Without that check this route would hand a fresh cookie to any loopback
+    process that asked, which is the self-service mint D-3 rejects; with it,
+    rotation can only ever re-issue a credential its caller already held.
+
+    Same write-then-apply ordering as `api_remote_access_rotate`, for the same
+    reason; a failed write changes nothing.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    if not _local_cookie_ok(request.scope):
+        return JSONResponse(
+            {"ok": False, "error": "Rotating the local secret requires a "
+                                   "signed-in browser"},
+            status_code=403, headers={"Cache-Control": "no-store"})
+    secret = await asyncio.to_thread(rotate_local_secret)
+    if not secret:
+        return {"ok": False,
+                "error": f"Could not write {local_secret_status()['path']}; "
+                         "the previous local secret is still in effect"}
+    set_local_secret(secret)
+    # Codes minted under the old secret would otherwise still exchange for a
+    # cookie; clearing them makes "rotate" mean every old way in is closed.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+    with _login_codes_lock:
+        _login_codes.clear()
+    reissued = _set_local_cookie(response)
+    log.warning("local secret rotated; every other loopback browser must "
+                "sign in again from the tray")
+    return {"ok": True, "reissued": reissued,
+            "message": "Every other browser has been signed out and must be "
+                       "reopened from the tray."}
 
 
 @app.post("/api/remote-access/rotate")

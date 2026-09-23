@@ -204,18 +204,149 @@ def _write_remote_secret() -> str:
     """
     value = secrets.token_urlsafe(32)
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(REMOTE_SECRET_PATH,
-                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, value.encode("ascii"))
-        finally:
-            os.close(fd)
+        _write_secret_file(REMOTE_SECRET_PATH, value)
     except OSError:
         log.error("Could not write %s; remote access stays disabled",
                   REMOTE_SECRET_PATH)
         return ""
     return value
+
+
+def _write_secret_file(path: Path, value: str) -> None:
+    """Fixed-mode create-truncate of one secret file. Raises ``OSError``.
+
+    Shared by the remote and the local secret so the two files are written by
+    one implementation (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+    Phase 4). Deliberately **not** tmp → ``os.replace``: a torn write leaves a
+    file shorter than ``REMOTE_SECRET_MIN_LEN``, which both loaders read as "no
+    usable secret" — it fails closed. D-19's atomic-write rule is about the
+    derived agent file, whose torn state fails *open*; it does not apply here.
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, value.encode("ascii"))
+    finally:
+        os.close(fd)
+
+
+# --- Local secret -----------------------------------------------------------
+#
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4. The key behind
+# the loopback cookie (`web.make_local_cookie`), in its own file beside the
+# remote secret and never in `config.toml`, for the same reason D8 gives there.
+# A separate secret rather than a reuse of the remote one: rotating the remote
+# secret to revoke a lost phone must not also sign the desktop out, and the two
+# cookies must never verify under each other's key (D-17).
+#
+# Same Windows caveat as `REMOTE_SECRET_PATH`: the 0o600 is real on POSIX and
+# decorative on Windows, where `%LOCALAPPDATA%`'s inherited ACLs protect it.
+LOCAL_SECRET_PATH = CONFIG_DIR / "local-secret"
+
+# D-22: a secret generated but not persisted is kept here for the life of the
+# process, so every door still mints a cookie that verifies. Without it, an
+# unwritable config dir would leave the UI unreachable and the settings panel
+# that explains why would itself be behind the gate.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_local_secret_memory = ""
+# Why the secret above is memory-only, or "" when the file on disk is in use.
+# Read by the settings route through `local_secret_status`.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+_local_secret_persist_error = ""
+
+
+def load_local_secret() -> str:
+    """Return the local secret **on disk**, or ``""`` when it is unusable.
+
+    Exactly `load_remote_secret`'s contract over `LOCAL_SECRET_PATH`: absent,
+    unreadable, empty, whitespace-only and shorter than
+    ``REMOTE_SECRET_MIN_LEN`` all collapse to ``""``. A pure disk read — the
+    D-22 in-memory fallback is `ensure_local_secret`'s business, not this one's.
+    Never raises.
+    """
+    try:
+        raw = LOCAL_SECRET_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    value = raw.strip()
+    if len(value) < REMOTE_SECRET_MIN_LEN:
+        return ""
+    return value
+
+
+def ensure_local_secret() -> str:
+    """Return the local secret, creating it if needed. Never ``""``.
+
+    Order: the usable file on disk; else the value an earlier call in this
+    process could not persist; else a freshly generated one. The middle term is
+    what keeps a second call after a failed write returning the *same* secret
+    rather than silently invalidating every cookie minted since the first.
+
+    Unlike `ensure_remote_secret`, a write failure does not return ``""``
+    (D-22): the value is kept in memory and the failure recorded for
+    `local_secret_status`. An existing usable file is returned untouched.
+    """
+    return load_local_secret() or _local_secret_memory or _write_local_secret()
+
+
+def rotate_local_secret() -> str:
+    """Issue a **new** local secret, replacing any existing one. ``""`` on failure.
+
+    Invalidates every loopback cookie at once, the caller's included — which is
+    why the HTTP route that calls this re-issues the caller's cookie in the same
+    response.
+
+    A failed write changes **nothing**, mirroring `rotate_remote_secret` rather
+    than D-22. D-22 exists for the no-secret-at-all case; here a working secret
+    already exists, and rotating only in memory would revoke cookies that come
+    back to life at the next restart, when the old file is read again.
+    """
+    value = secrets.token_urlsafe(32)
+    try:
+        _write_secret_file(LOCAL_SECRET_PATH, value)
+    except OSError:
+        log.error("Could not write %s; the previous local secret is still in "
+                  "effect", LOCAL_SECRET_PATH)
+        return ""
+    _clear_local_secret_fallback()
+    return value
+
+
+def local_secret_status() -> dict:
+    """Whether the local secret in use is persisted, for the settings panel.
+
+    Never carries the secret itself. ``persisted`` is False exactly when D-22's
+    in-memory fallback is in effect: cookies work until PowerAtlas exits, and
+    the next start will issue a new secret and sign every browser out.
+    """
+    return {
+        "persisted": not _local_secret_persist_error,
+        "error": _local_secret_persist_error,
+        "path": str(LOCAL_SECRET_PATH),
+    }
+
+
+def _write_local_secret() -> str:
+    """Generate and try to persist a fresh local secret; always return it."""
+    global _local_secret_memory, _local_secret_persist_error
+    value = secrets.token_urlsafe(32)
+    try:
+        _write_secret_file(LOCAL_SECRET_PATH, value)
+    except OSError as exc:
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 (D-22)
+        log.error("Could not write %s (%s); using an in-memory local secret "
+                  "until PowerAtlas exits", LOCAL_SECRET_PATH, exc)
+        _local_secret_memory = value
+        _local_secret_persist_error = f"Could not write {LOCAL_SECRET_PATH}: {exc}"
+        return value
+    _clear_local_secret_fallback()
+    return value
+
+
+def _clear_local_secret_fallback() -> None:
+    global _local_secret_memory, _local_secret_persist_error
+    _local_secret_memory = ""
+    _local_secret_persist_error = ""
 
 
 def validate_remote_bind_address(raw: object, port: int) -> str:

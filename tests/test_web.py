@@ -71,6 +71,15 @@ def isolated_config(tmp_path, monkeypatch):
     # into the next one's assertions about the settings panel.
     monkeypatch.setattr(agent_profile_mod, "_status",
                         agent_profile_mod.GenerationStatus())
+    # `lifespan` now creates the local secret at startup, so the path is
+    # redirected with the same unconditional reach, and the D-22 fallback
+    # state and the loaded key are reset because both are process-global.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+    from power_atlas import web as web_mod
+    monkeypatch.setattr(config_mod, "LOCAL_SECRET_PATH", tmp_path / "local-secret")
+    monkeypatch.setattr(config_mod, "_local_secret_memory", "")
+    monkeypatch.setattr(config_mod, "_local_secret_persist_error", "")
+    monkeypatch.setattr(web_mod, "_LOCAL_SECRET", "")
     return tmp_path
 
 
@@ -1045,7 +1054,7 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
                      "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds",
                      "remote_bind_address", "restart_to_apply", "in_force",
-                     "restart_pending"}
+                     "restart_pending", "local_secret"}
     assert set(body.keys()) == expected_keys
     assert body["autostart"] is False
     assert "terminal_command" not in body
@@ -23509,3 +23518,510 @@ class TestGenerationRunsAtStartup:
         assert held == [True], (
             "the settings were read outside the lock that serialises "
             "generation")
+
+
+
+# ---------------------------------------------------------------------------
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 — the local
+# secret, the one-time login code, and the `/local-auth` exchange. Nothing here
+# is gated yet (Phase 5); these pin the credential itself.
+# ---------------------------------------------------------------------------
+
+_LOCAL_TEST_SECRET = "L" * 43
+
+
+@pytest.fixture
+def local_enabled():
+    """A loaded local secret and an empty code store, torn down afterwards."""
+    from power_atlas import web as web_mod
+    web_mod.set_local_secret(_LOCAL_TEST_SECRET)
+    with web_mod._login_codes_lock:
+        web_mod._login_codes.clear()
+    web_mod._login_failures.clear()
+    try:
+        yield web_mod
+    finally:
+        web_mod.set_local_secret("")
+        with web_mod._login_codes_lock:
+            web_mod._login_codes.clear()
+        web_mod._login_failures.clear()
+
+
+def _local_scope(value):
+    return {"type": "http", "headers": [(b"cookie", f"pa_local={value}".encode())]}
+
+
+def _local_cookie_from(resp):
+    """The `pa_local` Set-Cookie line and its value, from a raw response."""
+    lines = [h for h in resp.headers.get_list("set-cookie")
+             if h.startswith("pa_local=")]
+    assert len(lines) == 1, resp.headers.get_list("set-cookie")
+    line = lines[0]
+    return line, line.split(";", 1)[0].split("=", 1)[1]
+
+
+class TestLocalSecretFile:
+    """The durable key behind the loopback cookie (config.py)."""
+
+    def test_created_on_first_call_reused_on_second_rotated_on_demand(
+            self, isolated_config):
+        from power_atlas import config as config_mod
+        path = isolated_config / "local-secret"
+        assert not path.exists()
+        first = config_mod.ensure_local_secret()
+        assert len(first) >= config_mod.REMOTE_SECRET_MIN_LEN
+        assert path.read_text(encoding="utf-8") == first
+        assert config_mod.ensure_local_secret() == first
+        assert config_mod.load_local_secret() == first
+        rotated = config_mod.rotate_local_secret()
+        assert rotated and rotated != first
+        assert config_mod.load_local_secret() == rotated
+        assert config_mod.ensure_local_secret() == rotated
+
+    def test_its_own_file_never_the_remote_secret(self, isolated_config):
+        """D-17: the loopback key is separate, so rotating one never touches
+        the other."""
+        from power_atlas import config as config_mod
+        local = config_mod.ensure_local_secret()
+        assert not (isolated_config / "remote-secret").exists()
+        remote = config_mod.ensure_remote_secret()
+        assert remote != local
+        config_mod.rotate_local_secret()
+        assert config_mod.load_remote_secret() == remote
+
+    @pytest.mark.parametrize("content", [
+        "", "   \n", "x" * 42, "y" * 20 + "\n", "\x00" * 10])
+    def test_truncated_or_short_file_reads_as_no_usable_secret(
+            self, isolated_config, content):
+        from power_atlas import config as config_mod
+        path = isolated_config / "local-secret"
+        path.write_text(content, encoding="utf-8")
+        assert config_mod.load_local_secret() == ""
+        # And `ensure` replaces it rather than trusting the short value.
+        fresh = config_mod.ensure_local_secret()
+        assert len(fresh) >= config_mod.REMOTE_SECRET_MIN_LEN
+        assert fresh.strip() != content.strip()
+        assert config_mod.load_local_secret() == fresh
+
+    def test_short_secret_is_refused_in_process_too(self, local_enabled):
+        web_mod = local_enabled
+        web_mod.set_local_secret("S" * 42)
+        assert web_mod._LOCAL_SECRET == ""
+        assert web_mod.make_local_cookie() == ""
+        assert web_mod.mint_login_code() == ""
+
+    def test_unpersistable_secret_is_kept_in_memory_and_reported(
+            self, isolated_config, client, monkeypatch):
+        """D-22: a failed write still yields one stable, usable secret for the
+        process lifetime, and `/api/settings` says it is not persisted."""
+        from power_atlas import config as config_mod
+
+        def refuse(path, value):
+            raise PermissionError(13, "Access is denied", str(path))
+
+        monkeypatch.setattr(config_mod, "_write_secret_file", refuse)
+        first = config_mod.ensure_local_secret()
+        assert len(first) >= config_mod.REMOTE_SECRET_MIN_LEN
+        assert not (isolated_config / "local-secret").exists()
+        # The same value on every later call — not a new one that would
+        # invalidate every cookie minted since the first.
+        assert config_mod.ensure_local_secret() == first
+        status = config_mod.local_secret_status()
+        assert status["persisted"] is False
+        assert "local-secret" in status["error"]
+        body = client.get("/api/settings").json()
+        assert body["local_secret"]["persisted"] is False
+        assert body["local_secret"]["error"] == status["error"]
+        assert first not in json.dumps(body), "the settings payload must never carry the secret"
+
+    def test_in_memory_secret_still_signs_in_a_browser(
+            self, isolated_config, client, monkeypatch):
+        """The whole point of D-22: through the real startup path, a secret
+        that could not be written still lets a door's code become a cookie
+        that verifies."""
+        from power_atlas import config as config_mod
+        from power_atlas import web as web_mod
+
+        def refuse(path, value):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(config_mod, "_write_secret_file", refuse)
+        TestGenerationRunsAtStartup()._run_lifespan(web_mod)
+        assert web_mod._LOCAL_SECRET == config_mod._local_secret_memory != ""
+        code = web_mod.mint_login_code()
+        resp = client.get(web_mod.login_path(code), follow_redirects=False)
+        assert resp.status_code == 303
+        _, value = _local_cookie_from(resp)
+        assert web_mod._local_cookie_ok(_local_scope(value))
+
+    def test_persisted_secret_reports_persisted(self, isolated_config, client):
+        from power_atlas import config as config_mod
+        config_mod.ensure_local_secret()
+        body = client.get("/api/settings").json()
+        assert body["local_secret"] == {
+            "persisted": True, "error": "",
+            "path": str(isolated_config / "local-secret")}
+
+    def test_startup_loads_the_file_secret(self, isolated_config):
+        from power_atlas import config as config_mod
+        from power_atlas import web as web_mod
+        TestGenerationRunsAtStartup()._run_lifespan(web_mod)
+        assert web_mod._LOCAL_SECRET == config_mod.load_local_secret() != ""
+
+    def test_failed_rotation_changes_nothing(self, isolated_config, monkeypatch):
+        from power_atlas import config as config_mod
+        before = config_mod.ensure_local_secret()
+
+        def refuse(path, value):
+            raise PermissionError(13, "Access is denied")
+
+        monkeypatch.setattr(config_mod, "_write_secret_file", refuse)
+        assert config_mod.rotate_local_secret() == ""
+        assert config_mod.load_local_secret() == before
+        assert config_mod.local_secret_status()["persisted"] is True
+
+
+class TestLocalCookie:
+    """`pa_local`: `make_device_cookie`'s shape over the local key."""
+
+    def test_valid_cookie_verifies(self, local_enabled):
+        web_mod = local_enabled
+        value = web_mod.make_local_cookie()
+        assert value.count(".") == 2
+        assert web_mod._local_cookie_ok(_local_scope(value))
+
+    def test_verification_is_compare_digest_over_bytes(self, local_enabled):
+        web_mod = local_enabled
+        value = web_mod.make_local_cookie()
+        real = web_mod.secrets.compare_digest
+        seen = []
+
+        def spy(a, b):
+            seen.append((type(a), type(b)))
+            return real(a, b)
+
+        with patch.object(web_mod.secrets, "compare_digest", spy):
+            assert web_mod._local_cookie_ok(_local_scope(value))
+        assert seen == [(bytes, bytes)]
+
+    def test_tampered_signature_refused(self, local_enabled):
+        web_mod = local_enabled
+        subject, stamp, sig = web_mod.make_local_cookie().split(".")
+        flipped = ("0" if sig[0] != "0" else "1") + sig[1:]
+        assert not web_mod._local_cookie_ok(_local_scope(f"{subject}.{stamp}.{flipped}"))
+        assert not web_mod._local_cookie_ok(_local_scope(f"{subject}.{stamp}.{sig}x"))
+        # Non-ASCII in the signature is a refusal, never a TypeError.
+        assert not web_mod._local_cookie_ok(_local_scope(f"{subject}.{stamp}.é{sig[1:]}"))
+
+    def test_tampered_timestamp_refused(self, local_enabled):
+        web_mod = local_enabled
+        subject, stamp, sig = web_mod.make_local_cookie().split(".")
+        assert not web_mod._local_cookie_ok(
+            _local_scope(f"{subject}.{int(stamp) - 1}.{sig}"))
+        # Non-ASCII digits are refused by the ASCII-only stamp pattern.
+        assert not web_mod._local_cookie_ok(
+            _local_scope(f"{subject}.١٢٣.{sig}"))
+
+    def test_future_dated_stamp_refused(self, local_enabled):
+        web_mod = local_enabled
+        future = int(time.time()) + web_mod._COOKIE_FUTURE_SKEW_SECONDS + 60
+        assert not web_mod._local_cookie_ok(
+            _local_scope(web_mod.make_local_cookie(issued_at=future)))
+
+    def test_expired_stamp_refused(self, local_enabled):
+        web_mod = local_enabled
+        old = int(time.time()) - web_mod.LOCAL_COOKIE_MAX_AGE_SECONDS - 60
+        assert not web_mod._local_cookie_ok(
+            _local_scope(web_mod.make_local_cookie(issued_at=old)))
+
+    def test_wrong_subject_refused(self, local_enabled):
+        web_mod = local_enabled
+        stamp = str(int(time.time()))
+        sig = web_mod._device_cookie_sig(_LOCAL_TEST_SECRET, "phone", stamp)
+        assert not web_mod._local_cookie_ok(_local_scope(f"phone.{stamp}.{sig}"))
+
+    def test_remote_key_does_not_sign_a_local_cookie(self, local_enabled):
+        """D-17: the two cookies never verify under each other's key."""
+        web_mod = local_enabled
+        stamp = str(int(time.time()))
+        sig = web_mod._device_cookie_sig(_TEST_SECRET, "loopback", stamp)
+        assert not web_mod._local_cookie_ok(_local_scope(f"loopback.{stamp}.{sig}"))
+
+    def test_device_cookie_name_is_not_accepted(self, local_enabled):
+        web_mod = local_enabled
+        value = web_mod.make_local_cookie()
+        scope = {"type": "http", "headers": [(b"cookie", f"pa_device={value}".encode())]}
+        assert not web_mod._local_cookie_ok(scope)
+
+    def test_no_secret_refuses_everything(self, local_enabled):
+        web_mod = local_enabled
+        value = web_mod.make_local_cookie()
+        web_mod.set_local_secret("")
+        assert not web_mod._local_cookie_ok(_local_scope(value))
+        assert web_mod.make_local_cookie() == ""
+
+
+class TestLoginCodeExchange:
+    """`mint_login_code` (in-process) and `GET /local-auth` (D-16, D-21)."""
+
+    def test_code_shape(self, local_enabled):
+        code = local_enabled.mint_login_code()
+        assert local_enabled._LOGIN_CODE_RE.fullmatch(code)
+
+    def test_exchange_sets_a_host_only_httponly_cookie_and_redirects(
+            self, local_enabled, client):
+        web_mod = local_enabled
+        resp = client.get(web_mod.login_path(web_mod.mint_login_code()),
+                          follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/"
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["referrer-policy"] == "no-referrer"
+        line, value = _local_cookie_from(resp)
+        lowered = line.lower()
+        assert "httponly" in lowered
+        assert "samesite=strict" in lowered
+        assert "path=/" in lowered
+        # Host-only: no Domain attribute, so Phase 5's canonical host is the
+        # only spelling the browser returns it to.
+        assert "domain=" not in lowered
+        assert web_mod._local_cookie_ok(_local_scope(value))
+
+    def test_exactly_once_replay_refused(self, local_enabled, client):
+        web_mod = local_enabled
+        path = web_mod.login_path(web_mod.mint_login_code())
+        assert client.get(path, follow_redirects=False).status_code == 303
+        replay = client.get(path, follow_redirects=False)
+        assert replay.status_code == 403
+        assert not [h for h in replay.headers.get_list("set-cookie")
+                    if h.startswith("pa_local=")]
+
+    def test_unknown_code_refused(self, local_enabled, client):
+        resp = client.get(local_enabled.login_path("A" * 43), follow_redirects=False)
+        assert resp.status_code == 403
+        assert "tray" in resp.text
+
+    def test_ttl_is_monotonic_and_expiry_refuses(self, local_enabled, client,
+                                                 monkeypatch):
+        """120 s on `time.monotonic()`, asserted by moving the clock seam."""
+        web_mod = local_enabled
+        assert web_mod._login_now is time.monotonic
+        assert web_mod._LOGIN_CODE_TTL_SECONDS == 120.0
+        clock = [1000.0]
+        monkeypatch.setattr(web_mod, "_login_now", lambda: clock[0])
+        fresh = web_mod.mint_login_code()
+        stale = web_mod.mint_login_code()
+        clock[0] += 119.0
+        assert client.get(web_mod.login_path(fresh),
+                          follow_redirects=False).status_code == 303
+        clock[0] += 1.0
+        assert client.get(web_mod.login_path(stale),
+                          follow_redirects=False).status_code == 403
+
+    def test_wall_clock_jump_does_not_expire_a_code(self, local_enabled, client,
+                                                    monkeypatch):
+        """R-18: the TTL ignores `time.time()` entirely."""
+        web_mod = local_enabled
+        code = web_mod.mint_login_code()
+        real = time.time
+        monkeypatch.setattr(web_mod.time, "time", lambda: real() + 86400)
+        assert client.get(web_mod.login_path(code),
+                          follow_redirects=False).status_code == 303
+
+    def test_store_is_bounded(self, local_enabled, client):
+        web_mod = local_enabled
+        codes = [web_mod.mint_login_code() for _ in range(1000)]
+        assert len(web_mod._login_codes) == web_mod._LOGIN_CODE_MAX_OUTSTANDING
+        # The oldest were evicted; the newest still work.
+        assert client.get(web_mod.login_path(codes[0]),
+                          follow_redirects=False).status_code == 403
+        assert client.get(web_mod.login_path(codes[-1]),
+                          follow_redirects=False).status_code == 303
+
+    def test_expired_codes_are_purged_on_mint(self, local_enabled, monkeypatch):
+        web_mod = local_enabled
+        clock = [0.0]
+        monkeypatch.setattr(web_mod, "_login_now", lambda: clock[0])
+        for _ in range(10):
+            web_mod.mint_login_code()
+        clock[0] += 121.0
+        web_mod.mint_login_code()
+        assert len(web_mod._login_codes) == 1
+
+    def test_throttling_one_code_does_not_refuse_another(self, local_enabled,
+                                                         client):
+        """The D-16 regression test. Every loopback caller is 127.0.0.1, so a
+        peer-keyed throttle would refuse the real user's valid code here."""
+        web_mod = local_enabled
+        bad = "B" * 43
+        assert client.get(web_mod.login_path(bad),
+                          follow_redirects=False).status_code == 403
+        for _ in range(5):
+            assert client.get(web_mod.login_path(bad),
+                              follow_redirects=False).status_code == 429
+        assert bad in web_mod._login_failures
+        assert "127.0.0.1" not in web_mod._login_failures
+        good = web_mod.mint_login_code()
+        resp = client.get(web_mod.login_path(good), follow_redirects=False)
+        assert resp.status_code == 303
+        _, value = _local_cookie_from(resp)
+        assert web_mod._local_cookie_ok(_local_scope(value))
+
+    def test_throttled_code_is_refused_before_it_is_compared(
+            self, local_enabled, client):
+        """A live code under lockout is not consumed, so the backoff is checked
+        first — the same order `remote_auth_exchange` uses."""
+        web_mod = local_enabled
+        code = web_mod.mint_login_code()
+        web_mod._record_exchange_failure(code, web_mod._login_failures)
+        assert client.get(web_mod.login_path(code),
+                          follow_redirects=False).status_code == 429
+        assert code in web_mod._login_codes
+
+    def test_failure_table_is_bounded(self, local_enabled):
+        """Per-code keys are attacker-chosen, so the table must not grow with
+        them."""
+        web_mod = local_enabled
+        for i in range(web_mod._EXCHANGE_MAX_TRACKED_PEERS + 100):
+            web_mod._record_exchange_failure(f"{i:0>43}", web_mod._login_failures)
+        assert len(web_mod._login_failures) == web_mod._EXCHANGE_MAX_TRACKED_PEERS
+
+    def test_login_failures_do_not_touch_the_remote_peer_table(
+            self, local_enabled, client):
+        web_mod = local_enabled
+        web_mod._exchange_failures.clear()
+        client.get(web_mod.login_path("C" * 43), follow_redirects=False)
+        assert web_mod._exchange_failures == {}
+
+    @pytest.mark.parametrize("query", [
+        "", "code=", "code=short", "code=" + "D" * 44,
+        "code=" + "%3B" * 15, "code=" + "%C3%A9" * 43])
+    def test_malformed_code_is_400_and_not_recorded(self, local_enabled, client,
+                                                    query):
+        web_mod = local_enabled
+        resp = client.get(f"{web_mod._LOCAL_AUTH_PATH}?{query}",
+                          follow_redirects=False)
+        assert resp.status_code == 400
+        assert web_mod._login_failures == {}
+
+    def test_oversized_query_refused_before_parsing(self, local_enabled, client):
+        web_mod = local_enabled
+        resp = client.get(f"{web_mod._LOCAL_AUTH_PATH}?pad={'x' * 600}",
+                          follow_redirects=False)
+        assert resp.status_code == 400
+
+    def test_too_many_fields_is_a_refusal_not_a_500(self, local_enabled, client):
+        web_mod = local_enabled
+        resp = client.get(f"{web_mod._LOCAL_AUTH_PATH}?" + "a=1&" * 100,
+                          follow_redirects=False)
+        assert resp.status_code == 400
+
+    def test_no_local_secret_mints_nothing_and_exchanges_nothing(
+            self, local_enabled, client):
+        web_mod = local_enabled
+        code = web_mod.mint_login_code()
+        web_mod.set_local_secret("")
+        assert web_mod.mint_login_code() == ""
+        assert client.get(web_mod.login_path(code),
+                          follow_redirects=False).status_code == 503
+
+    def test_refusal_logging_is_rate_bounded(self, local_enabled, client,
+                                             monkeypatch, caplog):
+        """A local process inventing a new code per request opens a new
+        per-code window each time; the log line must not scale with that."""
+        web_mod = local_enabled
+        monkeypatch.setattr(web_mod, "_login_warn_state",
+                            {"last": float("-inf"), "suppressed": 0})
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            for i in range(20):
+                client.get(web_mod.login_path(f"{i:0>43}"), follow_redirects=False)
+        lines = [r for r in caplog.records
+                 if "login-code exchange refused" in r.getMessage()]
+        assert len(lines) == 1
+
+    def test_remote_peer_cannot_reach_the_exchange(self, local_enabled,
+                                                   remote_enabled):
+        """Loopback-only by omission from `_REMOTE_ALLOWED_PATHS`."""
+        web_mod = local_enabled
+        assert web_mod._LOCAL_AUTH_PATH not in web_mod._REMOTE_ALLOWED_PATHS
+        code = web_mod.mint_login_code()
+        status, _, _ = _peer_http(web_mod._LOCAL_AUTH_PATH)
+        assert status == 403
+        assert code in web_mod._login_codes
+
+    def test_minting_is_not_a_route(self, local_enabled):
+        """D-3, SC-6: the mint is an in-process call only."""
+        web_mod = local_enabled
+        endpoints = {getattr(r, "endpoint", None) for r in web_mod.app.routes}
+        assert web_mod.mint_login_code not in endpoints
+        assert web_mod._consume_login_code not in endpoints
+        methods = {m for r in web_mod.app.routes
+                   if getattr(r, "path", None) == web_mod._LOCAL_AUTH_PATH
+                   for m in getattr(r, "methods", ())}
+        assert methods <= {"GET", "HEAD"}
+
+
+class TestLocalSecretRotation:
+    """`POST /api/local-secret/rotate` re-issues its caller's cookie."""
+
+    @pytest.fixture
+    def rotation_ready(self, isolated_config, local_enabled):
+        from power_atlas import config as config_mod
+        local_enabled.set_local_secret(config_mod.ensure_local_secret())
+        return local_enabled
+
+    def test_rotation_reauthenticates_the_caller(self, rotation_ready, client):
+        web_mod = rotation_ready
+        from power_atlas import config as config_mod
+        before_secret = web_mod._LOCAL_SECRET
+        old_cookie = web_mod.make_local_cookie()
+        pending = web_mod.mint_login_code()
+        resp = client.post("/api/local-secret/rotate",
+                           headers={"Cookie": f"pa_local={old_cookie}"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["reissued"] is True
+        assert resp.headers["cache-control"] == "no-store"
+        _, new_cookie = _local_cookie_from(resp)
+        assert web_mod._LOCAL_SECRET != before_secret
+        assert web_mod._LOCAL_SECRET == config_mod.load_local_secret()
+        assert web_mod._local_cookie_ok(_local_scope(new_cookie))
+        assert not web_mod._local_cookie_ok(_local_scope(old_cookie))
+        # Codes minted before the rotation no longer open anything.
+        assert pending not in web_mod._login_codes
+
+    def test_caller_without_a_valid_cookie_gets_nothing(self, rotation_ready,
+                                                        client):
+        """Otherwise the rotate route would be a mint for any local process."""
+        web_mod = rotation_ready
+        before = web_mod._LOCAL_SECRET
+        for headers in ({}, {"Cookie": "pa_local=loopback.1.abc"}):
+            resp = client.post("/api/local-secret/rotate", headers=headers)
+            assert resp.status_code == 403
+            assert not [h for h in resp.headers.get_list("set-cookie")
+                        if h.startswith("pa_local=")]
+        assert web_mod._LOCAL_SECRET == before
+
+    def test_failed_write_keeps_the_old_secret_and_cookie(
+            self, rotation_ready, client, monkeypatch):
+        web_mod = rotation_ready
+        from power_atlas import config as config_mod
+        before = web_mod._LOCAL_SECRET
+        cookie = web_mod.make_local_cookie()
+
+        def refuse(path, value):
+            raise PermissionError(13, "Access is denied")
+
+        monkeypatch.setattr(config_mod, "_write_secret_file", refuse)
+        resp = client.post("/api/local-secret/rotate",
+                           headers={"Cookie": f"pa_local={cookie}"})
+        assert resp.json()["ok"] is False
+        assert web_mod._LOCAL_SECRET == before
+        assert web_mod._local_cookie_ok(_local_scope(cookie))
+
+    def test_remote_rotation_does_not_touch_the_local_secret(
+            self, rotation_ready, client):
+        web_mod = rotation_ready
+        before = web_mod._LOCAL_SECRET
+        client.post("/api/remote-access/rotate")
+        assert web_mod._LOCAL_SECRET == before
