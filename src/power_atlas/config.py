@@ -1,5 +1,6 @@
 """Thread-safe config persistence via TOML."""
 
+import errno
 import ipaddress
 import logging
 import os
@@ -186,11 +187,10 @@ def rotate_remote_secret() -> str:
     HMAC keyed by this value. That is the intended semantic; the caller owns
     saying so.
 
-    Writing is the same fixed-mode create-truncate ``ensure_remote_secret``
-    uses, not a write-temp-then-``os.replace``. A torn write here is not a
-    silent hazard: ``load_remote_secret`` rejects anything shorter than
-    ``REMOTE_SECRET_MIN_LEN``, so a truncated file reads as "no usable secret"
-    and fails closed rather than authenticating a prefix.
+    Writing is the same atomic tmp → ``fsync`` → ``os.replace`` that
+    ``ensure_remote_secret`` uses (``_write_secret_file``), so a failed write
+    leaves the previous secret on disk exactly as it was and the ``""`` this
+    returns is the truth: nothing changed.
     """
     return _write_remote_secret()
 
@@ -200,7 +200,7 @@ def _write_remote_secret() -> str:
 
     Shared by ``ensure_remote_secret`` and ``rotate_remote_secret`` so the two
     differ only in *whether* they write, never in *how* — the mode, the
-    truncation and the failure verdict are one implementation.
+    atomic replace and the failure verdict are one implementation.
     """
     value = secrets.token_urlsafe(32)
     try:
@@ -213,21 +213,51 @@ def _write_remote_secret() -> str:
 
 
 def _write_secret_file(path: Path, value: str) -> None:
-    """Fixed-mode create-truncate of one secret file. Raises ``OSError``.
+    """Atomically replace one secret file. Raises ``OSError``; on failure the
+    previous file is untouched.
 
     Shared by the remote and the local secret so the two files are written by
     one implementation (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
-    Phase 4). Deliberately **not** tmp → ``os.replace``: a torn write leaves a
-    file shorter than ``REMOTE_SECRET_MIN_LEN``, which both loaders read as "no
-    usable secret" — it fails closed. D-19's atomic-write rule is about the
-    derived agent file, whose torn state fails *open*; it does not apply here.
+    Phase 4). ``save_config``'s pattern: a fixed-0o600 tmp beside the target,
+    every byte written, ``fsync``, then ``os.replace``.
+
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+    reversed the earlier in-place create-truncate. Its argument was that a torn
+    write "fails closed" because the loaders reject a short file. That is true
+    and is not enough: truncation happened *before* the write, so a failed
+    rotation destroyed the working secret while reporting that nothing had
+    changed, and the next start signed every browser out (reproduced with
+    ENOSPC: rotate returned ``""`` and the file was ``b""``).
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    tmp = path.with_name(path.name + ".tmp")
+    data = memoryview(value.encode("ascii"))
     try:
-        os.write(fd, value.encode("ascii"))
-    finally:
-        os.close(fd)
+        # A stale tmp from a crash would keep whatever mode it was created
+        # with, because `O_CREAT` never changes an existing file's mode.
+        tmp.unlink(missing_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            # `os.write` may write fewer bytes than asked. Loop until all are
+            # written; a call that makes no progress is a failed write, never
+            # a finished one.
+            while data:
+                written = os.write(fd, data)
+                if written <= 0:
+                    raise OSError(errno.EIO, "short write", str(tmp))
+                data = data[written:]
+            os.fsync(fd)
+        finally:
+            # Closed before the unlink below: Windows refuses to delete an
+            # open file, and that error would mask the real one.
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 # --- Local secret -----------------------------------------------------------
@@ -255,23 +285,46 @@ _local_secret_memory = ""
 _local_secret_persist_error = ""
 
 
+# A real secret file is 43 bytes. Read at most one byte past this, so a huge
+# file costs a bounded read rather than a `MemoryError` at startup, and a file
+# longer than this is unusable content rather than a prefix taken as a secret.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+_LOCAL_SECRET_READ_CAP = 4096
+
+
+def _read_local_secret_file() -> str:
+    """Read `LOCAL_SECRET_PATH`; the usable value, or ``""`` for bad content.
+
+    **Raises** rather than collapsing I/O failures, because the two callers need
+    them apart: ``FileNotFoundError`` when the file is absent, any other
+    ``OSError`` or ``UnicodeDecodeError`` when it exists but cannot be read.
+    Content that was read but is not a usable secret (empty, whitespace, short,
+    over the read cap) is ``""``.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+    """
+    with open(LOCAL_SECRET_PATH, "rb") as f:
+        raw = f.read(_LOCAL_SECRET_READ_CAP + 1)
+    if len(raw) > _LOCAL_SECRET_READ_CAP:
+        return ""
+    value = raw.decode("utf-8").strip()
+    if len(value) < REMOTE_SECRET_MIN_LEN:
+        return ""
+    return value
+
+
 def load_local_secret() -> str:
     """Return the local secret **on disk**, or ``""`` when it is unusable.
 
     Exactly `load_remote_secret`'s contract over `LOCAL_SECRET_PATH`: absent,
     unreadable, empty, whitespace-only and shorter than
-    ``REMOTE_SECRET_MIN_LEN`` all collapse to ``""``. A pure disk read — the
-    D-22 in-memory fallback is `ensure_local_secret`'s business, not this one's.
-    Never raises.
+    ``REMOTE_SECRET_MIN_LEN`` all collapse to ``""`` (and so does a file over
+    ``_LOCAL_SECRET_READ_CAP``). A pure disk read — the D-22 in-memory fallback
+    is `ensure_local_secret`'s business, not this one's. Never raises.
     """
     try:
-        raw = LOCAL_SECRET_PATH.read_text(encoding="utf-8")
+        return _read_local_secret_file()
     except (OSError, UnicodeDecodeError):
         return ""
-    value = raw.strip()
-    if len(value) < REMOTE_SECRET_MIN_LEN:
-        return ""
-    return value
 
 
 def ensure_local_secret() -> str:
@@ -285,8 +338,44 @@ def ensure_local_secret() -> str:
     Unlike `ensure_remote_secret`, a write failure does not return ``""``
     (D-22): the value is kept in memory and the failure recorded for
     `local_secret_status`. An existing usable file is returned untouched.
+
+    A file that **exists but cannot be read** (a sharing violation from an
+    antivirus scan, an ACL, bytes that are not UTF-8) is never overwritten: it
+    may hold the secret every browser's cookie was signed with, and replacing
+    it would revoke them all with nothing logged. This process uses an
+    in-memory secret instead (D-22) and the next start reads the file again.
+    Only an absent file, or one whose content is readable and not a usable
+    secret, is replaced.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
     """
-    return load_local_secret() or _local_secret_memory or _write_local_secret()
+    try:
+        on_disk = _read_local_secret_file()
+    except FileNotFoundError:
+        on_disk = ""
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning("Could not read %s (%s); leaving it untouched and using an "
+                    "in-memory local secret until PowerAtlas exits",
+                    LOCAL_SECRET_PATH, exc)
+        return hold_local_secret_in_memory(
+            f"Could not read {LOCAL_SECRET_PATH}: {exc}")
+    return on_disk or _local_secret_memory or _write_local_secret()
+
+
+def hold_local_secret_in_memory(reason: str) -> str:
+    """D-22's fallback: a process-lifetime secret, with ``reason`` reported.
+
+    Returns the in-memory secret this process already holds, if any, so that
+    repeated fallbacks never invalidate cookies minted under the first one;
+    otherwise generates one. ``reason`` becomes `local_secret_status`'s
+    ``error``. Also the `web.lifespan` fallback when `ensure_local_secret`
+    fails in a way nobody predicted (R-13). Never raises.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+    """
+    global _local_secret_memory, _local_secret_persist_error
+    if not _local_secret_memory:
+        _local_secret_memory = secrets.token_urlsafe(32)
+    _local_secret_persist_error = reason
+    return _local_secret_memory
 
 
 def rotate_local_secret() -> str:
@@ -317,7 +406,9 @@ def local_secret_status() -> dict:
 
     Never carries the secret itself. ``persisted`` is False exactly when D-22's
     in-memory fallback is in effect: cookies work until PowerAtlas exits, and
-    the next start will issue a new secret and sign every browser out.
+    are lost at the next start — which either issues a new secret (the file
+    could not be written) or reads the old one again (the file could not be
+    read). ``error`` says which.
     """
     return {
         "persisted": not _local_secret_persist_error,
@@ -327,8 +418,9 @@ def local_secret_status() -> dict:
 
 
 def _write_local_secret() -> str:
-    """Generate and try to persist a fresh local secret; always return it."""
-    global _local_secret_memory, _local_secret_persist_error
+    """Generate and try to persist a fresh local secret; return the one now in
+    effect — the persisted value, or D-22's in-memory one when the write fails.
+    """
     value = secrets.token_urlsafe(32)
     try:
         _write_secret_file(LOCAL_SECRET_PATH, value)
@@ -336,9 +428,8 @@ def _write_local_secret() -> str:
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 (D-22)
         log.error("Could not write %s (%s); using an in-memory local secret "
                   "until PowerAtlas exits", LOCAL_SECRET_PATH, exc)
-        _local_secret_memory = value
-        _local_secret_persist_error = f"Could not write {LOCAL_SECRET_PATH}: {exc}"
-        return value
+        return hold_local_secret_in_memory(
+            f"Could not write {LOCAL_SECRET_PATH}: {exc}")
     _clear_local_secret_fallback()
     return value
 

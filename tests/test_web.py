@@ -23635,7 +23635,7 @@ class TestLocalSecretFile:
         assert first not in json.dumps(body), "the settings payload must never carry the secret"
 
     def test_in_memory_secret_still_signs_in_a_browser(
-            self, isolated_config, client, monkeypatch):
+            self, isolated_config, local_enabled, client, monkeypatch):
         """The whole point of D-22: through the real startup path, a secret
         that could not be written still lets a door's code become a cookie
         that verifies."""
@@ -23662,7 +23662,9 @@ class TestLocalSecretFile:
             "persisted": True, "error": "",
             "path": str(isolated_config / "local-secret")}
 
-    def test_startup_loads_the_file_secret(self, isolated_config):
+    def test_startup_loads_the_file_secret(self, isolated_config, local_enabled):
+        # `local_enabled` resets the loaded key and the code store on teardown.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
         from power_atlas import config as config_mod
         from power_atlas import web as web_mod
         TestGenerationRunsAtStartup()._run_lifespan(web_mod)
@@ -23679,6 +23681,164 @@ class TestLocalSecretFile:
         assert config_mod.rotate_local_secret() == ""
         assert config_mod.load_local_secret() == before
         assert config_mod.local_secret_status()["persisted"] is True
+
+    # --- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review:
+    # the writer is atomic. These fail the low-level `os.write` rather than
+    # replacing `_write_secret_file`, because the defect was inside the writer:
+    # it truncated the working file before a write that then failed.
+
+    @staticmethod
+    def _failing_os_write(mode):
+        real = os.write
+
+        def fake(fd, data):
+            if mode == "enospc":
+                # A partial write, then the disk fills: the reviewer's repro.
+                real(fd, bytes(data[:10]))
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return 0  # "no_progress": a short write that never completes
+        return fake
+
+    @pytest.mark.parametrize("mode", ["enospc", "no_progress"])
+    def test_failed_rotation_write_leaves_the_old_file_intact(
+            self, isolated_config, mode):
+        from power_atlas import config as config_mod
+        path = isolated_config / "local-secret"
+        before = config_mod.ensure_local_secret()
+        with patch.object(config_mod.os, "write", self._failing_os_write(mode)):
+            rotated = config_mod.rotate_local_secret()
+        assert rotated == ""
+        assert path.read_text(encoding="utf-8") == before
+        assert config_mod.load_local_secret() == before
+        assert config_mod.local_secret_status() == {
+            "persisted": True, "error": "", "path": str(path)}
+        assert not (isolated_config / "local-secret.tmp").exists()
+        # And the next start still finds the old secret.
+        assert config_mod.ensure_local_secret() == before
+
+    def test_short_os_writes_are_completed(self, isolated_config):
+        """`os.write` may write fewer bytes than asked; the writer loops."""
+        from power_atlas import config as config_mod
+        real = os.write
+
+        def one_byte(fd, data):
+            return real(fd, bytes(data[:1]))
+
+        with patch.object(config_mod.os, "write", one_byte):
+            rotated = config_mod.rotate_local_secret()
+        assert rotated
+        assert (isolated_config / "local-secret").read_text(encoding="utf-8") == rotated
+
+    def test_failed_first_write_leaves_no_file_and_reports_it(
+            self, isolated_config):
+        from power_atlas import config as config_mod
+        with patch.object(config_mod.os, "write", self._failing_os_write("enospc")):
+            value = config_mod.ensure_local_secret()
+        assert value == config_mod._local_secret_memory != ""
+        assert not (isolated_config / "local-secret").exists()
+        assert not (isolated_config / "local-secret.tmp").exists()
+        status = config_mod.local_secret_status()
+        assert status["persisted"] is False
+        assert "Could not write" in status["error"]
+
+    def test_remote_secret_shares_the_atomic_writer(self, isolated_config):
+        from power_atlas import config as config_mod
+        path = isolated_config / "remote-secret"
+        before = config_mod.ensure_remote_secret()
+        with patch.object(config_mod.os, "write", self._failing_os_write("enospc")):
+            assert config_mod.rotate_remote_secret() == ""
+        assert path.read_text(encoding="utf-8") == before
+        assert config_mod.load_remote_secret() == before
+        assert not (isolated_config / "remote-secret.tmp").exists()
+
+    # --- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review:
+    # a file that exists but cannot be read is never overwritten.
+
+    def test_undecodable_file_is_kept_and_an_in_memory_secret_used(
+            self, isolated_config, caplog):
+        from power_atlas import config as config_mod
+        path = isolated_config / "local-secret"
+        path.write_bytes(b"\xff" * 50)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.config"):
+            value = config_mod.ensure_local_secret()
+        assert path.read_bytes() == b"\xff" * 50
+        assert value == config_mod._local_secret_memory != ""
+        assert config_mod.ensure_local_secret() == value
+        status = config_mod.local_secret_status()
+        assert status["persisted"] is False
+        assert "Could not read" in status["error"]
+        assert [r for r in caplog.records
+                if r.levelno == logging.WARNING and "Could not read" in r.getMessage()]
+
+    def test_unreadable_file_is_kept_and_an_in_memory_secret_used(
+            self, isolated_config, monkeypatch, client):
+        """A transient sharing violation (an antivirus scan) at startup must
+        not revoke every browser's cookie by replacing the file."""
+        import builtins
+        from power_atlas import config as config_mod
+        path = isolated_config / "local-secret"
+        path.write_text("K" * 43, encoding="utf-8")
+        real_open = builtins.open
+
+        def locked(file, *args, **kwargs):
+            if Path(file) == path:
+                raise PermissionError(13, "The process cannot access the file "
+                                          "because it is being used by another "
+                                          "process", str(file))
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(config_mod, "open", locked, raising=False)
+        value = config_mod.ensure_local_secret()
+        monkeypatch.delattr(config_mod, "open")
+        assert value != "K" * 43
+        assert value == config_mod._local_secret_memory
+        assert path.read_text(encoding="utf-8") == "K" * 43
+        body = client.get("/api/settings").json()
+        assert body["local_secret"]["persisted"] is False
+        assert "Could not read" in body["local_secret"]["error"]
+        # Once the file is readable again, the next start uses it.
+        assert config_mod.load_local_secret() == "K" * 43
+
+    def test_missing_file_is_created(self, isolated_config):
+        from power_atlas import config as config_mod
+        value = config_mod.ensure_local_secret()
+        assert (isolated_config / "local-secret").read_text(encoding="utf-8") == value
+        assert config_mod.local_secret_status()["persisted"] is True
+
+    def test_oversized_file_is_bounded_and_replaced(self, isolated_config):
+        """The read is capped, so a huge file cannot exhaust memory at
+        startup, and a file over the cap is bad content, not a secret."""
+        from power_atlas import config as config_mod
+        path = isolated_config / "local-secret"
+        path.write_text("A" * (config_mod._LOCAL_SECRET_READ_CAP + 1),
+                        encoding="utf-8")
+        assert config_mod.load_local_secret() == ""
+        fresh = config_mod.ensure_local_secret()
+        assert path.read_text(encoding="utf-8") == fresh
+        assert len(fresh) < config_mod._LOCAL_SECRET_READ_CAP
+
+    def test_startup_survives_an_unexpected_local_secret_error(
+            self, isolated_config, local_enabled, client, monkeypatch):
+        """R-13: an unpredicted failure degrades to D-22, never aborts
+        startup, and a door's code still becomes a working cookie."""
+        from power_atlas import config as config_mod
+        web_mod = local_enabled
+
+        def broken():
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(web_mod, "ensure_local_secret", broken)
+        TestGenerationRunsAtStartup()._run_lifespan(web_mod)
+        assert web_mod._LOCAL_SECRET == config_mod._local_secret_memory
+        assert web_mod._LOCAL_SECRET not in ("", _LOCAL_TEST_SECRET)
+        resp = client.get(web_mod.login_path(web_mod.mint_login_code()),
+                          follow_redirects=False)
+        assert resp.status_code == 303
+        _, value = _local_cookie_from(resp)
+        assert web_mod._local_cookie_ok(_local_scope(value))
+        body = client.get("/api/settings").json()
+        assert body["local_secret"]["persisted"] is False
+        assert "RuntimeError" in body["local_secret"]["error"]
 
 
 class TestLocalCookie:
@@ -23746,6 +23906,24 @@ class TestLocalCookie:
         stamp = str(int(time.time()))
         sig = web_mod._device_cookie_sig(_TEST_SECRET, "loopback", stamp)
         assert not web_mod._local_cookie_ok(_local_scope(f"loopback.{stamp}.{sig}"))
+
+    def test_no_local_secret_never_falls_back_to_the_remote_key(
+            self, local_enabled):
+        """D-17 with the local key absent: a loopback cookie signed under the
+        remote key is still refused, rather than verified under whatever key
+        happens to be loaded.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+        """
+        web_mod = local_enabled
+        web_mod.set_local_secret("")
+        web_mod.set_remote_secret(_TEST_SECRET)
+        try:
+            stamp = str(int(time.time()))
+            sig = web_mod._device_cookie_sig(_TEST_SECRET, "loopback", stamp)
+            assert not web_mod._local_cookie_ok(
+                _local_scope(f"loopback.{stamp}.{sig}"))
+        finally:
+            web_mod.set_remote_secret("")
 
     def test_device_cookie_name_is_not_accepted(self, local_enabled):
         web_mod = local_enabled
@@ -23939,6 +24117,61 @@ class TestLoginCodeExchange:
                  if "login-code exchange refused" in r.getMessage()]
         assert len(lines) == 1
 
+    def test_code_lookup_is_compare_digest_over_every_candidate(
+            self, local_enabled):
+        """`_consume_login_code` compares against each outstanding code with
+        `compare_digest` over bytes, never a dict lookup whose timing depends
+        on the guess.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+        """
+        web_mod = local_enabled
+        codes = [web_mod.mint_login_code() for _ in range(5)]
+        real = web_mod.secrets.compare_digest
+        seen = []
+
+        def spy(a, b):
+            seen.append((type(a), type(b)))
+            return real(a, b)
+
+        with patch.object(web_mod.secrets, "compare_digest", spy):
+            assert web_mod._consume_login_code(codes[2])
+        assert seen == [(bytes, bytes)] * len(codes)
+        assert codes[2] not in web_mod._login_codes
+
+    def test_no_secret_refusal_logging_is_rate_bounded(
+            self, local_enabled, client, monkeypatch, caplog):
+        """The no-secret branch shares the refusal window, keeping ERROR.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+        """
+        web_mod = local_enabled
+        monkeypatch.setattr(web_mod, "_login_warn_state",
+                            {"last": float("-inf"), "suppressed": 0})
+        web_mod.set_local_secret("")
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            for i in range(20):
+                assert client.get(web_mod.login_path(f"{i:0>43}"),
+                                  follow_redirects=False).status_code == 503
+        lines = [r for r in caplog.records
+                 if "no usable local secret" in r.getMessage()]
+        assert len(lines) == 1
+        assert lines[0].levelno == logging.ERROR
+        assert web_mod._login_warn_state["suppressed"] == 19
+
+    def test_suppressed_refusal_count_is_flushed_at_shutdown(
+            self, local_enabled, monkeypatch, caplog):
+        """The final burst's count reaches the log even with no later refusal.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+        """
+        web_mod = local_enabled
+        state = {"last": time.monotonic(), "suppressed": 7}
+        monkeypatch.setattr(web_mod, "_login_warn_state", state)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            TestGenerationRunsAtStartup()._run_lifespan(web_mod)
+        lines = [r.getMessage() for r in caplog.records
+                 if "7 further refusals suppressed" in r.getMessage()]
+        assert len(lines) == 1
+        assert state["suppressed"] == 0
+
     def test_remote_peer_cannot_reach_the_exchange(self, local_enabled,
                                                    remote_enabled):
         """Loopback-only by omission from `_REMOTE_ALLOWED_PATHS`."""
@@ -24025,3 +24258,33 @@ class TestLocalSecretRotation:
         before = web_mod._LOCAL_SECRET
         client.post("/api/remote-access/rotate")
         assert web_mod._LOCAL_SECRET == before
+
+    def test_write_and_apply_do_not_yield_the_loop(
+            self, rotation_ready, client, monkeypatch):
+        """Two concurrent rotations must not interleave as "write A, write B,
+        apply B, apply A", which leaves the process on A and the file on B.
+        Pinned structurally: the write runs on the event loop's own thread, so
+        there is no `await` between writing the file and applying the secret.
+        A `to_thread` hop fails `get_running_loop` here.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+        """
+        web_mod = rotation_ready
+        from power_atlas import config as config_mod
+        real = config_mod.rotate_local_secret
+        on_loop = []
+
+        def rotate_on_loop():
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(True)
+            except RuntimeError:
+                on_loop.append(False)
+            return real()
+
+        monkeypatch.setattr(web_mod, "rotate_local_secret", rotate_on_loop)
+        cookie = web_mod.make_local_cookie()
+        resp = client.post("/api/local-secret/rotate",
+                           headers={"Cookie": f"pa_local={cookie}"})
+        assert resp.json()["ok"] is True
+        assert on_loop == [True]
+        assert web_mod._LOCAL_SECRET == config_mod.load_local_secret()

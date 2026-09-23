@@ -28,11 +28,17 @@ def isolated_config(tmp_path, monkeypatch):
     secret functions called only from `tests/test_web.py`, which redirects all
     three paths. It stops being latent the first time a secret test is written
     here, and the failure is writing a live credential over the user's own.
+
+    `LOCAL_SECRET_PATH` is import-time in exactly the same way and is
+    redirected for the same reason.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
     """
     monkeypatch.setattr("power_atlas.config.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("power_atlas.config.CONFIG_PATH", tmp_path / "config.toml")
     monkeypatch.setattr("power_atlas.config.REMOTE_SECRET_PATH",
                         tmp_path / "remote-secret")
+    monkeypatch.setattr("power_atlas.config.LOCAL_SECRET_PATH",
+                        tmp_path / "local-secret")
 
 
 def _write_toml(tmp_path, data):

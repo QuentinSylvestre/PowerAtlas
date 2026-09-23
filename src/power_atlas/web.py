@@ -39,8 +39,8 @@ from .config import (load_config, save_config, get_active_launch_profile,
                      LaunchProfile, ensure_remote_secret, load_remote_secret,
                      rotate_remote_secret, validate_remote_bind_address,
                      REMOTE_SECRET_MIN_LEN, REMOTE_SECRET_PATH,
-                     ensure_local_secret, local_secret_status,
-                     rotate_local_secret)
+                     ensure_local_secret, hold_local_secret_in_memory,
+                     local_secret_status, rotate_local_secret)
 from . import agent_profile, autostart, data, icons, launcher, notifications, presence
 from .status_classifier import get_semantic_status, SemanticStatus
 
@@ -515,7 +515,19 @@ async def lifespan(app_instance):
     # a cookie that verifies. `ensure_local_secret` never returns "" (D-22): an
     # unwritable file degrades to an in-memory secret, reported in settings.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
-    set_local_secret(await asyncio.to_thread(ensure_local_secret))
+    #
+    # Guarded like `_sync_derived_agent` above (R-13): an unpredicted failure
+    # here must not become "the application will not start". It degrades to
+    # the same D-22 in-memory secret a failed write gets, with the reason
+    # recorded for `/api/settings`.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+    try:
+        set_local_secret(await asyncio.to_thread(ensure_local_secret))
+    except Exception as exc:
+        log.exception("local secret setup failed; using an in-memory local "
+                      "secret until PowerAtlas exits")
+        set_local_secret(hold_local_secret_in_memory(
+            f"Local secret setup failed: {type(exc).__name__}: {exc}"))
     task = asyncio.create_task(_background_refresh())
     # Guarded exactly as the teardown below is. An `acp` import failure is
     # designed to degrade to "/acp disabled" (see the import at the top of this
@@ -585,6 +597,13 @@ async def lifespan(app_instance):
                     acp.shutdown()
                 except Exception:
                     log.exception("ACP teardown failed")
+            # The count from the last burst of refused login-code exchanges
+            # is otherwise only written by the next refusal, which never comes.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+            try:
+                _flush_login_refusal_warnings()
+            except Exception:
+                log.exception("login-refusal log flush failed")
 
 
 async def _background_refresh():
@@ -3606,17 +3625,38 @@ _LOCAL_AUTH_REFUSED = """<!doctype html>
 """
 
 
-def _warn_login_refused(reason: str) -> None:
-    """One WARNING per `_LOGIN_WARN_INTERVAL_SECONDS`, counting the rest."""
+def _warn_login_refused(reason: str, level: int = logging.WARNING) -> None:
+    """One line per `_LOGIN_WARN_INTERVAL_SECONDS`, counting the rest.
+
+    ``level`` lets the no-secret refusal keep its ERROR severity while sharing
+    this one window, so no refusal path logs once per request.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+    """
     now = time.monotonic()
     state = _login_warn_state
     if now - state["last"] < _LOGIN_WARN_INTERVAL_SECONDS:
         state["suppressed"] += 1
         return
-    log.warning("login-code exchange refused: %s (%d further refusals "
-                "suppressed since the last line)", reason, state["suppressed"])
+    log.log(level, "login-code exchange refused: %s (%d further refusals "
+            "suppressed since the last line)", reason, state["suppressed"])
     state["last"] = now
     state["suppressed"] = 0
+
+
+def _flush_login_refusal_warnings() -> None:
+    """Write the suppressed-refusal count now, if there is one.
+
+    Called from `lifespan` teardown, after the precedent of
+    `__main__._RepeatedRecordFilter.flush`: a suppressed count is otherwise
+    only reported by the next refusal, so the final burst's count would never
+    reach the log.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+    """
+    state = _login_warn_state
+    if state["suppressed"]:
+        log.warning("login-code exchange: %d further refusals suppressed "
+                    "since the last line", state["suppressed"])
+        state["suppressed"] = 0
 
 
 def _local_auth_refusal(message: str, status_code: int) -> HTMLResponse:
@@ -3659,7 +3699,10 @@ async def local_auth_exchange(request: Request):
             f"Too many attempts with this link. Try again in "
             f"{int(remaining) + 1}s.", 429)
     if not _LOCAL_SECRET:
-        log.error("login-code exchange attempted with no usable local secret")
+        # Rate-limited like every other refusal, so a local process cannot
+        # write one ERROR line per request.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+        _warn_login_refused("no usable local secret", logging.ERROR)
         return _local_auth_refusal("PowerAtlas has no usable local secret.", 503)
     if not _consume_login_code(supplied):
         _record_exchange_failure(supplied, _login_failures)
@@ -4449,6 +4492,14 @@ async def api_local_secret_rotate(request: Request, response: Response):
 
     Same write-then-apply ordering as `api_remote_access_rotate`, for the same
     reason; a failed write changes nothing.
+
+    And, like it, the write runs **synchronously on the loop**, with no
+    `await` between writing the file and applying the secret. Through
+    `asyncio.to_thread`, two concurrent rotations could interleave as "write A,
+    write B, apply B, apply A", leaving the process honouring A while the file
+    holds B — every cookie then dies at the next restart. One small file write
+    and `fsync`, on a user-initiated action, is the price.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
     """
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
@@ -4457,7 +4508,7 @@ async def api_local_secret_rotate(request: Request, response: Response):
             {"ok": False, "error": "Rotating the local secret requires a "
                                    "signed-in browser"},
             status_code=403, headers={"Cache-Control": "no-store"})
-    secret = await asyncio.to_thread(rotate_local_secret)
+    secret = rotate_local_secret()
     if not secret:
         return {"ok": False,
                 "error": f"Could not write {local_secret_status()['path']}; "
@@ -4466,6 +4517,13 @@ async def api_local_secret_rotate(request: Request, response: Response):
     # Codes minted under the old secret would otherwise still exchange for a
     # cookie; clearing them makes "rotate" mean every old way in is closed.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+    #
+    # Known race, accepted: a code a door minted moments before the rotation
+    # is cleared too, so a browser still opening from that door lands on the
+    # "expired or already used" page and has to be reopened from the tray.
+    # Accepted in favour of the security property — after a rotation no way in
+    # issued before it remains.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
     with _login_codes_lock:
         _login_codes.clear()
     reissued = _set_local_cookie(response)
