@@ -513,16 +513,19 @@
 // needs htmx.process(). Add that call if any hx-* markup ever appears here:
 // static/htmx.min.js binds handlers at DOMContentLoaded and nowhere else.
 (function () {
-  var ACP_TOKEN = {{ acp_token | tojson }};
   var ACP_SID = {{ sid | tojson }};
   // Non-empty when web.py's guarded import of acp.py failed. The whole point of
   // guarding that import is that the rest of the dashboard keeps working, which
   // only pays off if this page says why it is dead instead of looking merely
   // disconnected.
   var ACP_ERROR = {{ acp_error | tojson }};
-  // Whether this page is being viewed from the machine running it. Not used
-  // in JavaScript — the JS gate for the ⋯ menu is ACP_CAN_DELETE below,
-  // which is derived from both the peer address and the User-Agent.
+  // Whether this page is being viewed from the machine running it. Not a
+  // gate — the JS gate for the ⋯ menu is ACP_CAN_DELETE below, which is
+  // derived from both the peer address and the User-Agent. Read only to word
+  // the signed-out message: a loopback browser signs back in from the tray,
+  // a remote one at /remote-auth.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+  var ACP_LOCAL = {{ local | tojson }};
 
   // True when the viewer may use the \u22ef rail-row menu (delete). Loopback
   // viewers always get true. Remote viewers get true for desktop UAs, false for
@@ -1040,8 +1043,11 @@
     // Derived from location.host, never a hardcoded port: config.py defaults
     // `port` to 0 (OS-assigned), so any literal here would be wrong on most
     // launches while looking right on the machine it was written on.
+    // No query string: the socket is authenticated by the loopback/device
+    // cookie the browser sends with the upgrade, not by a page-embedded token.
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
     var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return scheme + '//' + location.host + WS_PATH + '?t=' + encodeURIComponent(ACP_TOKEN);
+    return scheme + '//' + location.host + WS_PATH;
   }
 
   // Returns whether the frame actually left. Callers holding something the
@@ -5308,39 +5314,63 @@
     logLine('in', '← ' + type + ' ' + JSON.stringify(payload));
   }
 
-  function reportStaleToken() {
-    // The server answered an ordinary GET but refused the socket. The /acp
-    // token is regenerated on every launch and baked into the page at render
-    // time, so the one this tab holds belongs to a process that has exited.
-    // Reconnect would replay that dead token forever; only a reload can pick up
-    // the live one, and it keeps ?sid= so the session is re-subscribed rather
-    // than abandoned. Rotation is a security property and stays — the page
-    // recovers from it instead of the server weakening it.
-    setState('closed', 'stale token');
-    logLine('error', 'handshake rejected while the server is up: this tab was served ' +
-                     'by an earlier PowerAtlas process, and the /acp token is ' +
-                     'regenerated every launch. Reload to pick up the current one.');
+  function reportSignedOut() {
+    // The server is up and refused this browser's plain GET with a 403: the
+    // credential gate (LoopbackCredentialGate for pa_local, RemoteAccessGuard
+    // for pa_device) has no valid cookie from this tab — never signed in, or
+    // the local secret was rotated. Neither Reconnect nor a reload can help:
+    // both send the same missing cookie. Only a new login code can, which the
+    // tray mints (or /remote-auth, on a paired remote device).
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+    var how = ACP_LOCAL
+      ? 'open PowerAtlas from its tray icon to sign this browser back in.'
+      : 'sign this device in again at /remote-auth.';
+    setState('closed', 'signed out');
+    // In the transcript as well as the log: the log strip is 120 px tall and
+    // collapsed by default, and this is the one thing the user must act on.
+    addMessage('note', 'Signed out — ' + how);
+    logLine('error', 'handshake refused and the page itself answers 403: this browser ' +
+                     'is signed out. ' + how);
     reconnectBtn.hidden = true;
-    reloadBtn.hidden = false;
+    reloadBtn.hidden = true;
   }
 
-  function diagnoseRejectedHandshake() {
-    // No onopen, so the handshake itself was refused. web.py closes before
-    // accept(), which uvicorn turns into an HTTP 403 with the code discarded,
-    // and the browser reports that as 1006 with an empty reason — byte for byte
-    // what it reports when there is no server at all. The page cannot tell those
-    // apart from the close event, so ask the server directly: if a plain GET of
-    // this same page succeeds, the server is up and it is the token that is
-    // stale.
+  function explainRefusedHandshake() {
+    // No onopen, so the handshake itself was refused. A refused upgrade
+    // reaches the browser as 1006 with an empty reason — byte for byte what it
+    // reports when there is no server at all. The page cannot tell those
+    // apart from the close event, so ask the server directly with a plain GET
+    // of this same page, which passes through the same credential gate:
+    //   - a network failure means the server is not answering;
+    //   - a 403 means the server is up and this browser is signed out;
+    //   - anything else means the server is up and admits this browser, so the
+    //     refusal was transient (e.g. a restart in between) — Reconnect.
+    // Replaces the stale-token diagnosis, whose reload advice no longer
+    // applies: there is no per-launch token to go stale, and a reload would
+    // not help a signed-out tab.
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
     setState('closed', 'handshake rejected');
     reconnectBtn.hidden = true;
+    reloadBtn.hidden = true;
     fetch(location.pathname + location.search, {
       cache: 'no-store',
       credentials: 'same-origin'
     }).then(function (res) {
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      reportStaleToken();
-    }).catch(function () {
+      if (res.status === 403) {
+        reportSignedOut();
+        return;
+      }
+      if (res.ok) {
+        setState('closed', 'disconnected');
+        logLine('info', 'the handshake was refused but the server is up and this ' +
+                        'browser is signed in. Reconnect to try again.');
+      } else {
+        setState('closed', 'server error');
+        logLine('error', 'the handshake was refused and the server answered HTTP ' +
+                         res.status + '. Reconnect to try again.');
+      }
+      reconnectBtn.hidden = false;
+    }, function () {
       setState('closed', 'server unreachable');
       logLine('info', 'the server is not answering — it may still be starting. ' +
                       'Reconnect once it is back up.');
@@ -5433,7 +5463,7 @@
         _reconnectDelay = Math.min(_reconnectDelay * 2, 30000);
         setState('closed', 'reconnecting\u2026');
       } else {
-        diagnoseRejectedHandshake();
+        explainRefusedHandshake();
       }
     };
     ws.onerror = function () {

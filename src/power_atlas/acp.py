@@ -5316,9 +5316,12 @@ def shutdown() -> None:
 async def serve_socket(ws: WebSocket) -> None:
     """Handle one WebSocket connection on the ``/ws/acp`` route.
 
-    Web.py's route handler checks ``_acp_token_ok`` and ``_ws_origin_ok`` and
+    Web.py authenticates the upgrade in middleware (the ``pa_local`` /
+    ``pa_device`` cookie), then its route handler checks ``_ws_origin_ok`` and
     accepts before handing the socket here without ever reading a frame's
     ``type`` -- this function does not repeat those checks.
+    (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6: the
+    per-launch token check is retired.)
     """
     conn = _Connection(ws)
     if len(_registry.connections) >= MAX_CONNECTIONS:

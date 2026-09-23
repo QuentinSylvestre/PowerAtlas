@@ -856,8 +856,9 @@ def _acp_navigation_ok(request: Request) -> bool:
       (browsers only attach it to navigations that are not GET/HEAD) and a
       same-origin ``Referer``;
     * a bookmark or a typed address — **neither** header;
-    * the page's own ``fetch`` of itself in ``diagnoseRejectedHandshake`` —
-      same-origin ``Referer``, no ``Origin``.
+    * the page's own ``fetch`` of itself in ``explainRefusedHandshake``
+      (renamed by 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+      Phase 6) — same-origin ``Referer``, no ``Origin``.
 
     So "missing Origin" and even "missing both" have to pass, and that is what
     ``Sec-Fetch-Site`` is consulted for. It is set by the browser and cannot be
@@ -1063,8 +1064,8 @@ def _cookie_ok(scope) -> bool:
     if now - issued > REMOTE_COOKIE_MAX_AGE_SECONDS:
         return False
     # UTF-8 bytes, not str: `compare_digest` raises `TypeError` for a `str`
-    # holding non-ASCII, and a cookie is entirely attacker-chosen — the same
-    # lesson `_acp_token_ok` already encodes.
+    # holding non-ASCII, and a cookie is entirely attacker-chosen, so a `str`
+    # comparison would turn a refusal into a 500 any caller can drive.
     return secrets.compare_digest(
         sig.encode("utf-8", "replace"),
         _device_cookie_sig(secret, device_id, issued_at).encode("utf-8"))
@@ -1716,39 +1717,12 @@ def login_url(server_url: str) -> str:
     return f"{server_url.rstrip('/')}{login_path(code)}"
 
 
-# Per-process, never persisted, regenerated every launch. The origin check
-# below stops a web page; it does nothing against a local non-browser process,
-# which can send any header it likes — and past the handoff `ws_acp` is an
-# opaque router onto the full ACP protocol, `session/request_permission`
-# prompts included, so a holder of this token can answer its own approval
-# prompts and reach arbitrary command execution just the same.
-#
-# Residual risk, stated rather than implied: this token is delivered inside a
-# page served over unauthenticated HTTP, so any local process that can fetch
-# GET /acp can read it. That raises the bar from "connect blindly" to "scrape
-# one page first"; it is not a boundary. Closing it properly means
-# authenticating the page route too, which this prototype does not do.
-#
-# dashboard/ACP-merge Phase 3: `index()` now embeds this token too, since the
-# dashboard's own transcript panel speaks the live protocol directly for
-# `held`/`available` kiro-cli-v3 sessions. This does not narrow the residual
-# risk above — `/` is at least as reachable as `/acp` already — it only
-# widens which already-reachable page it can be scraped from.
-_ACP_TOKEN = secrets.token_urlsafe(32)
-
-
-def _acp_token_ok(supplied: str) -> bool:
-    """Constant-time token comparison that cannot fault on hostile input.
-
-    ``secrets.compare_digest`` raises ``TypeError`` for a ``str`` holding
-    non-ASCII, and query params arrive URL-decoded — so ``?t=%C3%A9`` would turn
-    a 403 on the authentication path into a 500 that any unauthenticated caller
-    can drive. Comparing UTF-8 bytes keeps the comparison constant-time and
-    fails closed for every wrong token instead.
-    """
-    return secrets.compare_digest(
-        supplied.encode("utf-8", "replace"), _ACP_TOKEN.encode("utf-8")
-    )
+# The per-launch page-embedded `/ws/acp` token that used to live here is
+# retired: it was readable by any local process that could fetch `/` or
+# `/acp`, so it added no barrier a cookie-holder does not already pass (D-4).
+# `/ws/acp` is authenticated by `LoopbackCredentialGate` (`pa_local`) for a
+# loopback peer and `RemoteAccessGuard` (`pa_device`) for a remote one.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
 
 
 def _ws_origin_ok(ws: WebSocket) -> bool:
@@ -1851,15 +1825,13 @@ async def index(request: Request):
         "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
         "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
-        # dashboard/ACP-merge Phase 3: the transcript panel's own composer
-        # opens `/ws/acp` directly for held/available kiro-cli-v3 sessions,
-        # same as acp.html — see _ACP_TOKEN's comment for what this widens.
-        # `None` (never the empty string acp is None already uses elsewhere)
-        # when the module failed to import, so the dashboard's own JS can
-        # tell "no token issued" apart from "issued, but empty" and skip
-        # ever trying to open the socket rather than connecting with a
-        # token that will just be refused.
-        "acp_token": _ACP_TOKEN if acp is not None else None,
+        # Whether the guarded `acp` import succeeded. The dashboard's
+        # ACP-only affordances (its transcript panel opens `/ws/acp` directly
+        # for held/available kiro-cli-v3 sessions) key off this. It used to be
+        # read from whether a per-launch token was issued; the token is gone
+        # and the `pa_local` cookie authenticates the socket instead.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 (D-15)
+        "acp_available": acp is not None,
     })
 
 
@@ -1928,11 +1900,13 @@ def _acp_csp(nonce: str, host: str) -> str:
 async def acp_page(request: Request, sid: str = ""):
     """The Agent orchestrator page. ``sid`` names the session to re-subscribe to.
 
-    This page is the ACP token's only delivery vehicle, so it repeats the
-    ``_ALLOWED_HOSTS`` check that ``same_origin_guard`` now runs for every
-    method. The duplication is deliberate: the middleware was POST-only until
-    recently, and narrowing it again would silently make this route hand the
-    token to whatever Host a rebinding attack chooses. It calls the same
+    This page repeats the ``_ALLOWED_HOSTS`` check that ``same_origin_guard``
+    now runs for every method. The duplication is deliberate: the middleware
+    was POST-only until recently, and narrowing it again would silently make
+    this route serve its session-bearing page to whatever Host a rebinding
+    attack chooses. (It was once also the ACP token's delivery vehicle; that
+    token is retired — 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+    Phase 6 — and the check stays for the page itself.) It calls the same
     ``_request_host_allowed`` helper, so the rule has one home and the two
     copies cannot drift into disagreeing about what a loopback Host is.
     """
@@ -1942,7 +1916,6 @@ async def acp_page(request: Request, sid: str = ""):
     # spent by the time it could be replayed into another.
     nonce = secrets.token_urlsafe(16)
     response = templates.TemplateResponse(request, "acp.html", {
-        "acp_token": _ACP_TOKEN,
         "sid": sid,
         "csp_nonce": nonce,
         # Whether the dashboard is reachable *for this viewer*. `/` is not on
@@ -1975,30 +1948,40 @@ async def acp_page(request: Request, sid: str = ""):
     # nothing hostile survives into the header value.
     response.headers["Content-Security-Policy"] = _acp_csp(
         nonce, request.headers["host"].strip())
-    # This page is the ACP token's only delivery vehicle, so the response body
-    # is a live credential. The token rotates per launch and the page survives a
-    # stale one, so a retained copy is not a live hole — but nothing should be
-    # holding one on disk or in an intermediary either way. Scoped to this
-    # route: no other response carries a secret, and `StaticFiles` deliberately
-    # sets no caching headers at all.
+    # Kept after the ACP token's retirement
+    # (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6): the body
+    # no longer carries a credential, but it is served only to a signed-in
+    # browser, and a copy on disk or in an intermediary would outlive that
+    # sign-in. Removing a header is a separate decision from retiring the
+    # token, so it is not made here. `StaticFiles` deliberately sets no
+    # caching headers at all.
     response.headers["Cache-Control"] = "no-store"
     return response
 
 
 @app.websocket(_ACP_WS_PATH)
 async def ws_acp(ws: WebSocket) -> None:
-    """Transport for the ACP page. Token, then origin, then hand off.
+    """Transport for the ACP page. Origin, then hand off.
 
-    Both checks run before ``accept()``. uvicorn converts a pre-accept close
-    into an HTTP 403 handshake rejection and discards the code, so 1008 is the
-    intent recorded here rather than what a client observes.
+    Authentication happens before this route runs: ``LoopbackCredentialGate``
+    refuses a loopback upgrade without a valid ``pa_local`` and
+    ``RemoteAccessGuard`` a remote one without a valid ``pa_device``, so the
+    socket is accepted on the cookie alone. The per-launch ``?t=`` token that
+    used to be checked here is retired
+    (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6).
+
+    The origin check runs before ``accept()``. uvicorn converts a pre-accept
+    close into an HTTP 403 handshake rejection and discards the code, so 1008
+    is the intent recorded here rather than what a client observes.
 
     Past the handoff this route is an opaque router: ``acp`` owns the frames
     and this function never inspects a ``type``, which is what lets later
     phases add message types without touching ``web.py``.
 
-    **From a remote peer the only controls on this upgrade are the device
-    cookie and ``_ACP_TOKEN``.** An earlier note claimed ``/ws/acp`` was
+    **From a remote peer the only control on this upgrade is the device
+    cookie** (it was the device cookie and the now-retired per-launch token
+    until 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6). An
+    earlier note claimed ``/ws/acp`` was
     incidentally browser-only from remote, on the grounds that ``_ws_origin_ok``
     demands an ``Origin`` that non-browser clients do not send. That is false
     and was disproved by execution, not by reading: ``_ws_origin_ok`` requires
@@ -2006,7 +1989,7 @@ async def ws_acp(ws: WebSocket) -> None:
     client sets in one line, and ``_host_allowed`` admits loopback names
     without reference to the peer's actual address — so a remote client may
     simply claim ``Host: 127.0.0.1:4915``. A non-browser client on a remote
-    address, presenting a valid cookie and token, reaches ``accept()`` and
+    address, presenting a valid cookie, reaches ``accept()`` and
     ``acp.serve_socket``.
 
     Recorded here because a phantom control is worse than a missing one: a
@@ -2015,9 +1998,6 @@ async def ws_acp(ws: WebSocket) -> None:
     sort. ``_ws_origin_ok`` is browser-CSRF hygiene — it stops a *web page* on
     another origin from opening this socket — and nothing more.
     """
-    if not _acp_token_ok(ws.query_params.get("t", "")):
-        await ws.close(code=1008)
-        return
     if not _ws_origin_ok(ws):
         await ws.close(code=1008)
         return
@@ -3673,8 +3653,8 @@ async def remote_auth_page(request: Request):
 async def remote_auth_exchange(request: Request):
     """Verify the secret, then set the long-lived device cookie.
 
-    The comparison is constant-time over UTF-8 bytes for the reason
-    `_acp_token_ok` documents: `compare_digest` raises `TypeError` on a `str`
+    The comparison is constant-time over UTF-8 bytes because
+    `compare_digest` raises `TypeError` on a `str`
     holding non-ASCII, and this field is entirely attacker-chosen, so a `str`
     comparison turns a 403 on the authentication path into a 500 that any
     unauthenticated caller can drive.
@@ -4628,9 +4608,10 @@ async def api_remote_access(response: Response):
     `_REMOTE_ALLOWED_PATHS`, and the allowlist is default-deny \u2014 so the secret
     is never served over the remote surface it authenticates.
 
-    `no-store` for the same reason `/acp` sets it, only more so: this body
-    carries the **permanent** device secret, where `/acp` carries the strictly
-    weaker per-launch rotating `_ACP_TOKEN`. Nothing fetches this route yet,
+    `no-store` because this body carries the **permanent** device secret.
+    (`/acp` once set it for the per-launch page token, retired by
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6; this route's
+    reason never depended on that one.) Nothing fetches this route yet,
     which is exactly why the header goes on now — before a consumer exists to
     start caching it.
     """

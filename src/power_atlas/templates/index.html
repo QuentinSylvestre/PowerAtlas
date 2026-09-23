@@ -247,12 +247,12 @@
           <div class="acp-rail-menu ws-filter-menu" id="wsFilterMenu" role="menu"
                aria-label="Filter workspaces" hidden></div>
         </div>
-        <!-- Hidden by default; shown by JS iff ACP_TOKEN is set (see the
-             dashRailNewAcpBtn wiring below), the same runtime gate every
+        <!-- Hidden by default; shown by JS iff ACP_AVAILABLE is true (see
+             the dashRailNewAcpBtn wiring below), the same runtime gate every
              other ACP-only affordance on this page uses instead of a
-             server-rendered conditional -- acp_token isn't known to be
-             truthy/falsy until the ACP_TOKEN assignment further down in the
-             page's own script runs. The picker this opens
+             server-rendered conditional (sentinel renamed by
+             260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6).
+             The picker this opens
              (dashPickerOpen('')) is otherwise reachable
              only from a workspace's own quick actions (plans/done/
              260919-1551_DASHBOARD_ACP_NEW_SESSION_PICKER.md scoped a global
@@ -365,9 +365,11 @@
            (acp.html:163-164). Both hidden until dashConnect()'s onclose
            handler decides which applies: Reconnect for an ordinary drop
            (already auto-retried by the backoff timer below -- this button is
-           a manual retry-now escape hatch), Reload for a stale-token
-           handshake rejection or a failed session load, neither of which a
-           reconnect attempt alone can recover from. -->
+           a manual retry-now escape hatch), Reload for a failed session
+           load, which a reconnect attempt alone cannot recover from. (A
+           stale-token handshake rejection used to show Reload too; that
+           state no longer exists --
+           260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6.) -->
       <button class="acp-btn" id="dashReconnect" type="button" hidden>Reconnect</button>
       <button class="acp-btn" id="dashReload" type="button" hidden>Reload page</button>
       <!-- Mirrors /acp's own #acpClose: same "hidden unless attached,
@@ -929,11 +931,18 @@ function openSessionTranscript(row){
 // permission_resolved/agent_error all go through the exact same shared
 // functions transcript-renderer.js already gives both pages (Phase 2), so a
 // live turn cannot render any differently here than it does on /acp.
-var ACP_TOKEN = {{ acp_token | tojson }};
+// Whether this server's `acp` module imported, i.e. whether the dashboard's
+// ACP-only affordances (live attach, picker, rail create/delete items) exist.
+// A boolean, never a credential: the loopback cookie authenticates /ws/acp.
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 (D-15)
+var ACP_AVAILABLE = {{ acp_available | tojson }};
 var WS_PATH = '/ws/acp';
 function dashWsUrl(){
+  // No query string: the pa_local cookie the browser sends with the upgrade
+  // authenticates the socket, not a page-embedded token.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
   var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return scheme + '//' + location.host + WS_PATH + '?t=' + encodeURIComponent(ACP_TOKEN);
+  return scheme + '//' + location.host + WS_PATH;
 }
 var _dashWs = null;
 // WS reconnect-on-drop (SC7, dashboard/ACP feature-parity plan Phase 6) --
@@ -943,7 +952,7 @@ var _dashWs = null;
 // set true in onopen): true once THIS connection attempt's onopen has
 // fired -- onclose reads it to decide whether the drop is an ordinary
 // transient one (reconnect with backoff) or the handshake itself was
-// refused (diagnose instead -- see dashDiagnoseRejectedHandshake() below).
+// refused (diagnose instead -- see dashExplainRefusedHandshake() below).
 // _dashReconnectQueueSnapshot exists only to survive dashHandle()'s own
 // `session`-frame case, which (Fix 1, Phase 3 review) unconditionally
 // clears _dashQueuedPrompt/_dashQueuedPromptSession for the current sid --
@@ -974,34 +983,50 @@ function send(type, payload, sid){
   logLine('out', '→ ' + type);
   return true;
 }
-// Mirrors acp.html's own reportStaleToken() (acp.html:5276-5290) -- the
-// /acp token (ACP_TOKEN above, shared with this page's own WS handshake) is
-// regenerated on every PowerAtlas launch and baked into the page at render
-// time, so a handshake refused while the server answers an ordinary GET
-// means this tab was served by an earlier, now-exited process. Reconnect
-// would replay the dead token forever; only a reload picks up the live one.
-function dashReportStaleToken() {
-  logLine('error', 'handshake rejected while the server is up: this tab was served ' +
-                   'by an earlier PowerAtlas process, and the /acp token is ' +
-                   'regenerated every launch. Reload to pick up the current one.');
+// Mirrors acp.html's own reportSignedOut(): the server is up and refused
+// this browser's plain GET with the loopback gate's 403, so the tab holds no
+// valid pa_local (never signed in, or the local secret was rotated). Neither
+// Reconnect nor a reload can help -- both resend the same missing cookie --
+// so neither is offered; only a new login code from the tray can.
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+function dashReportSignedOut() {
+  var msg = 'Signed out — open PowerAtlas from its tray icon to sign this browser back in.';
+  logLine('error', 'handshake refused and the page itself answers 403: ' + msg);
+  // The composer note, not only the log: the debug log is collapsed by
+  // default, and this is the one state the user has to act on.
+  dashSetComposerNote(msg);
   dashReconnectBtn.hidden = true;
-  dashReloadBtn.hidden = false;
+  dashReloadBtn.hidden = true;
 }
-// Mirrors acp.html's own diagnoseRejectedHandshake() (acp.html:5292-5314):
-// no onopen fired, so the handshake itself was refused. web.py closes before
-// accept(), which the browser reports as an empty-reason 1006 -- from the
-// close event alone, indistinguishable from there being no server at all.
-// Ask the server directly: an ordinary GET of this same page succeeding
-// means the server is up and the token is what is stale.
-function dashDiagnoseRejectedHandshake() {
+// Mirrors acp.html's own explainRefusedHandshake(): no onopen fired, so the
+// handshake itself was refused, which the browser reports as an empty-reason
+// 1006 -- from the close event alone, indistinguishable from there being no
+// server at all. Ask the server directly with a GET of this same page, which
+// passes through the same credential gate: a network failure means
+// unreachable, a 403 means signed out, anything else means the server is up
+// and admits this browser, so Reconnect. Replaces the stale-token diagnosis
+// (and its Reload advice), which no longer applies now there is no per-launch
+// token. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+function dashExplainRefusedHandshake() {
   dashReconnectBtn.hidden = true;
+  dashReloadBtn.hidden = true;
   fetch(location.pathname + location.search, {
     cache: 'no-store',
     credentials: 'same-origin'
   }).then(function (res) {
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    dashReportStaleToken();
-  }).catch(function () {
+    if (res.status === 403) {
+      dashReportSignedOut();
+      return;
+    }
+    if (res.ok) {
+      logLine('info', 'the handshake was refused but the server is up and this ' +
+                      'browser is signed in. Reconnect to try again.');
+    } else {
+      logLine('error', 'the handshake was refused and the server answered HTTP ' +
+                       res.status + '. Reconnect to try again.');
+    }
+    dashReconnectBtn.hidden = false;
+  }, function () {
     logLine('info', 'the server is not answering — it may still be starting. ' +
                     'Reconnect once it is back up.');
     dashReconnectBtn.hidden = false;
@@ -1210,7 +1235,7 @@ function dashConnect(onReady){
       }, _dashReconnectDelay);
       _dashReconnectDelay = Math.min(_dashReconnectDelay * 2, 30000);
     } else {
-      dashDiagnoseRejectedHandshake();
+      dashExplainRefusedHandshake();
     }
   };
 }
@@ -1525,14 +1550,14 @@ dashSendBtn.addEventListener('click', dashSendPrompt);
 //   _dashPendingCreate         -- a close-then-create flow is in progress; do not
 //                                 consume a slot that conflicts with the pending create.
 //   !_viewingSid               -- no session selected.
-//   !ACP_TOKEN                 -- ACP not available on this server.
+//   !ACP_AVAILABLE             -- ACP not available on this server.
 //   _dashEagerFocusSuppressed  -- programmatic focus (e.g. dashStageOne's image
 //                                 handler); set/cleared synchronously around that call.
 dashPromptInput.addEventListener('focus', function () {
   if (_dashLoadingSid || _dashAttachedSid) return;
   if (_dashOrigin === 'joined') return;
   if (_dashPendingCreate) return;
-  if (!_viewingSid || !ACP_TOKEN) return;
+  if (!_viewingSid || !ACP_AVAILABLE) return;
   if (_dashEagerFocusSuppressed) return;
   var sid = _viewingSid;
   _dashOrigin = 'dashboard';
@@ -1664,10 +1689,10 @@ dashSendModeBtn.addEventListener('click', function () {
  *  capacity-conscious reasoning acp.html's selectSession documents: eagerly
  *  loading every row a user merely glances at would exhaust the shared
  *  8-session cap on curiosity alone. Skipped entirely for a non-kiro-cli-v3
- *  provider (no composer, ever) or when ACP_TOKEN is null (acp failed to
- *  import — see _ACP_TOKEN's comment in web.py). */
+ *  provider (no composer, ever) or when ACP_AVAILABLE is false (acp failed
+ *  to import). */
 function dashMaybeAttach(row, sid){
-  if (!ACP_TOKEN || row.dataset.provider !== 'kiro-cli-v3') return;
+  if (!ACP_AVAILABLE || row.dataset.provider !== 'kiro-cli-v3') return;
   fetch('/api/session-availability?sid=' + encodeURIComponent(sid) +
         '&cwd=' + encodeURIComponent(row.dataset.cwd || ''))
     .then(function(r){ if (!r.ok) throw new Error(r.status); return r.json(); })
@@ -3022,8 +3047,8 @@ function dashHandle(frame){
     // succeeded, on whatever socket answered it -- the earliest reliable
     // "we're good now" signal already used above for the same reasoning
     // (setContext/dashSetComposerNote resets). A Reload button shown earlier
-    // by an unrelated load failure (dashHandle()'s `error` case) or a
-    // stale-token diagnosis must not linger once a different session's load
+    // by an unrelated load failure (dashHandle()'s `error` case) must not
+    // linger once a different session's load
     // goes on to succeed on the same, reused socket -- previously the only
     // reset was dashConnect()'s own fresh-socket-open path, which does not
     // run on every session switch.
@@ -3694,9 +3719,10 @@ function dashHandle(frame){
       // Phase 6 (SC7): mirrors acp.html's own reportLoadFailure()
       // (acp.html:1272-1284) -- the socket itself is fine (no onclose here),
       // but this specific session's load failed and nothing else will retry
-      // it. Offers the same reload recovery a stale-token handshake
-      // rejection shows, for the same underlying reason: nothing left this
-      // connection can do about it on its own.
+      // it. Offers a reload, because nothing left this connection can do
+      // about it on its own. (The stale-token handshake rejection that also
+      // offered one is retired --
+      // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6.)
       // Suppress the Reload button for focus-triggered (eager) load failures:
       // the user never explicitly initiated this load, so a Reload prompt has
       // no actionable meaning yet. Re-enable the textarea silently so the user
@@ -3860,7 +3886,7 @@ var _dashPickerTrapRemove = null; // cleanup fn returned by _dashTrapFocus
 
 /** Open the picker. If cwd is given, pre-fill the workspace filter with it. */
 function dashPickerOpen(cwd) {
-  if (!ACP_TOKEN) return;
+  if (!ACP_AVAILABLE) return;
   var picker = document.getElementById('dashPicker');
   var searchEl = document.getElementById('dashPickerSearch');
   var noteEl = document.getElementById('dashPickerNote');
@@ -4930,7 +4956,7 @@ function dashRailRowNode(session, flat, workspace){
   // "Pin session" shown when not pinned (unpin is via the amber button).
   // Delete shown for kiro-cli-v3 sessions.
   var hasPinMenuItem = !session.pinned;
-  var hasDeleteMenuItem = ACP_TOKEN && session.provider === 'kiro-cli-v3';
+  var hasDeleteMenuItem = ACP_AVAILABLE && session.provider === 'kiro-cli-v3';
   if (hasPinMenuItem || hasDeleteMenuItem) {
     var moreBtn = document.createElement('button');
     moreBtn.type = 'button';
@@ -5279,10 +5305,10 @@ function dashRailGroupNode(group){
   aiMenu.hidden = true;
   // Fixed "New kiro-cli v3 ACP session" item — creates directly in this
   // workspace via dashRailQuickCreate (no picker: the destination is already
-  // this group's own cwd). Only rendered when ACP is available (ACP_TOKEN is
-  // non-null), matching the guard on other ACP affordances throughout this page.
+  // this group's own cwd). Only rendered when ACP is available (ACP_AVAILABLE),
+  // matching the guard on other ACP affordances throughout this page.
   // plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md Phase 5
-  if (ACP_TOKEN) {
+  if (ACP_AVAILABLE) {
     var acpItem = document.createElement('button');
     acpItem.type = 'button';
     acpItem.className = 'acp-rail-menu-item acp-rail-action-item';
@@ -5400,12 +5426,12 @@ function dashRailGroupNode(group){
   settingsItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); openWorkspaceSettings(settingsItem); });
   moreMenu.appendChild(settingsItem);
   // Delete: ported from /acp's own workspace-⋯ menu, reusing the same
-  // /api/acp/sessions/delete endpoint. Gated on ACP_TOKEN, not on a
+  // /api/acp/sessions/delete endpoint. Gated on ACP_AVAILABLE, not on a
   // provider check on `group` -- a lazily-skipped or paginated group's
   // loaded `sessions` never reliably says whether it holds any kiro-cli-v3
   // rows, so the item always renders; the confirmation modal below is
   // explicit that only kiro-cli sessions are touched.
-  if (ACP_TOKEN) {
+  if (ACP_AVAILABLE) {
     var deleteWsDivider = document.createElement('div');
     deleteWsDivider.className = 'acp-rail-menu-divider';
     moreMenu.appendChild(deleteWsDivider);
@@ -5964,7 +5990,7 @@ dashRailMoreEl.addEventListener('click', function(){
   loadGroupPage(dashRailGroupPage + 1);
 });
 var dashRailNewAcpBtn = document.getElementById('dashRailNewAcp');
-if (ACP_TOKEN) {
+if (ACP_AVAILABLE) {
   dashRailNewAcpBtn.hidden = false;
   dashRailNewAcpBtn.addEventListener('click', function(){ dashPickerOpen(''); });
 }

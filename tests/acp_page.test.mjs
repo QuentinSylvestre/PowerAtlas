@@ -632,7 +632,6 @@ function serveListing(store, params) {
 function loadPage(templatePath, opts = {}) {
   const src = fs.readFileSync(templatePath, "utf8");
   const html = render(src, {
-    acp_token: opts.token ?? "TEST-TOKEN",
     sid: opts.sid ?? "",
     acp_error: opts.acpError ?? "",
     csp_nonce: opts.nonce ?? "NONCE-1",
@@ -743,7 +742,7 @@ function loadPage(templatePath, opts = {}) {
                  confirms, store, opts, reloaded: false };
 
   // A fetch with a body. The old stub answered `{ok: true}` and nothing else,
-  // which is enough for the stale-token diagnosis (the only caller before the
+  // which is enough for the refused-handshake diagnosis (the only caller before the
   // rail) and useless for anything that reads a response. `opts.answer` lets a
   // check fail or reject a specific request; everything else is served from the
   // synthetic store above.
@@ -8270,7 +8269,7 @@ check("reconnect delay resets on open", (tpl) => {
     "delay should reset to 1000ms after ws.onopen");
 });
 
-// SC-3 test 5: no auto-reconnect when opened=false (stale-token path)
+// SC-3 test 5: no auto-reconnect when opened=false (refused-handshake path)
 check("no auto reconnect when not opened", (tpl) => {
   // Load page but do NOT call page.open() — socket was created but onopen never fired
   const page = loadPage(tpl);
@@ -8281,7 +8280,7 @@ check("no auto reconnect when not opened", (tpl) => {
   assertEqual(page.timers.length, timersBefore,
     "no reconnect timer should be scheduled when socket closes without having been opened");
   assertEqual(page.el("acpReconnect").hidden, true,
-    "reconnect button must not appear on stale-token close");
+    "reconnect button must not appear before the refused handshake is diagnosed");
 });
 
 // SC-5 test 1: railRefreshSoon called after sendPrompt success
@@ -10124,11 +10123,71 @@ check("WebSocket connects to /ws/acp", (tpl) => {
   page.open();
   const url = page.sockets[0] && page.sockets[0].url;
   assert(url != null, "page.open() did not create a WebSocket socket");
-  // wsUrl() always appends "?t=" + the token, so the real path is followed
-  // by "?" — not by "-v3" or anything else. Anchor on that boundary so this
-  // can't be satisfied by a retired sibling path like /ws/acp-v3.
-  assert(/\/ws\/acp(\?|$)/.test(url),
-    `WebSocket URL should connect to /ws/acp; got: ${JSON.stringify(url)}`);
+  // The bare path and nothing after it: no retired sibling like /ws/acp-v3,
+  // and no "?t=" token — the cookie authenticates the socket.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+  assertEqual(url, "ws://127.0.0.1:4915/ws/acp",
+    `WebSocket URL should be the bare /ws/acp path; got: ${JSON.stringify(url)}`);
+});
+
+// ---- refused handshake: signed out vs unreachable -----------------------
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6. Driven, not
+// grepped: the socket closes without opening and the page's own GET of
+// itself (/acp) answers as the server would. Both directions asserted; the
+// retired stale-token Reload affordance must appear in neither.
+
+async function refusedHandshake(tpl, pageAnswer, opts = {}) {
+  const page = loadPage(tpl, {
+    ...opts,
+    answer: (u) => (u.startsWith("/acp") ? pageAnswer : null),
+  });
+  page.socket().onclose({ code: 1006, reason: "" }); // never opened
+  await page.settle();
+  return {
+    page,
+    status: () => page.el("acpStatus").textContent,
+    log: () => page.el("acpLog").textContent,
+    transcript: () => page.el("acpTranscript").textContent,
+  };
+}
+
+check("refused handshake: a cookie-less tab (the gate's 403) reads as signed out, pointing at the tray", async (tpl) => {
+  const r = await refusedHandshake(tpl, { ok: false, status: 403, body: {} });
+  assertEqual(r.status(), "signed out", "the status must say signed out");
+  assert(/signed out/i.test(r.transcript()) && /tray/i.test(r.transcript()),
+    `the transcript must tell the user to open PowerAtlas from the tray; got ${JSON.stringify(r.transcript())}`);
+  assert(!/unreachable|not answering|still be starting/i.test(r.status() + r.log() + r.transcript()),
+    "the gate's 403 comes from a live server and must not read as unreachable");
+  assertEqual(r.page.el("acpReconnect").hidden, true, "Reconnect cannot help a signed-out tab");
+  assertEqual(r.page.el("acpReload").hidden, true,
+    "no stale-token Reload affordance: a reload cannot sign a browser back in");
+  assertEqual(r.page.reloaded, false, "nothing may reload the page on its own");
+});
+
+check("refused handshake: a signed-out remote viewer is sent to /remote-auth, not to a tray it does not have", async (tpl) => {
+  const r = await refusedHandshake(tpl, { ok: false, status: 403, body: {} },
+                                   { local: false, canDelete: true });
+  assert(/remote-auth/.test(r.transcript()) && !/tray/i.test(r.transcript()),
+    `a remote viewer's sign-in path is /remote-auth; got ${JSON.stringify(r.transcript())}`);
+});
+
+check("refused handshake: a server that is not answering still reads as unreachable, not signed out", async (tpl) => {
+  const r = await refusedHandshake(tpl, { reject: "connection refused" });
+  assertEqual(r.status(), "server unreachable", "the status must say unreachable");
+  assert(!/signed out/i.test(r.log() + r.transcript()),
+    "a network failure must not be reported as signed out");
+  assertEqual(r.page.el("acpReconnect").hidden, false, "Reconnect must reappear for an unreachable server");
+  assertEqual(r.page.el("acpReload").hidden, true, "Reload is not the recovery for an unreachable server");
+});
+
+check("refused handshake: a server that admits this browser offers Reconnect, never the stale-token Reload", async (tpl) => {
+  const r = await refusedHandshake(tpl, null); // the default stub answers 200
+  assert(!/stale|reload/i.test(r.status() + r.log() + r.transcript()),
+    `no stale-token wording may survive; log: ${JSON.stringify(r.log())}`);
+  assert(!/signed out/i.test(r.status() + r.transcript()), "a signed-in browser is not signed out");
+  assertEqual(r.page.el("acpReconnect").hidden, false, "Reconnect is the recovery here");
+  assertEqual(r.page.el("acpReload").hidden, true,
+    "the stale-token Reload affordance is retired -- there is no per-launch token to go stale");
 });
 
 
@@ -11126,11 +11185,13 @@ const DASH_IMAGE_ATTACH_NAMES = [
 ];
 // SC7 (WS reconnect-on-drop, dashboard/ACP feature-parity plan Phase 6) --
 // guards against dashConnect()'s reconnect/backoff machinery, or the
-// stale-token diagnosis it defers to, silently moving out of this region.
+// refused-handshake diagnosis it defers to, silently moving out of this region.
+// The diagnosis names were renamed from the stale-token pair by
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6.
 const DASH_CONNECT_NAMES = [
   "function dashConnect", "_dashReconnectTimer", "_dashReconnectDelay",
-  "_dashOpened", "_dashReconnectQueueSnapshot", "dashReportStaleToken",
-  "dashDiagnoseRejectedHandshake", "dashReconnectOnReady",
+  "_dashOpened", "_dashReconnectQueueSnapshot", "dashReportSignedOut",
+  "dashExplainRefusedHandshake", "dashReconnectOnReady",
   "dashReconnectBtn.addEventListener", "dashReloadBtn.addEventListener",
 ];
 // Close-button click region (Fix 3, Phase 6 review): just the
@@ -11298,8 +11359,8 @@ function dashPickerSource() {
   // WS reconnect-on-drop region (SC7, dashboard/ACP feature-parity plan
   // Phase 6): from dashWsUrl's declaration (dashConnect's own dependency)
   // through immediately before dashComposerEl's declaration -- covers
-  // _dashWs/the reconnect-timer state, send(), dashReportStaleToken(),
-  // dashDiagnoseRejectedHandshake(), dashConnect() itself, and the
+  // _dashWs/the reconnect-timer state, send(), dashReportSignedOut(),
+  // dashExplainRefusedHandshake(), dashConnect() itself, and the
   // Reconnect/Reload button wiring. Loaded only when a check opts in
   // (loadDashPicker({realConnect: true})) -- see that function's own header
   // comment for why: this region's real dashConnect() waits on a real
@@ -11609,10 +11670,19 @@ function loadDashPicker(opts = {}) {
       fetches.push({ url, init: init || {} });
       // opts.fetchFails (SC7, dashboard/ACP feature-parity plan Phase 6):
       // simulates a server that is not answering at all -- the branch
-      // dashDiagnoseRejectedHandshake()'s own .catch() covers, distinct from
-      // the default resolved-ok response below, which is what drives it to
-      // dashReportStaleToken() instead.
+      // dashExplainRefusedHandshake()'s rejection handler covers.
       if (opts.fetchFails) return Promise.reject(new Error("network error"));
+      // opts.pageStatus: the status the page's own GET of itself ("/", the
+      // sandbox location.pathname) answers with -- 403 is the loopback gate
+      // refusing a browser with no valid pa_local. Keyed on the exact page
+      // URL so the picker's own workspace fetches stay healthy.
+      // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+      if (opts.pageStatus !== undefined && String(url) === "/") {
+        return Promise.resolve({
+          ok: opts.pageStatus >= 200 && opts.pageStatus < 300, status: opts.pageStatus,
+          json: () => Promise.resolve({}), text: () => Promise.resolve(""),
+        });
+      }
       // opts.sessionTranscriptFails (Fix 3, Step 9 review): a failed
       // /api/session-transcript fetch specifically -- openSessionTranscript()'s
       // own .catch() branch under test, distinct from opts.fetchFails above
@@ -11629,7 +11699,9 @@ function loadDashPicker(opts = {}) {
       });
     },
     // Globals read by the picker/dashHandle at runtime
-    ACP_TOKEN: opts.acpToken !== undefined ? opts.acpToken : "TEST-TOKEN",
+    // The ACP-availability sentinel (web.py's `acp_available`), a boolean.
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+    ACP_AVAILABLE: opts.acpAvailable !== undefined ? opts.acpAvailable : true,
     _dashAttachedSid: opts.dashAttachedSid !== undefined ? opts.dashAttachedSid : null,
     _dashTurnActive: opts.dashTurnActive !== undefined ? opts.dashTurnActive : false,
     _viewingSid: opts.viewingSid !== undefined ? opts.viewingSid : null,
@@ -11873,7 +11945,7 @@ function loadDashPicker(opts = {}) {
     // (Fix 7, Phase 5 review, mirroring dashConnect()'s own onopen logLine
     // call) -- this sandbox has no browser `location` global otherwise,
     // unlike the acp.html-side harness's loadPage() (this file, ~line 886).
-    // pathname/search/reload (SC7, Phase 6): dashDiagnoseRejectedHandshake()
+    // pathname/search/reload (SC7, Phase 6): dashExplainRefusedHandshake()
     // fetches location.pathname + location.search, and dashReloadBtn's click
     // handler calls location.reload() -- recorded, not a no-op, so a check
     // can assert a reload was actually requested.
@@ -12011,7 +12083,7 @@ function loadDashPicker(opts = {}) {
   // opt-in only (see connectRegion's own header comment in dashPickerSource()
   // for why): overwrites the synchronous no-op dashConnect stub set in the
   // sandbox literal above with the real dashConnect()/dashWsUrl()/
-  // dashReportStaleToken()/dashDiagnoseRejectedHandshake(), and wires the
+  // dashReportSignedOut()/dashExplainRefusedHandshake(), and wires the
   // real Reconnect/Reload buttons. Run last -- by this point every function
   // dashConnect()'s onclose handler reaches as a free variable
   // (dashRefreshComposerControls, dashCloseSubagentView, dashCloseSubWs,
@@ -14846,7 +14918,7 @@ check("dashboard: sub-agent panel — session_closed/error note text uses textCo
 // dashConnect()'s real source (connectRegion, loadDashPicker({realConnect:
 // true})) is used throughout, not a hand-rewritten stand-in, for the same
 // reason cmdPaletteRegion/queueSteerWiringRegion/imageAttachRegion/
-// crewSubagentRegion are: the backoff scheduling, the stale-token diagnosis,
+// crewSubagentRegion are: the backoff scheduling, the refused-handshake diagnosis,
 // and the state-restoration logic must be exercised as written. Base
 // mechanics (checks 1-6) mirror acp.html's own SC-3 reconnect tests
 // (tests/acp_page.test.mjs, "auto reconnect scheduled on close when opened"
@@ -14941,29 +15013,182 @@ check("dashboard: reconnect — onclose while a timer is pending replaces it, no
     "a second close while the retry timer is still pending must replace it, not stack a second one");
 });
 
-check("dashboard: reconnect — a stale-token handshake rejection shows Reload only, not Reconnect", async () => {
-  // Default fetch stub resolves { ok: true } -- the server is up, so the
-  // rejected handshake is diagnosed as a stale token.
-  const p = loadDashPicker({ realConnect: true });
-  p.sandbox.dashConnect();
-  p.closeMain({ code: 4401, reason: "token expired" }); // never opened
-  await p.settle();
-  assertEqual(p.el("dashReconnect").hidden, true,
-    "Reconnect must stay hidden for a stale-token rejection -- only a reload picks up the live token");
-  assertEqual(p.el("dashReload").hidden, false,
-    "Reload must be shown for a stale-token rejection");
-});
+// ---- refused handshake: signed out vs unreachable -----------------------
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6. The
+// rejection is driven, not grepped for: the socket closes without ever
+// opening, and the page's own GET of itself answers as the real server
+// would -- the loopback gate's 403 for a cookie-less tab, a network error for
+// a server that is down. Both directions are asserted, and in no case does
+// the retired stale-token "reload" affordance appear.
 
-check("dashboard: reconnect — a rejected handshake with the server unreachable shows Reconnect again, not Reload", async () => {
-  const p = loadDashPicker({ realConnect: true, fetchFails: true });
+function dashRefusedHandshake(opts) {
+  const p = loadDashPicker({ realConnect: true, ...opts });
+  const notes = [];
+  p.sandbox.dashSetComposerNote = (t) => notes.push(t);
   p.sandbox.dashConnect();
   p.closeMain({ code: 1006, reason: "" }); // never opened
+  return { p, notes, log: () => p.el("dashLog").textContent };
+}
+
+check("dashboard: refused handshake — a cookie-less tab (the gate's 403) reads as signed out, not unreachable", async () => {
+  const { p, notes, log } = dashRefusedHandshake({ pageStatus: 403 });
   await p.settle();
+  const shown = notes.join(" | ");
+  assert(/signed out/i.test(shown) && /tray/i.test(shown),
+    `the composer note must say signed out and point at the tray; got ${JSON.stringify(shown)}`);
+  assert(!/unreachable|not answering|still be starting/i.test(log() + shown),
+    `a 403 from a live server must not read as unreachable; log: ${JSON.stringify(log())}`);
+  assertEqual(p.el("dashReconnect").hidden, true,
+    "Reconnect cannot help a signed-out tab -- it resends the same missing cookie");
+  assertEqual(p.el("dashReload").hidden, true,
+    "no stale-token Reload affordance: a reload cannot sign a browser back in");
+  assertEqual(p.reloaded(), false, "nothing may reload the page on its own");
+});
+
+check("dashboard: refused handshake — a server that is not answering still reads as unreachable, not signed out", async () => {
+  const { p, notes, log } = dashRefusedHandshake({ fetchFails: true });
+  await p.settle();
+  assert(/not answering/i.test(log()),
+    `an unreachable server must say so; log: ${JSON.stringify(log())}`);
+  assert(!/signed out/i.test(log() + notes.join(" ")),
+    "a network failure must not be reported as signed out");
   assertEqual(p.el("dashReconnect").hidden, false,
     "Reconnect must reappear once the diagnosis concludes the server itself is unreachable");
-  assertEqual(p.el("dashReload").hidden, true,
-    "Reload must not be shown when the server is unreachable -- there is no live token to have gone stale");
+  assertEqual(p.el("dashReload").hidden, true, "Reload must not be shown when the server is unreachable");
 });
+
+check("dashboard: refused handshake — a server that admits this browser offers Reconnect, never the stale-token Reload", async () => {
+  const { p, notes, log } = dashRefusedHandshake({ pageStatus: 200 });
+  await p.settle();
+  assert(!/stale|reload/i.test(log() + notes.join(" ")),
+    `no stale-token wording may survive; log: ${JSON.stringify(log())}`);
+  assert(!/signed out/i.test(notes.join(" ")), "a signed-in browser is not signed out");
+  assertEqual(p.el("dashReconnect").hidden, false, "Reconnect is the recovery when the server admits this browser");
+  assertEqual(p.el("dashReload").hidden, true,
+    "the stale-token Reload affordance is retired -- there is no per-launch token to go stale");
+});
+
+check("dashboard: the socket URL carries no ?t= token (cookie-only authentication)", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  const url = p.mainSocket().url;
+  assertEqual(url, "ws://test.invalid/ws/acp",
+    "the dashboard's /ws/acp URL must be the bare path -- the pa_local cookie authenticates it");
+});
+
+// ---- ACP_AVAILABLE: every gated dashboard feature, both directions --------
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 (D-15). The
+// sentinel was ACP_TOKEN doubling as "acp imported"; it is now a boolean.
+// Only the pair (renders when true, hidden when false) catches an inverted
+// sentinel, so every gated site is driven both ways from real source. Two
+// sites live in loadDashPicker's regions (the eager-load focus guard and
+// dashPickerOpen, covered there and just below); the other five are not in
+// any region that harness loads, so each runs here from its own slice with
+// call-time stubs for the rail's DOM helpers.
+
+function dashSentinelSlice(fromMarker, toMarker) {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const from = src.indexOf(fromMarker);
+  if (from < 0) throw new Error(`index.html no longer contains ${fromMarker}`);
+  const to = src.indexOf(toMarker, from);
+  if (to < 0) throw new Error(`index.html no longer has ${toMarker} after ${fromMarker}`);
+  const slice = src.slice(from, to);
+  if (!slice.includes("ACP_AVAILABLE")) {
+    throw new Error(`${fromMarker} no longer reads ACP_AVAILABLE; this check measures nothing`);
+  }
+  return slice;
+}
+
+function runDashSentinel(slice, acpAvailable, extra = {}) {
+  const fetches = [];
+  const newAcpBtn = new El("button");
+  newAcpBtn.hidden = true; // the markup's own initial state
+  const railIcon = new Proxy({}, { get: () => () => new El("svg") });
+  const box = {
+    ACP_AVAILABLE: acpAvailable,
+    document: {
+      createElement: (tag) => new El(tag),
+      getElementById: (id) => (id === "dashRailNewAcp" ? newAcpBtn : null),
+    },
+    fetch: (u) => { fetches.push(String(u)); return new Promise(() => {}); },
+    window: { _launchers: [], _availableProviders: [] },
+    RAIL_ICON: railIcon,
+    _viewingSid: null,
+    dashRailFilter: "",
+    dashRailAvailability: () => "available",
+    dashRailRowHoverText: () => "",
+    dashRailDotClass: () => "",
+    dashRailTitleText: (s) => String(s.id),
+    dashRailWhenShort: () => "",
+    dashRailProviderIcon: () => new El("img"),
+    dashRailHeadNode: () => new El("div"),
+    dashRailIsCollapsed: () => true,
+    _wireRailActionMenu: () => {},
+    ...extra,
+  };
+  vm.createContext(box);
+  vm.runInContext(slice, box, { filename: "index.html#acp-available-sentinel" });
+  return { box, fetches, newAcpBtn };
+}
+
+const hasText = (root, text) => root.descendants().some((n) => n.textContent === text);
+
+for (const available of [true, false]) {
+  const want = available ? "renders" : "is hidden";
+
+  check(`ACP_AVAILABLE=${available}: the rail's New ACP session button ${want}`, () => {
+    const slice = dashSentinelSlice("var dashRailNewAcpBtn", "// ---- session-level live diffing");
+    const { newAcpBtn } = runDashSentinel(slice, available);
+    assertEqual(newAcpBtn.hidden, !available,
+      `the global New ACP session button must be ${available ? "shown" : "left hidden"}`);
+  });
+
+  check(`ACP_AVAILABLE=${available}: a kiro-cli-v3 row's Delete session item ${want}`, () => {
+    const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
+    const { box } = runDashSentinel(slice, available);
+    // Pinned, so the only reason for a ⋯ menu to exist is the Delete item.
+    const row = box.dashRailRowNode(
+      { id: "s1", provider: "kiro-cli-v3", pinned: true, availability: "available" }, true, null);
+    assertEqual(hasText(row, "Delete session"), available,
+      `a kiro-cli-v3 row's Delete session item must ${available ? "exist" : "not exist"}`);
+  });
+
+  check(`ACP_AVAILABLE=${available}: a workspace's New kiro-cli v3 ACP session item ${want}`, () => {
+    const slice = dashSentinelSlice("function dashRailGroupNode", "// ---- custom-launcher quick launch");
+    const { box } = runDashSentinel(slice, available);
+    const group = box.dashRailGroupNode(
+      { cwd: "/ws", name: "ws", sessions: [], total: 0, pinned: true });
+    assertEqual(hasText(group, "New kiro-cli v3 ACP session"), available,
+      `the workspace's quick-create ACP item must ${available ? "exist" : "not exist"}`);
+  });
+
+  check(`ACP_AVAILABLE=${available}: a workspace's Delete kiro-cli sessions item ${want}`, () => {
+    const slice = dashSentinelSlice("function dashRailGroupNode", "// ---- custom-launcher quick launch");
+    const { box } = runDashSentinel(slice, available);
+    const group = box.dashRailGroupNode(
+      { cwd: "/ws", name: "ws", sessions: [], total: 0, pinned: true });
+    assertEqual(hasText(group, "Delete kiro-cli sessions…"), available,
+      `the workspace's delete item must ${available ? "exist" : "not exist"}`);
+  });
+
+  check(`ACP_AVAILABLE=${available}: dashMaybeAttach ${available ? "peeks" : "does not peek"} a kiro-cli-v3 session's availability`, () => {
+    const slice = dashSentinelSlice("function dashMaybeAttach", "// ---- Image paste-to-attach");
+    const { box, fetches } = runDashSentinel(slice, available);
+    const row = new El("button");
+    row.dataset.provider = "kiro-cli-v3";
+    row.dataset.cwd = "/ws";
+    box.dashMaybeAttach(row, "s1");
+    assertEqual(fetches.some((u) => u.startsWith("/api/session-availability")), available,
+      `the live-attach availability peek must ${available ? "run" : "not run"}`);
+  });
+
+  check(`ACP_AVAILABLE=${available}: dashPickerOpen ${available ? "opens" : "does not open"} the picker`, () => {
+    const p = loadDashPicker({ acpAvailable: available });
+    p.sandbox.dashPickerOpen("");
+    assertEqual(p.el("dashPicker").hidden, !available,
+      `the new-session picker must ${available ? "open" : "stay closed"}`);
+  });
+}
 
 check("dashboard: reconnect — clicking Reconnect opens a socket and resubscribes the previously-attached session", () => {
   const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1" });
@@ -15288,7 +15513,7 @@ check("dashboard: an error frame with code close_in_progress during an unconfirm
   assertEqual(p.sandbox._dashPendingSend, null, "_dashPendingSend must be cleared");
   assertEqual(p.sandbox._dashPendingImages, null, "_dashPendingImages must be cleared");
   assertEqual(p.el("dashReload").hidden, false,
-    "the same reload recovery a stale-token handshake rejection shows must appear here too -- " +
+    "the reload recovery must appear here -- " +
     "nothing else will retry this specific load");
 });
 
@@ -15660,12 +15885,23 @@ check("dashboard: eager-connect — focus guard: !_viewingSid (no session select
     "focus must not load when _viewingSid is null");
 });
 
-check("dashboard: eager-connect — focus guard: !ACP_TOKEN (ACP not available)", () => {
-  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1", acpToken: null });
+// Both directions, because only the pair catches an inverted sentinel.
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+check("dashboard: eager-connect — focus guard: !ACP_AVAILABLE (ACP not available)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1", acpAvailable: false });
   p.sandbox.dashConnect();
   p.sandbox.dashPromptInput.dispatch("focus");
   assertEqual(p.sentOf("load").length, 0,
-    "focus must not load when ACP_TOKEN is falsy");
+    "focus must not load when ACP_AVAILABLE is false");
+});
+
+check("dashboard: eager-connect — focus loads when ACP_AVAILABLE is true (the sentinel's other direction)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1", acpAvailable: true });
+  p.sandbox.dashConnect();
+  p.sandbox.dashPromptInput.dispatch("focus");
+  p.openMain();
+  assertEqual(p.sentOf("load").length, 1,
+    "focus on a viewed session must eager-load it when ACP is available");
 });
 
 check("dashboard: eager-connect — stale-arrival re-enables composer for B after A's session frame arrives mid-cross-session", () => {

@@ -291,26 +291,40 @@ def test_index_returns_html(client):
     assert "skeleton-card" in resp.text
 
 
-def test_index_carries_the_live_acp_token_for_the_transcript_panel(client):
-    """dashboard/ACP-merge Phase 3: the transcript panel's composer opens
-    /ws/acp directly for held/available kiro-cli-v3 sessions, the same way
-    acp.html already does -- it needs the same token acp.html embeds."""
-    from power_atlas.web import _ACP_TOKEN
-
+def test_index_reports_acp_available_when_acp_imported(client):
+    """The dashboard's ACP-only affordances key off `ACP_AVAILABLE`, which is
+    true exactly when the guarded `acp` import succeeded. Paired with the test
+    below: only both directions together catch an inverted sentinel.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 (D-15)"""
     resp = client.get("/")
     assert resp.status_code == 200
-    assert f"var ACP_TOKEN = {_ACP_TOKEN!r}".replace("'", '"') in resp.text
+    assert "var ACP_AVAILABLE = true;" in resp.text
 
 
-def test_index_reports_no_acp_token_when_acp_is_unavailable(client, monkeypatch):
-    """acp is optional/guarded-import prototype code -- the dashboard must
-    not embed a token that opens nothing, so its own JS can skip trying."""
+def test_index_reports_acp_unavailable_when_acp_is_unavailable(client, monkeypatch):
+    """acp is optional/guarded-import code -- with it missing, the dashboard
+    must hide every ACP-only affordance rather than offer ones that open
+    nothing. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6"""
     import power_atlas.web as web_mod
     monkeypatch.setattr(web_mod, "acp", None)
 
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "var ACP_TOKEN = null" in resp.text
+    assert "var ACP_AVAILABLE = false;" in resp.text
+
+
+def test_no_page_embeds_an_acp_credential(client):
+    """`_ACP_TOKEN` is retired (SC-7): neither page carries a per-launch
+    credential for `/ws/acp` any more; the loopback cookie authenticates it.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6"""
+    import power_atlas.web as web_mod
+    assert not hasattr(web_mod, "_ACP_TOKEN")
+    assert not hasattr(web_mod, "_acp_token_ok")
+    for path in ("/", "/acp"):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert "ACP_TOKEN" not in resp.text, path
+        assert "?t=" not in resp.text, path
 
 
 @patch("power_atlas.web.save_config")
@@ -1275,7 +1289,6 @@ class TestAcpNavigationGuard:
         resp = raw_client.get("/acp?sid=abc", headers={
             "Origin": "http://evil.example.com", "Sec-Fetch-Site": "cross-site"})
         assert resp.status_code == 403
-        assert _ACP_TOKEN not in resp.text
 
     def test_a_cross_origin_referer_is_refused(self, raw_client):
         resp = raw_client.get("/acp?sid=abc",
@@ -1290,7 +1303,6 @@ class TestAcpNavigationGuard:
         resp = raw_client.get("/acp?sid=abc",
                               headers={"Sec-Fetch-Site": "cross-site"})
         assert resp.status_code == 403
-        assert _ACP_TOKEN not in resp.text
 
     def test_origin_null_is_refused(self, raw_client):
         resp = raw_client.get("/acp", headers={"Origin": "null"})
@@ -1341,8 +1353,14 @@ class TestHostAllowlistCoversGetRequests:
 # --- ACP surface: DNS-rebinding and token-check regressions ---
 
 from starlette.websockets import WebSocketDisconnect
-from power_atlas.web import (
-    _ACP_TOKEN, _acp_token_ok, _host_allowed, _ws_origin_ok)
+from power_atlas.web import _host_allowed, _ws_origin_ok
+
+# Present in the rendered `/acp` page and nowhere in a refusal: proves the
+# template actually rendered. It stands in for `_ACP_TOKEN`, which these tests
+# used as that proof until 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+# Phase 6 retired the token.
+_ACP_PAGE_MARKER = "var ACP_SID = "
+
 
 
 class TestSingleLabelHostRejected:
@@ -1362,12 +1380,11 @@ class TestSingleLabelHostRejected:
         for host in ("testserver", "evil.com"):
             resp = raw_client.get("/acp", headers={"Host": host})
             assert resp.status_code == 403, f"GET /acp should reject Host: {host}"
-            assert _ACP_TOKEN not in resp.text
 
     def test_acp_page_served_on_loopback(self, raw_client):
         resp = raw_client.get("/acp")
         assert resp.status_code == 200
-        assert _ACP_TOKEN in resp.text
+        assert _ACP_PAGE_MARKER in resp.text
 
 
 class TestAcpBackLinkMatchesReachability:
@@ -1477,16 +1494,16 @@ class TestTheDashboardLinksToTheAgentPage:
 
 
 class TestAcpPageIsNotCacheable:
-    """``GET /acp`` renders the live ACP token, so its response is a credential.
+    """``GET /acp`` is served only to a signed-in browser, so nothing may
+    retain a copy of it — not the browser's disk cache, not an intermediary.
 
-    Nothing may retain a copy of it — not the browser's disk cache, not an
-    intermediary. The token rotates per launch and the page recovers from a
-    stale one, so this is depth rather than a live hole.
+    It used to render the live ACP token; the header outlived that token's
+    retirement (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6).
     """
 
-    def test_the_credential_bearing_response_says_no_store(self, raw_client):
+    def test_the_acp_page_response_says_no_store(self, raw_client):
         resp = raw_client.get("/acp")
-        assert _ACP_TOKEN in resp.text, "the assertion below would be vacuous"
+        assert _ACP_PAGE_MARKER in resp.text, "the assertion below would be vacuous"
         assert resp.headers["cache-control"] == "no-store"
 
     def test_no_other_route_gained_a_caching_header(self, raw_client):
@@ -1600,7 +1617,6 @@ class TestHostHeaderIsParsedNotTrusted:
         status, body = _raw_asgi(app, path, [(b"host", host.encode())])
         assert status == 403, f"GET {path} with Host: {host} answered {status}"
         assert b"Forbidden" in body
-        assert _ACP_TOKEN.encode() not in body
 
     @pytest.mark.parametrize("path", _GUARDED_PATHS)
     def test_absent_host_is_forbidden(self, path):
@@ -1609,7 +1625,6 @@ class TestHostHeaderIsParsedNotTrusted:
         left, so ``url.hostname`` was 127.0.0.1 by construction."""
         status, body = _raw_asgi(app, path, [])
         assert status == 403, f"GET {path} without a Host answered {status}"
-        assert _ACP_TOKEN.encode() not in body
 
     @pytest.mark.parametrize("order", [
         [b"127.0.0.1", b"evil.com"],
@@ -1654,7 +1669,7 @@ class TestAcpInlineHostCheck:
         just as well mean the route never ran."""
         status, body = _raw_asgi(_ROUTER_ONLY, "/acp", [(b"host", b"127.0.0.1:4915")])
         assert status == 200
-        assert _ACP_TOKEN.encode() in body
+        assert _ACP_PAGE_MARKER.encode() in body
 
     @pytest.mark.parametrize("host", [
         "evil.com", "a_b.evil.com", "[::1", "evil.com@127.0.0.1", "testserver",
@@ -1662,12 +1677,10 @@ class TestAcpInlineHostCheck:
     def test_inline_check_refuses_without_the_middleware(self, host):
         status, body = _raw_asgi(_ROUTER_ONLY, "/acp", [(b"host", host.encode())])
         assert status == 403, f"/acp served Host: {host} with no middleware above it"
-        assert _ACP_TOKEN.encode() not in body
 
     def test_inline_check_refuses_absent_host(self):
         status, body = _raw_asgi(_ROUTER_ONLY, "/acp", [])
         assert status == 403
-        assert _ACP_TOKEN.encode() not in body
 
 
 class TestWsOriginUnaffectedByTheHostFallback:
@@ -2069,23 +2082,57 @@ class TestAcpTransportFrameCap:
                 f"uvicorn.Config at line {call.lineno} leaves the 16 MiB default"
 
 
-class TestAcpTokenCheck:
-    @pytest.mark.parametrize("supplied", [
-        "", "é", "é" * 60, "�", "A" * 4000, "not-the-token",
-    ])
-    def test_wrong_token_rejected_without_raising(self, supplied):
-        assert _acp_token_ok(supplied) is False
+class TestAcpSocketIsCookieAuthenticated:
+    """`/ws/acp` is accepted on the loopback cookie alone, with no `?t=`.
 
-    def test_correct_token_accepted(self):
-        assert _acp_token_ok(_ACP_TOKEN) is True
+    Through the real `app`, so the gate, the origin check and `ws_acp` all
+    run; only `acp.serve_socket` is replaced, to observe that the route got
+    as far as handing the socket over.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+    """
 
-    def test_non_ascii_token_closes_socket(self, raw_client):
-        """``?t=%C3%A9`` URL-decodes to a non-ASCII str, which ``compare_digest``
-        used to reject with TypeError — an unauthenticated 500 on the auth path."""
+    # TestClient's websocket_connect sends `Host: testserver` whatever the
+    # base_url, and `_ws_origin_ok` refuses that single-label name, so both
+    # halves of the same-origin pair are set explicitly.
+    _ORIGIN = {"Host": "127.0.0.1", "Origin": "http://127.0.0.1"}
+
+    @pytest.fixture
+    def reached(self, monkeypatch):
+        from power_atlas import web as web_mod
+        assert web_mod.acp is not None, "the guarded acp import must succeed here"
+        got: list[str] = []
+
+        async def fake_serve(ws):
+            got.append(ws.url.query)
+            await ws.send_text("handed-over")
+            await ws.receive_text()
+
+        monkeypatch.setattr(web_mod.acp, "serve_socket", fake_serve)
+        return got
+
+    def test_accepted_with_the_cookie_and_no_token(self, raw_client, reached):
+        with raw_client.websocket_connect("/ws/acp", headers=self._ORIGIN) as ws:
+            assert ws.receive_text() == "handed-over"
+            ws.send_text("bye")
+        assert reached == [""], "the socket was not handed to acp on the cookie alone"
+
+    def test_refused_without_the_cookie(self, anonymous_client, reached):
+        """The other half: the cookie is now the socket's only credential."""
         with pytest.raises(WebSocketDisconnect) as exc:
-            with raw_client.websocket_connect("/ws/acp?t=%C3%A9"):
+            with anonymous_client.websocket_connect("/ws/acp", headers=self._ORIGIN):
                 pass
         assert exc.value.code == 1008
+        assert reached == []
+
+    def test_a_leftover_token_parameter_is_neither_needed_nor_checked(
+            self, raw_client, reached):
+        """A tab rendered before the upgrade still sends `?t=<old token>`;
+        nothing reads it any more, so it neither helps nor hurts."""
+        with raw_client.websocket_connect("/ws/acp?t=%C3%A9",
+                                          headers=self._ORIGIN) as ws:
+            assert ws.receive_text() == "handed-over"
+            ws.send_text("bye")
+        assert reached == ["t=%C3%A9"]
 
 
 # --- ACP phase 4: prompt, streaming fan-out, and reconnect replay ---
@@ -12134,7 +12181,6 @@ class TestRemoteBindDoesNotWidenTheHostAllowlist:
         status, body, _ = _peer_http(
             "/acp", [(b"host", host.encode()), _cookie_header()])
         assert status == 403, f"Host: {host} was served with the remote bind on"
-        assert _ACP_TOKEN.encode() not in body
 
     def test_the_configured_ip_is_admitted(self, remote_enabled):
         from power_atlas.web import _host_allowed
@@ -12622,9 +12668,8 @@ class TestSettingsSurface:
         assert config_mod.load_remote_secret() == body["secret"]
 
     def test_the_secret_route_is_not_cacheable(self, client):
-        """This body carries the **permanent** device secret, where `/acp`
-        carries the strictly weaker per-launch rotating `_ACP_TOKEN` — and
-        `/acp` already sets these headers. Nothing fetches this route yet,
+        """This body carries the **permanent** device secret. Nothing fetches
+        this route yet,
         which is why the header goes on before a consumer exists to cache it.
         """
         resp = client.get("/api/remote-access")
@@ -12641,7 +12686,7 @@ class TestBindSockets:
 
     def test_loopback_socket_is_exclusive_and_not_inheritable(self):
         """A second local process binding the identical 127.0.0.1:<port> would
-        hijack a surface serving `_ACP_TOKEN` and fronting `kiro-cli acp -a`.
+        hijack a surface fronting `kiro-cli acp -a`.
         `uvicorn.Config.bind_socket` sets `SO_REUSEADDR`, which permits it."""
         import socket as socket_mod
         import sys as sys_mod
