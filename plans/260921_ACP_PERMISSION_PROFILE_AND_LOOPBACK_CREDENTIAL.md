@@ -1,8 +1,8 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: In Progress — Phases 0-3 complete, reviewed, Green (deny floor removed from scope
-> entirely, user decision 2026-09-22, see § 9); Phase 4 closing, Phase 5 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-4 complete, reviewed, Green (deny floor removed from scope
+> entirely, user decision 2026-09-22, see § 9); Phase 5 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -551,16 +551,16 @@ stops verifying, or the rotate request logs the user out of the surface they use
 > throttle per-code.
 
 **Exit criteria**:
-- [ ] Local secret created on first call, reused on the second, rotates to a different value on demand
-- [ ] A truncated or short secret file reads as "no usable secret" rather than as a usable short one
-- [ ] A secret that cannot be persisted is still usable in-process for the process lifetime, and the condition is recorded where the settings route can report it
-- [ ] A login code is exchangeable exactly once; a replay is refused
-- [ ] A code older than its TTL is refused, with the TTL measured on `time.monotonic()` (asserted by patching the clock, not by sleeping)
-- [ ] Minting many codes without exchanging them does not grow the store without bound
-- [ ] The cookie verifies with `compare_digest`; tampered signature, tampered timestamp and future-dated stamp are each refused
-- [ ] Throttling one code's repeated failures does not refuse a different, valid code — the D-16 regression test
-- [ ] `rotate_local_secret`'s response re-authenticates its caller
-- [ ] `pytest tests/test_web.py --timeout=300` passes
+- [x] Local secret created on first call, reused on the second, rotates to a different value on demand
+- [x] A truncated or short secret file reads as "no usable secret" rather than as a usable short one — mutation-verified by the Security reviewer
+- [x] A secret that cannot be persisted is still usable in-process for the process lifetime, and the condition is recorded where the settings route can report it — `GET /api/settings`'s `local_secret: {persisted, error, path}`. *The first implementation could report `persisted: True` over a file a failed rotation had emptied; the review fix (`3a4f3b5`) made secret writes atomic, so the recorded status is now truthful*
+- [x] A login code is exchangeable exactly once; a replay is refused — mutation-verified; confirmed live in Step 5b
+- [x] A code older than its TTL is refused, with the TTL measured on `time.monotonic()` (asserted by patching the clock, not by sleeping) — mutation to `time.time` killed
+- [x] Minting many codes without exchanging them does not grow the store without bound — 64-code store, 512-entry failure table, both mutation-verified
+- [x] The cookie verifies with `compare_digest`; tampered signature, tampered timestamp and future-dated stamp are each refused — plus a review-fix test that a remote-key-signed cookie is refused when the local key is empty (D-17)
+- [x] Throttling one code's repeated failures does not refuse a different, valid code — the D-16 regression test — peer-keyed mutations killed
+- [x] `rotate_local_secret`'s response re-authenticates its caller — only for a caller already holding a valid `pa_local`; confirmed live in Step 5b
+- [x] `pytest tests/test_web.py --timeout=300` passes — 1631 at `6ff4b50`; 1646 after `3a4f3b5`; 1657 after the Phase 3 fix `4fc6923`
 
 **Covers**: SC-6 (credential half)
 
@@ -606,6 +606,8 @@ no-store, loopback-only *pattern* of `GET /api/remote-access`. Clipboard via `py
 - [ ] Guard ordering asserted, not assumed
 - [ ] Each of the three doors produces a URL that authenticates in one navigation
 - [ ] "Copy login link" is not reachable as an HTTP route — asserted by a request to any plausible mint path returning 404/403
+- [ ] **(added, Phase 4 review, 2026-09-23)** The exempt exchange route is exactly `GET /local-auth` (Phase 4's name); doors build their URL with `web.login_path(web.mint_login_code())`, never by hand
+- [ ] **(added, Phase 4 review, 2026-09-23)** The pywebview (peek) window survives a local-secret rotation: it loads its URL once at process start, so after `POST /api/local-secret/rotate` it would hold a dead cookie until restart. Either mint a fresh code and navigate to `login_path` whenever peek is shown, or assert and document the limitation
 - [ ] `pytest tests/test_web.py --timeout=300` passes
 
 **Covers**: SC-5, SC-6 (delivery half)
@@ -707,6 +709,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | R-16 Cross-plan comment collision | Low | Addressed: D-23 requires plan-slug attribution on every comment in a shared file |
 | R-17 Parity plan's Phase 6 ports code this plan deletes | Medium | Addressed: Phase 0 step 2 records the post-port names; Phase 6's deletion check is behavioural rather than name-based |
 | R-18 Clock correction rejects a valid credential | Low | Addressed: login-code TTL on `time.monotonic()` (D-21). The cookie's own wall-clock skew bound is inherited from the existing device-cookie design and is self-recovering via a fresh mint |
+| R-19 A same-user process reads `local-secret` and forges `pa_local`; or another local listener on a different `127.0.0.1` port receives the cookie (cookies are host-scoped and port-agnostic) and replays it for its 90-day life | High | **Accepted by the user, 2026-09-23** (Phase 4 review): the credential's real boundary is other OS users, web content, and processes that cannot read the user's profile — **not** code already running as the user, which this layer cannot stop (DPAPI does not help against a same-user caller; Follow-up #5's file handoff has the same limit). Cookie lifetime kept at 90 days by the same decision. Cross-port POST forgery is still blocked: `_origin_or_referer_ok` compares the exact origin including the port |
 
 ## 7) Verification
 
@@ -754,7 +757,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | 1 | Derived-agent generation and settings | **Complete** | 15/15 exit criteria; 3 commits (`6490554` feat, `ae36282` self-fix, `c2f324b` Step 5 review fix — 3 High findings, generate-only-when-`on` policy adopted); Green health, see § 9 and Review Log |
 | 2 | Mode wiring and frame enrichment | **Complete** | 7/7 exit criteria; 4 commits (`bf832a7`, `dba7684`, review fixes `04d9360`, `e0f25d0`); server-side derived-mode gate added; QA PASS 8/8; Green |
 | 3 | Settings and permission-prompt UI `[P:4]` | **Complete** | 10/10 exit criteria; 2 commits (`04982bf` feat, `4fc6923` review fix — server resolves Default, user decision 2026-09-23); QA PASS 13/13 over HTTP (no real browser); Green |
-| 4 | Local secret, login code, exchange `[P:3]` | Not started | Parallel-eligible with 3 |
+| 4 | Local secret, login code, exchange `[P:3]` | **Complete** | 10/10 exit criteria; 2 commits (`6ff4b50` feat, `3a4f3b5` review fix — atomic secret writes, guarded startup); R-19 accepted by the user 2026-09-23; QA PASS 11/11; Green |
 | 5 | Default-deny gate and the three doors | Not started | |
 | 6 | Retire `_ACP_TOKEN`, add `ACP_AVAILABLE` | Not started | Ordered: repoint before delete |
 | 7 | Live verification and documentation | Not started | Requires a user-performed restart |
@@ -1436,6 +1439,72 @@ One state-dependent observation from this QA, not a failure at the time: renamin
 a missing one after a good generation keeps the last-good file (D-10), so `in_effect` stays `true`
 and the panel showed no warning. Raised as review finding UX-3 and fixed in `4fc6923`.
 
+### Phase 4 (2026-09-23) — local secret, login code, exchange route
+
+Parallel group with Phase 3 (see § 9 Phase 3). Committed by the orchestrator.
+
+Implementation (2026-09-23, code: `6ff4b50`)
+
+Phase 4 adds a local secret, stored in its own file beside the remote secret. `config.py` gains `LOCAL_SECRET_PATH` (`CONFIG_DIR/local-secret`) and three functions: `load_local_secret`, `ensure_local_secret` and `rotate_local_secret`. A `local_secret_status()` accessor reports the secret's state. Loading applies the same fail-closed `REMOTE_SECRET_MIN_LEN` check as the remote secret, so an empty, whitespace-only, truncated or short file reads as "no usable secret". Both secret files are now written by one shared `_write_secret_file`, a fixed-mode create-truncate, which `_write_remote_secret` now calls as well. This approach was chosen over tmp then `os.replace` on purpose. A torn secret fails closed through the length check, while D-19's atomic rule exists for the derived agent file, whose torn state fails open.
+
+Under D-22, a write failure in `ensure_local_secret` does not return an empty secret. The generated value is kept in `_local_secret_memory` for the life of the process, and later calls return that same value. The failure is logged at ERROR and recorded in `_local_secret_persist_error`. `GET /api/settings` exposes the status as a new `local_secret: {persisted, error, path}` field, which never includes the secret. `rotate_local_secret` behaves like the remote rotation instead: a failed write changes nothing. Keeping a rotation only in memory would revoke cookies that the old file brings back at the next restart. `web.lifespan` loads the secret at startup with `set_local_secret(await asyncio.to_thread(ensure_local_secret))`.
+
+In `web.py`, the loopback cookie is `pa_local`. It is separate from `pa_device` and signed with a different key (D-17). It has the same shape as `make_device_cookie`, `subject.stamp.hmac`, with the constant subject `loopback` so one parser shape serves both cookies. `make_local_cookie` mints it. `_local_cookie_ok(scope)` is the check Phase 5's gate will call. It never raises, and it rejects a missing secret, a wrong name or subject, non-ASCII-digit stamps, stamps more than 300 s in the future, stamps older than 90 days, and bad signatures. The signature comparison uses `compare_digest` over UTF-8 bytes. `_set_local_cookie` is the one place that sets the cookie's attributes: `HttpOnly`, `SameSite=Strict`, `Path=/`, no `Domain` and no `Secure`. The cookie is therefore host-only, and neither its name nor its path depends on the Host header, so Phase 5 can introduce a canonical loopback host without changing this code.
+
+Login codes follow D-21. `power_atlas.web.mint_login_code()` is a plain in-process function, never a route, and a test asserts that no route's endpoint is the mint function. It returns `secrets.token_urlsafe(32)` and stores the code with its mint time from `_login_now`, a module seam that is `time.monotonic`. The store holds at most 64 codes, purges codes past the 120 s TTL, evicts the oldest code when full, and is guarded by a `threading.Lock` because Phase 5's tray and peek threads will mint while the event loop exchanges. `login_path(code)` builds the door URL path.
+
+The exchange is `GET /local-auth?code=...`. It checks the query length (512 bytes or less) and the field count before parsing, and checks the code's shape before the code reaches a throttle key or a log line. It then checks the backoff before the comparison. The code is consumed with a `compare_digest` against every outstanding code, so a code works exactly once. Success returns 303 to `/` with the cookie, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. Refusals are script-free HTML pages that say to open PowerAtlas from the tray: 400 for a malformed code, 429 for a throttled one, 403 for an unknown, expired or used one, and 503 when there is no secret.
+
+The hardening mirrors `remote_auth_exchange` except for the D-16 difference: failures are recorded per code in `_login_failures`. The existing backoff helpers take an optional `store` argument for this, and the table keeps the existing 512-entry bound. A code that one process keeps failing therefore never locks out another valid code from the same 127.0.0.1 peer. Refusal logging is limited to one WARNING per 60 s, because a local process can invent a new code for every request. The route is loopback-only because it is left out of `_REMOTE_ALLOWED_PATHS`. Phase 5 must exempt `/local-auth` from its gate.
+
+`POST /api/local-secret/rotate` writes the new secret before it applies it in-process, and it clears outstanding codes. It sets the caller's replacement cookie in the same response. It does this only for a caller that presented a valid `pa_local` cookie; any other caller gets 403 and nothing is rotated, so the route can never mint for a stranger. No route is gated yet, and `_ACP_TOKEN` is untouched.
+
+`tests/test_web.py`'s autouse `isolated_config` fixture now redirects `LOCAL_SECRET_PATH` and resets the D-22 state and `_LOCAL_SECRET`. The Phase 4 tests are grouped into four classes: `TestLocalSecretFile`, `TestLocalCookie`, `TestLoginCodeExchange` and `TestLocalSecretRotation`.
+
+Other files in the working tree were modified when this phase started and were not touched here: Phase 3's templates, static files and `tests/acp_page.test.mjs`, plus `docs/KNOWLEDGE.md`. `tests/test_config.py` has its own `isolated_config` that does not redirect `LOCAL_SECRET_PATH`. That file is outside this phase's scope, and none of its tests reach the new functions.
+
+**Divergences declared by the implementer:**
+
+- `_write_remote_secret` now delegates to a shared `_write_secret_file`. *(The create-truncate
+  choice it carried was **reversed** by the review fix — see below.)*
+- The exchange is `GET /local-auth?code=…`, not a POST form: a door opens a URL, so the first
+  browser load must be the exchange. Body/field ceilings became a 512-byte query cap plus
+  `parse_qsl(max_num_fields=64)`, both before parsing.
+- `POST /api/local-secret/rotate` re-issues a cookie only to a caller already holding a valid
+  `pa_local` (403 otherwise, nothing rotated) — without this the route would be a self-service mint
+  (D-3). Consequence: rotation is unusable until Phase 5's doors hand out cookies.
+- A failed rotate write changes nothing; D-22's in-memory rule applies only to `ensure`.
+- The startup load is wired in `web.lifespan`, not `__main__.py` (Phase 5's file).
+- D-22 is reported through a new `local_secret` field on `GET /api/settings`; the UI does not
+  render it yet.
+- The backoff helpers gained an optional `store` argument; remote behaviour and tests unchanged.
+- Helpers the plan does not name: `login_path(code)`, a once-per-60 s refusal WARNING, and clearing
+  outstanding codes on rotation.
+
+#### Step 5 review fix pass (2026-09-23, code: `3a4f3b5`)
+
+The Phase 4 review auto-fixes (F1 to F11) are applied. `config._write_secret_file` now writes atomically, the same way `save_config` does. It writes a `<name>.tmp` beside the target with mode 0o600, loops until every byte is written (a write that makes no progress counts as a failure), fsyncs, and then calls `os.replace`. On any failure it deletes the tmp. This reverses the Phase 4 choice of create-truncate: that approach truncated the working secret before a write that could then fail, so a failed rotation destroyed the file while reporting that nothing had changed. The remote secret shares the writer and otherwise behaves exactly as before. `ensure_local_secret` now tells a missing file apart from one it cannot read. Only a missing file, or one that is readable but holds unusable content, is replaced. A file that exists but cannot be read or decoded is left untouched and logged at WARNING, and the process uses a D-22 in-memory secret through the new `config.hold_local_secret_in_memory`. That function is also the new R-13 fallback when `lifespan`'s now-guarded local-secret setup raises anything unexpected. In both cases `/api/settings` reports the reason. The local secret read is capped at 4096 bytes. `/api/local-secret/rotate` now writes and applies the secret synchronously on the event loop, as the remote rotate route does, so concurrent rotations cannot leave the process and the file holding different secrets. A comment at the login-code clear records the accepted race with a door-minted code. The no-secret refusal on `/local-auth` now shares the rate-limited refusal logger and keeps ERROR severity, and the suppressed-refusal count is flushed during `lifespan` teardown. On the test side, the `isolated_config` fixture in `tests/test_config.py` now redirects `LOCAL_SECRET_PATH`, and two startup tests now use `local_enabled` for teardown. New tests cover failing and short low-level `os.write` calls, unreadable, undecodable and oversized files, startup surviving an unexpected error, loop-bound rotation, refusal of a remote-key cookie when the local key is empty, a per-candidate `compare_digest` in `_consume_login_code`, and rate-bounded and flushed refusal logging. Each new test was confirmed to kill its named mutation. Two items remain outside this phase's file scope: the comment at `agent_profile.py` lines 46-48, which still describes the old in-place secret write, and the plan's own Phase 4 divergence note, which F1 reverses.
+
+*(Both out-of-scope items are now closed: the `agent_profile.py` comment in `4fc6923`, and the
+divergence note above, which is marked reversed.)* Further fix-pass divergences: rotation runs
+synchronously on the loop rather than under an `asyncio.Lock` (a module-level lock binds to the
+first loop that contends it, and the suite runs several); only an *unreadable* existing file is
+protected from overwrite — a readable file with unusable content could never have signed a cookie,
+so it is still replaced; the remote loader keeps its old read behaviour (no cap, no
+missing-vs-unreadable distinction).
+
+#### Step 5b QA verification (2026-09-23) — PASS, 11/11
+
+An isolated `uvicorn` of the real app and real `lifespan` (scratch config dir, port 18917; never the
+live process or the real config dir), run against `6ff4b50`. Confirmed live: the lifespan creates the
+local secret; `GET /api/settings` reports `local_secret.persisted` without exposing the secret; a
+code minted in-process exchanges in one navigation for a 303 to `/` carrying `pa_local` with
+`HttpOnly`, `SameSite=Strict`, `Path=/`, plus `no-store` and `no-referrer`; a replay gets a 403 HTML
+page, a malformed code 400, a well-formed unknown code 403; rotation without a cookie is refused 403,
+and with a valid cookie writes a new secret and returns a replacement cookie; no route is gated yet.
+Not re-run after the fix pass: the fix pass changed the write path and startup guard, both covered by
+the fix pass's new unit tests, each with a confirmed-killed mutation.
+
 ## Follow-up Work (Deferred)
 
 1. **Fail-closed on generation failure.** R-3 accepted rather than fixed: a session whose derived agent
@@ -1651,6 +1720,38 @@ Finding 1's resolution changed Phase 2 behaviour (a `None` hook now reads as not
 `kiro_default` is resolved through the gate) — recorded in § 9 Phase 3. Cycle 2 skipped per user
 instruction ("1 qreview cycle per phase"); the fix pass's suite runs (693 page checks, 1657 + 440
 pytest) and 13 confirmed-killed mutations serve as this cycle's verification.
+
+### 2026-09-23 — Implementation Review (after Phase 4, persona: Security auditor, Reliability engineer)
+
+Implementation health: Green (all fixed or user-accepted). 16 findings merged across two personas
+(3 High, 6 Medium, 7 Low). The security audit ran 15 mutations (13 killed; the two survivors became
+findings 7 and 13); the reliability review probed four failure shapes live in a scratch directory.
+Both confirmed the exchange, cookie and rotate logic hold against a same-user HTTP caller.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | [Reliability] A rotate write failing after the truncating open emptied `local-secret`, reported no change, and signed every browser out at restart — reproduced | Fixed — secret writes atomic (tmp, full-write loop, fsync, `os.replace`) for local and remote (`3a4f3b5`) |
+| 2 | High | [Reliability] The new `lifespan` secret load had no `except Exception`, contrary to R-13 | Fixed — guarded, with an in-memory D-22 fallback reported by `/api/settings`; read capped at 4096 bytes |
+| 3 | High | [Security] A same-user process can read `local-secret` and forge `pa_local` indefinitely; no risk row covered it | User: accepted — 2026-09-23, recorded as R-19 with the honest boundary (not code running as the user) |
+| 4 | Medium | [Security] `pa_local` on `127.0.0.1` reaches every local port; another listener could replay it for 90 days | User: accepted — 2026-09-23, folded into R-19, cookie lifetime kept at 90 days |
+| 5 | Medium | [Reliability] `os.write`'s return value was ignored, so a short write was reported as persisted | Fixed — full-write loop; zero-progress write is a failure |
+| 6 | Medium | [Reliability] Two concurrent rotations could leave the process and the file holding different secrets | Fixed — rotation writes and applies synchronously on the loop, like the remote route |
+| 7 | Medium | [Security] A fallback to the remote key when the local key is empty survived every Phase 4 test | Fixed — test added; the mutation is now killed |
+| 8 | Medium | Both: an existing but unreadable secret file was silently overwritten, revoking every cookie | Fixed — only a missing (or readable-but-unusable) file is replaced; unreadable is kept, logged, in-memory fallback |
+| 9 | Medium | [Reliability] The peek webview holds a dead cookie after a rotation until restart | Fixed as a routing — added as a Phase 5 exit criterion (peek is Phase 5's door) |
+| 10 | Medium | [Reliability] `tests/test_config.py`'s fixture did not redirect `LOCAL_SECRET_PATH` | Fixed — redirected |
+| 11 | Low | [Reliability] The no-secret refusal logged an ERROR per request outside the rate limit | Fixed — routed through the rate-limited logger, ERROR kept |
+| 12 | Low | [Reliability] Clearing codes on rotation can kill a code a door minted a moment earlier | Fixed — kept deliberately (the Security review counts it as a protection); race named in a comment |
+| 13 | Low | [Security] The constant-time code comparison was claimed but not pinned; a dict-lookup mutation survived | Fixed — spy test requires one `compare_digest` per outstanding code |
+| 14 | Low | Both: the suppressed-refusal count from a final burst was never logged | Fixed — flushed during `lifespan` teardown |
+| 15 | Low | [Security] Two startup tests left `web._LOCAL_SECRET` set after they ran | Fixed — moved to the `local_enabled` fixture |
+| 16 | Low | [Reliability] `agent_profile.py`'s comment still described in-place secret writes after the fix | Fixed — corrected in `4fc6923` (Phase 3's fix pass, whose scope included that file) |
+
+Findings 3 and 4 record the user's answer to the escalation of 2026-09-23 ("Accept, keep 90 days").
+The security auditor's "remote refactor unchanged" check was re-confirmed by the fix pass's
+consumer list (every caller of the shared writer still returns its existing verdicts). Cycle 2
+skipped per user instruction ("1 qreview cycle per phase"); the fix pass's suite runs (1646 + 440
+pytest) and 10 confirmed-killed mutations serve as this cycle's verification.
 
 ## Harness Improvement Opportunities
 
