@@ -1,8 +1,8 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: In Progress — Phases 0-2 complete, reviewed, Green (deny floor removed from scope
-> entirely, user decision 2026-09-22, see § 9); Phases 3-4 next (parallel group)  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-3 complete, reviewed, Green (deny floor removed from scope
+> entirely, user decision 2026-09-22, see § 9); Phase 4 closing, Phase 5 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -509,16 +509,16 @@ pattern. Settings copy must state that the setting governs **newly created sessi
 > **Use instead:** the settings row reports on-but-not-in-effect.
 
 **Exit criteria**:
-- [ ] Toggle and base-agent input render and round-trip against the Phase 1 routes
-- [ ] The settings panel shows on-but-not-in-effect when generation has failed (SC-8's UI half)
-- [ ] Settings copy states the setting applies to newly created sessions only
-- [ ] A frame carrying a `consent` block renders capability and resource; one carrying **no** consent block still renders without throwing
-- [ ] A consent `resource` and a title each containing `<script>alert(1)</script>` and quote characters render as inert text — the escaping assertion R-7 promises
-- [ ] A 500-character shell title renders without truncation
-- [ ] **(added, Phase 2 divergence, 2026-09-22; revised after Phase 2 review)** With the permission setting `off`, the mode picker's Default entry does **not** offer `poweratlas-acp` as a selectable `modeId`. This is now a **UX** criterion, not the security gate: the Phase 2 review fix (`04d9360`) added a server-side `mode_gate_hook` that refuses `poweratlas-acp` with `bad_payload` unless the derived agent is `on`. The picker's job is to not offer an option the server will refuse, and to surface that refusal legibly if a stale tab sends it anyway
-- [ ] **(added, Phase 2 review, 2026-09-22)** Every `consent` field renders through `textContent` (never `innerHTML`) with CSS overflow/wrap, including a `resource` of tens of kilobytes — the only bound on these fields is the 1 MiB inbound-line cap (`MAX_AGENT_LINE_BYTES`), so the renderer is where their length is contained
-- [ ] **(added, Phase 2 review, 2026-09-22)** The in-page browser `Notification` built in `acp.html` from a permission frame's title is clamped client-side (200 chars, matching `MAX_PERMISSION_TITLE_CHARS`) — Phase 2 moved the server-side clamp to the OS toast only, so the frame title arriving in the page is now unbounded
-- [ ] `node tests/acp_page.test.mjs` passes
+- [x] Toggle and base-agent input render and round-trip against the Phase 1 routes — `acp_page.test.mjs` settings round-trip checks; confirmed live over HTTP in Step 5b
+- [x] The settings panel shows on-but-not-in-effect when generation has failed (SC-8's UI half) — badge, warning line and (after the review fix) the settings-gear dot; also warns when a failed base-agent change left the previous profile in effect
+- [x] Settings copy states the setting applies to newly created sessions only — reworded in the review fix to also cover sessions reopened later (P2)
+- [x] A frame carrying a `consent` block renders capability and resource; one carrying **no** consent block still renders without throwing — absent, `{}`, `null`, string, array and partial blocks all tested
+- [x] A consent `resource` and a title each containing `<script>alert(1)</script>` and quote characters render as inert text — the escaping assertion R-7 promises — mutation-verified by the Security reviewer: switching either sink to `innerHTML`/`insertAdjacentHTML` fails 6-15 tests
+- [x] A 500-character shell title renders without truncation
+- [x] **(added, Phase 2 divergence, 2026-09-22; revised after Phase 2 review)** With the permission setting `off`, the mode picker's Default entry does **not** offer `poweratlas-acp` as a selectable `modeId`. This is now a **UX** criterion, not the security gate: the Phase 2 review fix (`04d9360`) added a server-side `mode_gate_hook` that refuses `poweratlas-acp` with `bad_payload` unless the derived agent is `on`. The picker's job is to not offer an option the server will refuse, and to surface that refusal legibly if a stale tab sends it anyway — **met in a stronger form after the Phase 3 review** (user decision 2026-09-23): no picker option ever carries `poweratlas-acp`, and Default is resolved by the **server**, so the page never chooses the posture; a refused create is legible in the transcript on both pages
+- [x] **(added, Phase 2 review, 2026-09-22)** Every `consent` field renders through `textContent` (never `innerHTML`) with CSS overflow/wrap, including a `resource` of tens of kilobytes — the only bound on these fields is the 1 MiB inbound-line cap (`MAX_AGENT_LINE_BYTES`), so the renderer is where their length is contained — 48 KB resource test; the title is now height-bounded too (review fix)
+- [x] **(added, Phase 2 review, 2026-09-22)** The in-page browser `Notification` built in `acp.html` from a permission frame's title is clamped client-side (200 chars, matching `MAX_PERMISSION_TITLE_CHARS`) — Phase 2 moved the server-side clamp to the OS toast only, so the frame title arriving in the page is now unbounded
+- [x] `node tests/acp_page.test.mjs` passes — 687/687 at `04982bf`, 693/693 after the review fix `4fc6923`
 
 **Covers**: SC-1 (UI half), SC-4 (UI half), SC-8 (UI half)
 
@@ -753,7 +753,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | 0 | Pre-flight — preconditions, anchors, harness, rule set | **Complete — Gate resolved** | Deny floor failed bypass resistance (3/4 forms); user decision 2026-09-22 removed the floor from scope entirely (D-13 superseded) rather than patching it, see § 9 |
 | 1 | Derived-agent generation and settings | **Complete** | 15/15 exit criteria; 3 commits (`6490554` feat, `ae36282` self-fix, `c2f324b` Step 5 review fix — 3 High findings, generate-only-when-`on` policy adopted); Green health, see § 9 and Review Log |
 | 2 | Mode wiring and frame enrichment | **Complete** | 7/7 exit criteria; 4 commits (`bf832a7`, `dba7684`, review fixes `04d9360`, `e0f25d0`); server-side derived-mode gate added; QA PASS 8/8; Green |
-| 3 | Settings and permission-prompt UI `[P:4]` | Not started | Includes `transcript-renderer.js`; parallel-eligible with 4 |
+| 3 | Settings and permission-prompt UI `[P:4]` | **Complete** | 10/10 exit criteria; 2 commits (`04982bf` feat, `4fc6923` review fix — server resolves Default, user decision 2026-09-23); QA PASS 13/13 over HTTP (no real browser); Green |
 | 4 | Local secret, login code, exchange `[P:3]` | Not started | Parallel-eligible with 3 |
 | 5 | Default-deny gate and the three doors | Not started | |
 | 6 | Retire `_ACP_TOKEN`, add `ACP_AVAILABLE` | Not started | Ordered: repoint before delete |
@@ -1364,7 +1364,77 @@ Implementation (2026-09-22, code: `dba7684`)
 
 #### Step 5b QA verification (2026-09-22) — PASS, 8/8
 
-Driven over the real `/ws/acp` socket against an isolated `uvicorn` instance (same module-attribute isolation as Phase 1's QA; never the live process or the real `~/.kiro`). The one stub is `_supervisor.new_session`, which runs *after* the gate, so the "gate passes" probe spawns no real kiro-cli; the gate and `web.py`'s hook wiring are real. Confirmed: the real `lifespan` registers the hook; with the setting off, `new` for `poweratlas-acp` is refused with `bad_payload` before any `pending` frame or spawn; a hand-authored same-named file (state `unknown`) is still refused; after enabling through `POST /api/acp-permissions` the gate passes and reaches spawn; a vendor mode (`kiro_default`) is never gated. Not exercised here: the permission frame's consent projection against a live agent prompt — that needs a real kiro-cli permission round trip and is covered by the unit suite plus Phase 7's live probes.
+Driven over the real `/ws/acp` socket against an isolated `uvicorn` instance (same module-attribute isolation as Phase 1's QA; never the live process or the real `~/.kiro`). The one stub is `_supervisor.new_session`, which runs *after* the gate, so the "gate passes" probe spawns no real kiro-cli; the gate and `web.py`'s hook wiring are real. Confirmed: the real `lifespan` registers the hook; with the setting off, `new` for `poweratlas-acp` is refused with `bad_payload` before any `pending` frame or spawn; a hand-authored same-named file (state `unknown`) is still refused; after enabling through `POST /api/acp-permissions` the gate passes and reaches spawn; a vendor mode (`kiro_default`) is never gated. *(Superseded 2026-09-23 by the Phase 3 review fix `4fc6923`: `kiro_default` is now the Default entry's wire value and **is** resolved through the gate — see § 9 Phase 3.)* Not exercised here: the permission frame's consent projection against a live agent prompt — that needs a real kiro-cli permission round trip and is covered by the unit suite plus Phase 7's live probes.
+
+### Phase 3 (2026-09-23) — settings and permission-prompt UI
+
+Executed as a parallel group with Phase 4 (disjoint file scopes, confirmed by comparing the two
+returned changed-file manifests before committing). Both sub-agents ran commit-suppressed; the
+orchestrator committed each phase serially.
+
+Implementation (2026-09-23, code: `04982bf`)
+
+Phase 3 builds the UI half of the ACP permission profile. The dashboard settings menu gets an "Agent permissions" section. It has a Permission profile toggle (`#acpPermToggle`), a Base agent input (`#acpPermBaseAgent`), a scope line stating that the setting applies to newly created sessions only (D-12), and an on-but-not-in-effect report. The report follows the `restart_pending` drift-badge pattern: a "not in effect" badge on the toggle row, plus an amber warning line that carries `generation_error`. Every element is addressed by id, never by `.topbar-toggle`. The toggle posts `{enabled: <value it is moving to>}` to `POST /api/acp-permissions`, because that route sets the value rather than flipping it. Success is read from the body's `ok`, because a refusal arrives as HTTP 200. The base agent is trimmed and saved through `/api/save-setting` under `acp_permission_base_agent`. After a rejection, the value in force is written back into the field, even when the field still has focus after an Enter save. The rows render `in_effect`, never the toggle alone. The toggle has no Jinja initial state: that would need a render-context key in `web.py`, which is Phase 4's file. It is filled from `GET /api/acp-permissions` on load and whenever the tab becomes visible again.
+
+The permission prompt now renders the frame's `consent` block through a new `permissionConsentBlock` in `transcript-renderer.js`. `addPermissionRequest` gains an optional trailing `consent` argument, which both `acp.html` and `index.html` pass. Only string values of the five allowlisted fields are shown, with `matchedRule` shown as "capability -> effect". Values are set through `textContent` only. An absent, empty or malformed block renders the prompt exactly as before. Length is contained in `style.css`: consent values wrap anywhere and scroll inside a 12em maximum height. The now-unclamped title gains `overflow-wrap: anywhere` and is never cut. The in-page browser `Notification` in `acp.html` clamps the title to 200 characters (`NOTIFY_PERMISSION_TITLE_MAX`, which matches `MAX_PERMISSION_TITLE_CHARS`), while the transcript row keeps the full title.
+
+SC-3's picker rule lives in `composer-chrome.js` so both pages share it. No picker option ever carries `poweratlas-acp`. Instead, the Default choice is rewritten at send time to the derived agent only when `enabled && in_effect`. When the profile is off, or on but not in effect, it sends `kiro_default`, the server's own fallback. A user-named base agent is not a valid `modeId`, so "base agent when off" means `kiro_default` on the wire. The state is re-read when a picker opens, on page load and when the tab becomes visible in `/acp`, and after any `bad_payload` error. That last case means a stale tab whose derived-agent create was refused shows the server's message and sends `kiro_default` next time. A Default create waits for the state read if one has never completed or one is in flight, rather than guessing `kiro_default` while the profile might be on. The dashboard's quick create also resolves through the same rule; before, it hardcoded `kiro_default`.
+
+Tests: `tests/acp_page.test.mjs` gains 17 checks. They cover consent rendering, malformed consent, an injection payload in the title and resource, a 500-character title, a 48 KB resource with its CSS containment, the notification clamp, the picker in the off, in-effect, on-but-not-in-effect and race cases on both pages, the stale-tab refusal, and the settings rows. The panel and dashboard-picker harnesses gained the permission elements and an `/api/acp-permissions` route. The existing quick-create check became async because the first Default create now waits one microtask for the state read. The result is 687 passed, 0 failed, and a mutation run confirmed that the new checks fail when the behaviour is removed.
+
+**Divergences declared by the implementer** (judged by the review; the client-side resolver ones
+are superseded by the review fix below): no Jinja initial state for the toggle (`web.py` was Phase
+4's file); "base agent when off" sent as `kiro_default`, since a user-named base is not a valid
+`modeId`; a second copy of the `poweratlas-acp` literal in `composer-chrome.js` *(removed by the
+review fix)*; the shared resolver placed in `composer-chrome.js` *(removed by the review fix)*;
+`dashRailQuickCreate` made to resolve Default too; a Default create made to wait for the state read
+*(removed by the review fix)*.
+
+#### Step 5 review fix pass (2026-09-23, code: `4fc6923`)
+
+Both reviewers independently found the same High: when the page's read of `/api/acp-permissions`
+failed, it resolved Default to `kiro_default`, starting an ungated session that looked gated. On the
+remote phone page the read *always* fails (the route is not in `_REMOTE_ALLOWED_PATHS`), and Phase 5
+would add stale tabs. **User decision, 2026-09-23: the server resolves Default.** The fix pass
+implemented that plus 13 auto-fixes:
+
+The Phase 3 review fixes move the Default decision from the page to the server, as the user decided on 2026-09-23 (G1). Every page path now sends the Default entry's own value, `kiro_default`. That covers the /acp picker, the dashboard picker, the dashboard quick create, and both close-then-create paths. The client resolver in `composer-chrome.js` (`DERIVED_AGENT_MODE`, `refreshAcpPermissionState`, `wireTaskMode`, `withWireTaskMode`) is deleted along with every call site, so no page needs `/api/acp-permissions` to create a session. The settings panel still reads that route for display. In `acp.py`, `_handle_new` treats `kiro_default` and an omitted mode as Default. It asks `mode_gate_hook` whether the permission profile is in effect, then binds `DERIVED_AGENT_NAME` if it is and `kiro_default` otherwise, which is D-10's fallback. An explicit `poweratlas-acp` request uses the same predicate and is refused unless in effect. The refusal copy now points to Settings and no longer says "turn it on". A hook that raises refuses the create on both paths with its own "could not check" message, rather than falling back to an ungated session. A `None` hook reads as not in effect: Default binds `kiro_default` and the derived agent is refused. The created `session` frame now carries the bound `mode`. `web._derived_agent_in_effect` is now exactly `_acp_permission_state`'s `in_effect` (setting on and file `on`), so a leftover `on` file left behind while the setting is off is never used. `acp.py` still imports only `.config` and `.launcher` (D-20). One consequence is deliberate: while the profile is in effect, `kiro_default` cannot be chosen explicitly. Another is that every Default create now costs one off-loop config read plus one file classification. On the dashboard, a refused create now replaces the "Creating session…" placeholder with the server's message in the transcript, and brings the composer back when a session is still attached (G2). The settings rows gained several things. They warn when a base-agent change failed but the previous profile is still in effect (G3). They light the settings-gear dot, shared with restart drift and combined by OR, while the profile is on but not working as set (G4). The scope note now covers reopened sessions (G5), and a visible line says what on and off mean (G6). The toggle is a keyboard-operable `role="switch"` with `aria-checked` kept in sync (G7). Each warning names a next step (G9). A failed state read shows as "could not read" (`aria-checked="mixed"`) instead of off (G10). The error toasts have a dismiss button (G12). Permission prompts bound the unclamped title's height with internal scroll (G8). Known capability and source identifiers show as plain words with the raw id kept, looked up with `hasOwnProperty` (G11). A doc comment now names `permissionConsentBlock` correctly (G13), and `agent_profile.py`'s D-19 comment now describes the atomic secret writes (G14). Python tests cover Default binding the derived agent when in effect, `kiro_default` when off and when on but not in effect, refusal when the hook raises, the leftover `on` file, and the bound mode in the frame. The Node harness drops the resolver checks and asserts that every Default path sends `kiro_default` without reading `/api/acp-permissions`. Six Python and seven JS mutations were each confirmed killed. Results: `node tests/acp_page.test.mjs` 693 passed; `tests/test_web.py` 1657 passed; the other modules 440 passed and 2 skipped; `_check_test_names.py` is clean.
+
+**Divergences from the fix pass, recorded for the reader:**
+
+- While the profile is in effect, `kiro_default` cannot be chosen explicitly: the Default value
+  always binds the derived agent. This is SC-3 read literally, and the intent of "on".
+- **Reverses a Phase 2 statement.** § 9 Phase 2 says "`None` is permissive, so `acp.py` stays
+  usable standalone". After `4fc6923` a `None` hook reads as *not in effect*: Default binds
+  `kiro_default` and an explicit `poweratlas-acp` is refused. `acp.py` is still usable standalone;
+  it just never offers the derived agent without a hook to vouch for it.
+- An omitted `mode` is now resolved as Default, rather than passed through as `None` — otherwise a
+  client that omits the mode would bypass the profile.
+- **Extends Phase 2's cost note.** Every Default create now does one `load_config()` plus one
+  derived-file classification, off the event loop. Phase 2 recorded that cost as derived-mode-only.
+- A hook that raises refuses with a dedicated "could not check" message, distinct from "not in
+  effect", so a broken check is never reported as the profile being off.
+- The bound mode travels only on the created `session` frame (`mode`). No page renders it: SC-8
+  and the 2026-09-21 decision reject a per-session badge.
+- The settings-gear dot is the existing `topbarPendingDot`, shared with restart drift, each source
+  keeping its own flag so one cannot clear the other's reason.
+- Reported, not fixed (outside scope): `autostartToggle` and `notifyToggle` have the same keyboard
+  gap the new toggle's fix closed; after a refused dashboard create, the attached session's earlier
+  transcript is not repainted (predates Phase 3).
+
+#### Step 5b QA verification (2026-09-23) — PASS, 13/13 (HTTP), with a gap named
+
+The Chrome extension was not connected, so no real browser was driven. The substitute: an isolated
+`uvicorn` of the real app (scratch config and `~/.kiro/agents`, port 18918), asserting the served
+`index.html` carries every new settings element and the scope copy, the served
+`composer-chrome.js`/`acp.html` load, and the full API round trip the rows depend on — off/absent
+initially, on → `in_effect`, a bad base-agent name rejected, off → absent. DOM behaviour itself is
+covered by the node harness (693 checks). **Not exercised in a real browser**: layout, long-content
+containment, and screen-reader announcement — carried to Step 9b.
+
+One state-dependent observation from this QA, not a failure at the time: renaming the base agent to
+a missing one after a good generation keeps the last-good file (D-10), so `in_effect` stays `true`
+and the panel showed no warning. Raised as review finding UX-3 and fixed in `4fc6923`.
 
 ## Follow-up Work (Deferred)
 
@@ -1547,6 +1617,41 @@ re-dispatched after the user confirmed quota was back, and completed.
 Cycle 2 skipped per user instruction ("1 qreview cycle per phase"). The fix pass's own suite run (2020
 passed, 2 skipped) and the 8/8 live Step 5b probe serve as this cycle's verification.
 
+### 2026-09-23 — Implementation Review (after Phase 3, persona: Security auditor, End-user advocate)
+
+Implementation health: Green (all fixed; one by user decision). 18 findings merged across two
+personas (1 High — raised independently by both — 8 Medium, 9 Low). Both ran in isolated worktrees
+and mutation-verified the escaping, notification-clamp and not-in-effect tests.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Both: a failed or non-OK permission-state read resolved Default to `kiro_default`, starting an ungated session that looked gated — always, from the phone | Fixed — user decision 2026-09-23: the server resolves Default through the gate; the client resolver is deleted (`4fc6923`) |
+| 2 | Medium | [Security] After Phase 5 gates `/api/*`, a stale tab would hit finding 1 on every create | Fixed — same fix; creating a session no longer reads `/api/acp-permissions` |
+| 3 | Medium | [End-user] A server-refused create on the dashboard left "Creating session…" with the composer hidden; only a 4 s toast explained | Fixed — the refusal replaces the placeholder in the transcript and restores the composer |
+| 4 | Medium | [End-user] A failed base-agent change kept the last-good profile silently; also found by Step 5b QA | Fixed — warns "Still using the previous profile…" when `generation_ok` is false |
+| 5 | Medium | [End-user] Not-in-effect was visible only inside the closed settings menu | Fixed — lights the settings-gear dot, shared with restart drift by OR |
+| 6 | Medium | [End-user] The scope copy omitted sessions reopened later, which keep their creation-time agent (P2) | Fixed — reworded to cover reopened sessions |
+| 7 | Medium | [End-user] What on and off mean lived only in a tooltip keyboard and touch users cannot reach | Fixed — visible one-line description, referenced by `aria-describedby` |
+| 8 | Medium | [End-user] The new toggle was a `div` with no keyboard operation or switch semantics | Fixed — `role="switch"`, `tabindex`, `aria-checked`, Enter/Space; the two older toggles reported, not changed |
+| 9 | Medium | [End-user] An unbounded title above the consent block could push Allow/Deny off screen | Fixed — the title gets a max-height with internal scroll; never truncated |
+| 10 | Low | [Security] A second copy of the `poweratlas-acp` literal in `composer-chrome.js` reintroduced D-20's drift risk | Fixed — removed with the client resolver |
+| 11 | Low | Both: a Default create waiting on a hung state read never happened and said nothing | Fixed — the wait is gone with server-side resolution |
+| 12 | Low | [End-user] The refusal copy said "turn it on" even when the profile was already on but not in effect | Fixed — rewritten to point to Settings |
+| 13 | Low | [End-user] Warnings showed raw errors with no next step | Fixed — every warning ends with a next step |
+| 14 | Low | [End-user] A failed state read on load showed the toggle as off | Fixed — shown as "could not read" (`aria-checked="mixed"`) |
+| 15 | Low | [End-user] Consent labels showed raw identifiers such as `fs_write` | Fixed — plain words with the raw id kept; `hasOwnProperty` lookup |
+| 16 | Low | [End-user] The new error toasts lacked the dismiss button the others carry | Fixed — added |
+| 17 | Low | [Security] A doc comment named `addPermissionConsent`, not `permissionConsentBlock` | Fixed — renamed |
+| 18 | Low | [End-user] The dashboard refusal path was not asserted by any test | Fixed — two dashboard assertions added |
+
+Not a reviewer finding, recorded for completeness: the Phase 4 fixer reported `agent_profile.py`'s
+D-19 comment still described in-place secret writes; corrected in `4fc6923`.
+
+Finding 1's resolution changed Phase 2 behaviour (a `None` hook now reads as not in effect, and
+`kiro_default` is resolved through the gate) — recorded in § 9 Phase 3. Cycle 2 skipped per user
+instruction ("1 qreview cycle per phase"); the fix pass's suite runs (693 page checks, 1657 + 440
+pytest) and 13 confirmed-killed mutations serve as this cycle's verification.
+
 ## Harness Improvement Opportunities
 
 - All three `/qexplore` Step 1.5 sub-agents, and the `/qplan` doc-impact sub-agent, refused the brief's
@@ -1587,3 +1692,11 @@ passed, 2 skipped) and the 8/8 live Step 5b probe serve as this cycle's verifica
   have been misled — suggested change: when a Gate resolution supersedes a design decision referenced by
   a not-yet-executed phase's own prose (not just its exit criteria), `/qdev` should re-read and correct
   the affected phase body at resolution time, not only append to its criteria.
+- The Agent tool's `isolation: "worktree"` created every review worktree from `origin/main`, not from
+  local `main`, so all four Phase 3/4 reviewers saw pre-Phase-3 code and (correctly) stopped; the
+  harness then deleted each worktree when its agent stopped unchanged, so resuming them found no
+  directory. Recreating worktrees by hand then failed on Windows' 260-character path limit
+  (`_proto/` images, `plans/done/` names under the long scratchpad path) — cost: roughly 20 minutes
+  and four wasted dispatches before any review began — suggested change: `/qdev`'s review dispatch
+  should say "unpushed commits: build the worktree yourself from local HEAD" and name a sparse
+  checkout (`src/ tests/ plans/*.md` plus governance files) as the default on Windows.
