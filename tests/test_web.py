@@ -4494,6 +4494,11 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._sweep_failures.clear()
 
 
+# `_new_with_gate`'s "send no `mode` key at all".
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1).
+_OMITTED = object()
+
+
 def _acp_conn(acp_mod):
     conn = acp_mod._Connection(_SinkWs())
     acp_mod._registry.connections.add(conn)
@@ -6800,14 +6805,17 @@ class TestAcpTaskModeSelection:
         "autonomous", "semantic_reviewer", "kiro_default",
     ])
     def test_handle_new_accepts_every_valid_task_mode(
-            self, acp_store, tmp_path, mode):
+            self, acp_store, tmp_path, mode, monkeypatch):
         """All 8 modes kiro-cli's own session/new response enumerates
         (plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md Phase 2 divergence 1) are
         accepted by the backend -- not just the 5 the UI picker itself offers
         (vibe/autonomous/semantic_reviewer are backend robustness only, per
         that plan's Phase 3 design). The derived agent, the 9th value, has its
-        own test below."""
+        own test below. No gate hook, so Default (`kiro_default`) binds
+        itself (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3,
+        G1)."""
         acp_mod, _store = acp_store
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", None)
         conn = _acp_conn(acp_mod)
         seen = {}
 
@@ -6824,8 +6832,8 @@ class TestAcpTaskModeSelection:
         assert not errors, errors
 
     def test_handle_new_accepts_the_derived_agent_as_a_mode(
-            self, acp_store, tmp_path):
-        """The derived agent is selectable through ``modeId``.
+            self, acp_store, tmp_path, monkeypatch):
+        """The derived agent is selectable through ``modeId`` while in effect.
 
         PowerAtlas generates ``~/.kiro/agents/poweratlas-acp.md``, and probe P1
         established that any file under ``~/.kiro/agents/`` registers in
@@ -6836,11 +6844,15 @@ class TestAcpTaskModeSelection:
         string, and with an identity check that ``acp`` names that same object,
         because D-20's point is one definition site: a copied literal in
         ``acp.py`` would drift from the filename ``agent_profile`` writes.
+        The gate is installed as "in effect": with no hook the derived agent
+        is refused (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+        Phase 3, G1).
         """
         from power_atlas.config import DERIVED_AGENT_NAME
         acp_mod, _store = acp_store
         assert acp_mod.DERIVED_AGENT_NAME is DERIVED_AGENT_NAME
         assert DERIVED_AGENT_NAME in acp_mod._VALID_TASK_MODES
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", lambda: True)
         conn = _acp_conn(acp_mod)
         seen = {}
 
@@ -6878,20 +6890,27 @@ class TestAcpTaskModeSelection:
             seen["mode"] = mode
             return {"sessionId": "taskmode-000g", "cwd": cwd}
 
+        payload = {"cwd": str(tmp_path)}
+        if mode is not _OMITTED:
+            payload["mode"] = mode
         with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
-            asyncio.run(acp_mod._handle_new(
-                conn, {"cwd": str(tmp_path), "mode": mode}))
-        errors = [f["payload"] for f in _queued(conn)
-                  if f.get("type") == "error"]
+            asyncio.run(acp_mod._handle_new(conn, payload))
+        frames = _queued(conn)
+        errors = [f["payload"] for f in frames if f.get("type") == "error"]
+        # The `session` frame the creator gets, for the bound-mode assertions
+        # (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3, G1).
+        self.session_frames = [f["payload"] for f in frames
+                               if f.get("type") == "session"]
         return seen["mode"], errors, len(calls)
 
-    def test_derived_mode_is_accepted_with_no_gate_hook(
+    def test_no_gate_hook_reads_as_not_in_effect(
             self, acp_store, tmp_path, monkeypatch):
-        """`None` is permissive: acp.py on its own, and every test that does
-        not opt in, keeps accepting the derived agent."""
+        """`None` (acp.py on its own) is "not in effect" on both paths: Default
+        still creates a session, as `kiro_default`, and the derived agent is
+        refused, since nothing vouches that its file exists.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1)."""
         acp_mod, _store = acp_store
         monkeypatch.setattr(acp_mod, "mode_gate_hook", None)
-        conn = _acp_conn(acp_mod)
         seen = {}
 
         async def fake_new_session(self, cwd, mode=None):
@@ -6899,10 +6918,76 @@ class TestAcpTaskModeSelection:
             return {"sessionId": "taskmode-000h", "cwd": cwd}
 
         with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+            conn = _acp_conn(acp_mod)
+            asyncio.run(acp_mod._handle_new(
+                conn, {"cwd": str(tmp_path), "mode": "kiro_default"}))
+            assert seen.pop("mode") == "kiro_default"
+            assert not [f for f in _queued(conn) if f.get("type") == "error"]
+            conn = _acp_conn(acp_mod)
             asyncio.run(acp_mod._handle_new(
                 conn, {"cwd": str(tmp_path), "mode": acp_mod.DERIVED_AGENT_NAME}))
-        assert seen["mode"] == acp_mod.DERIVED_AGENT_NAME
-        assert not [f for f in _queued(conn) if f.get("type") == "error"]
+        assert "mode" not in seen, "the derived agent reached new_session()"
+        assert [f["payload"]["code"] for f in _queued(conn)
+                if f.get("type") == "error"] == ["bad_payload"]
+
+    # ---- Default is resolved by the server --------------------------------
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1, user
+    # decision 2026-09-23). The page sends Default as `kiro_default` (or, from
+    # an older client, no mode at all); `_handle_new` binds the derived agent
+    # while the permission profile is in effect and `kiro_default` otherwise,
+    # and tells the page which through the `session` frame's `mode`.
+
+    @pytest.mark.parametrize("mode", ["kiro_default", _OMITTED])
+    def test_default_binds_the_derived_agent_while_in_effect(
+            self, acp_store, tmp_path, monkeypatch, mode):
+        acp_mod, _store = acp_store
+        bound, errors, runs = self._new_with_gate(
+            acp_mod, tmp_path, monkeypatch, lambda: True, mode)
+        assert bound == acp_mod.DERIVED_AGENT_NAME
+        assert not errors, errors
+        assert runs == 1
+        assert [f["mode"] for f in self.session_frames] == [
+            acp_mod.DERIVED_AGENT_NAME]
+
+    @pytest.mark.parametrize("mode", ["kiro_default", _OMITTED])
+    def test_default_binds_kiro_default_while_not_in_effect(
+            self, acp_store, tmp_path, monkeypatch, mode):
+        """Off, or on but not in effect: the hook answers False either way,
+        and Default falls back to `kiro_default` (D-10)."""
+        acp_mod, _store = acp_store
+        bound, errors, runs = self._new_with_gate(
+            acp_mod, tmp_path, monkeypatch, lambda: False, mode)
+        assert bound == "kiro_default"
+        assert not errors, errors
+        assert runs == 1
+        assert [f["mode"] for f in self.session_frames] == ["kiro_default"]
+
+    @pytest.mark.parametrize("mode", ["kiro_default", _OMITTED])
+    def test_default_is_refused_when_the_gate_raises(
+            self, acp_store, tmp_path, monkeypatch, caplog, mode):
+        """Fails closed: binding `kiro_default` when the check broke would
+        start an ungated session exactly when it should have been gated."""
+        acp_mod, _store = acp_store
+
+        def boom():
+            raise RuntimeError("gate exploded")
+
+        with caplog.at_level("ERROR", logger=acp_mod.log.name):
+            bound, errors, _runs = self._new_with_gate(
+                acp_mod, tmp_path, monkeypatch, boom, mode)
+        assert bound == "not called"
+        assert [e["code"] for e in errors] == ["bad_payload"], errors
+        assert "could not check" in errors[0]["message"]
+        assert "gate exploded" in caplog.text
+        assert self.session_frames == []
+
+    def test_a_vendor_mode_session_frame_carries_its_own_mode(
+            self, acp_store, tmp_path, monkeypatch):
+        acp_mod, _store = acp_store
+        bound, errors, _runs = self._new_with_gate(
+            acp_mod, tmp_path, monkeypatch, lambda: True, "spec")
+        assert bound == "spec"
+        assert [f["mode"] for f in self.session_frames] == ["spec"]
 
     def test_derived_mode_is_refused_while_the_gate_says_off(
             self, acp_store, tmp_path, monkeypatch):
@@ -6917,6 +7002,10 @@ class TestAcpTaskModeSelection:
         assert mode == "not called"
         assert [e["code"] for e in errors] == ["bad_payload"], errors
         assert "not in effect" in errors[0]["message"]
+        # UX#10 (Phase 3 review): the copy must read correctly when the
+        # profile is on but not in effect, so it no longer says "turn it on".
+        assert "Turn it on" not in errors[0]["message"]
+        assert "Settings" in errors[0]["message"]
         assert runs == 1
 
     def test_derived_mode_is_accepted_while_the_gate_says_on(
@@ -6949,8 +7038,9 @@ class TestAcpTaskModeSelection:
 
     def test_the_gate_is_not_consulted_for_any_other_mode(
             self, acp_store, tmp_path, monkeypatch):
-        """Only the derived agent pays for the file read, and an off gate
-        does not leak into the vendor modes."""
+        """Only Default and the derived agent pay for the gate's config and
+        file read (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+        Phase 3, G1), and an off gate does not leak into the vendor modes."""
         acp_mod, _store = acp_store
         mode, errors, runs = self._new_with_gate(
             acp_mod, tmp_path, monkeypatch, lambda: False, "spec")
@@ -6958,9 +7048,14 @@ class TestAcpTaskModeSelection:
         assert not errors, errors
         assert runs == 0
 
-    def test_handle_new_omitted_mode_passes_none_through(
-            self, acp_store, tmp_path):
+    def test_handle_new_omitted_mode_is_resolved_as_default(
+            self, acp_store, tmp_path, monkeypatch):
+        """No mode at all is Default: `new_session` would send it as
+        `kiro_default`, so it is resolved the same way rather than passed
+        through as None, which would skip the permission profile.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1)."""
         acp_mod, _store = acp_store
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", None)
         conn = _acp_conn(acp_mod)
         seen = {}
 
@@ -6970,7 +7065,7 @@ class TestAcpTaskModeSelection:
 
         with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
             asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
-        assert seen["mode"] is None
+        assert seen["mode"] == "kiro_default"
 
     @pytest.mark.parametrize("bad_mode", [
         "", "KIRO_DEFAULT", "spec ", "Spec", "not-a-mode",
@@ -23411,6 +23506,78 @@ class TestGenerationRunsAtStartup:
         gates = self._run_lifespan_capturing_gate(web_mod)
         assert ap.derived_block_state() == "absent"
         assert gates[0]() is False
+
+    # ---- Default through the real gate ------------------------------------
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1): what
+    # the picker's Default binds, decided by `web._derived_agent_in_effect`
+    # (the same predicate as the settings panel's `in_effect`) over the real,
+    # redirected config and agents dir.
+
+    @staticmethod
+    def _default_binds(acp_store, monkeypatch, tmp_path):
+        from power_atlas import web as web_mod
+        acp_mod, _store = acp_store
+        monkeypatch.setattr(acp_mod, "mode_gate_hook",
+                            web_mod._derived_agent_in_effect)
+        conn = _acp_conn(acp_mod)
+        seen = {"mode": "not called"}
+
+        async def fake_new_session(self, cwd, mode=None):
+            seen["mode"] = mode
+            return {"sessionId": "gate-real-0001", "cwd": cwd}
+
+        with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+            asyncio.run(acp_mod._handle_new(
+                conn, {"cwd": str(tmp_path), "mode": "kiro_default"}))
+        return seen["mode"]
+
+    def test_default_binds_the_derived_agent_when_in_effect(
+            self, isolated_config, acp_store, monkeypatch, tmp_path):
+        from power_atlas.config import DERIVED_AGENT_NAME
+        ap = _agent_profile()
+        _write_base(isolated_config)
+        _enable_in_config(isolated_config)
+        ap.regenerate(enabled=True, base_agent="kiro_default")
+        assert ap.derived_block_state() == "on"
+        assert self._default_binds(
+            acp_store, monkeypatch, tmp_path) == DERIVED_AGENT_NAME
+
+    def test_default_binds_kiro_default_when_off(
+            self, isolated_config, acp_store, monkeypatch, tmp_path):
+        _write_base(isolated_config)
+        assert self._default_binds(
+            acp_store, monkeypatch, tmp_path) == "kiro_default"
+
+    def test_default_binds_kiro_default_when_on_but_not_in_effect(
+            self, isolated_config, acp_store, monkeypatch, tmp_path):
+        """On, but no base agent on disk, so no derived agent was ever
+        generated: D-10's fallback, not a refusal."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _enable_in_config(isolated_config)
+        asyncio.run(web_mod._sync_derived_agent())  # guarded; it logs, not raises
+        assert ap.last_generation().ok is False
+        assert ap.derived_block_state() != "on"
+        assert web_mod._acp_permission_state(
+            web_mod.load_config())["in_effect"] is False
+        assert self._default_binds(
+            acp_store, monkeypatch, tmp_path) == "kiro_default"
+
+    def test_a_leftover_on_file_is_not_used_while_the_setting_is_off(
+            self, isolated_config, acp_store, monkeypatch, tmp_path):
+        """A derived agent that could not be deleted when the setting went off
+        still classifies as `"on"`. The gate is the full `in_effect`
+        predicate, so the setting being off wins."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_base(isolated_config)
+        ap.regenerate(enabled=True, base_agent="kiro_default")
+        assert ap.derived_block_state() == "on"
+        from power_atlas import config as config_mod
+        assert config_mod.load_config().acp_permissions_enabled is False
+        assert web_mod._derived_agent_in_effect() is False
+        assert self._default_binds(
+            acp_store, monkeypatch, tmp_path) == "kiro_default"
 
     def test_lifespan_generates_the_derived_agent(self, isolated_config):
         from power_atlas import web as web_mod

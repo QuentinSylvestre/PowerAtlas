@@ -117,12 +117,18 @@
            session would get. -->
       <div class="topbar-menu-divider"></div>
       <div class="topbar-menu-section-label">Agent permissions</div>
-      <div id="acpPermToggle" class="topbar-menu-row topbar-toggle" onclick="toggleAcpPermissions(this)" title="Permission profile: ACP sessions PowerAtlas creates ask before running shell commands, writing files and similar. Off keeps today's behaviour, where they never ask.">
+      <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G7):
+           a keyboard-operable switch. aria-checked is kept in sync by
+           _acpPermSetToggle(); "mixed" while the state could not be read
+           (G10). The Startup toggles above share the gap and are out of scope. -->
+      <div id="acpPermToggle" class="topbar-menu-row topbar-toggle" role="switch" tabindex="0" aria-checked="false" aria-describedby="acpPermDesc" onclick="toggleAcpPermissions(this)" onkeydown="acpPermToggleKey(event, this)" title="Permission profile: ACP sessions PowerAtlas creates ask before running shell commands, writing files and similar. Off keeps today's behaviour, where they never ask.">
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6Z"/></svg>
         <span class="topbar-menu-label">Permission profile</span>
         <span id="acpPermBadge" class="restart-badge" hidden>not in effect</span>
         <span class="topbar-switch"><span class="topbar-switch-knob"></span></span>
       </div>
+      <!-- G6: what on and off mean, visible rather than only in the tooltip. -->
+      <div id="acpPermDesc" class="topbar-menu-note">On: new ACP sessions ask before running commands or writing files. Off: they never ask.</div>
       <div class="topbar-menu-row acp-perm-base-group" title="The kiro-cli agent the permission profile is built from. It is read, never modified.">
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
         <label class="topbar-menu-label peek-label" for="acpPermBaseAgent">Base agent</label>
@@ -134,7 +140,9 @@
                  onchange="saveAcpPermissionBaseAgent(this)">
         </div>
       </div>
-      <div id="acpPermScopeNote" class="topbar-menu-note">Applies to newly created sessions only. Sessions already open keep the permissions they started with.</div>
+      <!-- G5: resumed sessions too — session/load keeps the agent the session
+           was created with (probe P2, D-12). -->
+      <div id="acpPermScopeNote" class="topbar-menu-note">Applies to sessions created after this change. Existing sessions, including ones you reopen later, keep the permissions they were created with.</div>
       <div id="acpPermWarn" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
 
       <div id="topbarRestartDivider" class="topbar-menu-divider"></div>
@@ -1047,6 +1055,10 @@ function dashConnect(onReady){
   };
   _dashWs.onclose = function(ev){
     logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G2): the
+    // create's answer cannot arrive on a dead socket; a later sid-less error
+    // on the next one must not be read as its refusal.
+    _dashCreateInFlight = false;
 
     // ---- SC7 (Phase 6): restore or tear down the full Phases 1-5 state ----
     // ---- surface a drop leaves behind -------------------------------------
@@ -2854,6 +2866,7 @@ function dashHandle(frame){
     // payload.created === true arrives when dashPickerCreate fired send('new').
     // Phase 4: plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md
     if (payload && payload.created) {
+      _dashCreateInFlight = false;
       _viewingSid = sid;
       _dashEagerLoadPending = false; // creation is not an eager load
       _dashLoadingSid = null; // creation is not a load-slot; prevents abandon-close path
@@ -3712,13 +3725,25 @@ function dashHandle(frame){
       dashSetComposerNote(refuseMsg + ' Try again when the turn finishes.');
       return;
     }
-    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: a create
-    // for the derived agent refused because the profile is no longer in
-    // effect arrives as `bad_payload`. The toast below carries the server's
-    // explanation; re-reading the state makes the next create send
-    // `kiro_default` rather than be refused again.
-    if (payload && payload.code === 'bad_payload') refreshAcpPermissionState();
     var errText = (payload && typeof payload.message === 'string') ? payload.message : 'The agent refused that.';
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G2): a
+    // refused create (sid-less, like every `new` refusal) replaces the
+    // "Creating session…" placeholder with the server's own message, in the
+    // transcript where it stays — acp.html's shape — rather than a toast that
+    // is gone in four seconds. The composer comes back if a session is still
+    // attached (a plain create never closed it); with none attached there is
+    // no composer to restore, and the rail's create actions are the way on.
+    if (_dashCreateInFlight && !sid) {
+      _dashCreateInFlight = false;
+      var createPane = document.getElementById('dashTranscript');
+      if (createPane) createPane.textContent = '';
+      addMessage('error', '[' + ((payload && payload.code) || 'error') + '] ' + errText);
+      dashComposerEl.hidden = !_dashAttachedSid;
+      dashSetComposerNote('');
+      dashPromptInput.disabled = false;
+      dashRefreshComposerControls();
+      return;
+    }
     showToast('<div class="toast toast-error">' + _escHtml(errText) + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
     dashSetComposerNote('');
     dashPromptInput.disabled = false;
@@ -3740,6 +3765,16 @@ var _dashPickerCapacity = {held: 0, max: 8};
 var _dashPickerFilter = '';
 var _dashPickedTaskMode = 'kiro_default';
 var _dashPendingCreate = null; // {cwd, mode} set while close-before-create is in flight
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G2): true
+// from the moment a `new` frame is sent until its `session` (created) or its
+// sid-less refusal arrives. The refusal otherwise left "Creating session…" in
+// the pane with the composer hidden, explained only by a 4-second toast.
+var _dashCreateInFlight = false;
+
+/** Send a `new` frame, marking the create as in flight (G2). */
+function dashSendNew(cwd, mode) {
+  _dashCreateInFlight = !!send('new', {cwd: cwd, mode: mode}, null);
+}
 
 // Task modes offered in the picker — mirrors /acp's own list.
 var _DASH_TASK_MODES = [
@@ -3847,9 +3882,6 @@ function dashPickerOpen(cwd) {
       o.setAttribute('aria-current', o.getAttribute('data-value') === 'kiro_default' ? 'true' : 'false');
     });
   }
-  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: re-read
-  // what Default resolves to before the user can press create.
-  refreshAcpPermissionState();
 
   document.getElementById('dashPickerCloseCurrent').checked = false;
   dashPickerRenderKeepRow();
@@ -3998,7 +4030,10 @@ function dashPickerCreate(cwd) {
     _dashAttachedSid &&
     !_dashTurnActive
   );
-  var picked = _dashPickedTaskMode;
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (SC-3):
+  // Default is sent as its own value, `kiro_default`; the server decides what
+  // it binds (the derived agent while the permission profile is in effect).
+  var mode = _dashPickedTaskMode;
   // Clear the transcript pane now so the user doesn't see a stale previous
   // session's content during the creation round-trip.
   var transcriptEl = document.getElementById('dashTranscript');
@@ -4011,22 +4046,16 @@ function dashPickerCreate(cwd) {
   }
   dashComposerEl.hidden = true;
   dashPickerClose();
-  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (SC-3):
-  // Default becomes the derived agent only while the permission profile is in
-  // effect (composer-chrome.js, withWireTaskMode). Resolved before either
-  // branch, so the deferred close-then-create carries the same answer.
-  withWireTaskMode(picked, function(mode) {
-    if (!wantsClose) {
-      dashConnect(function() { send('new', {cwd: cwd, mode: mode}, null); });
-    } else {
-      _dashPendingCreate = {cwd: cwd, mode: mode};
-      if (!send('close', {}, _dashAttachedSid)) {
-        // Socket not open — clear pending so it doesn't fire on a future frame
-        _dashPendingCreate = null;
-        return;
-      }
+  if (!wantsClose) {
+    dashConnect(function() { dashSendNew(cwd, mode); });
+  } else {
+    _dashPendingCreate = {cwd: cwd, mode: mode};
+    if (!send('close', {}, _dashAttachedSid)) {
+      // Socket not open — clear pending so it doesn't fire on a future frame
+      _dashPendingCreate = null;
+      return;
     }
-  });
+  }
 }
 
 /** Create a new kiro-cli v3 ACP session in `cwd` immediately, with no picker
@@ -4056,11 +4085,10 @@ function dashRailQuickCreate(cwd){
   }
   dashComposerEl.hidden = true;
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (SC-3): the
-  // default task mode, resolved the same way the picker's Default entry is —
-  // this path bypasses the picker, so it must not bypass the profile too.
-  withWireTaskMode('kiro_default', function(mode) {
-    dashConnect(function() { send('new', {cwd: cwd, mode: mode}, null); });
-  });
+  // Default value, which the server binds to the derived agent while the
+  // permission profile is in effect — so this path, which bypasses the picker,
+  // does not bypass the profile.
+  dashConnect(function() { dashSendNew(cwd, 'kiro_default'); });
 }
 
 /** Fire a pending close-then-create after the close completes. */
@@ -4071,7 +4099,7 @@ function dashPickerRunPending() {
   // (acp.html's pickerRunPending() also skips the re-check for the same reason.)
   var pending = _dashPendingCreate;
   _dashPendingCreate = null;
-  dashConnect(function() { send('new', {cwd: pending.cwd, mode: pending.mode}, null); });
+  dashConnect(function() { dashSendNew(pending.cwd, pending.mode); });
 }
 
 // Static picker element wiring — moved to DOMContentLoaded (Phase 5 review fix:
@@ -4247,7 +4275,7 @@ function refreshNotifyToggle(){
     .then(function(d){if(d)el.classList.toggle('active',!!d.enabled)})
     .catch(function(){});
 }
-function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();if(typeof refreshAcpPermissionState==='function')refreshAcpPermissionState();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
+function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){
   fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});
   initProviderFilter();initWorkspaceFilters();
@@ -6810,13 +6838,31 @@ function renderRestartKeys(settings) {
 // being /acp's own status-menu restart item. restartPowerAtlas() carries its
 // own confirm() now that it is reachable this generally, matching that
 // item's guard against the exact same accidental-click concern.
+//
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G4): the dot
+// has two sources now — a restart-pending setting, and a permission profile
+// that is on but not doing what the user set (not in effect, or kept on a
+// previous base agent). Each source records its own flag and the dot is their
+// OR, so neither writer can hide the other's reason. The title says which.
+var _topbarDotRestart = false;
+var _topbarDotPerm = '';
+function _syncTopbarDot() {
+  var dot = document.getElementById('topbarPendingDot');
+  if (!dot) return;
+  dot.hidden = !(_topbarDotRestart || _topbarDotPerm);
+  var why = [];
+  if (_topbarDotRestart) why.push('Some settings need a restart to take effect');
+  if (_topbarDotPerm) why.push(_topbarDotPerm);
+  dot.title = why.join('. ');
+}
 function markTopbarRestart(pending) {
   var dot = document.getElementById('topbarPendingDot');
   var note = document.getElementById('topbarRestartNote');
   var text = document.getElementById('topbarRestartText');
   if (!dot || !note || !text) return;
   var has = pending.length > 0;
-  dot.hidden = !has;
+  _topbarDotRestart = has;
+  _syncTopbarDot();
   note.hidden = !has;
   if (has) {
     text.textContent = pending.length === 1
@@ -6884,24 +6930,71 @@ function openRemoteModal() {
 
 var _acpPermSaving = false;
 
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 review
+// (G3, G9): every warning names its cause and a next step. G3 is the case the
+// first version missed: a base-agent change whose regeneration failed keeps
+// the last-good derived agent (D-10), so `in_effect` stays true and nothing
+// said the new base agent was not being used.
+var _ACP_PERM_NEXT_BASE = 'Check the Base agent name below, then turn the '
+  + 'profile off and on again to regenerate it.';
+var _ACP_PERM_NEXT_REGEN = 'Turn it off and on again to regenerate it.';
+
+function _acpPermHasError(d) {
+  return typeof d.generation_error === 'string' && d.generation_error !== '';
+}
+
 function _acpPermWarnText(d) {
   if (d.enabled === true && d.in_effect !== true) {
-    var why = (typeof d.generation_error === 'string' && d.generation_error)
-      ? d.generation_error
-      : (d.state === 'stale'
-          ? 'the permission profile on disk is out of date'
-          : 'the permission profile could not be generated');
+    var why, next;
+    if (_acpPermHasError(d)) {
+      why = d.generation_error;
+      next = _ACP_PERM_NEXT_BASE;
+    } else if (d.state === 'stale') {
+      why = 'the permission profile on disk is out of date';
+      next = _ACP_PERM_NEXT_REGEN;
+    } else {
+      why = 'the permission profile could not be generated';
+      next = _ACP_PERM_NEXT_REGEN + ' If that fails, check the Base agent name below.';
+    }
     return 'On, but not in effect: ' + why + '. New sessions start without the '
-      + 'permission profile and will not ask before acting.';
+      + 'permission profile and will not ask before acting. ' + next;
+  }
+  // G3: on and in effect, but the latest generation failed — the profile in
+  // force is the previous one, built from the previous base agent.
+  if (d.enabled === true && d.generation_ok === false) {
+    return 'Still using the previous profile; the new base agent could not be '
+      + 'used: ' + (_acpPermHasError(d) ? d.generation_error : 'unknown error')
+      + '. Check the Base agent name below.';
   }
   // Off, but PowerAtlas could not remove its derived agent: it is still on
   // disk and still selectable from kiro-cli's own agent picker.
-  if (d.enabled === false && d.generation_ok === false
-      && typeof d.generation_error === 'string' && d.generation_error) {
+  if (d.enabled === false && d.generation_ok === false && _acpPermHasError(d)) {
     return 'Off, but the old permission profile could not be removed: '
-      + d.generation_error;
+      + d.generation_error + '. Turn it on and off again to retry.';
   }
   return '';
+}
+
+/** G7: the toggle's visual and ARIA state, together. `on` is true, false, or
+ *  null for "could not read" (G10), which reads as mixed rather than off. */
+function _acpPermSetToggle(el, on) {
+  if (!el) return;
+  el.classList.toggle('active', on === true);
+  el.setAttribute('aria-checked', on === null ? 'mixed' : (on ? 'true' : 'false'));
+}
+
+/** G7: Enter and Space operate the switch, as they would a native control. */
+function acpPermToggleKey(ev, el) {
+  if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
+  ev.preventDefault();
+  toggleAcpPermissions(el);
+}
+
+/** G12: the permission rows' error toasts carry the same dismiss button the
+ *  surrounding toasts do. */
+function _acpPermToast(msg) {
+  showToast('<div class="toast toast-error">' + _escHtml(msg)
+    + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
 }
 
 /** Draw the permission rows from a `GET`/`POST /api/acp-permissions` (or
@@ -6913,7 +7006,7 @@ function renderAcpPermissions(d) {
   var badge = document.getElementById('acpPermBadge');
   var warn = document.getElementById('acpPermWarn');
   var base = document.getElementById('acpPermBaseAgent');
-  if (toggle) toggle.classList.toggle('active', d.enabled);
+  _acpPermSetToggle(toggle, d.enabled);
   // Not while the user is typing into it: a background refresh would replace
   // a half-typed name with the saved one.
   if (base && typeof d.base_agent === 'string' && document.activeElement !== base) {
@@ -6929,21 +7022,42 @@ function renderAcpPermissions(d) {
     warn.hidden = !text;
     warn.textContent = text;
   }
+  // G4: visible without opening the menu, on the same gear dot the
+  // restart-drift badge uses. Only for the two "on, but not as set" cases.
+  var attention = notInEffect || (d.enabled === true && d.generation_ok === false);
+  _topbarDotPerm = attention
+    ? 'The permission profile is not working as set; see Agent permissions' : '';
+  _syncTopbarDot();
+}
+
+/** G10: the state could not be read. The toggle shows neither on nor off —
+ *  "off" would claim a posture nobody checked. */
+function _acpPermRenderUnread() {
+  _acpPermSetToggle(document.getElementById('acpPermToggle'), null);
+  var badge = document.getElementById('acpPermBadge');
+  if (badge) badge.hidden = true;
+  var warn = document.getElementById('acpPermWarn');
+  if (warn) {
+    warn.hidden = false;
+    warn.textContent = 'Could not read the permission setting, so whether it is '
+      + 'on is unknown. Reload the page to try again.';
+  }
 }
 
 function loadAcpPermissions() {
   return fetch('/api/acp-permissions')
-    .then(function (r) { return r.json(); })
-    .then(renderAcpPermissions)
-    .catch(function () {});
-}
-
-// The dashboard's own new-session picker reads the same state through
-// composer-chrome.js; re-read it after a change here so a create that follows
-// in this tab uses the new answer. Guarded because the panel's test harness
-// runs this script without composer-chrome.js.
-function _acpPermSyncPicker() {
-  if (typeof refreshAcpPermissionState === 'function') refreshAcpPermissionState();
+    .then(function (r) {
+      if (!r || !r.ok) throw new Error('HTTP ' + (r && r.status));
+      return r.json();
+    })
+    .then(function (d) {
+      if (!d || typeof d !== 'object' || typeof d.enabled !== 'boolean') {
+        _acpPermRenderUnread();
+        return;
+      }
+      renderAcpPermissions(d);
+    })
+    .catch(_acpPermRenderUnread);
 }
 
 /** The toggle. `POST /api/acp-permissions` **sets** the value rather than
@@ -6952,8 +7066,12 @@ function _acpPermSyncPicker() {
  *  body, not the status. */
 function toggleAcpPermissions(el) {
   if (_acpPermSaving) return;
+  var was = el.getAttribute('aria-checked');
   var want = !el.classList.contains('active');
-  el.classList.toggle('active', want);  // optimistic; reconciled from the answer
+  _acpPermSetToggle(el, want);  // optimistic; reconciled from the answer
+  function revert() {
+    _acpPermSetToggle(el, was === 'mixed' ? null : !want);
+  }
   _acpPermSaving = true;
   fetch('/api/acp-permissions', {
     method: 'POST',
@@ -6966,18 +7084,14 @@ function toggleAcpPermissions(el) {
       if (d && d.ok) {
         renderAcpPermissions(d);
       } else {
-        el.classList.toggle('active', !want);
-        showToast('<div class="toast toast-error">'
-          + _escHtml((d && d.error) || 'The permission setting was not saved.')
-          + '</div>');
+        revert();
+        _acpPermToast((d && d.error) || 'The permission setting was not saved.');
       }
-      _acpPermSyncPicker();
     })
     .catch(function () {
       _acpPermSaving = false;
-      el.classList.toggle('active', !want);
-      showToast('<div class="toast toast-error">'
-        + _escHtml('The permission setting was not saved.') + '</div>');
+      revert();
+      _acpPermToast('The permission setting was not saved.');
     });
 }
 
@@ -6998,18 +7112,15 @@ function saveAcpPermissionBaseAgent(input) {
       if (d && d.ok) {
         renderAcpPermissions(d);
       } else {
-        showToast('<div class="toast toast-error">'
-          + _escHtml((d && d.error) || 'The base agent was not saved.') + '</div>');
+        _acpPermToast((d && d.error) || 'The base agent was not saved.');
         // Put the saved value back, so the field never shows a name that is
         // not the one in force. Written to the field directly: Enter saves
         // with focus still in it, where renderAcpPermissions would not touch it.
         _acpPermRestoreBase(input);
       }
-      _acpPermSyncPicker();
     })
     .catch(function () {
-      showToast('<div class="toast toast-error">'
-        + _escHtml('The base agent was not saved.') + '</div>');
+      _acpPermToast('The base agent was not saved.');
       _acpPermRestoreBase(input);
     });
 }

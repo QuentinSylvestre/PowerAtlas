@@ -723,8 +723,9 @@ _OVERLAY_STEERING: tuple[dict[str, str], ...] = (
 #   Membership here is therefore necessary but not sufficient: `_handle_new`
 #   also asks `mode_gate_hook` (below), which `web.py` backs with
 #   `agent_profile`'s own verdict on the file — an import this module must not
-#   make itself (D-20). With no hook installed the check is permissive, which
-#   is the state of every test that does not opt in.
+#   make itself (D-20). With no hook installed the derived agent is refused
+#   (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3, G1), and
+#   the same hook decides what the Default mode binds.
 # - Only 5 of the 8 vendor modes are offered in the /acp UI's own picker
 #   (plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md Phase 3) — the other 3 (vibe,
 #   autonomous, semantic_reviewer) were only observed to exist, never
@@ -964,11 +965,21 @@ def set_notify_hook(hook) -> None:
     notify_hook = hook
 
 
-# Called with no arguments when a `new` frame asks for the derived agent
-# (DERIVED_AGENT_NAME) as its mode; returns whether that agent is actually in
-# effect right now. `None` until something wires it, and `None` means
-# **permissive** — the state of every test that does not opt in, and of this
-# module used on its own.
+# Called with no arguments when a `new` frame asks for the Default mode
+# (`DEFAULT_TASK_MODE`, or no mode at all) or for the derived agent
+# (DERIVED_AGENT_NAME); returns whether the permission profile is in effect
+# right now. The answer decides both: Default binds the derived agent when it
+# is and `kiro_default` when it is not, and an explicit derived request is
+# refused when it is not. One predicate for both paths, so the page and the
+# server cannot disagree about what Default means.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1, user
+# decision 2026-09-23: the server resolves Default, not the page).
+#
+# `None` until something wires it, and `None` reads as **not in effect**:
+# Default binds `kiro_default` (today's behaviour, so this module used on its
+# own still creates sessions) and the derived agent is refused, since nothing
+# vouches that its file exists. (Before Phase 3's review, `None` allowed the
+# derived agent; nothing in-tree relied on that outside the tests.)
 #
 # A hook and not an import, for the same reason the two above are: the answer
 # lives in `agent_profile`, which classifies the file on disk (on, stale,
@@ -978,36 +989,37 @@ def set_notify_hook(hook) -> None:
 # hand-authored file as "in effect". `web.py` already imports both and does the
 # wiring.
 #
-# Called through `asyncio.to_thread`, not on the loop: the answer is a file
-# read, and that is this codebase's idiom for filesystem I/O from a coroutine.
-# Only consulted for the one mode it gates, so no other session creation pays
-# for it.
+# Called through `asyncio.to_thread`, not on the loop: the answer is a config
+# read plus a file read, and that is this codebase's idiom for filesystem I/O
+# from a coroutine. Consulted only for Default and the derived agent; the
+# vendor task modes never pay for it.
 mode_gate_hook = None
 
 
 def set_mode_gate_hook(hook) -> None:
-    """Install the derived-agent gate. Loop-thread only, like the others."""
+    """Install the permission-profile gate. Loop-thread only, like the others."""
     global mode_gate_hook
     mode_gate_hook = hook
 
 
-async def _derived_mode_in_effect() -> bool:
-    """Whether `_handle_new` may forward DERIVED_AGENT_NAME as a modeId.
+# The picker's Default entry, as it travels on the wire. What it *binds* is
+# decided in `_handle_new` (see `mode_gate_hook` above).
+DEFAULT_TASK_MODE: Final[str] = "kiro_default"
 
-    **Fails closed.** A hook that raises is treated as "not in effect" and the
-    session is refused, logged with its traceback. The alternative — letting
-    the mode through when the check itself broke — is exactly the silent
-    coercion to "vibe" the gate exists to prevent, and a refusal the user can
-    see and retry is the cheaper of the two failures.
+
+async def _derived_mode_in_effect() -> bool:
+    """Whether the permission profile is in effect, per `mode_gate_hook`.
+
+    `None` hook: False. **Lets a hook's exception propagate.** The caller has
+    to refuse on it, and it cannot do that with a boolean: False means "bind
+    `kiro_default`" on the Default path, which would start an ungated session
+    exactly when the check that would have gated it broke.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1).
     """
     hook = mode_gate_hook
     if hook is None:
-        return True
-    try:
-        return bool(await asyncio.to_thread(hook))
-    except Exception:
-        log.exception("ACP mode gate hook failed; refusing the derived agent")
         return False
+    return bool(await asyncio.to_thread(hook))
 
 
 def _notify(event: str, session_id: str, detail: str = "") -> None:
@@ -5874,17 +5886,49 @@ async def _handle_new(conn, payload):
         # except further down.
         conn.send(error_frame("bad_payload", "'mode' is not a recognized task mode."))
         return
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1, user
+    # decision 2026-09-23): the server, not the page, decides what Default
+    # binds. Default — `DEFAULT_TASK_MODE`, or no mode at all, which
+    # `new_session` would otherwise send as `kiro_default` — binds the derived
+    # agent while the permission profile is in effect and `kiro_default`
+    # otherwise (D-10's fallback). A page that cannot read the setting, or read
+    # it before it changed, therefore still gets the right posture. The cost is
+    # deliberate: while the profile is in effect, `kiro_default` itself cannot
+    # be chosen, which is what "on" means.
+    #
     # The derived agent is a member of _VALID_TASK_MODES whatever the setting
-    # says; this is the half that checks it is actually on disk and current.
-    # Forwarded while off, kiro-cli would silently run the session as "vibe".
-    if raw_mode == DERIVED_AGENT_NAME and not await _derived_mode_in_effect():
-        log.warning("ACP session/new refused: derived agent %r requested "
-                    "but not in effect", raw_mode)
-        conn.send(error_frame(
-            "bad_payload",
-            "The PowerAtlas permission profile is not in effect, so its agent "
-            "cannot be selected. Turn it on in Settings, or pick another mode."))
-        return
+    # says; an explicit request for it is refused unless the same predicate
+    # says it is in effect. Forwarded while off, kiro-cli would silently run
+    # the session as "vibe".
+    bound_mode = raw_mode
+    if raw_mode is None or raw_mode in (DEFAULT_TASK_MODE, DERIVED_AGENT_NAME):
+        try:
+            in_effect = await _derived_mode_in_effect()
+        except Exception:
+            # Fails closed on both paths. On Default, binding `kiro_default`
+            # here would start an ungated session exactly when the check that
+            # gates it broke; a refusal the user can see and retry is cheaper.
+            log.exception("ACP session/new refused: the permission-profile "
+                          "check failed (mode %r)", raw_mode)
+            conn.send(error_frame(
+                "bad_payload",
+                "PowerAtlas could not check whether its permission profile is "
+                "in effect, so no session was created. Try again; if it keeps "
+                "failing, see orchestrator.log."))
+            return
+        if raw_mode == DERIVED_AGENT_NAME:
+            if not in_effect:
+                log.warning("ACP session/new refused: derived agent %r "
+                            "requested but not in effect", raw_mode)
+                conn.send(error_frame(
+                    "bad_payload",
+                    "The PowerAtlas permission profile is not in effect, so its "
+                    "agent cannot be selected. Settings shows whether the "
+                    "profile is off or why it is not in effect. Pick Default "
+                    "or another mode to start a session now."))
+                return
+        else:
+            bound_mode = DERIVED_AGENT_NAME if in_effect else DEFAULT_TASK_MODE
     if _supervisor.at_capacity():
         conn.send(error_frame(SessionLimit.code, _session_limit_message()))
         log.warning("ACP session/new refused: [%s] at the session cap",
@@ -5893,7 +5937,7 @@ async def _handle_new(conn, payload):
     conn.send(envelope("meta", {"pending": "new"}))
     try:
         cwd = await asyncio.to_thread(_resolve_session_cwd, raw_cwd)
-        info = await _supervisor.new_session(cwd, mode=raw_mode)
+        info = await _supervisor.new_session(cwd, mode=bound_mode)
     except AcpError as exc:
         log.warning("ACP session/new refused: [%s] %s", exc.code, exc)
         conn.send(error_frame(exc.code, str(exc)))
@@ -5916,6 +5960,13 @@ async def _handle_new(conn, payload):
         "sessionId": session_id,
         "cwd": info["cwd"],
         "created": True,
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1):
+        # the modeId this session was bound to. The page sends Default and
+        # cannot know what it resolved to, so it reads it from here — the
+        # derived agent's name means the permission profile gates this
+        # session; anything else means it does not. Creation only: a resumed
+        # session's mode is kiro-cli's (P2), not something this module saw.
+        "mode": bound_mode,
         # Step 9 final review fix (Medium): _handle_subscribe's `session`
         # envelope already carries these; this one didn't, so a
         # contextPercent/inflight state cached into `meta` by a

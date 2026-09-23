@@ -4310,10 +4310,6 @@
     // to an unrelated later session otherwise.
     _applyTaskMode('kiro_default');
     _closeTaskModeMenu();
-    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: re-read
-    // what Default resolves to (composer-chrome.js, withWireTaskMode). The
-    // setting lives on the dashboard, so a tab left open cannot see it change.
-    refreshAcpPermissionState();
     pickerRenderKeepRow();
     pickerNote.textContent = 'loading workspaces…';
     pickerRender();
@@ -4468,18 +4464,14 @@
     // Captured before pickerClose() (which only hides the menu, not the
     // selection) so both branches below send the task mode the user actually
     // picked, not whatever the picker resets to on its next open.
-    var picked = pickedTaskMode;
-    pickerClose();
+    //
     // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (SC-3):
-    // Default becomes the derived agent only while the permission profile is
-    // in effect. Resolved once, here, so the deferred close-then-create path
-    // carries the same answer the immediate path would have sent.
-    withWireTaskMode(picked, function (taskMode) {
-      pickerCreateResolved(cwd, wantsClose, taskMode);
-    });
-  }
-
-  function pickerCreateResolved(cwd, wantsClose, taskMode) {
+    // Default is sent as its own value, `kiro_default`. The server decides
+    // what that binds — the derived agent while the permission profile is in
+    // effect, `kiro_default` otherwise — so this page never needs to read the
+    // setting to create a session, and a stale tab cannot bind the wrong one.
+    var taskMode = pickedTaskMode;
+    pickerClose();
     if (!wantsClose) {
       send('new', { cwd: cwd, mode: taskMode }, null);
       setView('chat');
@@ -5301,15 +5293,6 @@
         logLine('error', 'create for ' + (wanted.cwd || "the agent's own folder")
           + ' abandoned — the close was refused');
       }
-      if (payload.code === 'bad_payload') {
-        // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: one
-        // way this arrives is a create for the derived agent refused because
-        // the profile stopped being in effect after this tab last looked. The
-        // server's message (rendered below) says so; re-reading the state
-        // means the next create from this tab sends `kiro_default` instead of
-        // being refused again.
-        refreshAcpPermissionState();
-      }
       var failedLoad = loadingSid !== null &&
                        (frame.sessionId || sessionId) === loadingSid;
       setLoading(null);
@@ -6031,10 +6014,6 @@
     connect();
     railLoadFirstPage();
     refreshNotifyEnabled();
-    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: what the
-    // picker's Default resolves to. Read on the same schedule as the notify
-    // flag above, and for the same reason.
-    refreshAcpPermissionState();
     // Coming back to the tab refreshes at once, which is the moment a stale
     // dot would otherwise be believed — a phone returns to this page far more
     // often than it leaves it open for a full interval.
@@ -6046,7 +6025,6 @@
         // /acp tab left open for days from honouring a setting the user
         // changed in the meantime.
         refreshNotifyEnabled();
-        refreshAcpPermissionState();
       }
     });
     setInterval(function () {

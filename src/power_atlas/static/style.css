@@ -1131,6 +1131,11 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    unbroken shell command wrap instead of widening the transcript. Never
    clipped: the whole title is what the user is approving. */
 .acp-permission-question { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+/* 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 review (G8):
+   the title is unclamped (Phase 2) and sits above the consent block and the
+   Allow/Deny buttons, so a long one pushed the buttons off screen. Bounded
+   and scrolled inside itself like the consent values below; never cut. */
+.acp-permission-question { max-height: 12em; overflow-y: auto; overflow-x: hidden; }
 /* 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the consent
    block (capability, resource, scope, source, matched rule). Every value is
    agent-authored and bounded only by the 1 MiB inbound-line cap, so this CSS

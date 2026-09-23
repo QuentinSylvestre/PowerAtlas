@@ -493,14 +493,19 @@ async def _sync_derived_agent() -> None:
 
 
 def _derived_agent_in_effect() -> bool:
-    """`acp.mode_gate_hook`: whether the derived agent may be a session's mode.
+    """`acp.mode_gate_hook`: whether the permission profile is in effect.
 
-    `"on"` only — the one state `agent_profile.derived_block_state` documents as
-    in effect. `"absent"` (the setting is off, or a first generation failed),
-    `"stale"` and `"unknown"` all refuse, so a user who never enabled the
-    posture cannot be handed a hand-authored file of the same name.
+    Decides both what Default binds (the derived agent when True,
+    `kiro_default` when False) and whether an explicit request for the derived
+    agent is allowed. Exactly `_acp_permission_state`'s `in_effect` — the
+    setting is on **and** the file is `"on"` — so the settings panel and the
+    session gate can never disagree. `"absent"`, `"stale"` and `"unknown"` all
+    read False, so a hand-authored file of the same name is never handed out.
+    The setting half is what keeps a leftover `"on"` file that could not be
+    deleted while the setting is off from being used.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1).
     """
-    return agent_profile.derived_block_state() == "on"
+    return _acp_permission_state(load_config())["in_effect"]
 
 
 @asynccontextmanager
@@ -554,9 +559,11 @@ async def lifespan(app_instance):
         acp.set_notify_hook(_notify_from_acp)
         # And the third: `acp` may not import `agent_profile` either (D-20),
         # but it must refuse the derived agent as a modeId while that agent is
-        # not in effect, or kiro-cli silently runs the session as "vibe".
-        # `acp` calls this off the loop and fails closed if it raises.
-        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 2 review.
+        # not in effect, or kiro-cli silently runs the session as "vibe" — and
+        # it must bind Default to the derived agent while it is.
+        # `acp` calls this off the loop and refuses the create if it raises.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 2 review,
+        # Phase 3 (G1).
         acp.set_mode_gate_hook(_derived_agent_in_effect)
     sweeper =acp.start_sweeper() if acp is not None else None
     try:

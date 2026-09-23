@@ -43,13 +43,16 @@ Four properties this module is built around, each measured rather than assumed
   file that has already been read back means a failure leaves the previous file
   untouched because `os.replace` never ran.
 
-  The pattern is `config.save_config`'s rather than
-  `config._write_remote_secret`'s in-place `O_CREAT|O_TRUNC`. The two fail in
-  opposite directions. A torn secret fails closed, because `load_remote_secret`
-  rejects anything short. A torn `permissions:` block fails **open**: kiro-cli
-  loads an agent whose frontmatter does not parse without an error or a warning,
-  and silently falls back to the wider scopes. That was reproduced live, by
-  accident, across seven consecutive probe runs in Phase 0.
+  The pattern is `config.save_config`'s, which the secret files now share too
+  (`config._write_secret_file`: tmp, `fsync`, `os.replace`; the earlier
+  in-place `O_CREAT|O_TRUNC` secret write was reversed in
+  260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review). It
+  matters more here than there. A torn `permissions:` block fails **open**:
+  kiro-cli loads an agent whose frontmatter does not parse without an error or
+  a warning, and silently falls back to the wider scopes. That was reproduced
+  live, by accident, across seven consecutive probe runs in Phase 0. This file
+  adds one step the secrets do not need: the tmp is read back and re-excised
+  before `os.replace`.
 
 * **Generation failure never widens the posture** (D-10/SC-8). A failed
   regeneration leaves whatever is already on disk exactly where it is. It never

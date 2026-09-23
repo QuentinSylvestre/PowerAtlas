@@ -1713,7 +1713,7 @@ function appendChunk(role, text) {
  *  is the frame's allowlisted projection of kiro-cli's consent block — what
  *  capability is asked for, against which resource, and which rule matched.
  *  Optional, and every field in it is optional: a frame without one, or with
- *  `{}`, renders exactly as before. See addPermissionConsent below. */
+ *  `{}`, renders exactly as before. See permissionConsentBlock below. */
 function addPermissionRequest(requestId, sid, title, options, consent) {
   var stick = stuckToBottom();
   var row = document.createElement('div');
@@ -1773,6 +1773,39 @@ var PERMISSION_CONSENT_FIELDS = [
   ['source', 'Source'],
 ];
 
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 review (G11):
+// plain words for the identifiers a prompt most often carries, so a prompt
+// reads "Write or delete files (fs_write)" rather than a bare `fs_write`. The
+// capability names are the ones the shipped rule set uses
+// (src/power_atlas/agents/permissions.yaml); `agent-profile` is the source
+// measured in probe P4. Anything else falls back to the raw value. Looked up
+// with hasOwnProperty, because the value is agent-authored and "constructor"
+// or "__proto__" must not resolve to something on Object.prototype.
+var PERMISSION_CAPABILITY_WORDS = {
+  fs_read: 'Read files',
+  fs_write: 'Write or delete files',
+  shell: 'Run shell commands',
+  mcp: 'Use an MCP tool',
+  web_fetch: 'Fetch a web page',
+  web_search: 'Search the web',
+  subagent: 'Start a sub-agent',
+  skill: 'Use a skill',
+  power: 'Use a power',
+};
+var PERMISSION_SOURCE_WORDS = {
+  'agent-profile': 'The agent’s own permissions',
+};
+
+function permissionWords(table, raw) {
+  return Object.prototype.hasOwnProperty.call(table, raw) ? table[raw] : null;
+}
+
+/** "Plain words (raw)" for a known value, the raw value otherwise. */
+function permissionLabelled(table, raw) {
+  var words = permissionWords(table, raw);
+  return words ? words + ' (' + raw + ')' : raw;
+}
+
 /** Build the consent block for a permission question, or return null when
  *  there is nothing to show.
  *
@@ -1789,12 +1822,17 @@ function permissionConsentBlock(consent) {
   var rows = [];
   PERMISSION_CONSENT_FIELDS.forEach(function (f) {
     var v = consent[f[0]];
-    if (typeof v === 'string' && v !== '') rows.push([f[0], f[1], v]);
+    if (typeof v !== 'string' || v === '') return;
+    if (f[0] === 'capability') v = permissionLabelled(PERMISSION_CAPABILITY_WORDS, v);
+    else if (f[0] === 'source') v = permissionLabelled(PERMISSION_SOURCE_WORDS, v);
+    rows.push([f[0], f[1], v]);
   });
   var rule = consent.matchedRule;
   if (rule && typeof rule === 'object' && !Array.isArray(rule)) {
     var parts = [];
-    if (typeof rule.capability === 'string' && rule.capability !== '') parts.push(rule.capability);
+    if (typeof rule.capability === 'string' && rule.capability !== '') {
+      parts.push(permissionWords(PERMISSION_CAPABILITY_WORDS, rule.capability) || rule.capability);
+    }
     if (typeof rule.effect === 'string' && rule.effect !== '') parts.push(rule.effect);
     if (parts.length) rows.push(['matchedRule', 'Matched rule', parts.join(' → ')]);
   }

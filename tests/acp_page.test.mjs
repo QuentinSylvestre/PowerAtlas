@@ -4789,6 +4789,10 @@ function loadPanel(opts = {}) {
   byId.set("acpPermBadge", permBadge);
   byId.set("acpPermWarn", permWarn);
   byId.set("acpPermBaseAgent", permBase);
+  // G4 (Phase 3 review): the settings gear's dot, shared with restart drift.
+  const pendingDot = new El("span");
+  pendingDot.hidden = true;
+  byId.set("topbarPendingDot", pendingDot);
   // The two live controls in the dashboard topbar that `markRestartInputs`
   // reaches for by class. Present here because their absence is a passing
   // state in that function (`if (!host) return`), so a harness without them
@@ -10541,17 +10545,36 @@ check("permission prompt: a consent block renders capability and resource", (tpl
   }));
   const row = lastPermRow(page);
   assert(row, "no permission row was drawn for a frame carrying a consent block");
-  assertEqual(consentValue(row, "capability"), "fs_write",
+  // G11 (Phase 3 review): known identifiers read as plain words, raw kept.
+  assertEqual(consentValue(row, "capability"), "Write or delete files (fs_write)",
     "the prompt does not say which capability is being asked for");
   assertEqual(consentValue(row, "resource"), "C:\\work\\repo\\src\\app.py",
     "the prompt does not name the file — the whole point of SC-4 is that a write " +
     "prompt stops reading as a bare 'Write File'");
   assertEqual(consentValue(row, "scope"), "agent", "scope was not rendered");
-  assertEqual(consentValue(row, "source"), "agent-profile", "source was not rendered");
-  assertEqual(consentValue(row, "matchedRule"), "fs_write \u2192 ask",
+  assertEqual(consentValue(row, "source"), "The agent\u2019s own permissions (agent-profile)",
+    "source was not rendered");
+  assertEqual(consentValue(row, "matchedRule"), "Write or delete files \u2192 ask",
     "the matched rule was not rendered as capability and effect");
   assertEqual(row.querySelectorAll(".acp-permission-option").length, 2,
     "the consent block displaced the answer buttons");
+});
+
+check("permission prompt: an unknown or prototype-named capability renders raw, not mapped", (tpl) => {
+  // G11 (Phase 3 review): the plain-words table is looked up with
+  // hasOwnProperty, because the value is agent-authored — "constructor" must
+  // not resolve to Object.prototype.constructor and print a function.
+  const { page, live } = connected(tpl);
+  const cases = ["future_capability", "constructor", "__proto__", "toString"];
+  cases.forEach((cap, i) => {
+    page.deliver(permFrame(live, 150 + i, "Do something", {
+      capability: cap, source: "hasOwnProperty", matchedRule: { capability: cap, effect: "ask" } }));
+    const row = lastPermRow(page);
+    assertEqual(consentValue(row, "capability"), cap, `capability ${cap} was not rendered raw`);
+    assertEqual(consentValue(row, "source"), "hasOwnProperty", "an unknown source was not rendered raw");
+    assertEqual(consentValue(row, "matchedRule"), cap + " \u2192 ask",
+      `the matched rule for ${cap} was not rendered raw`);
+  });
 });
 
 check("permission prompt: no consent block, an empty one, or a malformed one renders without throwing", (tpl) => {
@@ -10643,8 +10666,14 @@ check("permission prompt: a tens-of-kilobytes resource renders through textConte
   assert(/max-height:/.test(value) && /overflow-y:\s*auto/.test(value),
     "a consent value has no bounded, scrollable height: a 48 KB resource would push " +
     "the answer buttons a screen away");
-  assert(/overflow-wrap:\s*anywhere/.test(body(".acp-permission-question")),
+  const question = body(".acp-permission-question");
+  assert(/overflow-wrap:\s*anywhere/.test(question),
     "the now-unclamped title has no overflow-wrap");
+  // G8 (Phase 3 review): the title sits above the consent block and the
+  // buttons, so it is bounded and scrolls inside itself too.
+  assert(/max-height:/.test(question) && /overflow-y:\s*auto/.test(question),
+    "the permission title has no bounded, scrollable height: a long title " +
+    "pushes the Allow/Deny buttons off screen");
   // The transcript-renderer source itself: no HTML sink anywhere near consent.
   const renderer = transcriptRendererSource();
   const from = renderer.indexOf("function permissionConsentBlock(");
@@ -10678,142 +10707,112 @@ check("permission prompt: the in-page browser notification clamps the title to 2
     "the clamp reached the transcript row, which must show the whole title");
 });
 
-// The new-session Default against the permission profile (SC-3). The page
-// learns the state from GET /api/acp-permissions; `answer` models the server.
+// The new-session Default against the permission profile (SC-3).
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1, user
+// decision 2026-09-23): the server resolves Default. Every page path sends the
+// Default entry's own value, `kiro_default`, and never reads
+// /api/acp-permissions to decide it — a page that could not read the setting
+// (the remote phone page; a stale tab) used to send `kiro_default` while the
+// profile was on and start an ungated session that looked gated. The answer
+// below would say "in effect" if anything asked, so a page that still resolved
+// Default itself would send the derived agent and fail these checks.
 
-function permAnswer(state) {
-  return (url) => url.startsWith("/api/acp-permissions") ? { body: state } : null;
-}
+const PERM_IN_EFFECT = (url) => url.startsWith("/api/acp-permissions")
+  ? { body: { enabled: true, in_effect: true, state: "on" } } : null;
 
-check("task-mode picker: with the permission profile off, Default sends kiro_default and no option names the derived agent", async (tpl) => {
+check("task-mode picker: Default sends kiro_default, never the derived agent, without reading the permission state", async (tpl) => {
   const page = await railed(tpl, {
     store: fakeStore({ workspaces: 1, sessions: 1 }),
-    answer: permAnswer({ enabled: false, in_effect: false, state: "absent" }),
+    answer: PERM_IN_EFFECT,
   });
   await page.openPicker();
   const values = page.all("acpPickerTaskModeMenu", ".acp-taskmode-option")
     .map((o) => o.dataset.value);
   assert(values.length >= 5, "the task-mode menu has no options to check");
   assert(!values.includes("poweratlas-acp"),
-    "the picker offers the derived agent as a mode of its own; the server refuses it " +
-    "while the profile is off, so it must never be offered");
+    "the picker offers the derived agent as a mode of its own; Default is how it is reached");
   page.click("acpPickerNeutral");
-  await page.settle();
+  // Sent at once: nothing to wait for, since the page no longer resolves it.
   const sent = page.sentOf("new");
-  assertEqual(sent.length, 1, "no create was sent");
+  assertEqual(sent.length, 1, "the create did not go out synchronously");
   assertEqual(sent[0].payload.mode, "kiro_default",
-    "with the profile off, Default sent something other than kiro_default");
-  assert(page.fetches.some((f) => f.url === "/api/acp-permissions"),
-    "the page never asked the server whether the profile is in effect");
-});
-
-check("task-mode picker: with the permission profile in effect, Default sends the derived agent", async (tpl) => {
-  const page = await railed(tpl, {
-    store: fakeStore({ workspaces: 1, sessions: 1 }),
-    answer: permAnswer({ enabled: true, in_effect: true, state: "on" }),
-  });
-  await page.openPicker();
-  page.click("acpPickerNeutral");
-  await page.settle();
-  const sent = page.sentOf("new");
-  assertEqual(sent.length, 1, "no create was sent");
-  assertEqual(sent[0].payload.mode, "poweratlas-acp",
-    "with the profile in effect, Default did not resolve to the derived agent (SC-3)");
-  // A vendor mode is never rewritten.
+    "Default sent something other than its own value; the server decides what it binds");
+  // A vendor mode passes through untouched.
   await page.openPicker();
   page.click("acpPickerTaskModeOptSpec");
   page.click("acpPickerNeutral");
   await page.settle();
-  assertEqual(page.sentOf("new")[1].payload.mode, "spec",
-    "a vendor task mode was rewritten by the permission profile");
+  assertEqual(page.sentOf("new")[1].payload.mode, "spec", "a vendor task mode was rewritten");
+  assert(!page.fetches.some((f) => f.url.startsWith("/api/acp-permissions")),
+    "the /acp page read /api/acp-permissions; creating a session must not depend on it");
 });
 
-check("task-mode picker: on but not in effect, Default falls back to kiro_default", async (tpl) => {
-  // Generation failed: the server would refuse the derived agent, so the page
-  // must not send it. Keyed on in_effect, never on the toggle alone.
-  const page = await railed(tpl, {
-    store: fakeStore({ workspaces: 1, sessions: 1 }),
-    answer: permAnswer({ enabled: true, in_effect: false, state: "absent",
-                         generation_ok: false, generation_error: "base agent not found" }),
-  });
-  await page.openPicker();
-  page.click("acpPickerNeutral");
+check("task-mode picker: a refused derived-agent create is legible in the transcript", async (tpl) => {
+  const { page } = connected(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
   await page.settle();
-  assertEqual(page.sentOf("new")[0].payload.mode, "kiro_default",
-    "on-but-not-in-effect sent the derived agent, which the server refuses");
-});
-
-check("task-mode picker: a create sent before the state read lands waits for it", async (tpl) => {
-  // Guessing kiro_default here while the profile is on would start an
-  // ungated session that looks gated.
-  const page = await railed(tpl, {
-    store: fakeStore({ workspaces: 1, sessions: 1 }),
-    answer: permAnswer({ enabled: true, in_effect: true, state: "on" }),
-  });
-  page.click("acpRailNew");          // opens the picker; its reads are in flight
-  page.click("acpPickerNeutral");    // pressed before any of them has answered
-  assertEqual(page.sentOf("new").length, 0,
-    "the create went out before the page knew what Default resolves to");
-  await page.settle();
-  assertEqual(page.sentOf("new").length, 1, "the create never went out");
-  assertEqual(page.sentOf("new")[0].payload.mode, "poweratlas-acp",
-    "the create that waited did not use the answer it waited for");
-});
-
-check("task-mode picker: a stale tab's refused derived-agent create is legible and self-corrects", async (tpl) => {
-  let state = { enabled: true, in_effect: true, state: "on" };
-  const { page } = connected(tpl, {
-    store: fakeStore({ workspaces: 1, sessions: 1 }),
-    answer: (url) => url.startsWith("/api/acp-permissions") ? { body: state } : null,
-  });
-  await page.settle();
-  // The profile is turned off elsewhere; this tab still believes it is on.
-  state = { enabled: false, in_effect: false, state: "absent" };
   const message = "The PowerAtlas permission profile is not in effect, so its agent " +
-    "cannot be selected. Turn it on in Settings, or pick another mode.";
-  const before = page.fetches.filter((f) => f.url === "/api/acp-permissions").length;
+    "cannot be selected. Settings shows whether the profile is off or why it is not " +
+    "in effect. Pick Default or another mode to start a session now.";
   page.deliver({ type: "error", payload: { code: "bad_payload", message } });
   assert(page.transcript().includes(message),
     "the server's refusal did not reach the transcript, so the create just silently failed");
-  await page.settle();
-  assert(page.fetches.filter((f) => f.url === "/api/acp-permissions").length > before,
-    "the refusal did not make the page re-read the permission state");
-  await page.openPicker();
-  page.click("acpPickerNeutral");
-  await page.settle();
-  const sent = page.sentOf("new");
-  assertEqual(sent[sent.length - 1].payload.mode, "kiro_default",
-    "after the refusal the next create still asked for the derived agent");
 });
 
-check("dashboard picker: Default follows the permission profile, and quick create does too", async () => {
-  for (const [perm, want] of [
-    [{ enabled: false, in_effect: false, state: "absent" }, "kiro_default"],
-    [{ enabled: true, in_effect: false, state: "absent" }, "kiro_default"],
-    [{ enabled: true, in_effect: true, state: "on" }, "poweratlas-acp"],
-  ]) {
-    const p = loadDashPicker({ acpPermissions: perm });
-    const values = p.el("dashPickerTaskModeMenu").querySelectorAll(".acp-taskmode-option")
-      .map((o) => o.getAttribute("data-value"));
-    assert(!values.includes("poweratlas-acp"),
-      "the dashboard picker offers the derived agent as a mode of its own");
-    p.sandbox.dashPickerOpen("");
-    assert(p.fetches.some((f) => f.url === "/api/acp-permissions"),
-      "opening the dashboard picker did not re-read the permission state");
-    // The harness's dialog has no removeEventListener; skip the focus-trap
-    // teardown the same way "dashPickerClose hides the picker" does.
-    p.sandbox._dashPickerTrapRemove = null;
-    p.sandbox.dashPickerCreate("/ws");
-    await p.settle();
-    const created = p.sentOf("new");
-    assertEqual(created.length, 1, `no create was sent for ${JSON.stringify(perm)}`);
-    assertEqual(created[0].payload.mode, want,
-      `the dashboard picker's Default sent the wrong mode for ${JSON.stringify(perm)}`);
-    p.sandbox.dashRailQuickCreate("/ws2");
-    await p.settle();
-    assertEqual(p.sentOf("new")[1].payload.mode, want,
-      `quick create bypassed the permission profile for ${JSON.stringify(perm)}`);
-  }
+check("dashboard: the picker's Default and quick create both send kiro_default without reading the permission state", async () => {
+  const p = loadDashPicker();
+  const values = p.el("dashPickerTaskModeMenu").querySelectorAll(".acp-taskmode-option")
+    .map((o) => o.getAttribute("data-value"));
+  assert(!values.includes("poweratlas-acp"),
+    "the dashboard picker offers the derived agent as a mode of its own");
+  p.sandbox.dashPickerOpen("");
+  // The harness's dialog has no removeEventListener; skip the focus-trap
+  // teardown the same way "dashPickerClose hides the picker" does.
+  p.sandbox._dashPickerTrapRemove = null;
+  p.sandbox.dashPickerCreate("/ws");
+  assertEqual(p.sentOf("new").length, 1, "the picker's create did not go out synchronously");
+  assertEqual(p.sentOf("new")[0].payload.mode, "kiro_default",
+    "the dashboard picker's Default sent something other than kiro_default");
+  p.sandbox.dashRailQuickCreate("/ws2");
+  assertEqual(p.sentOf("new")[1].payload.mode, "kiro_default",
+    "quick create sent something other than kiro_default");
+  await p.settle();
+  assert(!p.fetches.some((f) => String(f.url).startsWith("/api/acp-permissions")),
+    "the dashboard read /api/acp-permissions to create a session");
+});
+
+check("dashboard: a refused create replaces 'Creating session…' with the server's message", () => {
+  // G2 (Phase 3 review, UX#2): the refusal used to leave the placeholder in the
+  // pane with the composer hidden, explained only by a 4-second toast.
+  const p = loadDashPicker({ dashAttachedSid: null });
+  const toasts = [];
+  p.sandbox.showToast = (html) => toasts.push(html);
+  p.sandbox._dashPickerCapacity = { held: 0, max: 8 };
+  p.sandbox.dashRailQuickCreate("/proj");
+  assert(/Creating session/.test(p.el("dashTranscript").textContent),
+    "fixture: the placeholder was not drawn");
+  assertEqual(p.sandbox.dashComposerEl.hidden, true, "fixture: the composer was not hidden");
+  const message = "PowerAtlas could not check whether its permission profile is in effect, " +
+    "so no session was created.";
+  p.sandbox.dashHandle({ type: "error", payload: { code: "bad_payload", message } });
+  assert(!/Creating session/.test(p.el("dashTranscript").textContent),
+    "the 'Creating session…' placeholder survived the refusal");
+  const said = p.addMessageCalls.map((c) => c.role + " " + c.text).join("\n");
+  assert(said.includes(message), `the refusal did not reach the transcript: ${said}`);
+  assertEqual(toasts.length, 0, "the refusal went to a toast instead of the transcript");
+  // A later sid-less error is not mistaken for another create refusal.
+  p.sandbox.dashHandle({ type: "error", payload: { code: "bad_payload", message: "other" } });
+  assertEqual(toasts.length, 1, "an unrelated error after the refusal was not a toast");
+});
+
+check("dashboard: a refused create with a session still attached brings the composer back", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.showToast = () => {};
+  p.sandbox._dashPickerCapacity = { held: 1, max: 8 };
+  p.sandbox.dashRailQuickCreate("/proj");
+  assertEqual(p.sandbox.dashComposerEl.hidden, true, "fixture: the composer was not hidden");
+  p.sandbox.dashHandle({ type: "error", payload: { code: "session_limit", message: "full" } });
+  assertEqual(p.sandbox.dashComposerEl.hidden, false,
+    "the composer stayed hidden although the attached session is still open");
 });
 
 check("dashboard: a permission_request frame passes its consent block to the renderer", () => {
@@ -10868,6 +10867,107 @@ check("settings: the permission rows render the server's state, and warn only wh
   p.sandbox.renderAcpPermissions({ ok: false, error: "nope" });
   assertEqual($("acpPermToggle").classList.contains("active"), true,
     "an {ok:false} answer repainted the toggle");
+});
+
+check("settings: every warning names a next step (G9)", () => {
+  const p = loadPanel();
+  const warn = () => p.sandbox.document.getElementById("acpPermWarn").textContent;
+  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: false, state: "absent",
+    base_agent: "x", generation_ok: false, generation_error: "base agent 'x' not found" });
+  assert(/Check the Base agent name below/.test(warn()), `no next step for a failed generation: ${warn()}`);
+  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: false, state: "stale",
+    base_agent: "x", generation_ok: true, generation_error: "" });
+  assert(/off and on again to regenerate/.test(warn()), `no next step for a stale profile: ${warn()}`);
+  p.sandbox.renderAcpPermissions({ enabled: false, in_effect: false, state: "on",
+    base_agent: "x", generation_ok: false, generation_error: "access denied" });
+  assert(/on and off again to retry/.test(warn()), `no next step for an undeletable profile: ${warn()}`);
+});
+
+check("settings: a failed base-agent change that kept the previous profile is reported (G3)", () => {
+  // D-10 keeps the last-good derived agent, so in_effect stays true; the
+  // first version of the panel showed nothing at all for this.
+  const p = loadPanel();
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: true, state: "on",
+    base_agent: "new_agent", generation_ok: false,
+    generation_error: "base agent 'new_agent' not found" });
+  assertEqual($("acpPermWarn").hidden, false, "a kept-previous-profile state shows no warning");
+  assert(/Still using the previous profile/.test($("acpPermWarn").textContent),
+    `the warning does not say the previous profile is still in use: ${$("acpPermWarn").textContent}`);
+  assert($("acpPermWarn").textContent.includes("base agent 'new_agent' not found"),
+    "the warning does not carry the generation error");
+  assertEqual($("acpPermBadge").hidden, true,
+    "the 'not in effect' badge is shown although the (previous) profile is in effect");
+});
+
+check("settings: the gear dot lights for a profile not working as set, and restart drift cannot hide it (G4)", () => {
+  const p = loadPanel();
+  const dot = p.sandbox.document.getElementById("topbarPendingDot");
+  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: true, state: "on",
+    base_agent: "kiro_default", generation_ok: true, generation_error: "" });
+  assertEqual(dot.hidden, true, "the healthy on state lit the gear dot");
+  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: false, state: "absent",
+    base_agent: "x", generation_ok: false, generation_error: "nope" });
+  assertEqual(dot.hidden, false, "on-but-not-in-effect did not light the gear dot");
+  assert(/permission profile/i.test(dot.title), `the dot does not say why: ${dot.title}`);
+  // The restart-drift writer runs with nothing pending: it must not hide it.
+  p.sandbox._topbarDotRestart = false;
+  p.sandbox._syncTopbarDot();
+  assertEqual(dot.hidden, false, "the restart-drift source hid the permission source's dot");
+  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: true, state: "on",
+    base_agent: "x", generation_ok: false, generation_error: "nope" });
+  assertEqual(dot.hidden, false, "the kept-previous-profile state (G3) did not light the gear dot");
+  p.sandbox.renderAcpPermissions({ enabled: false, in_effect: false, state: "absent",
+    base_agent: "x", generation_ok: true, generation_error: "" });
+  assertEqual(dot.hidden, true, "turning the profile off left the gear dot lit");
+});
+
+check("settings: the toggle is a switch whose aria-checked follows it, and Enter/Space operate it (G7)", async () => {
+  let answer = { ok: true, enabled: true, in_effect: true, state: "on", base_agent: "kiro_default" };
+  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: answer } : { body: {} } });
+  const toggle = p.sandbox.document.getElementById("acpPermToggle");
+  p.sandbox.renderAcpPermissions({ enabled: false, in_effect: false, state: "absent", base_agent: "kiro_default" });
+  assertEqual(toggle.getAttribute("aria-checked"), "false", "aria-checked does not read off");
+  let prevented = 0;
+  const key = (k) => p.sandbox.acpPermToggleKey({ key: k, preventDefault() { prevented++; } }, toggle);
+  key("a");
+  assertEqual(p.fetches.length, 0, "an unrelated key operated the switch");
+  key("Enter");
+  assertEqual(p.fetches.length, 1, "Enter did not operate the switch");
+  assertEqual(prevented, 1, "Enter was not consumed");
+  assertEqual(toggle.getAttribute("aria-checked"), "true", "aria-checked did not follow the optimistic change");
+  await p.settle();
+  answer = { ok: true, enabled: false, in_effect: false, state: "absent", base_agent: "kiro_default" };
+  key(" ");
+  assertEqual(p.fetches.length, 2, "Space did not operate the switch");
+  await p.settle();
+  assertEqual(toggle.getAttribute("aria-checked"), "false", "aria-checked did not follow the answer");
+});
+
+check("settings: a state read that fails shows 'could not read', not off (G10)", async () => {
+  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { reject: "offline" } : null });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  await p.sandbox.loadAcpPermissions();
+  assertEqual($("acpPermToggle").getAttribute("aria-checked"), "mixed",
+    "a failed read rendered the toggle as a definite state");
+  assertEqual($("acpPermToggle").classList.contains("active"), false, "a failed read rendered on");
+  assertEqual($("acpPermWarn").hidden, false, "a failed read showed no explanation");
+  assert(/Could not read the permission setting/.test($("acpPermWarn").textContent),
+    `the explanation does not say the read failed: ${$("acpPermWarn").textContent}`);
+  // An answer that is not the state's shape is a failed read too.
+  const q = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: { detail: "Not Found" } } : null });
+  await q.sandbox.loadAcpPermissions();
+  assertEqual(q.sandbox.document.getElementById("acpPermToggle").getAttribute("aria-checked"), "mixed",
+    "a non-state answer rendered the toggle as a definite state");
+});
+
+check("settings: the permission rows' error toasts can be dismissed (G12)", async () => {
+  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions"
+    ? { body: { ok: false, error: "nope" } } : { body: {} } });
+  p.sandbox.toggleAcpPermissions(p.sandbox.document.getElementById("acpPermToggle"));
+  await p.settle();
+  assertEqual(p.toasts.length, 1, "the refusal raised no toast");
+  assert(p.toasts[0].includes('class="toast-dismiss"'), "the error toast has no dismiss button");
 });
 
 check("settings: the toggle sets the value it is moving to, and reconciles from the answer", async () => {
@@ -10928,7 +11028,7 @@ check("settings: the base agent saves through /api/save-setting and shows the re
     "the field kept a name the server rejected, which is not the one in force");
 });
 
-check("settings: the permission rows say they apply to newly created sessions only", () => {
+check("settings: the permission rows say which sessions they apply to, what on and off mean, and are a keyboard switch", () => {
   // Static markup, which the panel harness does not render; asserted on the
   // template source, anchored on the rows' own ids.
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
@@ -10938,8 +11038,20 @@ check("settings: the permission rows say they apply to newly created sessions on
   const rows = src.slice(from, to);
   const note = /id="acpPermScopeNote"[^>]*>([^<]*)</.exec(rows);
   assert(note, "the permission rows carry no scope note");
-  assert(/newly created sessions only/i.test(note[1]),
-    `the scope note does not say the setting applies to newly created sessions only: ${note[1]}`);
+  // G5 (Phase 3 review): resumed sessions keep their original agent (P2).
+  assert(/sessions created after this change/i.test(note[1]),
+    `the scope note does not say the setting applies to new sessions only: ${note[1]}`);
+  assert(/reopen/i.test(note[1]),
+    `the scope note does not cover sessions reopened later: ${note[1]}`);
+  // G6: the meaning of on and off is visible, not only a tooltip.
+  const desc = /id="acpPermDesc"[^>]*>([^<]*)</.exec(rows);
+  assert(desc && /On:.*ask/.test(desc[1]) && /Off:.*never ask/.test(desc[1]),
+    `the rows do not say what on and off mean: ${desc && desc[1]}`);
+  // G7: operable from the keyboard.
+  const toggleTag = /<div id="acpPermToggle"[^>]*>/.exec(src)[0];
+  for (const attr of ['role="switch"', 'tabindex="0"', "aria-checked=", "onkeydown="]) {
+    assert(toggleTag.includes(attr), `the permission toggle lacks ${attr}`);
+  }
   assert(/id="acpPermBaseAgent"/.test(rows), "there is no base-agent input");
   assert(!/querySelector\(['"]\.topbar-toggle/.test(src),
     "a `.topbar-toggle` class query is back — it matches the Startup toggles first");
@@ -11507,18 +11619,6 @@ function loadDashPicker(opts = {}) {
       // (which would also break the picker's own workspace-loading fetches).
       if (opts.sessionTranscriptFails && String(url).indexOf("/api/session-transcript") === 0) {
         return Promise.reject(new Error("network error"));
-      }
-      // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the
-      // permission state the new-session Default resolves against. Routed by
-      // URL because the default answer below is a workspace listing; a check
-      // passes opts.acpPermissions to model the profile on, off, or failed.
-      if (String(url).indexOf("/api/acp-permissions") === 0) {
-        const perm = opts.acpPermissions ?? { enabled: false, in_effect: false, state: "absent" };
-        return Promise.resolve({
-          ok: true, status: 200,
-          json: () => Promise.resolve(perm),
-          text: () => Promise.resolve(JSON.stringify(perm)),
-        });
       }
       return Promise.resolve({
         ok: true, status: 200,
@@ -12261,10 +12361,6 @@ check("dashRailQuickCreate sends 'new' directly and never opens the picker when 
   p.sandbox.send = function(type, payload, sid) { sent.push({ type, payload, sid }); return true; };
   p.sandbox._dashPickerCapacity = { held: 0, max: 8 };
   p.sandbox.dashRailQuickCreate("/proj");
-  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the default
-  // mode now waits for the first read of /api/acp-permissions (withWireTaskMode
-  // in composer-chrome.js), so the send lands a microtask later.
-  await p.settle();
   assertEqual(p.el("dashPicker").hidden, true,
     "the picker must stay hidden -- this path exists specifically to skip it");
   const newFrame = sent.find((f) => f.type === "new");
