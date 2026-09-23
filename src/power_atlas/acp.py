@@ -4678,9 +4678,10 @@ class _Supervisor:
         of hang SC-9 exists to close). The ``id`` check is the same class one
         step later: an unhashable ``id`` (a JSON list or object) raises
         ``TypeError`` at the ``_pending_permission`` store. ``bool`` is
-        excluded although it is an ``int``, and a missing ``id`` (``None``) is
-        refused too — JSON-RPC allows neither, and a request with no usable id
-        could not be answered anyway.
+        excluded although it is an ``int`` (JSON-RPC 2.0 does not allow a
+        boolean ``id``). A ``null`` or fractional ``id`` is refused too: the
+        spec permits both but says they SHOULD NOT be used, so a well-behaved
+        agent does not send them.
         """
         request_id = msg.get("id")
         params = msg.get("params") or {}

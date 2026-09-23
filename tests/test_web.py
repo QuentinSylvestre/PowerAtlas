@@ -21804,8 +21804,8 @@ class TestSupervisor:
         call_soon_threadsafe callback as the non-dict `params` case above, so
         the same hang: logged by asyncio's default handler, answered by nobody.
         `bool` is refused although it is an `int`, and so are a missing id and
-        a float: JSON-RPC allows only strings and integers here. Every one
-        takes the `_refuse` path, and nothing is stored."""
+        a float, which JSON-RPC 2.0 permits but says SHOULD NOT be used.
+        Every one takes the `_refuse` path, and nothing is stored."""
         from power_atlas import acp as acp_mod
         sv3 = self._sv3(monkeypatch)
         sid = "sess_permbadid00-0000-0000-000001"
