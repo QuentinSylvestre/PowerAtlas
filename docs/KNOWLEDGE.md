@@ -144,30 +144,33 @@ PowerAtlas removed v2 support in this plan. The `~/.kiro/sessions/cli/` director
 
 > Three structural findings about kiro-cli v3's ACP protocol. None is a to-do — they are hard limits of the current binary that constrain what PowerAtlas can do from the client side. Recorded together because they were all surface-level items in the same "ACP v3 Follow-up" roadmap section and have the same evidence pattern: a probe attempted a wire call, it returned -32601/-32603, and no alternative was found.
 
-### Session close has no wire-level confirmation — measured on every kiro-cli v3 build to date
+### Session close — `session/delete` works on v3 2.23.1; prior methods fail
 
-**Measured on kiro-cli 2.22.0 / KAS 0.66.0 (v3 engine), 2026-09-21.** Every close-related JSON-RPC call probed returns a method-not-found or internal-error:
+**Measured on kiro-cli 2.23.1 (v3), 2026-09-23.** Wire close method status by build:
 
-| Method | Result |
-|---|---|
-| `_kiro.dev/session/terminate` | `-32603 Internal error` |
-| `session/close` | `-32601 Method not found` |
-| `session/terminate` | `-32601 Method not found` |
-| `_kiro.dev/session/close` | `-32601 Method not found` |
+| Method | v2 (≤2.16.0) | v3 (2.22.0) | v3 (2.23.1) |
+|---|---|---|---|
+| `_kiro.dev/session/terminate` | ✓ `{}` in ~2 ms | `-32603` | `-32603 "Ext method has no persistence classification"` |
+| `session/delete` | not tested | not tested | ✓ `{}` on success |
+| `session/close` | — | `-32601` | `-32601` |
+| `session/terminate` | — | `-32601` | `-32601` |
+| `_kiro.dev/session/close` | — | `-32601` | `-32601` |
 
-`_kiro.dev/session/terminate` **worked on the v2 engine** (kiro-cli 2.16.0, measured 2026-07-31: `{}` in ~2 ms, freed 3 processes and 172.6 MB, left the session resumable). It stopped working when the v3 engine became the sole engine (`260911_ACP_V2_TO_V3_ENGINE_CUTOVER`, 2026-09-12). No documented replacement has appeared.
+**`session/delete` (v3 2.23.1)**: Returns `{}` on first call; returns `-32000 "Something went wrong with the cloud session service"` on a second call (not idempotent). After a successful delete, the session is gone from kiro-cli's registry — subsequent calls referencing the session id return "Session not found". Advertised in `agentCapabilities.sessionCapabilities.delete` from `initialize` (confirmed present in 2.23.1 response).
 
-**Consequence for PowerAtlas.** `CLOSE_METHOD = None` in `acp.py:645`. `close_session()` (`acp.py:4911`) executes per-session local cleanup — removes from `self.sessions`, `self.history`, `self.inflight`, crew state, subscriber registry — but no wire call is made. The kiro-cli agent keeps the session's MCP server processes alive until either the whole KAS process exits or the kiro-cli process itself reaps them on an internal idle timeout (if such a timeout exists on v3 — unverified). The idle sweeper (`acp_idle_ttl_seconds`, default 1800 s) calls the same `close_session()`, so its memory-reclaim effect is limited to PowerAtlas's own tracking; the actual process overhead may persist on the agent side.
+**Current PowerAtlas code is out of date**: `CLOSE_METHOD = None` in `acp.py:645` was set when v3 first launched and no method worked. `session/delete` was not available then. It now needs to be implemented as `CLOSE_METHOD = "session/delete"` with error handling for the non-idempotent failure mode (treat `-32000` on re-delete as success).
 
-**What `session/cancel` does** (distinct from close): cancels a running turn. Works as a notification (`_notify`, not a request); `stopReason: "cancelled"` arrives in ~0.11 s. Does not release session resources. Not a substitute.
+**v3 process model context**: In v3, all sessions share ONE process tree (kiro-cli.exe → bun.exe → node.exe). The ~3 processes / ~161 MB per session figure from v2 does NOT apply. With 27 sessions, the tree is 3 processes / ~655 MB total. Session delete frees kiro-cli's internal session registry; whether it frees per-session in-process memory (within bun/node) is unverified but the process count is unchanged regardless. The sweeper's memory value on v3 is freeing PowerAtlas's own data structures (history ring buffers, session meta dict), not kiro-cli processes.
 
-**Would reopen if**: kiro-cli v3 ships a documented per-session release method, or if `_kiro.dev/session/terminate` starts returning `{}` on v3 again (test probe: `{"method": "_kiro.dev/session/terminate", "params": {"sessionId": "<sid>"}}` — currently `-32603`).
+**`_kiro.dev/session/terminate` dead on v3**: Kept working through v2's lifetime. The v3 error message "Ext method has no persistence classification" suggests the extension method registry was not updated when the v3 engine was built. Do not attempt to revive it; use `session/delete` instead.
+
+**What `session/cancel` does** (distinct from close): cancels a running turn. Works as a notification; `stopReason: "cancelled"` arrives in ~0.11 s. Does not release session resources. Not a substitute for delete.
 
 ---
 
 ### Supervisor crash detection has a blind spot on Windows — kiro-cli.exe wrapper keeps the pipe alive
 
-**Found 2026-09-19 on kiro-cli 2.22.0.** `kiro-cli.exe` is a thin Rust wrapper that spawns a `node.exe` child (the actual KAS/ACP server). `PowerAtlas.Popen` holds pipes to `kiro-cli.exe`'s stdin/stdout. The child `node.exe` **inherits the write end of the stdout pipe** from the wrapper.
+**Found 2026-09-19 on kiro-cli 2.22.0, confirmed on 2.23.1.** The actual process tree is `kiro-cli.exe` → `bun.exe` → `node.exe` (not just wrapper → node as originally stated). PowerAtlas's `Popen` holds pipes to `kiro-cli.exe`'s stdin/stdout. Both `bun.exe` and `node.exe` **inherit the write end of the stdout pipe** from their parent chain.
 
 When `kiro-cli.exe` crashes or is killed (Task Manager, process kill), `node.exe` survives and still holds the write handle. The reader thread in `_reader_loop()` (`acp.py:3273`) calls `stream.read1(READ_BLOCK_BYTES)` in a loop; since the pipe is still open (write handle in `node.exe`), `read1()` **blocks indefinitely instead of returning `b""`** (EOF). The thread's `finally: self._post(self._on_agent_death, proc)` never fires.
 
@@ -186,19 +189,36 @@ A watchdog (option 1) is cheap and correct for the attended case. Option 2 is ar
 
 ---
 
-### MCP OAuth flow is not buildable from confirmed signals — `authorizationUrl` never observed
+### `_kiro/mcp/status` notification — MCP server status and OAuth URL confirmed
 
-**Observed on kiro-cli 2.21.4 and 2.22.0.** When an MCP server requires OAuth, kiro-cli emits a `session_info_update` notification with `_meta.kiro.kind == "display_error"` carrying a human-readable error message (e.g. "Needs authentication"). PowerAtlas forwards this as an `agent_error` frame; `/acp` renders it inline in the transcript as a system message.
+**Measured on kiro-cli 2.23.1 (v3), 2026-09-23.** `_kiro/mcp/status` is a real notification fired by kiro-cli v3. It is NOT a callable method (not in `extensionMethods`). Current PowerAtlas code logs it as an unhandled notification at INFO (falls through to `log.info` at `acp.py:4383`).
 
-**What is confirmed:**
-- The error message arrives and is displayed.
-- The `_kiro.dev/commands/available` notification's `mcpServers` array carries the connected server list (name, status). This data arrives but is not extracted or stored in `meta["mcpServers"]` by the current code — commands and skills are extracted, MCP server list is not.
-- No `authorizationUrl` field has ever been observed in any notification shape, on any MCP server that required auth, across all probes to date.
+**Notification shape**: `{"sessionId": "<sess_id>", "servers": [...]}`
 
-**Why the OAuth completion flow is not currently buildable.** A "Connect" button in `/acp` would need to know the OAuth URL to open. The only candidate was `_kiro/mcp/status` from KiroCrew's source analysis — no such method exists in the v3 ACP protocol (not in `initialize`'s `extensionMethods` list, returns `-32601` if called). The `display_error` message is plain text from which the URL cannot be reliably extracted.
+Each server entry:
+```json
+{
+  "name": "atlassian",
+  "status": "connecting" | "connected" | "failed" | "disabled",
+  "authType": "oauth",           // only when OAuth is needed
+  "failedAuthorization": true,   // only when auth attempt failed
+  "authorizationUrl": "https://mcp.atlassian.com/...",  // when failedAuthorization
+  "tools": [{name, description, disabled, inputSchema}, ...],  // when connected
+  "_meta": {"kiro": {"resource": {"resourceType": "mcpServer", "source": {"origin": "user"}}}}
+}
+```
 
-**What remains open:**
-- Whether `_kiro.dev/commands/available`'s `mcpServers` entries carry auth status fields (e.g. `{name, status: "unauthorized", authUrl: "..."}`) — the shape has not been captured for an auth-required server during a session where MCP auth was denied. A targeted probe (start a session, deny Atlassian MCP auth, capture the raw `mcpServers` array) would settle this.
-- Whether the `/mcp` status panel functionality (which exists in kiro-cli's terminal TUI) is available as an ACP notification or method. Not probed.
+**Firing pattern**: Fires immediately after `session/new` (while servers are in "connecting" state), then again as servers reach "connected"/"failed"/"disabled". Also fires periodically (~50-60 min intervals, based on log observation). Sends ALL servers in one notification — state is replace-all, not delta.
 
-**Would reopen if**: a probe captures a `mcpServers` array entry with an `authorizationUrl` or equivalent field during a session where an MCP server needs auth; or a new `_kiro/mcp/*` or `_kiro.dev/mcp/*` method appears in `initialize`'s `extensionMethods` list.
+**`authorizationUrl` is present** when `status: "failed"` + `failedAuthorization: true`. This was logged in PowerAtlas's own log today (2026-09-23 15:21:17) and on prior dates. The ROADMAP's statement "no `authorizationUrl`-bearing signal has ever been observed" was wrong — the signal exists, it was arriving all along, it just wasn't being handled.
+
+**The feature is buildable**: A "Connect" button for OAuth MCP servers is achievable — extract `authorizationUrl` from the `_kiro/mcp/status` notification, show a button in the `/acp` MCP panel, open the URL when clicked. No additional protocol support needed.
+
+**Not in `extensionMethods`**: `_kiro/mcp/status` is a notification (server-to-client push), not a client-callable method. `extensionMethods` from `initialize` lists methods the agent handles; notifications it emits are not listed there.
+
+**What remains unknown**: Whether the `authorizationUrl` is stable (same URL across multiple notifications for the same server requiring auth), or whether it rotates. This affects whether showing the URL as a button is safe vs. needing to use the latest notification's URL. The log entries suggest the URL appears for as long as the server is in the "failed" state and a new notification arrives when the state changes.
+
+**Other new notification types confirmed on v3 2.23.1** (previously unknown, logged as unhandled):
+- `_kiro/governance/state` — fires on session/new, unknown params shape
+- `_kiro/tools/didChange` — fires on session/new, unknown params shape  
+- `_kiro/powers/items_changed` — fires on session/new, unknown params shape
