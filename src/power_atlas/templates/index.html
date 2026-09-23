@@ -995,9 +995,34 @@ function dashReportSignedOut() {
   // The composer note, not only the log: the debug log is collapsed by
   // default, and this is the one state the user has to act on.
   dashSetComposerNote(msg);
+  // And the transcript, as acp.html's reportSignedOut() does: the note sits
+  // inside #dashComposer, which both create paths (dashPickerCreate,
+  // dashRailQuickCreate) hide before calling dashConnect(), so on those paths
+  // the note alone is invisible and "Creating session…" stays up forever. A
+  // pane holding only a single system line (that placeholder, or the initial
+  // "Select a session…") is replaced; a real transcript is appended to,
+  // never wiped. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+  // review (J4)
+  var pane = document.getElementById('dashTranscript');
+  if (pane) {
+    // Elements only (`children`): the markup's whitespace text nodes around
+    // the initial line would make `childNodes` count three.
+    var kids = pane.children || pane.childNodes || [];
+    if (kids.length === 1 && kids[0].className === 'acp-system-msg') {
+      pane.textContent = '';
+    }
+    var line = document.createElement('div');
+    line.className = 'acp-system-msg';
+    line.textContent = msg;
+    pane.appendChild(line);
+  }
   dashReconnectBtn.hidden = true;
   dashReloadBtn.hidden = true;
 }
+// How long dashExplainRefusedHandshake() waits for its diagnostic GET before
+// reading the silence as "server unreachable".
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J6)
+var DASH_DIAGNOSE_TIMEOUT_MS = 5000;
 // Mirrors acp.html's own explainRefusedHandshake(): no onopen fired, so the
 // handshake itself was refused, which the browser reports as an empty-reason
 // 1006 -- from the close event alone, indistinguishable from there being no
@@ -1010,10 +1035,42 @@ function dashReportSignedOut() {
 function dashExplainRefusedHandshake() {
   dashReconnectBtn.hidden = true;
   dashReloadBtn.hidden = true;
-  fetch(location.pathname + location.search, {
-    cache: 'no-store',
-    credentials: 'same-origin'
-  }).then(function (res) {
+  // Review fixes, 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+  // Phase 6 review:
+  //   J6 -- the GET is bounded: a fetch that never settles would otherwise
+  //         leave Reconnect and Reload hidden for good. After
+  //         DASH_DIAGNOSE_TIMEOUT_MS it is aborted and read as unreachable.
+  //   J8 -- the answer is dropped once it is stale: already concluded (the
+  //         timeout won), or a later dashConnect() -- a session click or
+  //         either create path, all reachable while this runs -- has
+  //         replaced the socket or has it open. Painting Reconnect or the
+  //         signed-out note over a live socket is the bug this prevents.
+  //   J7 -- a final catch, because .then(ok, err) does not catch a throw
+  //         inside ok; it shows Reconnect.
+  var sock = _dashWs;
+  var concluded = false;
+  var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  function stale() {
+    return concluded || _dashWs !== sock ||
+      (_dashWs && _dashWs.readyState === WebSocket.OPEN);
+  }
+  function unreachable() {
+    logLine('info', 'the server is not answering — it may still be starting. ' +
+                    'Reconnect once it is back up.');
+    dashReconnectBtn.hidden = false;
+  }
+  var timer = setTimeout(function () {
+    if (stale()) return;
+    concluded = true;
+    if (ctrl) ctrl.abort();
+    unreachable();
+  }, DASH_DIAGNOSE_TIMEOUT_MS);
+  var init = { cache: 'no-store', credentials: 'same-origin' };
+  if (ctrl) init.signal = ctrl.signal;
+  fetch(location.pathname + location.search, init).then(function (res) {
+    if (stale()) return;
+    concluded = true;
+    clearTimeout(timer);
     if (res.status === 403) {
       dashReportSignedOut();
       return;
@@ -1027,9 +1084,17 @@ function dashExplainRefusedHandshake() {
     }
     dashReconnectBtn.hidden = false;
   }, function () {
-    logLine('info', 'the server is not answering — it may still be starting. ' +
-                    'Reconnect once it is back up.');
+    if (stale()) return;
+    concluded = true;
+    clearTimeout(timer);
+    unreachable();
+  }).catch(function () {
+    if (_dashWs !== sock || (_dashWs && _dashWs.readyState === WebSocket.OPEN)) return;
     dashReconnectBtn.hidden = false;
+    try {
+      logLine('error', 'the handshake was refused and diagnosing it failed. ' +
+                       'Reconnect to try again.');
+    } catch (e) { /* the log itself may be what threw */ }
   });
 }
 // Opens the socket if needed (reused across session switches within one page

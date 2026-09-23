@@ -336,7 +336,9 @@ def _bind(host: str, port: int) -> socket.socket:
     Do **not** replace this with ``uvicorn.Config.bind_socket``. That helper
     sets ``SO_REUSEADDR``, which on Windows lets a *different local process*
     bind the identical ``127.0.0.1:<port>`` and hijack connections to a surface
-    that serves ``_ACP_TOKEN`` and fronts ``kiro-cli acp -a``. It also sets
+    that fronts ``kiro-cli acp -a`` and receives the browser's ``pa_local``
+    cookie (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+    retired the page-embedded token this line used to name). It also sets
     ``set_inheritable(True)``, handing the listener to every child process the
     app spawns — and this app spawns terminals and agents.
 

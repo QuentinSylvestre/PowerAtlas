@@ -5314,6 +5314,11 @@
     logLine('in', '← ' + type + ' ' + JSON.stringify(payload));
   }
 
+  // How long explainRefusedHandshake() waits for its diagnostic GET before
+  // reading the silence as "server unreachable".
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J6)
+  var DIAGNOSE_TIMEOUT_MS = 5000;
+
   function reportSignedOut() {
     // The server is up and refused this browser's plain GET with a 403: the
     // credential gate (LoopbackCredentialGate for pa_local, RemoteAccessGuard
@@ -5322,15 +5327,19 @@
     // both send the same missing cookie. Only a new login code can, which the
     // tray mints (or /remote-auth, on a paired remote device).
     // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
-    var how = ACP_LOCAL
-      ? 'open PowerAtlas from its tray icon to sign this browser back in.'
-      : 'sign this device in again at /remote-auth.';
-    setState('closed', 'signed out');
+    // A remote viewer also gets this 403 when remote access has been turned
+    // off, so its message names both causes rather than sending it to sign
+    // in at /remote-auth for a door that is shut.
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J9)
+    var msg = ACP_LOCAL
+      ? 'Signed out — open PowerAtlas from its tray icon to sign this browser back in.'
+      : 'Signed out, or remote access is turned off. Sign in again at '
+        + '/remote-auth, or ask for remote access to be turned back on.';
+    setState('closed', ACP_LOCAL ? 'signed out' : 'signed out or remote access off');
     // In the transcript as well as the log: the log strip is 120 px tall and
     // collapsed by default, and this is the one thing the user must act on.
-    addMessage('note', 'Signed out — ' + how);
-    logLine('error', 'handshake refused and the page itself answers 403: this browser ' +
-                     'is signed out. ' + how);
+    addMessage('note', msg);
+    logLine('error', 'handshake refused and the page itself answers 403. ' + msg);
     reconnectBtn.hidden = true;
     reloadBtn.hidden = true;
   }
@@ -5352,10 +5361,44 @@
     setState('closed', 'handshake rejected');
     reconnectBtn.hidden = true;
     reloadBtn.hidden = true;
-    fetch(location.pathname + location.search, {
-      cache: 'no-store',
-      credentials: 'same-origin'
-    }).then(function (res) {
+    // Review fixes, 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+    // Phase 6 review:
+    //   J6 — the GET is bounded. A fetch that never settles would otherwise
+    //        leave both recovery buttons hidden for good; after
+    //        DIAGNOSE_TIMEOUT_MS it is aborted and read as unreachable.
+    //        AbortController is feature-tested so an old browser still gets
+    //        the timeout, just without the abort.
+    //   J8 — the answer is dropped once it is stale: already concluded (the
+    //        timeout won), or a later connect() has replaced the socket this
+    //        diagnosis was about. Here connect() is reachable only through
+    //        Reconnect, which is hidden until the diagnosis concludes, so the
+    //        race needs the J6 timeout to open first; the guard is kept for
+    //        that path. Socket identity only: readyState is not consulted.
+    //   J7 — a final catch, because .then(ok, err) does not catch a throw
+    //        inside ok. It shows Reconnect and nothing else — setState is
+    //        a plausible thrower and must not be the recovery path.
+    var sock = ws;
+    var concluded = false;
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    function stale() { return concluded || ws !== sock; }
+    function unreachable() {
+      setState('closed', 'server unreachable');
+      logLine('info', 'the server is not answering — it may still be starting. ' +
+                      'Reconnect once it is back up.');
+      reconnectBtn.hidden = false;
+    }
+    var timer = setTimeout(function () {
+      if (stale()) return;
+      concluded = true;
+      if (ctrl) ctrl.abort();
+      unreachable();
+    }, DIAGNOSE_TIMEOUT_MS);
+    var init = { cache: 'no-store', credentials: 'same-origin' };
+    if (ctrl) init.signal = ctrl.signal;
+    fetch(location.pathname + location.search, init).then(function (res) {
+      if (stale()) return;
+      concluded = true;
+      clearTimeout(timer);
       if (res.status === 403) {
         reportSignedOut();
         return;
@@ -5371,10 +5414,17 @@
       }
       reconnectBtn.hidden = false;
     }, function () {
-      setState('closed', 'server unreachable');
-      logLine('info', 'the server is not answering — it may still be starting. ' +
-                      'Reconnect once it is back up.');
+      if (stale()) return;
+      concluded = true;
+      clearTimeout(timer);
+      unreachable();
+    }).catch(function () {
+      if (ws !== sock) return;
       reconnectBtn.hidden = false;
+      try {
+        logLine('error', 'the handshake was refused and diagnosing it failed. ' +
+                         'Reconnect to try again.');
+      } catch (e) { /* the log itself may be what threw */ }
     });
   }
 

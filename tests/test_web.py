@@ -1289,6 +1289,7 @@ class TestAcpNavigationGuard:
         resp = raw_client.get("/acp?sid=abc", headers={
             "Origin": "http://evil.example.com", "Sec-Fetch-Site": "cross-site"})
         assert resp.status_code == 403
+        assert _ACP_PAGE_MARKER not in resp.text
 
     def test_a_cross_origin_referer_is_refused(self, raw_client):
         resp = raw_client.get("/acp?sid=abc",
@@ -1303,6 +1304,7 @@ class TestAcpNavigationGuard:
         resp = raw_client.get("/acp?sid=abc",
                               headers={"Sec-Fetch-Site": "cross-site"})
         assert resp.status_code == 403
+        assert _ACP_PAGE_MARKER not in resp.text
 
     def test_origin_null_is_refused(self, raw_client):
         resp = raw_client.get("/acp", headers={"Origin": "null"})
@@ -1373,13 +1375,14 @@ class TestSingleLabelHostRejected:
         assert resp.status_code == 403
 
     def test_acp_page_rejected_for_non_loopback_host(self, raw_client):
-        """End-to-end: no rebound Host reaches the token, whichever check stops
+        """End-to-end: no rebound Host reaches the page, whichever check stops
         it. Which one actually did is a question this cannot answer, because the
         middleware runs first — see ``TestAcpInlineHostCheck`` for the route's
         own check, tested with the middleware out of the way."""
         for host in ("testserver", "evil.com"):
             resp = raw_client.get("/acp", headers={"Host": host})
             assert resp.status_code == 403, f"GET /acp should reject Host: {host}"
+            assert _ACP_PAGE_MARKER not in resp.text
 
     def test_acp_page_served_on_loopback(self, raw_client):
         resp = raw_client.get("/acp")
@@ -1605,7 +1608,9 @@ _HOSTILE_HOSTS = [
 
 # One route per kind of thing a rebound page could take: the dashboard (which
 # embeds `custom_launchers`, whose `env` holds cleartext credentials), the ACP
-# token's delivery page, a JSON API, and the static mount — the last because
+# page (once the token's delivery page; the token is retired by
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6), a JSON API,
+# and the static mount — the last because
 # `StaticFiles` sits behind the same middleware and was answering 500.
 _GUARDED_PATHS = ["/", "/acp", "/api/settings", "/static/style.css"]
 
@@ -1617,6 +1622,7 @@ class TestHostHeaderIsParsedNotTrusted:
         status, body = _raw_asgi(app, path, [(b"host", host.encode())])
         assert status == 403, f"GET {path} with Host: {host} answered {status}"
         assert b"Forbidden" in body
+        assert _ACP_PAGE_MARKER.encode() not in body
 
     @pytest.mark.parametrize("path", _GUARDED_PATHS)
     def test_absent_host_is_forbidden(self, path):
@@ -1625,6 +1631,7 @@ class TestHostHeaderIsParsedNotTrusted:
         left, so ``url.hostname`` was 127.0.0.1 by construction."""
         status, body = _raw_asgi(app, path, [])
         assert status == 403, f"GET {path} without a Host answered {status}"
+        assert _ACP_PAGE_MARKER.encode() not in body
 
     @pytest.mark.parametrize("order", [
         [b"127.0.0.1", b"evil.com"],
@@ -1654,9 +1661,11 @@ class TestHostHeaderIsParsedNotTrusted:
 
 
 class TestAcpInlineHostCheck:
-    """``GET /acp`` repeats the Host check the middleware already runs, because
-    it is the ACP token's only delivery vehicle and a narrowing of the
-    middleware must not silently un-protect it.
+    """``GET /acp`` repeats the Host check the middleware already runs, so a
+    narrowing of the middleware cannot silently un-protect the page. (It was
+    the ACP token's only delivery vehicle until
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 retired the
+    token; the check stays for the page itself.)
 
     Every other test of that route goes through the middleware, which answers
     first — so deleting the inline check left the whole suite green. These probe
@@ -1677,10 +1686,12 @@ class TestAcpInlineHostCheck:
     def test_inline_check_refuses_without_the_middleware(self, host):
         status, body = _raw_asgi(_ROUTER_ONLY, "/acp", [(b"host", host.encode())])
         assert status == 403, f"/acp served Host: {host} with no middleware above it"
+        assert _ACP_PAGE_MARKER.encode() not in body
 
     def test_inline_check_refuses_absent_host(self):
         status, body = _raw_asgi(_ROUTER_ONLY, "/acp", [])
         assert status == 403
+        assert _ACP_PAGE_MARKER.encode() not in body
 
 
 class TestWsOriginUnaffectedByTheHostFallback:
@@ -1776,7 +1787,8 @@ class TestWsOriginReadsTheRawHostOnEveryStarlette:
     ``127.0.0.1`` while ``netloc`` keeps the userinfo and reproduces the
     attacker's Origin exactly — the two halves disagree and the check passes.
     Practical exposure is nil (browsers never emit userinfo in ``Host``, and a
-    local process that can set headers already holds the token); what was broken
+    local process that can set headers is already on the loopback side of
+    every Host check); what was broken
     is a stated invariant and the fact that no test could observe it, because
     1.3.1's ``_HOST_RE`` refuses both before the function is reached.
     """
@@ -2123,6 +2135,52 @@ class TestAcpSocketIsCookieAuthenticated:
                 pass
         assert exc.value.code == 1008
         assert reached == []
+
+    # With the token gone, `_ws_origin_ok` is the only defence against
+    # cross-site websocket hijacking: a signed-in browser attaches `pa_local` to
+    # an upgrade any page opens. Driven with a valid cookie on the loopback
+    # peer, so the gate passes and only the Origin check can refuse.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J2)
+    _LOOPBACK_WS_HOST = (b"host", b"127.0.0.1:4915")
+
+    @pytest.mark.parametrize("origin", [
+        None,                            # missing
+        b"null",                         # sandboxed iframe, file://, data:
+        b"http://127.0.0.1:3000",        # same host, another port
+        b"http://localhost:4915",        # another loopback spelling
+        b"http://evil.example.com",      # a foreign host
+    ], ids=["missing", "null", "other-port", "localhost", "foreign"])
+    def test_a_hostile_origin_is_closed_with_a_valid_cookie(self, origin, reached):
+        """260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J2)"""
+        headers = [self._LOOPBACK_WS_HOST,
+                   (b"cookie", f"pa_local={_valid_local_cookie()}".encode())]
+        if origin is not None:
+            headers.append((b"origin", origin))
+        sent = _peer_ws("/ws/acp", headers, client=("127.0.0.1", 50000))
+        assert [(m["type"], m.get("code")) for m in sent] == [
+            ("websocket.close", 1008)], origin
+        assert reached == [], f"Origin {origin!r} reached acp.serve_socket"
+
+    def test_the_matching_origin_is_served_on_the_same_path(self, monkeypatch):
+        """The twin: the same cookie, Host and peer with the matching Origin
+        reaches `serve_socket`, so the refusals above are the Origin's. Its
+        own recorder, because `_peer_ws` has no frames for `reached`'s
+        `receive_text` to read.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J2)
+        """
+        from power_atlas import web as web_mod
+        got: list[str] = []
+
+        async def fake_serve(ws):
+            got.append(ws.url.path)
+
+        monkeypatch.setattr(web_mod.acp, "serve_socket", fake_serve)
+        headers = [self._LOOPBACK_WS_HOST,
+                   (b"cookie", f"pa_local={_valid_local_cookie()}".encode()),
+                   (b"origin", b"http://127.0.0.1:4915")]
+        sent = _peer_ws("/ws/acp", headers, client=("127.0.0.1", 50000))
+        assert sent[0]["type"] == "websocket.accept"
+        assert got == ["/ws/acp"]
 
     def test_a_leftover_token_parameter_is_neither_needed_nor_checked(
             self, raw_client, reached):
@@ -11634,6 +11692,58 @@ class TestRemoteRequestsNeedTheCookie:
         assert sent[0]["code"] == 1008
         assert not any(m["type"] == "http.response.start" for m in sent)
 
+    # A self-consistent remote Host/Origin pair, so `ws_acp`'s own Origin
+    # check passes and the device cookie is the only thing left to refuse.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J1)
+    _REMOTE_WS_HEADERS = [(b"host", f"{_LOCAL_BIND_IP}:4915".encode()),
+                          (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode())]
+
+    @pytest.fixture
+    def served(self, monkeypatch):
+        """Records every socket `ws_acp` hands to `acp.serve_socket`."""
+        from power_atlas import web as web_mod
+        assert web_mod.acp is not None, "the guarded acp import must succeed here"
+        got: list[str] = []
+
+        async def fake_serve(ws):
+            got.append(ws.url.path)
+
+        monkeypatch.setattr(web_mod.acp, "serve_socket", fake_serve)
+        return got
+
+    def test_the_ws_acp_upgrade_with_origin_but_no_cookie_is_closed(
+            self, remote_enabled, served):
+        """The device cookie is the remote socket's only credential since the
+        per-launch token was retired. `test_the_ws_acp_upgrade_without_a_cookie_is_closed`
+        above sends no Origin, so `ws_acp` refuses it for that reason and the
+        test stayed green with the guard waving websockets through. Here the
+        Origin is valid, so only the cookie check can refuse.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J1)
+        """
+        sent = _peer_ws("/ws/acp", self._REMOTE_WS_HEADERS)
+        assert [(m["type"], m.get("code")) for m in sent] == [
+            ("websocket.close", 1008)]
+        assert served == [], "a cookie-less remote upgrade reached acp.serve_socket"
+
+    def test_the_same_upgrade_with_the_cookie_is_served(self, remote_enabled, served):
+        """The twin: the refusal above is the cookie's, not the Host or Origin.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J1)
+        """
+        sent = _peer_ws("/ws/acp", [*self._REMOTE_WS_HEADERS, _cookie_header()])
+        assert sent[0]["type"] == "websocket.accept"
+        assert served == ["/ws/acp"]
+
+    def test_the_guard_alone_closes_a_cookie_less_upgrade(self, remote_enabled):
+        """Sentinel-isolated, as Phase 5 did for the loopback gate: with the
+        Origin valid and no inner check in the way, only the guard's cookie
+        check stands between the upgrade and the app. Its cookie-bearing twin
+        is `TestRemotePathAllowlistIsDefaultDeny.test_the_websocket_route_still_passes_the_gate`.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J1)
+        """
+        sent = _peer_ws("/ws/acp", self._REMOTE_WS_HEADERS,
+                        asgi_app=_guard_over_sentinel())
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+
     def test_ws_static_is_refused_and_never_reaches_the_mount(self, remote_enabled):
         """D7's second finding: `/static` is a `Mount` whose `matches` admits
         websocket scopes, so `ws://<ip>/static/x` reached `StaticFiles` having
@@ -12181,6 +12291,7 @@ class TestRemoteBindDoesNotWidenTheHostAllowlist:
         status, body, _ = _peer_http(
             "/acp", [(b"host", host.encode()), _cookie_header()])
         assert status == 403, f"Host: {host} was served with the remote bind on"
+        assert _ACP_PAGE_MARKER.encode() not in body
 
     def test_the_configured_ip_is_admitted(self, remote_enabled):
         from power_atlas.web import _host_allowed
@@ -24665,10 +24776,13 @@ class TestLoopbackGateRefusesWithoutACookie:
 
     def test_ws_acp_upgrade_through_a_test_client(self):
         """Through the gate over a sentinel, not the real app: there `ws_acp`
-        refuses a token-less upgrade 1008 on its own, so the test passed with
-        the gate skipping websockets. Here only the gate can refuse, and the
-        signed-in twin shows the same upgrade reaching the inner app.
-        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+        refused the upgrade 1008 on its own — for the missing token until
+        Phase 6, and still for `TestClient`'s single-label `Host: testserver`
+        and absent `Origin` — so the test passed with the gate skipping
+        websockets. Here only the gate can refuse, and the signed-in twin shows
+        the same upgrade reaching the inner app.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review;
+        reworded 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
         """
         signed_in = TestClient(_gate_over_sentinel(), base_url="http://127.0.0.1",
                                client=_LOOPBACK_PEER)

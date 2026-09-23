@@ -754,6 +754,15 @@ function loadPage(templatePath, opts = {}) {
     if (override && override.reject) {
       return Promise.reject(new Error(override.reject));
     }
+    // A request that never answers, until the page aborts it — the case the
+    // refused-handshake diagnosis's timeout exists for.
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J6)
+    if (override && override.hang) {
+      return new Promise((_resolve, reject) => {
+        const signal = init && init.signal;
+        if (signal) signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }
     const ok = override ? override.ok !== false : true;
     const status = override && override.status ? override.status : (ok ? 200 : 500);
     // The delete path is matched **before** the listing, and by equality rather
@@ -892,6 +901,10 @@ function loadPage(templatePath, opts = {}) {
     history: { replaceState: (_s, _t, u) => urls.push(u) },
     WebSocket: FakeWs,
     fetch: fakeFetch,
+    // Node's own. The diagnosis feature-tests for it and aborts its GET on
+    // timeout. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
+    // review (J6)
+    AbortController,
     // The page's confirmation gate. A real one blocks the thread, which is
     // exactly the property the delete path relies on — nothing after it runs
     // until the user has answered — so answering synchronously here models it
@@ -8277,7 +8290,10 @@ check("no auto reconnect when not opened", (tpl) => {
   const timersBefore = page.timers.length;
   // Fire close without ever having opened
   page.socket().onclose({ code: 4401, reason: "token expired" });
-  assertEqual(page.timers.length, timersBefore,
+  // The diagnostic GET's own 5 s timeout is the one timer allowed here; it is
+  // not a reconnect. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+  // Phase 6 review (J6)
+  assertEqual(page.timers.filter((t) => t.ms !== 5000).length, timersBefore,
     "no reconnect timer should be scheduled when socket closes without having been opened");
   assertEqual(page.el("acpReconnect").hidden, true,
     "reconnect button must not appear before the refused handshake is diagnosed");
@@ -10190,6 +10206,73 @@ check("refused handshake: a server that admits this browser offers Reconnect, ne
     "the stale-token Reload affordance is retired -- there is no per-launch token to go stale");
 });
 
+// ---- refused handshake: review fixes ---------------------------------------
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review
+// (J5-J9). The "any other answer" branch, the diagnostic GET's timeout, a
+// throw inside the success handler, a stale answer, and the remote wording.
+
+check("refused handshake: a 5xx answer is a server error -- not signed out, not unreachable -- and offers Reconnect (J5)", async (tpl) => {
+  const r = await refusedHandshake(tpl, { ok: false, status: 500, body: {} });
+  const all = r.status() + r.log() + r.transcript();
+  assertEqual(r.status(), "server error", "a 5xx must read as a server error");
+  assert(!/signed out/i.test(all), `a 5xx is not a signed-out browser; got ${JSON.stringify(all)}`);
+  assert(!/unreachable|not answering|still be starting/i.test(all),
+    `a server that answered 500 is reachable; got ${JSON.stringify(all)}`);
+  assertEqual(r.page.el("acpReconnect").hidden, false, "Reconnect is the recovery for a server error");
+});
+
+check("refused handshake: a diagnostic GET that never answers times out as unreachable and offers Reconnect (J6)", async (tpl) => {
+  const r = await refusedHandshake(tpl, { hang: true });
+  assertEqual(r.page.el("acpReconnect").hidden, true, "fixture: still diagnosing");
+  const diag = r.page.timers.filter((t) => t.ms === 5000);
+  assertEqual(diag.length, 1, "the diagnosis must arm exactly one 5 s timeout");
+  diag[0].fn();
+  await r.page.settle();
+  assertEqual(r.status(), "server unreachable", "silence past the timeout reads as unreachable");
+  assertEqual(r.page.el("acpReconnect").hidden, false, "Reconnect must reappear after the timeout");
+  const get = r.page.fetches.find((f) => f.url.startsWith("/acp"));
+  assert(get && get.init.signal && get.init.signal.aborted,
+    "the hung GET must be aborted, not left open");
+});
+
+check("refused handshake: a throw inside the success handler still ends with Reconnect shown (J7)", async (tpl) => {
+  const page = loadPage(tpl); // the page's own GET answers 200
+  page.socket().onclose({ code: 1006, reason: "" }); // never opened
+  // The 200 branch's first act is setState('closed', 'disconnected').
+  Object.defineProperty(page.el("acpStatus"), "textContent", {
+    configurable: true,
+    get() { return ""; },
+    set() { throw new Error("injected failure"); },
+  });
+  await page.settle();
+  await page.settle();
+  assertEqual(page.el("acpReconnect").hidden, false,
+    "an exception in the success handler left both recovery buttons hidden");
+});
+
+check("refused handshake: an answer for a socket a later connect() replaced paints nothing (J8)", async (tpl) => {
+  const page = loadPage(tpl, {
+    answer: (u) => (u.startsWith("/acp") ? { ok: false, status: 403, body: {} } : null),
+  });
+  page.socket().onclose({ code: 1006, reason: "" }); // never opened
+  page.el("acpReconnect").click(); // a new connect() before the GET answers
+  const before = page.el("acpTranscript").textContent;
+  await page.settle();
+  await page.settle();
+  assert(!/signed out/i.test(page.el("acpTranscript").textContent.slice(before.length)
+                             + page.el("acpStatus").textContent),
+    "a stale diagnosis painted signed out over the newer connection");
+});
+
+check("refused handshake: a remote 403 names both causes -- signed out, or remote access turned off (J9)", async (tpl) => {
+  const r = await refusedHandshake(tpl, { ok: false, status: 403, body: {} },
+                                   { local: false, canDelete: true });
+  assert(/remote access is turned off/i.test(r.transcript()),
+    `a remote 403 may mean remote access was stopped; got ${JSON.stringify(r.transcript())}`);
+  assert(/remote-auth/.test(r.transcript()) && !/tray/i.test(r.transcript()),
+    `the remote sign-in path is still /remote-auth; got ${JSON.stringify(r.transcript())}`);
+});
+
 
 check("rail fetches /api/acp/sessions", async (tpl) => {
   // Same story for the rail's first fetch: one engine, one listing path.
@@ -11672,6 +11755,15 @@ function loadDashPicker(opts = {}) {
       // simulates a server that is not answering at all -- the branch
       // dashExplainRefusedHandshake()'s rejection handler covers.
       if (opts.fetchFails) return Promise.reject(new Error("network error"));
+      // opts.pageHangs: the page's own GET of itself never answers until the
+      // page aborts it. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+      // Phase 6 review (J6)
+      if (opts.pageHangs && String(url) === "/") {
+        return new Promise((_resolve, reject) => {
+          const signal = init && init.signal;
+          if (signal) signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      }
       // opts.pageStatus: the status the page's own GET of itself ("/", the
       // sandbox location.pathname) answers with -- 403 is the loopback gate
       // refusing a browser with no valid pa_local. Keyed on the exact page
@@ -11941,6 +12033,9 @@ function loadDashPicker(opts = {}) {
     // in the real file, outside the extracted region, which starts at
     // dashWsUrl's own declaration.
     WS_PATH: "/ws/acp",
+    // Node's own, for dashExplainRefusedHandshake()'s timeout abort.
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J6)
+    AbortController,
     // dashConnectSubWs()'s onopen/onerror logLine calls read location.host
     // (Fix 7, Phase 5 review, mirroring dashConnect()'s own onopen logLine
     // call) -- this sandbox has no browser `location` global otherwise,
@@ -14996,7 +15091,10 @@ check("dashboard: reconnect — no auto reconnect when not opened; diagnosis run
   p.sandbox.dashConnect(); // constructs the socket but never opens it
   const timersBefore = p.timers.length;
   p.closeMain({ code: 4401, reason: "token expired" });
-  assertEqual(p.timers.length, timersBefore,
+  // The diagnostic GET's own 5 s timeout is the one timer allowed here; it is
+  // not a reconnect. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+  // Phase 6 review (J6)
+  assertEqual(p.timers.filter((t) => t.ms !== 5000).length, timersBefore,
     "no reconnect timer should be scheduled when the socket closes without having been opened");
   assertEqual(p.el("dashReconnect").hidden, true,
     "the Reconnect button must not appear on a rejected handshake -- diagnosis decides what to show instead");
@@ -15066,6 +15164,107 @@ check("dashboard: refused handshake — a server that admits this browser offers
   assertEqual(p.el("dashReconnect").hidden, false, "Reconnect is the recovery when the server admits this browser");
   assertEqual(p.el("dashReload").hidden, true,
     "the stale-token Reload affordance is retired -- there is no per-launch token to go stale");
+});
+
+// ---- dashboard refused handshake: review fixes ---------------------------
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review
+// (J4-J8).
+
+/** True when `el` and every ancestor the harness models is not hidden. */
+function dashVisible(el) {
+  for (let n = el; n; n = n.parentNode) if (n.hidden) return false;
+  return true;
+}
+
+for (const path of ["quick create", "picker create"]) {
+  check(`dashboard: a signed-out refusal on the ${path} path is visible, replacing 'Creating session…' (J4)`, async () => {
+    const p = loadDashPicker({ realConnect: true, pageStatus: 403, dashAttachedSid: null });
+    p.sandbox.dashSetComposerNote = () => {}; // the composer is hidden on this path
+    // The real markup nests the transcript inside its wrapper.
+    p.el("dashTranscriptWrap").appendChild(p.el("dashTranscript"));
+    p.sandbox._dashPickerCapacity = { held: 0, max: 8 };
+    if (path === "quick create") {
+      p.sandbox.dashRailQuickCreate("/proj");
+    } else {
+      p.sandbox.dashPickerOpen("");
+      p.sandbox._dashPickerTrapRemove = null;
+      p.sandbox.dashPickerCreate("/proj");
+    }
+    assert(/Creating session/.test(p.el("dashTranscript").textContent),
+      "fixture: the placeholder was not drawn");
+    assertEqual(p.sandbox.dashComposerEl.hidden, true,
+      "fixture: the create path hides the composer, so its note cannot be the message");
+    p.closeMain({ code: 1006, reason: "" }); // never opened
+    await p.settle();
+    const pane = p.el("dashTranscript");
+    const shown = pane.childNodes.find((c) => /signed out/i.test(c.textContent));
+    assert(shown && /tray/i.test(shown.textContent),
+      `the transcript must carry the signed-out message; got ${JSON.stringify(pane.textContent)}`);
+    assert(dashVisible(shown), "the signed-out message sits under a hidden element");
+    assert(!/Creating session/.test(pane.textContent),
+      "'Creating session…' survived a refusal that will never create anything");
+  });
+}
+
+check("dashboard: a signed-out refusal appends to a real transcript rather than wiping it (J4)", async () => {
+  const p = loadDashPicker({ realConnect: true, pageStatus: 403 });
+  p.sandbox.dashSetComposerNote = () => {};
+  const pane = p.el("dashTranscript");
+  for (const t of ["first", "second"]) {
+    const row = new El("div"); row.className = "acp-msg"; row.textContent = t; pane.appendChild(row);
+  }
+  p.sandbox.dashConnect();
+  p.closeMain({ code: 1006, reason: "" });
+  await p.settle();
+  assert(/first/.test(pane.textContent) && /second/.test(pane.textContent),
+    "the viewed transcript was wiped");
+  assert(/signed out/i.test(pane.textContent), "the signed-out message was not appended");
+});
+
+check("dashboard: refused handshake — a 5xx is neither signed out nor unreachable, and offers Reconnect (J5)", async () => {
+  const { p, notes, log } = dashRefusedHandshake({ pageStatus: 500 });
+  await p.settle();
+  const all = log() + notes.join(" ") + p.el("dashTranscript").textContent;
+  assert(!/signed out/i.test(all), `a 5xx is not a signed-out browser; got ${JSON.stringify(all)}`);
+  assert(!/unreachable|not answering|still be starting/i.test(all),
+    `a server that answered 500 is reachable; got ${JSON.stringify(all)}`);
+  assertEqual(p.el("dashReconnect").hidden, false, "Reconnect is the recovery for a server error");
+});
+
+check("dashboard: refused handshake — a diagnostic GET that never answers times out as unreachable (J6)", async () => {
+  const { p, log } = dashRefusedHandshake({ pageHangs: true });
+  await p.settle();
+  assertEqual(p.el("dashReconnect").hidden, true, "fixture: still diagnosing");
+  const diag = p.timers.filter((t) => t.ms === 5000);
+  assertEqual(diag.length, 1, "the diagnosis must arm exactly one 5 s timeout");
+  diag[0].fn();
+  await p.settle();
+  assert(/not answering/i.test(log()), `silence past the timeout reads as unreachable; log: ${JSON.stringify(log())}`);
+  assertEqual(p.el("dashReconnect").hidden, false, "Reconnect must reappear after the timeout");
+  const get = p.fetches.find((f) => String(f.url) === "/");
+  assert(get && get.init.signal && get.init.signal.aborted, "the hung GET must be aborted, not left open");
+});
+
+check("dashboard: refused handshake — a throw inside the success handler still ends with Reconnect shown (J7)", async () => {
+  const p = loadDashPicker({ realConnect: true, pageStatus: 403 });
+  p.sandbox.dashReportSignedOut = () => { throw new Error("injected failure"); };
+  p.sandbox.dashConnect();
+  p.closeMain({ code: 1006, reason: "" });
+  await p.settle();
+  await p.settle();
+  assertEqual(p.el("dashReconnect").hidden, false,
+    "an exception in the success handler left both recovery buttons hidden");
+});
+
+check("dashboard: refused handshake — an answer arriving after a later dashConnect() opened paints nothing (J8)", async () => {
+  const { p, notes } = dashRefusedHandshake({ pageStatus: 403 });
+  p.sandbox.dashConnect(); // a session click or create, before the GET answers
+  await p.settle();
+  await p.settle();
+  assertEqual(notes.length, 0, `a stale diagnosis wrote the composer note: ${JSON.stringify(notes)}`);
+  assert(!/signed out/i.test(p.el("dashTranscript").textContent),
+    "a stale diagnosis painted signed out over the newer connection");
+  assertEqual(p.el("dashReconnect").hidden, true, "a stale diagnosis showed Reconnect over a live socket");
 });
 
 check("dashboard: the socket URL carries no ?t= token (cookie-only authentication)", () => {

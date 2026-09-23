@@ -227,7 +227,9 @@ MAX_COMMANDS_COUNT = 200
 # them once decoded.
 #
 # Both are **floors of defence, not the budget the page aims at**. `/ws/acp` is
-# reachable by a non-browser client holding the device cookie and the token, so
+# reachable by a non-browser client holding the device cookie (the per-launch
+# token it once also needed is retired,
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6), so
 # an `images` array is untrusted input rather than "whatever the page sent" —
 # every limit the browser rations itself against is re-checked here.
 #

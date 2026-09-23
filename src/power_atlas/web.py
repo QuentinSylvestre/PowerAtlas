@@ -765,8 +765,10 @@ def _host_allowed(raw_host: str | None) -> bool:
       underscores are absent from that character class) is discarded and the URL
       is rebuilt from ``scope["server"]``. ``Host: a_b.evil.com`` therefore
       reports a hostname of ``127.0.0.1`` and passes the allowlist, handing a
-      rebound page every response body this app has — including the ACP token
-      and ``custom_launchers``, whose ``env`` holds cleartext credentials.
+      rebound page every response body this app has — including
+      ``custom_launchers``, whose ``env`` holds cleartext credentials. (The
+      list once also named the ACP token, retired by
+      260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6.)
       Browsers do send hostnames containing underscores, so this is reachable.
     * It **raises**. ``hostname`` runs ``urlsplit``, which throws ``ValueError``
       on an unmatched bracket (``[evil``, ``[::1``), turning a rejection into a
