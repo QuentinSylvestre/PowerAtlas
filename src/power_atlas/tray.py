@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 from typing import Callable
@@ -70,28 +71,59 @@ def _open_in_browser(url: str) -> None:
         log.error("Failed to open browser: %s", e)
 
 
+# `OpenClipboard` fails while another process holds the clipboard, which
+# clipboard managers and remote-desktop clients do for a few milliseconds at a
+# time. A handful of tries tens of milliseconds apart rides that out without a
+# noticeable delay on the tray thread.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+_CLIPBOARD_ATTEMPTS = 5
+_CLIPBOARD_RETRY_SECONDS = 0.05
+
+
+def _has_clipboard() -> bool:
+    """Whether this platform has a clipboard mechanism `_copy_to_clipboard` uses.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+    """
+    return sys.platform == "win32"
+
+
 def _copy_to_clipboard(text: str) -> bool:
     """Put ``text`` on the Windows clipboard. False when it could not.
 
     `pywin32`'s `win32clipboard`, already a declared Windows dependency, so
     "Copy login link" adds no package. There is no clipboard elsewhere without
-    one, and the caller displays the link instead.
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+    one, and the caller displays the link instead. On Windows a failed attempt
+    is retried `_CLIPBOARD_ATTEMPTS` times before giving up, and only the final
+    failure is logged — never ``text``, which is a live login link.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (retry:
+    Phase 5 review)
     """
-    if sys.platform != "win32":
+    if not _has_clipboard():
         return False
     try:
         import win32clipboard
-        win32clipboard.OpenClipboard()
-        try:
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
-        finally:
-            win32clipboard.CloseClipboard()
-        return True
     except Exception as e:
-        log.error("Could not copy the login link to the clipboard: %s", e)
+        log.error("Could not copy the login link: no clipboard module (%s)",
+                  type(e).__name__)
         return False
+    error = None
+    for attempt in range(_CLIPBOARD_ATTEMPTS):
+        if attempt:
+            time.sleep(_CLIPBOARD_RETRY_SECONDS)
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(text,
+                                                win32clipboard.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
+            return True
+        except Exception as e:
+            error = e
+    log.error("Could not copy the login link to the clipboard after %d "
+              "attempts: %s", _CLIPBOARD_ATTEMPTS, error)
+    return False
 
 
 def copy_login_link(server_url: str, icon=None) -> str:
@@ -102,14 +134,23 @@ def copy_login_link(server_url: str, icon=None) -> str:
     in another browser, or re-enters one that lost its cookie; it works once,
     within the login code's TTL. It is never logged: it is a live credential
     until used. Returns the link for the caller's (and a test's) benefit.
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+
+    Where a clipboard exists (Windows) but the copy failed, the notification
+    says so and does **not** show the link: a Windows toast persists in Action
+    Center, its text cannot be selected, and the link would sit there as a
+    live credential. Only a platform with no clipboard mechanism displays it.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (failure
+    branch: Phase 5 review)
     """
     url = _login_url(server_url)
     if _copy_to_clipboard(url):
         message, title = ("Paste it into a browser within 2 minutes. It "
                           "works once."), "Login link copied"
+    elif _has_clipboard():
+        message, title = ("The clipboard was busy. Choose \"Copy login link\" "
+                          "again."), "Could not copy the login link"
     else:
-        # No clipboard: display the link for manual copy.
+        # No clipboard mechanism: display the link for manual copy.
         message, title = url, "PowerAtlas login link (works once, 2 minutes)"
     if icon is not None:
         try:

@@ -1,5 +1,6 @@
 """Tests for power_atlas.peek — works without pywebview/pynput installed."""
 
+import logging
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -380,3 +381,32 @@ class TestHideCallsResetOverlays:
         else:
             pw._window.toggle_fullscreen.assert_called_once()
         pw._window.hide.assert_called_once()
+
+    def test_show_navigation_exception_does_not_propagate(self, monkeypatch,
+                                                           caplog):
+        """`_show`'s twin of the test above. `_show` runs inside pynput's
+        keyboard hook; an exception escaping it stops the listener, leaving
+        peek and its Escape dismiss dead until a restart.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+        """
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        # The win32 branch reaches `System.Windows.Forms` through the mock's
+        # truthy `native.ShowInTaskbar`; the navigation is the same on both.
+        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        monkeypatch.setattr(peek_mod, "_login_url", lambda url: url + "/signed")
+        pw = peek_mod.PeekWindow.__new__(peek_mod.PeekWindow)
+        pw._server_url = "http://localhost:8000"
+        pw._window = MagicMock()
+        pw._window.load_url.side_effect = RuntimeError("webview gone")
+        pw._visible = False
+        pw._webview_ok = True
+        pw._last_trigger_time = 0.0
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            pw._show()  # must not raise
+        pw._window.load_url.assert_called_once_with(
+            "http://localhost:8000/signed")
+        assert pw._visible is True
+        assert "could not navigate" in caplog.text
+        # The URL carries a live login code, so it is not in the log line.
+        assert "/signed" not in caplog.text

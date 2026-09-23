@@ -24512,10 +24512,23 @@ class TestLocalSecretRotation:
         assert web_mod._local_cookie_ok(_local_scope(cookie))
 
     def test_remote_rotation_does_not_touch_the_local_secret(
-            self, rotation_ready, client):
+            self, rotation_ready, remote_enabled, client):
+        """`rotation_ready` swaps in a new local key, so the autouse cookie no
+        longer verifies: without a cookie made under that key the gate refuses
+        the POST before the route runs, and the assertion is vacuous. The
+        rotate is asserted to have happened before its effect is checked.
+        `remote_enabled` resets the process-global remote secret afterwards.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+        """
         web_mod = rotation_ready
         before = web_mod._LOCAL_SECRET
-        client.post("/api/remote-access/rotate")
+        before_remote = web_mod._REMOTE_SECRET
+        resp = client.post(
+            "/api/remote-access/rotate",
+            headers={"Cookie": f"pa_local={web_mod.make_local_cookie()}"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert web_mod._REMOTE_SECRET != before_remote
         assert web_mod._LOCAL_SECRET == before
 
     def test_write_and_apply_do_not_yield_the_loop(
@@ -24605,9 +24618,23 @@ class TestLoopbackGateRefusesWithoutACookie:
         sent = _peer_ws("/ws/acp", [_LOOPBACK_HOST_HEADER], client=_LOOPBACK_PEER)
         assert sent == [{"type": "websocket.close", "code": 1008}]
 
-    def test_ws_acp_upgrade_through_a_test_client(self, anonymous_client):
+    def test_ws_acp_upgrade_through_a_test_client(self):
+        """Through the gate over a sentinel, not the real app: there `ws_acp`
+        refuses a token-less upgrade 1008 on its own, so the test passed with
+        the gate skipping websockets. Here only the gate can refuse, and the
+        signed-in twin shows the same upgrade reaching the inner app.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+        """
+        signed_in = TestClient(_gate_over_sentinel(), base_url="http://127.0.0.1",
+                               client=_LOOPBACK_PEER)
+        with pytest.raises(_Reached):
+            with signed_in.websocket_connect("/ws/acp"):
+                pass
+        anonymous = TestClient(_gate_over_sentinel(), base_url="http://127.0.0.1",
+                               client=_LOOPBACK_PEER)
+        del anonymous.headers["cookie"]
         with pytest.raises(WebSocketDisconnect) as exc:
-            with anonymous_client.websocket_connect("/ws/acp"):
+            with anonymous.websocket_connect("/ws/acp"):
                 pass
         assert exc.value.code == 1008
 
@@ -24755,6 +24782,44 @@ class TestPeerClassSelectsTheCredential:
         """Refusing a remote peer is `RemoteAccessGuard`'s job, not the gate's."""
         with pytest.raises(_Reached):
             _peer_http("/api/settings", asgi_app=_gate_over_sentinel())
+
+    @staticmethod
+    def _acts(guard, peer) -> bool:
+        """Whether ``guard`` refuses a credential-less request from ``peer``
+        (True) or passes it to the inner app (False)."""
+        client = None if peer is None else (peer, 50000)
+        try:
+            status, _, _ = _peer_http("/api/settings", [_LOOPBACK_HOST_HEADER],
+                                      client=client, asgi_app=guard)
+        except _Reached:
+            return False
+        assert status == 403
+        return True
+
+    # `::ffff:127.0.0.1` is loopback as of Python 3.13 (an IPv4-mapped address
+    # takes its IPv4 half's properties); older versions answered False, which
+    # would move it to the remote side. Pinned so a runtime change is visible.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+    @pytest.mark.parametrize("peer, loopback", [
+        (None, False),
+        ("testclient", False),
+        ("127.0.0.1", True),
+        ("::1", True),
+        ("::ffff:127.0.0.1", True),
+        (_REMOTE_IP, False),
+    ])
+    def test_exactly_one_guard_acts_for_each_peer(self, peer, loopback):
+        """Each peer meets exactly one credential check — never both, never
+        neither — and the one that acts is the expected one. The exclusivity
+        alone cannot catch a change to the shared `_is_remote_peer`, which
+        moves both guards together, so the side is asserted as well: an
+        absent or unparseable peer is remote (fail closed).
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+        """
+        gate_acts = self._acts(_gate_over_sentinel(), peer)
+        remote_acts = self._acts(_guard_over_sentinel(), peer)
+        assert gate_acts != remote_acts, (peer, gate_acts, remote_acts)
+        assert gate_acts is loopback, peer
 
     def test_a_loopback_peer_holding_only_a_device_cookie_is_refused(
             self, remote_enabled):
@@ -24928,20 +24993,126 @@ class TestLoopbackDoors:
 
     def test_tray_copy_login_link_without_a_clipboard_displays_it(
             self, local_enabled, monkeypatch):
+        """Only where no clipboard mechanism exists (non-Windows)."""
         tray_mod, icon = self._tray_menu(monkeypatch)
-        monkeypatch.setattr(tray_mod, "_copy_to_clipboard", lambda text: False)
+        monkeypatch.setattr(tray_mod.sys, "platform", "linux")
         icon.menu["Copy login link"](icon, None)
         assert len(icon.notified) == 1
         _signs_in_in_one_navigation(icon.notified[0][0], self._SERVER)
 
+    @staticmethod
+    def _failing_clipboard(failures: int, calls: list):
+        """A `win32clipboard` whose `OpenClipboard` fails ``failures`` times."""
+
+        class _Clip:
+            CF_UNICODETEXT = 13
+
+            def OpenClipboard(self):
+                calls.append("open")
+                if calls.count("open") <= failures:
+                    raise OSError(5, "OpenClipboard", "Access is denied.")
+
+            def EmptyClipboard(self):
+                calls.append("empty")
+
+            def SetClipboardText(self, text, fmt):
+                calls.append(("set", text, fmt))
+
+            def CloseClipboard(self):
+                calls.append("close")
+
+        return _Clip()
+
+    def test_tray_copy_login_link_retries_a_busy_clipboard(self, local_enabled,
+                                                            monkeypatch):
+        """A clipboard held by another process for a moment is retried, tens
+        of milliseconds apart, and the copy then succeeds.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+        """
+        tray_mod, icon = self._tray_menu(monkeypatch)
+        calls, sleeps = [], []
+        monkeypatch.setitem(sys.modules, "win32clipboard",
+                            self._failing_clipboard(2, calls))
+        monkeypatch.setattr(tray_mod.sys, "platform", "win32")
+        monkeypatch.setattr(tray_mod.time, "sleep", sleeps.append)
+        icon.menu["Copy login link"](icon, None)
+        assert calls.count("open") == 3
+        assert sleeps == [tray_mod._CLIPBOARD_RETRY_SECONDS] * 2
+        assert 0.01 <= tray_mod._CLIPBOARD_RETRY_SECONDS < 0.1
+        _, url, _ = next(c for c in calls if isinstance(c, tuple))
+        assert icon.notified == [(icon.notified[0][0], "Login link copied")]
+        assert url not in icon.notified[0][0]
+
+    def test_tray_copy_login_link_failure_does_not_show_the_link(
+            self, local_enabled, monkeypatch):
+        """Windows, clipboard never available: the toast says the copy failed
+        and to try again, and never carries the link — Action Center keeps a
+        toast, and its text cannot be selected anyway.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+        """
+        tray_mod, icon = self._tray_menu(monkeypatch)
+        calls, sleeps = [], []
+        monkeypatch.setitem(sys.modules, "win32clipboard",
+                            self._failing_clipboard(10**6, calls))
+        monkeypatch.setattr(tray_mod.sys, "platform", "win32")
+        monkeypatch.setattr(tray_mod.time, "sleep", sleeps.append)
+        url = tray_mod.copy_login_link(self._SERVER, icon)
+        assert calls.count("open") == tray_mod._CLIPBOARD_ATTEMPTS
+        assert len(sleeps) == tray_mod._CLIPBOARD_ATTEMPTS - 1
+        assert len(icon.notified) == 1
+        message, title = icon.notified[0]
+        assert "could not copy" in title.lower()
+        assert "again" in message
+        code = url.rsplit("=", 1)[1]
+        for text in (message, title):
+            assert code not in text and "code=" not in text
+            assert "/local-auth" not in text
+
     def test_the_login_link_is_never_logged(self, local_enabled, monkeypatch,
                                             caplog):
-        from power_atlas import tray as tray_mod
-        monkeypatch.setattr(tray_mod, "_copy_to_clipboard", lambda text: False)
-        with caplog.at_level(logging.DEBUG):
-            url = tray_mod.copy_login_link(self._SERVER)
-        code = url.rsplit("=", 1)[1]
-        assert code not in caplog.text
+        """No door logs its link: "Copy login link" (every branch), tray Open,
+        the peek double-tap and the peek show. At DEBUG for every logger,
+        `power_atlas.*` included, no record carries the login path, the
+        ``code=`` field or the code itself.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (all
+        doors but Copy login link: Phase 5 review)
+        """
+        from unittest.mock import MagicMock
+        tray_mod, icon = self._tray_menu(monkeypatch)
+        peek_mod, pw = self._peek()
+        urls = []
+        monkeypatch.setattr(tray_mod, "_open_in_browser", urls.append)
+        monkeypatch.setattr(peek_mod.webbrowser, "open", urls.append)
+        monkeypatch.setattr(tray_mod.time, "sleep", lambda s: None)
+        with caplog.at_level(logging.DEBUG), \
+                caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            # Copy login link: no clipboard, a failed clipboard, a copied one.
+            monkeypatch.setattr(tray_mod.sys, "platform", "linux")
+            urls.append(tray_mod.copy_login_link(self._SERVER, icon))
+            monkeypatch.setattr(tray_mod.sys, "platform", "win32")
+            monkeypatch.setitem(sys.modules, "win32clipboard",
+                                self._failing_clipboard(10**6, []))
+            urls.append(tray_mod.copy_login_link(self._SERVER, icon))
+            monkeypatch.setitem(sys.modules, "win32clipboard",
+                                self._failing_clipboard(0, []))
+            urls.append(tray_mod.copy_login_link(self._SERVER, icon))
+            # Tray Open.
+            icon.menu["Open"](icon, None)
+            # Peek show, then a double-tap. `sys` is one module, so the
+            # platform patched for the clipboard above is patched here too.
+            monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+            pw._window = MagicMock()
+            pw._show()
+            (shown,), _ = pw._window.load_url.call_args
+            urls.append(shown)
+            pw._show()
+        assert len(urls) == 6
+        records = "\n".join(r.getMessage() for r in caplog.records)
+        for text in (caplog.text, records):
+            assert "/local-auth" not in text
+            assert "code=" not in text
+            for url in urls:
+                assert url.rsplit("=", 1)[1] not in text
 
     def _peek(self):
         from power_atlas import peek as peek_mod
@@ -24989,9 +25160,11 @@ class TestLoopbackDoors:
         pw._last_trigger_time = 0.0
         monkeypatch.setattr(peek_mod.sys, "platform", "linux")
         pw._show()
-        (script,), _ = win.evaluate_js.call_args
-        assert script.startswith("location.href=") and script.endswith(";")
-        return json.loads(script[len("location.href="):-1])
+        # `load_url`, not `evaluate_js`, since the Phase 5 review (H1).
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+        win.evaluate_js.assert_not_called()
+        (url,), _ = win.load_url.call_args
+        return url
 
     def test_peek_show_mints_a_fresh_code_every_time(self, local_enabled,
                                                      monkeypatch):
@@ -25041,3 +25214,95 @@ class TestLoginLinkIsNotARoute:
         for fn in (web_mod.login_url, web_mod.mint_login_code,
                    tray_mod.copy_login_link):
             assert fn not in endpoints
+
+
+class TestLoopbackGateRefusalLogging:
+    """A locked-out user leaves a trace in `orchestrator.log`: one WARNING per
+    interval, the rest counted, the count flushed at shutdown — and never a
+    cookie or a query string, which can carry a login code.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+    """
+
+    @pytest.fixture
+    def state(self, monkeypatch):
+        from power_atlas import web as web_mod
+        fresh = {"last": float("-inf"), "suppressed": 0}
+        monkeypatch.setattr(web_mod, "_gate_warn_state", fresh)
+        return fresh
+
+    @staticmethod
+    def _lines(caplog):
+        return [r for r in caplog.records
+                if r.name == "power_atlas.web"
+                and ("loopback request refused" in r.getMessage()
+                     or "loopback gate:" in r.getMessage())]
+
+    def test_a_refusal_logs_its_scope_type_and_path_but_no_credential(
+            self, state, caplog):
+        c = TestClient(app, base_url="http://127.0.0.1", client=_LOOPBACK_PEER,
+                       headers={"cookie": "pa_local=loopback.1.cookievalue"})
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            assert _is_json_403(c.get("/api/settings?code=querycodevalue"))
+        (line,) = self._lines(caplog)
+        message = line.getMessage()
+        assert line.levelno == logging.WARNING
+        assert "http" in message and "GET" in message
+        assert "'/api/settings'" in message
+        for leaked in ("cookievalue", "pa_local=", "querycodevalue", "code=",
+                       "?"):
+            assert leaked not in message, leaked
+
+    def test_a_websocket_refusal_names_its_scope_type(self, state, caplog):
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            _peer_ws("/ws/acp", [_LOOPBACK_HOST_HEADER], client=_LOOPBACK_PEER,
+                     asgi_app=_gate_over_sentinel())
+        (line,) = self._lines(caplog)
+        assert "websocket" in line.getMessage()
+        assert "'/ws/acp'" in line.getMessage()
+
+    def test_a_hostile_path_cannot_forge_a_log_line(self, state, caplog):
+        from power_atlas import web as web_mod
+        path = "/x\nFAKE 00:00:00 CRITICAL forged" + "y" * 500
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            _peer_http(path, [_LOOPBACK_HOST_HEADER], client=_LOOPBACK_PEER,
+                       asgi_app=_gate_over_sentinel())
+        (line,) = self._lines(caplog)
+        assert "\n" not in line.getMessage()
+        assert len(line.getMessage()) < web_mod._GATE_LOG_PATH_MAX + 200
+
+    def test_refusals_are_rate_bounded_and_counted(self, state, caplog,
+                                                   anonymous_client,
+                                                   monkeypatch):
+        from power_atlas import web as web_mod
+        clock = [1000.0]
+        monkeypatch.setattr(web_mod.time, "monotonic", lambda: clock[0])
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            for _ in range(20):
+                anonymous_client.get("/api/settings")
+            assert len(self._lines(caplog)) == 1
+            assert state["suppressed"] == 19
+            clock[0] += web_mod._LOGIN_WARN_INTERVAL_SECONDS
+            anonymous_client.get("/api/launchers")
+        lines = self._lines(caplog)
+        assert len(lines) == 2
+        assert "19 further refusals suppressed" in lines[1].getMessage()
+        assert state["suppressed"] == 0
+
+    def test_a_signed_in_request_logs_nothing(self, state, client, caplog):
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            assert client.get("/api/settings").status_code == 200
+        assert self._lines(caplog) == []
+        assert state == {"last": float("-inf"), "suppressed": 0}
+
+    def test_suppressed_count_is_flushed_at_shutdown(self, monkeypatch,
+                                                     caplog):
+        from power_atlas import web as web_mod
+        state = {"last": time.monotonic(), "suppressed": 7}
+        monkeypatch.setattr(web_mod, "_gate_warn_state", state)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            TestGenerationRunsAtStartup()._run_lifespan(web_mod)
+        lines = [r.getMessage() for r in caplog.records
+                 if "loopback gate: 7 further refusals suppressed"
+                 in r.getMessage()]
+        assert len(lines) == 1
+        assert state["suppressed"] == 0

@@ -611,6 +611,12 @@ async def lifespan(app_instance):
                 _flush_login_refusal_warnings()
             except Exception:
                 log.exception("login-refusal log flush failed")
+            # The loopback gate's twin of the flush above.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+            try:
+                _flush_gate_refusal_warnings()
+            except Exception:
+                log.exception("gate-refusal log flush failed")
 
 
 async def _background_refresh():
@@ -1569,6 +1575,59 @@ LOOPBACK_HOST = "127.0.0.1"
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
 _LOCAL_PAGE_PATHS = frozenset({"/", _ACP_PATH, _REMOTE_AUTH_PATH})
 
+# The gate's refusals share one rate-limited window, as the login-code
+# exchange's do (`_warn_login_refused`), and on the same interval: a browser
+# that lost its cookie refuses on every poll, and a local process can send
+# refusals as fast as it likes. Without a line here a locked-out user leaves no
+# trace at all — uvicorn runs at warning level, so there is no access log.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+_gate_warn_state = {"last": float("-inf"), "suppressed": 0}
+
+# A path is attacker-chosen; the logged form is `repr`-escaped (no forged log
+# lines) and cut to this length.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+_GATE_LOG_PATH_MAX = 120
+
+
+def _warn_gate_refused(scope) -> None:
+    """One WARNING per `_LOGIN_WARN_INTERVAL_SECONDS`, counting the rest.
+
+    Names the scope type, method and path of the refusal that opened the
+    window — never a header, a cookie or the query string, which can carry a
+    login code.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+    """
+    now = time.monotonic()
+    state = _gate_warn_state
+    if now - state["last"] < _LOGIN_WARN_INTERVAL_SECONDS:
+        state["suppressed"] += 1
+        return
+    path = scope.get("path") or ""
+    shown = repr(path[:_GATE_LOG_PATH_MAX])
+    if len(path) > _GATE_LOG_PATH_MAX:
+        shown += "..."
+    log.warning("loopback request refused without a valid pa_local cookie: "
+                "%s %s %s (%d further refusals suppressed since the last "
+                "line)", scope.get("type"), scope.get("method") or "-", shown,
+                state["suppressed"])
+    state["last"] = now
+    state["suppressed"] = 0
+
+
+def _flush_gate_refusal_warnings() -> None:
+    """Write the gate's suppressed-refusal count now, if there is one.
+
+    `_flush_login_refusal_warnings`'s twin, called beside it from `lifespan`
+    teardown for the same reason: the final burst's count is otherwise never
+    written.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+    """
+    state = _gate_warn_state
+    if state["suppressed"]:
+        log.warning("loopback gate: %d further refusals suppressed since the "
+                    "last line", state["suppressed"])
+        state["suppressed"] = 0
+
 
 def _local_gate_exempt(scope) -> bool:
     """Whether a loopback scope may pass without `pa_local`.
@@ -1597,6 +1656,7 @@ async def _refuse_local(scope, receive, send) -> None:
     to open PowerAtlas from the tray — the only way a browser gets signed in.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
     """
+    _warn_gate_refused(scope)
     if (scope["type"] == "http" and scope.get("method") in ("GET", "HEAD")
             and (scope.get("path") or "") in _LOCAL_PAGE_PATHS):
         page = _local_auth_refusal("This browser is not signed in.", 403)

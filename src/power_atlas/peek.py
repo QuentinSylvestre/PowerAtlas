@@ -1,6 +1,5 @@
 """Peek window: hotkey-held native overlay showing the dashboard."""
 
-import json
 import logging
 import sys
 import threading
@@ -236,17 +235,20 @@ class PeekWindow:
             # before a restart. The cost is a full page load per show in
             # place of the old in-page `doRefresh()`.
             # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
-            win.evaluate_js(self._show_script())
-
-    def _show_script(self) -> str:
-        """The JS `_show` runs: navigate to a freshly minted login URL.
-
-        `json.dumps` quotes the URL as a JS string literal. A login code is
-        URL-safe base64 and cannot break out of one, but the literal does not
-        depend on that.
-        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
-        """
-        return f"location.href={json.dumps(_login_url(self._server_url))};"
+            #
+            # `load_url`, not `evaluate_js`: it needs only a shown window,
+            # whereas `evaluate_js` waits for the JS bridge on the current page
+            # and raises after a 20 s wait when that page never loaded. This
+            # runs inside pynput's keyboard hook, where an escaping exception
+            # stops the listener and leaves peek (and its Escape dismiss) dead
+            # until a restart — so nothing may raise out of it. The URL is
+            # never logged: it carries a live login code.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
+            try:
+                win.load_url(_login_url(self._server_url))
+            except Exception as e:
+                log.warning("Peek could not navigate the webview on show: %s",
+                            type(e).__name__)
 
     def _hide(self) -> None:
         win = self._window  # local capture for thread safety
