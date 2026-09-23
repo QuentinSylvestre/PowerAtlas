@@ -1,8 +1,8 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: In Progress — Phases 0-1 complete, reviewed, Green (deny floor removed from scope
-> entirely, user decision 2026-09-22, see § 9); Phase 2 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-2 complete, reviewed, Green (deny floor removed from scope
+> entirely, user decision 2026-09-22, see § 9); Phases 3-4 next (parallel group)  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -229,7 +229,7 @@ replaces.
 | D-17 Cookie isolation | Separate cookies; **peer class selects the credential**; one canonical loopback host | One unified cookie | Cookies are host-only. A canonical host is required because `127.0.0.1`, `localhost` and `::1` all pass the Host check but do not share a cookie jar |
 | D-18 Frontmatter injection | **Textual insert/replace between the `---` fences. No YAML parsing, no new dependency** | PyYAML; `ruamel.yaml` for round-trip fidelity | No YAML library is declared *or installed*. Byte-identity is the exit criterion, and only not-parsing achieves it by construction. An existing `permissions:` key is **replaced**, not merged |
 | D-19 Derived-agent write | **Atomic**: tmp → `fsync` → `os.replace`, reusing `save_config`'s pattern | In-place truncate, mirroring `_write_remote_secret` | Opposite failure directions: a torn secret fails closed (length check), a torn `permissions:` block fails **open** (P5). The secret's pattern must not be copied here |
-| D-20 `DERIVED_AGENT_NAME` | Defined in `config.py` | In `agent_profile.py`; duplicated literal in `acp.py` | `acp.py` already imports `config` and nothing else intra-package; this adds no import and no sync-bug risk |
+| D-20 `DERIVED_AGENT_NAME` | Defined in `config.py` | In `agent_profile.py`; duplicated literal in `acp.py` | `acp.py` already imports from `config` (and `launcher`, its only other intra-package module); this adds a name to an existing import line, no new module, and no sync-bug risk. *(Corrected 2026-09-22: the original wording "`config` and nothing else" was false — `launcher` was always the second module.)* |
 | D-21 Login code | `secrets.token_urlsafe(32)`; single-use; **120 s TTL on `time.monotonic()`**; bounded outstanding-code store | Leave to the implementer; wall-clock TTL | Entropy is load-bearing because a same-user attacker reaches the exchange directly. Monotonic avoids NTP/sleep clock corrections; the codes are process-local so wall time buys nothing |
 | D-22 Local-secret write failure | Keep the generated secret **in memory** for the process lifetime; log ERROR; report in settings | Fail startup; proceed with no secret | Without this, every door mints a cookie that verifies nowhere and the settings panel explaining it is itself behind the gate. In-memory degrades to today's per-launch `_ACP_TOKEN` lifetime |
 | D-23 Comment attribution | Every comment this plan adds to a shared file carries the plan slug | Bare `Phase N` / `SC-n` markers | The shared files already carry bare markers from four other plans in the same number space |
@@ -515,7 +515,9 @@ pattern. Settings copy must state that the setting governs **newly created sessi
 - [ ] A frame carrying a `consent` block renders capability and resource; one carrying **no** consent block still renders without throwing
 - [ ] A consent `resource` and a title each containing `<script>alert(1)</script>` and quote characters render as inert text — the escaping assertion R-7 promises
 - [ ] A 500-character shell title renders without truncation
-- [ ] **(added, Phase 2 divergence, 2026-09-22)** With the permission setting `off`, the mode picker's Default entry does **not** offer `poweratlas-acp` as a selectable `modeId` — `acp.py`'s `_VALID_TASK_MODES` accepts it unconditionally (D-20's isolation boundary keeps `acp.py` from checking the toggle itself), so a client that sent it anyway while `off` would get kiro-cli's silent coercion to `vibe` (R-2) rather than an error. This criterion is the only place in the plan that verifies the picker actually excludes it — Phase 7's `modeId_in_effect` probe is the backstop if it doesn't
+- [ ] **(added, Phase 2 divergence, 2026-09-22; revised after Phase 2 review)** With the permission setting `off`, the mode picker's Default entry does **not** offer `poweratlas-acp` as a selectable `modeId`. This is now a **UX** criterion, not the security gate: the Phase 2 review fix (`04d9360`) added a server-side `mode_gate_hook` that refuses `poweratlas-acp` with `bad_payload` unless the derived agent is `on`. The picker's job is to not offer an option the server will refuse, and to surface that refusal legibly if a stale tab sends it anyway
+- [ ] **(added, Phase 2 review, 2026-09-22)** Every `consent` field renders through `textContent` (never `innerHTML`) with CSS overflow/wrap, including a `resource` of tens of kilobytes — the only bound on these fields is the 1 MiB inbound-line cap (`MAX_AGENT_LINE_BYTES`), so the renderer is where their length is contained
+- [ ] **(added, Phase 2 review, 2026-09-22)** The in-page browser `Notification` built in `acp.html` from a permission frame's title is clamped client-side (200 chars, matching `MAX_PERMISSION_TITLE_CHARS`) — Phase 2 moved the server-side clamp to the OS toast only, so the frame title arriving in the page is now unbounded
 - [ ] `node tests/acp_page.test.mjs` passes
 
 **Covers**: SC-1 (UI half), SC-4 (UI half), SC-8 (UI half)
@@ -669,6 +671,8 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 - [ ] `modeId_in_effect` reads `DERIVED_AGENT_NAME`, confirming no silent coercion to `vibe`
 - [ ] With the setting **off**, no prompt is raised and no pattern is blocked — confirms **off** is a genuine no-op over today's behaviour (D-13 superseded 2026-09-22, no floor layer exists)
 - [ ] **(added, Step 5 review, 2026-09-22)** With the setting **on**: an allow-listed command (e.g. `git status`) runs silently with no prompt, **and** a capability this design intends to gate but that isn't allow-listed (e.g. `web_fetch`, or another capability from Phase 0 § 9 Step 7's list) still prompts — the live pair confirming rule-assembly completeness is what backstops `on` now that no floor exists
+- [ ] **(added, Phase 2 review, 2026-09-22)** With the setting **off**, a live `session/new` requesting `poweratlas-acp` is refused with `bad_payload` and no kiro-cli process is spawned — the server-side gate, confirmed against the running build rather than only unit-tested
+- [ ] **(added, Phase 2 review, 2026-09-22)** `session/load` of a session id with **no persisted kiro-cli metadata**, sent once with `modeId: "kiro_default"` and once without: record the bound mode in each case. The vendored KAS source (`hydrateSessionForLoad`) makes the request's `modeId` the fallback when persisted metadata is absent, so P2's "ignored on load" holds only for sessions that have metadata. Decide from the result whether PowerAtlas should send the derived agent's name, the base agent's, or nothing on load
 - [ ] Denying a prompt leaves the tool `failed` with no side effect on disk
 - [ ] The UI is reachable from all three doors after a restart
 - [ ] `README.md` updated: the Default→agent mapping, the "tool permissions are asked, not assumed" paragraph (already stale today), the `http://127.0.0.1:<port>` bare-visit behaviour, and the new loopback credential as user-visible WebUI surface
@@ -748,7 +752,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 |---|---|---|---|
 | 0 | Pre-flight — preconditions, anchors, harness, rule set | **Complete — Gate resolved** | Deny floor failed bypass resistance (3/4 forms); user decision 2026-09-22 removed the floor from scope entirely (D-13 superseded) rather than patching it, see § 9 |
 | 1 | Derived-agent generation and settings | **Complete** | 15/15 exit criteria; 3 commits (`6490554` feat, `ae36282` self-fix, `c2f324b` Step 5 review fix — 3 High findings, generate-only-when-`on` policy adopted); Green health, see § 9 and Review Log |
-| 2 | Mode wiring and frame enrichment | **Implemented, review pending** | 7/7 exit criteria; 2 commits (`bf832a7`, `dba7684`); R-2 exposure flagged for Phase 3 (new criterion added), see § 9 |
+| 2 | Mode wiring and frame enrichment | **Complete** | 7/7 exit criteria; 4 commits (`bf832a7`, `dba7684`, review fixes `04d9360`, `e0f25d0`); server-side derived-mode gate added; QA PASS 8/8; Green |
 | 3 | Settings and permission-prompt UI `[P:4]` | Not started | Includes `transcript-renderer.js`; parallel-eligible with 4 |
 | 4 | Local secret, login code, exchange `[P:3]` | Not started | Parallel-eligible with 3 |
 | 5 | Default-deny gate and the three doors | Not started | |
@@ -1340,11 +1344,27 @@ Implementation (2026-09-22, code: `dba7684`)
 
 **Change 3 — `load_session`'s mode.** Resolved by comment (the route the phase explicitly sanctioned), not by threading a real mode through: `_handle_load` has no per-session mode to pass, and P2 measured kiro-cli ignores the parameter on this method anyway, so manufacturing one would read as a stronger posture claim, not a more honest one. Three call sites now document this explicitly, dated and citing P2.
 
-**R-2 exposure introduced and documented, not fixed.** Phase 1's revised design (§ 9 Phase 1's Gate resolution) deletes the derived agent file entirely when the setting is off. `_VALID_TASK_MODES` now accepts `"poweratlas-acp"` as a modeId regardless of the toggle, so a client that sends it while off gets kiro-cli's silent coercion to `vibe` (R-2) rather than an error — `acp.py` cannot detect the toggle state without importing `agent_profile`, which D-20's isolation boundary forbids. SC-3 places the gate upstream (the picker's Default entry resolving to the base agent while off); the comment states plainly that nothing in `acp.py` itself enforces this. **Flagged for Phase 3 to own** (verify the picker actually excludes the derived-agent option while off) **and for Phase 7's live `modeId_in_effect` probe to catch** if it doesn't.
+**R-2 exposure introduced and documented, not fixed** *(superseded — fixed server-side in the Step 5 review pass, `04d9360`; see "Step 5 review fix pass" below)*. Phase 1's revised design (§ 9 Phase 1's Gate resolution) deletes the derived agent file entirely when the setting is off. `_VALID_TASK_MODES` now accepts `"poweratlas-acp"` as a modeId regardless of the toggle, so a client that sends it while off gets kiro-cli's silent coercion to `vibe` (R-2) rather than an error — `acp.py` cannot detect the toggle state without importing `agent_profile`, which D-20's isolation boundary forbids. SC-3 places the gate upstream (the picker's Default entry resolving to the base agent while off); the comment states plainly that nothing in `acp.py` itself enforces this. **Flagged for Phase 3 to own** (verify the picker actually excludes the derived-agent option while off) **and for Phase 7's live `modeId_in_effect` probe to catch** if it doesn't.
 
 **Two stale claims found outside this phase's file scope, reported not fixed**: `agent_profile.py:62` still says `acp.py` "imports exactly two intra-package names" (now three, same two modules); `config.py:115` says `acp.py` "imports config and nothing else intra-package," which was already false before this phase (`launcher` is the other) — neither file is in Phase 2's scope.
 
 **Tests**: 1568 passed, 1 skipped (up from 1562 + 1; 6 new tests). `tests/acp_page.test.mjs` not run — no template or static file touched this phase. A same-phase follow-up commit (`dba7684`) corrected three comment claims a pre-handback review pass caught: the module-header import count, a citation of "D-10 as revised" that should have cited the actual Gate-resolution decision, and an unverified claim that Phase 3's UI already gates the picker.
+
+#### Step 5 review fix pass (2026-09-22, code: `04d9360`, `e0f25d0`)
+
+**Derived-mode gate.** `_VALID_TASK_MODES` membership is now necessary but not sufficient for `poweratlas-acp`. `acp.py` gains `mode_gate_hook` / `set_mode_gate_hook` on the existing `notify_hook` / `sessions_changed_hook` pattern — `None` is permissive, so `acp.py` stays usable standalone and D-20 holds (no new import). `_handle_new` consults it, through `asyncio.to_thread`, only when the derived mode is requested, and refuses with the existing `bad_payload` shape if it answers falsy. `web.py` wires it in `lifespan` to `agent_profile.derived_block_state() == "on"`, so `absent`, `stale` and `unknown` all refuse — a hand-authored same-named file is never handed to a user as PowerAtlas's profile. **A hook that raises fails closed** (refuses): failing open would forward a modeId kiro-cli silently runs as `vibe`, the exact failure the gate exists to prevent. Consequence: the session-open path now does one read-only file classification, only for the derived mode — D-9's "no filesystem I/O on the session-open path" was about regeneration and still holds for it. `web.py` was outside Phase 2's file scope; the gate can only be wired there, because `acp.py` may not import `agent_profile`.
+
+**`session/load` wire left unchanged, deliberately.** The vendored KAS bundles (kiro-cli 2.22.0, 2.22.1, and the installed 2.23.1) make `_meta.kiro.modeId` optional in the schema, so omitting it is schema-safe — but `hydrateSessionForLoad` selects `persisted ? persisted.metadata.agentMode : modeId ?? "vibe"`. P2's "ignored on load" therefore holds only when the session has persisted metadata; without it, the request's `modeId` is the fallback, and omitting the key would move that fallback from `kiro_default` to `vibe`. The comments now record this reading instead of "ignored". A Phase 7 probe was added to settle which value PowerAtlas should send.
+
+**Permission-frame hardening.** `_project_consent` now omits missing and non-string fields at both levels and drops an empty `matchedRule` (it previously emitted `''`, contradicting its own docstring). `_on_permission_request` refuses a JSON-RPC id that is not a string or integer (bool excluded) before the `_pending_permission` store — an unhashable id used to raise `TypeError` there, inside the same callback, hanging the agent. Comments no longer say asyncio "swallows" that callback's exceptions (its default handler logs them at ERROR; the hang is real because nothing answers the agent). The `MAX_PERMISSION_TITLE_CHARS` comments now say the clamp covers only the server desktop toast; the in-page browser `Notification` in `acp.html` needs a client-side clamp, now a Phase 3 exit criterion. The measured-consent test also asserts `requestId`, `sessionId`, `toolCall` and `options` survive.
+
+**Housekeeping.** Seven dead citations of three archived plans repointed to their `plans/done/` names. The stale import-count comments in `agent_profile.py` and `config.py` corrected (comment-only). Reported, not fixed: `tests/test_web.py:~3848` has one more "the same handler swallows it" line.
+
+**Tests**: full suite 2020 passed, 2 skipped; `tests/test_web.py` 1580 passed.
+
+#### Step 5b QA verification (2026-09-22) — PASS, 8/8
+
+Driven over the real `/ws/acp` socket against an isolated `uvicorn` instance (same module-attribute isolation as Phase 1's QA; never the live process or the real `~/.kiro`). The one stub is `_supervisor.new_session`, which runs *after* the gate, so the "gate passes" probe spawns no real kiro-cli; the gate and `web.py`'s hook wiring are real. Confirmed: the real `lifespan` registers the hook; with the setting off, `new` for `poweratlas-acp` is refused with `bad_payload` before any `pending` frame or spawn; a hand-authored same-named file (state `unknown`) is still refused; after enabling through `POST /api/acp-permissions` the gate passes and reaches spawn; a vendor mode (`kiro_default`) is never gated. Not exercised here: the permission frame's consent projection against a live agent prompt — that needs a real kiro-cli permission round trip and is covered by the unit suite plus Phase 7's live probes.
 
 ## Follow-up Work (Deferred)
 
@@ -1501,6 +1521,31 @@ a council escalation, given the strength of that convergence; user confirmed. Cy
 instruction ("1 qreview cycle per phase"); the fix batch's own test run (1562 passed, 1 skipped, up from
 1526) and the three mutation-verified High-finding regression tests serve as this cycle's verification
 in place of a second full review pass.
+
+### 2026-09-22 — Implementation Review (after Phase 2, persona: Security auditor, Senior engineer)
+
+Implementation health: Green (all fixed or deliberately routed to a later phase). 12 findings
+(0 High, 3 Medium, 9 Low). The Senior engineer also checked and cleared one concern (history replay
+of the new `consent` block — `_emit` stores the whole payload), recorded here rather than as a finding. The Security auditor's first dispatch failed on an API weekly limit; it was
+re-dispatched after the user confirmed quota was back, and completed.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | [Security] The server accepted `poweratlas-acp` whatever the setting; the only planned gate was the Phase 3 picker, so a stale tab silently fell back to `vibe` | Fixed — server-side `mode_gate_hook` refuses unless `derived_block_state() == "on"`, fails closed on hook error (`04d9360`); verified live |
+| 2 | Medium | Both personas: `session/load` still puts `modeId: "kiro_default"` on the wire; a future kiro-cli honouring it would rebind derived-agent sessions | Fixed as a finding, wire unchanged — KAS source shows omission would move the no-metadata fallback to `vibe`; comments corrected, Phase 7 probe added |
+| 3 | Medium | [Senior] The Phase 3 picker criterion was the sole R-2 gate, and the Phase 7 backstop only runs with the setting on | Fixed — Phase 3 criterion reframed as UX; Phase 7 gains an off-state refusal probe |
+| 4 | Low | `_project_consent` emitted `''` for missing or non-string fields, contradicting its docstring | Fixed — both levels omit; empty `matchedRule` dropped; partial-rule and non-string tests added |
+| 5 | Low | [Security] An unhashable JSON-RPC id raised `TypeError` at the pending-permission store, hanging the agent | Fixed — non-str/int (and bool) ids refused via `_refuse` before the store; parametrized test |
+| 6 | Low | [Security] The in-page browser `Notification` in `acp.html` lost its clamp when the frame title became unclamped | Fixed as a routing — comment corrected; client-side clamp added as a Phase 3 exit criterion (template is Phase 3 scope) |
+| 7 | Low | Five unbounded agent-authored consent strings reach the browser; nothing named the renderer as their bound | Fixed as a routing — Phase 3 criterion: `textContent` only, CSS overflow/wrap; confirmed no renderer reads `consent` yet |
+| 8 | Low | [Senior] Call-site comment said all three guards live there; the third is inside `_project_consent` | Fixed — reworded |
+| 9 | Low | [Security] Comments said asyncio "swallows" the callback exception; its default handler logs it at ERROR | Fixed — reworded in five places; one more in `tests/test_web.py:~3848` reported, not fixed |
+| 10 | Low | [Senior] The P4 consent test asserted only `consent`, not that the frame's other fields survive | Fixed — also asserts `requestId`, `sessionId`, `toolCall`, `options` |
+| 11 | Low | [Senior] Nine citations of three archived plans pointed at paths that no longer exist | Fixed — seven path citations repointed to `plans/done/`; four bare slug mentions left as non-paths |
+| 12 | Low | [Senior] Stale import-count claims in `agent_profile.py`, `config.py`, and this plan's D-20 row | Fixed — comment-only corrections; D-20 row corrected by the orchestrator |
+
+Cycle 2 skipped per user instruction ("1 qreview cycle per phase"). The fix pass's own suite run (2020
+passed, 2 skipped) and the 8/8 live Step 5b probe serve as this cycle's verification.
 
 ## Harness Improvement Opportunities
 
