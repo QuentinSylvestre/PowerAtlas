@@ -37,6 +37,7 @@ All 4 success criteria (SC-1 through SC-4) delivered. 7 phases, 25 commits, 1812
   - The sweeper stops an agent that has had no session for `AGENT_IDLE_RECYCLE_SECONDS` (900 s). This releases the sessions kiro-cli keeps loaded, now that close is local only.
   - UI: the label is now "MCP connected/active". Sign-in needed is amber, and red is kept for real failures. Disabled servers sort last and are dimmed. The panel has a heading and a state line under each server.
   - Using `session/delete` for the explicit Delete action was considered and dropped.
+- **Correction, same day: MCP sign-in over ACP now works.** The Post-archival note's claim that kiro-cli completes MCP OAuth only in its terminal UI was wrong. kiro-cli keeps sign-ins in storage the ACP client provides, and PowerAtlas provided none. A terminal sign-in therefore never reached PowerAtlas sessions, and the "sign in from a terminal" instruction above was replaced. PowerAtlas now declares `secretStorage` and `openExternalUrl`, keeps sign-ins DPAPI-encrypted, and the panel's Connect starts kiro-cli's own sign-in. Details: `docs/KNOWLEDGE.md`, "MCP OAuth sign-in over ACP needs client-side secret storage".
 
 ---
 

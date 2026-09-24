@@ -81,11 +81,18 @@ import shutil
 import subprocess
 import threading
 import time
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Final
+from urllib.parse import urlsplit
 
 from fastapi import WebSocket, WebSocketDisconnect
+
+try:
+    import win32crypt  # pywin32, a Windows-only dependency: DPAPI for _SecretStore
+except ImportError:
+    win32crypt = None
 
 from .config import CONFIG_DIR, DERIVED_AGENT_NAME
 from .launcher import _SESSION_ID_RE
@@ -169,6 +176,7 @@ except Exception as _e:  # pragma: no cover - only when the dep is missing
 CLIENT_TYPES = frozenset({
     "subscribe", "new", "load", "prompt", "cancel", "close", "steer",
     "commands_options", "commands_execute", "permission_response",
+    "mcp_signin",  # the MCP panel's Connect; see `_handle_mcp_signin`
 })
 SERVER_TYPES = frozenset({
     "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
@@ -686,6 +694,141 @@ def _build_child_env(extra: dict[str, str]) -> dict[str, str]:
         and k not in _SCRUB_EXACT
     }
     return {**base, "POWER_ATLAS_SESSION": "1", **extra}
+
+
+# ---- ACP secret storage: where kiro-cli keeps MCP OAuth sign-ins -----------
+#
+# kiro-cli stores an OAuth MCP server's client registration and tokens in
+# storage the ACP *client* provides (`_kiro/secret/*`), and only when the
+# client declares `clientCapabilities._meta.kiro.secretStorage`. Its own
+# terminal UI does; PowerAtlas did not, so every PowerAtlas agent started with
+# no sign-in and Atlassian failed with Unauthorized even after a terminal
+# sign-in (measured on kiro-cli 2.24.0). The terminal's own store is not shared:
+# its format is kiro-cli's, and writing it alongside a running terminal could
+# corrupt it. PowerAtlas keeps its own, encrypted per Windows user with DPAPI,
+# so a sign-in made from the MCP panel survives agent restarts.
+
+ACP_SECRETS_PATH = CONFIG_DIR / "acp-secrets.bin"
+_SECRET_KEY_MAX = 512
+_SECRET_VALUE_MAX = 256 * 1024
+_SECRET_COUNT_MAX = 256
+_SECRET_METHODS = frozenset({"_kiro/secret/get", "_kiro/secret/store", "_kiro/secret/delete"})
+# How long `_handle_mcp_signin` waits for a sign-in: `_kiro/mcp/resetServer`
+# answers only once the user has finished (or abandoned) the browser flow.
+MCP_SIGNIN_WINDOW_SECONDS = 300.0
+# How long after a Connect press kiro-cli may ask to open that sign-in's page.
+# Much shorter than the wait above because `_kiro/openExternalUrl` names no
+# server: an open grant is the only thing tying a page to a press, and a lazy
+# re-auth for another server arriving while one is open would be let through.
+# The page request came about 2 s after resetServer in the 2026-09-24 probe.
+MCP_SIGNIN_OPEN_SECONDS = 30.0
+
+
+class _SecretStoreError(Exception):
+    """The secret file could not be read or written; the message says which."""
+
+
+class _SecretStore:
+    """A small ``{key: value}`` map, DPAPI-encrypted at rest in one file.
+
+    Loaded on first use and cached; every write rewrites the whole file
+    atomically (temp file + ``os.replace``). Called from worker threads via
+    ``asyncio.to_thread``, hence the lock. A file that exists but cannot be
+    read (a sharing violation, an ACL) raises rather than being treated as
+    empty, so a transient failure can never overwrite a good store; one that
+    reads but does not decrypt or parse (another Windows user's, or damaged)
+    is moved aside to ``.unreadable`` and replaced, which costs a sign-in.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._data: dict[str, str] | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def available(self) -> bool:
+        return win32crypt is not None
+
+    def _load(self) -> dict[str, str]:
+        if self._data is not None:
+            return self._data
+        try:
+            blob = self._path.read_bytes()
+        except FileNotFoundError:
+            self._data = {}
+            return self._data
+        except OSError as exc:
+            raise _SecretStoreError(f"cannot read {self._path.name}: {exc.strerror or exc}") from None
+        try:
+            plain = win32crypt.CryptUnprotectData(blob, None, None, None, 0)[1]
+            data = json.loads(plain.decode("utf-8"))
+            if not isinstance(data, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+                raise ValueError("not a string map")
+        except Exception:
+            aside = self._path.with_name(self._path.name + ".unreadable")
+            log.warning("ACP: %s does not decrypt for this user; moved aside to %s "
+                        "(MCP servers will need signing in again)",
+                        self._path.name, aside.name)
+            with contextlib.suppress(OSError):
+                os.replace(self._path, aside)
+            data = {}
+        self._data = data
+        return data
+
+    def _save(self, data: dict[str, str]) -> None:
+        try:
+            blob = win32crypt.CryptProtectData(
+                json.dumps(data).encode("utf-8"), "PowerAtlas ACP secrets", None, None, None, 0)
+        except Exception as exc:  # pywintypes.error, not OSError
+            raise _SecretStoreError(f"cannot encrypt: {exc}") from None
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(blob)
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise _SecretStoreError(f"cannot write {self._path.name}: {exc.strerror or exc}") from None
+
+    def get(self, key: str) -> str | None:
+        with self._lock:
+            return self._load().get(key)
+
+    def store(self, key: str, value: str) -> None:
+        with self._lock:
+            data = dict(self._load())
+            if key not in data and len(data) >= _SECRET_COUNT_MAX:
+                raise _SecretStoreError(f"store is full ({_SECRET_COUNT_MAX} entries)")
+            data[key] = value
+            self._save(data)
+            self._data = data
+
+    def delete(self, key: str) -> None:
+        with self._lock:
+            data = self._load()
+            if key not in data:
+                return
+            data = {k: v for k, v in data.items() if k != key}
+            self._save(data)
+            self._data = data
+
+
+_secrets = _SecretStore(ACP_SECRETS_PATH)
+
+
+def _kiro_client_capabilities() -> dict:
+    """The kiro-specific ``clientCapabilities`` this client can honour.
+
+    Both hinge on ``_secrets``: without somewhere to keep a sign-in, opening
+    a sign-in page would only produce tokens kiro-cli throws away. Off
+    Windows (no DPAPI) nothing is declared and OAuth MCP servers behave as
+    before: failed, needing sign-in.
+    """
+    if not _secrets.available:
+        return {}
+    return {"_meta": {"kiro": {"secretStorage": True, "openExternalUrl": True}}}
 
 
 # Overlay steering delivered to every ACP session via _meta.kiro.steering.
@@ -2772,6 +2915,11 @@ class _Supervisor:
         # Monotonic time the agent was first seen alive with nothing using it;
         # `None` while anything is. Read and reset only by `_maybe_recycle_idle`.
         self._idle_since: float | None = None
+        # One open grant per user-started MCP sign-in: token -> deadline
+        # (monotonic). Added by `_handle_mcp_signin`, which alone removes its
+        # own token when the sign-in ends, so concurrent sign-ins cannot close
+        # each other's; `_open_external_url` consumes the oldest live grant.
+        self._mcp_open_grants: dict[object, float] = {}
         self._pending: dict[int, asyncio.Future] = {}
         self._next_id = 1
         self.sessions: dict[str, dict] = {}
@@ -3014,6 +3162,7 @@ class _Supervisor:
                         "clientCapabilities": {
                             "fs": {"readTextFile": False, "writeTextFile": False},
                             "terminal": False,
+                            **_kiro_client_capabilities(),
                         },
                     },
                     timeout=INITIALIZE_TIMEOUT_SECONDS,
@@ -4781,8 +4930,104 @@ class _Supervisor:
         if method == "session/request_permission":
             self._on_permission_request(msg)
             return
+        if method in _SECRET_METHODS and _secrets.available:
+            _spawn_task(self._serve_secret(msg))
+            return
+        if method == "_kiro/openExternalUrl" and _secrets.available:
+            _spawn_task(self._open_external_url(msg))
+            return
         log.warning("ACP: refusing unsupported agent request '%s'", method)
         _spawn_task(self._refuse(msg.get("id"), method))
+
+    async def _answer(self, request_id, result: dict | None = None,
+                      error: tuple[int, str] | None = None) -> None:
+        """Reply to one agent request. Best effort: logs a failure, never raises."""
+        response: dict = {"jsonrpc": "2.0", "id": request_id}
+        if error is None:
+            response["result"] = result or {}
+        else:
+            response["error"] = {"code": error[0], "message": error[1]}
+        try:
+            await asyncio.to_thread(self._write, response)
+        except AcpError as exc:
+            log.warning("ACP: could not deliver a reply (id=%r): %s", request_id, exc)
+
+    async def _serve_secret(self, msg: dict) -> None:
+        """Answer `_kiro/secret/get|store|delete` from ``_secrets``.
+
+        kiro-cli keeps MCP OAuth state (client registration, tokens, PKCE
+        verifier, discovery) in storage its client provides, and only when the
+        client declares ``secretStorage`` (measured on kiro-cli 2.24.0). Without
+        it an OAuth MCP server fails with Unauthorized on every agent start.
+        Values are never logged; keys are ``kiro.mcp.<connection hash>.<kind>``
+        and carry nothing secret, so a key is logged on failure only.
+        """
+        method, request_id = msg.get("method"), msg.get("id")
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        key, value = params.get("key"), params.get("value")
+        if not isinstance(key, str) or not 0 < len(key) <= _SECRET_KEY_MAX:
+            await self._answer(request_id, error=(-32602, "'key' must be a non-empty string."))
+            return
+        try:
+            if method == "_kiro/secret/get":
+                found = await asyncio.to_thread(_secrets.get, key)
+                await self._answer(request_id, {} if found is None else {"value": found})
+                return
+            if method == "_kiro/secret/store":
+                if not isinstance(value, str) or len(value) > _SECRET_VALUE_MAX:
+                    await self._answer(request_id, error=(-32602, "'value' must be a string of at most 256 KiB."))
+                    return
+                await asyncio.to_thread(_secrets.store, key, value)
+            else:
+                await asyncio.to_thread(_secrets.delete, key)
+            await self._answer(request_id)
+        except _SecretStoreError as exc:
+            log.warning("ACP: %s for %r failed: %s", method, key, exc)
+            await self._answer(request_id, error=(-32000, str(exc)))
+        except Exception:
+            # Never leave the agent's request unanswered: it would stall the
+            # sign-in until kiro-cli's own timeout.
+            log.exception("ACP: %s for %r failed unexpectedly", method, key)
+            await self._answer(request_id, error=(-32000, "secret storage failed"))
+
+    async def _open_external_url(self, msg: dict) -> None:
+        """Answer `_kiro/openExternalUrl`: open an MCP sign-in page on this PC.
+
+        Only against an open grant a Connect press created
+        (``_mcp_open_grants``, one page per grant, ``MCP_SIGNIN_OPEN_SECONDS``),
+        and only for ``https``. kiro-cli
+        also asks for this on a mid-session 401 ("lazy-auth"); opening a
+        browser nobody asked for is refused, and the panel's sign-in state
+        still offers the user a Connect of their own. Opened in the browser of
+        the machine PowerAtlas runs on because the OAuth callback is
+        kiro-cli's own ``http://localhost:<port>`` listener there: a browser on
+        another device could not reach it.
+        """
+        request_id = msg.get("id")
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        url = params.get("url")
+        parts = urlsplit(url) if isinstance(url, str) else None
+        if parts is None or parts.scheme != "https" or not parts.netloc:
+            log.warning("ACP: refusing to open a non-https URL")
+            await self._answer(request_id, error=(-32602, "Only https URLs are opened."))
+            return
+        now = time.monotonic()
+        live = [(deadline, token) for token, deadline in self._mcp_open_grants.items()
+                if deadline > now]
+        if not live:
+            log.info("ACP: refusing to open %s: no sign-in was started from "
+                     "PowerAtlas", parts.netloc)
+            await self._answer(request_id, error=(
+                -32000, "PowerAtlas opens a sign-in page only when the user "
+                        "starts the sign-in from its MCP panel."))
+            return
+        self._mcp_open_grants.pop(min(live, key=lambda g: g[0])[1])  # one page per Connect
+        log.info("ACP: opening MCP sign-in page on %s", parts.netloc)
+        opened = await asyncio.to_thread(webbrowser.open, url)
+        if opened:
+            await self._answer(request_id)
+        else:
+            await self._answer(request_id, error=(-32000, "No browser could be opened."))
 
     def _on_permission_request(self, msg: dict) -> None:
         """Handle an inbound `session/request_permission` request (SC-9).
@@ -5693,6 +5938,9 @@ def _dispatch(conn: _Connection, frame: dict) -> None:
     if type_ == "permission_response":
         _spawn_task(_handle_permission_response(conn, session_id, payload))
         return
+    if type_ == "mcp_signin":
+        _spawn_task(_handle_mcp_signin(conn, session_id, payload))
+        return
     if type_ == "close":
         _spawn_task(_handle_close(conn, session_id))
         return
@@ -6579,6 +6827,54 @@ async def _handle_steer(conn, session_id, payload):
         log.exception("ACP _handle_steer: unexpected error")
         conn.send(error_frame(
             "internal_error", "Steer failed unexpectedly.", session_id))
+
+
+async def _handle_mcp_signin(conn, session_id, payload):
+    """Start an MCP server's OAuth sign-in: the MCP panel's Connect button.
+
+    Sends kiro-cli ``_kiro/mcp/resetServer`` with ``startOAuth``, the same
+    request its terminal ``/mcp`` sign-in uses. kiro-cli then asks this client
+    to open the provider's page (``_kiro/openExternalUrl``, allowed once by the
+    open grant added here), waits on its own localhost callback, and stores the
+    result through ``_kiro/secret/store``. The request is answered only when
+    the sign-in finishes, so it runs under ``MCP_SIGNIN_WINDOW_SECONDS``. The
+    outcome reaches the page as the next ``mcp_servers`` frame; only a failure
+    is sent back here, as ``mcp_signin_failed``.
+    """
+    name = payload.get("serverName")
+    if not isinstance(name, str) or not name:
+        conn.send(error_frame("bad_payload", "'mcp_signin' needs a serverName.", session_id))
+        return
+    if conn.session_id != session_id:
+        conn.send(error_frame("not_subscribed", "Subscribe to this session first.", session_id))
+        return
+    meta = _supervisor.sessions.get(session_id)
+    if meta is None:
+        conn.send(error_frame("unknown_session", "This session is not live.", session_id))
+        return
+    if not _secrets.available:
+        conn.send(error_frame(
+            "mcp_signin_failed",
+            "MCP sign-in needs Windows secret storage, which is not available here.",
+            session_id))
+        return
+    if name not in {s.get("name") for s in meta.get("mcpServers") or []}:
+        conn.send(error_frame("bad_payload", f"No MCP server named {name!r} in this session.", session_id))
+        return
+    grant = object()
+    _supervisor._mcp_open_grants[grant] = time.monotonic() + MCP_SIGNIN_OPEN_SECONDS
+    log.info("ACP: MCP sign-in started for %r (session %s)", name, session_id)
+    try:
+        await _supervisor._request(
+            "_kiro/mcp/resetServer",
+            {"sessionId": session_id, "serverName": name, "startOAuth": True},
+            timeout=MCP_SIGNIN_WINDOW_SECONDS)
+    except AcpError as exc:
+        log.warning("ACP: MCP sign-in for %r failed: %s", name, exc)
+        conn.send(error_frame(
+            "mcp_signin_failed", f"Sign-in for {name} did not complete: {exc}", session_id))
+    finally:
+        _supervisor._mcp_open_grants.pop(grant, None)
 
 
 async def _handle_permission_response(conn, session_id, payload):

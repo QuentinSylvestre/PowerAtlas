@@ -26253,6 +26253,231 @@ class TestAcpIdleAgentRecycle:
         assert len(seen) == 1
 
 
+_needs_dpapi = pytest.mark.skipif(
+    __import__("power_atlas.acp", fromlist=["win32crypt"]).win32crypt is None,
+    reason="DPAPI (pywin32) is Windows-only")
+
+
+class TestAcpMcpSignIn:
+    """MCP OAuth sign-in over ACP: the client-side secret store kiro-cli keeps
+    sign-ins in, the gated ``_kiro/openExternalUrl``, and the panel's
+    ``mcp_signin`` frame that starts a sign-in with ``_kiro/mcp/resetServer``.
+    kiro-cli only loads or saves an MCP sign-in through a client that declares
+    ``secretStorage``; without it Atlassian failed on every agent start."""
+
+    SID = "sess_mcpsign0-0000-0000-0000-000000000001"
+
+    def _setup(self, acp_mod, monkeypatch, tmp_path):
+        sv3 = acp_mod._Supervisor()
+        monkeypatch.setattr(acp_mod, "_supervisor", sv3)
+        monkeypatch.setattr(acp_mod, "_secrets", acp_mod._SecretStore(tmp_path / "s.bin"))
+        written = []
+        monkeypatch.setattr(acp_mod._Supervisor, "_write", lambda self, m: written.append(m))
+        sv3.sessions[self.SID] = {"cwd": "C:\\scratch", "created": 0.0, "mcpServers": [
+            {"name": "atlassian", "status": "failed", "failedAuthorization": True, "toolCount": 0}]}
+        sv3.history[self.SID] = acp_mod._History()
+        return sv3, written
+
+    def _conn(self, acp_mod):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, self.SID)
+        return conn
+
+    def _cleanup(self, acp_mod):
+        for conn in tuple(acp_mod._registry.connections):
+            acp_mod._registry.detach(conn)
+        acp_mod._registry.connections.clear()
+        acp_mod._registry.subscribers.clear()
+        acp_mod._registry.loading.clear()
+
+    @_needs_dpapi
+    def test_store_round_trips_encrypted_and_survives_reload(self, tmp_path):
+        from power_atlas import acp as acp_mod
+        path = tmp_path / "s.bin"
+        store = acp_mod._SecretStore(path)
+        store.store("kiro.mcp.abc.tokens", "top-secret-value")
+        assert b"top-secret-value" not in path.read_bytes()
+        again = acp_mod._SecretStore(path)
+        assert again.get("kiro.mcp.abc.tokens") == "top-secret-value"
+        again.delete("kiro.mcp.abc.tokens")
+        assert acp_mod._SecretStore(path).get("kiro.mcp.abc.tokens") is None
+
+    @_needs_dpapi
+    def test_undecryptable_file_is_moved_aside_not_trusted(self, tmp_path):
+        from power_atlas import acp as acp_mod
+        path = tmp_path / "s.bin"
+        path.write_bytes(b"not dpapi at all")
+        store = acp_mod._SecretStore(path)
+        assert store.get("k") is None
+        assert (tmp_path / "s.bin.unreadable").read_bytes() == b"not dpapi at all"
+        store.store("k", "v")
+        assert acp_mod._SecretStore(path).get("k") == "v"
+
+    def test_unreadable_file_raises_instead_of_being_overwritten(self, tmp_path, monkeypatch):
+        from power_atlas import acp as acp_mod
+        path = tmp_path / "s.bin"
+        path.write_bytes(b"keep me")
+        monkeypatch.setattr(acp_mod, "win32crypt", object())
+        def locked(self):
+            raise PermissionError(13, "sharing violation")
+        monkeypatch.setattr(type(path), "read_bytes", locked)
+        with pytest.raises(acp_mod._SecretStoreError):
+            acp_mod._SecretStore(path).store("k", "v")
+        monkeypatch.undo()
+        assert path.read_bytes() == b"keep me"
+
+    def test_capabilities_follow_store_availability(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "win32crypt", object())
+        assert acp_mod._kiro_client_capabilities() == {
+            "_meta": {"kiro": {"secretStorage": True, "openExternalUrl": True}}}
+        monkeypatch.setattr(acp_mod, "win32crypt", None)
+        assert acp_mod._kiro_client_capabilities() == {}
+
+    @_needs_dpapi
+    def test_secret_requests_are_answered_from_the_store(self, monkeypatch, tmp_path):
+        from power_atlas import acp as acp_mod
+        sv3, written = self._setup(acp_mod, monkeypatch, tmp_path)
+        run = lambda m: asyncio.run(sv3._serve_secret(m))
+        run({"id": 1, "method": "_kiro/secret/get", "params": {"key": "kiro.mcp.x.tokens"}})
+        run({"id": 2, "method": "_kiro/secret/store", "params": {"key": "kiro.mcp.x.tokens", "value": "t"}})
+        run({"id": 3, "method": "_kiro/secret/get", "params": {"key": "kiro.mcp.x.tokens"}})
+        run({"id": 4, "method": "_kiro/secret/delete", "params": {"key": "kiro.mcp.x.tokens"}})
+        run({"id": 5, "method": "_kiro/secret/get", "params": {"key": "kiro.mcp.x.tokens"}})
+        run({"id": 6, "method": "_kiro/secret/store", "params": {"key": "", "value": "t"}})
+        run({"id": 7, "method": "_kiro/secret/store", "params": {"key": "k", "value": 5}})
+        by_id = {m["id"]: m for m in written}
+        assert by_id[1]["result"] == {}
+        assert by_id[2]["result"] == {}
+        assert by_id[3]["result"] == {"value": "t"}
+        assert by_id[4]["result"] == {}
+        assert by_id[5]["result"] == {}
+        assert by_id[6]["error"]["code"] == -32602
+        assert by_id[7]["error"]["code"] == -32602
+
+    def test_open_external_url_needs_a_user_started_signin_and_https(self, monkeypatch, tmp_path):
+        from power_atlas import acp as acp_mod
+        sv3, written = self._setup(acp_mod, monkeypatch, tmp_path)
+        opened = []
+        monkeypatch.setattr(acp_mod.webbrowser, "open", lambda u: opened.append(u) or True)
+        run = lambda i, url: asyncio.run(sv3._open_external_url(
+            {"id": i, "method": "_kiro/openExternalUrl", "params": {"url": url}}))
+        run(1, "https://auth.example.com/authorize")        # nothing pending: refused
+        sv3._mcp_open_grants[object()] = time.monotonic() + 60
+        run(2, "http://auth.example.com/authorize")         # pending, but not https
+        run(3, "javascript:alert(1)")
+        run(4, "https://auth.example.com/authorize")        # pending + https: opened
+        run(5, "https://auth.example.com/again")            # consumed: refused
+        by_id = {m["id"]: m for m in written}
+        assert by_id[1]["error"]["code"] == -32000
+        assert by_id[2]["error"]["code"] == -32602
+        assert by_id[3]["error"]["code"] == -32602
+        assert by_id[4]["result"] == {}
+        assert by_id[5]["error"]["code"] == -32000
+        assert opened == ["https://auth.example.com/authorize"]
+
+    def test_signin_frame_sends_reset_server_with_start_oauth(self, monkeypatch, tmp_path):
+        from power_atlas import acp as acp_mod
+        sv3, _ = self._setup(acp_mod, monkeypatch, tmp_path)
+        monkeypatch.setattr(acp_mod, "win32crypt", object())
+        calls = []
+        async def fake_request(self, method, params, timeout=None):
+            calls.append((method, params, timeout, len(self._mcp_open_grants)))
+            return {"success": True}
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", fake_request)
+        conn = self._conn(acp_mod)
+        try:
+            _queued(conn)
+            asyncio.run(acp_mod._handle_mcp_signin(conn, self.SID, {"serverName": "atlassian"}))
+            assert calls == [("_kiro/mcp/resetServer",
+                              {"sessionId": self.SID, "serverName": "atlassian", "startOAuth": True},
+                              acp_mod.MCP_SIGNIN_WINDOW_SECONDS, 1)]
+            assert sv3._mcp_open_grants == {}, "the grant must go once the sign-in returns"
+            assert [f for f in _queued(conn) if f["type"] == "error"] == []
+        finally:
+            self._cleanup(acp_mod)
+
+    def test_signin_frame_refusals(self, monkeypatch, tmp_path):
+        from power_atlas import acp as acp_mod
+        sv3, _ = self._setup(acp_mod, monkeypatch, tmp_path)
+        monkeypatch.setattr(acp_mod, "win32crypt", object())
+        async def failing_request(self, method, params, timeout=None):
+            raise acp_mod.AgentTimeout("no answer")
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", failing_request)
+        conn = self._conn(acp_mod)
+        try:
+            _queued(conn)
+            codes = []
+            for sid, payload in ((self.SID, {}),
+                                 ("sess_other", {"serverName": "atlassian"}),
+                                 (self.SID, {"serverName": "nope"}),
+                                 (self.SID, {"serverName": "atlassian"})):
+                asyncio.run(acp_mod._handle_mcp_signin(conn, sid, payload))
+                codes.append([f["payload"]["code"] for f in _queued(conn) if f["type"] == "error"])
+            assert codes == [["bad_payload"], ["not_subscribed"], ["bad_payload"],
+                             ["mcp_signin_failed"]]
+            assert sv3._mcp_open_grants == {}
+        finally:
+            self._cleanup(acp_mod)
+
+    def test_concurrent_signins_keep_their_own_grants(self, monkeypatch, tmp_path):
+        """One sign-in ending must not close another's grant (review finding)."""
+        from power_atlas import acp as acp_mod
+        sv3, written = self._setup(acp_mod, monkeypatch, tmp_path)
+        sv3.sessions[self.SID]["mcpServers"].append(
+            {"name": "jira", "status": "failed", "failedAuthorization": True, "toolCount": 0})
+        monkeypatch.setattr(acp_mod, "win32crypt", object())
+        opened = []
+        monkeypatch.setattr(acp_mod.webbrowser, "open", lambda u: opened.append(u) or True)
+        gates = {}
+        async def fake_request(self, method, params, timeout=None):
+            gates[params["serverName"]] = asyncio.Event()
+            await gates[params["serverName"]].wait()
+            return {"success": True}
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", fake_request)
+        conn = self._conn(acp_mod)
+        async def scenario():
+            a = asyncio.create_task(acp_mod._handle_mcp_signin(conn, self.SID, {"serverName": "atlassian"}))
+            b = asyncio.create_task(acp_mod._handle_mcp_signin(conn, self.SID, {"serverName": "jira"}))
+            await asyncio.sleep(0.01)
+            assert len(sv3._mcp_open_grants) == 2
+            gates["atlassian"].set()          # A finishes before B's page is asked for
+            await a
+            await sv3._open_external_url({"id": 9, "params": {"url": "https://auth.example.com/b"}})
+            gates["jira"].set()
+            await b
+        try:
+            asyncio.run(scenario())
+            assert opened == ["https://auth.example.com/b"], "B's page must still open"
+            assert sv3._mcp_open_grants == {}
+        finally:
+            self._cleanup(acp_mod)
+
+    def test_expired_grant_opens_nothing(self, monkeypatch, tmp_path):
+        from power_atlas import acp as acp_mod
+        sv3, written = self._setup(acp_mod, monkeypatch, tmp_path)
+        opened = []
+        monkeypatch.setattr(acp_mod.webbrowser, "open", lambda u: opened.append(u) or True)
+        sv3._mcp_open_grants[object()] = time.monotonic() - 1
+        asyncio.run(sv3._open_external_url({"id": 1, "params": {"url": "https://auth.example.com/x"}}))
+        assert opened == [] and written[-1]["error"]["code"] == -32000
+
+    def test_encrypt_failure_is_answered_not_dropped(self, monkeypatch, tmp_path):
+        """A DPAPI encrypt error must reach the agent as an error reply."""
+        from power_atlas import acp as acp_mod
+        sv3, written = self._setup(acp_mod, monkeypatch, tmp_path)
+        class Broken:
+            @staticmethod
+            def CryptProtectData(*a):
+                raise RuntimeError("profile not loaded")
+        monkeypatch.setattr(acp_mod, "win32crypt", Broken)
+        asyncio.run(sv3._serve_secret(
+            {"id": 1, "method": "_kiro/secret/store", "params": {"key": "k", "value": "v"}}))
+        assert written[-1]["id"] == 1 and written[-1]["error"]["code"] == -32000
+        assert not (tmp_path / "s.bin").exists()
+
+
 def _noop_death(self, proc):
     """No-op replacement for _on_agent_death in watchdog tests."""
 

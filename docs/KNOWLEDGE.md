@@ -214,7 +214,19 @@ Each server entry:
 
 **`authorizationUrl` is present** when `status: "failed"` + `failedAuthorization: true`. This was logged in PowerAtlas's own log today (2026-09-23 15:21:17) and on prior dates. The ROADMAP's statement "no `authorizationUrl`-bearing signal has ever been observed" was wrong — the signal exists, it was arriving all along, it just wasn't being handled.
 
-**The feature is buildable**: A "Connect" button for OAuth MCP servers is achievable — extract `authorizationUrl` from the `_kiro/mcp/status` notification, show a button in the `/acp` MCP panel, open the URL when clicked. No additional protocol support needed.
+**The feature is buildable, but not the way this section first said.** Opening `authorizationUrl` from the page does nothing useful: kiro-cli has already stopped its callback listener by then, and it keeps an MCP sign-in only in storage the ACP *client* provides. See the next section.
+
+### MCP OAuth sign-in over ACP needs client-side secret storage
+
+**Measured on kiro-cli 2.24.0, 2026-09-24**, from its bundled `acp-server.js` and live probes.
+
+- kiro-cli keeps each OAuth MCP server's state (client registration, tokens, PKCE verifier, discovery) through the client, under keys `kiro.mcp.<connection hash>.{client,tokens,verifier,discovery}`. It does this only when `initialize` declares `clientCapabilities._meta.kiro.secretStorage: true`. The agent then sends the client `_kiro/secret/get` (`{key}` → `{value}` or `{}`), `_kiro/secret/store` (`{key, value}`) and `_kiro/secret/delete` (`{key}`).
+- Without it, every agent start logs `Failed to connect ... Unauthorized` for Atlassian, even after a successful terminal sign-in. The terminal UI is an ACP client of the same agent that declares the capability (its log says "Client supports ACP secret storage"). Its store is its own. Ruled out as causes: the agent's cwd, and PowerAtlas's injected env vars.
+- A sign-in opens a browser only in the "explicit-reauth" phase (user-started) or "lazy" (mid-session 401), never "passive" (agent start). It opens it by sending the client `_kiro/openExternalUrl` (`{url}`), and only if `clientCapabilities._meta.kiro.openExternalUrl: true`. The user-started trigger is `_kiro/mcp/resetServer` with `{sessionId, serverName, startOAuth: true}`, the terminal's `/mcp` sign-in. It answers only after the browser flow ends.
+- kiro-cli receives the callback on its own `http://localhost:<port>/oauth/callback`, on the machine it runs on.
+- Probe: with both capabilities declared, a Connect produced `connected` with 41 tools. A fresh agent given the same stored secrets reconnected with no browser.
+
+**Implemented 2026-09-24**: `acp.py` `_SecretStore` (DPAPI-encrypted `acp-secrets.bin` in the config folder, Windows only), `_serve_secret`, `_open_external_url` (https only, one page per Connect press within 30 s of it, on the PowerAtlas PC's browser; `_kiro/openExternalUrl` names no server, so a lazy re-auth for another server inside that 30 s would also open), and the `mcp_signin` client frame (`_handle_mcp_signin`) behind the panel's Connect. Off Windows neither capability is declared, and OAuth servers stay "needs sign-in".
 
 **Not in `extensionMethods`**: `_kiro/mcp/status` is a notification (server-to-client push), not a client-callable method. `extensionMethods` from `initialize` lists methods the agent handles; notifications it emits are not listed there.
 

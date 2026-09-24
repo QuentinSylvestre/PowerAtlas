@@ -1063,7 +1063,12 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 /* Never wider than the viewport; composer-chrome.js `_positionMcpPanel`
    shifts it horizontally on open so it stays on screen wherever the toolbar
    wraps the indicator (measured at 390 px, right-anchored: x = -52). */
-.acp-mcp-panel { max-width: min(340px, calc(100vw - 16px)); }
+/* text-transform/letter-spacing reset: on the dashboard the indicator sits
+   inside `.section-label`, which uppercases and tracks everything under it. */
+.acp-mcp-panel {
+  max-width: min(340px, calc(100vw - 16px));
+  text-transform: none; letter-spacing: normal;
+}
 .acp-mcp-panel-head {
   padding: 2px 12px 6px; font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);
@@ -1088,6 +1093,15 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-mcp-badge-auth       { background: transparent; box-shadow: inset 0 0 0 2px var(--amber); }
 .acp-mcp-badge-failed     { background: #ef4444; }
 .acp-mcp-badge-disabled   { background: var(--text-muted); }
+.acp-mcp-connect-btn {
+  align-self: center; flex-shrink: 0; font-size: 11px; padding: 2px 8px;
+  border-radius: 4px; border: 1px solid var(--border);
+  background: transparent; color: var(--accent); cursor: pointer;
+  font-family: inherit; white-space: nowrap;
+}
+.acp-mcp-connect-btn:hover:not(:disabled) { background: var(--accent-dim); }
+.acp-mcp-connect-btn:disabled { color: var(--text-muted); cursor: default; }
+.acp-mcp-connect-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Transcript is the primary pane; the transport log below it is a fixed strip,
    because once chunks stream the conversation is what the page is for. */

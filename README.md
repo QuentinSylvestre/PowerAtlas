@@ -440,9 +440,13 @@ separately.
 **An MCP connection or authorization failure surfaces inline in the transcript**, as a plain-text
 error message attached to the turn, and via the **MCP status indicator** in the session toolbar — labelled "MCP" with connected over active servers (for example "MCP 1/2"). It appears once kiro-cli
 reports server status. Red means a server failed to start; amber means one is still connecting or needs
-sign-in. Opening it lists each server with its state in words, disabled servers last. kiro-cli only
-completes an MCP OAuth sign-in in its terminal UI, so a server that needs sign-in says so: run
-`kiro-cli` in a terminal and use `/mcp`.
+sign-in. Opening it lists each server with its state in words, disabled servers last. A server that
+needs sign-in (an OAuth MCP server such as Atlassian) has a **Connect** button: it opens the provider's
+sign-in page in the browser of the PC PowerAtlas runs on, because kiro-cli receives the sign-in on that
+PC's `localhost`. Finish there, even when you pressed Connect from another device. The sign-in is kept
+for PowerAtlas sessions, encrypted for your Windows user (`acp-secrets.bin` in PowerAtlas's config
+folder), and survives restarts. It is separate from a terminal kiro-cli sign-in, so each needs its own
+once.
 
 **The slash-command palette lists the agent's own catalogue.** Selecting a skill entry works the same
 way as typing its name; kiro-default (the palette's own "switch agent" entry, meaningless here because

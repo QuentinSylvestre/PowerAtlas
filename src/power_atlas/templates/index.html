@@ -868,6 +868,7 @@ initMcpIndicatorDom({
   compactEl:   document.getElementById('dashMcpCompact'),
   panelEl:     document.getElementById('dashMcpPanel'),
   listEl:      document.getElementById('dashMcpList'),
+  onSignIn:    function (name) { send('mcp_signin', { serverName: name }, _dashAttachedSid); },
 });
 // Toggle, outside-click and Escape for the MCP panel are wired by
 // initMcpIndicatorDom itself (composer-chrome.js), shared with /acp.
@@ -3745,6 +3746,7 @@ function dashHandle(frame){
     return;
   }
   if (type === 'error') {
+    if (payload && payload.code === 'mcp_signin_failed') clearMcpSignInPending();
     // Phase 3 (SC5): unconditional, at the very top of the handler, before
     // any payload.code branching below -- mirrors acp.html's own error
     // handler exactly (acp.html:5222-5239, its setTurn(turnActive) repaint

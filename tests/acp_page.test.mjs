@@ -16647,7 +16647,7 @@ check("mcp: frame shows the indicator with connected/active ratio", (tpl) => {
     "accessible name");
 });
 
-check("mcp: sign-in needed is amber with a terminal instruction, never red or a button", (tpl) => {
+check("mcp: sign-in needed is amber, never red, and offers Connect", (tpl) => {
   const { page, live } = connected(tpl);
   mcpDeliver(page, live, [
     { name: "playwright", status: "connected", toolCount: 21 },
@@ -16655,17 +16655,53 @@ check("mcp: sign-in needed is amber with a terminal instruction, never red or a 
   ]);
   const toggle = page.el("acpMcpToggle");
   assert(toggle.classList.contains("acp-mcp-caution"), "sign-in needed must be amber");
-  assert(!toggle.classList.contains("acp-mcp-warn"),
-    "sign-in needed must not be red: it never clears in ACP mode");
+  assert(!toggle.classList.contains("acp-mcp-warn"), "sign-in needed must not be red");
   assert(/1 needs sign-in/.test(toggle.getAttribute("aria-label")),
     "accessible name must say sign-in is needed: " + toggle.getAttribute("aria-label"));
   const row = mcpRows(page)[1];
   assert(row.querySelector(".acp-mcp-badge-auth"), "sign-in badge class missing");
-  const detail = row.querySelector(".acp-mcp-server-detail").textContent;
-  assert(/kiro-cli/.test(detail) && /\/mcp/.test(detail),
-    "detail must tell the user how to sign in: " + detail);
-  assertEqual(page.el("acpMcpList").querySelectorAll("button").length, 0,
-    "no Connect button: its OAuth redirect has no listener in ACP mode");
+  assertEqual(row.querySelector(".acp-mcp-server-detail").textContent, "Needs sign-in", "detail");
+  const btn = row.querySelector(".acp-mcp-connect-btn");
+  assert(btn && !btn.disabled && btn.textContent === "Connect", "a sign-in row offers Connect");
+  assertEqual(mcpRows(page)[0].querySelectorAll("button").length, 0,
+    "a connected server offers no button");
+});
+
+check("mcp: Connect sends mcp_signin once, then waits for the browser sign-in", (tpl) => {
+  const { page, live } = connected(tpl);
+  const servers = (atl) => [{ name: "playwright", status: "connected", toolCount: 21 }, atl];
+  mcpDeliver(page, live, servers({ name: "atlassian", status: "failed", failedAuthorization: true }));
+  mcpRows(page)[1].querySelector(".acp-mcp-connect-btn").dispatch("click", {});
+  const sent = page.sentOf("mcp_signin");
+  assertEqual(sent.length, 1, "Connect must send one mcp_signin frame");
+  assertEqual(sent[0].payload.serverName, "atlassian", "frame names the server");
+  assertEqual(sent[0].sessionId, live, "frame is for the session on screen");
+  let row = mcpRows(page)[1];
+  let btn = row.querySelector(".acp-mcp-connect-btn");
+  assert(btn.disabled && /Waiting/.test(btn.textContent), "button waits after a press");
+  assert(/browser on the PowerAtlas PC/.test(row.querySelector(".acp-mcp-server-detail").textContent),
+    "detail says where to finish signing in");
+  btn.dispatch("click", {});
+  assertEqual(page.sentOf("mcp_signin").length, 1, "a waiting row must not send again");
+  // kiro-cli reports the server as connecting while the browser flow runs.
+  mcpDeliver(page, live, servers({ name: "atlassian", status: "connecting" }));
+  assert(/browser on the PowerAtlas PC/.test(mcpRows(page)[1].querySelector(".acp-mcp-server-detail").textContent),
+    "still waiting while the server is connecting");
+  mcpDeliver(page, live, servers({ name: "atlassian", status: "connected", toolCount: 41 }));
+  row = mcpRows(page)[1];
+  assertEqual(row.querySelector(".acp-mcp-server-detail").textContent, "41 tools", "signed in");
+  assertEqual(row.querySelectorAll("button").length, 0, "no button once connected");
+});
+
+check("mcp: an mcp_signin_failed error offers Connect again", (tpl) => {
+  const { page, live } = connected(tpl);
+  mcpDeliver(page, live, [{ name: "atlassian", status: "failed", failedAuthorization: true }]);
+  mcpRows(page)[0].querySelector(".acp-mcp-connect-btn").dispatch("click", {});
+  assert(mcpRows(page)[0].querySelector(".acp-mcp-connect-btn").disabled, "waiting first");
+  page.deliver({ type: "error", sessionId: live,
+                 payload: { code: "mcp_signin_failed", message: "Sign-in did not complete" } });
+  const btn = mcpRows(page)[0].querySelector(".acp-mcp-connect-btn");
+  assert(btn && !btn.disabled && btn.textContent === "Connect", "Connect is offered again");
 });
 
 check("mcp: a real failure is red", (tpl) => {

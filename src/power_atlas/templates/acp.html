@@ -677,6 +677,7 @@
     compactEl:   document.getElementById('acpMcpCompact'),
     panelEl:     document.getElementById('acpMcpPanel'),
     listEl:      document.getElementById('acpMcpList'),
+    onSignIn:    function (name) { send('mcp_signin', { serverName: name }, sessionId); },
   });
   // sessionCommands/sessionSkills/cmdDropdownEl/_cmdSelectedIndex, declared in
   // /static/composer-chrome.js (dashboard/ACP feature-parity plan, Phase 2) —
@@ -5236,6 +5237,7 @@
     }
     if (type === 'error') {
       setPending(false);
+      if (payload && payload.code === 'mcp_signin_failed') clearMcpSignInPending();
       // A refused `cancel` or `close` leaves its button reading "Stopping…" /
       // "Closing…" and disabled, with no other frame coming to restore it.
       // Re-asserting the turn state the page already holds costs nothing and

@@ -66,6 +66,12 @@ var _mcpRefToggle    = null;
 var _mcpRefCompact   = null;
 var _mcpRefPanel     = null;
 var _mcpRefList      = null;
+var _mcpOnSignIn     = null;  // host page's sender for an `mcp_signin` frame
+// The sign-in the user started with Connect: {name, until}. Shown as
+// "finish in the browser" while that server is still auth/connecting, dropped
+// once it settles, on `mcp_signin_failed`, on session change, or at `until`.
+var _mcpSignInPending = null;
+var MCP_SIGNIN_WAIT_MS = 300000;  // acp.py MCP_SIGNIN_WINDOW_SECONDS
 
 /** Called once by each host page so _renderMcpIndicator knows which elements
  *  to update, and to wire the disclosure behaviour -- toggle, outside click,
@@ -81,6 +87,7 @@ function initMcpIndicatorDom(refs) {
   _mcpRefCompact   = refs.compactEl;
   _mcpRefPanel     = refs.panelEl;
   _mcpRefList      = refs.listEl;
+  _mcpOnSignIn     = typeof refs.onSignIn === 'function' ? refs.onSignIn : null;
   var toggle = _mcpRefToggle;
   var indicator = _mcpRefIndicator;
   if (!toggle || !indicator) return;
@@ -627,6 +634,7 @@ function resetCommandPalette() {
   sessionCommands = [];
   sessionSkills = [];
   sessionMcpServers = null; // hide MCP indicator on session change
+  _mcpSignInPending = null;
   _renderMcpIndicator();
   hideCommandDropdown();
 }
@@ -664,11 +672,18 @@ function setSessionMcpServers(list) {
   _renderMcpIndicator();
 }
 
+/** A host page calls this on an `mcp_signin_failed` error frame, so the row
+ *  offers Connect again instead of waiting out MCP_SIGNIN_WAIT_MS. */
+function clearMcpSignInPending() {
+  _mcpSignInPending = null;
+  _renderMcpIndicator();
+}
+
 /** One server's display state. `auth` is its own state rather than `failed`:
- *  kiro-cli reports a server that needs sign-in as failed, and in ACP mode
- *  that stays true until the user signs in from a terminal -- shown in red it
- *  would be a warning that never clears, and a permanent warning trains
- *  people to ignore the real ones. */
+ *  kiro-cli reports a server that needs sign-in as failed, and it stays that
+ *  way until someone signs in -- shown in red it would be a warning nobody can
+ *  clear from a glance, and a lasting warning trains people to ignore the
+ *  real ones. */
 function _mcpState(srv) {
   if (srv.failedAuthorization === true) return 'auth';
   var s = srv.status;
@@ -676,7 +691,8 @@ function _mcpState(srv) {
 }
 
 var _MCP_DETAIL = {
-  auth: 'Sign in from a terminal: run kiro-cli, then /mcp',
+  auth: 'Needs sign-in',
+  waiting: 'Finish signing in in the browser on the PowerAtlas PC',
   failed: 'Failed to start',
   connecting: 'Connecting\u2026',
   disabled: 'Disabled',
@@ -708,6 +724,14 @@ function _renderMcpIndicator() {
     var da = a.state === 'disabled' ? 1 : 0, db = b.state === 'disabled' ? 1 : 0;
     return (da - db) || (a.i - b.i);
   });
+
+  // A pending sign-in survives only while its server is still waiting on it.
+  var pending = _mcpSignInPending;
+  if (pending && (Date.now() >= pending.until || !servers.some(function (e) {
+        return e.srv.name === pending.name && (e.state === 'auth' || e.state === 'connecting');
+      }))) {
+    pending = _mcpSignInPending = null;
+  }
 
   var connected = 0, active = 0, failed = 0, auth = 0;
   servers.forEach(function (e) {
@@ -754,14 +778,33 @@ function _renderMcpIndicator() {
     // The state in words, visible: the badge is colour only.
     var detail = document.createElement('span');
     detail.className = 'acp-mcp-server-detail';
+    var waiting = pending && pending.name === srv.name;
     if (e.state === 'connected') {
       var n = typeof srv.toolCount === 'number' ? srv.toolCount : 0;
       detail.textContent = n + (n === 1 ? ' tool' : ' tools');
     } else {
-      detail.textContent = _MCP_DETAIL[e.state];
+      detail.textContent = _MCP_DETAIL[waiting ? 'waiting' : e.state];
     }
     text.appendChild(detail);
     li.appendChild(text);
+    // Connect starts kiro-cli's own OAuth flow (acp.py _handle_mcp_signin):
+    // the provider's page opens in the browser of the PC PowerAtlas runs on,
+    // because kiro-cli's callback listener is on that PC's localhost.
+    if (e.state === 'auth' && _mcpOnSignIn) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'acp-mcp-connect-btn';
+      btn.textContent = waiting ? 'Waiting…' : 'Connect';
+      btn.disabled = !!waiting;
+      btn.setAttribute('aria-label', 'Sign in to ' + nameEl.textContent);
+      btn.addEventListener('click', function () {
+        if (_mcpSignInPending) return;
+        _mcpSignInPending = { name: srv.name, until: Date.now() + MCP_SIGNIN_WAIT_MS };
+        _mcpOnSignIn(srv.name);
+        _renderMcpIndicator();
+      });
+      li.appendChild(btn);
+    }
     listEl.appendChild(li);
   });
 }
