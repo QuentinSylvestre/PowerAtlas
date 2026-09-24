@@ -2,6 +2,12 @@
 
 ## Pattern
 
+### Driving PowerAtlas's tray and peek doors for live QA on Windows
+
+**Why**: The door check (tray Open, peek double-tap, Copy login link) looked GUI-only, but was automated on 2026-09-23 with four non-obvious tricks. The tray icon sits in the hidden-icons overflow; UI Automation `Invoke` on the `PowerAtlas` button (class `SystemTray.NormalButton`) runs pystray's default item, **Open**. pystray's context menu (`#32768`) exposes no items to UI Automation, and a right-click lands on the wrong spot unless the PowerShell process first calls `SetProcessDPIAware` (UIA rects are physical pixels) — then Down, Down, Enter selects **Copy login link** (menu order: Open, Copy login link, Logs, Restart, Quit — miscounting reaches Restart/Quit). Peek taps come from `pynput.keyboard.Controller` (ctrl+shift+z; double-tap window 0.5 s). A locked session (`LogonUI` process present) makes SendKeys and the clipboard fail with "Access is denied".
+**How to apply**: For any live door check, reuse this recipe; confirm each door by a `loopback browser signed in with a login code` line in `orchestrator.log` (and, for the browser doors, Firefox — the default browser — history or a fresh headless context). Check for `LogonUI` before starting.
+**Source**: `plans/done/260924-0525_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` § 9 Phase 7, criterion 679 | **Verified**: 2026-09-23 (session, empirical)
+
 ### A capacity re-check across a close-then-create boundary must read post-close state, not the pre-close snapshot
 
 **Why**: `dashPickerRunPending()` re-checked `_dashPickerCapacity.held >= max` before sending the deferred `new` frame, using the capacity value captured before the close-in-flight session actually closed. Since that count still included the session being closed, the check always false-blocked the create — the close-then-create picker flow could never complete. Caught by the Step 9 final review (Medium); fixed by removing the redundant re-check and matching `acp.html`'s behavior of relying on the server's own cap enforcement instead.
@@ -235,11 +241,11 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Frequency**: 1 (below threshold) | **Sessions**: (sourced from plan archive) | **Last observed**: 2026-09-12
 **Evidence-quote**: "when a rename/consolidation plan's phases partition a codebase by file, add one lightweight cross-phase sweep step (a repo-wide grep for the retired names, run once after all rename phases land, scoped to comments/docstrings only) rather than relying on each phase's reviewer to independently notice a neighbor file's drift"
 
-### `/acp` is unreachable via direct tool-driven URL navigation during automated QA
+### `/acp` 403s during automated QA: check the cookie gate first, then the navigation guard
 
-**Why**: Every phase of `260921_DASHBOARD_ACP_FEATURE_PARITY`'s Live QA (Phases 1-6) reported `/acp` as unreachable ("403 Forbidden") and skipped testing it, treating it as an auth failure. Step 9b traced the actual cause to `web.py`'s `_acp_navigation_ok()`'s `Sec-Fetch-Site` cross-origin-navigation guard — a deliberate CSRF protection for a route that spawns a kiro-cli agent process on load, not an authentication problem.
-**How to apply**: When driving `/acp` during automated browser QA, reach it via a real in-page `<a href="/acp">` link click (e.g. the dashboard's own ACP nav button) — never a direct tool-driven URL navigation, which always returns 403 by design regardless of session/auth state.
-**Source**: `plans/done/260922-0859_DASHBOARD_ACP_FEATURE_PARITY.md`, Step 9b Review Log entry | **Verified**: 2026-09-22
+**Why**: Since `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL` Phase 5, every loopback route refuses a caller without the `pa_local` cookie — pages get the "open PowerAtlas from its tray icon" HTML with 403, APIs get `{"error":"Forbidden"}`. That is now the usual cause of a QA 403. The older reading here ("direct navigation always 403s by design") was wrong: `_acp_navigation_ok` passes `Sec-Fetch-Site: none` — its docstring: "`none` is a user-initiated load (bookmark, address bar), while a cross-site navigation says `cross-site`" — so a typed URL or a Playwright `goto` reaches `/acp` once signed in (measured 2026-09-23); only a genuinely cross-site navigation trips that guard.
+**How to apply**: On a 403, read the body first. Tray page or `{"error":"Forbidden"}` → sign in per `AGENTS.md`'s QA sign-in bullet. A 403 on `/acp` alone while signed in → suspect the `Sec-Fetch-Site` guard (a cross-site navigation).
+**Source**: `plans/done/260924-0525_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` § 9 Phase 5-6 QA; `web.py` `_acp_navigation_ok`; supersedes `plans/done/260922-0859_DASHBOARD_ACP_FEATURE_PARITY.md` Step 9b | **Verified**: 2026-09-24 (session, code re-read + live GET /acp 200 on 2026-09-23)
 
 ### WinRT toast template `ToastImageAndText01` silently drops the body — use `ToastText02` for two-slot toasts
 
