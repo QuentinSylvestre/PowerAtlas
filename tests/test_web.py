@@ -4024,7 +4024,7 @@ class TestAcpMarkdownRendering:
 
         And it loses it *quietly*. The explicit ``_markdown is None`` test looks
         redundant beside the ``except Exception`` below it — without the test,
-        calling ``None`` raises and the same handler swallows it — but the two
+        calling ``None`` raises and the same handler catches it — but the two
         are not the same outcome: the handler logs, so a machine missing an
         optional dependency would write a traceback per bubble per turn into
         ``orchestrator.log`` for the life of the process. A degradation is
@@ -12742,6 +12742,50 @@ class TestSettingsSurface:
                                      method="POST")
         assert status == 403
         assert b"Forbidden" in body
+
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F4):
+    # the two loopback-only routes that plan added, pinned the same way. The
+    # peer carries a valid device cookie *and* a valid `pa_local`, so if the
+    # path were ever added to `_REMOTE_ALLOWED_PATHS` the handler behind it
+    # would run and succeed; only the allowlist's own refusal (`Forbidden`)
+    # passes these.
+
+    @staticmethod
+    def _both_cookies():
+        device = _cookie_header()[1].decode()
+        return (b"cookie", f"{device}; pa_local={_valid_local_cookie()}".encode())
+
+    def test_the_local_secret_rotate_route_is_loopback_only(self, remote_enabled):
+        before = remote_enabled._LOCAL_SECRET
+        status, body, _ = _peer_http(
+            "/api/local-secret/rotate",
+            [self._both_cookies(),
+             (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode())],
+            method="POST")
+        assert status == 403
+        assert b"Forbidden" in body
+        assert remote_enabled._LOCAL_SECRET == before, (
+            "a remote peer rotated the local secret")
+
+    def test_the_acp_permissions_read_is_loopback_only(self, remote_enabled):
+        status, body, _ = _peer_http("/api/acp-permissions",
+                                     [self._both_cookies()])
+        assert status == 403
+        assert b"Forbidden" in body
+
+    def test_the_acp_permissions_write_is_loopback_only(self, remote_enabled):
+        from power_atlas import config as config_mod
+        assert config_mod.load_config().acp_permissions_enabled is False
+        status, body, _ = _peer_http(
+            "/api/acp-permissions",
+            [self._both_cookies(),
+             (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode()),
+             (b"content-type", b"application/json")],
+            method="POST", body=b'{"enabled": true}')
+        assert status == 403
+        assert b"Forbidden" in body
+        assert config_mod.load_config().acp_permissions_enabled is False, (
+            "a remote peer changed the permission posture")
 
     def test_rotating_replaces_the_stored_secret(self, client, tmp_path):
         from power_atlas import config as config_mod
@@ -22875,6 +22919,51 @@ class TestSupervisor:
         finally:
             self._cleanup_registry(acp_mod)
 
+    @pytest.mark.parametrize("step", ["_notify", "_flush_bubble"])
+    def test_turn_end_sweep_answers_cancelled_even_when_a_later_step_raises(
+            self, monkeypatch, step):
+        """F1. The swept requests are popped (their cards disabled) before
+        the turn-end steps run, and answered `cancelled` after them. A raise
+        in between -- `_notify`, `_flush_bubble` or `_emit` -- used to skip the
+        answers, leaving kiro-cli blocked on a request nothing could answer.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review"""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permsweepra-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        sv3._pending_permission["op-1"] = {
+            "session_id": sid, "options": [], "kiro_id": 51}
+
+        async def fake_prompt(self, session_id, text, images):
+            return {"stopReason": "end_turn"}
+
+        real = getattr(acp_mod, step)
+        calls = []
+
+        def raising(*a, **k):
+            # `_flush_bubble` also runs once before the turn starts; only the
+            # turn-end call (the last one) raises.
+            calls.append(1)
+            if step == "_flush_bubble" and len(calls) == 1:
+                return real(*a, **k)
+            raise RuntimeError(f"{step} exploded")
+
+        monkeypatch.setattr(acp_mod, step, raising)
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "prompt", fake_prompt), \
+                    patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                with pytest.raises(RuntimeError, match="exploded"):
+                    asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hello"}))
+            assert written == [self._cancelled(51)], (
+                "a raising turn-end step skipped the cancelled answer")
+            assert sv3._pending_permission == {}
+        finally:
+            self._cleanup_registry(acp_mod)
+
     def test_malformed_permission_request_is_answered_cancelled_not_an_error(
             self, monkeypatch):
         """K3. kiro-cli KAS 2.23.1's turn-approval parser treats a JSON-RPC
@@ -23025,6 +23114,19 @@ model: claude-sonnet-4.6
 def _agent_profile():
     from power_atlas import agent_profile as agent_profile_mod
     return agent_profile_mod
+
+
+def _regenerate(ap, *, enabled, base_agent):
+    """Generate (``enabled``) or remove the derived agent from explicit values.
+
+    `agent_profile.regenerate` was a production function with only test
+    callers, so it was removed; this drives the same locked core
+    `sync_from_config` uses, with values that need not be in `config.toml` --
+    which is what the invalid-name and self-reference cases below require.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11)
+    """
+    with ap._generation_lock:
+        return ap._apply_locked(enabled=enabled, base_agent=base_agent)
 
 
 def _write_base(isolated_config, text=_BASE_NO_PERMISSIONS, name="kiro_default"):
@@ -23370,7 +23472,7 @@ class TestDerivedAgentWrite:
         ap = _agent_profile()
         base = _write_base(isolated_config)
         before = hashlib.sha256(base.read_bytes()).hexdigest()
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         after = hashlib.sha256(base.read_bytes()).hexdigest()
         assert before == after
         assert ap.derived_agent_path().exists()
@@ -23378,7 +23480,7 @@ class TestDerivedAgentWrite:
     def test_the_written_file_is_the_injected_base(self, isolated_config):
         ap = _agent_profile()
         _write_base(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         written = ap.derived_agent_path().read_bytes().decode("utf-8")
         assert written == ap.build_derived_agent(_BASE_NO_PERMISSIONS)
         assert ap.last_generation().ok is True
@@ -23389,7 +23491,7 @@ class TestDerivedAgentWrite:
         """D-10/SC-8: a regen failure must not widen or destroy the posture."""
         ap = _agent_profile()
         _write_base(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         good = ap.derived_agent_path().read_bytes()
         assert ap.derived_block_state() == "on"
         # A *different* base, so the failed regeneration would genuinely have
@@ -23405,7 +23507,7 @@ class TestDerivedAgentWrite:
         # the context manager, and nothing else in this test runs concurrently.
         with patch.object(ap.os, "replace", boom):
             with pytest.raises(ap.AgentProfileError):
-                ap.regenerate(enabled=True, base_agent="kiro_default")
+                _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert ap.derived_agent_path().read_bytes() == good, (
             "the last good derived agent was replaced by a failed regen")
         assert ap.derived_block_state() == "on"
@@ -23420,14 +23522,14 @@ class TestDerivedAgentWrite:
 
         Verifying after `os.replace` detects a bad splice with the last-good
         file already destroyed, which is the opposite of what the module
-        docstring, `regenerate`'s docstring and D-10/SC-8 all promise. The
+        docstring, `_generate`'s docstring and D-10/SC-8 all promise. The
         ordering is asserted directly -- `os.replace` must never be called --
         rather than only through its outcome, because a module that published
         and then rolled back would pass an outcome-only assertion.
         """
         ap = _agent_profile()
         _write_base(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         good = ap.derived_agent_path().read_bytes()
         _write_base(isolated_config, text=_BASE_WITH_PERMISSIONS)
 
@@ -23449,7 +23551,7 @@ class TestDerivedAgentWrite:
         with patch.object(ap.os, "fsync", torn_fsync), \
                 patch.object(ap.os, "replace", spy_replace):
             with pytest.raises(ap.AgentProfileError):
-                ap.regenerate(enabled=True, base_agent="kiro_default")
+                _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert replaced == [], (
             "the staged file was published before it was verified, so the "
             "last-good derived agent is gone")
@@ -23472,7 +23574,7 @@ class TestDerivedAgentWrite:
 
         with patch.object(ap.os, "fsync", torn_fsync):
             with pytest.raises(ap.AgentProfileError):
-                ap.regenerate(enabled=True, base_agent="kiro_default")
+                _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert not ap.derived_agent_path().exists()
         assert not ap._stage_path().exists()
         assert ap.derived_block_state() == "absent"
@@ -23485,17 +23587,17 @@ class TestDerivedAgentWrite:
         stray = ap._stage_path()
         stray.parent.mkdir(parents=True, exist_ok=True)
         stray.write_bytes(b"left over by a crash\n")
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert not stray.exists()
         # Including on the `off` pass, which writes nothing at all.
         stray.write_bytes(b"left over by a crash\n")
-        ap.regenerate(enabled=False, base_agent="kiro_default")
+        _regenerate(ap, enabled=False, base_agent="kiro_default")
         assert not stray.exists()
 
     def test_a_missing_base_agent_is_a_typed_error(self, isolated_config):
         ap = _agent_profile()
         with pytest.raises(ap.AgentProfileError):
-            ap.regenerate(enabled=True, base_agent="does_not_exist")
+            _regenerate(ap, enabled=True, base_agent="does_not_exist")
         assert not ap.derived_agent_path().exists()
         assert ap.derived_block_state() == "absent"
 
@@ -23506,7 +23608,7 @@ class TestDerivedAgentWrite:
         ap = _agent_profile()
         _write_base(isolated_config, name=DERIVED_AGENT_NAME)
         with pytest.raises(ap.AgentProfileError):
-            ap.regenerate(enabled=True, base_agent=DERIVED_AGENT_NAME)
+            _regenerate(ap, enabled=True, base_agent=DERIVED_AGENT_NAME)
 
     def test_the_block_state_distinguishes_on_stale_absent_and_foreign(
             self, isolated_config):
@@ -23514,7 +23616,7 @@ class TestDerivedAgentWrite:
         ap = _agent_profile()
         _write_base(isolated_config)
         assert ap.derived_block_state() == "absent"
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert ap.derived_block_state() == "on"
         # This module's own output from a different overlay revision, or from
         # the version that wrote an allow-all block in the `off` state.
@@ -23550,14 +23652,14 @@ class TestDerivedAgentWrite:
         ap = _agent_profile()
         _write_base(isolated_config,
                     text="---\r\ndescription: d\r\nmodel: m\r\n---\r\nbody\r\n")
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert ap.last_generation().ok is True
         assert ap.last_generation().error == ""
         assert ap.derived_block_state() == "on"
         written = ap.derived_agent_path().read_bytes()
         assert len(re.findall(rb"(?<!\r)\n", written)) == 0, "mixed endings"
         # And the off transition still recognises it as PowerAtlas's own.
-        ap.regenerate(enabled=False, base_agent="kiro_default")
+        _regenerate(ap, enabled=False, base_agent="kiro_default")
         assert not ap.derived_agent_path().exists()
 
     def test_a_trailing_blank_line_in_the_overlay_does_not_break_generation(
@@ -23575,7 +23677,7 @@ class TestDerivedAgentWrite:
         raw = ap.overlay_text()
         with patch.object(ap, "_overlay_cache", raw.rstrip("\n") + "\n\n\n"):
             assert ap.overlay_text().endswith("\n\n\n")
-            ap.regenerate(enabled=True, base_agent="kiro_default")
+            _regenerate(ap, enabled=True, base_agent="kiro_default")
             assert ap.last_generation().ok is True
             assert ap.derived_block_state() == "on"
 
@@ -23593,9 +23695,9 @@ class TestDerivedAgentRemovalOnOff:
     def test_off_removes_a_file_this_module_wrote(self, isolated_config):
         ap = _agent_profile()
         _write_base(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert ap.derived_agent_path().exists()
-        status = ap.regenerate(enabled=False, base_agent="kiro_default")
+        status = _regenerate(ap, enabled=False, base_agent="kiro_default")
         assert not ap.derived_agent_path().exists()
         assert ap.derived_block_state() == "absent"
         assert status.ok is True
@@ -23610,7 +23712,7 @@ class TestDerivedAgentRemovalOnOff:
         """
         ap = _agent_profile()
         _write_base(isolated_config)
-        status = ap.regenerate(enabled=False, base_agent="kiro_default")
+        status = _regenerate(ap, enabled=False, base_agent="kiro_default")
         assert status.ok is True
         assert status.error == ""
         assert ap.derived_block_state() == "absent"
@@ -23632,7 +23734,7 @@ class TestDerivedAgentRemovalOnOff:
             b"  rules:\n    - capability: all\n      effect: allow\n"
             b"---\nbody\n")
         assert ap.derived_block_state() == "stale"
-        ap.regenerate(enabled=False, base_agent="kiro_default")
+        _regenerate(ap, enabled=False, base_agent="kiro_default")
         assert not ap.derived_agent_path().exists()
 
     def test_off_leaves_a_file_this_module_did_not_write(self, isolated_config):
@@ -23645,7 +23747,7 @@ class TestDerivedAgentRemovalOnOff:
         ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
         ap.derived_agent_path().write_bytes(foreign)
         with pytest.raises(ap.AgentProfileError):
-            ap.regenerate(enabled=False, base_agent="kiro_default")
+            _regenerate(ap, enabled=False, base_agent="kiro_default")
         assert ap.derived_agent_path().read_bytes() == foreign
         assert ap.last_generation().ok is False
         assert "PowerAtlas" in ap.last_generation().error
@@ -23655,7 +23757,7 @@ class TestDerivedAgentRemovalOnOff:
         """The fail-safe direction is a surviving file that is reported."""
         ap = _agent_profile()
         _write_base(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         good = ap.derived_agent_path().read_bytes()
 
         def boom(self, missing_ok=False):
@@ -23663,7 +23765,7 @@ class TestDerivedAgentRemovalOnOff:
 
         with patch.object(Path, "unlink", boom):
             with pytest.raises(ap.AgentProfileError):
-                ap.regenerate(enabled=False, base_agent="kiro_default")
+                _regenerate(ap, enabled=False, base_agent="kiro_default")
         assert ap.derived_agent_path().read_bytes() == good
         assert ap.last_generation().ok is False
         assert ap.last_generation().error
@@ -23677,8 +23779,8 @@ class TestDerivedAgentRemovalOnOff:
         """
         ap = _agent_profile()
         _write_base(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
-        status = ap.regenerate(enabled=False, base_agent="../nonsense")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
+        status = _regenerate(ap, enabled=False, base_agent="../nonsense")
         assert status.ok is True
         assert not ap.derived_agent_path().exists()
 
@@ -24143,7 +24245,7 @@ class TestGenerationRunsAtStartup:
         ap = _agent_profile()
         _write_base(isolated_config)
         _enable_in_config(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert ap.derived_block_state() == "on"
         assert self._default_binds(
             acp_store, monkeypatch, tmp_path) == DERIVED_AGENT_NAME
@@ -24177,7 +24279,7 @@ class TestGenerationRunsAtStartup:
         from power_atlas import web as web_mod
         ap = _agent_profile()
         _write_base(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert ap.derived_block_state() == "on"
         from power_atlas import config as config_mod
         assert config_mod.load_config().acp_permissions_enabled is False
@@ -24218,7 +24320,7 @@ class TestGenerationRunsAtStartup:
         from power_atlas import web as web_mod
         ap = _agent_profile()
         _write_base(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         assert ap.derived_agent_path().exists()
         self._run_lifespan(web_mod)
         assert not ap.derived_agent_path().exists()
@@ -24251,6 +24353,63 @@ class TestGenerationRunsAtStartup:
         with patch.object(ap, "sync_from_config", boom):
             assert self._run_lifespan(web_mod, lambda: "started") == "started"
 
+    # -- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review --
+
+    def test_a_predicted_generation_failure_is_logged_once(
+            self, isolated_config, caplog):
+        """F10. `agent_profile` logs its own `AgentProfileError` and records
+        it for the panel; `_sync_derived_agent` used to log it a second time
+        with a traceback."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _enable_in_config(isolated_config)  # on, and no base agent on disk
+        with caplog.at_level(logging.INFO):
+            asyncio.run(web_mod._sync_derived_agent())
+        assert ap.last_generation().ok is False
+        messages = [r.getMessage() for r in caplog.records]
+        assert sum("derived agent update failed" in m for m in messages) == 1, messages
+        assert not any("derived agent sync failed" in m for m in messages), messages
+
+    def test_a_stalled_derived_agent_sync_does_not_hold_up_startup(
+            self, isolated_config, monkeypatch, caplog):
+        """F5. `__main__` reports "Server failed to start" after 10 s; the
+        sync is bounded well inside that and startup carries on."""
+        import time as _time
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        monkeypatch.setattr(web_mod, "_LIFESPAN_STEP_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(ap, "sync_from_config", lambda: _time.sleep(0.5))
+        started = _time.monotonic()
+        with caplog.at_level(logging.ERROR, logger="power_atlas"):
+            assert self._run_lifespan(
+                web_mod, lambda: _time.monotonic() - started) < 0.4
+        assert any("did not finish" in r.getMessage() for r in caplog.records)
+
+    def test_a_stalled_local_secret_load_falls_back_to_memory(
+            self, isolated_config, monkeypatch):
+        """F5. A load that outlives the timeout degrades to D-22's in-memory
+        secret, and a late success does not flip the settings report to
+        "persisted" for a secret this process is not using."""
+        import time as _time
+        from power_atlas import config as config_mod
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_LIFESPAN_STEP_TIMEOUT_SECONDS", 0.05)
+
+        def slow_success():
+            _time.sleep(0.3)
+            config_mod._clear_local_secret_fallback()  # what a late write does
+            return "D" * 43
+
+        monkeypatch.setattr(web_mod, "ensure_local_secret", slow_success)
+        try:
+            self._run_lifespan(web_mod)
+            assert web_mod._LOCAL_SECRET and web_mod._LOCAL_SECRET != "D" * 43
+            status = config_mod.local_secret_status()
+            assert status["persisted"] is False, status
+            assert "took longer" in status["error"]
+        finally:
+            config_mod._clear_local_secret_fallback()
+
     def test_startup_keeps_a_valid_derived_agent_when_regen_fails(
             self, isolated_config):
         """D-10: no base-agent fallback over a previously generated file."""
@@ -24258,7 +24417,7 @@ class TestGenerationRunsAtStartup:
         ap = _agent_profile()
         base = _write_base(isolated_config)
         _enable_in_config(isolated_config)
-        ap.regenerate(enabled=True, base_agent="kiro_default")
+        _regenerate(ap, enabled=True, base_agent="kiro_default")
         good = ap.derived_agent_path().read_bytes()
         # The base agent disappears, so the next regeneration cannot succeed.
         base.unlink()
@@ -25084,6 +25243,84 @@ class TestLocalSecretRotation:
         assert resp.json()["ok"] is True
         assert on_loop == [True]
         assert web_mod._LOCAL_SECRET == config_mod.load_local_secret()
+
+    # -- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F3)
+    # The gate checks `pa_local` only at the handshake, so a rotation has to
+    # close the sockets opened under the old key itself.
+
+    class _FakeWs:
+        def __init__(self, client):
+            self.scope = {"type": "websocket", "client": client}
+            self.closed = []
+
+        async def close(self, code=1000, reason=None):
+            self.closed.append((code, reason))
+
+    def test_close_connections_closes_only_what_the_selector_picks(self):
+        from power_atlas import acp as acp_mod
+        local_a = acp_mod._Connection(self._FakeWs(("127.0.0.1", 50001)))
+        local_b = acp_mod._Connection(self._FakeWs(("::1", 50002)))
+        remote = acp_mod._Connection(self._FakeWs(("100.78.1.2", 50003)))
+        conns = (local_a, local_b, remote)
+        acp_mod._registry.connections.update(conns)
+        try:
+            closed = asyncio.run(acp_mod.close_connections(
+                lambda scope: scope["client"][0] != "100.78.1.2",
+                1008, "signed out"))
+            assert closed == 2
+            assert local_a.ws.closed == [(1008, "signed out")]
+            assert local_b.ws.closed == [(1008, "signed out")]
+            assert remote.ws.closed == []
+            assert remote in acp_mod._registry.connections
+            assert local_a not in acp_mod._registry.connections
+            assert local_b not in acp_mod._registry.connections
+        finally:
+            acp_mod._registry.connections.difference_update(conns)
+
+    def test_rotation_closes_every_loopback_socket_and_no_remote_one(
+            self, rotation_ready, client, monkeypatch):
+        """All loopback sockets, the caller's included: its cookie value is
+        what a leaked copy would carry, so it cannot be spared by matching it.
+        Its page reconnects with the cookie this response sets."""
+        web_mod = rotation_ready
+        calls = []
+
+        async def record(should_close, code, reason):
+            calls.append((should_close, code, reason))
+            return 0
+
+        monkeypatch.setattr(web_mod.acp, "close_connections", record)
+        cookie = web_mod.make_local_cookie()
+        resp = client.post("/api/local-secret/rotate",
+                           headers={"Cookie": f"pa_local={cookie}"})
+        assert resp.json()["ok"] is True
+        assert len(calls) == 1, "a rotation left the old key's sockets open"
+        should_close, code, _reason = calls[0]
+        assert code == 1008
+        for peer in ("127.0.0.1", "::1"):
+            assert should_close({"client": (peer, 1)}) is True
+        assert should_close({"client": ("100.78.1.2", 1)}) is False
+
+    def test_a_failed_rotation_closes_nothing(
+            self, rotation_ready, client, monkeypatch):
+        web_mod = rotation_ready
+        from power_atlas import config as config_mod
+        calls = []
+
+        async def record(*args):
+            calls.append(args)
+            return 0
+
+        def refuse(path, value):
+            raise PermissionError(13, "Access is denied")
+
+        monkeypatch.setattr(web_mod.acp, "close_connections", record)
+        monkeypatch.setattr(config_mod, "_write_secret_file", refuse)
+        resp = client.post(
+            "/api/local-secret/rotate",
+            headers={"Cookie": f"pa_local={web_mod.make_local_cookie()}"})
+        assert resp.json()["ok"] is False
+        assert calls == []
 
 
 # ---------------------------------------------------------------------------

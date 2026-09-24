@@ -54,6 +54,10 @@ def _login_url(server_url: str) -> str:
     through an HTTP route. `web` is imported lazily, like `data` in `on_open`,
     so importing this module does not pull in the web app.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+
+    The one door helper: `peek` imports this function for its two doors
+    rather than keeping a copy of it.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11)
     """
     from .web import login_url
     return login_url(server_url)

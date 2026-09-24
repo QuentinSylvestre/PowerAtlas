@@ -4754,6 +4754,8 @@ const PANEL_NAMES = [
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3.
   "renderAcpPermissions", "loadAcpPermissions", "toggleAcpPermissions",
   "saveAcpPermissionBaseAgent",
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review.
+  "renderLocalSecret", "rotateLocalSecret",
 ];
 
 function panelSource() {
@@ -4805,6 +4807,16 @@ function loadPanel(opts = {}) {
   const pendingDot = new El("span");
   pendingDot.hidden = true;
   byId.set("topbarPendingDot", pendingDot);
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F2,
+  // F3): the Browser sign-in rows, initial `hidden` states as in the markup.
+  const secretWarn = new El("div");
+  secretWarn.hidden = true;
+  const secretRotate = new El("button");
+  const secretNote = new El("div");
+  secretNote.hidden = true;
+  byId.set("localSecretWarn", secretWarn);
+  byId.set("localSecretRotate", secretRotate);
+  byId.set("localSecretNote", secretNote);
   // The two live controls in the dashboard topbar that `markRestartInputs`
   // reaches for by class. Present here because their absence is a passing
   // state in that function (`if (!host) return`), so a harness without them
@@ -10180,6 +10192,15 @@ check("refused handshake: a cookie-less tab (the gate's 403) reads as signed out
   assertEqual(r.page.reloaded, false, "nothing may reload the page on its own");
 });
 
+check("refused handshake: the signed-out message names the step after the tray -- reload this tab (F7)", async (tpl) => {
+  // Both recovery buttons stay hidden on a signed-out tab, so the message is
+  // the only place the way back can be.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review
+  const r = await refusedHandshake(tpl, { ok: false, status: 403, body: {} });
+  assert(/tray/i.test(r.transcript()) && /reload this tab/i.test(r.transcript()),
+    `the signed-out message must say to reload this tab after the tray; got ${JSON.stringify(r.transcript())}`);
+});
+
 check("refused handshake: a signed-out remote viewer is sent to /remote-auth, not to a tray it does not have", async (tpl) => {
   const r = await refusedHandshake(tpl, { ok: false, status: 403, body: {} },
                                    { local: false, canDelete: true });
@@ -11200,6 +11221,104 @@ check("settings: the base agent saves through /api/save-setting and shows the re
     "a rejected base-agent name was not reported");
   assertEqual(input.value, "kiro_default",
     "the field kept a name the server rejected, which is not the one in force");
+});
+
+// ---- Browser sign-in: the local key --------------------------------------
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F2, F3).
+
+check("settings: an in-memory local key is reported with its cause and next step, and nothing is shown when it is persisted (F2)", async () => {
+  const lost = { persisted: false, error: "Could not write C:\\cfg\\local-secret: [Errno 13] denied",
+                 path: "C:\\cfg\\local-secret" };
+  let local = lost;
+  const p = loadPanel({ answer: (url) => url === "/api/settings"
+    ? { body: { restart_to_apply: [], restart_pending: [], local_secret: local } } : { body: {} } });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  await p.sandbox.loadRestartKeys();
+  assertEqual($("localSecretWarn").hidden, false, "an in-memory key was not reported");
+  const text = $("localSecretWarn").textContent;
+  assert(text.includes("Errno 13"), `the cause is missing: ${text}`);
+  assert(/sign in again/i.test(text) && /restart/i.test(text),
+    `the consequence (sign in again after the next restart) is missing: ${text}`);
+  assert(text.includes("C:\\cfg\\local-secret") && /check/i.test(text),
+    `the next step (check the path) is missing: ${text}`);
+  assertEqual($("topbarPendingDot").hidden, false, "the settings gear's dot did not flag it");
+
+  local = { persisted: true, error: "", path: "C:\\cfg\\local-secret" };
+  await p.sandbox.loadRestartKeys();
+  assertEqual($("localSecretWarn").hidden, true, "a persisted key still shows the warning");
+  assertEqual($("topbarPendingDot").hidden, true, "the dot outlived the condition");
+
+  // An older server with no `local_secret` field says nothing, rather than
+  // guessing.
+  p.sandbox.renderLocalSecret({ restart_to_apply: [] });
+  assertEqual($("localSecretWarn").hidden, true, "an absent field was read as not persisted");
+});
+
+check("settings: 'Sign out other browsers' arms on the first click and rotates only on the second, without window.confirm (F3)", async () => {
+  const p = loadPanel({ answer: (url) => url === "/api/local-secret/rotate"
+    ? { body: { ok: true, reissued: true, message: "x" } } : { body: {} } });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  const btn = $("localSecretRotate");
+  const rotations = () => p.fetches.filter((f) => f.url === "/api/local-secret/rotate");
+  p.sandbox.rotateLocalSecret(btn);
+  assertEqual(rotations().length, 0, "the first click rotated the key");
+  assert(btn.classList.contains("armed") && /again/i.test(btn.textContent),
+    `the first click did not arm the button: ${btn.textContent}`);
+  assertEqual(p.confirms.length, 0, "window.confirm() was used");
+  p.sandbox.rotateLocalSecret(btn);
+  assertEqual(rotations().length, 1, "the second click did not rotate");
+  assertEqual(rotations()[0].init.method, "POST", "the rotation was not a POST");
+  assert(!btn.classList.contains("armed"), "the button stayed armed after acting");
+  await p.settle();
+  const note = $("localSecretNote");
+  assertEqual(note.hidden, false, "the outcome was not shown");
+  assert(/this browser stays signed in/i.test(note.textContent),
+    `success did not say this browser stays signed in: ${note.textContent}`);
+});
+
+check("settings: an armed rotation button disarms by itself, and a stale timer cannot disarm a newer arming (F3)", () => {
+  const p = loadPanel();
+  const btn = p.sandbox.document.getElementById("localSecretRotate");
+  p.sandbox.rotateLocalSecret(btn);
+  const first = p.timers.at(-1);
+  first.fn();
+  assert(!btn.classList.contains("armed"), "the arming never expired");
+  p.sandbox.rotateLocalSecret(btn);  // armed again
+  first.fn();                       // the old timer fires late
+  assert(btn.classList.contains("armed"), "a stale timer disarmed the newer arming");
+  assertEqual(p.fetches.filter((f) => f.url === "/api/local-secret/rotate").length, 0,
+    "arming alone rotated the key");
+});
+
+check("settings: the markup wires the rotation button and the sign-in rows the script addresses (F3)", () => {
+  // The script above is driven through `loadPanel`'s stand-ins; this pins the
+  // real markup to the same ids and handler, so a renamed id or a dropped
+  // onclick cannot leave a button that does nothing.
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const btn = src.match(/<button id="localSecretRotate"[^>]*>([^<]*)<\/button>/);
+  assert(btn, "index.html has no #localSecretRotate button");
+  assert(/onclick="rotateLocalSecret\(this\)"/.test(btn[0]),
+    `the button does not call rotateLocalSecret(this): ${btn[0]}`);
+  assert(/Sign out other browsers/.test(btn[1]), `unexpected label: ${btn[1]}`);
+  assert(/type="button"/.test(btn[0]), "the button must not default to submit");
+  for (const id of ["localSecretWarn", "localSecretNote"]) {
+    const el = src.match(new RegExp(`<div id="${id}"[^>]*>`));
+    assert(el && /\bhidden\b/.test(el[0]) && /role="status"/.test(el[0]),
+      `#${id} is missing, not hidden initially, or not a status region`);
+  }
+});
+
+check("settings: a refused rotation says so and does not claim success (F3)", async () => {
+  const p = loadPanel({ answer: (url) => url === "/api/local-secret/rotate"
+    ? { body: { ok: false, error: "Could not write the key file; the previous local secret is still in effect" } }
+    : { body: {} } });
+  const btn = p.sandbox.document.getElementById("localSecretRotate");
+  p.sandbox.rotateLocalSecret(btn);
+  p.sandbox.rotateLocalSecret(btn);
+  await p.settle();
+  const note = p.sandbox.document.getElementById("localSecretNote");
+  assert(/still in effect/.test(note.textContent), `the refusal was not shown: ${note.textContent}`);
+  assert(!/signed out/i.test(note.textContent), "a refused rotation claimed browsers were signed out");
 });
 
 check("settings: the permission rows say which sessions they apply to, what on and off mean, and are a keyboard switch", () => {
@@ -15175,6 +15294,30 @@ check("dashboard: refused handshake — a cookie-less tab (the gate's 403) reads
   assertEqual(p.el("dashReload").hidden, true,
     "no stale-token Reload affordance: a reload cannot sign a browser back in");
   assertEqual(p.reloaded(), false, "nothing may reload the page on its own");
+});
+
+check("dashboard: the signed-out message names the step after the tray -- reload this tab (F7)", async () => {
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review
+  const { p, notes } = dashRefusedHandshake({ pageStatus: 403 });
+  await p.settle();
+  assert(/reload this tab/i.test(notes.join(" ")),
+    `the composer note must say to reload this tab after the tray; got ${JSON.stringify(notes)}`);
+});
+
+check("dashboard: a 403 on an htmx request reports signed out, once; other errors do not (F7)", () => {
+  // The loopback gate answers a signed-out tab's partials and polls with 403,
+  // and nothing used to handle it.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review
+  const p = loadDashPicker({ realConnect: true });
+  let reported = 0;
+  p.sandbox.dashReportSignedOut = () => { reported++; };
+  p.fireDoc("htmx:responseError", { detail: { xhr: { status: 500 } } });
+  p.fireDoc("htmx:responseError", { detail: {} });
+  assertEqual(reported, 0, "a non-403 error was reported as signed out");
+  p.fireDoc("htmx:responseError", { detail: { xhr: { status: 403 } } });
+  assertEqual(reported, 1, "a 403 on an htmx request was not reported as signed out");
+  p.fireDoc("htmx:responseError", { detail: { xhr: { status: 403 } } });
+  assertEqual(reported, 1, "every polled 403 repeated the signed-out report");
 });
 
 check("dashboard: refused handshake — a server that is not answering still reads as unreachable, not signed out", async () => {

@@ -82,7 +82,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Callable, Final
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -5489,6 +5489,48 @@ async def serve_socket(ws: WebSocket) -> None:
                  len(_registry.connections))
 
 
+async def close_connections(should_close: Callable[[dict], bool], code: int,
+                            reason: str) -> int:
+    """Close every open ``/ws/acp`` socket whose ASGI scope ``should_close``
+    selects. Returns how many were closed. Never raises.
+
+    For revocation: a credential is checked only at the handshake, so a socket
+    opened under a credential that has since been withdrawn stays open until
+    something closes it. The caller decides which sockets that covers; this
+    module does not read cookies or classify peers.
+
+    Each socket is deregistered first, so no broadcast reaches it again, then
+    its writer is stopped (the single-sender rule ``stop()`` documents) without
+    a drain: the queued frames belong to a browser that is being signed out and
+    are not owed to it. ``serve_socket``'s receive loop then sees the
+    disconnect and runs its own, idempotent, cleanup.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F3)
+    """
+    closed = 0
+    for conn in tuple(_registry.connections):
+        try:
+            scope = getattr(conn.ws, "scope", None) or {}
+            if not should_close(scope):
+                continue
+        except Exception:
+            log.exception("ACP socket %s: close_connections selector failed; "
+                          "left open", conn.cid)
+            continue
+        _registry.detach(conn)
+        _registry.connections.discard(conn)
+        try:
+            await conn.stop()
+            await conn.ws.close(code=code, reason=reason)
+        except Exception:
+            # A peer that is already gone makes `close()` raise; nothing to do.
+            pass
+        closed += 1
+    if closed:
+        log.info("ACP closed %d socket(s): %s (%d open)", closed, reason,
+                 len(_registry.connections))
+    return closed
+
+
 def _dispatch(conn: _Connection, frame: dict) -> None:
     """Validate an inbound envelope and route it to a handler function."""
     type_ = frame.get("type")
@@ -6021,6 +6063,18 @@ async def _handle_new(conn, payload):
     # under the user-scope permissions. That is exactly the posture "off" asks
     # for, and it can only happen while the user is turning the profile off.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K4).
+    #
+    # Its mirror, when turning it on, is accepted too and left as it is. The
+    # settings route saves the setting and then generates the derived agent,
+    # and the hook reads both halves. A create that lands between those two
+    # steps sees "on" with no derived agent yet on disk, so `in_effect` is
+    # False and Default binds `kiro_default`, while the toggle already reads
+    # on. That session does not ask before acting and never will (P2 binds
+    # the agent at `session/new`). The window is one small file write long,
+    # needs a create in the same moment the user flips the switch, and the
+    # posture it yields is the one the user had a moment before — the one
+    # "off" means — never a wider one.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F12)
     bound_mode = raw_mode
     if raw_mode is None or raw_mode in (DEFAULT_TASK_MODE, DERIVED_AGENT_NAME):
         try:
@@ -6082,11 +6136,13 @@ async def _handle_new(conn, payload):
         "cwd": info["cwd"],
         "created": True,
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1):
-        # the modeId this session was bound to. The page sends Default and
-        # cannot know what it resolved to, so it reads it from here — the
-        # derived agent's name means the permission profile gates this
-        # session; anything else means it does not. Creation only: a resumed
-        # session's mode is kiro-cli's (P2), not something this module saw.
+        # the modeId this session was bound to — the derived agent's name
+        # means the permission profile gates this session; anything else
+        # means it does not. Creation only: a resumed session's mode is
+        # kiro-cli's (P2), not something this module saw.
+        # Carried for clients and tests; no page renders it today (an earlier
+        # version of this comment said the page read it, which it never did).
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11)
         "mode": bound_mode,
         # Step 9 final review fix (Medium): _handle_subscribe's `session`
         # envelope already carries these; this one didn't, so a
@@ -6232,49 +6288,57 @@ async def _handle_prompt(conn, session_id, payload):
         # answer awaits a write and nothing else in here should wait on it.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
         _swept_permissions = _pop_pending_permissions(session_id)
-        _finishing_crew = _supervisor.crews.get(session_id)
-        if _finishing_crew:
-            _crew_changed = False
-            for _entry in _finishing_crew.values():
-                if not _entry["done"]:
-                    _entry["done"] = True
-                    if _entry.get("stoppedAt") is None:
-                        _entry["stoppedAt"] = time.time()
-                    _crew_changed = True
-            if _crew_changed:
-                _emit_subagents_frame(session_id, _supervisor.crews,
-                                      _supervisor._active_fan_out_wave)
-        _evict_crew_children(session_id, keep_history=True, broadcast_empty=False)
-        _finished_crew_toolcallid = _crew_toolcallid(session_id)
-        _had_crew = session_id in _supervisor.crews or bool(_finished_crew_toolcallid)
-        _supervisor.crew_spawn_toolcallids.pop(session_id, None)
-        _supervisor._active_fan_out_wave.pop(session_id, None)
-        if _had_crew and session_id not in _supervisor.crews:
-            _registry.broadcast(session_id, envelope(
-                "subagents",
-                {"subagents": [], "toolCallId": _finished_crew_toolcallid},
-                session_id))
-        log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
-        _flush_bubble(session_id, emit_fn=_emit)
-        _emit(session_id, envelope(
-            "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
-        # After the emit, so the transcript is already consistent for anyone the
-        # notification brings back to the page. Every way a turn can end reaches
-        # this `finally` -- normal completion, AcpError, an unexpected
-        # exception, the silence-timeout AgentTimeout, and a user cancel -- so
-        # this one call site covers them all; the consumer filters on
-        # `stop_reason` rather than this module guessing which endings matter.
-        _notify("turn_end", session_id, stop_reason)
-        # Last, so a slow or failing write delays nothing above. An entry
-        # still here means the turn ended without its request being answered
-        # -- most usefully a silence timeout, where kiro-cli is still blocked
-        # on it and `cancelled` is what releases it as a deny. When the agent
-        # is dead the write fails, and `_answer_permission_cancelled` logs it
-        # rather than raising out of this `finally`.
-        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
-        for _swept in _swept_permissions:
-            await _supervisor._answer_permission_cancelled(
-                _swept["kiro_id"], "turn ended with the request unanswered")
+        # Everything between the sweep and the `cancelled` answers sits in its
+        # own `try`, so the answers are written even when a step here raises
+        # (`_emit`, `_flush_bubble` and `_notify` all can). Skipping them
+        # would leave kiro-cli blocked on a request whose card has already
+        # been disabled on every page -- nothing could ever answer it.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F1)
+        try:
+            _finishing_crew = _supervisor.crews.get(session_id)
+            if _finishing_crew:
+                _crew_changed = False
+                for _entry in _finishing_crew.values():
+                    if not _entry["done"]:
+                        _entry["done"] = True
+                        if _entry.get("stoppedAt") is None:
+                            _entry["stoppedAt"] = time.time()
+                        _crew_changed = True
+                if _crew_changed:
+                    _emit_subagents_frame(session_id, _supervisor.crews,
+                                          _supervisor._active_fan_out_wave)
+            _evict_crew_children(session_id, keep_history=True, broadcast_empty=False)
+            _finished_crew_toolcallid = _crew_toolcallid(session_id)
+            _had_crew = session_id in _supervisor.crews or bool(_finished_crew_toolcallid)
+            _supervisor.crew_spawn_toolcallids.pop(session_id, None)
+            _supervisor._active_fan_out_wave.pop(session_id, None)
+            if _had_crew and session_id not in _supervisor.crews:
+                _registry.broadcast(session_id, envelope(
+                    "subagents",
+                    {"subagents": [], "toolCallId": _finished_crew_toolcallid},
+                    session_id))
+            log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
+            _flush_bubble(session_id, emit_fn=_emit)
+            _emit(session_id, envelope(
+                "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
+            # After the emit, so the transcript is already consistent for anyone the
+            # notification brings back to the page. Every way a turn can end reaches
+            # this `finally` -- normal completion, AcpError, an unexpected
+            # exception, the silence-timeout AgentTimeout, and a user cancel -- so
+            # this one call site covers them all; the consumer filters on
+            # `stop_reason` rather than this module guessing which endings matter.
+            _notify("turn_end", session_id, stop_reason)
+        finally:
+            # Last, so a slow or failing write delays nothing above. An entry
+            # still here means the turn ended without its request being answered
+            # -- most usefully a silence timeout, where kiro-cli is still blocked
+            # on it and `cancelled` is what releases it as a deny. When the agent
+            # is dead the write fails, and `_answer_permission_cancelled` logs it
+            # rather than raising out of this `finally`.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
+            for _swept in _swept_permissions:
+                await _supervisor._answer_permission_cancelled(
+                    _swept["kiro_id"], "turn ended with the request unanswered")
 
 
 def _pop_pending_permissions(session_id: str) -> list[dict]:
@@ -6287,14 +6351,25 @@ def _pop_pending_permissions(session_id: str) -> list[dict]:
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
     """
     dropped = []
+    popped = []
     for opaque_id in [k for k, v in _supervisor._pending_permission.items()
                       if v.get("session_id") == session_id]:
         entry = _supervisor._pending_permission.pop(opaque_id, None)
         if entry is None:
             continue
         dropped.append(entry)
-        _emit(session_id, envelope(
-            "permission_resolved", {"requestId": opaque_id}, session_id))
+        popped.append(opaque_id)
+    # Announced only after every entry is popped and collected, and each
+    # announcement guarded, so a raising `_emit` can never lose an entry the
+    # caller still has to answer `cancelled`.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F1)
+    for opaque_id in popped:
+        try:
+            _emit(session_id, envelope(
+                "permission_resolved", {"requestId": opaque_id}, session_id))
+        except Exception:
+            log.exception("ACP could not announce permission request %s as "
+                          "resolved; session=%s", opaque_id, session_id)
     return dropped
 
 

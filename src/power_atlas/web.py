@@ -30,7 +30,8 @@ from urllib.parse import parse_qsl, urlparse
 
 import jinja2 as _jinja2
 
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
+from fastapi import (BackgroundTasks, FastAPI, HTTPException, Request,
+                     Response, WebSocket)
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -487,9 +488,85 @@ async def _sync_derived_agent() -> None:
     """
     try:
         await asyncio.to_thread(agent_profile.sync_from_config)
+    except agent_profile.AgentProfileError:
+        # Already logged, once, by `agent_profile._apply_locked`, which also
+        # recorded it for the settings panel. A second traceback here added
+        # nothing but noise.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F10)
+        pass
     except Exception:
         log.exception("derived agent sync failed; "
                       "the permission posture is unchanged")
+
+
+# How long `lifespan` waits for each of its two filesystem steps (the derived
+# agent sync and the local-secret load) before carrying on without it.
+# `__main__` gives the whole startup 10 s before it reports "Server failed to
+# start", so a stalled disk (an antivirus scan, a hung network profile) must
+# not be allowed to spend that budget. `asyncio.wait_for` stops waiting; it
+# cannot stop the worker thread, which finishes, or not, in the background.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F5)
+_LIFESPAN_STEP_TIMEOUT_SECONDS = 3.0
+
+
+async def _startup_sync_derived_agent() -> None:
+    """`_sync_derived_agent`, bounded for `lifespan` (F5).
+
+    On a timeout the posture is left as it is on disk: this process does not
+    touch the file, and `derived_block_state()` keeps reading whatever is there,
+    so the settings panel stays truthful. A sync still running in its thread
+    may yet complete; it holds `agent_profile`'s lock, so a settings write
+    queues behind it rather than racing it.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F5)
+    """
+    try:
+        await asyncio.wait_for(_sync_derived_agent(),
+                               _LIFESPAN_STEP_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        log.error("derived agent sync did not finish within %.0f s; startup "
+                  "continues with the permission posture unchanged",
+                  _LIFESPAN_STEP_TIMEOUT_SECONDS)
+
+
+async def _startup_load_local_secret() -> None:
+    """Load the local secret for `lifespan`, bounded and never fatal.
+
+    A load that fails, or does not finish within
+    `_LIFESPAN_STEP_TIMEOUT_SECONDS`, degrades to D-22's in-memory secret with
+    the reason recorded for `/api/settings`. A late-finishing load is
+    discarded, and re-records the reason when it lands, because a successful
+    write clears it and the settings panel would then claim a persisted secret
+    this process is not using.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F5)
+    """
+    # `run_in_executor` rather than `to_thread`: a plain future that completes
+    # when the thread does, never a task that could be cancelled first, so the
+    # late-result callback below always sees the thread's real finish.
+    load = asyncio.get_running_loop().run_in_executor(None, ensure_local_secret)
+    try:
+        done, _ = await asyncio.wait({load}, timeout=_LIFESPAN_STEP_TIMEOUT_SECONDS)
+        if not done:
+            reason = (f"Loading the local secret took longer than "
+                      f"{_LIFESPAN_STEP_TIMEOUT_SECONDS:.0f} s")
+            log.error("%s; using an in-memory local secret until PowerAtlas "
+                      "exits", reason)
+            set_local_secret(hold_local_secret_in_memory(reason))
+
+            def _late(fut) -> None:
+                if not fut.cancelled():
+                    fut.exception()  # retrieved, so asyncio does not log it
+                hold_local_secret_in_memory(reason)
+            load.add_done_callback(_late)
+            return
+        set_local_secret(load.result())
+    except Exception as exc:
+        # Guarded like `_sync_derived_agent` (R-13): an unpredicted failure
+        # here must not become "the application will not start".
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+        log.exception("local secret setup failed; using an in-memory local "
+                      "secret until PowerAtlas exits")
+        set_local_secret(hold_local_secret_in_memory(
+            f"Local secret setup failed: {type(exc).__name__}: {exc}"))
 
 
 def _derived_agent_in_effect() -> bool:
@@ -520,7 +597,9 @@ async def lifespan(app_instance):
     # Guarded inside `_sync_derived_agent` rather than here, so that every
     # caller of it inherits the same "never fatal" contract.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
-    await _sync_derived_agent()
+    # Bounded by `_LIFESPAN_STEP_TIMEOUT_SECONDS`, as is the secret load below.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F5)
+    await _startup_sync_derived_agent()
     # Before the first request, so the first door's code already exchanges for
     # a cookie that verifies. `ensure_local_secret` never returns "" (D-22): an
     # unwritable file degrades to an in-memory secret, reported in settings.
@@ -531,14 +610,10 @@ async def lifespan(app_instance):
     # the same D-22 in-memory secret a failed write gets, with the reason
     # recorded for `/api/settings`.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
-    try:
-        set_local_secret(await asyncio.to_thread(ensure_local_secret))
-    except Exception as exc:
-        log.exception("local secret setup failed; using an in-memory local "
-                      "secret until PowerAtlas exits")
-        set_local_secret(hold_local_secret_in_memory(
-            f"Local secret setup failed: {type(exc).__name__}: {exc}"))
-    task = asyncio.create_task(_background_refresh())
+    # The guard, and now a timeout, live in `_startup_load_local_secret`.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F5)
+    await _startup_load_local_secret()
+    task =asyncio.create_task(_background_refresh())
     # Guarded exactly as the teardown below is. An `acp` import failure is
     # designed to degrade to "/acp disabled" (see the import at the top of this
     # module); an unguarded start here would promote it to "the application
@@ -1601,6 +1676,43 @@ _gate_warn_state = {"last": float("-inf"), "suppressed": 0}
 _GATE_LOG_PATH_MAX = 120
 
 
+def _rate_limited_log(state: dict, level: int, msg: str, *args,
+                      detail=None) -> None:
+    """One line per `_LOGIN_WARN_INTERVAL_SECONDS` for ``state``, counting the rest.
+
+    The one implementation behind the login-code exchange's refusals and the
+    loopback gate's. ``state`` is that caller's ``{"last", "suppressed"}``
+    dict, so each keeps its own window. ``detail``, when given, is called only
+    for a line that is actually written and returns extra ``%`` arguments —
+    formatting a refusal that is then suppressed would be wasted work on the
+    path a flood arrives on. The suppressed count is always the last argument.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11)
+    """
+    now = time.monotonic()
+    if now - state["last"] < _LOGIN_WARN_INTERVAL_SECONDS:
+        state["suppressed"] += 1
+        return
+    extra = tuple(detail()) if detail is not None else ()
+    log.log(level, msg, *args, *extra, state["suppressed"])
+    state["last"] = now
+    state["suppressed"] = 0
+
+
+def _flush_rate_limited_log(state: dict, label: str) -> None:
+    """Write ``state``'s suppressed-refusal count now, if there is one.
+
+    Called from `lifespan` teardown, after the precedent of
+    `__main__._RepeatedRecordFilter.flush`: a suppressed count is otherwise
+    only reported by the next refusal, so the final burst's count would never
+    reach the log.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11)
+    """
+    if state["suppressed"]:
+        log.warning("%s: %d further refusals suppressed since the last line",
+                    label, state["suppressed"])
+        state["suppressed"] = 0
+
+
 def _warn_gate_refused(scope) -> None:
     """One WARNING per `_LOGIN_WARN_INTERVAL_SECONDS`, counting the rest.
 
@@ -1609,21 +1721,18 @@ def _warn_gate_refused(scope) -> None:
     login code.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
     """
-    now = time.monotonic()
-    state = _gate_warn_state
-    if now - state["last"] < _LOGIN_WARN_INTERVAL_SECONDS:
-        state["suppressed"] += 1
-        return
-    path = scope.get("path") or ""
-    shown = repr(path[:_GATE_LOG_PATH_MAX])
-    if len(path) > _GATE_LOG_PATH_MAX:
-        shown += "..."
-    log.warning("loopback request refused without a valid pa_local cookie: "
-                "%s %s %s (%d further refusals suppressed since the last "
-                "line)", scope.get("type"), scope.get("method") or "-", shown,
-                state["suppressed"])
-    state["last"] = now
-    state["suppressed"] = 0
+    def detail():
+        path = scope.get("path") or ""
+        shown = repr(path[:_GATE_LOG_PATH_MAX])
+        if len(path) > _GATE_LOG_PATH_MAX:
+            shown += "..."
+        return scope.get("type"), scope.get("method") or "-", shown
+
+    _rate_limited_log(
+        _gate_warn_state, logging.WARNING,
+        "loopback request refused without a valid pa_local cookie: "
+        "%s %s %s (%d further refusals suppressed since the last line)",
+        detail=detail)
 
 
 def _flush_gate_refusal_warnings() -> None:
@@ -1634,11 +1743,7 @@ def _flush_gate_refusal_warnings() -> None:
     written.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
     """
-    state = _gate_warn_state
-    if state["suppressed"]:
-        log.warning("loopback gate: %d further refusals suppressed since the "
-                    "last line", state["suppressed"])
-        state["suppressed"] = 0
+    _flush_rate_limited_log(_gate_warn_state, "loopback gate")
 
 
 def _local_gate_exempt(scope) -> bool:
@@ -3803,15 +3908,9 @@ def _warn_login_refused(reason: str, level: int = logging.WARNING) -> None:
     this one window, so no refusal path logs once per request.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
     """
-    now = time.monotonic()
-    state = _login_warn_state
-    if now - state["last"] < _LOGIN_WARN_INTERVAL_SECONDS:
-        state["suppressed"] += 1
-        return
-    log.log(level, "login-code exchange refused: %s (%d further refusals "
-            "suppressed since the last line)", reason, state["suppressed"])
-    state["last"] = now
-    state["suppressed"] = 0
+    _rate_limited_log(_login_warn_state, level,
+                      "login-code exchange refused: %s (%d further refusals "
+                      "suppressed since the last line)", reason)
 
 
 def _flush_login_refusal_warnings() -> None:
@@ -3823,11 +3922,7 @@ def _flush_login_refusal_warnings() -> None:
     reach the log.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
     """
-    state = _login_warn_state
-    if state["suppressed"]:
-        log.warning("login-code exchange: %d further refusals suppressed "
-                    "since the last line", state["suppressed"])
-        state["suppressed"] = 0
+    _flush_rate_limited_log(_login_warn_state, "login-code exchange")
 
 
 def _local_auth_refusal(message: str, status_code: int) -> HTMLResponse:
@@ -3989,9 +4084,22 @@ def _acp_permission_state(config) -> dict:
     }
 
 
+async def _current_acp_permission_state() -> dict:
+    """`_acp_permission_state(load_config())`, off the event loop.
+
+    Both halves touch the filesystem — the config parse and the derived agent's
+    read-back — so the settings routes run them through `asyncio.to_thread`,
+    per D-9. `_derived_agent_in_effect` keeps its synchronous body: `acp`
+    already threads its call out (`_derived_mode_in_effect`).
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F9)
+    """
+    return await asyncio.to_thread(
+        lambda: _acp_permission_state(load_config()))
+
+
 @app.get("/api/acp-permissions")
 async def get_acp_permissions():
-    return _acp_permission_state(load_config())
+    return await _current_acp_permission_state()
 
 
 @app.post("/api/acp-permissions")
@@ -4013,7 +4121,7 @@ async def set_acp_permissions(request: Request):
     config.acp_permissions_enabled = enabled
     save_config(config)
     await _sync_derived_agent()
-    return {"ok": True, **_acp_permission_state(load_config())}
+    return {"ok": True, **(await _current_acp_permission_state())}
 
 
 @app.post("/api/open-folder", response_class=HTMLResponse)
@@ -4605,7 +4713,7 @@ async def save_setting(request: Request):
         # failed — the setting was saved, which is all `ok` ever meant, but the
         # caller had no way to see that the posture had not moved with it.
         return {"ok": True, "restart_required": key in _RESTART_TO_APPLY,
-                **_acp_permission_state(load_config())}
+                **(await _current_acp_permission_state())}
     return {"ok": True, "restart_required": key in _RESTART_TO_APPLY}
 
 
@@ -4648,8 +4756,42 @@ async def api_remote_access(response: Response):
     }
 
 
+async def _close_loopback_acp_sockets() -> None:
+    """Close every loopback ``/ws/acp`` socket with 1008 after a rotation.
+
+    The gate checks ``pa_local`` only at the handshake, so without this a tab
+    opened under the old key kept a live socket — a leaked cookie's socket
+    included — and the rotate route's "signed out" was untrue for it.
+
+    **All** loopback sockets, the caller's included. The caller's own socket
+    cannot be told apart by anything the server holds: its cookie value is
+    exactly what a copied, leaked cookie would carry, so keeping sockets that
+    match it would keep the leak's socket too. The caller's page loses nothing
+    it cannot recover: its close handler reconnects after a second, with the
+    fresh cookie this route's response set, while every other tab's reconnect
+    is refused and lands on the signed-out message. Remote sockets are not
+    touched; they hold ``pa_device``, which a local rotation does not change.
+    Runs as a background task, after the response (and so the new cookie) has
+    been sent.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F3)
+    """
+    if acp is None:
+        return
+
+    def loopback(scope) -> bool:
+        return not _is_remote_peer((scope.get("client") or (None,))[0])
+
+    try:
+        await acp.close_connections(
+            loopback, 1008, "signed out: the local key was rotated")
+    except Exception:
+        log.exception("closing loopback /ws/acp sockets after a local "
+                      "secret rotation failed")
+
+
 @app.post("/api/local-secret/rotate")
-async def api_local_secret_rotate(request: Request, response: Response):
+async def api_local_secret_rotate(request: Request, response: Response,
+                                  background_tasks: BackgroundTasks):
     """Issue a new local secret, signing every loopback browser out but this one.
 
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4. Rotation
@@ -4699,6 +4841,9 @@ async def api_local_secret_rotate(request: Request, response: Response):
     with _login_codes_lock:
         _login_codes.clear()
     reissued = _set_local_cookie(response)
+    # Open sockets outlive the key they were admitted under; close them.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F3)
+    background_tasks.add_task(_close_loopback_acp_sockets)
     log.warning("local secret rotated; every other loopback browser must "
                 "sign in again from the tray")
     return {"ok": True, "reissued": reissued,

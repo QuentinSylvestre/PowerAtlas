@@ -704,14 +704,3 @@ def sync_from_config() -> GenerationStatus:
         return _apply_locked(
             enabled=bool(config.acp_permissions_enabled),
             base_agent=config.acp_permission_base_agent)
-
-
-def regenerate(*, enabled: bool, base_agent: str) -> GenerationStatus:
-    """`sync_from_config` for a caller that already holds the values.
-
-    `enabled=True` writes the derived agent; `enabled=False` deletes it. Raises
-    `AgentProfileError` on the failures this module predicts, having left the
-    file on disk exactly as it was.
-    """
-    with _generation_lock:
-        return _apply_locked(enabled=enabled, base_agent=base_agent)

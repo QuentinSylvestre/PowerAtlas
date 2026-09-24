@@ -8,6 +8,29 @@ import webbrowser
 
 log = logging.getLogger("power_atlas.peek")
 
+# Both peek doors — the webview and the double-tap browser — need the
+# `pa_local` cookie, and the login code in this URL is exchanged for it on
+# first load. The tray's helper, shared rather than copied; it imports `web`
+# lazily, so this module still loads without the web app.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11)
+from .tray import _login_url
+
+
+def _clamp_pywebview_logger() -> None:
+    """Hold pywebview's logger at INFO or above, whatever the environment says.
+
+    pywebview reads ``PYWEBVIEW_LOG`` when it is imported and, at DEBUG, logs
+    ``Loading URL: <url>`` for every navigation. Peek's URLs carry a live login
+    code, and the record propagates to the root handler, which is
+    ``orchestrator.log``. Only ever raises the level, so an explicit WARNING
+    stays WARNING.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F6)
+    """
+    logger = logging.getLogger("pywebview")
+    if logger.level < logging.INFO:  # NOTSET (0) included
+        logger.setLevel(logging.INFO)
+
+
 _AVAILABLE = True
 _IMPORT_ERROR = ""
 try:
@@ -16,6 +39,9 @@ try:
 except ImportError as e:
     _AVAILABLE = False
     _IMPORT_ERROR = str(e)
+else:
+    # After the import, which is where pywebview applies ``PYWEBVIEW_LOG``.
+    _clamp_pywebview_logger()
 
 
 def is_available() -> bool:
@@ -24,19 +50,6 @@ def is_available() -> bool:
 
 
 _DOUBLE_TAP_INTERVAL = 0.5  # seconds between two hotkey triggers to open the browser
-
-
-def _login_url(server_url: str) -> str:
-    """``server_url`` plus a fresh one-time login code, via `web.login_url`.
-
-    Both peek doors — the webview and the double-tap browser — need the
-    `pa_local` cookie, and the code in this URL is exchanged for it on first
-    load. Minted in-process, never over HTTP. `web` is imported lazily so this
-    module stays importable without the web app.
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
-    """
-    from .web import login_url
-    return login_url(server_url)
 
 
 class PeekWindow:
@@ -204,7 +217,17 @@ class PeekWindow:
             if self._visible:
                 self._hide()
             # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
-            webbrowser.open(_login_url(self._server_url))
+            #
+            # Guarded like the single-tap `load_url` below, for the same
+            # reason: this runs inside pynput's keyboard hook, where an escaping
+            # exception stops the listener. The URL is not logged; it carries
+            # a live login code.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F8)
+            try:
+                webbrowser.open(_login_url(self._server_url))
+            except Exception as e:
+                log.warning("Peek could not open the browser on double-tap: %s",
+                            type(e).__name__)
             return
         self._last_trigger_time = now
         win = self._window  # local capture for thread safety

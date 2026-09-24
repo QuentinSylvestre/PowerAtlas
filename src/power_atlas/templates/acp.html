@@ -5331,8 +5331,13 @@
     // off, so its message names both causes rather than sending it to sign
     // in at /remote-auth for a door that is shut.
     // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J9)
+    // "…then reload this tab": both recovery buttons stay hidden below, so the
+    // message names the step that brings this tab back once the tray has
+    // signed the browser in again.
+    // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F7)
     var msg = ACP_LOCAL
-      ? 'Signed out — open PowerAtlas from its tray icon to sign this browser back in.'
+      ? 'Signed out — open PowerAtlas from its tray icon to sign this browser '
+        + 'back in, then reload this tab.'
       : 'Signed out, or remote access is turned off. Sign in again at '
         + '/remote-auth, or ask for remote access to be turned back on.';
     setState('closed', ACP_LOCAL ? 'signed out' : 'signed out or remote access off');

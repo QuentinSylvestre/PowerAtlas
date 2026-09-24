@@ -153,6 +153,19 @@
       <div id="acpPermScopeNote" class="topbar-menu-note">Turning it on applies to sessions created afterwards. Turning it off also stops sessions that were using it from asking.</div>
       <div id="acpPermWarn" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
 
+      <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review
+           (F2, F3): the loopback sign-in. The warning is D-22's "report in
+           settings": renderLocalSecret() fills it from /api/settings'
+           `local_secret` and shows it only while the key is held in memory.
+           The button rotates the local key, which signs every other browser
+           out; it arms on the first click and acts on the second, rather
+           than using window.confirm(). -->
+      <div class="topbar-menu-divider"></div>
+      <div class="topbar-menu-section-label">Browser sign-in</div>
+      <div id="localSecretWarn" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
+      <button id="localSecretRotate" type="button" class="topbar-menu-row topbar-menu-action" onclick="rotateLocalSecret(this)" title="Rotate the local sign-in key. Every other browser signed in to PowerAtlas is signed out and must be reopened from the tray; this one stays signed in.">Sign out other browsers (rotate the local key)</button>
+      <div id="localSecretNote" class="topbar-menu-note" role="status" hidden></div>
+
       <div id="topbarRestartDivider" class="topbar-menu-divider"></div>
       <!-- Stays conditional (markTopbarRestart toggles it): the "why" only
            makes sense while a saved setting genuinely disagrees with the
@@ -998,7 +1011,12 @@ function send(type, payload, sid){
 // so neither is offered; only a new login code from the tray can.
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6
 function dashReportSignedOut() {
-  var msg = 'Signed out — open PowerAtlas from its tray icon to sign this browser back in.';
+  // "…then reload this tab": Reconnect and Reload stay hidden, so the message
+  // names the one step that brings this tab back once the tray has signed the
+  // browser in again. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+  // final review (F7)
+  var msg = 'Signed out — open PowerAtlas from its tray icon to sign this '
+    + 'browser back in, then reload this tab.';
   logLine('error', 'handshake refused and the page itself answers 403: ' + msg);
   // The composer note, not only the log: the debug log is collapsed by
   // default, and this is the one state the user has to act on.
@@ -1027,6 +1045,19 @@ function dashReportSignedOut() {
   dashReconnectBtn.hidden = true;
   dashReloadBtn.hidden = true;
 }
+// The dashboard's htmx requests (tiles, partials, polls) meet the same
+// loopback gate: a signed-out tab got a bare 403 on each and nothing said why.
+// A 403 is reported as signed out once per page -- a poll would otherwise
+// repeat it every few seconds. Any other error status is left to htmx.
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F7)
+var _dashHtmxSignedOutReported = false;
+function dashHtmxResponseError(ev) {
+  var xhr = ev && ev.detail && ev.detail.xhr;
+  if (!xhr || xhr.status !== 403 || _dashHtmxSignedOutReported) return;
+  _dashHtmxSignedOutReported = true;
+  dashReportSignedOut();
+}
+document.addEventListener('htmx:responseError', dashHtmxResponseError);
 // How long dashExplainRefusedHandshake() waits for its diagnostic GET before
 // reading the silence as "server unreachable".
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 review (J6)
@@ -6945,13 +6976,17 @@ function renderRestartKeys(settings) {
 // OR, so neither writer can hide the other's reason. The title says which.
 var _topbarDotRestart = false;
 var _topbarDotPerm = '';
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F2): a
+// third source, the local sign-in key held in memory only.
+var _topbarDotSecret = '';
 function _syncTopbarDot() {
   var dot = document.getElementById('topbarPendingDot');
   if (!dot) return;
-  dot.hidden = !(_topbarDotRestart || _topbarDotPerm);
+  dot.hidden = !(_topbarDotRestart || _topbarDotPerm || _topbarDotSecret);
   var why = [];
   if (_topbarDotRestart) why.push('Some settings need a restart to take effect');
   if (_topbarDotPerm) why.push(_topbarDotPerm);
+  if (_topbarDotSecret) why.push(_topbarDotSecret);
   dot.title = why.join('. ');
 }
 function markTopbarRestart(pending) {
@@ -7004,8 +7039,14 @@ function markRestartInputs(keys) {
 }
 
 function loadRestartKeys() {
+  // The same payload carries `local_secret`, drawn first and on its own so a
+  // failure in either renderer cannot hide the other's warning.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F2)
   return fetch('/api/settings').then(function (r) { return r.json(); })
-    .then(renderRestartKeys).catch(function () {});
+    .then(function (settings) {
+      try { renderLocalSecret(settings); } catch (e) { /* drawn by the next load */ }
+      renderRestartKeys(settings);
+    }).catch(function () {});
 }
 
 function openRemoteModal() {
@@ -7232,6 +7273,98 @@ function _acpPermRestoreBase(input) {
       renderAcpPermissions(d);
     })
     .catch(function () {});
+}
+
+// ---- Browser sign-in: the local key ----------------------------------------
+//
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F2, F3).
+
+/** D-22's settings report. `/api/settings` carries `local_secret: {persisted,
+ *  error, path}`; `persisted === false` means the key could not be saved (or
+ *  read) and lives in memory, so every cookie dies at the next restart. Shown
+ *  only then, with the cause and a next step, and on the settings gear's dot. */
+function renderLocalSecret(settings) {
+  var ls = settings && settings.local_secret;
+  var show = !!ls && typeof ls === 'object' && ls.persisted === false;
+  var warn = document.getElementById('localSecretWarn');
+  if (warn) {
+    warn.hidden = !show;
+    warn.textContent = show ? _localSecretWarnText(ls) : '';
+  }
+  _topbarDotSecret = show
+    ? 'The browser sign-in key is held in memory only; see Browser sign-in' : '';
+  _syncTopbarDot();
+}
+
+function _localSecretWarnText(ls) {
+  var why = (typeof ls.error === 'string' && ls.error)
+    ? ls.error : 'the sign-in key could not be saved';
+  var where = (typeof ls.path === 'string' && ls.path)
+    ? ls.path : 'the local-secret file';
+  return 'Sign-in key held in memory only: ' + why + '. Every browser will '
+    + 'need to sign in again from the tray after the next restart. Check '
+    + where + ' and that its folder can be written.';
+}
+
+var LOCAL_SECRET_ARM_MS = 5000;
+var _LOCAL_SECRET_ROTATE_LABEL = 'Sign out other browsers (rotate the local key)';
+var _localSecretArmSeq = 0;
+var _localSecretArmed = 0;  // the arming's token; 0 while not armed
+
+function _localSecretDisarm(btn) {
+  _localSecretArmed = 0;
+  btn.classList.remove('armed');
+  btn.textContent = _LOCAL_SECRET_ROTATE_LABEL;
+}
+
+function _localSecretNote(text, warn) {
+  var note = document.getElementById('localSecretNote');
+  if (!note) return;
+  note.hidden = !text;
+  note.textContent = text;
+  note.classList.toggle('topbar-menu-warn', !!warn);
+}
+
+/** Rotate the local key: signs out every other browser. The first click only
+ *  arms the button, which says what a second click will do; the second, within
+ *  LOCAL_SECRET_ARM_MS, rotates. No window.confirm(): a two-step in-page
+ *  control needs no modal and cannot be dismissed by a stray Enter. Disarmed
+ *  by a token rather than clearTimeout, so a stale timer from an earlier
+ *  arming can never disarm a newer one. */
+function rotateLocalSecret(btn) {
+  if (!btn || btn.disabled) return;
+  if (!_localSecretArmed) {
+    var token = ++_localSecretArmSeq;
+    _localSecretArmed = token;
+    btn.classList.add('armed');
+    btn.textContent = 'Click again to sign out every other browser';
+    _localSecretNote('', false);
+    setTimeout(function () {
+      if (_localSecretArmed === token) _localSecretDisarm(btn);
+    }, LOCAL_SECRET_ARM_MS);
+    return;
+  }
+  _localSecretDisarm(btn);
+  btn.disabled = true;
+  fetch('/api/local-secret/rotate', {method: 'POST'})
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      btn.disabled = false;
+      if (!d || !d.ok) {
+        _localSecretNote((d && d.error) || 'The local key was not rotated.', true);
+        return;
+      }
+      _localSecretNote(d.reissued
+        ? 'Done. Every other browser is signed out and must be reopened from '
+          + 'the tray. This browser stays signed in.'
+        : 'The key was rotated, but this browser could not be signed back in. '
+          + 'Reopen PowerAtlas from the tray.', !d.reissued);
+      loadRestartKeys();
+    })
+    .catch(function () {
+      btn.disabled = false;
+      _localSecretNote('The local key was not rotated.', true);
+    });
 }
 
 // The badges are the honest reading of the topbar itself, so they are applied

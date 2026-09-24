@@ -410,3 +410,69 @@ class TestHideCallsResetOverlays:
         assert "could not navigate" in caplog.text
         # The URL carries a live login code, so it is not in the log line.
         assert "/signed" not in caplog.text
+
+    def test_double_tap_browser_exception_does_not_propagate(self, monkeypatch,
+                                                              caplog):
+        """The double-tap twin of the test above: `webbrowser.open` runs in
+        the same pynput hook, so its failure must not escape either.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F8)
+        """
+        import time as _time
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        monkeypatch.setattr(peek_mod, "_login_url", lambda url: url + "/signed")
+
+        def no_browser(url):
+            raise RuntimeError("no default browser")
+
+        monkeypatch.setattr(peek_mod.webbrowser, "open", no_browser)
+        pw = peek_mod.PeekWindow.__new__(peek_mod.PeekWindow)
+        pw._server_url = "http://localhost:8000"
+        pw._window = MagicMock()
+        pw._visible = False
+        pw._webview_ok = True
+        pw._last_trigger_time = _time.monotonic()  # the first tap just landed
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            pw._show()  # must not raise
+        assert pw._last_trigger_time == 0.0, "fixture: this was not a double-tap"
+        assert "could not open the browser" in caplog.text
+        assert "/signed" not in caplog.text
+
+
+class TestPywebviewLoggerClamp:
+    """F6. pywebview at DEBUG logs every URL it loads, and peek's carry a live
+    login code; its logger is held at INFO or above.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review"""
+
+    @pytest.fixture
+    def pywebview_logger(self):
+        logger = logging.getLogger("pywebview")
+        before = logger.level
+        yield logger
+        logger.setLevel(before)
+
+    @pytest.mark.parametrize("level", [logging.NOTSET, logging.DEBUG])
+    def test_a_level_below_info_is_raised_to_info(self, pywebview_logger, level):
+        import power_atlas.peek as peek_mod
+        pywebview_logger.setLevel(level)
+        peek_mod._clamp_pywebview_logger()
+        assert pywebview_logger.level == logging.INFO
+
+    def test_a_stricter_level_is_left_alone(self, pywebview_logger):
+        import power_atlas.peek as peek_mod
+        pywebview_logger.setLevel(logging.WARNING)
+        peek_mod._clamp_pywebview_logger()
+        assert pywebview_logger.level == logging.WARNING
+
+    def test_the_clamp_runs_when_peek_is_imported(self, pywebview_logger,
+                                                  monkeypatch):
+        """Where pywebview applies `PYWEBVIEW_LOG`: at its own import, which
+        peek's module body triggers. Re-executed with the env var at DEBUG."""
+        import importlib
+        import power_atlas.peek as peek_mod
+        if not peek_mod.is_available():
+            pytest.skip("pywebview is not installed")
+        monkeypatch.setenv("PYWEBVIEW_LOG", "DEBUG")
+        pywebview_logger.setLevel(logging.DEBUG)
+        importlib.reload(peek_mod)
+        assert pywebview_logger.level == logging.INFO
