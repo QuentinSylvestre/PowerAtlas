@@ -233,7 +233,7 @@ def _cwd_to_sessions() -> tuple[dict[str, list[tuple[str, str]]], dict[str, tupl
                         continue
                     session_json = sess_dir / "session.json"
                     try:
-                        with session_json.open(encoding="utf-8", errors="replace") as f:
+                        with session_json.open(encoding="utf-8-sig", errors="replace") as f:
                             data = json.loads(f.read())
                         if not isinstance(data, dict):
                             continue
@@ -654,7 +654,7 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
         except OSError:
             continue
         try:
-            with session_json_path.open(encoding="utf-8", errors="replace") as f:
+            with session_json_path.open(encoding="utf-8-sig", errors="replace") as f:
                 data = json.loads(f.read())
             if not isinstance(data, dict):
                 continue
@@ -771,7 +771,7 @@ def refresh_stale_entries_for_cwd(
         for sess_dir_name in new_dirs:
             session_json = hash_dir / sess_dir_name / "session.json"
             try:
-                with session_json.open(encoding="utf-8", errors="replace") as f:
+                with session_json.open(encoding="utf-8-sig", errors="replace") as f:
                     data = json.loads(f.read())
                 if not isinstance(data, dict):
                     continue
@@ -807,7 +807,7 @@ def find_session_workspace(session_id: str) -> str | None:
             try:
                 if not session_json.is_file():
                     continue
-                with session_json.open(encoding="utf-8", errors="replace") as f:
+                with session_json.open(encoding="utf-8-sig", errors="replace") as f:
                     data = json.loads(f.read())
                 if not isinstance(data, dict):
                     continue

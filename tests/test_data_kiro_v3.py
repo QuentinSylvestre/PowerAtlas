@@ -307,6 +307,17 @@ class TestKiroV3DiscoverWorkspaces:
         result = dv3.discover_workspaces()
         assert result == []  # null session skipped
 
+    def test_discover_workspaces_bom_session_json(self, tmp_path, monkeypatch):
+        """A session.json with a UTF-8 BOM (Windows PowerShell 5's Set-Content
+        -Encoding UTF8 writes one) is still discovered and loaded, not dropped."""
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
+        session_json, _ = _make_session(tmp_path, "abc123", "sess_bom", "C:\\Work")
+        session_json.write_bytes(b"\xef\xbb\xbf" + session_json.read_bytes())
+        result = dv3.discover_workspaces()
+        assert len(result) == 1 and "Work" in result[0][0]
+        sessions, _ = dv3.load_sessions("C:\\Work")
+        assert [s.session_id for s in sessions] == ["sess_bom"]
+
     def test_discover_workspaces_missing_last_modified(self, tmp_path, monkeypatch):
         """Sessions with no lastModifiedAt sort stably (empty string sorts before any ISO date)."""
         monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
