@@ -296,6 +296,7 @@ function railStore(key, value) {
 
 var sessionCommands = [];
 var sessionSkills = [];
+var sessionMcpServers = null; // null = no notification yet; array = known server list
 var cmdDropdownEl = null;
 var _cmdSelectedIndex = -1;
 var cmdPromptInput = null;
@@ -579,7 +580,100 @@ function setSessionSkills(list) {
 function resetCommandPalette() {
   sessionCommands = [];
   sessionSkills = [];
+  sessionMcpServers = null; // hide MCP indicator on session change
+  _renderMcpIndicator();
   hideCommandDropdown();
+}
+
+/** Store the MCP server list from a `mcp_servers` frame and update the indicator.
+ *  Called by acp.html and the dashboard when a `mcp_servers` frame arrives.
+ *  SC-4, plan 260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS. */
+function setSessionMcpServers(list) {
+  sessionMcpServers = Array.isArray(list) ? list : null;
+  _renderMcpIndicator();
+}
+
+/** Render or hide the MCP indicator from the current `sessionMcpServers` value.
+ *  `#acpMcpPanel` visibility is driven exclusively by `aria-expanded` on
+ *  `#acpMcpToggle` via the CSS sibling selector — never via `.hidden`. */
+function _renderMcpIndicator() {
+  var indicatorEl = document.getElementById('acpMcpIndicator');
+  if (!indicatorEl) return;
+
+  if (!sessionMcpServers) {
+    indicatorEl.hidden = true;
+    return;
+  }
+
+  indicatorEl.hidden = false;
+  var toggleEl = document.getElementById('acpMcpToggle');
+  var compactEl = document.getElementById('acpMcpCompact');
+  var listEl    = document.getElementById('acpMcpList');
+  var servers = sessionMcpServers;
+
+  // Count connected servers; flag failed / auth-needed state.
+  var connected = 0;
+  var needsAction = false;
+  var nonDisabled = 0;
+  servers.forEach(function (srv) {
+    if (srv.status === 'connected') connected++;
+    if (srv.status !== 'disabled') nonDisabled++;
+    if (srv.status === 'failed' || srv.failedAuthorization) needsAction = true;
+  });
+
+  // Compact label + accessible name (F5-3 fix: title alone degrades to bare text).
+  var label = connected + ' connected';
+  if (compactEl) compactEl.textContent = label;
+  if (toggleEl) {
+    // Set aria-label so screen readers announce context, not just the raw count.
+    var ariaLabel = needsAction
+      ? 'MCP servers — action needed (' + label + ')'
+      : 'MCP servers — ' + label;
+    toggleEl.setAttribute('aria-label', ariaLabel);
+    toggleEl.title = ariaLabel;
+    toggleEl.classList.toggle('acp-mcp-warn', needsAction);
+    toggleEl.classList.toggle('acp-mcp-caution',
+      !needsAction && connected < nonDisabled);
+  }
+
+  // Expanded list.
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  var _VALID_STATUSES = {connected: 1, connecting: 1, failed: 1, disabled: 1};
+  servers.forEach(function (srv) {
+    var li = document.createElement('li');
+    li.className = 'acp-mcp-server';
+
+    var badge = document.createElement('span');
+    var safeStatus = _VALID_STATUSES[srv.status] ? srv.status : 'disabled';
+    badge.className = 'acp-mcp-badge acp-mcp-badge-' + safeStatus;
+    badge.setAttribute('aria-hidden', 'true');
+    li.appendChild(badge);
+
+    var nameEl = document.createElement('span');
+    nameEl.className = 'acp-mcp-server-name';
+    nameEl.textContent = srv.name || '?';
+    li.appendChild(nameEl);
+
+    if (srv.failedAuthorization && srv.authorizationUrl) {
+      var url = srv.authorizationUrl;
+      // Security: only open https:// URLs; reject javascript:, file:, data:, etc.
+      if (typeof url !== 'string' || url.indexOf('https://') !== 0) {
+        url = null;
+      }
+      if (url) {
+        var btn = document.createElement('button');
+        btn.className = 'acp-mcp-connect-btn';
+        btn.type = 'button';
+        btn.textContent = 'Connect';
+        btn.addEventListener('click', function () {
+          window.open(url, '_blank', 'noopener,noreferrer');
+        });
+        li.appendChild(btn);
+      }
+    }
+    listEl.appendChild(li);
+  });
 }
 
 /** A `commands_execute_result` frame: render the command's ack (if any) as a

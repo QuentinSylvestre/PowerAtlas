@@ -5108,6 +5108,11 @@
       setSessionSkills(payload && payload.skills);
       return;
     }
+    if (type === 'mcp_servers') {
+      // MCP server status. SC-3/SC-4. Broadcast-only (not in history).
+      setSessionMcpServers(payload && payload.servers);
+      return;
+    }
     if (type === 'compaction') {
       // Context compaction progress (SC-2). Render a non-bubble system row
       // in the transcript so the user knows a compaction occurred.
@@ -5922,9 +5927,26 @@
     statusEl.setAttribute('aria-expanded', 'true');
   });
 
+  // MCP indicator toggle: open/close via aria-expanded (CSS drives visibility).
+  var _mcpToggleEl = document.getElementById('acpMcpToggle');
+  var _mcpPanelEl  = document.getElementById('acpMcpPanel');
+  var _mcpGuard = false;
+  if (_mcpToggleEl && _mcpPanelEl) {
+    _mcpToggleEl.addEventListener('click', function () {
+      var expanded = _mcpToggleEl.getAttribute('aria-expanded') === 'true';
+      _mcpGuard = true;
+      _mcpToggleEl.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+    });
+  }
+
   document.addEventListener('click', function () {
     if (_statusMenuGuard) { _statusMenuGuard = false; return; }
     if (!statusMenu.hidden) _statusMenuClose();
+    // Close MCP panel when clicking outside it.
+    if (_mcpGuard) { _mcpGuard = false; return; }
+    if (_mcpToggleEl && _mcpToggleEl.getAttribute('aria-expanded') === 'true') {
+      _mcpToggleEl.setAttribute('aria-expanded', 'false');
+    }
   });
 
   restartBtn.addEventListener('click', function () {
@@ -5952,6 +5974,11 @@
     // The picker first: it is the thing on top, and a single Escape should
     // dismiss one layer rather than both.
     if (!picker.hidden) { pickerClose(); return; }
+    // Close MCP panel before status menu.
+    if (_mcpToggleEl && _mcpToggleEl.getAttribute('aria-expanded') === 'true') {
+      _mcpToggleEl.setAttribute('aria-expanded', 'false');
+      return;
+    }
     // Focus does not move into the menu when it opens, so the button keeps it
     // and Escape returns the keyboard user exactly where they were — which is
     // the whole reason the menu is toggled in place rather than re-rendered.
