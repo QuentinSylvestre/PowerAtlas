@@ -621,17 +621,17 @@ function resetCommandPalette() {
 ```
 
 **Exit criteria**:
-- [ ] `mcp_servers` frame handler wired in `acp.html` frame dispatch
-- [ ] `setSessionMcpServers` and `_renderMcpIndicator` exported/accessible from `composer-chrome.js`
-- [ ] Toggle button opens/closes panel; outside click closes panel
-- [ ] Compact state shows connected-server count
-- [ ] `acp-mcp-warn` class on toggle when any `failedAuthorization` or `failed` status present
-- [ ] Expanded list renders one `<li>` per server with status badge
-- [ ] `failedAuthorization: true` + `authorizationUrl` → "Connect" button rendered; click calls `window.open(url, '_blank', 'noopener,noreferrer')`
-- [ ] `authorizationUrl` validated as `https://` scheme before `window.open`; non-https or non-string values do not open a window
-- [ ] `srv.status` validated against `{connected, connecting, failed, disabled}` before `className` construction; unknown values fall back to `disabled`
-- [ ] `sessionMcpServers = null` on `resetCommandPalette`; indicator hidden
-- [ ] Hard reload + start a kiro-cli session (Playwright): indicator appears in toolbar, shows server list, Connect button present for Atlassian if auth needed
+- [x] `mcp_servers` frame handler wired in `acp.html` frame dispatch
+- [x] `setSessionMcpServers` and `_renderMcpIndicator` exported/accessible from `composer-chrome.js`
+- [x] Toggle button opens/closes panel; outside click closes panel
+- [x] Compact state shows connected-server count
+- [x] `acp-mcp-warn` class on toggle when any `failedAuthorization` or `failed` status present
+- [x] Expanded list renders one `<li>` per server with status badge
+- [x] `failedAuthorization: true` + `authorizationUrl` → "Connect" button rendered; click calls `window.open(url, '_blank', 'noopener,noreferrer')`
+- [x] `authorizationUrl` validated as `https://` scheme before `window.open`; non-https or non-string values do not open a window
+- [x] `srv.status` validated against `{connected, connecting, failed, disabled}` before `className` construction; unknown values fall back to `disabled`
+- [x] `sessionMcpServers = null` on `resetCommandPalette`; indicator hidden
+- [ ] Hard reload + start a kiro-cli session (Playwright): indicator appears in toolbar, shows server list, Connect button present for Atlassian if auth needed [deferred to Step 9]
 
 ### Phase 7: MCP acp_page tests
 
@@ -671,11 +671,11 @@ test('null sessionMcpServers hides indicator', async () => {
 ```
 
 **Exit criteria**:
-- [ ] `node tests/acp_page.test.mjs` passes with new MCP tests
-- [ ] Connect button renders in the test DOM for `failedAuthorization: true` entries
-- [ ] Indicator hidden when no `mcp_servers` frame received
-- [ ] Test for `acp-mcp-warn` class on toggle when failed/OAuth state
-- [ ] Test: Connect button with a non-`https://` `authorizationUrl` does not render the button (or click is a no-op)
+- [x] `node tests/acp_page.test.mjs` passes with new MCP tests
+- [x] Connect button renders in the test DOM for `failedAuthorization: true` entries
+- [x] Indicator hidden when no `mcp_servers` frame received
+- [x] Test for `acp-mcp-warn` class on toggle when failed/OAuth state
+- [x] Test: Connect button with a non-`https://` `authorizationUrl` does not render the button (or click is a no-op)
 
 ## 6) Risk Assessment
 
@@ -731,6 +731,30 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 
 - Three pre-existing test fixtures (`TestAcpLifespanWiring`, `TestGenerationRunsAtStartup._fake_acp`, `_run_lifespan_capturing_gate`) needed `start_watchdog` stub added — they broke because lifespan now calls `acp.start_watchdog()`. Added stubs.
 - `test_watchdog_fires_on_crashed_process`: tracking stub clears `_proc` after first call to simulate `_on_agent_death/_detach` behavior and prevent repeated fires across ticks.
+
+### 2026-09-24 — Phase 6/7 review (full effort, 4 personas)
+
+Phase 6 review (Senior, Security, End-user, Maintainability) — 1 auto-fix cycle (direct edit).
+Phase 7 self-implemented (sub-agent unavailable); iframe/DOM harness finding found during test run.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F6-1 | Medium | `aria-expanded` not reset on session change — panel would re-open on next session's first MCP frame | Fixed — `_renderMcpIndicator` null branch now resets `aria-expanded="false"` on toggle (commit fb9023a) |
+| F6-2 | Low | Outside-click handler didn't guard against clicks inside panel (e.g., Connect button would close panel immediately) | Fixed — added `_mcpPanelEl.contains(event.target)` guard (commit fb9023a) |
+| F6-3 | Low | `listEl.innerHTML = ''` violates page no-innerHTML rule | Fixed — changed to `listEl.textContent = ''` (commit 85d6380) |
+
+Security auditor: no findings. Maintainability: no findings.
+
+Phase 6 health: **Green**. Phase 7: 743/743 acp_page tests passing.
+
+### Phase 6 (2026-09-24, code: 443ee7a, fix: fb9023a)
+
+- `aria-expanded` reset on session change not in plan — added to `_renderMcpIndicator` null branch (review finding F6-1).
+- `innerHTML = ''` not tested by harness until Phase 7 — fixed in Phase 7 commit (85d6380).
+
+### Phase 7 (2026-09-24, code: 85d6380)
+
+No divergences from plan.
 
 ### Phase 5 (2026-09-24, code: a99e343, fix: 8d9ced1)
 
