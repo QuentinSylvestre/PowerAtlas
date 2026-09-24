@@ -26113,3 +26113,240 @@ class TestLoopbackGateRefusalLogging:
                  in r.getMessage()]
         assert len(lines) == 1
         assert state["suppressed"] == 0
+
+
+
+class TestAcpCloseSessionWire:
+    """Phase 1 — session/delete wire close.
+
+    260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS Phase 1 adds a wire call
+    to ``close_session`` when the agent advertises ``sessionCapabilities.delete``
+    at handshake time. These tests pin the new behaviour: capability detection,
+    wire dispatch, error swallowing, and skip-when-dead.
+    """
+
+    # ------------------------------------------------------------------
+    # ensure_started / capability detection
+    # ------------------------------------------------------------------
+
+    def _run_ensure_started(self, acp_mod, initialize_result):
+        """Run ensure_started with a mocked _spawn and _request.
+
+        Patches _spawn to a no-op, _request to return the given result.
+        Returns the _close_method value captured right after ensure_started
+        completes (before teardown clears it).
+        """
+        captured = {}
+
+        async def fake_request(self, method, params,
+                               timeout=acp_mod.REQUEST_TIMEOUT_SECONDS):
+            return initialize_result
+
+        def fake_spawn(self):
+            # Set _proc to something non-None so alive() guard can work, but
+            # also to a mock that won't crash _discard/_dispose's proc.poll().
+            from unittest.mock import MagicMock
+            self._proc = MagicMock()
+            self._proc.poll.return_value = 0  # "process exited already"
+            self._proc.pid = 9999
+
+        async def run():
+            acp_mod._supervisor._loop = asyncio.get_running_loop()
+            try:
+                with patch.object(acp_mod._Supervisor, "_spawn", fake_spawn), \
+                        patch.object(acp_mod._Supervisor, "_request", fake_request):
+                    await acp_mod._supervisor.ensure_started()
+                # Capture before _discard resets it
+                captured["_close_method"] = acp_mod._supervisor._close_method
+            finally:
+                acp_mod._supervisor._discard("test teardown")
+                acp_mod._supervisor._loop = None
+                acp_mod._supervisor._pending.clear()
+
+        asyncio.run(run())
+        return captured.get("_close_method")
+
+    def test_close_session_close_method_set_when_delete_capability_present(
+            self, acp_store):
+        """When initialize returns sessionCapabilities.delete: true, _close_method
+        is set to 'session/delete'."""
+        acp_mod, _ = acp_store
+        result = {
+            "agentCapabilities": {
+                "sessionCapabilities": {"delete": True}
+            }
+        }
+        close_method = self._run_ensure_started(acp_mod, result)
+        assert close_method == "session/delete"
+
+    def test_close_session_close_method_none_when_delete_capability_absent(
+            self, acp_store):
+        """When initialize returns no sessionCapabilities, _close_method stays None."""
+        acp_mod, _ = acp_store
+        result = {"agentCapabilities": {}}
+        close_method = self._run_ensure_started(acp_mod, result)
+        assert close_method is None
+
+    def test_close_session_close_method_none_when_delete_capability_falsy(
+            self, acp_store):
+        """A falsy delete value (False, 0, '') is treated as absent — truthiness
+        test not `is not None`."""
+        acp_mod, _ = acp_store
+        for falsy in (False, 0, ""):
+            result = {
+                "agentCapabilities": {
+                    "sessionCapabilities": {"delete": falsy}
+                }
+            }
+            close_method = self._run_ensure_started(acp_mod, result)
+            assert close_method is None, \
+                f"expected None for delete={falsy!r}"
+
+    def test_close_session_close_method_none_when_agent_caps_absent(
+            self, acp_store):
+        """When initialize returns no agentCapabilities at all, _close_method is None."""
+        acp_mod, _ = acp_store
+        close_method = self._run_ensure_started(acp_mod, {})
+        assert close_method is None
+
+    # ------------------------------------------------------------------
+    # close_session wire call
+    # ------------------------------------------------------------------
+
+    def test_close_session_sends_wire_call_when_close_method_set(self, acp_session):
+        """When _close_method is set and the agent is alive, close_session sends
+        the wire call with the session id."""
+        acp_mod, sid = acp_session
+        calls = []
+
+        async def fake_request(self, method, params, timeout=None):
+            calls.append((method, params))
+            return {}
+
+        acp_mod._supervisor._close_method = "session/delete"
+        try:
+            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
+        finally:
+            acp_mod._supervisor._close_method = None
+
+        assert calls == [("session/delete", {"sessionId": sid})]
+        assert sid not in acp_mod._supervisor.sessions
+
+    def test_close_session_wire_call_uses_close_timeout_seconds(self, acp_session):
+        """The wire call passes CLOSE_TIMEOUT_SECONDS, not REQUEST_TIMEOUT_SECONDS."""
+        acp_mod, sid = acp_session
+        timeouts_seen = []
+
+        async def fake_request(self, method, params, timeout=None):
+            timeouts_seen.append(timeout)
+            return {}
+
+        acp_mod._supervisor._close_method = "session/delete"
+        try:
+            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
+        finally:
+            acp_mod._supervisor._close_method = None
+
+        assert timeouts_seen == [acp_mod.CLOSE_TIMEOUT_SECONDS]
+
+    def test_close_session_agent_rejected_swallowed_and_local_cleanup_runs(
+            self, acp_session):
+        """AgentRejected from the wire call is swallowed; local cleanup runs."""
+        acp_mod, sid = acp_session
+
+        async def fake_request(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected("-32000 Session not found")
+
+        acp_mod._supervisor._close_method = "session/delete"
+        try:
+            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
+        finally:
+            acp_mod._supervisor._close_method = None
+
+        # Local cleanup ran: session is gone
+        assert sid not in acp_mod._supervisor.sessions
+
+    def test_close_session_agent_rejected_is_logged_as_warning(
+            self, acp_session, caplog):
+        """AgentRejected is logged at WARNING level (not silently discarded)."""
+        acp_mod, sid = acp_session
+
+        async def fake_request(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected("-32000 Session not found")
+
+        acp_mod._supervisor._close_method = "session/delete"
+        try:
+            import logging as _logging
+            with caplog.at_level(_logging.WARNING, logger="power_atlas.acp"), \
+                    patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
+        finally:
+            acp_mod._supervisor._close_method = None
+
+        assert any("proceeding with local cleanup" in r.getMessage()
+                   for r in caplog.records if r.levelno == _logging.WARNING)
+
+    def test_close_session_other_acp_error_swallowed_and_local_cleanup_runs(
+            self, acp_session):
+        """AcpError (e.g. AgentDied) from the wire call is silently swallowed;
+        local cleanup runs."""
+        acp_mod, sid = acp_session
+
+        async def fake_request(self, method, params, timeout=None):
+            raise acp_mod.AgentDied("process died")
+
+        acp_mod._supervisor._close_method = "session/delete"
+        try:
+            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
+        finally:
+            acp_mod._supervisor._close_method = None
+
+        assert sid not in acp_mod._supervisor.sessions
+
+    def test_close_session_wire_call_skipped_when_agent_not_alive(self, acp_session):
+        """When alive() is False, the wire call is skipped entirely; local cleanup runs."""
+        acp_mod, sid = acp_session
+        calls = []
+
+        async def fake_request(self, method, params, timeout=None):
+            calls.append((method, params))
+            return {}
+
+        acp_mod._supervisor._close_method = "session/delete"
+        try:
+            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: False):
+                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
+        finally:
+            acp_mod._supervisor._close_method = None
+
+        assert calls == []
+        assert sid not in acp_mod._supervisor.sessions
+
+    def test_close_session_wire_call_skipped_when_close_method_is_none(
+            self, acp_session):
+        """When _close_method is None, the wire call is skipped; local cleanup runs."""
+        acp_mod, sid = acp_session
+        calls = []
+
+        async def fake_request(self, method, params, timeout=None):
+            calls.append((method, params))
+            return {}
+
+        # _close_method is None by default
+        assert acp_mod._supervisor._close_method is None
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
+
+        assert calls == []
+        assert sid not in acp_mod._supervisor.sessions

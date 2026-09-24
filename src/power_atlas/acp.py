@@ -8,9 +8,10 @@ registry, the outbound fan-out machinery — and, since Phase 3b, the supervised
 ``agent_message_chunk`` and tool-call fan-out behind it, and the per-session
 ring buffer that a reload replays. Phase 5 adds ``session/load``, which reaches
 sessions this process never created — including ones started from a terminal.
-Phase 6 adds ``session/cancel``, session close — which is *not*
-``session/close``; see ``CLOSE_METHOD`` — and the context-window telemetry
-that arrives alongside them.
+Phase 6 adds ``session/cancel``, session close — ``session/delete`` on
+kiro-cli v3 2.23.1+, read from ``sessionCapabilities.delete`` at handshake
+time and sent by ``close_session`` when present — and the context-window
+telemetry that arrives alongside them.
 
 Isolation boundary — this module imports from exactly two other ``power_atlas``
 modules, three names in all: ``config.CONFIG_DIR``, to place the agent's
@@ -647,9 +648,10 @@ DRAIN_TIMEOUT_SECONDS = 2.0
 # never passed.
 KIRO_BINARY = "kiro-cli"
 ACP_ARGS = ("acp", "--agent-engine", "v3")
-# No JSON-RPC session-close method exists (probe AS-5, 2026-08-19: every
-# candidate returns -32603 or -32601). `close_session` skips the
-# `_request` call and executes per-session local cleanup directly.
+# Historical module constant for the close method, kept for backward reference.
+# Superseded at runtime by `_Supervisor._close_method`, which is read from
+# `sessionCapabilities.delete` in the `initialize` response and set in
+# `ensure_started()`. This constant is no longer consulted by `close_session`.
 CLOSE_METHOD: "str | None" = None
 # Resolved once at module load — avoids PATH shadowing at token-fetch time.
 _KIRO_TOKEN_BINARY: "str | None" = shutil.which("kiro-cli")
@@ -797,6 +799,10 @@ MAX_SESSIONS = 8
 # field. Both are rebound by `apply_config`/rebindable by tests.
 ACP_IDLE_TTL_SECONDS = 1800.0
 SWEEP_INTERVAL_SECONDS = 60.0
+# Wire-close timeout: how long to wait for session/delete before giving up and
+# proceeding with local cleanup. Small because a non-answer is indistinguishable
+# from a dead agent, and local cleanup must always run regardless.
+CLOSE_TIMEOUT_SECONDS: "Final[float]" = 5.0
 
 # Wall-clock ceilings on JSON-RPC requests. Every pending future carries one:
 # an agent that has stopped answering is otherwise indistinguishable from one
@@ -2758,6 +2764,11 @@ class _Supervisor:
         self._reader: threading.Thread | None = None
         self._write_lock = threading.Lock()
         self._start_lock: asyncio.Lock | None = None
+        # Runtime-read from `sessionCapabilities.delete` in the `initialize`
+        # response. `None` until `ensure_started` runs successfully, and reset
+        # to `None` by `_discard`. Set to `"session/delete"` when the agent
+        # advertises the capability; stays `None` when it does not.
+        self._close_method: str | None = None
         self._pending: dict[int, asyncio.Future] = {}
         self._next_id = 1
         self.sessions: dict[str, dict] = {}
@@ -3015,6 +3026,14 @@ class _Supervisor:
                 self._discard(f"Handshake failed: {exc}")
                 raise
             self._ready = True
+            _caps = (result or {}).get("agentCapabilities") or {}
+            _session_caps = _caps.get("sessionCapabilities") or {}
+            if _session_caps.get("delete"):   # truthiness test — not `is not None`; False/"" also skip
+                self._close_method = "session/delete"
+                log.info("ACP: sessionCapabilities.delete present — wire close enabled")
+            else:
+                self._close_method = None
+                log.info("ACP: sessionCapabilities.delete absent — wire close unavailable (local cleanup only)")
             agent_info = (result or {}).get("agentInfo") or {}
             log.info("ACP agent ready: %s (pid %s, protocol %s)",
                      agent_info.get("version", "?"),
@@ -3098,6 +3117,7 @@ class _Supervisor:
         proc, self._proc = self._proc, None
         job, self._job = self._job, None
         self._ready = False
+        self._close_method = None
         # Disable every card still showing a request this agent will never
         # hear an answer to. Broadcast rather than `_emit`: the history the
         # frame would be recorded into is cleared a few lines down, and the
@@ -5119,17 +5139,37 @@ class _Supervisor:
         return {"sessionId": session_id, "cwd": cwd}
 
     async def close_session(self, session_id: str) -> None:
-        """Release one session locally (no JSON-RPC close method available).
+        """Release one session, sending a wire close when available.
 
-        Phase 0 AS-5 finding: every close method tested returns -32603 or
-        -32601. CLOSE_METHOD = None signals this — no wire call is made;
-        per-session local cleanup is executed directly.
+        On kiro-cli v3 2.23.1+ the agent advertises ``sessionCapabilities.delete``
+        in the ``initialize`` response. When present, ``session/delete`` is sent
+        before local cleanup. -32000 (already gone) is logged at WARNING and
+        swallowed; any other ``AcpError`` (including ``AgentDied`` and timeout)
+        is silently swallowed — local cleanup runs regardless.
+
+        If ``self._close_method`` is ``None`` (agent has not advertised the
+        capability, or ``ensure_started`` has not run yet) or the agent is not
+        alive, the wire call is skipped and only local cleanup is done.
         """
         if session_id not in self.sessions:
             raise AgentRejected("That session no longer exists on this agent.")
-        # No alive() check for v3: no wire call is made, so a dead KAS process
-        # should not prevent local cleanup. (F5 fix -- Phase 1 review.)
-        # No wire close for v3 (CLOSE_METHOD is None).
+        # Wire close: session/delete on kiro-cli v3 2.23.1+ (read from
+        # sessionCapabilities.delete at initialize time).
+        # -32000 = already gone; any error logged as WARNING, never re-raised —
+        # local cleanup must always run regardless.
+        if self._close_method and self.alive():
+            try:
+                await self._request(
+                    self._close_method, {"sessionId": session_id},
+                    timeout=CLOSE_TIMEOUT_SECONDS)
+            except AgentRejected as exc:
+                # -32000 = already gone; any other code is unexpected — warn but proceed.
+                log.warning(
+                    "ACP: %s for session %s returned: %s — proceeding with local cleanup",
+                    self._close_method, session_id, exc)
+            except AcpError:
+                # Covers AgentDied, asyncio.TimeoutError (wrapped), and other channel errors.
+                pass  # agent went away or timed out mid-close; local cleanup is correct
         self.sessions.pop(session_id, None)
         self._publish_live()
         self.history.pop(session_id, None)
@@ -6878,12 +6918,9 @@ async def _sweep_once() -> None:
     """One pass over the live sessions. Reclaims what nobody is using.
 
     What sweeping actually recovers is measured, and it is less than the word
-    implies: ``_kiro.dev/session/terminate`` frees the session's own MCP
-    processes (~3 processes / ~161 MB on kiro-cli 2.16.0, the final-QA
-    eight-session measurement — see ``_session_limit_message``) and removes its
-    ``.lock`` within ~0.3 s, and it leaves the ``.json`` and ``.jsonl``
-    transcripts intact so the session stays resumable by ``session/load``. It
-    does **not** kill a tool subprocess the agent left running — measured
+    implies: on kiro-cli v3, all sessions share one process tree — ``session/delete``
+    releases the session from kiro-cli's registry; no per-session processes are freed.
+    It does **not** kill a tool subprocess the agent left running — measured
     2026-08-01, a ``pwsh.exe``/``PING.EXE`` pair outlived terminate by the whole
     observation window. Such an orphan can only arise after a turn ended or was
     cancelled, since condition 4 keeps a session with a live turn off this path
