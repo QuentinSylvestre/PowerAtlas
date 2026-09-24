@@ -2262,6 +2262,7 @@ def acp_session():
         acp_mod._supervisor.crew_spawn_toolcallids.clear()
         acp_mod._supervisor._reserved = 0
         acp_mod._supervisor._pending_commands = None
+        acp_mod._supervisor._close_method = None
 
 
 class TestAcpServerTypeGuard:
@@ -4647,6 +4648,7 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor.crew_spawn_anchors.clear()
         acp_mod._supervisor.crew_spawn_toolcallids.clear()
         acp_mod._supervisor._compacting.clear()
+        acp_mod._supervisor._close_method = None
         acp_mod._bubbles.clear()
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
@@ -6145,11 +6147,12 @@ class TestAcpSessionClose:
     # `_handle_close` sends `CLOSE_METHOD` ("_kiro.dev/session/terminate")
     # over the wire before dropping the session record. The sole surviving
     # `close_session` (renamed from _SupervisorV3.close_session, Phase 1)
-    # makes no wire call at all -- `CLOSE_METHOD` is `None` -- so both the
-    # literal string this test pinned and the "ask before dropping"
-    # ordering it verified are gone, not merely renamed. Removed rather
-    # than renamed; the remaining "close succeeds and cleans up" coverage
-    # is carried by `test_a_subscribed_socket_still_closes` and
+    # makes no wire call in this context — `_close_method` is `None`
+    # (capability not advertised) — so both the literal string this test
+    # pinned and the "ask before dropping" ordering it verified are gone,
+    # not merely renamed. Removed rather than renamed; the remaining
+    # "close succeeds and cleans up" coverage is carried by
+    # `test_a_subscribed_socket_still_closes` and
     # `test_every_watching_socket_is_told_and_detached` below, neither of
     # which depends on a wire call happening.
 
@@ -6182,9 +6185,9 @@ class TestAcpSessionClose:
         Exception`/`finally: _supervisor.closing.discard(...)` cleanup path
         -- lost along with the wire-handshake tests above, which exercised
         a *wire* refusal this v3-descended `close_session` can no longer
-        produce (it makes no wire call at all, confirmed by reading its
-        body). Forcing `close_session` itself to raise is the only way left
-        to reach that branch.
+        produce in this test context (no wire call because `_close_method`
+        is `None` — capability not advertised). Forcing `close_session`
+        itself to raise is the only way left to reach that branch.
 
         The claim `_handle_close` takes (`_supervisor.closing.add`)
         happens before its one `await` point, same fact
@@ -6715,10 +6718,10 @@ class TestAcpPromptDuringAnInFlightClose:
         Pre-cutover this ordering was reproduced via a slow mock on
         `_request`, keyed off `method == acp_mod.CLOSE_METHOD`. The sole surviving
         `close_session` (renamed from `_SupervisorV3.close_session`, Phase 1
-        of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call at all --
-        `CLOSE_METHOD` is `None`, and `close_session`'s body has zero
-        internal `await` points, confirmed by direct reading -- so that
-        mock was never reached and this test hung indefinitely rather than
+        of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call in this
+        test context — `_close_method` is `None` (capability not advertised)
+        and the function is patched directly, so the old `_request` mock
+        was never reached and this test hung indefinitely rather than
         failing. Rewritten to patch `close_session` itself with the
         artificial delay instead: `_handle_close`'s `closing` claim happens
         in its synchronous prefix, before this awaited call, so the
@@ -10750,7 +10753,8 @@ class TestAcpIdleSweeper:
 
         Pre-cutover this attached the socket "mid-flight" during a mocked
         wire terminate call. The sole surviving `close_session` (Phase 1)
-        makes no wire call at all, so there is no window between
+        makes no wire call in this test context (`_close_method` is `None`
+        — capability not advertised), so there is no window between
         `_sweepable`'s check and the close itself to attach into any more —
         attaching is instead injected via a `close_session` patch that
         attaches immediately before delegating to the real implementation,
@@ -10782,7 +10786,8 @@ class TestAcpIdleSweeper:
         Pre-cutover this simulated the failure by refusing the wire
         terminate call `close_session` used to make. The sole surviving
         `close_session` (renamed from `_SupervisorV3.close_session`, Phase
-        1 of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call at all,
+        1 of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call in this
+        test context (`_close_method` is `None` — capability not advertised),
         so there is nothing left to refuse that way -- the failure is
         injected by patching `close_session` itself instead, which is
         exactly the boundary `_sweep_once`'s own try/except sits at."""
@@ -20323,8 +20328,8 @@ class TestSupervisor:
     # -- _handle_close --
 
     def test_handle_close_releases_the_session_locally_no_wire_call(self, monkeypatch):
-        """v3 close does no JSON-RPC call (CLOSE_METHOD is None) — unlike
-        v2's close, nothing must ever be written to the agent."""
+        """v3 close makes no wire call when `_close_method` is None (capability
+        not advertised) — unlike v2's close, nothing must ever be written to the agent."""
         import asyncio
         from power_atlas import acp as acp_mod
 
@@ -26294,9 +26299,9 @@ class TestAcpCloseSessionWire:
                    for r in caplog.records if r.levelno == _logging.WARNING)
 
     def test_close_session_other_acp_error_swallowed_and_local_cleanup_runs(
-            self, acp_session):
+            self, acp_session, caplog):
         """AcpError (e.g. AgentDied) from the wire call is silently swallowed;
-        local cleanup runs."""
+        local cleanup runs and no WARNING is emitted."""
         acp_mod, sid = acp_session
 
         async def fake_request(self, method, params, timeout=None):
@@ -26304,13 +26309,18 @@ class TestAcpCloseSessionWire:
 
         acp_mod._supervisor._close_method = "session/delete"
         try:
-            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+            import logging as _logging
+            with caplog.at_level(_logging.DEBUG, logger="power_atlas.acp"), \
+                    patch.object(acp_mod._Supervisor, "_request", fake_request), \
                     patch.object(acp_mod._Supervisor, "alive", lambda self: True):
                 _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
         finally:
             acp_mod._supervisor._close_method = None
 
         assert sid not in acp_mod._supervisor.sessions
+        # AcpError is silently swallowed, not logged at WARNING
+        import logging as _logging
+        assert not any(r.levelno == _logging.WARNING for r in caplog.records)
 
     def test_close_session_wire_call_skipped_when_agent_not_alive(self, acp_session):
         """When alive() is False, the wire call is skipped entirely; local cleanup runs."""
@@ -26349,4 +26359,45 @@ class TestAcpCloseSessionWire:
             _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
 
         assert calls == []
+        assert sid not in acp_mod._supervisor.sessions
+
+    def test_close_session_close_method_set_when_delete_capability_truthy_nonbool(
+            self, acp_store):
+        """A truthy non-bool value for delete (1, 'session/delete') also enables wire close."""
+        acp_mod, _ = acp_store
+        for truthy_nonbool in (1, "session/delete", {"supported": True}):
+            result = {
+                "agentCapabilities": {
+                    "sessionCapabilities": {"delete": truthy_nonbool}
+                }
+            }
+            close_method = self._run_ensure_started(acp_mod, result)
+            assert close_method == "session/delete", \
+                f"expected 'session/delete' for delete={truthy_nonbool!r}"
+
+    def test_close_session_cancelled_error_from_wire_does_not_skip_cleanup(
+            self, acp_session):
+        """If CancelledError propagates from _request, local cleanup still runs.
+
+        Finding 1 of the Phase 1 review: the original implementation had no
+        BaseException guard, so CancelledError bypassed all local cleanup lines.
+        After the fix, cleanup always runs before the CancelledError is re-raised.
+        """
+        acp_mod, sid = acp_session
+
+        async def fake_request(self_inner, method, params, timeout=None):
+            raise asyncio.CancelledError()
+
+        acp_mod._supervisor._close_method = "session/delete"
+        try:
+            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self_inner: True):
+                try:
+                    _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
+                except (asyncio.CancelledError, Exception):
+                    pass  # cancellation may re-raise after cleanup; that is correct
+        finally:
+            acp_mod._supervisor._close_method = None
+
+        # Local cleanup must have run regardless of the CancelledError
         assert sid not in acp_mod._supervisor.sessions

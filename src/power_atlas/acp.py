@@ -648,11 +648,6 @@ DRAIN_TIMEOUT_SECONDS = 2.0
 # never passed.
 KIRO_BINARY = "kiro-cli"
 ACP_ARGS = ("acp", "--agent-engine", "v3")
-# Historical module constant for the close method, kept for backward reference.
-# Superseded at runtime by `_Supervisor._close_method`, which is read from
-# `sessionCapabilities.delete` in the `initialize` response and set in
-# `ensure_started()`. This constant is no longer consulted by `close_session`.
-CLOSE_METHOD: "str | None" = None
 # Resolved once at module load — avoids PATH shadowing at token-fetch time.
 _KIRO_TOKEN_BINARY: "str | None" = shutil.which("kiro-cli")
 # SC-1: cap on _Supervisor._pending_early_frames per session_id. A burst of
@@ -2733,9 +2728,12 @@ class _Supervisor:
     Speaks kiro-cli's v3 ACP protocol (``--agent-engine v3``): sends
     `_kiro/auth/getAccessToken` an OIDC token, answers inbound
     `session/request_permission` interactively rather than trusting every tool
-    call, and has no working JSON-RPC session-close method (probe AS-5,
-    2026-08-19) — ``close_session`` does local cleanup only, never a wire call.
-    A session's id is ``result._meta.id``, not ``result.sessionId``.
+    call, and conditionally closes sessions via ``session/delete`` when the
+    agent advertises ``sessionCapabilities.delete`` at handshake time (kiro-cli
+    v3 2.23.1+) — ``close_session`` reads ``_close_method`` set by
+    ``ensure_started`` and sends the wire call before local cleanup, or skips
+    it when the capability is absent or the agent is not alive. A session's id
+    is ``result._meta.id``, not ``result.sessionId``.
 
     Sub-agent crew data does not arrive via a dedicated notification the way an
     earlier protocol generation used: it rides ordinary `tool_call`/
@@ -2766,7 +2764,7 @@ class _Supervisor:
         self._start_lock: asyncio.Lock | None = None
         # Runtime-read from `sessionCapabilities.delete` in the `initialize`
         # response. `None` until `ensure_started` runs successfully, and reset
-        # to `None` by `_discard`. Set to `"session/delete"` when the agent
+        # to `None` by `_detach`. Set to `"session/delete"` when the agent
         # advertises the capability; stays `None` when it does not.
         self._close_method: str | None = None
         self._pending: dict[int, asyncio.Future] = {}
@@ -5147,6 +5145,11 @@ class _Supervisor:
         swallowed; any other ``AcpError`` (including ``AgentDied`` and timeout)
         is silently swallowed — local cleanup runs regardless.
 
+        Historical context: probes AS-5 (2026-08-19) found no working JSON-RPC
+        session-close method on kiro-cli v3 builds prior to 2.23.1.
+        ``session/delete`` was not advertised then; the wire-call path is only
+        reached when the agent explicitly signals the capability.
+
         If ``self._close_method`` is ``None`` (agent has not advertised the
         capability, or ``ensure_started`` has not run yet) or the agent is not
         alive, the wire call is skipped and only local cleanup is done.
@@ -5154,9 +5157,10 @@ class _Supervisor:
         if session_id not in self.sessions:
             raise AgentRejected("That session no longer exists on this agent.")
         # Wire close: session/delete on kiro-cli v3 2.23.1+ (read from
-        # sessionCapabilities.delete at initialize time).
-        # -32000 = already gone; any error logged as WARNING, never re-raised —
-        # local cleanup must always run regardless.
+        # sessionCapabilities.delete at initialize time). -32000 (AgentRejected)
+        # is logged at WARNING; other AcpError is silently swallowed —
+        # local cleanup always runs regardless.
+        _wire_exc: BaseException | None = None
         if self._close_method and self.alive():
             try:
                 await self._request(
@@ -5170,6 +5174,8 @@ class _Supervisor:
             except AcpError:
                 # Covers AgentDied, asyncio.TimeoutError (wrapped), and other channel errors.
                 pass  # agent went away or timed out mid-close; local cleanup is correct
+            except BaseException as exc:  # e.g. asyncio.CancelledError
+                _wire_exc = exc  # delay re-raise until after local cleanup
         self.sessions.pop(session_id, None)
         self._publish_live()
         self.history.pop(session_id, None)
@@ -5205,6 +5211,8 @@ class _Supervisor:
             self.subagent_history.pop(_orphan_id, None)
             _bubbles.pop(_orphan_id, None)
         log.info("ACP session closed: %s; %d live", session_id, len(self.sessions))
+        if _wire_exc is not None:
+            raise _wire_exc
 
     def _publish_live(self) -> None:
         """Tell whoever is listening which sessions this agent holds.
@@ -6647,10 +6655,12 @@ async def _handle_cancel(conn, session_id):
 
 
 async def _handle_close(conn, session_id):
-    """Release a v3 session locally (no JSON-RPC close method exists).
+    """Release a v3 session from the local registry.
 
-    The Phase 1 proposed-accept finding: v3 close_session does no wire
-    call and has no alive() check. The closing guard still applies.
+    ``close_session`` sends a ``session/delete`` wire call when
+    ``_supervisor._close_method`` is set (agent advertised the capability at
+    handshake time), then runs local cleanup regardless of the wire outcome.
+    When the capability is absent, only local cleanup runs.
     """
     def refuse(code, message):
         conn.send(error_frame(code, message, session_id))
