@@ -1,7 +1,7 @@
 # ACP v3: Session Delete, Watchdog, and MCP Status Panel
 
 > **Date**: 2026-09-23
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Three improvements to the ACP supervisor and /acp UI — `session/delete` wire close, crash-detection watchdog, and `_kiro/mcp/status` toolbar panel with OAuth connect flow.
 > **Estimated effort**: 3–5 days
@@ -731,6 +731,27 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 
 - Three pre-existing test fixtures (`TestAcpLifespanWiring`, `TestGenerationRunsAtStartup._fake_acp`, `_run_lifespan_capturing_gate`) needed `start_watchdog` stub added — they broke because lifespan now calls `acp.start_watchdog()`. Added stubs.
 - `test_watchdog_fires_on_crashed_process`: tracking stub clears `_proc` after first call to simulate `_on_agent_death/_detach` behavior and prevent repeated fires across ticks.
+
+### 2026-09-24 — Step 9 final review (full effort, 4 personas)
+
+Senior engineer, Reliability engineer, End-user advocate, Security auditor.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F9-1 | Medium | README.md "no MCP status panel" claim still present — Phase 6 item | Fixed — updated to describe toolbar indicator + Connect button (commit 1c33497) |
+| F9-2 | Medium | plans/tests/260701_POWERATLAS.md lifespan task count still "both tasks" — Phase 2 item | Fixed — updated to "all three ACP tasks", added watchdog (commit 1c33497) |
+| F9-3 | Medium | Escape key didn't restore focus to toggle (ARIA Disclosure Button pattern) | Fixed — added `_mcpToggleEl.focus()` after `aria-expanded` reset (commit 1c33497) |
+| F9-4 | Low | plans/ROADMAP.md v2 "161 MB / session/terminate" claim | Fixed — qualified as v2-era, replaced session/terminate with session/delete (commit 1c33497) |
+| F9-5 | Low | docs/KNOWLEDGE.md "out of date" CLOSE_METHOD sentence stale | Fixed — replaced with "Implemented in plan 260923_..." note (commit 1c33497) |
+| F9-6 | Low | WATCHDOG_INTERVAL_SECONDS carried `Final[float]` annotation — inconsistent with rebindable tunables | Fixed — annotation removed (commit 1c33497) |
+| F9-7 | Low | test_watchdog_halts_after_max_consecutive_errors hardcoded `5.0` restore | Fixed — save/restore pattern added (commit 1c33497) |
+| F9-8 | Low | _noop_death defined after class that references it | Fixed — moved before TestAcpCrashWatchdog (commit 1c33497) |
+| F9-9 | Low | mcpServersNullHidesIndicator test didn't assert aria-expanded reset | Fixed — assertion added; test now opens panel before session-change (commit 1c33497) |
+| F9-10 | Low | Only `javascript:` scheme tested; `http://` and `data:` not covered | Fixed — added mcpServersHttpUrlNoConnectButton, mcpServersDataUrlNoConnectButton tests (commit 1c33497) |
+
+Reliability: no new findings. Security: only F9-10 (above). All previous High/Medium findings resolved across all phases.
+
+Health: **Green**. All phases complete. 745 acp_page tests, 1812 Python tests.
 
 ### 2026-09-24 — Phase 6/7 review (full effort, 4 personas)
 
