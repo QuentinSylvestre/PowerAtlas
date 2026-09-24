@@ -4485,12 +4485,16 @@ class _Supervisor:
             # Carries the full server list; replace-all semantics (not delta).
             # SC-1 early-frame buffer handles arrival before sessions[sid] is set.
             # Capped at MAX_COMMANDS_COUNT for consistency with commands/skills.
-            servers = list(params.get("servers") or [])[:MAX_COMMANDS_COUNT]
+            _raw = params.get("servers")
+            servers = (_raw if isinstance(_raw, list) else [])[:MAX_COMMANDS_COUNT]
             if isinstance(session_id, str) and session_id in self.sessions:
+                frame = envelope("mcp_servers", {"servers": servers}, session_id)
                 self.sessions[session_id]["mcpServers"] = servers
-                _registry.broadcast(
-                    session_id,
-                    envelope("mcp_servers", {"servers": servers}, session_id))
+                _registry.broadcast(session_id, frame)
+            else:
+                log.debug(
+                    "ACP _kiro/mcp/status for unknown session %r — dropped (not buffered or already closed)",
+                    session_id)
             return
         if method in ("_kiro.dev/clear/status", "kiro.dev/clear/status"):
             return

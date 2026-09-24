@@ -26768,11 +26768,43 @@ class TestAcpMcpStatusNotification:
             # The fallthrough log line reads: "ACP notification %s (%s): ..."
             # with the method as the first argument.
             assert not any(
-                "_kiro/mcp/status" in record.message
-                and "ACP notification" in record.message
+                "_kiro/mcp/status" in record.getMessage()
+                and "ACP notification" in record.getMessage()
                 for record in caplog.records
             ), "Expected no fallthrough log.info for _kiro/mcp/status"
         finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_mcp_status_sc1_buffer_holds_and_replays(self, monkeypatch):
+        """SC-1 early-frame buffer: a ``_kiro/mcp/status`` arriving while
+        ``_reserved > 0`` but before the session is committed is buffered and
+        replayed once the session is registered, populating ``mcpServers``."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_mcp00000-0000-0000-0000-000000000002"
+        servers = [{"name": "github", "status": "connected"}]
+
+        try:
+            # Simulate a session/new in-flight: reserve a slot so SC-1 buffers
+            # notifications that arrive before sessions[sid] is committed.
+            sv3._reserved = 1
+            sv3._on_notification(self._mcp_status_msg(sid, servers))
+
+            # Not yet in sessions — notification must have been buffered.
+            assert sid not in sv3.sessions
+            assert sid in sv3._pending_early_frames
+
+            # Simulate new_session() committing the session and replaying the buffer.
+            sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
+            sv3.history[sid] = acp_mod._History()
+            _buffered = sv3._pending_early_frames.pop(sid, [])
+            sv3._pending_early_frames_at.pop(sid, None)
+            for _msg in _buffered:
+                sv3._on_notification(_msg)
+
+            assert sv3.sessions[sid].get("mcpServers") == servers
+        finally:
+            sv3._reserved = 0
             self._cleanup_registry(acp_mod)
 
 
