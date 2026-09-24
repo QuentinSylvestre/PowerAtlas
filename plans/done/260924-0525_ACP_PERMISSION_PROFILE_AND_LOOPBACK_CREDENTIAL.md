@@ -3,13 +3,56 @@
 > **Date**: 2026-09-21
 > **Status**: Complete — all 8 phases and the final review done, Green; QA PASS on the final build
 > `06e969b` (live, including all three doors); ready for `/qclose`  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-09-24 05:25
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
 > **Estimated effort**: ~2-3 weeks (revised up after review; see Review Log finding SE-4)
 > **Execution constraint**: Starts only after `plans/260921_DASHBOARD_ACP_FEATURE_PARITY.md`
 > completes. User decision, 2026-09-21 — see D-14. **Phase 0 step 0 verifies this rather than
 > assuming it.**
+
+---
+
+## Completion Summary
+
+Shipped 2026-09-23, live on `06e969b`, with the user's QA done. Two things shipped. The first is an opt-in
+ACP permission profile: a PowerAtlas-generated derived agent, with Default resolved on the server.
+The second is a login-code/cookie credential in front of every loopback route, which retired
+`_ACP_TOKEN`. Live verification found and fixed three defects that predate this plan:
+
+- Allow was delivered as Deny.
+- A stale permission card could approve a newer request.
+- kiro-cli's turn-approval path read an error reply as approval.
+
+A follow-up commit, `054b0b4`, labels "always" answers as session-scoped.
+
+### Acknowledged at archival
+
+- **Review finding Rel-12** (plan review, Low: tray-icon posture indicator) — `Accepted`. The user
+  is not planning to build it; the Settings panel and gear dot are enough. Follow-up #6 stays as the
+  record.
+- **Review finding Phase 1 #19** (Low: CRLF/`os.replace` discrepancies) — `Accepted`. It
+  duplicated findings #1 and #11, both fixed.
+- **Implementation divergences** (§ 9, all phases) — each phase's review brief asked its reviewers
+  to judge every declared divergence, and the Review Log records the outcomes. None is left
+  unjudged.
+- **Harness items:**
+  - `Accepted (harness opportunity)`: sub-agents refused to write scratch report files. The
+    evidence is mixed, because later agents in this run complied.
+  - `Promoted`: roadmap seed notes cite manifest rows by content, never by row or line number.
+    Extends `shared/skills/qplan/SKILL.md`'s anchor rule; agent-playbook `5030b19`.
+  - `Accepted (harness opportunity)`: name deferred execution behind another plan as a
+    line-anchor staleness source.
+  - `Accepted (harness opportunity)`: dispatch the doc-impact scan before or after the plan
+    body is written, not concurrently.
+  - `Accepted (harness opportunity)`: the (default, override) record of 1 review cycle per
+    phase and the inferred Major tier.
+  - `Accepted (harness opportunity)`: `/qdev` briefs should state whether a predecessor's
+    live-probe authority carries forward.
+  - `Accepted (harness opportunity)`: correct a superseded decision in the prose of phases not
+    yet run, not only in their criteria.
+  - `Accepted (harness opportunity)`: review worktrees broke on unpushed commits and Windows
+    path limits. Reviewers need them to mutation-test without disturbing one another.
 
 ---
 
