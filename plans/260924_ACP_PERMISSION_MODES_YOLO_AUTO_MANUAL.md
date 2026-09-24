@@ -1,7 +1,7 @@
 # ACP Permission Modes: Yolo, Auto and Manual
 
 > **Date**: 2026-09-24
-> **Status**: Draft — five decisions pending the user (§ 3 Pending decisions)  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the on/off ACP permission profile with three permission modes (Yolo, Auto, Manual), an always-on hard-deny floor, and a plain-language Manual-mode rule editor that compiles to the derived agent
 > **Tier**: Major
@@ -40,7 +40,9 @@ kiro-cli's own permission model inside the derived agent. The base agent is neve
   PowerAtlas-originated prompts, and every Always blocked item is refused silently with kiro-cli's denial text.
   kiro-cli's own non-overridable built-in asks (measured in Phase 0 P-0.10) are disclosed in the Yolo
   description.
-- SC-3: The Always blocked floor, identical in every mode while the derived agent is in effect, contains:
+- SC-3: PowerAtlas never creates a Default session without the Always blocked floor: when the derived agent is
+  not in effect, Default creation is refused (D-34). Loaded sessions and vendor task modes are outside this
+  guarantee, and the UI says so. The floor, identical in every mode, contains:
   - `fs_read` deny on credential stores: `~/.ssh/**`, `~/.aws/**`, `~/.azure/**`, `~/.config/gcloud/**`,
     kiro-cli's token files under `~/.kiro/`, and PowerAtlas's `local-secret` and `remote-secret` files;
   - `shell` deny patterns that mention those credential stores (for example `*.ssh*`, `*.aws*`), labelled as
@@ -48,7 +50,6 @@ kiro-cli's own permission model inside the derived agent. The base agent is neve
   - `fs_write` deny on PowerAtlas's own derived agent (`~/.kiro/agents/poweratlas-acp.md`);
   - kiro-cli's own built-in denies (`~/.kiro/settings/`, `~/.kiro/workspace-roots/`), listed so the UI shows
     the complete floor;
-  - any additions the user approves in pending decision PD-3.
 - SC-4: In Manual, a new Default session follows the user's rules: allowed patterns run silently, everything
   else in an Ask row raises a permission prompt, Block rows are refused, and Protected paths prompt even under an
   Allow row.
@@ -203,9 +204,9 @@ decisions; D-22 onwards were added by the 2026-09-24 plan review.
 | D-3 | Floor reach (Q3) | Default ACP sessions bound to the derived agent only; copy states the limit | Floor in `~/.kiro/settings/permissions.yaml` | Keeps terminal sessions independent; avoids co-owning a setup.ps1 seed file |
 | D-4 | Floor content tiers (Q4) | Path rules plus a shell tier labelled best-effort | Paths only; patterns as a guarantee | Superseded in detail by D-5 and D-6 |
 | D-5 | Floor effect (Q5) | Always blocked = silent kiro `deny`, every mode; Yolo adds no PowerAtlas asks; Manual adds **Protected** `ask` rules for agent/steering/skill/hook writes, each switchable to Block | Floor as `ask` everywhere | User: "yolo remains yolo, no ask". Auto's future decider: answer Deny, send the reason as a steer message, escalate on repeat — reachable for `ask` prompts only |
-| D-6 | Always blocked list (Q6, C1) | Credential-store reads (`fs_read`), matching best-effort `shell` patterns, writes to PowerAtlas's own derived agent, kiro's built-in settings denies | Add home/root deletion patterns | User: deletion is Auto mode's job. Additions pending PD-3 |
+| D-6 | Always blocked list (Q6, C1) | Credential-store reads (`fs_read`), matching best-effort `shell` patterns, writes to PowerAtlas's own derived agent, kiro's built-in settings denies | Add home/root deletion patterns | User: deletion is Auto mode's job. No further additions (PD-3, 2026-09-24) |
 | D-7 | Editor shape (Q7) | One row per action kind: default Allow/Ask/Block plus allow and block pattern lists; `*`-prefix shell patterns; seeded from the old overlay; prompt-card button in scope | Raw rule table; YAML editor | User asked for intuitive editing; the raw model has silent-failure traps |
-| D-8 | Migration (Q8) | `true` → Manual, `false`/fresh → Yolo, old key in `_LEGACY_KEYS`, no Off state; derived agent always written | Keep a fourth "Off" mode | User accepted R-4 (re-confirmation pending PD-4) |
+| D-8 | Migration (Q8) | `true` → Manual, `false`/fresh → Yolo, old key in `_LEGACY_KEYS`, no Off state; derived agent always written | Keep a fourth "Off" mode | User accepted R-4, re-confirmed with its full scope (PD-4, 2026-09-24) |
 | D-9 | Remote (Q9) | Posture changes only from this computer | Allow the button remotely | Posture-widening stays on the machine |
 | D-10 | Terms (C2) | "permission mode", "Yolo/Auto/Manual", "Always blocked", "Protected" | "profile", "deny floor" in UI | AGENTS.md Terminology update proposed at the end of Phase 1 |
 | D-11 | Rule data model | `acp_permission_rules` = `{<row>: {default, allow[], block[]}, protected_block[]}`, rows `fs_read, fs_write, shell, web_fetch, web_search, mcp, subagent, skill, power` | Free-form rule list | Uniform rows keep editor and compiler simple; "the session folder" is a seeded `./**` in `fs_read.allow` |
@@ -232,33 +233,16 @@ decisions; D-22 onwards were added by the 2026-09-24 plan review.
 | D-32 | `apply_settings` result | Returns `{saved, generation_ok, generation_error}`; a save failure → route `ok: false`; a generation failure → `ok: true` plus a warning shown by the panel and the card | Raise | Distinguishes "nothing changed" from "saved, not yet in effect" |
 | D-33 | Base-agent save | `/api/save-setting` routes `acp_permission_base_agent` through `apply_settings` | Save then sync | D-16 covers every permission-relevant writer |
 
-### Pending decisions (user)
+### Decisions from the plan review (user, 2026-09-24)
 
-Escalated by the 2026-09-24 plan review; the plan's provisional text follows each recommendation and changes if
-the user decides otherwise.
+Escalated by the 2026-09-24 plan review; PD-1 and PD-2 went through a Full council first (§ Review Log).
 
-- **PD-1 — What Default binds when the derived agent is not in effect** (Arch #3, Rel #7, Sec #10). Options:
-  (A) refuse Default session creation with "Permission rules are not in effect — see Settings", vendor task modes
-  still available; (B) keep binding `kiro_default` (no floor, allow-all on this machine) and state in SC-3 and the
-  UI that the floor applies only while in effect; (C) bind the last PowerAtlas-written file even when stale.
-  Provisional: **A**, pending council and user.
-- **PD-2 — Same-user self-widening through PowerAtlas's own API** (Sec #1). An agent allowed to run an
-  interpreter can mint a `pa_local` cookie from the on-disk secret and POST a mode or rule change. Options:
-  (A) accept as a same-user threat (an agent with shell already has the user's rights), add best-effort shell
-  patterns; (B) require a fresh tray-minted login code to change mode or rules. Provisional: **A**, pending council
-  and user.
-- **PD-3 — Floor additions** (Arch #2/#13, Rel #14/#20, SE #8/#13/#14, Sec #2/#9/#12). Add to Always blocked:
-  `fs_write` deny `**/power-atlas/**` (config, secrets) and the configured base agent file; `fs_read` deny
-  `**/power-atlas/acp-secrets.bin`, `**/power-atlas/config.toml`, `**/power-atlas/*-secret*`,
-  `**/Kiro-Cli/data.sqlite3*`; shell best-effort `*poweratlas-acp*`, `*power-atlas*config.toml*`,
-  `*acp-secrets*`, `*load_local_secret*`, `*make_local_cookie*`, `*mint_login_code*`, `*<base>.md*`. Provisional:
-  **add all**.
-- **PD-4 — R-4 restated** (Arch #12). The always-present allow-all `poweratlas-acp` in kiro-cli's terminal agent
-  picker widens posture for a default-configuration kiro user (ask by default), not only for a stricter baseline.
-  Re-confirm D-8's acceptance.
-- **PD-5 — Rollback** (Sec #19). Rolling back to the previous release reads no `acp_permissions_enabled`, defaults
-  to off and deletes the derived agent — Manual users land on allow-all with no floor. Options: accept, or write
-  the legacy key for one release. Provisional: **accept**.
+| # | Decision | Choice | Alternatives considered | Rationale |
+|---|---|---|---|---|
+| D-34 | PD-1: Default when not in effect | **Fail closed.** `_handle_new` refuses a Default create while not in effect. The refusal names the specific cause (from the state and `generation_error`), the concrete fix (a Settings step, or a file to remove), says the fix needs this computer when the client is remote, and offers task modes as an explicit alternative that runs without the floor. Logged at WARNING. `session/load` keeps today's behaviour | Fall back to `kiro_default`; bind the stale file | User chose A; council 4-0. The old fallback was justified as "never wider than off", which no longer holds; a floorless fallback session could also make the file foreign and lock the fallback in |
+| D-35 | PD-2: same-user self-widening | **Accepted, disclosed** (`User: accepted — 2026-09-24`). R-16 states that allowing an interpreter or a broad shell prefix in Manual equals allow-all, including widening future sessions via the API or `config.toml`. The editor and the prompt-card button show "allowing an interpreter is equivalent to allow-all" when a pattern's first token is an interpreter or shell (D-20 list). A posture change not made from the dashboard (detected when the D-30 self-heal regenerates from a changed mode or rules) raises a visible dashboard notice naming the new mode | Tray-granted elevation for widening changes | User chose A; council 4-0: `config.toml` sits beside the secret, so an HTTP-layer gate would guard one of two equal doors |
+| D-36 | PD-3: floor additions | **None.** The floor stays as agreed in exploration (D-6). Within those items the patterns cover the files they name: `data.sqlite3*` (SQLite sidecars of the kiro token store) and `local-secret*` / `remote-secret*` (the rotation temp file) | Add the power-atlas folder, the base agent, extra shell tripwires | User chose to add nothing. Consequence recorded in R-16 and R-18: `config.toml` and the base agent stay writable by agents |
+| D-37 | PD-4 and PD-5 | Both accepted (`User: accepted — 2026-09-24`): R-4 with its full scope, and R-11 rollback | Legacy key for one release; reopen D-8 | User accepted both |
 
 ## 4) External Dependencies & Costs
 
@@ -343,7 +327,7 @@ files in the scratchpad (a scratch `.ssh/dummy` in the probe cwd), never real cr
 ### Phase 1: Modes, compiler and the mode picker [QA]
 
 **Goal**: The mode setting exists; Yolo and Manual (seed rules) compile with the Always blocked floor; migration
-runs; locking, the in-effect check and the Default fallback follow D-15, D-16, D-30 and PD-1; the settings menu
+runs; locking, the in-effect check and the Default refusal follow D-15, D-16, D-30 and D-34; the settings menu
 shows the three-option picker.
 **File scope**: `src/power_atlas/config.py`, `src/power_atlas/agent_profile.py`, `src/power_atlas/web.py`,
 `src/power_atlas/acp.py`, `src/power_atlas/templates/index.html`, `src/power_atlas/templates/acp.html` (comments
@@ -371,7 +355,7 @@ state payload. Logging per D-25 (once per distinct value per process).
 pure `compile_block(config) -> str` (reads `acp_permission_mode`, `acp_permission_rules`,
 `acp_permission_base_agent`). Output: the provenance header (keeps `_PROVENANCE_MARKER`), `rules:` with
 `FLOOR_RULES` first, then Yolo `{capability: all, effect: allow}` or Manual's Protected rules and rows (D-13,
-D-26). Floor per D-6 plus PD-3 if approved, paths in `**/` form unless P-0.2 says otherwise:
+D-26). Floor per D-6 and D-36, paths in `**/` form unless P-0.2 says otherwise:
 
 - `fs_read` deny: `**/.ssh/**`, `**/.aws/**`, `**/.azure/**`, `**/.config/gcloud/**`, `**/.kiro/secrets.json`,
   `**/Kiro-Cli/data.sqlite3*`, `**/power-atlas/local-secret*`, `**/power-atlas/remote-secret*`;
@@ -400,8 +384,7 @@ docstrings.
 **Gate and fallback.** `_acp_permission_state(config)` returns `mode`, `mode_warning`, `in_effect =
 derived_block_state(config) == "on"`, `floor` (display rows), `protected` (display rows), base-agent and
 generation fields; drop `enabled`. `_derived_agent_in_effect`: `acquire(timeout=2)`, D-30 self-heal, release.
-Default fallback when not in effect: per PD-1 (provisional A — `_handle_new` refuses Default with the message;
-`load_session` keeps sending `kiro_default` for a session with persisted metadata, as kiro-cli ignores it there).
+Default when not in effect: refuse per D-34 (`_handle_new`); `load_session` keeps sending `kiro_default` for a session with persisted metadata, as kiro-cli ignores the modeId there. D-30's self-heal records when it regenerated from a changed mode or rules, for D-35's dashboard notice.
 Store the bound mode in the session record (D-31). Rewrite the `_handle_new` refusal strings and the `acp.py`
 comments that describe "off" or "the profile" (~862-869, ~1128-1176, ~6432-6491, ~6528).
 
@@ -415,7 +398,7 @@ and task modes such as Spec or Plan are not covered." An "Always blocked" disclo
 marked "catches common accidents, not a guarantee"). Keep `#acpPermBadge`, `#acpPermWarn`, the gear dot, the
 base-agent field (tooltip reworded). Rewrite `_acpPermWarnText` (delete the off branch; "turn it off and on again"
 becomes "save the mode again or restart PowerAtlas"), `_ACP_PERM_NEXT_BASE`, `_ACP_PERM_NEXT_REGEN`, the gear-dot
-title, and show `mode_warning`. JS guards check `typeof d.mode === 'string'`. `var ACP_LOCAL = true` (D-21).
+title, and show `mode_warning`. Show the D-35 notice when the state reports an external posture change. JS guards check `typeof d.mode === 'string'`. `var ACP_LOCAL = true` (D-21).
 Update the `transcript-renderer.js` capability-words comment that cites `agents/permissions.yaml`.
 
 **Tests.**
@@ -441,7 +424,9 @@ Update the `transcript-renderer.js` capability-words comment that cites `agents/
 - Lock: deterministic — patch `_generate` to wait on an Event, run `apply_settings` in a thread, assert the hook
   raises within its timeout and `_handle_new` sends the refusal; assert `apply_settings` never deadlocks when a
   hook call happens during it.
-- Fallback per PD-1; D-30 self-heal after a hand edit.
+- D-34 refusal: a not-in-effect Default create is refused with the cause, the fix and the remote note; WARNING
+  logged; a task-mode create still succeeds. D-30 self-heal after a hand edit; D-35 notice raised when the heal
+  changed the mode or rules.
 - Page tests: radio group semantics, Auto disabled, `mode` guard, scope-note and warning copy (replace the pins at
   ~4773-4839, ~10989-11288, ~11513-11541).
 
@@ -476,7 +461,7 @@ plus Protected labels and the floor.
 `launch_profile_modal.html`, opened from "Edit rules…" in the settings section (every mode; rules apply when
 Manual is selected). Rows with plain labels (Read files, Write files, Run commands, Web fetch, Web search, MCP
 tools, Sub-agents, Skills, Powers), a default `<select>`, chip lists "Allow without asking" (hidden under default
-Allow) and "Always block". `./**` renders as "the session folder". A breadth warning (not a refusal) on patterns
+Allow) and "Always block". `./**` renders as "the session folder". A breadth warning (not a refusal) on patterns whose first token is an interpreter or shell (D-35: "equivalent to allow-all") and on patterns
 covering the session folder, a drive root or the home folder for Write files. Read-only Always blocked and
 Protected sections (per-item "Block outright" toggles). Footer: "Applies to sessions created afterwards." Save
 posts JSON, shows the server error inline, closes on success, shows the D-32 warning when generation failed.
@@ -512,7 +497,7 @@ whose default is Allow and rows outside D-11. Returns per D-32.
 
 **Card.** In `addPermissionRequest`, when `window.ACP_LOCAL === true`, `ruleEligible` is true and an option with
 `kind === "allow_once"` exists, add "Allow, and always in new sessions…". It opens an inline row: capability
-label, an editable field prefilled per D-20, Save and Cancel. Save posts the rule; on `ok` it answers with the
+label, an editable field prefilled per D-20, the D-35 interpreter warning when it applies, Save and Cancel. Save posts the rule; on `ok` it answers with the
 `allow_once` option and shows "Rule added — new sessions will not ask", or the D-32 warning. If a
 `permission_resolved` arrived meanwhile it skips the answer and says "Rule saved; this prompt was already
 answered". On error it shows the message and leaves the prompt open.
@@ -553,22 +538,23 @@ answered". On error it shows the message and leaves the prompt open.
 
 | # | Risk | Impact | Mitigation |
 |---|---|---|---|
-| R-1 | Edited rules read as stale; Default binds the fallback | Manual appears on but is not applied | D-15, D-30, PD-1 |
+| R-1 | Edited rules read as stale | Default creation refused until healed | D-15, D-30, D-34 |
 | R-2 | Shell floor bypassed by rephrasing | Credential read through shell | Accepted (D-6): labelled best-effort; path rules carry the weight |
 | R-3 | Path floor misses search tools, 8.3 names, `\\?\`/UNC forms | Credential read | Phase 0 P-0.1, P-0.11 gates; copy drops guarantee wording if bypassed |
-| R-4 | Always-present allow-all `poweratlas-acp` in kiro-cli's terminal picker | Widens posture for a default-configuration kiro user who picks it | Pending PD-4 |
+| R-4 | Always-present allow-all `poweratlas-acp` in kiro-cli's terminal picker | Widens posture for a default-configuration kiro user who picks it | User: accepted — 2026-09-24 (D-37) |
 | R-5 | A compiled block kiro-cli rejects fails open silently | All protection lost | D-14, D-26, P-0.7, invariants test |
 | R-6 | Missing `exclude` makes an allow rule dead | More prompts than configured | D-13; invariants test with a mutation check |
 | R-7 | Protected paths miss writes through a symlink's real target | Self-config edit without a prompt | P-0.4; disclosed if confirmed (Follow-up 3) |
 | R-8 | Allowed git commands run repository-controlled code (textconv, `diff.external`) | Code execution from a cloned repo | Accepted in the prior plan; carried forward |
 | R-9 | An unanswered prompt is cancelled after 1800 s | Lost turn when away | Out of scope (Follow-up 6) |
-| R-10 | Generation fails after a save | Not in effect | D-32 warning; PD-1 fallback; D-28 removes the commonest cause |
-| R-11 | Rollback to the previous release | Manual users land on allow-all | Pending PD-5 |
+| R-10 | Generation fails after a save | Default creation refused until fixed | D-32 warning; D-34 refusal names the fix; D-28 removes the commonest cause |
+| R-11 | Rollback to the previous release | Manual users land on allow-all | User: accepted — 2026-09-24 (D-37) |
 | R-12 | Shell floor blocks legitimate commands (`ssh -i ~/.ssh/key`) | Agent cannot run those | Accepted trade-off; listed in the Always blocked view |
 | R-13 | Another settings route saves a stale config copy over a just-applied mode or rule change | The change is silently reverted | D-30 keeps file and config consistent; the revert itself is visible in the editor; single-user, millisecond window — accepted, Follow-up 9 |
 | R-14 | Separators or substitution let `git status*` run another command | Silent command execution | P-0.8 gate; D-24 block patterns |
 | R-15 | Sub-agents run under their own agent's posture | Floor bypassed by spawning `kiro_default` | P-0.12 gate |
-| R-16 | Same-user agent changes the posture through PowerAtlas's API | Self-widening | Pending PD-2 |
+| R-16 | An agent allowed to run an interpreter or broad shell changes the posture (API or `config.toml`) | Future sessions widened; in Manual, allowing an interpreter equals allow-all | User: accepted — 2026-09-24 (D-35); warnings and the dashboard notice detect, they do not prevent |
+| R-18 | `config.toml` and the base agent file are writable by agents (no floor entry) | Rules or base agent tampered for future sessions | User: accepted — 2026-09-24 (D-36); D-35 notice surfaces mode and rule changes |
 | R-17 | No runtime signal that kiro-cli applied a compiled block | Silent fail-open looks like Yolo | Live probe per phase; Follow-up 10 |
 
 ## 7) Verification
@@ -596,7 +582,7 @@ answered". On error it shows the message and leaves the prompt open.
 
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
-| 0 | Pre-flight probes and gate | Pending | Blocked on PD-1..PD-5 only for the gate's escalations |
+| 0 | Pre-flight probes and gate | Pending | |
 | 1 | Modes, compiler and the mode picker | Pending | |
 | 2 | Custom Manual rules and the rule editor | Pending | |
 | 3 | "Allow, and always in new sessions" | Pending | |
@@ -621,10 +607,10 @@ Phase 4 (docs)
 | Item | Strategy | Safety effect |
 |---|---|---|
 | `acp_permissions_enabled` in `config.toml` | Migrated on load (D-8, D-27), dropped on save | `true` keeps prompting with the old rules, the agents-folder deny kept (D-23) and git prefixes guarded (D-24); `false` gains the floor |
-| Derived agent file | Always written; a foreign file at the path is left alone and reported (D-29) | `poweratlas-acp` always in kiro-cli's agent picker (R-4, PD-4) |
+| Derived agent file | Always written; a foreign file at the path is left alone and reported (D-29) | `poweratlas-acp` always in kiro-cli's agent picker (R-4, accepted) |
 | Running sessions at upgrade | Keep their bound agent until closed (P-C) | No change mid-session |
 | `/api/acp-permissions` payload | `enabled` → `mode`; POST body changes | Only in-repo pages consume it; updated in Phase 1 |
-| Rollback to the previous release | Old code defaults `enabled = False` and deletes the derived agent | Manual users land on allow-all (R-11, PD-5) |
+| Rollback to the previous release | Old code defaults `enabled = False` and deletes the derived agent | Manual users land on allow-all (R-11, accepted) |
 
 ## File Change Summary
 
@@ -655,7 +641,7 @@ Phase 4 (docs)
 2. **Home/root deletion protection.** Left to Auto (D-6).
 3. **Symlinked self-config.** If P-0.4 confirms writes through a symlink target skip Protected rules. Source: R-7.
 4. **Shell floor bypass by rephrasing.** Accepted best-effort. Source: R-2, R-12.
-5. **Terminal-picker exposure of the allow-all derived agent.** Source: R-4, PD-4.
+5. **Terminal-picker exposure of the allow-all derived agent.** User-accepted. Source: R-4, D-37.
 6. **Unanswered prompt cancelled at 1800 s.** Source: R-9.
 7. **git textconv / `diff.external` via allowed git commands.** Source: R-8.
 8. **Unnamed capabilities** (`context`, `diagnostics`, `sandbox_network`) inherit user scope; probe and name them.
@@ -673,7 +659,7 @@ Phase 4 (docs)
 Full effort (Major tier): four personas in parallel with fresh context — **Architect** (gap-critic lens),
 **Senior engineer**, **Security auditor**, **Reliability engineer** — plus the mandatory doc-impact sub-agent.
 One cycle, per the user's instruction ("1 qreview cycle"). 86 raw findings merged to 44 below (High 13, Medium
-23, Low 8). 39 fixed in the plan; 5 escalated to the user as PD-1 to PD-5.
+23, Low 8). 39 fixed in the plan; 5 escalated to the user as PD-1 to PD-5 and decided 2026-09-24 (D-34 to D-37).
 
 Per-persona confidence before fixes: Architect 50%, Senior engineer 60%, Security auditor 35%, Reliability
 engineer 45%.
@@ -687,18 +673,18 @@ The deviation trades refutation rigour for about 45 fewer sub-agent runs.
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
 | 1 | High | Phase 1 migrates `true` to Manual and accepts `manual` before any Manual compiler exists (Arch 6, Rel 1, SE 1, Sec 14) | Fixed — D-22: Phase 1 ships the Manual compiler with `SEED_RULES` |
-| 2 | High | Every not-in-effect path binds `kiro_default`, silently dropping the floor (Arch 3, Rel 7, Sec 10) | Escalated — PD-1, provisional fail-closed |
-| 3 | High | `config.toml`, now the policy source, is unprotected and effective without restart (Arch 2, SE 8, Sec 2) | Escalated — PD-3 floor additions |
+| 2 | High | Every not-in-effect path binds `kiro_default`, silently dropping the floor (Arch 3, Rel 7, Sec 10) | Fixed — D-34 fail closed (user decision after council 4-0) |
+| 3 | High | `config.toml`, now the policy source, is unprotected and effective without restart (Arch 2, SE 8, Sec 2) | User: accepted — 2026-09-24, no floor additions (D-36); R-18 |
 | 4 | High | `json.dumps` emits surrogate escapes; DEL passes; either can fail kiro-cli's parse open (Arch 8, Rel 3, SE 10, Sec 3) | Fixed — D-14 BMP-only validation, `ensure_ascii=False`, P-0.7 probe |
 | 5 | High | Prefix widening rests on `&&` only; other separators and substitution unprobed (Arch 1, Sec 5) | Fixed — P-0.8 with a gate back to exact literals |
 | 6 | High | `git diff*`/`git log*`/`git branch*` allow `--output`, `--no-index`, `branch -D` (Sec 4) | Fixed — D-24 block patterns; `git branch` stays exact; Follow-up #9 not closed |
 | 7 | High | Migration drops the old `**/.kiro/agents/**` write deny (Arch 7, Rel 14, SE 5, Sec 8) | Fixed — D-23 seeds `protected_block = ["agents"]` for migrated users |
 | 8 | High | Button prefill from agent-authored text yields `python*`, `/**`, `C:/**` in one click (Sec 7) | Fixed — D-20 interpreter/destructive exceptions, root/home fallbacks; D-14 rejects `*`/`**` |
-| 9 | High | Base agent file is an unguarded upstream of every derived agent (Sec 9) | Escalated — PD-3 adds its write deny and shell pattern |
+| 9 | High | Base agent file is an unguarded upstream of every derived agent (Sec 9) | User: accepted — 2026-09-24, no floor additions (D-36); R-18 |
 | 10 | High | Rule sets `{}`/partial may leave capabilities unnamed and fail open (Rel 2; Arch 16, SE 20, Sec 16) | Fixed — D-26 normalises in load and compile; invariants over `{}`/partial |
 | 11 | High | Path floor untested against 8.3 short names, `\\?\` and UNC forms (Sec 11) | Fixed — P-0.11 probe with a gate |
 | 12 | High | Sub-agent posture inheritance unprobed; `kiro_default` sub-agent may bypass the floor (Sec 6) | Fixed — P-0.12 probe; gate escalates to the user if it bypasses |
-| 13 | High | Same-user agent can mint a cookie and POST a posture change (Sec 1) | Escalated — PD-2 |
+| 13 | High | Same-user agent can mint a cookie and POST a posture change (Sec 1) | User: accepted — 2026-09-24, disclosed with warnings and a dashboard notice (D-35) |
 | 14 | Medium | Gate hook takes the lock unbounded; a stalled generation hangs session creation (Arch 4, Rel 4, SE 6) | Fixed — D-16 `acquire(timeout=2)`, raise, deterministic test |
 | 15 | Medium | Lock placement unspecified; a lock inside `derived_block_state` deadlocks `apply_settings` (Rel 5, Sec 22) | Fixed — D-16 names the only acquirers; state computed after release |
 | 16 | Medium | Base-agent save and other routes bypass `apply_settings` (Arch 5, Rel 6, SE 7, Sec 13) | Fixed — D-33 for the base agent; D-30 self-heal; residual R-13 → Follow-up 9 |
@@ -717,10 +703,10 @@ The deviation trades refutation rigour for about 45 fewer sub-agent runs.
 | 29 | Medium | Hand edits never regenerate; D-15 then reads stale until restart (Rel 16) | Fixed — D-30 self-heal |
 | 30 | Medium | `apply_settings` error contract unspecified; card claims success on generation failure (Rel 17) | Fixed — D-32 |
 | 31 | Medium | `deny`+`exclude` and non-empty block lists never probed (Sec 17) | Fixed — P-0.7 extended |
-| 32 | Medium | R-4 understates who the picker exposure affects (Arch 12) | Escalated — PD-4 |
-| 33 | Medium | Rollback lands Manual users on allow-all, accepted by the author only (Sec 19) | Escalated — PD-5 |
+| 32 | Medium | R-4 understates who the picker exposure affects (Arch 12) | User: accepted — 2026-09-24 (D-37) |
+| 33 | Medium | Rollback lands Manual users on allow-all, accepted by the author only (Sec 19) | User: accepted — 2026-09-24 (D-37) |
 | 34 | Medium | `acp.py` refusal strings, `index.html` "turn it off and on" copy, renderer comment omitted from scope (doc-impact; Arch 18, SE 17) | Fixed — named in Phase 1 scope and text |
-| 35 | Medium | Floor misses `acp-secrets.bin`, SQLite sidecars, secret-file writes (Rel 20, SE 13, Sec 12) | Fixed for sidecars and `*-secret*` reads; the rest in PD-3 |
+| 35 | Medium | Floor misses `acp-secrets.bin`, SQLite sidecars, secret-file writes (Rel 20, SE 13, Sec 12) | Fixed for sidecars and secret temp files within agreed items; the rest User: accepted — 2026-09-24 (D-36) |
 | 36 | Medium | ROADMAP target for Follow-up #9 wrong; Auto would duplicate an existing item (doc-impact) | Fixed — Phase 4 cross-references the existing item; #9 stays open |
 | 37 | Low | Race test was stochastic (Rel 18) | Fixed — deterministic Event-based test |
 | 38 | Low | Backslash shell pattern may be dead (Rel 19, SE 12) | Fixed — P-0.3 probe; variants dropped unless literal |
@@ -734,6 +720,17 @@ The deviation trades refutation rigour for about 45 fewer sub-agent runs.
 Doc-impact scan: every hit dispositioned in § 8, the phase text or as false-positive (historical dated notes,
 the peek/restart "overlay", `kiro_default` mode-name mentions, other plans' unqualified IDs in `acp.py`). Four
 stale `plans/260921_…` paths reported as Follow-up 11.
+
+### 2026-09-24 — Council on PD-1 and PD-2 (via /qcouncil, pre-escalation)
+
+Full tier (large blast radius). Per decision: assumption challenger, one advocate per option, one prosecutor per
+option, four jurors. PD-1 jurors (Security auditor, Reliability engineer, End-user advocate, Senior engineer):
+**A, fail closed, 4-0**; the End-user advocate was conditional on not-in-effect staying rare. PD-2 jurors (Security
+auditor, End-user advocate, Senior engineer, Architect): **A, accept and disclose, 4-0**; the Architect was
+conditional on an interpreter's own file writes not being bound by any kiro path rule (unmeasured; follows from how
+kiro rules bind). Every juror asked for the refusal to name the cause and the fix (PD-1), and for a fresh acceptance
+with the interpreter warning on the card (PD-2); both are in D-34 and D-35. The user chose A for both, "add nothing"
+for PD-3, and accepted PD-4 and PD-5 on 2026-09-24.
 
 ## Harness Improvement Opportunities
 
