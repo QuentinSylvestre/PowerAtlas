@@ -16,6 +16,11 @@
   - Run it by hand any time with `.venv-PowerAtlas/Scripts/python _check_test_names.py` (~270 ms over the whole tree).
 - `src/power_atlas/static/prism.js` is **generated** — the syntax highlighter behind /acp's code blocks, built by `_build_prism.mjs` from the `prismjs` npm tarball. Never hand-edit it: change the language list in `_build_prism.mjs` and rebuild (`npm pack prismjs@<version> && tar -xzf prismjs-<version>.tgz && node _build_prism.mjs ./package`). The languages are concatenated in dependency order and a grammar added out of order throws at load. `tests/acp_page.test.mjs` runs the committed bundle for real, so a bad rebuild fails there rather than in a browser.
 - `pytest-timeout` is a dev dependency (`.venv-PowerAtlas/Scripts/python -m pip install -e ".[dev]"` picks it up). Use `pytest tests/test_web.py --timeout=300` when running the full suite after a change to session-close/concurrency code — a test whose mocking strategy assumes a code path that no longer exists can hang on an `asyncio.Event` that nothing will ever set, rather than failing fast; the flag turns that into a loud stack dump at 300s instead of an indefinitely stuck run.
+- **Every loopback page and API needs the `pa_local` cookie** (since `plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` Phase 5). A bare `curl`, `/qqa` or browser-automation visit to `http://127.0.0.1:<port>/` gets the "open from the tray" page or a JSON 403, not the app. Only `/local-auth` and `/static` are open. For live QA, an agent signs in on the same-user path accepted as R-19. Either sign a cookie from the on-disk secret, or mint a one-time login code in-process and navigate to `/local-auth?code=<code>` once:
+  - `import power_atlas.web as w, power_atlas.config as c; w.set_local_secret(c.load_local_secret()); cookie = w.make_local_cookie()`
+  - `w.login_path(w.mint_login_code())`
+
+  Send `Cookie: pa_local=<cookie>` on every request. POSTs also need `Origin`/`Referer` of `http://127.0.0.1:<port>`, and `/ws/acp` needs a matching `Origin`. Use this only for local QA against this machine's own instance. Never paste the cookie or a code into a plan, a log or a commit.
 - When the user requests something that contradicts these guidelines, apply the request AND propose a durable update to this section so future sessions follow the new policy.
 
 ## Terminology
