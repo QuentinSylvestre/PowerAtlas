@@ -4814,6 +4814,70 @@ class TestAcpSessionLoad:
                  "children": [{"type": "text", "raw": "4"}]}]}),
         ]
 
+    def _load_mode_sent(self, acp_mod, store, acp_store_dir_v3, monkeypatch,
+                        gate, sid):
+        """Drive `_handle_load` with `gate` as `mode_gate_hook`; return the
+        `_meta.kiro.modeId` the `session/load` request carried and the frames.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7."""
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", gate)
+        calls = []
+        acp_store_dir_v3(sid, cwd=str(Path(store).resolve()))
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request",
+                          self._replay(acp_mod, sid, [], calls)), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        assert [m for m, _p in calls] == ["session/load"]
+        kiro = calls[0][1]["_meta"]["kiro"]
+        assert "modeId" in kiro, "session/load must never omit modeId"
+        return kiro["modeId"], _queued(conn)
+
+    def test_load_sends_the_derived_agent_while_the_profile_is_in_effect(
+            self, acp_store, acp_store_dir_v3, monkeypatch):
+        """For an id kiro-cli has no persisted metadata for, the load's
+        `modeId` is what binds (measured live 2026-09-23), so it must be what a
+        Default `session/new` would bind now: the derived agent while ON.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7."""
+        from power_atlas.config import DERIVED_AGENT_NAME
+        acp_mod, store = acp_store
+        mode, frames = self._load_mode_sent(
+            acp_mod, store, acp_store_dir_v3, monkeypatch,
+            lambda: True, "load-mode-on-01")
+        assert mode == DERIVED_AGENT_NAME
+        assert [f["type"] for f in frames][:2] == ["meta", "session"]
+
+    def test_load_sends_kiro_default_while_the_profile_is_off(
+            self, acp_store, acp_store_dir_v3, monkeypatch):
+        """OFF: `kiro_default`, never the derived agent, whose file is absent
+        and would make kiro-cli fall back to `vibe`.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7."""
+        acp_mod, store = acp_store
+        mode, _frames = self._load_mode_sent(
+            acp_mod, store, acp_store_dir_v3, monkeypatch,
+            lambda: False, "load-mode-off-01")
+        assert mode == "kiro_default"
+
+    def test_load_sends_kiro_default_and_proceeds_when_the_gate_raises(
+            self, acp_store, acp_store_dir_v3, monkeypatch, caplog):
+        """Unlike `_handle_new`, a broken check does not refuse: a refused load
+        strands a session that already exists. It binds `kiro_default`, logs
+        why, and the load completes.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7."""
+        acp_mod, store = acp_store
+
+        def broken():
+            raise OSError("config unreadable")
+
+        with caplog.at_level(logging.ERROR, logger=acp_mod.log.name):
+            mode, frames = self._load_mode_sent(
+                acp_mod, store, acp_store_dir_v3, monkeypatch,
+                broken, "load-mode-err-01")
+        assert mode == "kiro_default"
+        assert "error" not in [f["type"] for f in frames], frames
+        assert "session" in [f["type"] for f in frames]
+        assert any("session/load: the permission-profile check failed"
+                   in r.getMessage() for r in caplog.records)
+
     def test_a_replayed_tool_call_survives_the_load(self, acp_store):
         """Tool calls already forward and render; a loaded history full of them
         has to travel the same path rather than a second one."""
@@ -22203,8 +22267,12 @@ class TestSupervisor:
 
     def test_handle_permission_response_valid_option_writes_reply_and_clears_pending(
             self, monkeypatch):
-        """A valid optionId from the owning connection writes the exact
-        JSON-RPC reply shape Phase 0 confirmed live, clears the pending
+        """A valid optionId from the owning connection writes the ACP spec's
+        RequestPermissionResponse shape (`result.outcome.outcome ==
+        "selected"`, `result.outcome.optionId`; the flat `{"optionId": ...}`
+        this used to assert made kiro-cli reject every Allow --
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7, F1),
+        clears the pending
         entry, and (review fix -- SC-9 stale-replay/cross-tab closure)
         broadcasts a companion `permission_resolved` frame -- recorded into
         history exactly like `permission_request` itself (not
@@ -22230,7 +22298,8 @@ class TestSupervisor:
                     conn, sid, {"requestId": 7, "optionId": "opt-0"}))
 
             assert written == [
-                {"jsonrpc": "2.0", "id": 7, "result": {"optionId": "opt-0"}}]
+                {"jsonrpc": "2.0", "id": 7, "result": {
+                    "outcome": {"outcome": "selected", "optionId": "opt-0"}}}]
             assert 7 not in sv3._pending_permission
 
             frames = _queued(conn)
@@ -22247,6 +22316,40 @@ class TestSupervisor:
                 f"permission_resolved must be recorded into history like "
                 f"permission_request, got {[f['type'] for f in recorded]}")
             assert resolved[0]["payload"] == {"requestId": 7}
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_permission_response_deny_is_selected_with_the_reject_option(
+            self, monkeypatch):
+        """A deny travels exactly like an allow: `outcome: "selected"` with the
+        reject option's id. ACP has no separate "rejected" outcome; which way
+        the answer goes lives in the option the request offered, and
+        `cancelled` means the turn was abandoned, not that the user said no.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (F1)."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permdeny0000-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        # The three options kiro-cli KAS 2.23.1 offered on every prompt live.
+        options = [
+            {"optionId": "accept", "name": "Yes", "kind": "allow_once"},
+            {"optionId": "reject", "name": "No", "kind": "reject_once"},
+            {"optionId": "always-reject", "name": "Never", "kind": "reject_always"},
+        ]
+        sv3._pending_permission[5] = {"session_id": sid, "options": options}
+
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                asyncio.run(acp_mod._handle_permission_response(
+                    conn, sid, {"requestId": 5, "optionId": "reject"}))
+            assert written == [
+                {"jsonrpc": "2.0", "id": 5, "result": {
+                    "outcome": {"outcome": "selected", "optionId": "reject"}}}]
+            assert 5 not in sv3._pending_permission
         finally:
             self._cleanup_registry(acp_mod)
 
@@ -22338,7 +22441,8 @@ class TestSupervisor:
                 asyncio.run(acp_mod._handle_permission_response(
                     conn, sid, {"requestId": 11, "optionId": "opt-0"}))
                 assert written == [
-                    {"jsonrpc": "2.0", "id": 11, "result": {"optionId": "opt-0"}}]
+                    {"jsonrpc": "2.0", "id": 11, "result": {
+                        "outcome": {"outcome": "selected", "optionId": "opt-0"}}}]
                 assert 11 not in sv3._pending_permission
 
                 asyncio.run(acp_mod._handle_permission_response(

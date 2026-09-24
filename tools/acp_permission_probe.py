@@ -333,8 +333,14 @@ class Probe:
         params = dict(params)
         params["answered_with"] = {"optionId": chosen, "kind": chosen_kind}
         self.permission_requests.append(params)
+        # The ACP spec's RequestPermissionResponse shape.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (F1): a
+        # flat `{"optionId": ...}` makes kiro-cli's tool approval throw inside
+        # a try whose catch returns reject, so --answer allow_once used to be
+        # recorded as an allow while kiro-cli actually rejected the tool.
         self._write({"jsonrpc": "2.0", "id": request_id,
-                    "result": {"optionId": chosen}})
+                    "result": {"outcome": {"outcome": "selected",
+                                           "optionId": chosen}}})
 
     def _pick_option(self, options: list[dict]) -> str | None:
         # Exact match first: a substring match here is a real trap -- "always"

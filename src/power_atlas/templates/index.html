@@ -140,9 +140,13 @@
                  onchange="saveAcpPermissionBaseAgent(this)">
         </div>
       </div>
-      <!-- G5: resumed sessions too — session/load keeps the agent the session
-           was created with (probe P2, D-12). -->
-      <div id="acpPermScopeNote" class="topbar-menu-note">Applies to sessions created after this change. Existing sessions, including ones you reopen later, keep the permissions they were created with.</div>
+      <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (user
+           decision (3), 2026-09-23): the two directions differ. On reaches only
+           sessions created afterwards, since kiro-cli binds a session's agent at
+           session/new (probe P2, D-12). Off deletes the derived agent file, and
+           kiro-cli then falls back to `vibe` for sessions bound to it (measured
+           on a closed session, inferred for a live one), so they stop asking. -->
+      <div id="acpPermScopeNote" class="topbar-menu-note">Turning it on applies to sessions created afterwards. Turning it off also stops sessions that were using it from asking.</div>
       <div id="acpPermWarn" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
 
       <div id="topbarRestartDivider" class="topbar-menu-divider"></div>

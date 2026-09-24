@@ -752,9 +752,11 @@ def _build_kas_session_params(mode_id: str = "kiro_default") -> dict[str, Any]:
     plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md § 1): the
     agent binds its mode — and therefore its permission posture — at
     ``session/new``, and on ``session/load`` a session's own persisted mode
-    wins over this field. It is not quite dead there: the vendored KAS source
-    only falls back to it when the loaded session has no persisted metadata;
-    see `load_session`'s own call site.
+    wins over this field. On ``session/load`` of a session with **no**
+    persisted metadata it is what binds (measured live 2026-09-23, Phase 7),
+    so `load_session` passes the resolved Default rather than relying on this
+    signature's default; see its call site.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7.
     """
     return {
         "_meta": {
@@ -976,6 +978,9 @@ def set_notify_hook(hook) -> None:
 # server cannot disagree about what Default means.
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1, user
 # decision 2026-09-23: the server resolves Default, not the page).
+# `load_session` asks it too, for the `modeId` it sends on `session/load`
+# (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7), but there a
+# raising hook falls back to `kiro_default` instead of refusing.
 #
 # `None` until something wires it, and `None` reads as **not in effect**:
 # Default binds `kiro_default` (today's behaviour, so this module used on its
@@ -1022,6 +1027,18 @@ async def _derived_mode_in_effect() -> bool:
     if hook is None:
         return False
     return bool(await asyncio.to_thread(hook))
+
+
+def _default_mode_binding(in_effect: bool) -> str:
+    """What the Default mode binds, given `_derived_mode_in_effect`'s answer.
+
+    The one mapping both `_handle_new` (Default path) and
+    `_Supervisor.load_session` use, so a new session and a reload of one with
+    no persisted metadata cannot disagree about what Default means.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (user
+    decision (2), 2026-09-23).
+    """
+    return DERIVED_AGENT_NAME if in_effect else DEFAULT_TASK_MODE
 
 
 def _notify(event: str, session_id: str, detail: str = "") -> None:
@@ -4917,9 +4934,12 @@ class _Supervisor:
         arrives already resolved by the caller (_handle_load, via
         _stored_session_cwd_v3).
 
-        Takes no mode and sets no permission posture: the resumed session keeps
-        whatever it bound at `session/new`. See the comment on the
-        `session/load` request below for the measurement behind that.
+        Takes no mode from the caller. It sends the mode a Default
+        `session/new` would bind right now (`_default_mode_binding`), which
+        only matters for a session kiro-cli holds no persisted metadata for; a
+        session that has it keeps whatever it bound at `session/new`. See the
+        comment on the `session/load` request below.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7.
         """
         if self.at_capacity():
             raise SessionLimit(_session_limit_message())
@@ -4962,38 +4982,46 @@ class _Supervisor:
             self._reserved -= 1
             reserved = False
             try:
-                # `_build_kas_session_params()` with no mode argument on
-                # purpose. The payload still carries the signature's default
-                # `modeId`, but **this call asserts no mode and no permission
-                # posture**, because the agent does not read the field here.
-                # Measured 2026-09-21 (probe P2, kiro-cli 2.22.x,
-                # plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
-                # § 1): the agent binds its mode at `session/new` and ignores
-                # `modeId` on `session/load` — a fresh process sending
-                # "kiro_default" here still reported the session's original
-                # bound mode and still raised that mode's permission prompts.
-                # So the default value the signature supplies is inert on this
-                # path; threading a real mode in would read as a re-assertion
-                # of posture that does not happen, which is why it is not done.
-                # A resumed session keeps whatever posture it was created with;
-                # that is a property of kiro-cli, not a PowerAtlas choice
-                # (D-12).
+                # The `modeId` sent here is what a Default `session/new` would
+                # bind right now: the derived agent while the permission
+                # profile is in effect, `kiro_default` otherwise.
+                # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7
+                # (user decision (2), 2026-09-23).
                 #
-                # Read from source 2026-09-23 (the vendored KAS bundle,
-                # kiro-cli 2.22.0 through 2.23.1): `_meta.kiro.modeId` is
-                # `optional()` in the session-meta schema, and
-                # `hydrateSessionForLoad` picks
+                # Why it matters only sometimes. `hydrateSessionForLoad` in the
+                # vendored KAS bundle (kiro-cli 2.22.0 through 2.23.1) picks
                 # `persisted ? persisted.metadata.agentMode : modeId ?? "vibe"`.
-                # So P2's "ignored" holds whenever the session has persisted
-                # metadata, as any session kiro-cli itself created does; the
-                # field is only a fallback when that metadata is missing.
-                # The key is kept rather than omitted because omitting it moves
-                # that fallback from "kiro_default" to kiro-cli's "vibe" — a
-                # posture change for a case nobody has characterized.
+                # A session with persisted metadata, as any session kiro-cli
+                # itself created has, keeps the mode it bound at `session/new`
+                # and ignores this field (probe P2, 2026-09-21, D-12). For an
+                # id with no persisted metadata, which kiro-cli loads without
+                # error, this field is what binds (measured live 2026-09-23,
+                # Phase 7: `kiro_default` bound `kiro_default`, an omitted key
+                # bound `vibe`). Sending the constant `kiro_default` therefore
+                # made such a reload ungated while the profile was on.
+                #
+                # The key is never omitted: that moves the fallback to `vibe`,
+                # which runs under the user-scope allow-all. The derived agent
+                # is never sent unconditionally either: with its file absent,
+                # kiro-cli falls back to `vibe` too.
+                #
+                # A raising hook binds `kiro_default` and the load proceeds.
+                # `_handle_new` refuses on the same failure, but a refused load
+                # strands a session that already exists, and for a session with
+                # persisted metadata the field is inert anyway.
+                try:
+                    load_mode = _default_mode_binding(
+                        await _derived_mode_in_effect())
+                except Exception:
+                    log.exception(
+                        "ACP session/load: the permission-profile check "
+                        "failed; sending modeId %r for session %s",
+                        DEFAULT_TASK_MODE, session_id)
+                    load_mode = DEFAULT_TASK_MODE
                 await self._request(
                     "session/load",
                     {"sessionId": session_id, "cwd": cwd, "mcpServers": [],
-                     **_build_kas_session_params()})
+                     **_build_kas_session_params(mode_id=load_mode)})
             except BaseException:
                 self.sessions.pop(session_id, None)
                 self._publish_live()
@@ -5933,7 +5961,7 @@ async def _handle_new(conn, payload):
                     "or another mode to start a session now."))
                 return
         else:
-            bound_mode = DERIVED_AGENT_NAME if in_effect else DEFAULT_TASK_MODE
+            bound_mode = _default_mode_binding(in_effect)
     if _supervisor.at_capacity():
         conn.send(error_frame(SessionLimit.code, _session_limit_message()))
         log.warning("ACP session/new refused: [%s] at the session cap",
@@ -6275,12 +6303,21 @@ async def _handle_permission_response(conn, session_id, payload):
     # `permission_request` frame was addressed in `_on_permission_request`.
     _emit(entry["session_id"], envelope(
         "permission_resolved", {"requestId": request_id}, entry["session_id"]))
-    # (e) The exact reply shape confirmed live in Phase 0.
+    # (e) The ACP spec's RequestPermissionResponse: `outcome` wraps the choice.
+    # Allow and deny both travel as `selected`; which one it is lives in the
+    # optionId the request itself offered.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (F1): this
+    # used to send `{"optionId": ...}` flat, and a comment here called that
+    # shape "confirmed live in Phase 0". Phase 0 only ever observed rejects.
+    # kiro-cli KAS 2.23.1 reads `result.outcome.outcome` inside a try whose
+    # catch returns reject, so the flat shape turned every Allow into a
+    # rejection ("The user rejected this tool call."). Measured live
+    # 2026-09-23: the spec shape below ran the command the flat one refused.
     try:
         await asyncio.to_thread(_supervisor._write, {
             "jsonrpc": "2.0",
             "id": request_id,
-            "result": {"optionId": option_id},
+            "result": {"outcome": {"outcome": "selected", "optionId": option_id}},
         })
     except AcpError as exc:
         log.warning(

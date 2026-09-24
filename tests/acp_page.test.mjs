@@ -11180,11 +11180,13 @@ check("settings: the permission rows say which sessions they apply to, what on a
   const rows = src.slice(from, to);
   const note = /id="acpPermScopeNote"[^>]*>([^<]*)</.exec(rows);
   assert(note, "the permission rows carry no scope note");
-  // G5 (Phase 3 review): resumed sessions keep their original agent (P2).
-  assert(/sessions created after this change/i.test(note[1]),
-    `the scope note does not say the setting applies to new sessions only: ${note[1]}`);
-  assert(/reopen/i.test(note[1]),
-    `the scope note does not cover sessions reopened later: ${note[1]}`);
+  // G5 (Phase 3 review), reworded by
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (user
+  // decision (3)): on reaches new sessions only, off reaches running ones too.
+  assert(/turning it on applies to sessions created afterwards/i.test(note[1]),
+    `the scope note does not say turning it on applies to new sessions only: ${note[1]}`);
+  assert(/turning it off also stops sessions that were using it from asking/i.test(note[1]),
+    `the scope note does not say turning it off reaches running sessions too: ${note[1]}`);
   // G6: the meaning of on and off is visible, not only a tooltip.
   const desc = /id="acpPermDesc"[^>]*>([^<]*)</.exec(rows);
   assert(desc && /On:.*ask/.test(desc[1]) && /Off:.*never ask/.test(desc[1]),
