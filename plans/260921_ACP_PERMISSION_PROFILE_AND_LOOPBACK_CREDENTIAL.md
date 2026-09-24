@@ -1,8 +1,8 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: In Progress — Phases 0-6 complete, reviewed, Green (deny floor removed from scope
-> entirely, user decision 2026-09-22, see § 9); Phase 7 (live verification + docs) next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-6 complete, Phase 7 agent half complete, all Green; the GUI
+> door check (Phase 7 criterion 679) awaits the user, then the final review  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -667,24 +667,24 @@ A unit test cannot distinguish a working permission gate from an inert one — b
 supervised kiro-cli process and is never done autonomously. The phase presents the restart and waits.
 
 **Exit criteria**:
-- [ ] With the setting **on**, a real `/acp` session raises a prompt for a shell command showing the literal command
-- [ ] The same session raises a prompt for a file write that **names the file**
-- [ ] `consent.scope` reads `agent` and `consent.source` reads `agent-profile` — matching the P4 values recorded in § 1
-- [ ] `modeId_in_effect` reads `DERIVED_AGENT_NAME`, confirming no silent coercion to `vibe`
-- [ ] With the setting **off**, no prompt is raised and no pattern is blocked — confirms **off** is a genuine no-op over today's behaviour (D-13 superseded 2026-09-22, no floor layer exists)
-- [ ] **(added, Step 5 review, 2026-09-22)** With the setting **on**: an allow-listed command (e.g. `git status`) runs silently with no prompt, **and** a capability this design intends to gate but that isn't allow-listed (e.g. `web_fetch`, or another capability from Phase 0 § 9 Step 7's list) still prompts — the live pair confirming rule-assembly completeness is what backstops `on` now that no floor exists
-- [ ] **(added, Phase 2 review, 2026-09-22)** With the setting **off**, a live `session/new` requesting `poweratlas-acp` is refused with `bad_payload` and no kiro-cli process is spawned — the server-side gate, confirmed against the running build rather than only unit-tested
-- [ ] **(added, Phase 2 review, 2026-09-22)** `session/load` of a session id with **no persisted kiro-cli metadata**, sent once with `modeId: "kiro_default"` and once without: record the bound mode in each case. The vendored KAS source (`hydrateSessionForLoad`) makes the request's `modeId` the fallback when persisted metadata is absent, so P2's "ignored on load" holds only for sessions that have metadata. Decide from the result whether PowerAtlas should send the derived agent's name, the base agent's, or nothing on load
-- [ ] Denying a prompt leaves the tool `failed` with no side effect on disk
+- [x] With the setting **on**, a real `/acp` session raises a prompt for a shell command showing the literal command
+- [x] The same session raises a prompt for a file write that **names the file**
+- [x] `consent.scope` reads `agent` and `consent.source` reads `agent-profile` — matching the P4 values recorded in § 1
+- [x] `modeId_in_effect` reads `DERIVED_AGENT_NAME`, confirming no silent coercion to `vibe`
+- [x] With the setting **off**, no prompt is raised and no pattern is blocked — confirms **off** is a genuine no-op over today's behaviour (D-13 superseded 2026-09-22, no floor layer exists)
+- [x] **(added, Step 5 review, 2026-09-22)** With the setting **on**: an allow-listed command (e.g. `git status`) runs silently with no prompt, **and** a capability this design intends to gate but that isn't allow-listed (e.g. `web_fetch`, or another capability from Phase 0 § 9 Step 7's list) still prompts — the live pair confirming rule-assembly completeness is what backstops `on` now that no floor exists
+- [x] **(added, Phase 2 review, 2026-09-22)** With the setting **off**, a live `session/new` requesting `poweratlas-acp` is refused with `bad_payload` and no kiro-cli process is spawned — the server-side gate, confirmed against the running build rather than only unit-tested
+- [x] **(added, Phase 2 review, 2026-09-22)** `session/load` of a session id with **no persisted kiro-cli metadata**, sent once with `modeId: "kiro_default"` and once without: record the bound mode in each case. The vendored KAS source (`hydrateSessionForLoad`) makes the request's `modeId` the fallback when persisted metadata is absent, so P2's "ignored on load" holds only for sessions that have metadata. Decide from the result whether PowerAtlas should send the derived agent's name, the base agent's, or nothing on load
+- [x] Denying a prompt leaves the tool `failed` with no side effect on disk
 - [ ] The UI is reachable from all three doors after a restart — *peek's webview door already confirmed live 2026-09-23 (§ 9 Phase 5 QA); tray Open, peek double-tap and Copy login link remain.* **(added, Phase 5 review)** also: rapid peek show/hide/show shows no hotkey lag and does not unhook the listener
-- [ ] **(added, Phase 5, 2026-09-23)** README's "bookmark" guidance fits the real mechanism: the login link is single-use with a 120 s TTL, so the bookmark to recommend is `http://127.0.0.1:<port>/` after signing in (the cookie lasts 90 days), not the copied link
-- [ ] `README.md` updated: the Default→agent mapping, the "tool permissions are asked, not assumed" paragraph (already stale today), the `http://127.0.0.1:<port>` bare-visit behaviour, and the new loopback credential as user-visible WebUI surface
-- [ ] `docs/KNOWLEDGE.md`'s "Still outstanding: permission prompts — the shipped surface runs `-a`" corrected (stale on two counts)
-- [ ] `memory/MEMORY.md`'s "`kiro_default` — the value PowerAtlas hardcodes as its own default" corrected, and its 8-value `_VALID_TASK_MODES` guidance noted as now 9
-- [ ] `plans/tests/260701_POWERATLAS.md`'s `how-to-reach` lines annotated that loopback routes now require the cookie
-- [ ] `plans/260919_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS.md`'s "no length clamp" line corrected
-- [ ] `plans/ROADMAP.md`: both paired items marked shipped; the `/partials/launchers` item left open
-- [ ] `~/.kiro` state matches the Phase 0 baseline, by filename and hash
+- [x] **(added, Phase 5, 2026-09-23)** README's "bookmark" guidance fits the real mechanism: the login link is single-use with a 120 s TTL, so the bookmark to recommend is `http://127.0.0.1:<port>/` after signing in (the cookie lasts 90 days), not the copied link
+- [x] `README.md` updated: the Default→agent mapping, the "tool permissions are asked, not assumed" paragraph (already stale today), the `http://127.0.0.1:<port>` bare-visit behaviour, and the new loopback credential as user-visible WebUI surface
+- [x] `docs/KNOWLEDGE.md`'s "Still outstanding: permission prompts — the shipped surface runs `-a`" corrected (stale on two counts)
+- [x] `memory/MEMORY.md`'s "`kiro_default` — the value PowerAtlas hardcodes as its own default" corrected, and its 8-value `_VALID_TASK_MODES` guidance noted as now 9
+- [x] `plans/tests/260701_POWERATLAS.md`'s `how-to-reach` lines annotated that loopback routes now require the cookie
+- [x] `plans/260919_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS.md`'s "no length clamp" line corrected
+- [x] `plans/ROADMAP.md`: both paired items marked shipped; the `/partials/launchers` item left open
+- [x] `~/.kiro` state matches the Phase 0 baseline, by filename and hash
 
 **Covers**: SC-1, SC-2, SC-3, SC-4, SC-5, SC-6, SC-7, SC-8 (live confirmation)
 
@@ -761,7 +761,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | 4 | Local secret, login code, exchange `[P:3]` | **Complete** | 10/10 exit criteria; 2 commits (`6ff4b50` feat, `3a4f3b5` review fix — atomic secret writes, guarded startup); R-19 accepted by the user 2026-09-23; QA PASS 11/11; Green |
 | 5 | Default-deny gate and the three doors | **Complete** | 12/12 exit criteria; 2 commits (`d0f9296` feat, `d4bc801` review fix); live on the restarted build; QA PASS incl. R-14 measured for the webview door; Green |
 | 6 | Retire `_ACP_TOKEN`, add `ACP_AVAILABLE` | **Complete** | 8/8 exit criteria; 2 commits (`6e2f6ec` feat, `e30c1a9` review fix — socket auth pinned, signed-out UX); live 8/8 on the restarted build; Green |
-| 7 | Live verification and documentation | Not started | Requires a user-performed restart |
+| 7 | Live verification and documentation | **In progress — user half pending** | 17/18 exit criteria; live-verified on restarted builds; found and fixed F1 (Allow was Deny), load mode, stale-card hazard (`91362a7`, `13c66b0`); docs `c5d6b95`, `7741405`, `beaffe2`. Open: the three GUI doors (criterion 679) |
 
 ## Dependency Graph
 
@@ -1692,6 +1692,110 @@ Signed in with a `pa_local` built from the on-disk local secret, the path any sa
 Not exercised live: the diagnostic's on-screen rendering in a real browser. The Chrome extension
 was not connected. It is carried to Step 9b.
 
+### Phase 7 (2026-09-23) — live verification and documentation
+
+The user authorised restarts for this `/qdev` run (2026-09-23). Every probe ran on a restarted
+real build with no user session attached. The probes were:
+
+- a live-verification sub-agent on `e30c1a9`, using 7 model calls;
+- orchestrator re-probes on `91362a7` and `13c66b0`, using 4 model calls.
+
+Each probe restored the setting to off. Each confirmed `~/.kiro` against the Phase 0 baseline
+by SHA-256 (4/4 files match) and confirmed `poweratlas-acp.md` absent. Evidence sits in the session
+scratchpad's `p7live/` (`results.md`, `logs/`).
+
+#### Live measurements (criteria 670-678, 687)
+
+**With the setting on:**
+- A Default create (`kiro_default` on the wire) binds `poweratlas-acp`, and the created `session`
+  frame carries it. The harness reports `agentMode` and `currentModeId` as `poweratlas-acp`, with
+  `mode_coerced: false`.
+- A shell prompt's title is the literal command.
+- A file-write prompt names the file in `consent.resource`; the title reads "Write File".
+- Every prompt carries `scope: agent`, `source: agent-profile` and `matchedRule {<cap>, ask}`.
+- `git status` in a scratch repo runs silently, and `web_fetch` prompts.
+- Resource loading raises no prompt at session start.
+- `./**` matches Windows absolute paths.
+
+**With the setting off:**
+- No prompt is raised and the command runs.
+- An explicit `poweratlas-acp` create is refused with `bad_payload` before any spawn. The
+  kiro-cli process list is unchanged.
+
+**Other measurements:**
+- **Deny:** a denied `fs_write` ends `failed` and leaves no file.
+- **`session/load` of an id with no persisted metadata:** `modeId: kiro_default` binds
+  `kiro_default`, an omitted mode binds `vibe`, and (after the fix below) `poweratlas-acp` binds
+  `poweratlas-acp`.
+- **Turning the setting off mid-session:** a session that had just been asking ran its next
+  command with zero prompts. This is kiro-cli's `vibe` fallback for a deleted custom agent.
+- **Not measured:** Phase 1's question (c), whether `*` stops at `&&`. The shipped overlay uses
+  exact literals, and answering would need a hand-written probe agent under `~/.kiro/agents/`.
+
+#### Found live and fixed in this phase (user decisions, 2026-09-23)
+
+The live probes surfaced three things the plan had not anticipated. The user decided each.
+
+- **F1 (High, pre-existing): Allow was delivered as Deny.** PowerAtlas answered
+  `session/request_permission` with `{"result":{"optionId":…}}`. kiro-cli's KAS 2.23.1
+  (`acp-server.js`, read by the orchestrator) reads `result.outcome.outcome` inside a try whose
+  catch returns reject. It stayed hidden while sessions were allow-all, and Phase 0 only ever
+  observed rejects. The user chose to fix it in this plan. `91362a7` sends the ACP spec shape
+  `{"outcome":{"outcome":"selected","optionId":…}}`, also in `tools/acp_permission_probe.py`. It
+  was confirmed live twice: `echo pa-allow-1` on `91362a7` and `echo pa-allow-2` on `13c66b0` each
+  ran with exit 0 after Allow.
+- **`session/load` mode.** The user chose "same rule as Default". Load now sends what a Default
+  create would bind at that moment. It falls back to `kiro_default` if the gate raises, and never
+  omits the key.
+- **F2: turning the setting off affects running sessions.** The user chose to document rather
+  than change behaviour. The settings scope note, README, `docs/KNOWLEDGE.md` and the `AGENTS.md`
+  "derived agent" entry (user-approved wording, `beaffe2`) now say so.
+
+#### Code (2026-09-23, code: `91362a7`)
+
+Phase 7's live verification found that PowerAtlas answered kiro-cli's `session/request_permission` with a flat `{"optionId": ...}` result. kiro-cli KAS 2.23.1 reads `result.outcome.outcome` inside a try whose catch returns reject, so every Allow had always been delivered as a rejection. Phase 0 only ever observed rejects, which is why the flat shape looked confirmed. `_handle_permission_response` now sends the ACP RequestPermissionResponse shape, `{"outcome": {"outcome": "selected", "optionId": ...}}`, for allow and deny alike. `tools/acp_permission_probe.py` had the same flat shape and is fixed the same way. No other PowerAtlas path writes a result for a permission request: malformed requests still get a JSON-RPC error, and the turn-end sweep, agent teardown and close write nothing. Following user decision (2), `session/load` now sends the mode a Default `session/new` would bind at that moment. A new `_default_mode_binding` helper, shared with `_handle_new`, returns the derived agent while the profile is in effect and `kiro_default` otherwise. If the gate hook raises, the load logs the failure, sends `kiro_default` and goes ahead, because refusing would strand an existing session. This closes the ungated reload measured live for session ids that kiro-cli holds no persisted metadata for. Following user decision (3), the settings scope note now says that turning the setting on applies to sessions created afterwards and that turning it off also stops sessions that were using it from asking. Tests assert the exact allow and deny reply shapes, the load `modeId` in the on, off and hook-raises cases, and the reworded copy. Three mutations reverting the fixes were each killed. The code commit is `91362a7`. One stale docstring on `_derived_mode_in_effect` and one residual are left open. The residual: a `session/cancel` that kiro-cli does not honour within `CANCEL_GRACE_SECONDS` leaves its permission request unanswered.
+
+*(Both open items above were closed by the review fix pass below.)*
+
+#### Step 5 review fix pass (2026-09-23, code: `13c66b0`)
+
+The Phase 7 review fixes close a hazard where a permission card could approve a request the user never saw. When the agent process died and a new one started, kiro-cli's request ids started again from 0 and it offered the same accept and reject option ids. A card left over from the dead agent in a still-subscribed tab could then pass every server check and approve the new agent's request with the same number. PowerAtlas now gives each pending permission request its own opaque id, generated with `secrets.token_urlsafe`. Pages receive and echo back only that id. kiro-cli's JSON-RPC id stays on the server and is used only for the reply. When the agent dies, every dropped request is announced with `permission_resolved`, so its card stops being clickable. Abandoned requests now get the ACP `cancelled` outcome, which is a deny on every kiro-cli parser. That covers requests pending when the user presses Stop and requests still pending when a turn ends, for example after a silence timeout. The writes are best effort and log failures instead of raising. A malformed or unregistered permission request with a usable id also gets the `cancelled` outcome instead of a JSON-RPC error. kiro-cli 2.23.1's turn-approval path treats an error as approval, so the old refusal would have run the tool. The diagnostic probe tool was changed the same way. Comments now record three points. First, turning the setting off between the mode check and kiro-cli's `session/new` or `session/load` is a known race; it is benign because the session then binds `vibe` under the user-scope permissions. Second, `load_session` also consults the mode gate and falls back to `kiro_default` rather than refusing. Third, "Never" (`reject_always`) now makes kiro-cli keep a session-scoped deny rule in memory. The note next to the permission setting also records the 2026-09-23 live measurement: turning the setting off stops a running session from asking. New tests cover the agent-restart case, the announcements on agent death, the cancelled answers from Stop and from the turn-end sweep, a failed write during the sweep, the refusal shape, the deny path's `permission_resolved` frame, and a page round-trip of an opaque id.
+
+**Divergences declared by the fix pass:**
+- `_detach` announces through `_registry.broadcast`, not `_emit`, because the history `_emit`
+  records into is cleared a few lines later.
+- The cancelled-answer writer catches `Exception`, because it runs inside `_handle_prompt`'s
+  `finally`.
+- The `#acpPermScopeNote` HTML comment was updated with the live measurement. The copy itself is
+  unchanged.
+- One known pre-existing gap: if an earlier step in that `finally` raises, swept entries are
+  announced but never answered `cancelled`.
+
+Tests after the fix pass: `test_web.py` 1768, the other modules 441 passed and 2 skipped, and the
+node harness 725.
+
+#### Documentation (code: `c5d6b95`, `7741405`, and `beaffe2` for `AGENTS.md`)
+
+- **README:** a new "Signing in on this machine" section; the permission setting (what on and off
+  mean, the base agent, running sessions); Default resolved server-side; and the bare-visit page.
+  The bookmark guidance is "sign in, then bookmark `http://127.0.0.1:<port>/`".
+- **`docs/KNOWLEDGE.md`:** the stale "`-a`" line is corrected, and a new "ACP permission wire
+  shapes" section and a permission-model entry are added.
+- **`memory/MEMORY.md`:** the task-mode entry is amended in dated parentheticals.
+- **The test plan:** the how-to-reach lines are annotated `(pa_local)` (31 lines name an HTTP
+  route; the other 30 are library or UI steps), and its stale `-a` claims are corrected.
+- **The archived plans:** the TURN_END and DASHBOARD_ACP_FEATURE_PARITY files carry dated notes.
+- **`plans/ROADMAP.md`:** the two shipped items were **removed**, not "marked shipped", following
+  that file's own rule that shipped items are removed. This diverges from criterion 686's wording.
+  Dangling references were repointed.
+- **`AGENTS.md` Terminology:** two user-approved updates ("login code" and "derived agent").
+
+#### Still open, needs the user
+
+Criterion 679 is still open. The tray **Open**, peek **double-tap** and **Copy login link** doors,
+and a rapid peek show-hide hotkey check, need GUI interaction. The peek webview door was measured
+live in Phase 5.
+
 ## Follow-up Work (Deferred)
 
 1. **Fail-closed on generation failure.** R-3 accepted rather than fixed: a session whose derived agent
@@ -1998,6 +2102,34 @@ tests. Findings 1 and 2 turn that into pinned tests.
 Cycle 2 skipped per user instruction ("1 qreview cycle per phase"). The fix pass's suite runs (724
 node checks, 1758 + 441 pytest), its confirmed-killed mutations, and the 8/8 live check on the
 restarted build serve as this cycle's verification.
+
+### 2026-09-23 — Implementation Review (after Phase 7 code fix `91362a7`, persona: Security auditor, Senior engineer)
+
+Implementation health: Green (all fixed). 14 findings merged across two personas (1 High,
+2 Medium, 11 Low). Both personas confirmed the new reply shape against kiro-cli's own parser. The
+Security auditor read and cited each kiro-cli parse site, and both reviewers ran the mutations.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | [Security] After an agent restart a stale permission card could approve a newer request reusing its kiro id (live only once Allow worked) | Fixed — PowerAtlas-issued opaque request ids; `_detach` announces dropped requests (`13c66b0`); re-verified live |
+| 2 | Medium | [Senior] Stop never answered pending permission requests with the spec's `cancelled` outcome | Fixed — Stop and the turn-end sweep answer `cancelled`, best-effort |
+| 3 | Medium | Both: the new "off also affects running sessions" copy was unmeasured for a live session | Fixed — measured live 2026-09-23 (true); the comment records it |
+| 4 | Low | [Security] A malformed permission request got a JSON-RPC error, which kiro-cli's turn-approval parser treats as approval | Fixed — answered `cancelled`; probe harness likewise |
+| 5 | Low | Both: the silence-timeout cancel popped pending requests without replying | Fixed — with finding 2 |
+| 6 | Low | [Security] A toggle-off between the gate check and kiro-cli's bind yields `vibe` | Fixed — documented at both call sites as benign: `vibe` is the OFF posture the user is choosing |
+| 7 | Low | Both: stale comments said the gate's failure is always refused, or Default is decided only in `_handle_new` | Fixed — four comment sites updated |
+| 8 | Low | [Senior] Binding `poweratlas-acp` on a no-metadata load was not measured | Fixed — measured live: it binds `poweratlas-acp` |
+| 9 | Low | [Senior] "Never" (`reject_always`) became meaningful for the first time, unrecorded | Fixed — commented at the reply writer |
+| 10 | Low | [Senior] The deny test did not assert the `permission_resolved` frame | Fixed — asserted |
+| 11 | Low | [Senior] The scope-note node check pins copy, not behaviour | Fixed — the behaviour is now measured live (finding 3) |
+| 12 | Low | [Security] The probe harness's no-option path still sent an error | Fixed — with finding 4 |
+| 13 | Low | [Security] The settings copy does not say running sessions fall to `vibe` specifically | Fixed — the scope-note comment, README, KNOWLEDGE and `AGENTS.md` now say so |
+| 14 | Low | [Senior] The `_derived_mode_in_effect` docstring disclosed as stale by the implementer | Fixed — with finding 7 |
+
+The three user decisions behind the fix (fix F1 in this plan, resolved mode on load, document
+off) were given in this session on 2026-09-23. Cycle 2 skipped per user instruction ("1 qreview
+cycle per phase"). The fix pass's suite runs (1768 + 441 pytest, 725 node), seven killed
+mutations, and the live Allow re-probe on `13c66b0` serve as this cycle's verification.
 
 ## Harness Improvement Opportunities
 
