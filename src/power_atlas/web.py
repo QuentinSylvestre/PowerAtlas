@@ -504,6 +504,11 @@ def _derived_agent_in_effect() -> bool:
     The setting half is what keeps a leftover `"on"` file that could not be
     deleted while the setting is off from being used.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1).
+
+    `acp`'s `load_session` consults it too, for the `modeId` a reload sends,
+    through the same Default mapping. There a raising call falls back to
+    `kiro_default` instead of refusing the load.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K5).
     """
     return _acp_permission_state(load_config())["in_effect"]
 
@@ -564,6 +569,10 @@ async def lifespan(app_instance):
         # `acp` calls this off the loop and refuses the create if it raises.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 2 review,
         # Phase 3 (G1).
+        # `acp`'s `load_session` calls it as well, for the `modeId` a reload
+        # sends; there a raise falls back to `kiro_default` rather than
+        # refusing the load.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K5).
         acp.set_mode_gate_hook(_derived_agent_in_effect)
     sweeper =acp.start_sweeper() if acp is not None else None
     try:

@@ -75,6 +75,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -1010,18 +1011,28 @@ def set_mode_gate_hook(hook) -> None:
 
 
 # The picker's Default entry, as it travels on the wire. What it *binds* is
-# decided in `_handle_new` (see `mode_gate_hook` above).
+# decided in `_handle_new` for a new session and in
+# `_Supervisor.load_session` for the `modeId` a reload sends, both through
+# `_default_mode_binding` (see `mode_gate_hook` above). On a failed check the
+# first refuses and the second falls back to this value.
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K5).
 DEFAULT_TASK_MODE: Final[str] = "kiro_default"
 
 
 async def _derived_mode_in_effect() -> bool:
     """Whether the permission profile is in effect, per `mode_gate_hook`.
 
-    `None` hook: False. **Lets a hook's exception propagate.** The caller has
-    to refuse on it, and it cannot do that with a boolean: False means "bind
-    `kiro_default`" on the Default path, which would start an ungated session
-    exactly when the check that would have gated it broke.
+    `None` hook: False. **Lets a hook's exception propagate**, so each caller
+    picks its own failure posture, which a boolean could not carry: False
+    means "bind `kiro_default`" on the Default path.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1).
+
+    `_handle_new` refuses on it, since binding `kiro_default` there would
+    start an ungated session exactly when the check that would have gated it
+    broke. `_Supervisor.load_session` also consults it, and falls back to
+    `kiro_default` instead of refusing: a refused load strands a session that
+    already exists, and for one with persisted metadata the `modeId` is inert.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K5).
     """
     hook = mode_gate_hook
     if hook is None:
@@ -2892,8 +2903,16 @@ class _Supervisor:
         # is still active reuses it. See _on_agent_subtask_open.
         self._active_fan_out_wave: dict[str, str] = {}
         # SC-9: pending `session/request_permission` requests awaiting the
-        # user's answer, keyed by the JSON-RPC request's own `id`. Value is
-        # {"session_id": ..., "options": [...]} — a plain dict, not an
+        # user's answer. Keyed by an opaque id PowerAtlas mints per request
+        # (the `requestId` pages see and echo back), not by the JSON-RPC
+        # request's own `id`, which is kept inside the entry as `kiro_id`.
+        # kiro-cli's outgoing request counter restarts at 0 in every new
+        # process and offers the same option ids, so a card built from a dead
+        # agent's request would otherwise match, and approve, a newer request
+        # the user never saw.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1).
+        # Value is {"session_id": ..., "options": [...], "kiro_id": ...} — a
+        # plain dict, not an
         # asyncio.Future, per the "SC-9 UI shape & pending-request tracking"
         # Design Decisions row: the reply is written directly and
         # synchronously from _handle_permission_response once the client
@@ -3079,6 +3098,22 @@ class _Supervisor:
         proc, self._proc = self._proc, None
         job, self._job = self._job, None
         self._ready = False
+        # Disable every card still showing a request this agent will never
+        # hear an answer to. Broadcast rather than `_emit`: the history the
+        # frame would be recorded into is cleared a few lines down, and the
+        # open tabs are what need telling. First, while the sockets are still
+        # registered to these sessions. The opaque ids already make a stale
+        # card's answer unable to match anything; this makes it unclickable.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1b).
+        for opaque_id, entry in tuple(self._pending_permission.items()):
+            try:
+                _registry.broadcast(entry["session_id"], envelope(
+                    "permission_resolved", {"requestId": opaque_id},
+                    entry["session_id"]))
+            except Exception:
+                log.exception("ACP: could not announce dropped permission "
+                              "request %r", opaque_id)
+        self._pending_permission.clear()
         self.sessions.clear()
         self._publish_live()
         self.history.clear()
@@ -3108,7 +3143,6 @@ class _Supervisor:
         self._pending_early_frames.clear()
         self._pending_early_frames_at.clear()
         self._active_fan_out_wave.clear()
-        self._pending_permission.clear()
         return proc, job
 
     @classmethod
@@ -3513,6 +3547,29 @@ class _Supervisor:
             # hanging on it and the log is the only place that could say so.
             log.warning("ACP: could not deliver the refusal of '%s' (id=%r): %s",
                         method, request_id, exc)
+
+    async def _answer_permission_cancelled(self, kiro_id, why: str) -> None:
+        """Answer one `session/request_permission` with the ACP `cancelled`
+        outcome. Best effort: logs a failure, never raises.
+
+        The only safe way to say no without a user's choice. A JSON-RPC error
+        is not: kiro-cli KAS 2.23.1's turn-approval path catches it and
+        approves (`turnApproval.requestPermission.failOpen`, whose catch
+        answers `selected`/`accept`), while `cancelled` is a deny on every
+        kiro parser. It is also what the ACP spec asks of a client that
+        abandons a request. Used for a malformed request, for the user's Stop
+        and for the turn-end sweep.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2, K3).
+        """
+        try:
+            await asyncio.to_thread(self._write, {
+                "jsonrpc": "2.0",
+                "id": kiro_id,
+                "result": {"outcome": {"outcome": "cancelled"}},
+            })
+        except Exception as exc:
+            log.warning("ACP: could not answer permission request id=%r as "
+                        "cancelled (%s): %s", kiro_id, why, exc)
 
     def _stamp_activity(self, session_id) -> None:
         """Record that the agent has just said *something* about a session.
@@ -4673,8 +4730,10 @@ class _Supervisor:
         from `_on_agent_request` rather than `_on_notification`. Emits a
         ``permission_request`` frame for the client to render as an inline
         multiple-choice question, and records the pending state
-        `_handle_permission_response` needs to answer it later: keyed by
-        the request's own ``id``, valued ``{"session_id": ..., "options": [...]}``
+        `_handle_permission_response` needs to answer it later: keyed by an
+        opaque id minted here (the frame's ``requestId``), valued
+        ``{"session_id": ..., "options": [...], "kiro_id": <the request's own id>}``
+        (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7, K1)
         — see the "SC-9 UI shape & pending-request tracking" Design Decisions
         row in plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md.
 
@@ -4687,10 +4746,11 @@ class _Supervisor:
 
         A malformed request (no ``sessionId``, no usable options, a
         ``sessionId`` that names no registered session, or a JSON-RPC ``id``
-        that is not a string or an integer) is refused via the
-        same `_refuse` path `_on_agent_request`'s own unhandled-method
-        fallback uses, rather than
-        silently swallowed or stored — nothing could ever answer a pending
+        that is not a string or an integer) is refused rather than
+        silently swallowed or stored: answered with the ``cancelled`` outcome
+        when its id is usable, and with `_refuse`'s JSON-RPC error only when
+        it is not (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+        Phase 7, K3: kiro-cli approves on an error) — nothing could ever answer a pending
         entry with no session to route to, no valid choice, or a session
         this server never registered (Step 9 final review, Follow-up Work
         item 12: near-certainly unreachable in practice — a permission
@@ -4745,11 +4805,24 @@ class _Supervisor:
                 "usable options or a string/integer id, or names an "
                 "unregistered session (id=%r, sessionId=%r) — refusing",
                 request_id, session_id)
-            _spawn_task(self._refuse(request_id, msg.get("method")))
+            # A usable id is answered `cancelled`, not with `_refuse`'s
+            # JSON-RPC error: kiro-cli's turn-approval parser treats an error
+            # as approval (see `_answer_permission_cancelled`). The error is
+            # kept only where there is no id a result could be addressed to.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K3).
+            if usable_id:
+                _spawn_task(self._answer_permission_cancelled(
+                    request_id, "malformed or unregistered request"))
+            else:
+                _spawn_task(self._refuse(request_id, msg.get("method")))
             return
-        self._pending_permission[request_id] = {
+        # The page sees only this opaque id; the kiro id stays here.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1).
+        opaque_id = secrets.token_urlsafe(16)
+        self._pending_permission[opaque_id] = {
             "session_id": session_id,
             "options": options,
+            "kiro_id": request_id,
         }
         title = _as_text(tool_call.get("title"))
         # Every level type-guarded rather than `or {}`-chained. A truthy
@@ -4765,7 +4838,7 @@ class _Supervisor:
         kiro_meta = meta.get("kiro") if isinstance(meta, dict) else None
         consent = kiro_meta.get("consent") if isinstance(kiro_meta, dict) else None
         _emit(session_id, envelope("permission_request", {
-            "requestId": request_id,
+            "requestId": opaque_id,
             "sessionId": session_id,
             # Unclamped, unlike the notification below (D-5,
             # plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
@@ -5009,6 +5082,14 @@ class _Supervisor:
                 # `_handle_new` refuses on the same failure, but a refused load
                 # strands a session that already exists, and for a session with
                 # persisted metadata the field is inert anyway.
+                #
+                # A known race, judged benign: the setting can be turned off
+                # after the hook answers True and before kiro-cli handles this
+                # `session/load`. The derived agent's file is then gone, and
+                # kiro-cli binds `vibe`, which runs under the user-scope
+                # permissions. That is exactly the posture "off" asks for, and
+                # it can only happen while the user is turning the profile off.
+                # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K4).
                 try:
                     load_mode = _default_mode_binding(
                         await _derived_mode_in_effect())
@@ -5933,6 +6014,13 @@ async def _handle_new(conn, payload):
     # says; an explicit request for it is refused unless the same predicate
     # says it is in effect. Forwarded while off, kiro-cli would silently run
     # the session as "vibe".
+    #
+    # A known race, judged benign: the setting can be turned off after the
+    # hook below answers True and before kiro-cli handles `session/new`. The
+    # derived agent's file is then gone, and kiro-cli binds `vibe`, which runs
+    # under the user-scope permissions. That is exactly the posture "off" asks
+    # for, and it can only happen while the user is turning the profile off.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K4).
     bound_mode = raw_mode
     if raw_mode is None or raw_mode in (DEFAULT_TASK_MODE, DERIVED_AGENT_NAME):
         try:
@@ -6135,16 +6223,15 @@ async def _handle_prompt(conn, session_id, payload):
         # turn-end finally is the path that actually always fires, mirroring
         # how crew_spawn_anchors cleanup (immediately above) is already done
         # here for the identical shape of problem.
-        for _req_id in [k for k, v in _supervisor._pending_permission.items()
-                        if v.get("session_id") == session_id]:
-            _supervisor._pending_permission.pop(_req_id, None)
-            # SC-9 stale-replay / cross-tab fix: a request swept away here was
-            # never answered, but it is no longer actionable either -- the
-            # reply mechanism (the pending entry) is gone, so the client
-            # needs the same "no longer clickable" signal as an answered
-            # request. Same frame type, same client-side handling.
-            _emit(session_id, envelope(
-                "permission_resolved", {"requestId": _req_id}, session_id))
+        # SC-9 stale-replay / cross-tab fix: a request swept away here was
+        # never answered, but it is no longer actionable either -- the reply
+        # mechanism (the pending entry) is gone, so the client needs the same
+        # "no longer clickable" signal as an answered request. Same frame type,
+        # same client-side handling. Popped and announced here; answered
+        # `cancelled` at the very end of this `finally` (K2), because that
+        # answer awaits a write and nothing else in here should wait on it.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
+        _swept_permissions = _pop_pending_permissions(session_id)
         _finishing_crew = _supervisor.crews.get(session_id)
         if _finishing_crew:
             _crew_changed = False
@@ -6178,6 +6265,37 @@ async def _handle_prompt(conn, session_id, payload):
         # this one call site covers them all; the consumer filters on
         # `stop_reason` rather than this module guessing which endings matter.
         _notify("turn_end", session_id, stop_reason)
+        # Last, so a slow or failing write delays nothing above. An entry
+        # still here means the turn ended without its request being answered
+        # -- most usefully a silence timeout, where kiro-cli is still blocked
+        # on it and `cancelled` is what releases it as a deny. When the agent
+        # is dead the write fails, and `_answer_permission_cancelled` logs it
+        # rather than raising out of this `finally`.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
+        for _swept in _swept_permissions:
+            await _supervisor._answer_permission_cancelled(
+                _swept["kiro_id"], "turn ended with the request unanswered")
+
+
+def _pop_pending_permissions(session_id: str) -> list[dict]:
+    """Drop every pending permission request of one session, announcing each.
+
+    Pops each entry and emits its ``permission_resolved`` frame, so every tab
+    disables the card. Returns the popped entries for the caller to answer
+    ``cancelled``; popping first means a second path (the user's Stop, then
+    the turn-end sweep it causes) finds nothing left to answer twice.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
+    """
+    dropped = []
+    for opaque_id in [k for k, v in _supervisor._pending_permission.items()
+                      if v.get("session_id") == session_id]:
+        entry = _supervisor._pending_permission.pop(opaque_id, None)
+        if entry is None:
+            continue
+        dropped.append(entry)
+        _emit(session_id, envelope(
+            "permission_resolved", {"requestId": opaque_id}, session_id))
+    return dropped
 
 
 async def _handle_steer(conn, session_id, payload):
@@ -6255,7 +6373,14 @@ async def _handle_permission_response(conn, session_id, payload):
     stored for it, not whatever `sessionId` the client claims; without
     checking `conn.session_id` against that stored value, any connected WS
     client could resolve any pending permission request for a session it
-    never subscribed to, since request ids are small sequential integers.
+    never subscribed to, were it to learn the id.
+
+    `requestId` is the opaque id `_on_permission_request` minted, never
+    kiro-cli's own JSON-RPC id, which restarts at 0 in every new agent
+    process: a card left over from a dead agent then names nothing, rather
+    than the newer request that reused its number. The reply is written with
+    the entry's stored `kiro_id`.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1).
 
     Ordering below is load-bearing (security review finding) and must not be
     reordered: (a) unknown/already-answered request refused with no side
@@ -6313,16 +6438,25 @@ async def _handle_permission_response(conn, session_id, payload):
     # catch returns reject, so the flat shape turned every Allow into a
     # rejection ("The user rejected this tool call."). Measured live
     # 2026-09-23: the spec shape below ran the command the flat one refused.
+    #
+    # One consequence is new with this shape: "Never" (`reject_always`) now
+    # means something. kiro-cli persists a session-scoped, in-memory deny rule
+    # for it, so later matching tool calls in the same session are refused
+    # without asking. Under the flat shape every answer, "Never" included, was
+    # a one-off reject.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K7).
     try:
         await asyncio.to_thread(_supervisor._write, {
             "jsonrpc": "2.0",
-            "id": request_id,
+            # kiro-cli's own id, never the opaque one the page echoed.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1).
+            "id": entry["kiro_id"],
             "result": {"outcome": {"outcome": "selected", "optionId": option_id}},
         })
     except AcpError as exc:
         log.warning(
             "ACP: could not deliver permission_response for request %r: %s",
-            request_id, exc)
+            entry["kiro_id"], exc)
         conn.send(error_frame(
             "internal_error", "Could not deliver the response.", session_id))
         # Mirror _fulfill_token's own write-failure handling: most failures
@@ -6377,6 +6511,15 @@ async def _handle_cancel(conn, session_id):
             "internal_error",
             "Cancelling the turn failed; see orchestrator.log.", session_id))
         return
+    # The ACP spec: a client that cancels a turn answers each of that
+    # session's pending permission requests with the `cancelled` outcome.
+    # Popped (and announced to every tab) before the writes, so the turn-end
+    # sweep this cancel causes finds nothing left to answer a second time.
+    # Best effort: a failed write is logged, not raised.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
+    for entry in _pop_pending_permissions(session_id):
+        await _supervisor._answer_permission_cancelled(
+            entry["kiro_id"], "the user stopped the turn")
     crew = _supervisor.crews.get(session_id)
     if crew:
         now = time.time()

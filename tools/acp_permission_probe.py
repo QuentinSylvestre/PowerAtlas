@@ -323,8 +323,13 @@ class Probe:
             params = dict(params)
             params["answered_with"] = None
             self.permission_requests.append(params)
+            # The `cancelled` outcome, not a JSON-RPC error: kiro-cli KAS
+            # 2.23.1's turn-approval parser treats an error as approval
+            # (`turnApproval.requestPermission.failOpen`), which would run the
+            # very tool this path declines to guess an answer for.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K3).
             self._write({"jsonrpc": "2.0", "id": request_id,
-                        "error": {"code": -32000, "message": "no matching option"}})
+                        "result": {"outcome": {"outcome": "cancelled"}}})
             self.errors.append(
                 f"permission request had no options at all (id={request_id})")
             return
@@ -377,7 +382,9 @@ class Probe:
             # be an allow-shaped option (e.g. kiro-cli renames "reject_once" in a
             # future version), which would silently run the exact action the
             # default --answer reject promises never runs. Treat this identically
-            # to "no options at all" -- an error reply, not a guessed allow.
+            # to "no options at all" -- a `cancelled` reply, not a guessed allow
+            # (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 K3:
+            # this used to be an error reply, which kiro-cli approves).
             self.errors.append(
                 f"no reject-kind option found among "
                 f"{[opt.get('kind') for opt in options]!r}; refusing to guess an "

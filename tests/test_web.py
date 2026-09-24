@@ -20354,7 +20354,7 @@ class TestSupervisor:
         sv3._pending_early_frames[sid] = [{"dummy": "frame"}]
         sv3._pending_early_frames_at[sid] = 123.0
         sv3._active_fan_out_wave[sid] = "wave-1"
-        sv3._pending_permission[7] = {"session_id": sid, "options": []}
+        sv3._pending_permission[7] = {"session_id": sid, "options": [], "kiro_id": 7}
 
         sv3._detach("test")
 
@@ -20370,6 +20370,38 @@ class TestSupervisor:
         # the v3 override must not have shadowed or skipped it.
         assert sv3.sessions == {}
         assert sv3.history == {}
+
+    def test_detach_announces_every_dropped_permission_request(self, monkeypatch):
+        """A card for a request the dead agent will never hear an answer to
+        must stop being clickable: `_detach` broadcasts `permission_resolved`
+        for every entry it drops, to that entry's own session and to no other.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1b)."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid_a = "sess_detachperm_a-0000-0000-000001"
+        sid_b = "sess_detachperm_b-0000-0000-000001"
+        for sid in (sid_a, sid_b):
+            sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+            sv3.history[sid] = acp_mod._History()
+        conn_a = self._conn_v3(acp_mod, sid_a)
+        conn_b = self._conn_v3(acp_mod, sid_b)
+        sv3._pending_permission["op-a1"] = {
+            "session_id": sid_a, "options": [], "kiro_id": 1}
+        sv3._pending_permission["op-a2"] = {
+            "session_id": sid_a, "options": [], "kiro_id": 2}
+        sv3._pending_permission["op-b1"] = {
+            "session_id": sid_b, "options": [], "kiro_id": 3}
+        try:
+            sv3._detach("test")
+
+            def resolved(conn):
+                return sorted(f["payload"]["requestId"] for f in _queued(conn)
+                              if f["type"] == "permission_resolved")
+            assert resolved(conn_a) == ["op-a1", "op-a2"]
+            assert resolved(conn_b) == ["op-b1"]
+            assert sv3._pending_permission == {}
+        finally:
+            self._cleanup_registry(acp_mod)
 
     # ------------------------------------------------------------------
     # SC-1: the new_session() notification-drop race and its fix — a keyed
@@ -21839,13 +21871,17 @@ class TestSupervisor:
         try:
             sv3._on_agent_request(msg)
 
-            assert sv3._pending_permission[1] == {"session_id": sid, "options": options}
-
             frames = _queued(conn)
             perm_frames = [f for f in frames if f["type"] == "permission_request"]
             assert len(perm_frames) == 1, f"got frame types {[f['type'] for f in frames]}"
             payload = perm_frames[0]["payload"]
-            assert payload["requestId"] == 1
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7
+            # (K1): the page gets an opaque id, and the store is keyed by it;
+            # kiro-cli's own id stays inside the entry.
+            opaque = payload["requestId"]
+            assert isinstance(opaque, str) and opaque != "1", opaque
+            assert sv3._pending_permission == {opaque: {
+                "session_id": sid, "options": options, "kiro_id": 1}}
             assert payload["sessionId"] == sid
             assert payload["toolCall"]["title"] == "Pick a doc"
             assert payload["options"] == options
@@ -21922,7 +21958,7 @@ class TestSupervisor:
                 "matchedRule": {"capability": "fs_write", "effect": "ask"},
             }, f"got {payload['consent']!r}"
             # The rest of the frame survives a `_meta` block alongside it.
-            assert payload["requestId"] == 11
+            assert sv3._pending_permission[payload["requestId"]]["kiro_id"] == 11
             assert payload["sessionId"] == sid
             assert payload["toolCall"] == {"title": "Write File"}
             assert payload["options"] == [
@@ -22047,7 +22083,8 @@ class TestSupervisor:
                         if f["type"] == "permission_request"]
             assert len(payloads) == 3, f"got {len(payloads)} frame(s)"
             assert all(p["consent"] == {} for p in payloads), f"got {payloads!r}"
-            assert {13, 14, 15} <= set(sv3._pending_permission)
+            assert {13, 14, 15} <= {
+                e["kiro_id"] for e in sv3._pending_permission.values()}
         finally:
             self._cleanup_registry(acp_mod)
 
@@ -22114,8 +22151,10 @@ class TestSupervisor:
             sv3._on_agent_request(self._permission_request_msg(
                 10, sid, title="t",
                 options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
-            assert [f for f in _queued(conn) if f["type"] == "permission_request"]
-            assert sv3._pending_permission[10]["session_id"] == sid
+            perm = [f for f in _queued(conn) if f["type"] == "permission_request"]
+            assert perm
+            entry = sv3._pending_permission[perm[0]["payload"]["requestId"]]
+            assert entry["session_id"] == sid and entry["kiro_id"] == 10
         finally:
             acp_mod.notify_hook = previous
             self._cleanup_registry(acp_mod)
@@ -22152,9 +22191,12 @@ class TestSupervisor:
 
     def test_on_permission_request_malformed_request_is_refused_not_stored(
             self, monkeypatch):
-        """A request missing sessionId/usable options is refused via the
-        base class's _refuse path rather than silently stored -- nothing
-        could ever answer a pending entry with no session to route to.
+        """A request missing sessionId/usable options is refused rather than
+        silently stored -- nothing could ever answer a pending entry with no
+        session to route to. (Refused with the `cancelled` outcome since
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 K3; the
+        reply's shape is covered by
+        `test_malformed_permission_request_is_answered_cancelled_not_an_error`.)
 
         Patches _spawn_task itself (rather than running the coroutine) so
         this stays a synchronous test: what is under test is that the
@@ -22289,7 +22331,7 @@ class TestSupervisor:
         sv3.history[sid] = acp_mod._History()
         conn = self._conn_v3(acp_mod, sid)
         options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
-        sv3._pending_permission[7] = {"session_id": sid, "options": options}
+        sv3._pending_permission[7] = {"session_id": sid, "options": options, "kiro_id": 7}
 
         written = []
         try:
@@ -22339,7 +22381,7 @@ class TestSupervisor:
             {"optionId": "reject", "name": "No", "kind": "reject_once"},
             {"optionId": "always-reject", "name": "Never", "kind": "reject_always"},
         ]
-        sv3._pending_permission[5] = {"session_id": sid, "options": options}
+        sv3._pending_permission[5] = {"session_id": sid, "options": options, "kiro_id": 5}
 
         written = []
         try:
@@ -22350,6 +22392,18 @@ class TestSupervisor:
                 {"jsonrpc": "2.0", "id": 5, "result": {
                     "outcome": {"outcome": "selected", "optionId": "reject"}}}]
             assert 5 not in sv3._pending_permission
+            # A deny disables the card exactly as an allow does: one
+            # `permission_resolved`, sent and recorded.
+            # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K6).
+            frames = _queued(conn)
+            assert len(frames) == 1, (
+                f"a deny sends only the permission_resolved echo, got {frames}")
+            assert frames[0]["type"] == "permission_resolved"
+            assert frames[0]["payload"] == {"requestId": 5}
+            assert frames[0]["sessionId"] == sid
+            resolved = [f for f in sv3.history[sid].events()
+                        if f["type"] == "permission_resolved"]
+            assert [f["payload"] for f in resolved] == [{"requestId": 5}]
         finally:
             self._cleanup_registry(acp_mod)
 
@@ -22375,7 +22429,7 @@ class TestSupervisor:
         # request, which is the pending entry's real owner.
         conn = self._conn_v3(acp_mod, sid_b)
         options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
-        sv3._pending_permission[9] = {"session_id": sid_a, "options": options}
+        sv3._pending_permission[9] = {"session_id": sid_a, "options": options, "kiro_id": 9}
 
         written = []
         try:
@@ -22384,7 +22438,7 @@ class TestSupervisor:
                     conn, sid_a, {"requestId": 9, "optionId": "opt-0"}))
 
             assert written == [], "a refused response must never reach the agent"
-            assert sv3._pending_permission[9] == {"session_id": sid_a, "options": options}, (
+            assert sv3._pending_permission[9] == {"session_id": sid_a, "options": options, "kiro_id": 9}, (
                 "pending state must survive a refused attempt")
             frames = _queued(conn)
             assert frames[0]["payload"]["code"] == "not_subscribed"
@@ -22401,7 +22455,7 @@ class TestSupervisor:
         sv3.history[sid] = acp_mod._History()
         conn = self._conn_v3(acp_mod, sid)
         options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
-        sv3._pending_permission[3] = {"session_id": sid, "options": options}
+        sv3._pending_permission[3] = {"session_id": sid, "options": options, "kiro_id": 3}
 
         written = []
         try:
@@ -22410,7 +22464,7 @@ class TestSupervisor:
                     conn, sid, {"requestId": 3, "optionId": "does-not-exist"}))
 
             assert written == []
-            assert sv3._pending_permission[3] == {"session_id": sid, "options": options}
+            assert sv3._pending_permission[3] == {"session_id": sid, "options": options, "kiro_id": 3}
             assert _queued(conn)[0]["payload"]["code"] == "invalid_option"
         finally:
             self._cleanup_registry(acp_mod)
@@ -22433,7 +22487,7 @@ class TestSupervisor:
             {"optionId": "opt-0", "name": "A", "kind": "allow_once"},
             {"optionId": "opt-1", "name": "B", "kind": "allow_once"},
         ]
-        sv3._pending_permission[11] = {"session_id": sid, "options": options}
+        sv3._pending_permission[11] = {"session_id": sid, "options": options, "kiro_id": 11}
 
         written = []
         try:
@@ -22493,7 +22547,7 @@ class TestSupervisor:
             {"optionId": "opt-0", "name": "A", "kind": "allow_once"},
             {"optionId": "opt-1", "name": "B", "kind": "allow_once"},
         ]
-        sv3._pending_permission[17] = {"session_id": sid, "options": options}
+        sv3._pending_permission[17] = {"session_id": sid, "options": options, "kiro_id": 17}
 
         written = []
 
@@ -22565,7 +22619,7 @@ class TestSupervisor:
         sv3.history[sid] = acp_mod._History()
         conn = self._conn_v3(acp_mod, sid)
         options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
-        sv3._pending_permission[13] = {"session_id": sid, "options": options}
+        sv3._pending_permission[13] = {"session_id": sid, "options": options, "kiro_id": 13}
 
         discarded = []
         monkeypatch.setattr(sv3, "_discard", lambda reason: discarded.append(reason))
@@ -22614,8 +22668,8 @@ class TestSupervisor:
         sv3.history[other_sid] = acp_mod._History()
         conn = self._conn_v3(acp_mod, sid)
 
-        sv3._pending_permission["p1"] = {"session_id": sid, "options": []}
-        sv3._pending_permission["p2"] = {"session_id": other_sid, "options": []}
+        sv3._pending_permission["p1"] = {"session_id": sid, "options": [], "kiro_id": "p1"}
+        sv3._pending_permission["p2"] = {"session_id": other_sid, "options": [], "kiro_id": "p2"}
 
         async def fake_prompt(self, session_id, text, images):
             return {"stopReason": "end_turn"}
@@ -22628,7 +22682,7 @@ class TestSupervisor:
                 "a pending permission request for the finishing session must "
                 "be cleared at turn-end even with no explicit close/cancel")
             assert sv3._pending_permission.get("p2") == {
-                "session_id": other_sid, "options": []}, (
+                "session_id": other_sid, "options": [], "kiro_id": "p2"}, (
                 "turn-end cleanup must not touch another session's pending request")
 
             resolved_sid = [f for f in sv3.history[sid].events()
@@ -22645,6 +22699,216 @@ class TestSupervisor:
                 "another session's still-pending request")
         finally:
             self._cleanup_registry(acp_mod)
+
+    # -- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 --
+
+    _ACCEPT_REJECT = [
+        {"optionId": "accept", "name": "Yes", "kind": "allow_once"},
+        {"optionId": "reject", "name": "No", "kind": "reject_once"},
+    ]
+
+    @staticmethod
+    def _cancelled(kiro_id):
+        return {"jsonrpc": "2.0", "id": kiro_id,
+                "result": {"outcome": {"outcome": "cancelled"}}}
+
+    def test_stale_card_from_a_dead_agent_cannot_answer_a_reused_kiro_id(
+            self, monkeypatch):
+        """K1. kiro-cli's outgoing request counter restarts at 0 in every new
+        process and offers the same `accept`/`reject` ids, and a subscribed
+        tab stays subscribed across the agent's death. A card built from the
+        dead agent's request id 1 must not be able to approve the new agent's
+        request id 1, which the user never saw. The page echoes the frame's
+        `requestId`, so that is what this answers with."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permstale00-0000-0000-0000-000001"
+
+        def register():
+            sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+            sv3.history[sid] = acp_mod._History()
+
+        def card_id(conn):
+            return [f for f in _queued(conn)
+                    if f["type"] == "permission_request"][0]["payload"]["requestId"]
+
+        register()
+        conn = self._conn_v3(acp_mod, sid)
+        written = []
+        try:
+            sv3._on_agent_request(self._permission_request_msg(
+                1, sid, title="echo old", options=self._ACCEPT_REJECT))
+            stale = card_id(conn)
+            sv3._detach("The agent died.")
+            # The reload on a new kiro-cli process: same session, and the
+            # new agent's first permission request is id 1 again.
+            register()
+            sv3._on_agent_request(self._permission_request_msg(
+                1, sid, title="rm -rf build", options=self._ACCEPT_REJECT))
+            fresh = card_id(conn)
+
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                asyncio.run(acp_mod._handle_permission_response(
+                    conn, sid, {"requestId": stale, "optionId": "accept"}))
+                assert written == [], (
+                    f"a stale card's Allow reached the agent: {written}")
+                assert [f["payload"].get("code") for f in _queued(conn)
+                        if f["type"] == "error"] == ["unknown_request"]
+                assert fresh in sv3._pending_permission, (
+                    "the new request must still be pending, unanswered")
+
+                # The fresh card still works, and replies with kiro's own id.
+                asyncio.run(acp_mod._handle_permission_response(
+                    conn, sid, {"requestId": fresh, "optionId": "reject"}))
+            assert written == [
+                {"jsonrpc": "2.0", "id": 1, "result": {
+                    "outcome": {"outcome": "selected", "optionId": "reject"}}}]
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_stop_answers_every_pending_permission_request_cancelled(
+            self, monkeypatch):
+        """K2. The ACP spec: a client that cancels a turn answers each of the
+        session's pending permission requests with the `cancelled` outcome.
+        Stop sends `session/cancel`, then answers both of this session's
+        requests, announces each to the page, and leaves another session's
+        request alone."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permstop000-0000-0000-0000-000001"
+        other = "sess_permstopoth-0000-0000-0000-000001"
+        for s in (sid, other):
+            sv3.sessions[s] = acp_mod._new_session_record("C:\\scratch")
+            sv3.history[s] = acp_mod._History()
+        sv3.inflight.add(sid)
+        conn = self._conn_v3(acp_mod, sid)
+        sv3._pending_permission["op-1"] = {
+            "session_id": sid, "options": self._ACCEPT_REJECT, "kiro_id": 4}
+        sv3._pending_permission["op-2"] = {
+            "session_id": sid, "options": self._ACCEPT_REJECT, "kiro_id": 5}
+        sv3._pending_permission["op-o"] = {
+            "session_id": other, "options": self._ACCEPT_REJECT, "kiro_id": 6}
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                asyncio.run(acp_mod._handle_cancel(conn, sid))
+            assert written[0] == {"jsonrpc": "2.0", "method": "session/cancel",
+                                  "params": {"sessionId": sid}}
+            assert sorted(written[1:], key=lambda o: o["id"]) == [
+                self._cancelled(4), self._cancelled(5)]
+            assert set(sv3._pending_permission) == {"op-o"}
+            assert sorted(f["payload"]["requestId"] for f in _queued(conn)
+                          if f["type"] == "permission_resolved") == ["op-1", "op-2"]
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_turn_end_sweep_answers_swept_requests_cancelled(self, monkeypatch):
+        """K2. A request still pending when the turn ends -- most usefully a
+        silence timeout, where kiro-cli is still blocked on it -- is answered
+        `cancelled`, which releases it as a deny. Only the finishing
+        session's."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permsweep00-0000-0000-0000-000001"
+        other = "sess_permsweepot-0000-0000-0000-000001"
+        for s in (sid, other):
+            sv3.sessions[s] = acp_mod._new_session_record("C:\\scratch")
+            sv3.history[s] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        sv3._pending_permission["op-1"] = {
+            "session_id": sid, "options": [], "kiro_id": 21}
+        sv3._pending_permission["op-o"] = {
+            "session_id": other, "options": [], "kiro_id": 22}
+
+        async def timed_out(self, session_id, text, images):
+            raise acp_mod.AgentTimeout("silence")
+
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "prompt", timed_out), \
+                    patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hello"}))
+            assert written == [self._cancelled(21)]
+            assert set(sv3._pending_permission) == {"op-o"}
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_turn_end_sweep_contains_a_failed_cancelled_write(self, monkeypatch):
+        """K2. The sweep runs inside `_handle_prompt`'s `finally`; a write that
+        fails there (the agent is dead, or anything else) is logged, never
+        raised, and the turn still ends normally for the page."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permsweepfl-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        sv3._pending_permission["op-1"] = {
+            "session_id": sid, "options": [], "kiro_id": 31}
+
+        async def fake_prompt(self, session_id, text, images):
+            return {"stopReason": "end_turn"}
+
+        attempts = []
+
+        def failing_write(self, obj):
+            attempts.append(obj)
+            raise RuntimeError("stdin exploded")
+
+        try:
+            with patch.object(acp_mod._Supervisor, "prompt", fake_prompt), \
+                    patch.object(acp_mod._Supervisor, "_write", failing_write):
+                asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hello"}))
+            assert attempts == [self._cancelled(31)], (
+                "the sweep must have attempted the cancelled answer")
+            assert sv3._pending_permission == {}
+            frames = _queued(conn)
+            assert [f["payload"]["requestId"] for f in frames
+                    if f["type"] == "permission_resolved"] == ["op-1"]
+            assert any(f["type"] == "meta" and f["payload"].get("turn") == "end"
+                       for f in frames)
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_malformed_permission_request_is_answered_cancelled_not_an_error(
+            self, monkeypatch):
+        """K3. kiro-cli KAS 2.23.1's turn-approval parser treats a JSON-RPC
+        error reply as approval (`turnApproval.requestPermission.failOpen`), so
+        a request refused with one would run its tool. With a usable id the
+        refusal is the `cancelled` outcome; the error remains only for an id a
+        result could not be addressed to."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        spawned = []
+        monkeypatch.setattr(acp_mod, "_spawn_task", spawned.append)
+        # Unregistered session, and no usable options: both refused.
+        sv3._on_agent_request(self._permission_request_msg(
+            41, "sess_unregistered0-0000-000002", options=self._ACCEPT_REJECT))
+        sv3._on_agent_request({
+            "jsonrpc": "2.0", "id": "k-42", "method": "session/request_permission",
+            "params": {"sessionId": None, "options": []}})
+        # No usable id: nothing but the error can be sent.
+        sv3._on_agent_request({
+            "jsonrpc": "2.0", "id": None, "method": "session/request_permission",
+            "params": {"sessionId": None, "options": []}})
+        assert sv3._pending_permission == {}
+        written = []
+
+        async def run_all():
+            for coro in spawned:
+                await coro
+
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(run_all())
+        assert written[:2] == [self._cancelled(41), self._cancelled("k-42")]
+        assert len(written) == 3 and "error" in written[2] and "result" not in written[2]
+        assert written[2]["id"] is None
 
     # ------------------------------------------------------------------
     # SC-8 (Phase 7): available_commands_update excludes custom-agent

@@ -10617,6 +10617,38 @@ check("a permission_resolved frame with no matching row is a silent no-op", (tpl
   assertEqual(rows.length, 0, "no permission row should exist or be created by this frame");
 });
 
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1): the
+// server now sends an opaque `secrets.token_urlsafe(16)` string as requestId,
+// not kiro-cli's small integer. The page must echo it verbatim and match its
+// permission_resolved on it; the tests above only ever used numbers.
+check("an opaque string requestId is echoed verbatim and resolves its own row", (tpl) => {
+  const { page, live } = connected(tpl);
+  const opaque = "Zq-8_x3nV0aK-pL_9wQe2A";
+  page.deliver({
+    type: "permission_request", sessionId: live,
+    payload: {
+      requestId: opaque, sessionId: live,
+      toolCall: { title: "echo hi" },
+      options: [{ optionId: "accept", name: "Yes", kind: "allow_once" },
+                { optionId: "reject", name: "No", kind: "reject_once" }],
+    },
+  });
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-permission");
+  const row = rows[rows.length - 1];
+  const buttons = row.querySelectorAll(".acp-permission-option");
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: "other-id" } });
+  assertEqual(buttons[0].disabled, false,
+    "a permission_resolved for a different opaque id must leave this row clickable");
+  buttons[1].dispatch("click");
+  const sent = page.sentOf("permission_response");
+  assertEqual(sent.length, 1, "the click sends exactly one permission_response");
+  assertEqual(sent[0].payload.requestId, opaque,
+    "the opaque requestId must be echoed back exactly, as the same string");
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: opaque } });
+  assert(row.classList.contains("acp-permission-resolved"),
+    "a permission_resolved carrying the opaque id must mark its row resolved");
+});
+
 check("permission_request immediately followed by its own permission_resolved replays " +
       "into a resolved row, not fresh-and-clickable (review fix)", (tpl) => {
   const { page, live } = connected(tpl);
