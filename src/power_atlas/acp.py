@@ -6061,7 +6061,7 @@ def _handle_subscribe(conn, session_id):
     skills = meta.get("skills")
     if skills is not None:
         conn.send(envelope("skills", {"skills": skills}, session_id))
-    mcp_servers = meta.get("mcpServers")  # See also: commands/skills resend above — same pattern.
+    mcp_servers = meta.get("mcpServers")  # See also: commands/skills resend above — same SC-1 broadcast-only race window; must appear in both _handle_subscribe and _handle_new.
     if mcp_servers is not None:
         conn.send(envelope("mcp_servers", {"servers": mcp_servers}, session_id))
 
@@ -6306,7 +6306,7 @@ async def _handle_new(conn, payload):
         skills = meta.get("skills")
         if skills is not None:
             conn.send(envelope("skills", {"skills": skills}, session_id))
-        mcp_servers = meta.get("mcpServers")  # See also: commands/skills resend above — same pattern.
+        mcp_servers = meta.get("mcpServers")  # See also: commands/skills resend above — same SC-1 broadcast-only race window; must appear in both _handle_subscribe and _handle_new.
         if mcp_servers is not None:
             conn.send(envelope("mcp_servers", {"servers": mcp_servers}, session_id))
 

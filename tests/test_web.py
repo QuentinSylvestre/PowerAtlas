@@ -26851,40 +26851,44 @@ class TestAcpMcpStatusNotification:
             self._cleanup_registry(acp_mod)
 
     def test_handle_new_resends_mcp_servers_when_set(self, monkeypatch):
-        """_handle_new sends an `mcp_servers` frame when meta['mcpServers'] is set."""
+        """_handle_new sends an `mcp_servers` frame when meta['mcpServers'] is set.
+
+        Exercises the production path via asyncio.run(_handle_new(...)) with
+        mocked new_session and _derived_mode_in_effect.
+        """
         from power_atlas import acp as acp_mod
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
         sv3, sid = self._sv3_with_session(monkeypatch)
         servers = [{"name": "github", "status": "failed", "failedAuthorization": True,
                     "authorizationUrl": "https://github.com/oauth"}]
         sv3.sessions[sid]["mcpServers"] = servers
 
-        conn = self._conn_v3(acp_mod, sid)
-        acp_mod._registry.detach(conn)
-        _queued(conn)
+        # conn must be in _registry.connections (not attached — _handle_new attaches it)
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        _queued(conn)  # drain
 
-        # Simulate the tail of _handle_new: the meta resend block runs after
-        # the history replay. Call it directly by checking what _handle_new does
-        # after session registration: sends "session" frame, history, then
-        # commands/skills/mcpServers. We test only the mcpServers part via
-        # the module-level code path by calling the resend block directly.
-        if sv3.sessions.get(sid) is not None:
-            meta = sv3.sessions[sid]
-            _registry = acp_mod._registry
-            _registry.attach(conn, sid)
-            mcp_servers = meta.get("mcpServers")
-            if mcp_servers is not None:
-                conn.send(acp_mod.envelope("mcp_servers",
-                                           {"servers": mcp_servers}, sid))
+        async def run_handle_new():
+            with patch.object(acp_mod, "_derived_mode_in_effect",
+                              AsyncMock(return_value=False)), \
+                 patch.object(acp_mod, "_resolve_session_cwd",
+                              return_value="C:\\scratch"), \
+                 patch.object(sv3, "new_session",
+                              AsyncMock(return_value={"sessionId": sid, "cwd": "C:\\scratch"})):
+                await acp_mod._handle_new(conn, {"cwd": "C:\\scratch"})
 
         try:
+            asyncio.run(run_handle_new())
             frames = _queued(conn)
             mcp_frames = [f for f in frames if f["type"] == "mcp_servers"]
-            assert len(mcp_frames) == 1
+            assert len(mcp_frames) == 1, \
+                f"Expected 1 mcp_servers frame, got {len(mcp_frames)}"
             assert mcp_frames[0]["payload"]["servers"] == servers
         finally:
             self._cleanup_registry(acp_mod)
 
 
 def _noop_death(self, proc):
-    """No-op replacement for _on_agent_death in watchdog tests."""
     """No-op replacement for _on_agent_death in watchdog tests."""
