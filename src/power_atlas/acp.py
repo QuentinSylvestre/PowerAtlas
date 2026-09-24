@@ -6061,6 +6061,9 @@ def _handle_subscribe(conn, session_id):
     skills = meta.get("skills")
     if skills is not None:
         conn.send(envelope("skills", {"skills": skills}, session_id))
+    mcp_servers = meta.get("mcpServers")  # See also: commands/skills resend above — same pattern.
+    if mcp_servers is not None:
+        conn.send(envelope("mcp_servers", {"servers": mcp_servers}, session_id))
 
 
 async def _handle_load(conn, session_id):
@@ -6303,6 +6306,9 @@ async def _handle_new(conn, payload):
         skills = meta.get("skills")
         if skills is not None:
             conn.send(envelope("skills", {"skills": skills}, session_id))
+        mcp_servers = meta.get("mcpServers")  # See also: commands/skills resend above — same pattern.
+        if mcp_servers is not None:
+            conn.send(envelope("mcp_servers", {"servers": mcp_servers}, session_id))
 
 
 async def _handle_prompt(conn, session_id, payload):
