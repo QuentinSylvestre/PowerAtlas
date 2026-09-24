@@ -318,13 +318,13 @@ if method == "_kiro/mcp/status":
 Note: `MAX_COMMANDS_COUNT = 200` (`acp.py:224`) is the existing cap used for commands/skills; reuse here to bound the stored list.
 
 **Exit criteria**:
-- [ ] `"mcp_servers"` present in `SERVER_TYPES`
-- [ ] `_kiro/mcp/status` handler placed before the `log.info` fallthrough
-- [ ] `meta["mcpServers"]` set on notification; replace-all on repeated notifications
-- [ ] `_registry.broadcast` fires with `"mcp_servers"` frame type
-- [ ] Handler returns without falling through to `log.info` — no duplicate log line for `_kiro/mcp/status`
-- [ ] Notification arriving before session registration: SC-1 buffer holds it and replays after registration (verify via existing SC-1 buffer tests, no new code needed)
-- [ ] `pytest tests/test_web.py -k "mcp_status or mcp_servers" --timeout=60` passes with tests covering: (a) notification stored in `meta["mcpServers"]`; (b) broadcast frame type is `"mcp_servers"`; (c) `servers` list capped at `MAX_COMMANDS_COUNT`; (d) replace-all on second notification
+- [x] `"mcp_servers"` present in `SERVER_TYPES`
+- [x] `_kiro/mcp/status` handler placed before the `log.info` fallthrough
+- [x] `meta["mcpServers"]` set on notification; replace-all on repeated notifications
+- [x] `_registry.broadcast` fires with `"mcp_servers"` frame type
+- [x] Handler returns without falling through to `log.info` — no duplicate log line for `_kiro/mcp/status`
+- [x] Notification arriving before session registration: SC-1 buffer holds it and replays after registration (verify via existing SC-1 buffer tests, no new code needed)
+- [x] `pytest tests/test_web.py -k "mcp_status or mcp_servers" --timeout=60` passes with tests covering: (a) notification stored in `meta["mcpServers"]`; (b) broadcast frame type is `"mcp_servers"`; (c) `servers` list capped at `MAX_COMMANDS_COUNT`; (d) replace-all on second notification
 
 ### Phase 4: MCP replay paths [QA]
 
@@ -732,6 +732,10 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 - Three pre-existing test fixtures (`TestAcpLifespanWiring`, `TestGenerationRunsAtStartup._fake_acp`, `_run_lifespan_capturing_gate`) needed `start_watchdog` stub added — they broke because lifespan now calls `acp.start_watchdog()`. Added stubs.
 - `test_watchdog_fires_on_crashed_process`: tracking stub clears `_proc` after first call to simulate `_on_agent_death/_detach` behavior and prevent repeated fires across ticks.
 
+### Phase 3 (2026-09-24, code: a62ce27, fix: 21d13dc)
+
+No divergences from plan.
+
 *Remaining phases reserved — filled during /qdev execution.*
 
 ## Follow-up Work (Deferred)
@@ -743,6 +747,20 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 3. **`_kiro/governance/state`, `_kiro/tools/didChange`, `_kiro/powers/items_changed` notification handling.** Three new notification types observed during Phase 3 probing; params shapes unknown; currently logged as INFO. Investigate in a future session. Source: qexplore Discovery.
 
 ## Review Log
+
+### 2026-09-24 — Phase 3 review (full effort, 4 personas)
+
+Senior engineer, Security auditor, Reliability engineer, Maintainability reviewer. 1 auto-fix cycle.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F3-1 | Medium | `list(params.get("servers") or [])` unsafe for non-list truthy values (dict→keys, str→chars, int→TypeError) | Fixed — `isinstance(_raw, list)` guard; empty list fallback (commit 21d13dc) |
+| F3-2 | Low | `record.message` unreliable in caplog assertion — only set after `Formatter.format()` | Fixed — replaced with `record.getMessage()` (commit 21d13dc) |
+| F3-3 | Low | No dedicated SC-1 buffer test for `_kiro/mcp/status` | Fixed — added `test_mcp_status_sc1_buffer_holds_and_replays` (commit 21d13dc) |
+| F3-4 | Low | Unknown-session drop path silent after Phase 3 (no log trace) | Fixed — added `log.debug` for dropped/unknown-session case (commit 21d13dc) |
+| F3-5 | Low | `envelope()` evaluated after meta write — partial state on unlikely error | Fixed — compute `frame = envelope(...)` before meta write (commit 21d13dc) |
+
+Health: **Green** (1 Medium fixed, 4 Low fixed). 1809 tests passing.
 
 ### 2026-09-24 — Phase 2 review (full effort, 4 personas)
 
