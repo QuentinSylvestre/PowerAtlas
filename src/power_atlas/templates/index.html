@@ -188,16 +188,10 @@
 </div>
 
 <div class="search-area">
-  <!-- Provider-first, search-reveal: chips lead (the control touched more
-       once mid-workflow) and the search box is a compact pill that only
-       claims more of the row on focus, rather than search always owning
-       the row's full width up front. -->
+  <!-- Provider chips only. The workspace search moved into the Workspaces
+       panel header (#wsSearch). initProviderFilter hides this whole row
+       below 2 providers so it does not leave an empty padded band. -->
   <div class="provider-filter" id="providerFilter" role="tablist"></div>
-  <div class="search-area-spacer"></div>
-  <div class="command-bar">
-    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-    <input type="search" name="q" placeholder="Search..." aria-label="Search workspaces">
-  </div>
 </div>
 
 <main class="panels-container" id="panelsContainer">
@@ -255,8 +249,33 @@
          already lists, so its count is visible there without a second,
          redundant indicator. -->
     <div class="section-label">
-      <span>Workspaces</span>
-      <div class="ws-header-spacer"></div>
+      <span class="ws-header-title">Workspaces</span>
+      <!-- Search-reveal: a magnifier button beside Filters that grows into a
+           bar across all free header space when clicked (or on `/`). The
+           wrap itself is the row's spacer -- always flex:1 -- so the pill
+           animates from 32px to 100% of it instead of jumping between flex
+           bases. Collapses on blur while empty; stays open with the clear
+           button while a query is active. State machine: wsSearch* below. -->
+      <div class="ws-search-wrap">
+        <div class="ws-search" id="wsSearch">
+          <button class="ws-icon-btn ws-search-toggle" id="wsSearchBtn" type="button"
+                  aria-expanded="false" aria-controls="wsSearchInput"
+                  aria-label="Search workspaces" title="Search (/)">
+            <svg class="ws-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          </button>
+          <input type="search" id="wsSearchInput" name="q" placeholder="Search workspaces"
+                 aria-label="Search workspaces" autocomplete="off" spellcheck="false"
+                 tabindex="-1">
+          <button class="ws-search-clear" id="wsSearchClear" type="button" hidden
+                  aria-label="Clear search" title="Clear search">
+            <svg class="ws-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+      </div>
       <div class="ws-icon-group">
         <div class="ws-filter-wrap">
           <button class="ws-icon-btn" id="wsFilterBtn" type="button"
@@ -4445,8 +4464,7 @@ document.addEventListener('DOMContentLoaded',function(){
   fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});
   initProviderFilter();initWorkspaceFilters();
   dashRailInit();
-  var searchInput=document.querySelector('input[name="q"]');
-  if(searchInput){searchInput.addEventListener('input',debounce(function(e){dashRailSetFilter(e.target.value)},150))}
+  wsSearchInit();
   document.addEventListener('visibilitychange',function(){if(document.visibilityState!=='hidden')refreshSettings()});
   (function pollWarmup(){var t=setInterval(function(){fetch('/api/warmup-status').then(function(r){return r.json()}).then(function(d){if(d.ready){clearInterval(t);dashRailReload()}}).catch(function(){clearInterval(t)})},2000)})();
   dashPickerInitTaskMode();
@@ -4469,7 +4487,7 @@ window._availableProviders=[];
 // or the endpoint's own colored-glyph fallback) as the rail's quick-launch
 // buttons and resume icons -- one icon convention across the whole page
 // rather than reinventing it here as a second, text-only style.
-function initProviderFilter(){fetch('/api/available-providers').then(function(r){return r.json()}).then(function(providers){window._availableProviders=providers||[];var container=document.getElementById('providerFilter');if(!providers||providers.length<2){container.style.display='none';return}var html='<button class="provider-filter-btn active" data-provider="all" role="tab" aria-selected="true" onclick="switchProvider(\'all\')">All</button>';providers.forEach(function(p){html+='<button class="provider-filter-btn" data-provider="'+p.name+'" role="tab" aria-selected="false" onclick="switchProvider(\''+p.name+'\')"><img class="provider-filter-icon" alt="" src="/api/launcher-icon/provider--'+encodeURIComponent(p.name)+'" onerror="this.remove()">'+p.display+'</button>'});container.innerHTML=html;container.addEventListener('keydown',function(e){if(e.key==='ArrowRight'||e.key==='ArrowLeft'){var btns=Array.from(this.querySelectorAll('.provider-filter-btn'));var idx=btns.indexOf(document.activeElement);if(idx<0)return;var next=e.key==='ArrowRight'?(idx+1)%btns.length:(idx-1+btns.length)%btns.length;btns[next].focus();e.preventDefault()}})})}
+function initProviderFilter(){fetch('/api/available-providers').then(function(r){return r.json()}).then(function(providers){window._availableProviders=providers||[];var container=document.getElementById('providerFilter');if(!providers||providers.length<2){container.style.display='none';if(container.parentNode)container.parentNode.hidden=true;return}var html='<button class="provider-filter-btn active" data-provider="all" role="tab" aria-selected="true" onclick="switchProvider(\'all\')">All</button>';providers.forEach(function(p){html+='<button class="provider-filter-btn" data-provider="'+p.name+'" role="tab" aria-selected="false" onclick="switchProvider(\''+p.name+'\')"><img class="provider-filter-icon" alt="" src="/api/launcher-icon/provider--'+encodeURIComponent(p.name)+'" onerror="this.remove()">'+p.display+'</button>'});container.innerHTML=html;container.addEventListener('keydown',function(e){if(e.key==='ArrowRight'||e.key==='ArrowLeft'){var btns=Array.from(this.querySelectorAll('.provider-filter-btn'));var idx=btns.indexOf(document.activeElement);if(idx<0)return;var next=e.key==='ArrowRight'?(idx+1)%btns.length:(idx-1+btns.length)%btns.length;btns[next].focus();e.preventDefault()}})})}
 function switchProvider(provider){window._activeProvider=provider;document.querySelectorAll('.provider-filter-btn').forEach(function(b){b.classList.toggle('active',b.dataset.provider===provider);b.setAttribute('aria-selected',b.dataset.provider===provider?'true':'false')});dashRailReload()}
 // ---- The workspaces rail (dashboard/ACP-merge Phase 4) --------------------
 //
@@ -4710,6 +4728,84 @@ function dashRailSetFilter(text){
   } else {
     dashRenderRail();
   }
+}
+
+// ---- header search (search-reveal) ---------------------------------------
+//
+// A magnifier button in the Workspaces header that grows into a bar across
+// the free header space. States: closed (button only), open+empty (collapses
+// again when focus leaves the widget), open+query (stays open with a clear X
+// so an active filter stays visible). Only one of toggle/input is in the tab
+// order at a time, so Shift+Tab out of the open field leaves the widget
+// instead of landing on the now-decorative toggle. `/` opens it from anywhere
+// that is not already a text field -- the composer keeps its own `/` palette.
+function wsSearchInit(){
+  var box = document.getElementById('wsSearch');
+  var btn = document.getElementById('wsSearchBtn');
+  var input = document.getElementById('wsSearchInput');
+  var clear = document.getElementById('wsSearchClear');
+  if (!box || !btn || !input || !clear) return;
+  var row = box.closest('.section-label');
+
+  function setOpen(open){
+    box.classList.toggle('is-open', open);
+    if (row) row.classList.toggle('ws-search-open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.tabIndex = open ? -1 : 0;
+    input.tabIndex = open ? 0 : -1;
+  }
+  function syncQuery(){
+    var has = input.value.trim() !== '';
+    clear.hidden = !has;
+    box.classList.toggle('has-query', has);
+    return has;
+  }
+  function open(){
+    setOpen(true);
+    input.focus({preventScroll: true});
+    input.select();
+  }
+  function clearAll(){
+    input.value = '';
+    syncQuery();
+    // Immediate, not debounced: the pending debounced call (if any) reads
+    // input.value when it fires, sees '' and is a no-op for project mode.
+    dashRailSetFilter('');
+  }
+
+  btn.addEventListener('click', open);
+  // While open the toggle is the field's leading icon: clicking it must not
+  // steal focus from the input (which would read as a blur and collapse it).
+  btn.addEventListener('mousedown', function(e){ if (box.classList.contains('is-open')) e.preventDefault(); });
+  clear.addEventListener('mousedown', function(e){ e.preventDefault(); });
+  clear.addEventListener('click', function(){
+    clearAll();
+    setOpen(false);
+    btn.focus({preventScroll: true});
+  });
+  input.addEventListener('input', debounce(function(){ dashRailSetFilter(input.value); }, 150));
+  input.addEventListener('input', syncQuery);
+  input.addEventListener('keydown', function(e){
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    // Two-stage: first Escape clears the query, second collapses the bar.
+    if (syncQuery()) { clearAll(); return; }
+    setOpen(false);
+    btn.focus({preventScroll: true});
+  });
+  box.addEventListener('focusout', function(e){
+    if (box.contains(e.relatedTarget)) return;
+    if (!syncQuery()) setOpen(false);
+  });
+
+  document.addEventListener('keydown', function(e){
+    if (e.key !== '/' || e.ctrlKey || e.altKey || e.metaKey || e.defaultPrevented) return;
+    var t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    if (document.querySelector('dialog[open]')) return;
+    e.preventDefault();
+    open();
+  });
 }
 
 // ---- mode + persisted preferences ---------------------------------------
