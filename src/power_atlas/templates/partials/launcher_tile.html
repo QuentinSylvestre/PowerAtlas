@@ -11,7 +11,13 @@
   <div class="launcher-tooltip">
     <div class="launcher-tooltip-row"><strong>Command:</strong> {{ launcher.command }}{% if launcher.custom_args %} {{ launcher.custom_args }}{% endif %}</div>
     {% if launcher.cwd %}<div class="launcher-tooltip-row"><strong>Cwd:</strong> {{ launcher.cwd }}</div>{% endif %}
-    {% if launcher.env %}<div class="launcher-tooltip-row"><strong>Env:</strong> {{ launcher.env | tojson }}</div>{% endif %}
+    {# One row per variable, each ellipsized by CSS: a single tojson line ran
+       a long PYTHONPATH clean across the screen. Capped at 6 rows. #}
+    {% if launcher.env is mapping and launcher.env %}
+    <div class="launcher-tooltip-row"><strong>Env:</strong></div>
+    {% for k, v in launcher.env.items() %}{% if loop.index <= 6 %}<div class="launcher-tooltip-row launcher-tooltip-env">{{ k }}={{ v }}</div>{% endif %}{% endfor %}
+    {% if launcher.env | length > 6 %}<div class="launcher-tooltip-row launcher-tooltip-env">+{{ launcher.env | length - 6 }} more</div>{% endif %}
+    {% elif launcher.env %}<div class="launcher-tooltip-row"><strong>Env:</strong> {{ launcher.env | tojson }}</div>{% endif %}
     <div class="launcher-tooltip-row"><strong>Terminal:</strong> {{ 'yes' if launcher.terminal != false else 'no' }}</div>
     {% if launcher.use_selected_workspaces %}<div class="launcher-tooltip-row"><strong>Selection-aware:</strong> yes</div>{% endif %}
   </div>

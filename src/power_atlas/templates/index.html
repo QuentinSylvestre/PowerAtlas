@@ -440,10 +440,19 @@
            spawned it or whether anything was sent. -->
       <button class="acp-btn acp-danger dash-close-btn" id="dashCloseSession" type="button" hidden>Close session</button>
     </div>
+    <!-- Metadata strip for the session on screen: title, workspace, when
+         it was last updated, live status. Outside #dashTranscript on
+         purpose -- that pane is wiped on every load. Filled from the rail's
+         own session object by dashSessionMetaRender(); hidden when nothing
+         is open. The session id is not repeated here, #dashSid shows it. -->
+    <div class="dash-session-meta" id="dashSessionMeta" hidden></div>
     <div class="acp-transcript-wrap" id="dashTranscriptWrap">
       <div class="acp-transcript" id="dashTranscript" role="log" aria-live="polite"
            aria-label="Conversation">
-        <div class="acp-system-msg">Select a session to view its transcript.</div>
+        <!-- Exactly one child with className "acp-system-msg": the signed-out
+             note logic checks that string for equality, so the empty-state
+             variant is marked with data-empty rather than a second class. -->
+        <div class="acp-system-msg" data-empty><svg class="dash-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/><path d="M8.5 10.5h7M8.5 13.5h4.5"/></svg><span>Select a session to view its transcript.</span><span class="dash-empty-hint">or press <kbd>/</kbd> to search workspaces</span></div>
       </div>
       <div class="acp-prompt-nav" id="dashPromptNav" hidden>
         <button class="acp-btn acp-prompt-nav-btn" id="dashPromptUp" type="button"
@@ -599,7 +608,7 @@
 <div class="action-bar" id="actionBar">
   <span class="selection-info"><strong id="selCount">0</strong> workspaces selected</span>
   <div class="topbar-spacer"></div>
-  <button class="action-btn secondary" onclick="document.querySelectorAll('.acp-rail-group.selected').forEach(function(r){r.classList.remove('selected')});updateActionBar()">Clear</button>
+  <button class="action-btn secondary" onclick="dashRailClearSelection()">Clear</button>
 </div>
 <script>
 function markPortDirty() {
@@ -672,7 +681,7 @@ function _buildWorkspaceQs(){var qs='provider='+encodeURIComponent(window._activ
 // (openWorkspaceSettings), both otherwise unchanged.
 var _lastClicked=new WeakMap();
 function handleItemClick(item,event,selector){var container=item.parentElement;if(!container)return;if(event.shiftKey){var last=_lastClicked.get(container);if(last&&last!==item&&container.contains(last)){var items=Array.from(container.querySelectorAll(selector));var idxA=items.indexOf(last);var idxB=items.indexOf(item);if(idxA!==-1&&idxB!==-1){var start=Math.min(idxA,idxB);var end=Math.max(idxA,idxB);for(var i=start;i<=end;i++){items[i].classList.add('selected')}}updateActionBar();return}}_lastClicked.set(container,item);item.classList.toggle('selected');updateActionBar()}
-function updateActionBar(){var workspaceCount=document.querySelectorAll('.acp-rail-group.selected').length;document.getElementById('selCount').textContent=workspaceCount;document.getElementById('actionBar').classList.toggle('visible',workspaceCount>0);updateLauncherBadges()}
+function updateActionBar(){var workspaceCount=document.querySelectorAll('.acp-rail-group.selected').length;document.getElementById('selCount').textContent=workspaceCount;document.getElementById('actionBar').classList.toggle('visible',workspaceCount>0);var railGroups=document.getElementById('dashRailGroups');if(railGroups)railGroups.classList.toggle('has-selection',workspaceCount>0);updateLauncherBadges()}
 
 // ---- panel widths (Launchers | Workspaces | Sessions, panel resize) -----
 //
@@ -934,13 +943,77 @@ promptDownBtn.addEventListener('click', function() {
 // in-flight fetch for a row the user already clicked away from cannot land
 // after a newer one and show the wrong conversation.
 var _viewingSid = null;
-function openSessionTranscript(row){
+// Fills (or, given no session, hides) the metadata strip above the
+// transcript. Everything here comes from the rail's own session payload --
+// no extra fetch; the model and message count are not in that payload.
+var DASH_META_STATUS = {
+  'status-thinking': 'Working', 'status-waiting': 'Waiting for you',
+  'status-errored': 'Errored', 'status-idle': 'Idle', 'status-live': 'Running'
+};
+function dashSessionMetaRender(session, workspace){
+  var el = document.getElementById('dashSessionMeta');
+  if (!el) return;
+  el.textContent = '';
+  if (!session) { el.hidden = true; return; }
+  var top = document.createElement('div');
+  top.className = 'dash-session-meta-title';
+  if (session.provider) {
+    var icon = document.createElement('img');
+    icon.className = 'dash-session-meta-icon';
+    icon.src = '/api/launcher-icon/provider--' + encodeURIComponent(session.provider);
+    icon.alt = '';
+    icon.onerror = function(){ this.remove(); };
+    top.appendChild(icon);
+  }
+  var title = document.createElement('span');
+  title.textContent = dashRailTitleText(session);
+  title.title = title.textContent;
+  top.appendChild(title);
+  el.appendChild(top);
+
+  var line = document.createElement('div');
+  line.className = 'dash-session-meta-line';
+  function part(text, cls, tip){
+    var s = document.createElement('span');
+    s.className = cls;
+    s.textContent = text;
+    if (tip) s.title = tip;
+    line.appendChild(s);
+  }
+  var cwd = session.cwd || (workspace && workspace.cwd) || '';
+  var name = session.name || (workspace && workspace.name) || '';
+  if (name) part(name, 'dash-session-meta-ws', cwd);
+  if (cwd) part(cwd, 'dash-session-meta-path', cwd);
+  function when(label, value){
+    var d = dashRailParse(value);
+    if (!d) return;
+    part(label + ' ' + dashRailDayLabel(d, new Date()) + ' ' + dashRailPad2(d.getHours()) + ':' +
+      dashRailPad2(d.getMinutes()), 'dash-session-meta-when', label + ' ' + dashRailWhen(value));
+  }
+  when('Started', session.created_at);
+  when('Updated', session.updated_at);
+  var dotClass = dashRailDotClass(session);
+  if (dotClass && DASH_META_STATUS[dotClass]) {
+    var st = document.createElement('span');
+    st.className = 'dash-session-meta-status';
+    var dot = document.createElement('span');
+    dot.className = 'session-status ' + dotClass;
+    dot.setAttribute('aria-hidden', 'true');
+    st.appendChild(dot);
+    st.appendChild(document.createTextNode(DASH_META_STATUS[dotClass]));
+    line.appendChild(st);
+  }
+  el.appendChild(line);
+  el.hidden = false;
+}
+function openSessionTranscript(row, session, workspace){
   var sid = row.dataset.sid;
   if(!sid) return;
   dashCloseIfAbandoned();
   document.querySelectorAll('.acp-rail-row.viewing').forEach(function(r){r.classList.remove('viewing')});
   row.classList.add('viewing');
   _viewingSid = sid;
+  dashSessionMetaRender(session || null, workspace);
   dashComposerEl.hidden = true;
   var el = document.getElementById('dashTranscript');
   el.textContent = '';
@@ -3045,6 +3118,7 @@ function dashHandle(frame){
     if (payload && payload.created) {
       _dashCreateInFlight = false;
       _viewingSid = sid;
+      dashSessionMetaRender(null); // no rail row yet; the next rail render fills it
       _dashEagerLoadPending = false; // creation is not an eager load
       _dashLoadingSid = null; // creation is not a load-slot; prevents abandon-close path
       // Fix 2 (Phase 5 review): a sub-agent panel/crew state from whatever
@@ -4320,7 +4394,7 @@ function dashPickerRailAdopt(cwd) {
 }
 
 function resetOverlays(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)modal.close();var toasts=document.getElementById('toastContainer');if(toasts){toasts.querySelectorAll('.toast').forEach(function(t){if(!t.dataset.ts||(Date.now()-parseInt(t.dataset.ts,10))>1000)t.remove()})}}
-function showToast(html){var c=document.getElementById('toastContainer');if(!c){c=document.createElement('div');c.id='toastContainer';c.className='toast-container';document.body.appendChild(c)}var d=document.createElement('div');d.innerHTML=html;var t=d.firstElementChild;if(!t){t=document.createElement('div');t.className='toast toast-success';t.textContent=html||'Done'}t.dataset.ts=Date.now();c.appendChild(t);if(!t.classList.contains('toast-persistent')){setTimeout(function(){t.remove()},4000)}}
+function showToast(html){var c=document.getElementById('toastContainer');if(!c){c=document.createElement('div');c.id='toastContainer';c.className='toast-container';document.body.appendChild(c)}var d=document.createElement('div');d.innerHTML=html;var t=d.firstElementChild;if(!t){t=document.createElement('div');t.className='toast toast-success';t.textContent=html||'Done'}t.dataset.ts=Date.now();c.appendChild(t);if(!t.classList.contains('toast-persistent')){var timer=null;function arm(ms){clearTimeout(timer);timer=setTimeout(function(){t.classList.add('toast-leaving');timer=setTimeout(function(){t.remove()},200)},ms)}t.addEventListener('mouseenter',function(){clearTimeout(timer);t.classList.remove('toast-leaving')});t.addEventListener('mouseleave',function(){arm(2000)});arm(4000)}}
 // Row/group action buttons below are shared by the rail's row/group-header
 // builders (dashRailRowNode/dashRailGroupNode). `[data-sid]`/`[data-cwd]`
 // rather than a class selector: a pin or resume button sits as a *sibling*
@@ -4688,6 +4762,10 @@ function dashRailSummary(){
     var n = dashRailFlat.length;
     text = n ? (n + ' session' + (n === 1 ? '' : 's') + ' loaded') : 'no sessions found';
     if (dashRailFlatHasMore) text += ', more available';
+  } else if (dashRailFilter) {
+    // Project mode filters server-side, so the total is already the match count.
+    text = dashRailGroupTotal + ' workspace' + (dashRailGroupTotal === 1 ? '' : 's')
+      + ' match “' + dashRailFilter + '”';
   } else {
     text = dashRailGroups.length + ' of ' + dashRailGroupTotal + ' workspaces';
   }
@@ -4711,6 +4789,23 @@ function dashRailMatches(group, session){
   if (!dashRailFilter) return true;
   var hay = ((session.title || '') + ' ' + (group.name || '') + ' ' + (group.cwd || '')).toLowerCase();
   return hay.indexOf(dashRailFilter) !== -1;
+}
+// Writes `text` into `el`, wrapping the first occurrence of the active filter
+// in <mark class="rail-hit"> so the reason a row survived the filter is
+// visible. DOM nodes only -- `text` is fetched data (see the rail's
+// no-innerHTML note in the markup). A row that matched only on its cwd has
+// nothing visible to mark, which is fine: its group header carries the path.
+function dashRailSetHighlighted(el, text){
+  var q = dashRailFilter;
+  var i = q ? text.toLowerCase().indexOf(q) : -1;
+  if (i < 0) { el.textContent = text; return; }
+  el.textContent = '';
+  el.appendChild(document.createTextNode(text.slice(0, i)));
+  var hit = document.createElement('mark');
+  hit.className = 'rail-hit';
+  hit.textContent = text.slice(i, i + q.length);
+  el.appendChild(hit);
+  el.appendChild(document.createTextNode(text.slice(i + q.length)));
 }
 function dashRailSetFilter(text){
   var prev = dashRailFilter;
@@ -4739,6 +4834,7 @@ function dashRailSetFilter(text){
 // order at a time, so Shift+Tab out of the open field leaves the widget
 // instead of landing on the now-decorative toggle. `/` opens it from anywhere
 // that is not already a text field -- the composer keeps its own `/` palette.
+var wsSearchReset = null; // clears the query and collapses the field; set by wsSearchInit
 function wsSearchInit(){
   var box = document.getElementById('wsSearch');
   var btn = document.getElementById('wsSearchBtn');
@@ -4773,6 +4869,7 @@ function wsSearchInit(){
     dashRailSetFilter('');
   }
 
+  wsSearchReset = function(){ clearAll(); setOpen(false); };
   btn.addEventListener('click', open);
   // While open the toggle is the field's leading icon: clicking it must not
   // steal focus from the input (which would read as a blur and collapse it).
@@ -5151,8 +5248,11 @@ function dashRailRowNode(session, flat, workspace){
   }
   var title = document.createElement('span');
   title.className = 'acp-rail-row-title';
-  title.textContent = dashRailTitleText(session);
+  dashRailSetHighlighted(title, dashRailTitleText(session));
   row.appendChild(title);
+  // Re-rendering the viewed row refreshes the transcript panel's metadata
+  // strip too, so its status/updated time track the rail's own refreshes.
+  if (_viewingSid === session.id) dashSessionMetaRender(session, workspace);
   if (!flat) {
     var when = document.createElement('span');
     when.className = 'acp-rail-row-when';
@@ -5164,7 +5264,7 @@ function dashRailRowNode(session, flat, workspace){
   row.addEventListener('click', function(){
     if (state === 'locked') return;
     dashRailFocus = {sid: session.id};
-    openSessionTranscript(row);
+    openSessionTranscript(row, session, workspace);
   });
   wrap.appendChild(row);
 
@@ -5322,7 +5422,8 @@ function dashRailHeadNode(key, label, countText, opts){
   var name = document.createElement('span');
   name.className = 'acp-rail-group-name';
   if (opts && opts.title) name.title = opts.title;
-  name.textContent = label;
+  if (opts && opts.highlight) dashRailSetHighlighted(name, label);
+  else name.textContent = label;
   toggle.appendChild(name);
   var chevron = document.createElement('span');
   chevron.className = 'acp-rail-group-chevron';
@@ -5447,7 +5548,13 @@ function dashRailGroupNode(group){
   if (group.color) wrap.style.borderLeftColor = group.color;
 
   var matched = dashRailFilter ? group.sessions.filter(function(s){ return dashRailMatches(group, s); }) : group.sessions;
-  var countText = dashRailFilter ? (matched.length + ' matching') : (group.sessions.length + ' of ' + group.total);
+  // Collapsed, "loaded of total" (or "N matching") has nothing loaded to
+  // refer to -- a group matched by name alone read "0 matching" -- so the
+  // header shows the plain total; expanded, it keeps "3 of 74".
+  var groupCollapsed = dashRailIsCollapsed('g:' + group.cwd, !group.pinned);
+  var countText = groupCollapsed ? String(group.total)
+    : dashRailFilter ? (matched.length + ' matching')
+    : (group.sessions.length + ' of ' + group.total);
   var badge = null;
   if (group.exists === false) {
     badge = document.createElement('span');
@@ -5456,7 +5563,7 @@ function dashRailGroupNode(group){
     badge.title = 'This folder no longer exists on disk.';
   }
   var head = dashRailHeadNode('g:' + group.cwd, group.name || group.cwd, countText,
-    {title: group.cwd, badge: badge, dot: !!group.active, defaultCollapsed: !group.pinned, onExpand: function(){
+    {title: group.cwd, badge: badge, dot: !!group.active, highlight: true, defaultCollapsed: !group.pinned, onExpand: function(){
       // A lazily-skipped group (server-side lazy skip, never paged) has never
       // been fetched -- session_page is still its initial 0. Load its first
       // page immediately on expand instead of making the user find and click
@@ -5471,7 +5578,8 @@ function dashRailGroupNode(group){
   check.setAttribute('role', 'checkbox');
   check.setAttribute('tabindex', '0');
   check.setAttribute('aria-label', 'Select ' + (group.name || group.cwd));
-  check.addEventListener('click', function(e){ e.stopPropagation(); handleItemClick(wrap, e, '.acp-rail-group'); });
+  if (dashRailSelected.has(group.cwd)) wrap.classList.add('selected');
+  check.addEventListener('click', function(e){ e.stopPropagation(); handleItemClick(wrap, e, '.acp-rail-group'); dashRailSyncSelection(); });
   check.addEventListener('keydown', function(e){ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); check.click(); } });
   head.insertBefore(check, head.firstChild);
 
@@ -5772,6 +5880,7 @@ function dashRailForgetSession(sid){
   });
   if (_viewingSid === sid) {
     _viewingSid = null;
+    dashSessionMetaRender(null);
     dashCloseIfAbandoned();
     // Fix 3 (Step 9 review): same gap as openSessionTranscript()'s .catch()
     // branch above -- deleting the session currently on screen never reaches
@@ -6099,6 +6208,16 @@ function dashRenderRail(){
           : 'Nothing here matches that filter — the filter narrows what\'s already loaded, so load '
             + 'more sessions to widen it.')
       : 'No workspaces found.';
+    if (dashRailFilter) {
+      // One-click way out of a dead-end search, same effect as the field's X.
+      var clearLink = document.createElement('button');
+      clearLink.type = 'button';
+      clearLink.className = 'acp-rail-empty-clear';
+      clearLink.textContent = 'Clear search';
+      clearLink.addEventListener('click', function(){ if (wsSearchReset) wsSearchReset(); });
+      empty.appendChild(document.createElement('br'));
+      empty.appendChild(clearLink);
+    }
     dashRailGroupsEl.appendChild(empty);
   }
   if (dashRailMode === 'project') {
@@ -6108,7 +6227,68 @@ function dashRenderRail(){
     dashRailMoreEl.hidden = !dashRailFlatHasMore;
     dashRailMoreEl.textContent = 'Load more sessions';
   }
+  dashRailObserveEnd();
+  // A render drops every .selected group, so resync the action bar and the
+  // list's has-selection class rather than leave both describing rows that
+  // are gone (auto-load made renders routine during plain scrolling).
+  updateActionBar();
   dashRailRestoreFocus();
+}
+
+// ---- auto-load on scroll ------------------------------------------------
+//
+// A zero-height sentinel is re-appended at the end of the list on every
+// render (the render empties the list) and observed against the list's own
+// scroll box. It intersects either because the user scrolled near the end,
+// or because the loaded page is too short to fill the panel at all -- the
+// second case chains page loads until the panel is full or the server has no
+// more. #dashRailMore stays as the keyboard/no-IntersectionObserver fallback;
+// it sits outside the scroll box, so it can never be the observed element.
+// Flat modes with a filter are excluded: that filter is client-side, so a
+// narrow query would otherwise pull every page just to find matches.
+// ---- bulk selection that survives re-renders ----------------------------
+//
+// Every render rebuilds the group nodes, and `.selected` lived only on those
+// nodes, so any refresh -- routine now that scrolling auto-loads -- dropped
+// the user's ticks. The Set is the durable copy, keyed by cwd; each group
+// node re-applies it as it is built. Ticks on groups the current render did
+// not draw (hidden by a search, say) stay in the Set and come back with them,
+// but only drawn rows count as selected: getSelectedWorkspaceCwds and the
+// action bar both read the DOM, so nothing off-screen is ever acted on.
+var dashRailSelected = new Set();
+function dashRailSyncSelection(){
+  document.querySelectorAll('#dashRailGroups .acp-rail-group').forEach(function(g){
+    if (g.classList.contains('selected')) dashRailSelected.add(g.dataset.cwd);
+    else dashRailSelected.delete(g.dataset.cwd);
+  });
+}
+function dashRailClearSelection(){
+  dashRailSelected.clear();
+  document.querySelectorAll('.acp-rail-group.selected').forEach(function(r){ r.classList.remove('selected'); });
+  updateActionBar();
+}
+var dashRailEndObserver = null;
+function dashRailAutoLoad(){
+  if (dashRailBusy) return;
+  if (dashRailMode === 'project') {
+    if (dashRailHasMore) loadGroupPage(dashRailGroupPage + 1);
+  } else if (dashRailFlatHasMore && !dashRailFilter) {
+    loadFlatPage(dashRailFlatPage + 1);
+  }
+}
+function dashRailObserveEnd(){
+  if (typeof IntersectionObserver !== 'function') return;
+  if (!dashRailEndObserver) {
+    dashRailEndObserver = new IntersectionObserver(function(entries){
+      if (entries.some(function(e){ return e.isIntersecting; })) dashRailAutoLoad();
+    }, {root: dashRailGroupsEl, rootMargin: '0px 0px 200px 0px'});
+  }
+  dashRailEndObserver.disconnect();
+  var end = document.createElement('div');
+  end.className = 'acp-rail-end';
+  end.setAttribute('aria-hidden', 'true');
+  dashRailGroupsEl.appendChild(end);
+  dashRailEndObserver.observe(end);
 }
 
 // ---- focus restoration ----------------------------------------------

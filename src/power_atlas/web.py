@@ -2809,6 +2809,9 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             d["pinned"] = True
         if include_provider:
             d["provider"] = prov_name
+            # Dashboard-only: its transcript header shows when the session
+            # was started. Empty string when a provider does not record it.
+            d["created_at"] = s.created_at
             # Cheap all-provider liveness dot (dashboard-only, see
             # _session_is_live): a row this ACP doesn't hold still gets a
             # binary alive/dead signal, just not the richer classified
@@ -2974,6 +2977,7 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
         }
         if include_provider:
             d["provider"] = prov_name
+            d["created_at"] = s.created_at  # see _acp_listing's _row_dict
             # See _acp_listing's identical field for what this is and why.
             d["live"] = _session_is_live(snapshot, s, prov_name)
         return d

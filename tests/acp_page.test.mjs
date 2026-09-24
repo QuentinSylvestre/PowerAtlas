@@ -12139,6 +12139,9 @@ function loadDashPicker(opts = {}) {
     _dashAttachedSid: opts.dashAttachedSid !== undefined ? opts.dashAttachedSid : null,
     _dashTurnActive: opts.dashTurnActive !== undefined ? opts.dashTurnActive : false,
     _viewingSid: opts.viewingSid !== undefined ? opts.viewingSid : null,
+    // index.html's transcript-panel metadata strip; DOM-only, no behaviour
+    // these tests assert on.
+    dashSessionMetaRender: () => {},
     _dashLoadingSid: null,
     _dashEagerLoadPending: false,  // eager-connect plan
     _dashEagerFocusSuppressed: false,  // eager-connect plan
@@ -15787,6 +15790,10 @@ function runDashSentinel(slice, acpAvailable, extra = {}) {
     dashRailRowHoverText: () => "",
     dashRailDotClass: () => "",
     dashRailTitleText: (s) => String(s.id),
+    dashRailSetHighlighted: (el, text) => { el.textContent = text; },
+    dashSessionMetaRender: () => {},
+    dashRailSelected: new Set(),
+    dashRailSyncSelection: () => {},
     dashRailWhenShort: () => "",
     dashRailProviderIcon: () => new El("img"),
     dashRailHeadNode: () => new El("div"),
