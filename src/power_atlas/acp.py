@@ -3031,6 +3031,7 @@ class _Supervisor:
             self._ready = True
             _caps = (result or {}).get("agentCapabilities") or {}
             _session_caps = _caps.get("sessionCapabilities") or {}
+            log.debug("ACP agentCapabilities: %r", _caps)
             if _session_caps.get("delete"):   # truthiness test — not `is not None`; False/"" also skip
                 self._close_method = "session/delete"
                 log.info("ACP: sessionCapabilities.delete present — wire close enabled")

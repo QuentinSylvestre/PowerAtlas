@@ -381,6 +381,21 @@
       <!-- Debug/transport log toggle (SC4) -- mirrors acp.html's
            #acpLogToggle, wired through the shared composer-chrome.js module
            (initLogDom/logLine/setLogOpen). -->
+      <!-- MCP status indicator -- mirrors /acp's toolbar indicator. -->
+      <div class="acp-mcp-indicator" id="dashMcpIndicator" hidden>
+        <button class="acp-mcp-toggle" id="dashMcpToggle"
+                type="button" aria-expanded="false" aria-controls="dashMcpPanel">
+          <svg class="acp-mcp-icon" width="14" height="14" viewBox="0 0 16 16"
+               fill="none" aria-hidden="true">
+            <path d="M8 1L14.5 4.75V11.25L8 15L1.5 11.25V4.75L8 1Z"
+                  stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+          <span class="acp-mcp-compact" id="dashMcpCompact"></span>
+        </button>
+        <div class="acp-mcp-panel" id="dashMcpPanel">
+          <ul class="acp-mcp-list" id="dashMcpList" aria-label="MCP servers"></ul>
+        </div>
+      </div>
       <button class="acp-btn acp-log-toggle" id="dashLogToggle" type="button"
               aria-expanded="false" aria-controls="dashLog">Debug log<span
               class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
@@ -846,6 +861,31 @@ initLogDom({
   logToggle: document.getElementById('dashLogToggle'),
   isReplaying: function () { return _dashReplaying; },
 });
+initMcpIndicatorDom({
+  indicatorEl: document.getElementById('dashMcpIndicator'),
+  toggleEl:    document.getElementById('dashMcpToggle'),
+  compactEl:   document.getElementById('dashMcpCompact'),
+  panelEl:     document.getElementById('dashMcpPanel'),
+  listEl:      document.getElementById('dashMcpList'),
+});
+// MCP toggle: open/close panel via aria-expanded (CSS drives visibility).
+var _dashMcpToggleEl = document.getElementById('dashMcpToggle');
+var _dashMcpPanelEl  = document.getElementById('dashMcpPanel');
+var _dashMcpGuard = false;
+if (_dashMcpToggleEl) {
+  _dashMcpToggleEl.addEventListener('click', function () {
+    var expanded = _dashMcpToggleEl.getAttribute('aria-expanded') === 'true';
+    _dashMcpGuard = true;
+    _dashMcpToggleEl.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+  });
+  document.addEventListener('click', function (ev) {
+    if (_dashMcpGuard) { _dashMcpGuard = false; return; }
+    if (_dashMcpToggleEl.getAttribute('aria-expanded') === 'true') {
+      if (_dashMcpPanelEl && ev && _dashMcpPanelEl.contains(ev.target)) return;
+      _dashMcpToggleEl.setAttribute('aria-expanded', 'false');
+    }
+  });
+}
 // ---- prompt navigation arrows ---------------------------------------------
 //
 // acp.html wires its own copy of this (same shared transcriptEl/promptUpBtn/
@@ -3365,6 +3405,11 @@ function dashHandle(frame){
     // kiro-cli skills catalogue from the server. Broadcast-only (not in
     // history), so this is the only source for it after a reconnect.
     setSessionSkills(payload && payload.skills);
+    return;
+  }
+  if (type === 'mcp_servers') {
+    // MCP server status — mirrors /acp's handler (SC-4 dashboard parity).
+    setSessionMcpServers(payload && payload.servers);
     return;
   }
   if (type === 'commands_execute_result') {

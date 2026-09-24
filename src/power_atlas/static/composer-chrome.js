@@ -59,6 +59,24 @@ function initContextDom(refs) {
   contextLabel = refs.contextLabel;
 }
 
+// ---- MCP server status indicator -------------------------------------------
+
+var _mcpRefIndicator = null;  // set by initMcpIndicatorDom
+var _mcpRefToggle    = null;
+var _mcpRefCompact   = null;
+var _mcpRefPanel     = null;
+var _mcpRefList      = null;
+
+/** Called once by each host page so _renderMcpIndicator knows which elements
+ *  to update. Mirrors initContextDom's pattern: no page-lifecycle accessor. */
+function initMcpIndicatorDom(refs) {
+  _mcpRefIndicator = refs.indicatorEl;
+  _mcpRefToggle    = refs.toggleEl;
+  _mcpRefCompact   = refs.compactEl;
+  _mcpRefPanel     = refs.panelEl;
+  _mcpRefList      = refs.listEl;
+}
+
 function setContext(percent) {
   // Numeric or nothing. The server clamps this to 0-100 and rounds it, and
   // the check is repeated here because the value ends up as a CSS width:
@@ -597,20 +615,20 @@ function setSessionMcpServers(list) {
  *  `#acpMcpPanel` visibility is driven exclusively by `aria-expanded` on
  *  `#acpMcpToggle` via the CSS sibling selector — never via `.hidden`. */
 function _renderMcpIndicator() {
-  var indicatorEl = document.getElementById('acpMcpIndicator');
+  var indicatorEl = _mcpRefIndicator;
   if (!indicatorEl) return;
 
   if (!sessionMcpServers) {
     indicatorEl.hidden = true;
-    var t = document.getElementById('acpMcpToggle');
+    var t = _mcpRefToggle;
     if (t) t.setAttribute('aria-expanded', 'false'); // don't re-open on next session's frame
     return;
   }
 
   indicatorEl.hidden = false;
-  var toggleEl = document.getElementById('acpMcpToggle');
-  var compactEl = document.getElementById('acpMcpCompact');
-  var listEl    = document.getElementById('acpMcpList');
+  var toggleEl  = _mcpRefToggle;
+  var compactEl = _mcpRefCompact;
+  var listEl    = _mcpRefList;
   var servers = sessionMcpServers;
 
   // Count connected servers; flag failed / auth-needed state.
@@ -659,8 +677,12 @@ function _renderMcpIndicator() {
 
     if (srv.failedAuthorization && srv.authorizationUrl) {
       var url = srv.authorizationUrl;
-      // Security: only open https:// URLs; reject javascript:, file:, data:, etc.
-      if (typeof url !== 'string' || url.indexOf('https://') !== 0) {
+      // Security: allow https:// (any host) or http://localhost (kiro-cli's
+      // local OAuth relay for MCP auth flows). Reject all other schemes.
+      var _isHttpsAny = typeof url === 'string' && url.indexOf('https://') === 0;
+      var _isLocalHttp = typeof url === 'string' &&
+                         /^http:\/\/localhost(:\d+)?\//.test(url);
+      if (!(_isHttpsAny || _isLocalHttp)) {
         url = null;
       }
       if (url) {

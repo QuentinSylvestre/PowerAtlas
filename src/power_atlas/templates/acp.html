@@ -17,35 +17,6 @@
   <span class="acp-title">Agent orchestrator</span>
   <div class="topbar-spacer"></div>
   <div class="topbar-cluster">
-    <!-- How full the session's context window is. Hidden until the agent has
-         reported it, which it does once per turn — an empty bar and "0%" would
-         both claim a measurement that has not been taken. -->
-    <span class="acp-context" id="acpContext" hidden
-          title="Context window used by this session">
-      <span class="acp-context-track"><span class="acp-context-fill" id="acpContextFill"></span></span>
-      <span class="acp-context-label" id="acpContextLabel"></span>
-    </span>
-    <!-- MCP server status indicator. Hidden until first mcp_servers frame arrives.
-         JS (composer-chrome.js setSessionMcpServers) drives hidden/visible and list content.
-         Plan 260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS SC-4. -->
-    <div class="acp-mcp-indicator" id="acpMcpIndicator" hidden>
-      <button class="acp-mcp-toggle" id="acpMcpToggle"
-              type="button" title="MCP servers" aria-expanded="false"
-              aria-controls="acpMcpPanel">
-        <svg class="acp-mcp-icon" width="14" height="14" viewBox="0 0 16 16"
-             fill="none" aria-hidden="true">
-          <!-- Hexagon outline representing a server node -->
-          <path d="M8 1L14.5 4.75V11.25L8 15L1.5 11.25V4.75L8 1Z"
-                stroke="currentColor" stroke-width="1.5"/>
-        </svg>
-        <span class="acp-mcp-compact" id="acpMcpCompact"></span>
-      </button>
-      <!-- Panel: visibility driven by aria-expanded on #acpMcpToggle via CSS
-           sibling selector — Phase 6 toggles aria-expanded, not .hidden. -->
-      <div class="acp-mcp-panel" id="acpMcpPanel">
-        <ul class="acp-mcp-list" id="acpMcpList" aria-label="MCP servers"></ul>
-      </div>
-    </div>
     <!-- Status pill is a button when connected so the user can open the
          actions dropdown (restart, etc.). Only interactive when data-state
          is "open" — the aria-haspopup/aria-expanded reflect this. -->
@@ -215,14 +186,31 @@
               fill="var(--bg, #18181b)" stroke="currentColor" stroke-width="1.2"/>
       </svg>
     </button>
+    <!-- Context window + MCP status: inline with Debug log so they read as
+         session-scoped controls rather than global topbar chrome. -->
+    <span class="acp-context" id="acpContext" hidden
+          title="Context window used by this session">
+      <span class="acp-context-track"><span class="acp-context-fill" id="acpContextFill"></span></span>
+      <span class="acp-context-label" id="acpContextLabel"></span>
+    </span>
+    <!-- MCP server status indicator (SC-4, plan 260923). -->
+    <div class="acp-mcp-indicator" id="acpMcpIndicator" hidden>
+      <button class="acp-mcp-toggle" id="acpMcpToggle"
+              type="button" aria-expanded="false" aria-controls="acpMcpPanel">
+        <svg class="acp-mcp-icon" width="14" height="14" viewBox="0 0 16 16"
+             fill="none" aria-hidden="true">
+          <path d="M8 1L14.5 4.75V11.25L8 15L1.5 11.25V4.75L8 1Z"
+                stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+        <span class="acp-mcp-compact" id="acpMcpCompact"></span>
+      </button>
+      <div class="acp-mcp-panel" id="acpMcpPanel">
+        <ul class="acp-mcp-list" id="acpMcpList" aria-label="MCP servers"></ul>
+      </div>
+    </div>
     <!-- In the toolbar rather than its own row below the composer: a debugging
          aid most sessions of this page never open should not cost a whole
-         strip of vertical space of its own, especially once the agent bar
-         below can also be on screen. The chevron is CSS-drawn from
-         `aria-expanded` — the same technique the rail's own group chevron
-         uses (`.acp-rail-group-chevron`) — rather than a `▸`/`▾` character,
-         so this page draws one expand/collapse language throughout instead
-         of two. -->
+         strip of vertical space of its own. -->
     <button class="acp-btn acp-log-toggle" id="acpLogToggle" type="button"
             aria-expanded="false" aria-controls="acpLog">Debug log<span
             class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
@@ -681,6 +669,13 @@
     logEl: document.getElementById('acpLog'),
     logToggle: document.getElementById('acpLogToggle'),
     isReplaying: function () { return replaying; },
+  });
+  initMcpIndicatorDom({
+    indicatorEl: document.getElementById('acpMcpIndicator'),
+    toggleEl:    document.getElementById('acpMcpToggle'),
+    compactEl:   document.getElementById('acpMcpCompact'),
+    panelEl:     document.getElementById('acpMcpPanel'),
+    listEl:      document.getElementById('acpMcpList'),
   });
   // sessionCommands/sessionSkills/cmdDropdownEl/_cmdSelectedIndex, declared in
   // /static/composer-chrome.js (dashboard/ACP feature-parity plan, Phase 2) —
@@ -5928,14 +5923,14 @@
   });
 
   // MCP indicator toggle: open/close via aria-expanded (CSS drives visibility).
-  var _mcpToggleEl = document.getElementById('acpMcpToggle');
-  var _mcpPanelEl  = document.getElementById('acpMcpPanel');
+  var _acpMcpToggleEl = document.getElementById('acpMcpToggle');
+  var _acpMcpPanelEl  = document.getElementById('acpMcpPanel');
   var _mcpGuard = false;
-  if (_mcpToggleEl && _mcpPanelEl) {
-    _mcpToggleEl.addEventListener('click', function () {
-      var expanded = _mcpToggleEl.getAttribute('aria-expanded') === 'true';
+  if (_acpMcpToggleEl && _acpMcpPanelEl) {
+    _acpMcpToggleEl.addEventListener('click', function () {
+      var expanded = _acpMcpToggleEl.getAttribute('aria-expanded') === 'true';
       _mcpGuard = true;
-      _mcpToggleEl.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      _acpMcpToggleEl.setAttribute('aria-expanded', expanded ? 'false' : 'true');
     });
   }
 
@@ -5944,10 +5939,10 @@
     if (!statusMenu.hidden) _statusMenuClose();
     // Close MCP panel when clicking outside indicator+panel.
     if (_mcpGuard) { _mcpGuard = false; return; }
-    if (_mcpToggleEl && _mcpToggleEl.getAttribute('aria-expanded') === 'true') {
+    if (_acpMcpToggleEl && _acpMcpToggleEl.getAttribute('aria-expanded') === 'true') {
       // Ignore clicks inside the panel itself (e.g., Connect button).
-      if (_mcpPanelEl && event && _mcpPanelEl.contains(event.target)) return;
-      _mcpToggleEl.setAttribute('aria-expanded', 'false');
+      if (_acpMcpPanelEl && event && _acpMcpPanelEl.contains(event.target)) return;
+      _acpMcpToggleEl.setAttribute('aria-expanded', 'false');
     }
   });
 
@@ -5977,9 +5972,9 @@
     // dismiss one layer rather than both.
     if (!picker.hidden) { pickerClose(); return; }
     // Close MCP panel before status menu.
-    if (_mcpToggleEl && _mcpToggleEl.getAttribute('aria-expanded') === 'true') {
-      _mcpToggleEl.setAttribute('aria-expanded', 'false');
-      _mcpToggleEl.focus(); // restore focus per ARIA Disclosure Button pattern
+    if (_acpMcpToggleEl && _acpMcpToggleEl.getAttribute('aria-expanded') === 'true') {
+      _acpMcpToggleEl.setAttribute('aria-expanded', 'false');
+      _acpMcpToggleEl.focus(); // restore focus per ARIA Disclosure Button pattern
       return;
     }
     // Focus does not move into the menu when it opens, so the button keeps it

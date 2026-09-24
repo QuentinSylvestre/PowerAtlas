@@ -16716,7 +16716,25 @@ check("mcpServersNonHttpsUrlNoConnectButton", (tpl) => {
     "no Connect button for non-https authorizationUrl");
 });
 
-// mcpServersHttpUrlNoConnectButton
+// mcpServersLocalhostHttpUrlShowsConnectButton
+// http://localhost:PORT/ (kiro-cli OAuth relay) must show a Connect button.
+check("mcpServersLocalhostHttpUrlShowsConnectButton", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "mcp_servers",
+    sessionId: live,
+    payload: { servers: [
+      { name: "atlassian", status: "failed",
+        failedAuthorization: true,
+        authorizationUrl: "http://localhost:49830/oauth/callback" },
+    ]},
+  });
+  page.el("acpMcpToggle").dispatch("click", {});
+  const list = page.el("acpMcpList");
+  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
+  assert(connectBtns.length === 1,
+    "Connect button must render for http://localhost OAuth relay URL");
+});
 // http:// URL must also be rejected — only https:// is allowed.
 check("mcpServersHttpUrlNoConnectButton", (tpl) => {
   const { page, live } = connected(tpl);
