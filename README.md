@@ -78,7 +78,10 @@ A browser with no valid cookie is not served the page. Opening `http://127.0.0.1
 shows a short page that says to open PowerAtlas from its tray icon. An open tab whose cookie stops
 working (because it expired, or the local secret was rotated) says it is signed out and
 points to the tray icon. It offers neither Reconnect nor Reload, because both would resend the same
-missing cookie.
+missing cookie; once the tray has signed the browser back in, reload that tab. A rotation also closes
+every open `/acp` connection that was signed in under the old secret, so a tab left open is signed
+out at once rather than at its next reconnect (see *Signing out other browsers* under *Remote access*
+below).
 
 The cookie is signed with a local secret kept at `%LOCALAPPDATA%\power-atlas\local-secret` (Linux:
 `~/.config/power-atlas/local-secret`), created at first start and never served to a browser. Any
@@ -393,7 +396,11 @@ topbar). It is off by default.
   bind that agent. Shell commands, file writes, web fetches and searches, MCP tools, subagents, skills
   and powers ask first. Reading files under the session's folder runs without asking, and so do
   `git status`, `git log`, `git diff`, `git branch`, `pwd`, `whoami` and `uname`. Those commands are
-  matched as exact strings, so `git log --oneline` asks. Nothing asks when a session starts. The base agent file is never modified, so terminal
+  matched as exact strings, so `git log --oneline` asks. Reading a file outside the session's folder
+  asks, and writes to `**/.kiro/agents/**` and `**/.kiro/settings/**` are denied outright rather than
+  asked, so a session cannot rewrite the profile that constrains it. Sub-agents are gated too:
+  measured live 2026-09-23, spawning one asks, a shell command the sub-agent runs asks in the parent
+  session's page, and Allow runs it. Nothing asks when a session starts. The base agent file is never modified, so terminal
   kiro-cli sessions keep their own posture. The other task modes (Spec, Plan and so on) are not
   affected.
 
@@ -533,6 +540,19 @@ directory conventions — read it as a disclosure and decide deliberately; if th
 panel or `POST /api/remote-access/rotate` (loopback-only, so a peer holding a stolen cookie cannot
 re-key the surface around you). Rotation issues a new secret and invalidates **every** device cookie at
 once — there is no per-device revocation, so each remaining device must re-enter the new secret.
+
+**Signing out other browsers on this machine.** The loopback cookie, `pa_local`, has its own secret
+and its own revocation. In the settings menu (gear icon), *Browser sign-in* has a **Sign out other
+browsers (rotate the local key)** button. The first click arms it and the second, within five seconds,
+issues a new local secret: every other browser's cookie stops verifying, their open `/acp`
+connections are closed, and each must be reopened from the tray. The browser you pressed it from gets
+a fresh cookie in the same response and stays signed in. Use it if a `pa_local` cookie may have leaked,
+since it otherwise stays valid for 90 days. The same action is `POST /api/local-secret/rotate`,
+loopback-only and only for a browser that is already signed in. If the dashboard itself is out of
+reach, the fallback is to quit PowerAtlas, delete `%LOCALAPPDATA%\power-atlas\local-secret` (Linux:
+`~/.config/power-atlas/local-secret`) and start it again: a new secret is created at startup, and
+every browser signs in again from the tray. The same section warns when the local secret could not be
+saved and is held in memory only; every browser then has to sign in again after the next restart.
 
 **Turning it off right now, without a restart.** The *Remote access* panel carries a **Stop remote
 access now** button. Pressing it makes every request arriving from a remote address refused

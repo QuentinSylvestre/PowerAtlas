@@ -37,7 +37,7 @@
 - **[P2b] Session stores PowerAtlas cannot see** — closed; sqlite `conversations_v2` sessions permanently inaccessible post-v2-removal (2026-09-17); v3 covered
 
 ### Misc
-- **[SECURITY] `/partials/launchers` leaks custom-launcher `env`** — an unauthenticated local GET returns the credentials `_launchers_without_env` exists to strip, because the tile partial renders them after all
+- **[SECURITY] `/partials/launchers` leaks custom-launcher `env`** — any signed-in local caller's GET returns the credentials `_launchers_without_env` exists to strip, because the tile partial renders them after all (the loopback gate shipped in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL` removed anonymous access, not the leak)
 - **Claude Code sidecar fields inventory** — full table of every field PowerAtlas reads (or could read) from `~/.claude/sessions/<pid>.json`
 
 ---
@@ -211,11 +211,11 @@ condition).
 ## Misc
 
 - **[SECURITY] `/partials/launchers` renders custom-launcher `env`, defeating `_launchers_without_env`.** Found 2026-09-21 during the permission/credential exploration; verified by reading both files, not inferred.
-  - *The defect* — `partials_launchers` (`web.py:4280-4281`) renders `config.custom_launchers` **raw**, with no stripping call, and `templates/partials/launcher_tile.html:14` emits `{% if launcher.env %}…{{ launcher.env | tojson }}` whenever a launcher has a non-empty `env`. So one unauthenticated loopback GET returns the values as JSON inside a tooltip row.
+  - *The defect* — `partials_launchers` (`web.py:4280-4281`) renders `config.custom_launchers` **raw**, with no stripping call, and `templates/partials/launcher_tile.html:14` emits `{% if launcher.env %}…{{ launcher.env | tojson }}` whenever a launcher has a non-empty `env`. So one GET from any signed-in local caller returns the values as JSON inside a tooltip row.
   - *Why it survived* — `_launchers_without_env`'s docstring (`web.py:1331-1364`) enumerates the three payloads it fixed and justifies leaving this one alone with the assertion "the tile partial never renders `env`". That sentence is false. The defence was reasoned about and got one template line wrong.
   - *Why no test caught it* — the single test on this route configures its sample launcher with `env: {}`, which is falsy, so the `{% if %}` branch never executes. The test passes and observes nothing.
-  - *Exposure* — the docstring records that the live config carries `AUTH_TOKEN_PRODUCTION` and `AUTH_TOKEN_STAGING`. `/partials/launchers` is a GET, and `same_origin_guard`'s Origin/Referer check is POST-only by design, so this path has no CSRF guard at all.
-  - *Relation to the loopback credential* — SC-5 of `plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` gates this route as a side effect of default-deny, which removes the anonymous reachability. **It does not fix the leak**: any credentialed caller, and the page itself, still receive the credentials. The stripping fix is independent and should not wait on that plan.
+  - *Exposure* — the docstring records that the live config carries `AUTH_TOKEN_PRODUCTION` and `AUTH_TOKEN_STAGING`. `/partials/launchers` is a GET, and `same_origin_guard`'s Origin/Referer check is POST-only by design, so this path has no CSRF guard of its own. Since the loopback gate shipped it needs a valid `pa_local` cookie, so it is reachable by any signed-in local caller rather than by any local process; the cookie is `SameSite=Strict`, which keeps a page on another site from riding it.
+  - *Relation to the loopback credential* — SC-5 of `plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` has shipped and gates this route as a side effect of default-deny, which removed the anonymous reachability. **It does not fix the leak**: any credentialed caller, and the page itself, still receive the credentials. The stripping fix is independent and should not wait on that plan.
 
 - **[SECURITY — accepted, 2026-08-03] No NetBird access policy restricts this host, and that is now a decision rather than an oversight.** Measured 2026-07-31: `netbird status -d` enumerates **all 17** account peers in this host's network map, including machines belonging to other people (`akita`, `paros-g`, `nuc-chicago`, `ec2amaz-tv495hp`, `macbook-air-de-polestar`, …), so the stock `Default` (All → All) policy is still enabled.
   - *Measured 2026-08-03* — all inbound File and Printer Sharing rules (TCP 139, TCP 445) are **disabled** at the Windows Firewall level. The genuine exposure was UDP 137/138 (Network Discovery), admitted by two rules scoped to the Private profile. The WireGuard tunnel is classified Private, so those rules apply to NetBird peers.
