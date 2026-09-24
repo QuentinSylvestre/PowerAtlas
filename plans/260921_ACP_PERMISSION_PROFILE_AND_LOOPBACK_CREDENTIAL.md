@@ -1,8 +1,8 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: In Progress — Phases 0-6 complete, Phase 7 agent half complete, all Green; the GUI
-> door check (Phase 7 criterion 679) awaits the user, then the final review  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete — all 8 phases and the final review done, Green; QA PASS on the final build
+> `06e969b` (live, including all three doors); ready for `/qclose`  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -341,7 +341,7 @@ premise, **stop and revise the design before Phase 1**.
 - [x] Default rule set recorded, each rule tagged documentation-sourced or measured, with its source
 - [x] Deny-floor list drafted, every entry justified in one line
 - [x] Floor bypass attempted in all four forms; the matching semantics (literal vs canonicalized) recorded
-- [ ] Each of the 7 unexercised capabilities recorded as fires / does-not-fire with its consent payload — **6 of 7 measured live; `power` is untestable on this machine (no installed powers) — see § 9. Environment limitation, not deferred to a later phase: `power` was never part of any Success Criterion or the Gate's own findings, and the Gate was resolved with this gap already accounted for. No further action needed unless a future machine has powers installed to re-probe with.**
+- [x] Each of the 7 unexercised capabilities recorded as fires / does-not-fire with its consent payload — *(User: accepted, 2026-09-23 — `power` untestable on this machine; the overlay still gates it with an ask rule; re-probe if powers are ever installed)* **6 of 7 measured live; `power` is untestable on this machine (no installed powers) — see § 9. Environment limitation, not deferred to a later phase: `power` was never part of any Success Criterion or the Gate's own findings, and the Gate was resolved with this gap already accounted for. No further action needed unless a future machine has powers installed to re-probe with.**
 - [x] "Always allow" persistence answered yes/no, with the diffed paths named
 - [x] `~/.kiro` baseline recorded by filename and hash
 - [x] A statement in § 9 confirming the design still holds, or naming what must change — **it names what must change; the Gate fired (see § 9)**
@@ -676,7 +676,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 - [x] **(added, Phase 2 review, 2026-09-22)** With the setting **off**, a live `session/new` requesting `poweratlas-acp` is refused with `bad_payload` and no kiro-cli process is spawned — the server-side gate, confirmed against the running build rather than only unit-tested
 - [x] **(added, Phase 2 review, 2026-09-22)** `session/load` of a session id with **no persisted kiro-cli metadata**, sent once with `modeId: "kiro_default"` and once without: record the bound mode in each case. The vendored KAS source (`hydrateSessionForLoad`) makes the request's `modeId` the fallback when persisted metadata is absent, so P2's "ignored on load" holds only for sessions that have metadata. Decide from the result whether PowerAtlas should send the derived agent's name, the base agent's, or nothing on load
 - [x] Denying a prompt leaves the tool `failed` with no side effect on disk
-- [ ] The UI is reachable from all three doors after a restart — *peek's webview door already confirmed live 2026-09-23 (§ 9 Phase 5 QA); tray Open, peek double-tap and Copy login link remain.* **(added, Phase 5 review)** also: rapid peek show/hide/show shows no hotkey lag and does not unhook the listener
+- [x] The UI is reachable from all three doors after a restart — **all verified live 2026-09-23 on the restarted build by the orchestrator** (user asked it to test them itself): peek webview (single tap, sign-in 21:03:44), peek double-tap (Firefox opened the dashboard; history shows `/local-auth` then `/`; sign-in 21:05:07), tray Open (driven through Windows UI Automation; sign-in 21:05:52), and Copy login link (tray menu via UI Automation + keyboard; the copied link signed a fresh headless browser into the dashboard once and was refused `403` on reuse). Rapid show/hide: 8 taps in 6 s, then a further tap still re-signed the webview — the listener survived — *peek's webview door already confirmed live 2026-09-23 (§ 9 Phase 5 QA); tray Open, peek double-tap and Copy login link remain.* **(added, Phase 5 review)** also: rapid peek show/hide/show shows no hotkey lag and does not unhook the listener
 - [x] **(added, Phase 5, 2026-09-23)** README's "bookmark" guidance fits the real mechanism: the login link is single-use with a 120 s TTL, so the bookmark to recommend is `http://127.0.0.1:<port>/` after signing in (the cookie lasts 90 days), not the copied link
 - [x] `README.md` updated: the Default→agent mapping, the "tool permissions are asked, not assumed" paragraph (already stale today), the `http://127.0.0.1:<port>` bare-visit behaviour, and the new loopback credential as user-visible WebUI surface
 - [x] `docs/KNOWLEDGE.md`'s "Still outstanding: permission prompts — the shipped surface runs `-a`" corrected (stale on two counts)
@@ -694,7 +694,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 |---|---|---|
 | R-1 Anchors stale at execution | High | Addressed: Phase 0 re-locates every anchor; phases cite names, not lines |
 | R-2 Silent coercion to `vibe` | High | Addressed: Phase 7 asserts `modeId_in_effect` and `consent.scope`/`source` |
-| R-3 Fallback runs ungated while the toggle reads on | Medium | **Accepted by the user** (D-10), narrowed to settings-panel reporting, and further narrowed so a valid derived agent is never replaced by a fallback. See Follow-up #1 |
+| R-3 Fallback runs ungated while the toggle reads on | Medium | **Accepted by the user** (D-10), narrowed to settings-panel reporting, and further narrowed so a valid derived agent is never replaced by a fallback. See Follow-up #1. **Extended by the user, 2026-09-23 (final review):** also covers a derived agent left `stale` by an overlay revision whose regeneration then fails — new Default sessions bind `kiro_default` while the panel warns; reusing stale blocks was rejected because `stale` also covers old allow-all files |
 | R-4 Deny floor blocks legitimate work | Medium | **No longer applicable** — no floor ships (D-13 superseded 2026-09-22), so it cannot block anything |
 | R-5 Deny floor bypassed by rephrasing | High | **Confirmed true** (Phase 0 step 6: 3 of 4 forms bypassed live), which is *why* D-13 was superseded rather than patched. **Accepted, not mitigated**: `off` (allow-all) now ships with no PowerAtlas-authored control at all — this is a knowing return to today's shipped behaviour, not a "problem solved." A reader should not infer zero risk from "no floor"; it means the same exposure allow-all already has today |
 | R-6 Lockout — no door works | High | Addressed: Phase 5 asserts all three doors; D-22 keeps an unpersistable secret in memory so cookies still verify |
@@ -746,7 +746,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | `docs/KNOWLEDGE.md` | "Still outstanding: permission prompts — the shipped surface runs `-a`" — stale on two counts | 7 |
 | `memory/MEMORY.md` | "`kiro_default` — the value PowerAtlas hardcodes as its own default" becomes false; `_VALID_TASK_MODES` guidance moves from 8 values to 9 | 7 |
 | `plans/tests/260701_POWERATLAS.md` | ~38 `how-to-reach` lines name loopback routes with no credential; annotate that the cookie is now required | 7 |
-| `plans/260919_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS.md` | "`toolCall.title` passes through `_as_text` with no length clamp" — already false today, doubly so after Phase 2 | 7 |
+| `plans/done/260922-1140_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS.md` (archived name of `260919_…`) | "`toolCall.title` passes through `_as_text` with no length clamp" — already false today, doubly so after Phase 2 | 7 |
 | `plans/ROADMAP.md` | Mark both paired items shipped; leave `/partials/launchers` open | 7 |
 | `plans/260921_DASHBOARD_ACP_FEATURE_PARITY.md` | Its Phase 6 lines 314/327 instruct porting functions this plan deletes — reconcile at that plan's archival, or annotate if still active | 7 (doc-table-only) |
 
@@ -761,7 +761,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | 4 | Local secret, login code, exchange `[P:3]` | **Complete** | 10/10 exit criteria; 2 commits (`6ff4b50` feat, `3a4f3b5` review fix — atomic secret writes, guarded startup); R-19 accepted by the user 2026-09-23; QA PASS 11/11; Green |
 | 5 | Default-deny gate and the three doors | **Complete** | 12/12 exit criteria; 2 commits (`d0f9296` feat, `d4bc801` review fix); live on the restarted build; QA PASS incl. R-14 measured for the webview door; Green |
 | 6 | Retire `_ACP_TOKEN`, add `ACP_AVAILABLE` | **Complete** | 8/8 exit criteria; 2 commits (`6e2f6ec` feat, `e30c1a9` review fix — socket auth pinned, signed-out UX); live 8/8 on the restarted build; Green |
-| 7 | Live verification and documentation | **In progress — user half pending** | 17/18 exit criteria; live-verified on restarted builds; found and fixed F1 (Allow was Deny), load mode, stale-card hazard (`91362a7`, `13c66b0`); docs `c5d6b95`, `7741405`, `beaffe2`. Open: the three GUI doors (criterion 679) |
+| 7 | Live verification and documentation | **Complete** | 18/18 exit criteria (doors verified live by the orchestrator); live-verified on restarted builds; found and fixed F1 (Allow was Deny), load mode, stale-card hazard (`91362a7`, `13c66b0`); docs `c5d6b95`, `7741405`, `beaffe2`. Green |
 
 ## Dependency Graph
 
@@ -1261,7 +1261,7 @@ The write is `save_config`'s pattern — tmp -> `fsync` -> `os.replace`, tmp unl
 
 `config.py` gains `acp_permissions_enabled: bool = False`, `acp_permission_base_agent: str = "kiro_default"`, and `DERIVED_AGENT_NAME = "poweratlas-acp"` (D-20 — in `config.py` so Phase 2 can name it from `acp.py` without a second intra-package import). No load-time sanitisation: `load_config` must never raise, and a hand-edited bad name surfaces as a typed error in the generation status instead.
 
-`web.py` gains `_regenerate_derived_agent()`, called from `lifespan` (before the sweeper) and from the two settings write paths, through `asyncio.to_thread` (D-9), swallowing every exception with `log.exception`. `GET`/`POST /api/acp-permissions` carry the boolean; `acp_permission_base_agent` goes through `/api/save-setting` with validation on the write path, mirroring how `remote_bind_address` produces its named error there (D-11).
+`web.py` gains `_regenerate_derived_agent()` *(renamed `_sync_derived_agent` in the Phase 1 review fix)*, called from `lifespan` (before the sweeper) and from the two settings write paths, through `asyncio.to_thread` (D-9), swallowing every exception with `log.exception`. `GET`/`POST /api/acp-permissions` carry the boolean; `acp_permission_base_agent` goes through `/api/save-setting` with validation on the write path, mirroring how `remote_bind_address` produces its named error there (D-11).
 
 #### The rule set, and why it looks the way it does
 
@@ -1790,9 +1790,10 @@ node harness 725.
   Dangling references were repointed.
 - **`AGENTS.md` Terminology:** two user-approved updates ("login code" and "derived agent").
 
-#### Still open, needs the user
+#### Door check (criterion 679) — closed 2026-09-23
 
-Criterion 679 is still open. The tray **Open**, peek **double-tap** and **Copy login link** doors,
+The user asked the orchestrator to test the doors itself; all passed live (see the criterion). Originally:
+criterion 679 was still open. The tray **Open**, peek **double-tap** and **Copy login link** doors,
 and a rapid peek show-hide hotkey check, need GUI interaction. The peek webview door was measured
 live in Phase 5.
 
@@ -1817,6 +1818,18 @@ live in Phase 5.
 6. **Tray-icon posture indicator.** Reliability review suggested the tray icon could reflect effective
    posture at near-zero cost without violating D-12's no-toast/no-badge decision. Not adopted here
    because it is a new surface the user did not ask for. Source: Review Log Rel-12.
+
+7. **`/static/..` prefix gap in the remote allowlist.** `_remote_path_allowed` matches the `/static`
+   prefix the same way `_local_gate_exempt` did before `947e20d`, so the remote side still relies on
+   `StaticFiles` answering 404. The gap predates this plan. It was found by the final QA fix pass and
+   deliberately left unchanged. Source: Post-Implementation Review, Step 9b.
+8. **Rebuild `static/prism.js`.** Its generated header still describes the retired ACP token. The
+   source template in `_build_prism.mjs` is already fixed, but the rebuild needs `npm pack` (network).
+   Source: Phase 6 review #12.
+9. **Widen the exact-literal shell allow list.** Phase 1's question (c), whether `*` stops at `&&`,
+   was never measured. Answering it would let `git status*` replace the exact literals, and the user
+   accepted the git textconv concern (Phase 1 #12) as a constraint on any widening. Source: § 9
+   Phase 1 and Phase 7.
 
 ## Review Log
 
@@ -1905,7 +1918,7 @@ Implementation health: Green (all findings resolved — 7 fixed, 1 user-accepted
 | 2 | Medium | `Probe.spawn()` discarded kiro-cli's stderr unconditionally, foreclosing a diagnostic signal for the exact class of failure (silent fail-open) Gate finding #6 found | Fixed — stderr captured to the harness's own stderr under `--verbose`, never into the redacted `--json-out` frame log |
 | 3 | Medium | Phase 1/Phase 7 exit criteria had no check for rule-assembly completeness, which is now the sole backstop for `on` with the floor gone; Step 7's capability-silence finding was missing from the Gate resolution's "remaining obligations" list | Fixed — added explicit Phase 1 structural criteria (every capability named, `exclude` populated, finding #6 decision recorded) and a Phase 7 live behavioral pair; folded the capability-silence finding into the Gate resolution's obligations list |
 | 4 | Medium | The probe harness never documented that the caller owns `~/.kiro/agents/` file lifecycle, nor named the bare-colon YAML pitfall that broke 7 of Phase 0's own 9 step-7 runs | Fixed — added a docstring paragraph naming both explicitly |
-| 5 | Medium | All three Phase 0 commits (`ea79482`, `7114f33`, `341780b`) carry a `Claude-Session:` trailer, which the user's own CLAUDE.md explicitly bans and states overrides the harness default | User: accepted — leave as-is; nothing pushed to `origin` yet, and no `--amend`/`rebase -i` available to fix it safely. All commits from this point on in the session omit the trailer |
+| 5 | Medium | All three Phase 0 commits (`ea79482`, `7114f33`, `341780b`) carry a `Claude-Session:` trailer, which the user's own CLAUDE.md explicitly bans and states overrides the harness default | User: accepted — leave as-is; nothing pushed to `origin` yet, and no `--amend`/`rebase -i` available to fix it safely. All commits from this point on in the session omit the trailer. *(Corrected 2026-09-23, final review: two further slug commits, `c355f13` and `6589cc5`, still carried the trailer; every later one is clean. The user's decision covers them the same way.)* |
 | 6 | Low | "Status: blocked" (Phase 0 body text and § 9's opening) had no forward pointer to the Gate resolution, reading as still-blocking to a top-down reader | Fixed — one-line forward references added at both sites |
 | 7 | Low | Risk table R-4/R-5 said "Moot" after the floor's removal, which reads as "problem gone" rather than "accepted, not mitigated" | Fixed — reworded to state the accepted residual exposure explicitly |
 | 8 | Low | § 9 Step 3's prose still said the harness was "not yet committed... held pending the Gate decision," stale relative to the exit-criteria line two paragraphs above it | Fixed — synced to record the actual commit and the two subsequent Step 5 fixes |
@@ -1935,7 +1948,7 @@ independently reached the same recommendation on the phase's one flagged design 
 | 9 | Medium | The `ae36282` regression tests used the same splice/excise logic to verify their own correctness — the exact blind spot that let findings 1-3 slip through | Fixed — new regression tests carry an independent check each (e.g. an independently-scanned fence index, a spy on `os.replace`) rather than only round-tripping through the code under test |
 | 10 | Low | A trailing blank line in `permissions.yaml` made generation fail permanently (asymmetric whitespace comparison) | Fixed — both sides of the comparison normalized consistently |
 | 11 | Low | A CRLF base agent produced a mixed-line-ending derived file; the docstring's stated rationale described the opposite direction | Fixed — injected block now adopts the base's dominant line ending; docstring corrected to state both directions; end-to-end CRLF regression test through `regenerate()` |
-| 12 | Low | The shipped `git status`/`log`/`diff`/`branch` allow-list permits repository-controlled code execution via `.gitattributes` textconv or repo-local `diff.external` — reproduces kiro-cli's own documented default, not a regression | Fixed — noted in an overlay comment; flagged as a constraint on Phase 7's shell-pattern-widening item |
+| 12 | Low | The shipped `git status`/`log`/`diff`/`branch` allow-list permits repository-controlled code execution via `.gitattributes` textconv or repo-local `diff.external` — reproduces kiro-cli's own documented default, not a regression | User: accepted — 2026-09-23 (final review): mirrors kiro-cli's own default allow list; noted in an overlay comment and as a constraint on widening shell patterns |
 | 13 | Low | A hard kill between opening the tmp file and `os.replace` could leave a stray `.tmp` file inside `~/.kiro/agents/`, a directory kiro-cli scans for its mode catalogue | Fixed — staging file moved outside `~/.kiro/agents/` (same volume) and cleared at the start of every pass |
 | 14 | Low | `_frontmatter_bounds`'s docstring asserted kiro-cli's fence-recognition rule as measured fact; only that an inline `permissions:` block loads was actually measured | Fixed — docstring now marks it as an assumption pending Phase 7 live verification |
 | 15 | Low | The `-`/`#` block-continuation ordering invariant (why an earlier key's sequence is never absorbed) lived only in a commit message, not in the code | Fixed — comment added at the scan logic it governs |
@@ -2094,7 +2107,7 @@ tests. Findings 1 and 2 turn that into pinned tests.
 | 9 | Low | [Senior] `.then(ok, err)` missed a throw inside `ok`, leaving no button | Fixed — final `.catch` shows Reconnect |
 | 10 | Low | [Senior] A late diagnostic answer could paint over a newer live socket | Fixed — stale answers dropped by socket identity (and OPEN, on the dashboard) |
 | 11 | Low | [Security] A remote viewer whose remote access was switched off was told to sign in again | Fixed — the message names both causes |
-| 12 | Low | [Security] Comments in `web.py`, `acp.py` and `prism.js`'s header still described the token as live | Fixed — reworded; `prism.js` via `_build_prism.mjs`, the generated file updates on its next rebuild |
+| 12 | Low | [Security] Comments in `web.py`, `acp.py` and `prism.js`'s header still described the token as live | Fixed at source — `_build_prism.mjs`'s template reworded; the generated `prism.js` still carries the old header until its next rebuild (needs network) |
 | 13 | Low | [Security] A test docstring said `ws_acp` refuses a token-less upgrade on its own | Fixed — reworded |
 | 14 | Low | [Senior] The Phase 6 divergences were not in § 9 at review time | Fixed — § 9 Phase 6 written in this update (the reviewer could not see uncommitted plan edits) |
 | 15 | Low | The grep criterion's last hit, a `__main__.py` docstring, sat outside the phase's scope | Fixed — reworded in the fix pass; the criterion is now ticked, not deferred |
@@ -2116,12 +2129,12 @@ Security auditor read and cited each kiro-cli parse site, and both reviewers ran
 | 3 | Medium | Both: the new "off also affects running sessions" copy was unmeasured for a live session | Fixed — measured live 2026-09-23 (true); the comment records it |
 | 4 | Low | [Security] A malformed permission request got a JSON-RPC error, which kiro-cli's turn-approval parser treats as approval | Fixed — answered `cancelled`; probe harness likewise |
 | 5 | Low | Both: the silence-timeout cancel popped pending requests without replying | Fixed — with finding 2 |
-| 6 | Low | [Security] A toggle-off between the gate check and kiro-cli's bind yields `vibe` | Fixed — documented at both call sites as benign: `vibe` is the OFF posture the user is choosing |
+| 6 | Low | [Security] A toggle-off between the gate check and kiro-cli's bind yields `vibe` | User: accepted — 2026-09-23 (final review): benign, since `vibe` is the OFF posture the user is choosing; documented at both call sites |
 | 7 | Low | Both: stale comments said the gate's failure is always refused, or Default is decided only in `_handle_new` | Fixed — four comment sites updated |
 | 8 | Low | [Senior] Binding `poweratlas-acp` on a no-metadata load was not measured | Fixed — measured live: it binds `poweratlas-acp` |
 | 9 | Low | [Senior] "Never" (`reject_always`) became meaningful for the first time, unrecorded | Fixed — commented at the reply writer |
 | 10 | Low | [Senior] The deny test did not assert the `permission_resolved` frame | Fixed — asserted |
-| 11 | Low | [Senior] The scope-note node check pins copy, not behaviour | Fixed — the behaviour is now measured live (finding 3) |
+| 11 | Low | [Senior] The scope-note node check pins copy, not behaviour | User: accepted — 2026-09-23 (final review): the copy pin stays; the behaviour it describes was measured live (finding 3) |
 | 12 | Low | [Security] The probe harness's no-option path still sent an error | Fixed — with finding 4 |
 | 13 | Low | [Security] The settings copy does not say running sessions fall to `vibe` specifically | Fixed — the scope-note comment, README, KNOWLEDGE and `AGENTS.md` now say so |
 | 14 | Low | [Senior] The `_derived_mode_in_effect` docstring disclosed as stale by the implementer | Fixed — with finding 7 |
@@ -2130,6 +2143,87 @@ The three user decisions behind the fix (fix F1 in this plan, resolved mode on l
 off) were given in this session on 2026-09-23. Cycle 2 skipped per user instruction ("1 qreview
 cycle per phase"). The fix pass's suite runs (1768 + 441 pytest, 725 node), seven killed
 mutations, and the live Allow re-probe on `13c66b0` serve as this cycle's verification.
+
+### 2026-09-23 -- Post-Implementation Review
+
+Overall implementation health: Green (all findings fixed or user-accepted; see QA below).
+Personas: Senior engineer, Security auditor, Reliability engineer. The review ran at standard
+effort. That is a **user override** of the Major-tier default of full (2026-09-23, "Standard
+effort"), recorded here as a (default, override) pair.
+Finding counts: 22 after merging (0 High, 9 Medium, 13 Low). Two further findings came from QA
+(1 Medium, 1 Low).
+QA verification: PASS after one fix round (8/8 surfaces). The first run found 2 defects in UI added by
+this review; both were fixed and re-confirmed in a real browser. See the QA section below.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 0: Pre-flight | not_run | SKIP | Probe harness plus live measurement; no product code |
+| 1: Derived agent | pass | PASS | Isolated live QA |
+| 2: Mode wiring | pass | PASS (8/8) | |
+| 3: UI | pass | PASS (13/13, HTTP) | Real-browser surfaces re-verified at Step 9b |
+| 4: Credential | pass | PASS (11/11) | |
+| 5: Gate and doors | pass | PASS | Live on the restarted build; R-14 measured |
+| 6: Retire token | pass | PASS (8/8) | Live on the restarted build |
+| 7: Live verification | pass | PASS | 17/18 criteria plus doors; Allow-was-Deny found and fixed |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | [Senior, Reliability] Turn-end `cancelled` answers ran after steps that can raise, leaving kiro-cli blocked | Fixed — they run in a nested `finally`; announcements guarded per entry (`c294822`) |
+| 2 | Medium | [Senior, Reliability] D-22's "report in settings" had no UI | Fixed — "Browser sign-in" section with an in-memory-key warning and the gear dot |
+| 3 | Medium | [Security, Senior, Reliability] Local rotation had no UI and did not revoke open sockets | Fixed — two-click "Sign out other browsers"; closes all loopback `/ws/acp` sockets; README documents it and the fallback |
+| 4 | Medium | [Security] Nothing pinned `/api/acp-permissions` and `/api/local-secret/rotate` as loopback-only | Fixed — three remote-peer refusal tests; mutations killed |
+| 5 | Medium | [Reliability] Two new lifespan steps had no timeout; a stall aborted startup | Fixed — 3 s bound with the existing fallbacks |
+| 6 | Medium | [Security] A stale derived agent plus a failed regeneration binds Default ungated while the toggle reads on | User: accepted — 2026-09-23, R-3 extended; it fails visibly, and reusing stale blocks would also revive old allow-all files |
+| 7 | Medium | [Senior] No documented way for agents to sign in for live QA | Fixed — `AGENTS.md` Doc & Test bullet, user-approved (`260a3c3`) |
+| 8 | Medium | [Reliability] Sub-agent behaviour with the setting on was never exercised | Fixed — measured live: the spawn asks, the child's shell command asks in the parent's page, and Allow runs it; README records it |
+| 9 | Medium | [Reliability] A closure in the Phase 7 fix pass left a hang path with no user decision | Fixed — same as finding 1 |
+| 10 | Low | [Security] With `PYWEBVIEW_LOG=DEBUG`, a live login URL reached `orchestrator.log` | Fixed — the `pywebview` logger is clamped to INFO |
+| 11 | Low | [Reliability] A signed-out tab never said to reload after signing in again | Fixed — "…then reload this tab" on both pages |
+| 12 | Low | [Reliability] A signed-out dashboard's htmx 403 was unhandled | Fixed — listener added; QA then found the shim never fired it (QA finding 2) |
+| 13 | Low | [Reliability] Peek's double-tap was unguarded in the keyboard hook | Fixed — same guard as the single tap |
+| 14 | Low | [Reliability] Settings routes read the filesystem on the event loop | Fixed — `asyncio.to_thread` |
+| 15 | Low | [Reliability] `AgentProfileError` was logged twice | Fixed — caught separately |
+| 16 | Low | [Senior] The `session` frame comment claimed a page reads `mode` | Fixed — comment corrected |
+| 17 | Low | [Senior] `agent_profile.regenerate()` had only test callers | Fixed — deleted; tests use a helper |
+| 18 | Low | [Senior] Duplicated refusal loggers and door helpers | Fixed — one logger helper and one door helper; the cookie verifiers were deliberately left separate |
+| 19 | Low | [Reliability] The toggle-on race was undocumented | Fixed — comment beside the off-race note |
+| 20 | Low | [Senior] README omitted the overlay's out-of-folder read and `.kiro` write-deny rules | Fixed — added, checked against `permissions.yaml` |
+| 21 | Low | [Senior] ROADMAP still called `/partials/launchers` unauthenticated | Fixed — "any signed-in local caller"; the leak stays open |
+| 22 | Low | [Reliability] Refusal counts flush only on graceful shutdown | Fixed — the notes say "graceful" |
+
+**Review-log audit.** The reviewers found these closures that were not true fixes, and each is now
+corrected above:
+- Phase 1 #12, Phase 7 #6 and Phase 7 #11 were marked "Fixed" on a rationale alone. They are now
+  `User: accepted` per the user's 2026-09-23 decision.
+- Phase 0 #5 named too few commits; it now lists `c355f13` and `6589cc5`.
+- Phase 6 #12 is relabelled "Fixed at source", because the generated `prism.js` updates only on
+  its next rebuild.
+- Phase 2 #9's leftover comment was fixed in `c294822`.
+
+Cycle 2 was skipped per the user's "1 qreview cycle per phase". The fix pass's suites (1779 + 446
+pytest, 733 node) and its killed mutations stand in for it.
+
+#### Step 9b QA
+
+The first run returned FAIL, 6/8 surfaces passing. It used a headless Playwright browser with 103
+browser actions and 4 model calls, and it confined every destructive probe to an isolated
+instance. The live setting, `config.toml` and `~/.kiro` were all restored and verified. Both
+failures were in UI the final review had just added:
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| Q1 | Medium | The rotate button's arming click closed the settings menu, so its confirmation was never seen | Fixed — the button stops propagation; confirmed in headless Chromium (`947e20d`) |
+| Q2 | Low | The htmx 403 → signed-out listener was dead: the in-repo htmx shim never fires `htmx:responseError` and swaps error bodies | Fixed — the shim dispatches a bubbling `htmx:responseError` and never swaps non-2xx bodies; confirmed in Chromium |
+
+The gate held against all 17 look-alike and normalisation paths. An advisory: `/static/../<route>`
+passed the exemption's prefix check, and `StaticFiles` returned 404. It is now hardened in
+`947e20d`: a `..` segment under `/static` is refused with the JSON 403.
+
+The QA fix pass also found that clicking a text field inside the settings menu closed the menu, which
+made the new Base agent field unusable with a mouse. The pre-existing Peek hotkey field had the same
+problem. Both were fixed in a follow-up commit.
 
 ## Harness Improvement Opportunities
 
