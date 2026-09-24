@@ -2398,6 +2398,10 @@ function dashSendPrompt(){
       return;
     }
     _dashSent = true;
+    // Prompt send succeeded — trigger a rail refresh so the dot state
+    // updates promptly rather than waiting for the 60-second polling cycle.
+    // Mirrors acp.html's own railRefreshSoon() call after sendPrompt().
+    dashRailRefreshSoon();
     // Handed over rather than revoked -- a refusal has to be able to give
     // the images back (dashHandle()'s `error` case below), and re-staging
     // them costs another paste, decode and re-encode. Mirrors acp.html's
