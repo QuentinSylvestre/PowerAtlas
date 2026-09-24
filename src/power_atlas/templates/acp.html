@@ -40,7 +40,9 @@
         </svg>
         <span class="acp-mcp-compact" id="acpMcpCompact"></span>
       </button>
-      <div class="acp-mcp-panel" id="acpMcpPanel" hidden role="tooltip">
+      <!-- Panel: visibility driven by aria-expanded on #acpMcpToggle via CSS
+           sibling selector — Phase 6 toggles aria-expanded, not .hidden. -->
+      <div class="acp-mcp-panel" id="acpMcpPanel">
         <ul class="acp-mcp-list" id="acpMcpList" aria-label="MCP servers"></ul>
       </div>
     </div>

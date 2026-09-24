@@ -1047,6 +1047,7 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
   border-radius: var(--radius-sm); cursor: pointer; font-family: inherit;
 }
 .acp-mcp-toggle:hover { color: var(--text); background: var(--surface-hover); }
+.acp-mcp-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .acp-mcp-toggle.acp-mcp-warn { color: #ef4444; }
 .acp-mcp-toggle.acp-mcp-caution { color: var(--amber); }
 .acp-mcp-toggle[aria-expanded="true"] ~ .acp-mcp-panel { display: block; }
