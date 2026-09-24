@@ -1742,6 +1742,14 @@ function addPermissionRequest(requestId, sid, title, options, consent) {
     btn.type = 'button';
     btn.className = 'acp-btn acp-permission-option';
     btn.textContent = (opt && opt.name) ? opt.name : ((opt && opt.optionId) || '');
+    // An "always" answer is session-scoped: PowerAtlas sends no scope with
+    // its reply, so kiro-cli keeps the rule in memory for this session only
+    // and saves nothing to disk. Say so on the button, or it reads as permanent.
+    if (opt && typeof opt.kind === 'string' && /_always$/.test(opt.kind)) {
+      btn.textContent += ' (this session)';
+      btn.title = 'Applies until this session ends. Nothing is saved; ' +
+                  'a new session asks again.';
+    }
     btn.addEventListener('click', function () {
       if (btn.disabled) return;
       var buttons = btnRow.querySelectorAll('button');

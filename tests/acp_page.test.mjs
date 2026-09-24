@@ -10798,6 +10798,25 @@ check("permission prompt: a consent block renders capability and resource", (tpl
     "the consent block displaced the answer buttons");
 });
 
+check("permission prompt: an 'always' option says it lasts for this session only", (tpl) => {
+  // kiro-cli keeps an always-answer as an in-memory, session-scoped rule
+  // (PowerAtlas sends no scope), so the button must not read as permanent.
+  const { page, live } = connected(tpl);
+  const frame = permFrame(live, 190, "echo hi");
+  frame.payload.options = [
+    { optionId: "accept", name: "Allow", kind: "allow_once" },
+    { optionId: "reject", name: "Deny", kind: "reject_once" },
+    { optionId: "always-reject", name: "Always deny", kind: "reject_always" },
+  ];
+  page.deliver(frame);
+  const btns = lastPermRow(page).querySelectorAll(".acp-permission-option");
+  assertEqual(btns.map((b) => b.textContent).join("|"),
+    "Allow|Deny|Always deny (this session)",
+    "only the always option should carry the session-scope label");
+  assert(/session/.test(btns[2].title || ""), "the always option has no session-scope tooltip");
+  assert(!btns[0].title && !btns[1].title, "a one-off option gained a scope tooltip");
+});
+
 check("permission prompt: an unknown or prototype-named capability renders raw, not mapped", (tpl) => {
   // G11 (Phase 3 review): the plain-words table is looked up with
   // hasOwnProperty, because the value is agent-authored — "constructor" must

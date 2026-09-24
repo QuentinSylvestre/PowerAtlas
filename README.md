@@ -419,7 +419,9 @@ When a session does ask, the request renders inline in the transcript and the tu
 answer, from any tab or after a reload, the same way a clarifying question does. The prompt shows the
 full command or tool title, plus what kiro-cli reports about the request: the capability, the resource
 (for a write, the file name), the rule that matched, and where that rule came from. kiro-cli offers
-**Allow** (this once), **Deny** (this once) and **Always deny**; it offers no "always allow". Denying
+**Allow** (this once), **Deny** (this once) and **Always deny**; it offers no "always allow".
+**Always deny** lasts for the current session only, and the button says so: kiro-cli keeps the rule in
+memory, writes nothing to disk, and a new session asks again. Denying
 leaves the tool call failed with nothing written. Nothing answers on your behalf: a session nobody is
 watching waits at its first such request until the silence timeout above cancels the turn.
 `plans/ROADMAP.md`'s item on deciding permission requests by rule for unattended sessions is what would
