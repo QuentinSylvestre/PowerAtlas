@@ -1755,13 +1755,24 @@ def _local_gate_exempt(scope) -> bool:
     `StaticFiles.__call__`, which asserts an http scope. The mount is matched
     as a directory, so `/staticfoo` is not exempt.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
+
+    A path with a `..` segment is never exempt: `/static/../api/settings`
+    matches the prefix, and only `StaticFiles`' own traversal check (a 404)
+    kept it from anything. The exemption no longer depends on that. `scope
+    ["path"]` is already percent-decoded, so `..%2F` arrives here as `../`;
+    a backslash counts as a separator because the static directory is
+    resolved with Windows path rules.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
     """
     if scope["type"] != "http" or scope.get("method") not in ("GET", "HEAD"):
         return False
     path = scope.get("path") or ""
     if path == _LOCAL_AUTH_PATH:
         return True
-    return path == _REMOTE_STATIC_MOUNT or path.startswith(_REMOTE_STATIC_MOUNT + "/")
+    if not (path == _REMOTE_STATIC_MOUNT
+            or path.startswith(_REMOTE_STATIC_MOUNT + "/")):
+        return False
+    return ".." not in re.split(r"[/\\]", path)
 
 
 async def _refuse_local(scope, receive, send) -> None:

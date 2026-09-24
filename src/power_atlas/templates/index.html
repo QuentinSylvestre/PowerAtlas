@@ -159,11 +159,14 @@
            `local_secret` and shows it only while the key is held in memory.
            The button rotates the local key, which signs every other browser
            out; it arms on the first click and acts on the second, rather
-           than using window.confirm(). -->
+           than using window.confirm(). It passes `event` so the click stops
+           short of the document-level closer and the menu stays open on the
+           armed label and on the result note.
+           260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA -->
       <div class="topbar-menu-divider"></div>
       <div class="topbar-menu-section-label">Browser sign-in</div>
       <div id="localSecretWarn" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
-      <button id="localSecretRotate" type="button" class="topbar-menu-row topbar-menu-action" onclick="rotateLocalSecret(this)" title="Rotate the local sign-in key. Every other browser signed in to PowerAtlas is signed out and must be reopened from the tray; this one stays signed in.">Sign out other browsers (rotate the local key)</button>
+      <button id="localSecretRotate" type="button" class="topbar-menu-row topbar-menu-action" onclick="rotateLocalSecret(this, event)" title="Rotate the local sign-in key. Every other browser signed in to PowerAtlas is signed out and must be reopened from the tray; this one stays signed in.">Sign out other browsers (rotate the local key)</button>
       <div id="localSecretNote" class="topbar-menu-note" role="status" hidden></div>
 
       <div id="topbarRestartDivider" class="topbar-menu-divider"></div>
@@ -7331,7 +7334,13 @@ function _localSecretNote(text, warn) {
  *  control needs no modal and cannot be dismissed by a stray Enter. Disarmed
  *  by a token rather than clearTimeout, so a stale timer from an earlier
  *  arming can never disarm a newer one. */
-function rotateLocalSecret(btn) {
+function rotateLocalSecret(btn, ev) {
+  // The topbar menu's document-level click handler closes the menu on any
+  // click. Letting this one through closed it on the arming click, so the
+  // "Click again" label rendered into a closed menu and a user who reopened it
+  // and clicked again rotated without ever seeing the confirmation step.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+  if (ev && ev.stopPropagation) ev.stopPropagation();
   if (!btn || btn.disabled) return;
   if (!_localSecretArmed) {
     var token = ++_localSecretArmSeq;

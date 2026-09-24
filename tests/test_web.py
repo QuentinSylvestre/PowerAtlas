@@ -25465,6 +25465,49 @@ class TestLoopbackGateExemptions:
     def test_lookalike_paths_are_not_exempt(self, anonymous_client, path):
         assert _is_json_403(anonymous_client.get(path))
 
+    @pytest.mark.parametrize("path, raw_path", [
+        ("/static/../api/settings", "/static/../api/settings"),
+        # uvicorn percent-decodes `path` and keeps `raw_path` as sent.
+        ("/static/../api/settings", "/static/..%2Fapi/settings"),
+        ("/static/..\\api\\settings", "/static/..%5Capi%5Csettings"),
+        ("/static/..", "/static/.."),
+    ])
+    def test_a_dot_dot_segment_under_static_is_not_exempt(self, path, raw_path):
+        """The `/static` exemption is a prefix match; it must not also rely on
+        `StaticFiles` refusing the traversal. Driven over the sentinel, where
+        only the gate can refuse, with the scope uvicorn builds — an HTTP
+        client would normalise the first form to `/api/settings` before
+        sending it.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+        """
+        from power_atlas.web import _local_gate_exempt
+        scope = {"type": "http", "method": "GET", "path": path,
+                 "raw_path": raw_path.encode()}
+        assert _local_gate_exempt(scope) is False
+        status, body, sent = _peer_http(path, [_LOOPBACK_HOST_HEADER],
+                                        client=_LOOPBACK_PEER,
+                                        asgi_app=_gate_over_sentinel())
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        assert status == 403
+        assert (b"content-type", b"application/json") in start["headers"]
+        assert body == b'{"error":"Forbidden"}'
+
+    def test_a_dot_dot_encoded_request_through_the_app_is_json_403(
+            self, anonymous_client):
+        """End to end on the real app: `%2F` survives the client and is
+        decoded server-side into a `..` segment.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+        """
+        assert _is_json_403(anonymous_client.get("/static/..%2Fapi/settings"))
+
+    def test_a_static_file_name_containing_dots_stays_exempt(self):
+        """Only a whole `..` segment is refused, not any `..` substring.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+        """
+        from power_atlas.web import _local_gate_exempt
+        assert _local_gate_exempt({"type": "http", "method": "GET",
+                                   "path": "/static/a..b.css"}) is True
+
     @pytest.mark.parametrize("path", ["/local-auth", "/static/style.css"])
     def test_only_get_is_exempt(self, anonymous_client, path):
         resp = anonymous_client.post(path, headers={"Origin": "http://127.0.0.1"})

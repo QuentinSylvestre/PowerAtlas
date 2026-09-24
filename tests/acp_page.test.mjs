@@ -4779,6 +4779,22 @@ function panelSource() {
   return region;
 }
 
+// The topbar settings menu's open/close wiring: the gear's click listener, the
+// document-level closer and the Escape closer. Anchored on code at both ends.
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+function topbarMenuSource() {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const from = src.indexOf("var topbarSettingsBtn = document.getElementById('topbarSettingsBtn');");
+  if (from < 0) throw new Error("index.html no longer declares topbarSettingsBtn");
+  const to = src.indexOf("function restartPowerAtlas(", from);
+  if (to < 0) throw new Error("restartPowerAtlas no longer follows the topbar menu wiring");
+  const region = src.slice(from, to);
+  for (const name of ["closeTopbarSettings", "topbarMenuGuard", "document.addEventListener('click'"]) {
+    if (!region.includes(name)) throw new Error(`the topbar menu region lost ${name}`);
+  }
+  return region;
+}
+
 function loadPanel(opts = {}) {
   const body = new El("div");         // #remoteAccessBody
   const restartBody = new El("div");  // #remoteRestartBody
@@ -4817,6 +4833,16 @@ function loadPanel(opts = {}) {
   byId.set("localSecretWarn", secretWarn);
   byId.set("localSecretRotate", secretRotate);
   byId.set("localSecretNote", secretNote);
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA: the gear
+  // button and the menu it opens, driven by the real open/close wiring when
+  // `opts.topbarMenu` extracts it (topbarMenuSource below). The menu starts
+  // hidden, as in the markup.
+  const topbarBtn = new El("button");
+  topbarBtn.setAttribute("aria-expanded", "false");
+  const topbarMenu = new El("div");
+  topbarMenu.hidden = true;
+  byId.set("topbarSettingsBtn", topbarBtn);
+  byId.set("topbarSettingsMenu", topbarMenu);
   // The two live controls in the dashboard topbar that `markRestartInputs`
   // reaches for by class. Present here because their absence is a passing
   // state in that function (`if (!host) return`), so a harness without them
@@ -4833,6 +4859,10 @@ function loadPanel(opts = {}) {
   const clipboard = [];
   const timers = [];
   const domReady = [];
+  // Every other document-level listener, so the topbar menu's closer can be
+  // fired the way a bubbling click reaches it.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+  const docListeners = new Map();
 
   function fakeFetch(target, init) {
     const url = String(target);
@@ -4852,7 +4882,9 @@ function loadPanel(opts = {}) {
       getElementById: (id) => byId.get(id) ?? null,
       querySelector: (sel) => hosts.get(sel) ?? null,
       addEventListener: (type, fn) => {
-        if (type === "DOMContentLoaded") domReady.push(fn);
+        if (type === "DOMContentLoaded") { domReady.push(fn); return; }
+        if (!docListeners.has(type)) docListeners.set(type, []);
+        docListeners.get(type).push(fn);
       },
       write: () => HTML_SINK("document.write"),
     },
@@ -4876,10 +4908,21 @@ function loadPanel(opts = {}) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(panelSource(), sandbox, { filename: "index.html#remote-panel" });
+  if (opts.topbarMenu) {
+    vm.runInContext(topbarMenuSource(), sandbox, { filename: "index.html#topbar-menu" });
+  }
 
   return {
     sandbox, body, restartBody, modal, hosts,
     toasts, fetches, confirms, clipboard, timers, domReady,
+    topbarBtn, topbarMenu,
+    /** A click reaching the document: every document-level click listener
+     *  runs, as a bubbling click with nothing stopping it would reach them. */
+    fireDoc(type, ev) {
+      const fns = docListeners.get(type) ?? [];
+      if (fns.length === 0) throw new Error(`nothing listens for document '${type}'`);
+      for (const fn of fns) fn(ev ?? {});
+    },
     // The *copyable value* fields — the URL and the secret — and deliberately
     // not the bind-address editor, which shares `.remote-field` for its
     // spacing but is an input the user types into rather than a value the page
@@ -11297,8 +11340,10 @@ check("settings: the markup wires the rotation button and the sign-in rows the s
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
   const btn = src.match(/<button id="localSecretRotate"[^>]*>([^<]*)<\/button>/);
   assert(btn, "index.html has no #localSecretRotate button");
-  assert(/onclick="rotateLocalSecret\(this\)"/.test(btn[0]),
-    `the button does not call rotateLocalSecret(this): ${btn[0]}`);
+  // `event` is load-bearing: rotateLocalSecret stops it short of the topbar
+  // menu's document-level closer (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA).
+  assert(/onclick="rotateLocalSecret\(this, event\)"/.test(btn[0]),
+    `the button does not call rotateLocalSecret(this, event): ${btn[0]}`);
   assert(/Sign out other browsers/.test(btn[1]), `unexpected label: ${btn[1]}`);
   assert(/type="button"/.test(btn[0]), "the button must not default to submit");
   for (const id of ["localSecretWarn", "localSecretNote"]) {
@@ -11306,6 +11351,55 @@ check("settings: the markup wires the rotation button and the sign-in rows the s
     assert(el && /\bhidden\b/.test(el[0]) && /role="status"/.test(el[0]),
       `#${id} is missing, not hidden initially, or not a status region`);
   }
+});
+
+check("settings: a real click on 'Sign out other browsers' keeps the menu open on the armed label and on the result (final QA)", async () => {
+  // The QA found the arming click closed the menu: the document-level closer
+  // saw it, so "Click again" rendered into a closed menu and the natural
+  // re-click after reopening rotated with no confirmation seen. Driven as a
+  // browser delivers a click: the button's own inline handler, taken from the
+  // markup, then every document-level click listener unless it stopped
+  // propagation.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+  const p = loadPanel({ topbarMenu: true, answer: (url) => url === "/api/local-secret/rotate"
+    ? { body: { ok: true, reissued: true, message: "x" } } : { body: {} } });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  const btn = $("localSecretRotate");
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const onclick = src.match(/<button id="localSecretRotate"[^>]*onclick="([^"]*)"/)[1];
+  const inline = vm.runInContext(`(function (event) { ${onclick} })`, p.sandbox);
+  function click(el, handler) {
+    let stopped = false;
+    const ev = { type: "click", target: el, stopPropagation() { stopped = true; } };
+    handler.call(el, ev);
+    if (!stopped) p.fireDoc("click", ev);
+    return stopped;
+  }
+  const menuOpen = () => !p.topbarMenu.hidden
+    && p.topbarBtn.getAttribute("aria-expanded") === "true";
+  // Open the menu through the gear's real listener; its click then bubbles to
+  // the closer, which the guard absorbs.
+  click(p.topbarBtn, (ev) => p.topbarBtn.dispatch("click", ev));
+  assert(menuOpen(), "the gear did not open the menu");
+  // The closer is live: a click elsewhere closes the menu. Reopen for the check.
+  p.fireDoc("click", { type: "click" });
+  assert(!menuOpen(), "a click outside the menu did not close it; the check below would prove nothing");
+  click(p.topbarBtn, (ev) => p.topbarBtn.dispatch("click", ev));
+
+  click(btn, inline);
+  assert(menuOpen(), "the arming click closed the settings menu");
+  assert(btn.classList.contains("armed") && /click again/i.test(btn.textContent),
+    `the open menu does not show the armed label: ${btn.textContent}`);
+  assertEqual(p.fetches.filter((f) => f.url === "/api/local-secret/rotate").length, 0,
+    "the arming click rotated the key");
+
+  click(btn, inline);
+  await p.settle();
+  assert(menuOpen(), "the rotating click closed the settings menu");
+  const note = $("localSecretNote");
+  assertEqual(note.hidden, false, "the result note is not shown");
+  assert(/this browser stays signed in/i.test(note.textContent),
+    `the open menu does not show the result: ${note.textContent}`);
 });
 
 check("settings: a refused rotation says so and does not claim success (F3)", async () => {
@@ -15318,6 +15412,109 @@ check("dashboard: a 403 on an htmx request reports signed out, once; other error
   assertEqual(reported, 1, "a 403 on an htmx request was not reported as signed out");
   p.fireDoc("htmx:responseError", { detail: { xhr: { status: 403 } } });
   assertEqual(reported, 1, "every polled 403 repeated the signed-out report");
+});
+
+// The shipped htmx shim, run for real against the dashboard's own listener.
+// The check above fires a synthetic event; the QA found the shim itself never
+// dispatched one and swapped the gate's JSON 403 into the launcher grid.
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+const HTMX_SHIM = path.join(HERE, "..", "src", "power_atlas", "static", "htmx.min.js");
+
+function loadHtmxShim(p, answer) {
+  const dispatched = [];
+  // A bubbling event on an element in the page reaches the document's
+  // listeners; a non-bubbling one stays on the element.
+  class ShimEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.bubbles = Boolean(init.bubbles);
+      this.detail = init.detail;
+    }
+  }
+  p.sandbox.Event = ShimEvent;
+  p.sandbox.CustomEvent = ShimEvent;
+  p.sandbox.Element = { prototype: {} };
+  p.sandbox.fetch = (url) => {
+    const { status, body } = answer(url);
+    return Promise.resolve({
+      ok: status >= 200 && status < 300, status,
+      statusText: status === 403 ? "Forbidden" : "OK",
+      text: () => Promise.resolve(body),
+    });
+  };
+  vm.runInContext(fs.readFileSync(HTMX_SHIM, "utf8"), p.sandbox, { filename: "htmx.min.js" });
+  // `#launcher-tiles` as index.html marks it up. A plain stand-in rather than
+  // an El: the shim queries `[hx-get]`, and El implements class/tag selectors
+  // only; and its innerHTML is recorded, where El's forbids the sink.
+  function tiles() {
+    const attrs = { "hx-get": "/partials/launchers", "hx-trigger": "load", "hx-swap": "innerHTML" };
+    const el = {
+      swapped: [],
+      getAttribute: (n) => (n in attrs ? attrs[n] : null),
+      set innerHTML(v) { el.swapped.push(v); },
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+      dispatchEvent(ev) {
+        dispatched.push(ev);
+        if (ev.bubbles) {
+          try { p.fireDoc(ev.type, ev); } catch (e) {
+            if (!/nothing listens/.test(e.message)) throw e;
+          }
+        }
+        return true;
+      },
+    };
+    return el;
+  }
+  const rootOf = (el) => ({ querySelectorAll: (sel) => (sel === "[hx-get]" ? [el] : []) });
+  return { dispatched, tiles, rootOf };
+}
+
+check("dashboard: the shipped htmx shim reports a 403 as signed out, once, and does not swap the error body (final QA)", async () => {
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+  const p = loadDashPicker({ realConnect: true });
+  const notes = [];
+  p.sandbox.dashSetComposerNote = (t) => notes.push(t);
+  const shim = loadHtmxShim(p, () => ({ status: 403, body: '{"error":"Forbidden"}' }));
+  const first = shim.tiles();
+  p.sandbox.htmx.process(shim.rootOf(first));
+  await p.settle();
+  await p.settle();
+  assertEqual(first.swapped.length, 0,
+    `the shim swapped an error body into the page: ${JSON.stringify(first.swapped)}`);
+  const errors = shim.dispatched.filter((e) => e.type === "htmx:responseError");
+  assertEqual(errors.length, 1, "the shim did not dispatch htmx:responseError for a 403");
+  assertEqual(errors[0].bubbles, true, "htmx:responseError must bubble to the document listener");
+  assertEqual(errors[0].detail && errors[0].detail.xhr && errors[0].detail.xhr.status, 403,
+    "the event does not carry detail.xhr.status");
+  const signedOut = () => notes.filter((t) => /signed out/i.test(t)).length;
+  assertEqual(signedOut(), 1, `a 403 was not reported as signed out: ${JSON.stringify(notes)}`);
+  // A second 403 (the next load) is not reported again.
+  const second = shim.tiles();
+  p.sandbox.htmx.process(shim.rootOf(second));
+  await p.settle();
+  await p.settle();
+  assertEqual(second.swapped.length, 0, "the second 403 was swapped");
+  assertEqual(signedOut(), 1, "the signed-out report repeated");
+});
+
+check("dashboard: the shipped htmx shim still swaps a 2xx body and reports no error (final QA)", async () => {
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+  const p = loadDashPicker({ realConnect: true });
+  let reported = 0;
+  p.sandbox.dashReportSignedOut = () => { reported++; };
+  const shim = loadHtmxShim(p, () => ({ status: 200, body: "<div class=\"launcher-tile\"></div>" }));
+  const el = shim.tiles();
+  p.sandbox.htmx.process(shim.rootOf(el));
+  await p.settle();
+  await p.settle();
+  assertEqual(JSON.stringify(el.swapped), JSON.stringify(["<div class=\"launcher-tile\"></div>"]),
+    "a 2xx body was not swapped in");
+  assertEqual(shim.dispatched.filter((e) => e.type === "htmx:responseError").length, 0,
+    "a 2xx reported an error");
+  assertEqual(shim.dispatched.filter((e) => e.type === "htmx:afterSwap").length, 1,
+    "htmx:afterSwap no longer fires after a 2xx swap");
+  assertEqual(reported, 0, "a 2xx was reported as signed out");
 });
 
 check("dashboard: refused handshake — a server that is not answering still reads as unreachable, not signed out", async () => {
