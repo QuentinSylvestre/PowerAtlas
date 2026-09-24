@@ -476,13 +476,13 @@ Also add this rule to prevent `display: inline-flex` from overriding the `hidden
 ```
 
 **Exit criteria**:
-- [ ] `#acpMcpIndicator` element present in `acp.html` with `hidden` attribute (starts hidden)
-- [ ] `#acpMcpToggle`, `#acpMcpCompact`, `#acpMcpPanel`, `#acpMcpList` IDs present
-- [ ] `aria-expanded` and `aria-controls` on toggle button
-- [ ] CSS rules for `.acp-mcp-indicator`, `.acp-mcp-badge-{connected,connecting,failed,disabled}`, `.acp-mcp-connect-btn` present in `style.css`
-- [ ] Hard reload (`Ctrl+Shift+R`) shows the new element in the toolbar (confirm via Playwright snapshot — element hidden, correct structure present)
-- [ ] `#acpMcpIndicator[hidden] { display: none !important; }` rule in `style.css` (prevents inline-flex from overriding the `hidden` attribute)
-- [ ] CSS colour variables match those already used in the file (no new undefined variables)
+- [x] `#acpMcpIndicator` element present in `acp.html` with `hidden` attribute (starts hidden)
+- [x] `#acpMcpToggle`, `#acpMcpCompact`, `#acpMcpPanel`, `#acpMcpList` IDs present
+- [x] `aria-expanded` and `aria-controls` on toggle button
+- [x] CSS rules for `.acp-mcp-indicator`, `.acp-mcp-badge-{connected,connecting,failed,disabled}`, `.acp-mcp-connect-btn` present in `style.css`
+- [ ] Hard reload (`Ctrl+Shift+R`) shows the new element in the toolbar (confirm via Playwright snapshot — element hidden, correct structure present) [deferred to Step 9 — requires PowerAtlas restart]
+- [x] `#acpMcpIndicator[hidden] { display: none !important; }` rule in `style.css` (prevents inline-flex from overriding the `hidden` attribute)
+- [x] CSS colour variables match those already used in the file (no new undefined variables)
 
 ### Phase 6: MCP JavaScript — frame handler and panel logic [QA]
 
@@ -732,6 +732,11 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 - Three pre-existing test fixtures (`TestAcpLifespanWiring`, `TestGenerationRunsAtStartup._fake_acp`, `_run_lifespan_capturing_gate`) needed `start_watchdog` stub added — they broke because lifespan now calls `acp.start_watchdog()`. Added stubs.
 - `test_watchdog_fires_on_crashed_process`: tracking stub clears `_proc` after first call to simulate `_on_agent_death/_detach` behavior and prevent repeated fires across ticks.
 
+### Phase 5 (2026-09-24, code: a99e343, fix: 8d9ced1)
+
+- Divergence from plan: removed `role="tooltip"` from `#acpMcpPanel` (plan included it; ARIA prohibits interactive content in tooltip — review finding H1).
+- Divergence from plan: removed `hidden` from `#acpMcpPanel` initial HTML (panel visibility driven by `aria-expanded` CSS sibling selector; plan's original `hidden` created a conflict with the show mechanism — review finding M2).
+
 ### Phase 4 (2026-09-24, code: da4639b, fix: 0082414)
 
 No divergences from plan.
@@ -751,6 +756,19 @@ No divergences from plan.
 3. **`_kiro/governance/state`, `_kiro/tools/didChange`, `_kiro/powers/items_changed` notification handling.** Three new notification types observed during Phase 3 probing; params shapes unknown; currently logged as INFO. Investigate in a future session. Source: qexplore Discovery.
 
 ## Review Log
+
+### 2026-09-24 — Phase 5 review (full effort, 4 personas)
+
+Senior engineer, End-user advocate, Maintainability reviewer, Reliability engineer. 1 auto-fix cycle (direct edit).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F5-1 | High | `role="tooltip"` on `#acpMcpPanel` prohibits interactive descendants — Connect buttons (Phase 6) would be inaccessible to AT | Fixed — removed `role="tooltip"` from panel (commit 8d9ced1) |
+| F5-2 | Medium | `#acpMcpPanel[hidden]` had no `display: none !important` escape rule; author CSS sibling selector overrides UA `[hidden]` | Fixed — removed `hidden` from panel initial HTML; CSS `display: none` default is the closed state; panel visibility driven exclusively by `aria-expanded` sibling selector (commit 8d9ced1) |
+| F5-3 | Medium | Accessible name degrades to bare compact text when `#acpMcpCompact` is populated | Phase 6 task — JS must set `aria-label` on `#acpMcpToggle` when updating compact text |
+| F5-4 | Low | `.acp-mcp-toggle` had no `:focus-visible` rule | Fixed — added `.acp-mcp-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }` (commit 8d9ced1) |
+
+Health: **Green** (1 High fixed, 2 Medium fixed/deferred-to-P6, 1 Low fixed). F5-3 tracked for Phase 6.
 
 ### 2026-09-24 — Phase 4 review (full effort, 4 personas)
 
