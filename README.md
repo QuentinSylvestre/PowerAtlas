@@ -54,6 +54,39 @@ at `/acp` — a workspace-grouped session browser beside a conversation pane, tw
 drill-down below 768 px. Reach it from the **ACP** button beside the dashboard's logo, from the *open in
 ACP* action on any kiro-cli session row, or by opening `/acp` directly.
 
+### Signing in on this machine
+
+Every page and API route on `http://127.0.0.1:<port>` needs a sign-in cookie. Only the sign-in route
+itself and `/static` files are exempt. PowerAtlas signs your browser in for you when you open it from
+one of its three doors:
+
+- the tray icon's **Open** item;
+- a double-tap of the peek hotkey;
+- the peek overlay, whose built-in browser signs in again each time it is shown.
+
+Each door puts a fresh **login code** in the URL it opens. The browser exchanges that code once for a
+cookie, `pa_local`, and lands on the dashboard. The code works exactly once and expires after 120
+seconds. The cookie is HttpOnly and lasts 90 days.
+
+The tray also has **Copy login link**, for a second browser or any deliberate re-entry. It copies a
+fresh login link to the clipboard. The link is single-use and expires after 120 seconds, like any
+other login code, so do not bookmark it. To keep a bookmark, sign in first and then bookmark
+`http://127.0.0.1:<port>/`. The cookie belongs to the host name `127.0.0.1`, so a bookmark that uses
+`localhost` instead does not carry it.
+
+A browser with no valid cookie is not served the page. Opening `http://127.0.0.1:<port>/` directly
+shows a short page that says to open PowerAtlas from its tray icon. An open tab whose cookie stops
+working (because it expired, or the local secret was rotated) says it is signed out and
+points to the tray icon. It offers neither Reconnect nor Reload, because both would resend the same
+missing cookie.
+
+The cookie is signed with a local secret kept at `%LOCALAPPDATA%\power-atlas\local-secret` (Linux:
+`~/.config/power-atlas/local-secret`), created at first start and never served to a browser. Any
+program running as your user can read that file, so the cookie keeps out other users, web pages and
+other programs that cannot read your profile. It does not stop code already running as you. A remote
+device on NetBird is unaffected: it still signs in once at `/remote-auth` with the device secret (see
+*Remote access* below).
+
 ### Features
 
 - Auto-discovers workspaces from kiro-cli, Claude Code, and Kiro IDE session data
@@ -110,6 +143,8 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
   with no restart. Notifications reach the machine running PowerAtlas, **not** a remote browser: the
   remote bind serves plain HTTP, and browsers refuse the notification API outside a secure context,
   so a phone on the NetBird address is hard-denied by the browser and cannot be prompted
+- **Agent permissions** (gear icon in topbar, off by default) decides whether ACP sessions PowerAtlas
+  creates ask before acting. See *Tool permissions* under *Agent sessions* below
 - Platform-aware terminal detection:
   - Windows: Windows Terminal › PowerShell › cmd
   - Linux: kitty › Alacritty › GNOME Terminal › Konsole › xterm
@@ -148,6 +183,12 @@ acp_prompt_silence_seconds = 1800  # 60-86400. A turn is cancelled after this mu
                                   # agent — not this much total time — so a long turn that keeps
                                   # streaming is never cut off. A 24-hour absolute ceiling still
                                   # applies, so one chunk per window cannot run forever.
+
+# ACP permission profile. Both are set from the settings menu's "Agent permissions" section and take
+# effect without a restart; a hand edit here is applied at the next start. See "Tool permissions"
+# under "Agent sessions".
+acp_permissions_enabled = false          # true = new ACP sessions ask before acting
+acp_permission_base_agent = "kiro_default"  # the kiro-cli agent the permission profile is built from
 
 [provider_settings.claude-code]
 default_args = ""
@@ -332,19 +373,48 @@ prompting leaves the transcript byte-identical.
 **A session's task mode is chosen when it is created, and only then.** The *New session* picker
 carries a task-mode control offering Default, Spec, Quick spec, Bug fix, Plan and Semantic reviewer,
 which map to kiro-cli's own `kiro_default`, `spec`, `quick-spec`, `bug-fix`, `plan` and
-`semantic_reviewer` agent modes. The control resets to Default each time the picker opens. The mode
+`semantic_reviewer` agent modes. Default is resolved by the server when the session is created: it
+binds the derived agent `poweratlas-acp` while the permission setting below is on and in effect, and
+`kiro_default` otherwise. The control resets to Default each time the picker opens. The mode
 is fixed for the life of the session: kiro-cli ignores a different mode on resume, so a session created
 in Spec mode stays in Spec mode however it is reopened. The same control is offered when a session is
 created from the dashboard's workspace sparkle menu.
 
-**Tool permissions are asked, not assumed.** The agent runs kiro-cli's v3 engine without
-`--trust-all-tools`; the two are incompatible, and the flag is never passed. When the agent wants to
-run a shell command or write a file that its agent configuration does not already allow, the request
-renders inline in the transcript as a set of option buttons and the turn pauses until one is pressed,
-from any tab or after a reload, the same way a clarifying question does. Nothing answers on your
-behalf: a session nobody is watching waits at its first such request until the silence timeout above
-cancels the turn. That is the current unattended posture, and `plans/ROADMAP.md`'s permission-policy
-item is what would change it.
+**Tool permissions depend on a setting.** The agent runs kiro-cli's v3 engine without
+`--trust-all-tools`; the two are incompatible, and the flag is never passed. Whether a session asks
+before acting is decided by the **Agent permissions** section of the settings menu (gear icon in the
+topbar). It is off by default.
+
+- **Off.** PowerAtlas changes nothing. Default sessions run as `kiro_default`, with whatever
+  permissions that agent and your own kiro-cli settings give it. If your `~/.kiro/settings/permissions.yaml` allows everything, nothing asks.
+- **On.** PowerAtlas writes a derived agent, `~/.kiro/agents/poweratlas-acp.md`. It is a copy of the
+  **base agent** (the field below the toggle, `kiro_default` unless you change it) with one
+  `permissions:` block added, which reproduces kiro-cli's own default posture. Default sessions then
+  bind that agent. Shell commands, file writes, web fetches and searches, MCP tools, subagents, skills
+  and powers ask first. Reading files under the session's folder runs without asking, and so do
+  `git status`, `git log`, `git diff`, `git branch`, `pwd`, `whoami` and `uname`. Those commands are
+  matched as exact strings, so `git log --oneline` asks. Nothing asks when a session starts. The base agent file is never modified, so terminal
+  kiro-cli sessions keep their own posture. The other task modes (Spec, Plan and so on) are not
+  affected.
+
+Turning the setting on applies to sessions created afterwards. Turning it off deletes the derived
+agent, and kiro-cli then moves any session that was using it to its `vibe` agent, which runs under your
+own permission settings. So turning it off also stops sessions that were already running from asking.
+
+If the derived agent cannot be written, for example because the base agent is missing or cannot be
+read, PowerAtlas keeps a derived agent it wrote earlier, if one is still valid, and the settings menu
+warns that the change did not apply. With no valid earlier one, the menu shows a "not in effect" badge
+with the reason, and Default sessions bind `kiro_default`.
+
+When a session does ask, the request renders inline in the transcript and the turn pauses until you
+answer, from any tab or after a reload, the same way a clarifying question does. The prompt shows the
+full command or tool title, plus what kiro-cli reports about the request: the capability, the resource
+(for a write, the file name), the rule that matched, and where that rule came from. kiro-cli offers
+**Allow** (this once), **Deny** (this once) and **Always deny**; it offers no "always allow". Denying
+leaves the tool call failed with nothing written. Nothing answers on your behalf: a session nobody is
+watching waits at its first such request until the silence timeout above cancels the turn.
+`plans/ROADMAP.md`'s item on deciding permission requests by rule for unattended sessions is what would
+change that.
 
 **The agent can ask a clarifying question mid-turn, and the page answers it inline.** When the agent
 needs you to choose between options before continuing, the question and its choices render as buttons
@@ -369,8 +439,12 @@ page could click, so they're left out rather than shown broken.
 
 Off by default: with `remote_bind_address` unset, PowerAtlas has exactly one listening socket and it is
 loopback. Setting it to this machine's NetBird IP adds a **second** socket on the same port, so the
-laptop keeps using `http://127.0.0.1:<port>` unchanged while a phone on the same NetBird network can
-reach the agent surface.
+laptop keeps using `http://127.0.0.1:<port>` while a phone on the same NetBird network can reach the
+agent surface. The laptop still signs in through the tray as described under *Signing in on this
+machine*: a bare visit to `http://127.0.0.1:<port>` without the sign-in cookie shows the "open
+PowerAtlas from its tray icon" page. The two sign-ins are separate. A loopback browser needs the
+`pa_local` cookie, and a NetBird device needs the device cookie described below; neither is accepted in
+place of the other.
 
 **Enabling it — one save, one restart.** Open the topbar's **Remote** button to reach the *Remote
 access* panel, type this machine's NetBird IP literal into **Bind address**, and press **Save**. That

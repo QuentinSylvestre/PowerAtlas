@@ -227,6 +227,14 @@ Sonnet 5 — in-scope files are predominantly `.py` plus `acp.html`'s inline scr
   label must derive from `cwd`.
 - `permission_request`'s `toolCall.title` passes through `_as_text` with **no length clamp**,
   unlike `MAX_TITLE_CHARS`, `MAX_STEER_CHARS`, `MAX_TOOL_INPUT_CHARS` and five siblings.
+  *(Corrected 2026-09-23 by `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`: true when
+  written, but this plan's own implementation (`3f47642`) then added `MAX_PERMISSION_TITLE_CHARS`
+  (200). By 2026-09-21 `_on_permission_request` clamped the title with it and fed the clamped value
+  to both the frame and the toast. That
+  plan's Phase 2 then made the frame's title deliberately unclamped, so a prompt shows the whole
+  command, and moved `MAX_PERMISSION_TITLE_CHARS` to the server desktop toast only. Its Phase 3 added
+  a matching 200-character clamp, `NOTIFY_PERMISSION_TITLE_MAX`, for the in-page browser
+  notification in `acp.html`. The transcript row keeps the full title.)*
 - `tests/acp_page.test.mjs` is the **only** coverage of `acp.html`'s inline script, is not in
   the pytest suite, and is not run by CI (project `AGENTS.md`). Its three `vm` sandboxes
   (lines 830, 4778, 10427) stub `WebSocket` but not `Notification`. It already ships a

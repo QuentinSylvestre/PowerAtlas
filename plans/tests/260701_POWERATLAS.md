@@ -28,6 +28,7 @@ peek overlay, and per-provider settings.
   state before, restore after. No reboot needed (existence-only check).
 - **Main/Lifecycle** is process-level (named mutex `PowerAtlasMutex`, PID file, port binding) — isolate;
   do not run against a live user instance.
+- **Loopback routes need the `pa_local` cookie (added 2026-09-23).** Since `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL` every loopback HTTP and WebSocket route, `/` included, refuses a caller without it; only `GET`/`HEAD` of `/local-auth` and `/static/*` are exempt. A page request without it gets the "open PowerAtlas from its tray icon" HTML page, a websocket closes 1008, and everything else gets a JSON 403. Get the cookie through a door (tray **Open**, peek double-tap, peek overlay) or the tray's **Copy login link**, whose link is single-use with a 120 s TTL; use `http://127.0.0.1:<port>` afterwards, since the cookie is host-only and `localhost` does not carry it. A how-to-reach line marked *(pa_local)* names such a route; the browser-driven lines depend on the same cookie through the page they run in. The routes and citations below predate the gate and were not re-verified against it.
 - **Real provider data** on disk (read-only): kiro-cli-v3 at `~/.kiro/sessions/<workspace-hash>/sess_*/`;
   Claude Code at `~/.claude/projects/` + `~/.claude/history.jsonl`. Never modify or delete.
 - **Existing unit coverage is strong** (254 test functions in `tests/`). Runtime testing targets what unit
@@ -63,7 +64,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 1.1 Cross-provider workspace discovery with counts
 - **what**: `discover_workspaces_with_counts(provider)` merges kiro + claude workspaces into `(cwd, count, updated_at, provider)` tuples, cached 30s.
-- **how-to-reach**: `data.discover_workspaces_with_counts()` directly; or `GET /partials/workspaces?provider=all|kiro-cli-v3|claude-code`.
+- **how-to-reach**: `data.discover_workspaces_with_counts()` directly; or `GET /partials/workspaces?provider=all|kiro-cli-v3|claude-code`. *(pa_local)*
 - **probes**: provider=None (all) vs single provider; both providers present; one provider's dir absent; verify 30s cache hit returns same result then re-scan after TTL; concurrent calls during background refresh (H3); a provider raising inside `discover_workspaces` (bare `except: continue` → 0 workspaces, indistinguishable from empty).
 - **oracle**: sorted by `updated_at` desc; unavailable providers skipped; results cached per `workspaces_with_counts:<provider|all>` key.
 - **risks**: H3 unlocked `_cache`; H10 lexical cross-provider sort; 30s stale window hides just-created workspaces; broken provider silently yields zero.
@@ -77,7 +78,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 1.3 Compound-keyed SessionCache
 - **what**: thread-safe in-memory cache keyed `(provider, normalize_path(cwd))`, storing sessions + file stats + original cwd.
-- **how-to-reach**: `data.get_sessions(cwd, provider)`; `session_cache.clear()` via `/api/refresh`.
+- **how-to-reach**: `data.get_sessions(cwd, provider)`; `session_cache.clear()` via `/api/refresh`. *(pa_local)*
 - **probes**: miss→load→put→hit; `clear()` empties all four dicts; two real paths normalizing to same key collide (last-writer-wins on `_original_cwds`); mutate a returned Session and confirm it leaks to next caller (shallow `list()` copy); unbounded growth across many workspaces (no eviction).
 - **oracle**: `get()` returns a shallow copy or None; `last_refresh` stamped on every `put()`.
 - **risks**: no TTL/eviction; shared Session objects; single global `last_refresh` string not per-key.
@@ -91,7 +92,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 1.5 Get sessions for a workspace (provider-scoped)
 - **what**: `get_sessions(cwd, provider)` cache-first, dispatches to the provider adapter's `load_sessions` on miss.
-- **how-to-reach**: `GET /partials/sessions?cwd=...&provider=...` (card expand / warmup).
+- **how-to-reach**: `GET /partials/sessions?cwd=...&provider=...` (card expand / warmup). *(pa_local)*
 - **probes**: cold load (full dir scan, synchronous — time it on a large session dir); unknown provider name → `[]` (indistinguishable from empty workspace); workspace with 0 sessions; adapter raising internally.
 - **oracle**: cache miss → disk load → populate → return; unknown provider silently `[]`.
 - **risks**: cold call blocks the request thread; typo'd provider silently empty.
@@ -105,14 +106,14 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 1.7 Warmup (pinned folders + pinned sessions)
 - **what**: `warmup_all` runs discovery, preloads pinned folders under every available provider, and resolves pinned sessions to their workspaces (kiro metadata scan only).
-- **how-to-reach**: startup thread in `_run_foreground`; `POST /api/refresh`; `GET /partials/pinned-sessions`.
+- **how-to-reach**: startup thread in `_run_foreground`; `POST /api/refresh`; `GET /partials/pinned-sessions`. *(pa_local)*
 - **probes**: pinned folder existing for only one provider (other yields empty cache entry); pinned Claude session in an un-warmed workspace (never resolved — kiro-only scan, asymmetric); hundreds of metadata files (early-break once all found); corrupt metadata file silently dropped.
 - **oracle**: pinned folders loaded per provider; pinned kiro sessions resolved via `SESSION_DIR` glob.
 - **risks**: pinned Claude sessions can't be located; wasted scans loading a folder under the wrong provider; TOCTOU on `exists()`→load.
 
 ### 1.8 Session-tail + first-prompt dispatch (H2)
 - **what**: `get_session_tail` / `get_first_prompt` route to kiro or claude; kiro ignores cwd (global dir), claude requires cwd (resolve folder). The endpoint additionally passes `session_id` (from the `sid` query param) and `last_prompt` (from the session cache, or empty string on cache miss) to the template context. `first_prompt`, `last_prompt`, and all `messages` items are rendered through `mistune.create_markdown(escape=True)` before passing to the template (markdown rendering uses `mistune>=3.3.0,<4`; `escape=True` causes HTML entity-encoding, e.g. `<script>` → `&lt;script&gt;`). The `tail-empty` early-return guard fires only when ALL THREE of `messages`, `first_prompt`, and `last_prompt` are empty — a session with only a `last_prompt` will not short-circuit.
-- **how-to-reach**: `GET /partials/session-tail?sid&provider&cwd` (300ms hover tooltip).
+- **how-to-reach**: `GET /partials/session-tail?sid&provider&cwd` (300ms hover tooltip). *(pa_local)*
 - **probes**: kiro tail with empty cwd (tolerated) vs claude tail with empty/wrong cwd (silently `[]`); repeated hovers — confirm kiro caches (5s/60s) but claude re-reads every time (H2); 128KB tail truncation dropping newest messages in a huge session; kiro `"toolUse"` substring skip dropping a legit message mentioning the literal; `last_prompt` populated — verify it appears in rendered output under "User last message" label; `last_prompt` empty (cache miss, `session_cache.get` returns None) — verify "User last message" label appears with `—` (em dash) fallback; XSS probe: `<script>alert(1)</script>` as message input — verify entity-encoded to `&lt;script&gt;` in output (never raw `<script>`); JS-URL probe: `[click](javascript:alert(1))` as message input — verify `javascript:alert` is not present in rendered output (mistune's HTMLRenderer.safe_url() replaces `javascript:` hrefs with `#harmful-link` unconditionally).
 - **oracle**: oldest-first assistant messages; kiro `.history`-preferred first prompt; not-found → `[]`/`""`. `session_id` and `last_prompt` passed to template; all text fields HTML-entity-encoded via mistune before template rendering; output safe for Jinja2 `| safe` filter.
 - **risks**: H2 asymmetric caching; inconsistent cwd contract; textual `"toolUse"` heuristic fragility; negative-cache blanks kiro tooltip for 60s.
@@ -171,28 +172,28 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 2.1 Three-panel dashboard bootstrap
 - **what**: `GET /` renders topbar + 3 panels; htmx `hx-trigger=load` fires 4 partials (launchers, pinned-sessions, pinned-workspaces, workspaces).
-- **how-to-reach**: navigate to `/`.
+- **how-to-reach**: navigate to `/`. *(pa_local)*
 - **probes**: normal load; empty data (empty-state per panel); a partial erroring (toast, skeletons); verify `aria-busy` removed after workspace swap; slow backend keeps skeletons; 4 parallel partial fetches racing.
 - **oracle**: skeletons → cards; `startPinnedPoll` begins after workspace swap.
 - **risks**: parallel-fetch races; poll starts before cards settle; failed htmx leaves skeletons forever.
 
 ### 2.2 Workspace card expand + lazy-load
 - **what**: clicking a card header toggles collapse and lazy-loads sessions on first expand.
-- **how-to-reach**: click `.card-header`; `GET /partials/sessions?cwd&provider`.
+- **how-to-reach**: click `.card-header`; `GET /partials/sessions?cwd&provider`. *(pa_local)*
 - **probes**: expand→load; collapse+re-expand (no re-fetch, `data-loaded=true`); rapid double-click (double-fetch — `data-loaded` set before fetch completes); expand a 0-session workspace (`+ New session`); expand while endpoint errors (`Failed to load`).
 - **oracle**: first expand fetches; subsequent toggles don't; provider read from `card.dataset.provider`.
 - **risks**: double-fetch; selection lost on htmx swap.
 
 ### 2.3 Session-tail hover tooltip
 - **what**: hovering a session row 300ms fetches and positions a tail tooltip.
-- **how-to-reach**: hover `.session-content`; `GET /partials/session-tail`.
+- **how-to-reach**: hover `.session-content`; `GET /partials/session-tail`. *(pa_local)*
 - **probes**: hover shows tooltip; empty → "No recent output"; row swapped mid-hover (timer not cleared); scroll after show (stale position); kiro vs claude freshness (H2); provider/cwd passed from dataset.
 - **oracle**: 300ms debounce; positioned above or below the row depending on available viewport space. Specifically: when space above ≥ space below AND the tooltip fits above, opens above (`transform: translateY(-100%)`); when space below > space above (or above doesn't fit), opens below (`top: rect.bottom + 4px`, `transform: none`); when BOTH sides < 100px, suppressed (`display: none`). `hideTail` resets `left`, `top`, `transform`, and `maxHeight` on close.
 - **risks**: leaked timers; stale position; per-provider cost divergence (H2).
 
 ### 2.4 Provider tab switching
 - **what**: All / Kiro CLI / Claude Code tabs filter the right panel; only shown when >1 provider.
-- **how-to-reach**: click `.provider-tab`; `GET /partials/workspaces?provider=X`.
+- **how-to-reach**: click `.provider-tab`; `GET /partials/workspaces?provider=X`. *(pa_local)*
 - **probes**: switch each tab; `window._activeProvider` updates via `htmx:configRequest`; single-provider (no tabs); disabled provider hidden; empty per-provider states (distinct messages).
 - **oracle**: cards filtered per provider; active tab reflects selection.
 - **risks**: `_activeProvider` desync; refresh uses active provider.
@@ -206,49 +207,49 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 2.6 Launch selected (batch)
 - **what**: launches all selected sessions/cards; confirm dialog >5.
-- **how-to-reach**: click "Launch selected"; `POST /api/launch-batch`.
+- **how-to-reach**: click "Launch selected"; `POST /api/launch-batch`. *(pa_local)*
 - **probes**: launch 1; launch 5 (no confirm); 6+ (confirm); mixed valid/invalid workspaces (partial-success warning); mixed providers (per-provider default_args lookup); verify which sessions failed is lost in aggregate toast.
 - **oracle**: `>5` confirm; toast level success/warning/error by outcome.
 - **risks**: selection cleared by swap before launch; no post-launch reset; per-session failures not surfaced.
 
 ### 2.7 Pin / unpin session
 - **what**: toggles a session in `pinned_sessions`; pinned sessions render as a flat list in the left panel.
-- **how-to-reach**: hover row → click pin; `POST /api/pin-session` / `/api/unpin-session`; then `refreshCards(true)`.
+- **how-to-reach**: hover row → click pin; `POST /api/pin-session` / `/api/unpin-session`; then `refreshCards(true)`. *(pa_local)*
 - **probes**: pin → appears in "Pinned sessions"; unpin → removed; pin from a stale workspace; pin multiple across workspaces; full refresh loses expanded state; optimistic toast before refresh.
 - **oracle**: `pinned_sessions` list mutated + saved; cache-first render, metadata fallback for kiro.
 - **risks**: full refresh cost; pinned Claude session in un-warmed workspace shows blank prompts (kiro-only fallback).
 
 ### 2.8 Pin / unpin workspace folder
 - **what**: toggles a `{folder, provider}` entry in `pinned_folders`; pinned workspaces render in the center panel.
-- **how-to-reach**: hover card → click pin; `POST /api/pin-folder` / `/api/unpin-folder`.
+- **how-to-reach**: hover card → click pin; `POST /api/pin-folder` / `/api/unpin-folder`. *(pa_local)*
 - **probes**: pin → center panel; unpin → back to right; pin a stale folder (count 0, "missing" badge); dedup per `(folder, provider)`; pin same folder under both providers; **then open Settings and Save — verify the pinned Claude folder does NOT revert to kiro-cli-v3 (H1)**.
 - **oracle**: `{folder, provider}` appended if not duplicate; stale merged with count 0.
 - **risks**: H1 provider loss via settings save; provider defaults kiro-cli-v3 when missing.
 
 ### 2.9 Workspace icon emoji picker
 - **what**: sets a per-workspace emoji/custom icon stored in `workspace_icons` keyed by normalized path.
-- **how-to-reach**: click card icon → emoji picker → pick/custom/Enter; `POST /api/set-workspace-icon`.
+- **how-to-reach**: click card icon → emoji picker → pick/custom/Enter; `POST /api/set-workspace-icon`. *(pa_local)*
 - **probes**: set emoji → persists on reload; Reset → default 📁; custom string; optimistic `textContent` before save; normalize-path key mismatch (icon not applied to a differently-cased/slashed card); outside-click close race.
 - **oracle**: non-empty icon stored at normalized key; empty clears.
 - **risks**: optimistic UI desync; normalize-path keying gaps; unvalidated icon value.
 
 ### 2.10 Launcher create / edit / delete modal
 - **what**: CRUD for custom launchers via a modal; icon extracted on save, removed on delete.
-- **how-to-reach**: click `+` (new) or gear (edit); `POST /api/launcher/create|update|delete`.
+- **how-to-reach**: click `+` (new) or gear (edit); `POST /api/launcher/create|update|delete`. *(pa_local)*
 - **probes**: create minimal; edit fields; delete; env textarea lines without `=` dropped; color swatch select/deselect; icon extraction async after save (tile may show fallback briefly); `_launchers` JS cache staleness after save; malformed entry missing `id` (KeyError 500 on delete).
 - **oracle**: entry persisted with uuid; tile re-rendered from `/partials/launchers`.
 - **risks**: env parse silently drops lines; icon side-effects outside config lock (no rollback).
 
 ### 2.11 Provider-settings modal (gear)
 - **what**: edit a provider's `default_args`, `color`, `enabled` via a locked-field modal reusing the launcher modal.
-- **how-to-reach**: click provider-tile gear; `GET /api/provider/{key}` → `POST /api/provider/save`.
+- **how-to-reach**: click provider-tile gear; `GET /api/provider/{key}` → `POST /api/provider/save`. *(pa_local)*
 - **probes**: change default_args (e.g. `-a`) → affects subsequent launches; change color → tile + cards recolor; disable provider → its tab + tile + workspaces hidden; verify readonly fields restored on modal close.
 - **oracle**: `provider_settings[key]` replaced wholesale + saved.
 - **risks**: disabling hides a provider's data everywhere; no schema validation of enabled/color.
 
 ### 2.12 Launcher run (single + selection-aware batch)
 - **what**: clicking a launcher tile runs it once (no selection) or once per selected workspace.
-- **how-to-reach**: click tile; `POST /api/launcher/run` or `/api/launcher/run-batch`; provider tiles → `/api/launch-batch`.
+- **how-to-reach**: click tile; `POST /api/launcher/run` or `/api/launcher/run-batch`; provider tiles → `/api/launch-batch`. *(pa_local)*
 - **probes**: no selection → single run at launcher cwd; selection → batch per workspace; provider tile with no selection → "Select workspaces first" error; `pass_workspace_arg` only when non-terminal + use_selected; duplicate workspaces not deduped server-side.
 - **oracle**: batch iterates workspaces; aggregate toast.
 - **risks**: server no-dedup (relies on client); which workspace failed is lost.
@@ -262,14 +263,14 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 2.14 Search
 - **what**: debounced search filters workspaces by cwd substring + matches pinned sessions by title.
-- **how-to-reach**: type in search; `hx-trigger=input changed delay:300ms`; `GET /search?q`.
+- **how-to-reach**: type in search; `hx-trigger=input changed delay:300ms`; `GET /search?q`. *(pa_local)*
 - **probes**: query matching a folder name; no match (empty_state); clear (full list); rapid typing (debounce); pinned-session title match; verify it does NOT search session content despite `_session_matches` existing; pinned scan globs `SESSION_DIR` each keystroke (cost); search with status filter active (q + status param).
 - **oracle**: substring on cwd, case-insensitive; empty q restores all.
 - **risks**: cwd-only match; per-keystroke metadata glob; selection wiped by swap.
 
 ### 2.15 Manual refresh + last-refresh
 - **what**: refresh button clears caches, warms up, re-renders; last-refresh time shown.
-- **how-to-reach**: click `↻`; `POST /api/refresh`; `GET /api/last-refresh`.
+- **how-to-reach**: click `↻`; `POST /api/refresh`; `GET /api/last-refresh`. *(pa_local)*
 - **probes**: button → `...` disabled → re-enabled; full cache clear + warmup cost; `refreshTime` shows HH:MM:SS; visibilitychange re-refresh on tab focus.
 - **oracle**: `session_cache.clear()` + `_cache.clear()` + warmup; returns `last_refresh`.
 - **risks**: full clear expensive on many workspaces.
@@ -297,42 +298,42 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 2.19 Terminal preference quick-set
 - **what**: topbar `<select>` saves `terminal_command` immediately on change.
-- **how-to-reach**: change dropdown; `POST /api/save-setting key=terminal_command`.
+- **how-to-reach**: change dropdown; `POST /api/save-setting key=terminal_command`. *(pa_local)*
 - **probes**: select each detected option; verify persisted; no "custom" option in topbar (only settings page); diverges from `/api/settings` form path.
 - **oracle**: immediate save; value persisted.
 - **risks**: two save paths (`/api/save-setting` vs `/api/settings`) can diverge.
 
 ### 2.20 Autostart toggle (topbar + settings)
 - **what**: toggles Windows autostart; optimistic class flip.
-- **how-to-reach**: click topbar toggle or settings checkbox; `POST /api/autostart`.
+- **how-to-reach**: click topbar toggle or settings checkbox; `POST /api/autostart`. *(pa_local)*
 - **probes**: on → `.lnk` created; off → removed; visual state matches actual `is_enabled()`; optimistic class toggled before server confirm (desync if COM fails); platform label ("Start with Windows").
 - **oracle**: `POST /api/autostart` returns `{enabled: bool}`.
 - **risks**: optimistic UI ignores response; COM failure unhandled.
 
 ### 2.21 Peek hotkey save
 - **what**: topbar input saves `peek_hotkey` (lowercased) on change.
-- **how-to-reach**: edit peek input; `POST /api/save-setting key=peek_hotkey`.
+- **how-to-reach**: edit peek input; `POST /api/save-setting key=peek_hotkey`. *(pa_local)*
 - **probes**: valid combo persists; invalid syntax accepted by API (validation only at peek startup → fallback); requires restart to rebind the live listener.
 - **oracle**: lowercased value persisted.
 - **risks**: no syntax validation at save; rebind needs restart.
 
 ### 2.22 Settings page form save
 - **what**: `/settings` full form saves terminal + pinned folders (pipe-joined hidden field).
-- **how-to-reach**: `GET /settings` → submit `POST /api/settings`.
+- **how-to-reach**: `GET /settings` → submit `POST /api/settings`. *(pa_local)*
 - **probes**: values pre-populated; custom terminal row toggles on select; submit persists; **pinned_folders written as `list[str]` → H1 provider coercion**; full-page reload vs partial divergence.
 - **oracle**: form fields saved; page re-rendered.
 - **risks**: H1; read-modify-write clobbers concurrent edits.
 
 ### 2.23 save-setting allowlist endpoint
 - **what**: `POST /api/save-setting` writes only allowlisted keys with type checks. The allowlist is `port`, `peek_hotkey`, `default_directory`, `pinned_folders`, `pinned_sessions` and — added 2026-08-01 — `acp_max_sessions`, `acp_idle_ttl_seconds`, `acp_prompt_silence_seconds`, `remote_bind_address`. The three `acp_*` keys carry inclusive integer bounds (1–16, 300–86400, 60–7200); `remote_bind_address` is validated as an IP literal and, on first enable, creates the device secret in the same call. The response now carries `restart_required`, true for every key read once at startup (`port`, the three `acp_*`, `remote_bind_address`, `peek_hotkey`).
-- **how-to-reach**: `POST /api/save-setting {key, value}`.
+- **how-to-reach**: `POST /api/save-setting {key, value}`. *(pa_local)*
 - **probes**: valid key/type saved; unknown key rejected; wrong type rejected; **bool rejected before the int check** (`isinstance(True, int)` is true in Python); list with non-str element rejected; `pinned_folders` as list[str] accepted → re-introduces legacy shape (H1); each `acp_*` bound rejected one past each end and accepted at each end; `remote_bind_address` rejected for `0.0.0.0`, `::`, `::0`, `::ffff:0.0.0.0`, a loopback literal, a hostname, a bracketed form and a zone id; `remote_bind_address` set while `port = 0` rejected with a named error; whitespace-only address persisted as `""` rather than verbatim; `restart_required` true for `peek_hotkey` (it was answering false — a field that is positively wrong is worse than no field).
 - **oracle**: `{ok:true, restart_required:bool}` on success; `{ok:false,error}` otherwise, with the error naming the key and its permitted range.
 - **risks**: shallow validation; H1 legacy shape re-introduction; **adding a key to the type map without a matching bound** turns a fail-closed `Unknown setting` refusal into an unbounded write — the bounds map is the only range check for the `acp_*` keys, since `load_config` may not raise and `acp.apply_config` logs-and-ignores rather than clamping.
 
 ### 2.24 Session actions (resume / new / copy / open in ACP)
 - **what**: per-row resume, per-card new session, copy session id, and — added 2026-07-26, kiro-cli rows only — **open in `/acp`**, which navigates to the ACP page for that session id.
-- **how-to-reach**: hover reveal → click; `POST /api/launch` / `/api/new-session`; clipboard for copy; `GET /acp?sid=` for the ACP action.
+- **how-to-reach**: hover reveal → click; `POST /api/launch` / `/api/new-session`; clipboard for copy; `GET /acp?sid=` for the ACP action. *(pa_local)*
 - **probes**: resume valid session (toast); resume hidden on stale workspace; new session (no resume flag); copy → clipboard toast; provider from card dataset may be empty string; ACP action present on kiro-cli rows and absent on claude-code rows; ACP action does **not** toggle multi-select (it sits inside `.session-actions`, the container the row's own `onclick` excludes) — the same collision that killed the terminal-focus feature.
 - **what the ACP action lands on changed 2026-08-01.** `/acp` is no longer a single-pane prototype: it is a session rail beside a conversation, two panes at ≥768 px and a drill-down below, and `?sid=` now selects only the *initial* session — the rail can switch to another without a navigation. So probe the arrival state, not just the navigation: with `?sid=` the page must land **on the conversation** for that session (a phone arriving on the rail has lost the session it named), and with no `?sid=` it must land on the rail and send no subscribe. Selecting a rail row for a session the server does not hold goes `subscribe` → `unknown_session` → `load`, which is the adoption path, so a probe that only checks the first frame sees a failure that is not one.
 - **oracle**: launch toast success/error; resume hidden when stale; ACP action navigates with the row's `sid` and the page opens at that conversation.
@@ -340,14 +341,14 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 2.25 App restart endpoint
 - **what**: `POST /api/restart` sets the tray restart flag and stops icon/peek.
-- **how-to-reach**: `POST /api/restart`.
+- **how-to-reach**: `POST /api/restart`. *(pa_local)*
 - **probes**: triggers restart flow; mutates `tray` module globals directly; no auth on endpoint.
 - **oracle**: `{ok:true}`; relies on `__main__` honoring `restart_requested()`.
 - **risks**: direct global mutation; unauthenticated restart.
 
 ### 2.26 Workspace-level session delete (Phase 2)
 - **what**: `POST /api/acp/sessions/delete` with `{cwd: "..."}` enumerates and deletes all v2 sessions for that workspace; `delete_folder: true` also removes the workspace directory and cleans config.
-- **how-to-reach**: `POST /api/acp/sessions/delete` with JSON body containing `cwd`.
+- **how-to-reach**: `POST /api/acp/sessions/delete` with JSON body containing `cwd`. *(pa_local)*
 - **probes**: POST /api/acp/sessions/delete {cwd: ...} removes cwd from config.pinned_folders; POST /api/acp/sessions/delete {cwd: ..., delete_folder:true} removes cwd key from workspace_settings.
 - **oracle**: `{deleted: [...], failed: [...], total_found: N}`; with folder delete: `{folder_deleted: bool, folder_error: str}`.
 - **risks**: path safety checks on cwd; remote-only guard for folder delete; config lost-update race on concurrent settings mutations.
@@ -377,7 +378,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 3.3 Resume / new / batch session launch (provider-aware)
 - **what**: `launch_session` / `launch_batch` build provider commands, apply per-provider `default_args`, never raise.
-- **how-to-reach**: `POST /api/launch`, `/api/new-session`, `/api/launch-batch`.
+- **how-to-reach**: `POST /api/launch`, `/api/new-session`, `/api/launch-batch`. *(pa_local)*
 - **probes**: resume adds `--resume-id`(kiro)/`--resume`(claude); new omits it; batch never aborts on one failure; missing-workspace → per-item error; per-provider default_args in a mixed batch; unknown provider used as literal binary.
 - **oracle**: `LaunchResult(success, session_id, workspace, error)`; sequential batch.
 - **risks**: fire-and-forget (no PID); aggregate-only failure reporting.
@@ -412,7 +413,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 3.8 Custom launcher run (terminal vs detached)
 - **what**: `launch_custom` runs a command in a terminal or detached (`shell=True`, `DETACHED_PROCESS|CREATE_NO_WINDOW`); env merge; `pass_workspace_arg` quoting.
-- **how-to-reach**: `POST /api/launcher/run`, `/api/launcher/run-batch`.
+- **how-to-reach**: `POST /api/launcher/run`, `/api/launcher/run-batch`. *(pa_local)*
 - **probes**: terminal mode (new console); detached mode (`shell=True` — full injection by design); `%VAR%` in cwd env-expands under shell=True; `pass_workspace_arg` quotes only paths-with-spaces on Windows; cwd missing → error; unsafe cwd for terminal → None.
 - **oracle**: LaunchResult; detached success = Popen didn't raise.
 - **risks**: shell=True injection surface (by design, user-authored); fire-and-forget.
@@ -423,7 +424,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 4.1 Extraction on create / update, removal on delete
 - **what**: `extract_icon` at launcher create/update; `remove_icon` on delete.
-- **how-to-reach**: `POST /api/launcher/create|update|delete`.
+- **how-to-reach**: `POST /api/launcher/create|update|delete`. *(pa_local)*
 - **probes**: create with a real `.exe` command → PNG appears in `icons/`; update to a different binary → re-extracted; update to non-extractable → stale PNG unlinked, SVG served; delete → PNG removed; extraction failure at create is silent (return ignored).
 - **oracle**: PNG at `CONFIG_DIR/icons/<id>.png` on success; unlink on fail.
 - **risks**: failure not surfaced; provider icons never cleaned.
@@ -444,7 +445,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 4.4 SVG fallback + color tint
 - **what**: `default_icon_svg(is_terminal, color)` returns terminal/app glyph, recoloring `stroke="currentColor"`.
-- **how-to-reach**: `GET /api/launcher-icon` when no PNG.
+- **how-to-reach**: `GET /api/launcher-icon` when no PNG. *(pa_local)*
 - **probes**: terminal vs app glyph; color tint applied to stroke only (fill unaffected); **unescaped color value injected into SVG markup (potential injection)**; provider fallback uses provider color.
 - **oracle**: correct glyph; stroke recolored when color set.
 - **risks**: stroke-only recolor; unvalidated/unescaped color string.
@@ -481,7 +482,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 6.1 Enable / disable / query
 - **what**: Windows `enable()` creates `PowerAtlas.lnk` (WScript.Shell COM, target pythonw.exe, args `-m power_atlas`, icon); `disable()` unlinks; `is_enabled()` existence check.
-- **how-to-reach**: library `autostart.enable()/disable()/is_enabled()`; `POST /api/autostart`. **Snapshot state, restore after.**
+- **how-to-reach**: library `autostart.enable()/disable()/is_enabled()`; `POST /api/autostart`. **Snapshot state, restore after.** *(pa_local)*
 - **probes**: enable → `.lnk` at Startup with TargetPath = `.venv-PowerAtlas\Scripts\pythonw.exe`, resolved from the checkout by `interpreter.venv_python()` and **not** from the enabling process's `sys.executable` — probe it from a non-venv interpreter, which is the case that used to record the wrong target; **verify that pythonw.exe actually exists — may be absent from a venv built with `--without-pip` or a stripped copy**; verify IconLocation `poweratlas.ico` exists; disable removes it; disable when absent (no-op); enable twice (overwrite); is_enabled True/False; **stale shortcut pointing elsewhere still reports enabled** (existence-only).
 - **oracle**: `.lnk` presence = enabled; COM creates shortcut; target is a function of the checkout, not of the caller.
 - **risks**: pythonw.exe missing in venv breaks autostart silently; COM Dispatch failure unhandled; existence-only check ignores wrong target; APPDATA fallback path drift; a checkout with two off-convention `.venv*` directories resolves to None and silently falls back to `sys.executable`.
