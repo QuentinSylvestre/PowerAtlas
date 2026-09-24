@@ -273,13 +273,13 @@ acp.WATCHDOG_INTERVAL_SECONDS = _saved["WATCHDOG_INTERVAL_SECONDS"]
 ```
 
 **Exit criteria**:
-- [ ] `WATCHDOG_INTERVAL_SECONDS = 5.0` and `_WATCHDOG_MAX_ERRORS = 3` constants present in `acp.py`
-- [ ] `_watchdog_loop()` implemented: sleep-first, `rc = proc.poll()` bound once, `_on_agent_death` call on non-None rc, `CancelledError` re-raised, consecutive-error counter halts watchdog after 3 strikes
-- [ ] Comment in `_watchdog_loop` explains why `_on_agent_death` is called directly (not via `_post`)
-- [ ] `start_watchdog()` module-level function returns `asyncio.Task`
-- [ ] `web.py` lifespan starts watchdog alongside sweeper, cancels and awaits it in `finally`
-- [ ] `WATCHDOG_INTERVAL_SECONDS` in `acp_fast` save/restore
-- [ ] `pytest tests/test_web.py -k "watchdog" --timeout=60` passes with tests covering: (a) `proc.poll()` returns non-None → `_on_agent_death` fires within one tick; (b) double-fire is idempotent (second call after `_detach` sets `_proc = None`); (c) `_proc is None` → watchdog skips without error
+- [x] `WATCHDOG_INTERVAL_SECONDS = 5.0` and `_WATCHDOG_MAX_ERRORS = 3` constants present in `acp.py`
+- [x] `_watchdog_loop()` implemented: sleep-first, `rc = proc.poll()` bound once, `_on_agent_death` call on non-None rc, `CancelledError` re-raised, consecutive-error counter halts watchdog after 3 strikes
+- [x] Comment in `_watchdog_loop` explains why `_on_agent_death` is called directly (not via `_post`)
+- [x] `start_watchdog()` module-level function returns `asyncio.Task`
+- [x] `web.py` lifespan starts watchdog alongside sweeper, cancels and awaits it in `finally`
+- [x] `WATCHDOG_INTERVAL_SECONDS` in `acp_fast` save/restore
+- [x] `pytest tests/test_web.py -k "watchdog" --timeout=60` passes with tests covering: (a) `proc.poll()` returns non-None → `_on_agent_death` fires within one tick; (b) double-fire is idempotent (second call after `_detach` sets `_proc = None`); (c) `_proc is None` → watchdog skips without error
 
 ### Phase 3: MCP notification extraction and broadcast [QA]
 
@@ -727,6 +727,11 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 
 - `self._close_method = None` also added to `_discard()` (plan only specified `__init__` and `ensure_started`): prevents stale wire-close attempt after process teardown. `_discard` calls `_detach` which directly resets the field — sound addition, no plan text prohibits it.
 
+### Phase 2 (2026-09-24, code: ae3f906)
+
+- Three pre-existing test fixtures (`TestAcpLifespanWiring`, `TestGenerationRunsAtStartup._fake_acp`, `_run_lifespan_capturing_gate`) needed `start_watchdog` stub added — they broke because lifespan now calls `acp.start_watchdog()`. Added stubs.
+- `test_watchdog_fires_on_crashed_process`: tracking stub clears `_proc` after first call to simulate `_on_agent_death/_detach` behavior and prevent repeated fires across ticks.
+
 *Remaining phases reserved — filled during /qdev execution.*
 
 ## Follow-up Work (Deferred)
@@ -738,6 +743,21 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 3. **`_kiro/governance/state`, `_kiro/tools/didChange`, `_kiro/powers/items_changed` notification handling.** Three new notification types observed during Phase 3 probing; params shapes unknown; currently logged as INFO. Investigate in a future session. Source: qexplore Discovery.
 
 ## Review Log
+
+### 2026-09-24 — Phase 2 review (full effort, 4 personas)
+
+Senior engineer, Reliability engineer, Performance engineer, Maintainability reviewer.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F2-1 | Low | `WATCHDOG_INTERVAL_SECONDS` annotated `"Final[float]"` but is rebindable by tests — inconsistent with other rebindable tunables (`ACP_IDLE_TTL_SECONDS`, `SWEEP_INTERVAL_SECONDS`) which carry no annotation | Noted — remove `"Final[float]"` annotation; follow up at Step 9 |
+| F2-2 | Low | `test_watchdog_halts_after_max_consecutive_errors` hardcodes restore value `5.0` instead of saving/restoring — risks state leak if default changes | Noted — save/restore pattern; follow up at Step 9 |
+| F2-3 | Low | `test_watchdog_double_fire_is_idempotent` tests loop-level guard only, not the real `_on_agent_death` idempotency guard | Noted — acceptable at per-phase; real guard covered by `_on_agent_death` existing tests |
+| F2-4 | Low | `_noop_death` defined after `TestAcpCrashWatchdog` that uses it — functional but counter-intuitive ordering | Noted — move before the class at Step 9 |
+
+Reliability engineer and Performance engineer: no findings.
+
+Health: **Green** (0 High, 0 Medium). 1803 tests passing. Low findings noted for Step 9.
 
 ### 2026-09-24 — Phase 1 review (full effort, 4 personas)
 
