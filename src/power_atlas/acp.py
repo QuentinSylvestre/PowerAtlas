@@ -202,6 +202,9 @@ SERVER_TYPES = frozenset({
     # sequence lands in the correct final "resolved" state on its own,
     # closing both the stale-replay and cross-tab cases with one mechanism.
     "permission_resolved",
+    # v3-only (SC-3, plan Phase 3 of 260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS):
+    # `_kiro/mcp/status` notification; see `_on_notification`.
+    "mcp_servers",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -4475,6 +4478,19 @@ class _Supervisor:
                 self._pending_commands = (commands, skills)
             else:
                 log.debug("ACP commands_available: no sessions known and none reserved - dropped")
+            return
+        if method == "_kiro/mcp/status":
+            # SC-3 (Phase 3 of 260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS):
+            # Fired by kiro-cli on session/new completion and periodically (~50 min).
+            # Carries the full server list; replace-all semantics (not delta).
+            # SC-1 early-frame buffer handles arrival before sessions[sid] is set.
+            # Capped at MAX_COMMANDS_COUNT for consistency with commands/skills.
+            servers = list(params.get("servers") or [])[:MAX_COMMANDS_COUNT]
+            if isinstance(session_id, str) and session_id in self.sessions:
+                self.sessions[session_id]["mcpServers"] = servers
+                _registry.broadcast(
+                    session_id,
+                    envelope("mcp_servers", {"servers": servers}, session_id))
             return
         if method in ("_kiro.dev/clear/status", "kiro.dev/clear/status"):
             return

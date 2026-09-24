@@ -26612,5 +26612,169 @@ class TestAcpCrashWatchdog:
             f"but it did not exit within the allotted time")
 
 
+class TestAcpMcpStatusNotification:
+    """Phase 3 — MCP notification extraction and broadcast.
+
+    260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS Phase 3 handles the
+    ``_kiro/mcp/status`` notification: servers are stored in
+    ``meta["mcpServers"]`` (replace-all semantics) and broadcast as a
+    ``mcp_servers`` frame to subscribers.
+
+    Uses the same helpers as ``TestSupervisor`` (``_sv3``, ``_sv3_with_session``,
+    ``_conn_v3``, ``_cleanup_registry``) inlined here to avoid cross-class
+    coupling.
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers (mirror TestSupervisor's minimal helpers)
+    # ------------------------------------------------------------------
+
+    def _sv3(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        sv3 = acp_mod._Supervisor()
+        monkeypatch.setattr(acp_mod, "_supervisor", sv3)
+        return sv3
+
+    def _sv3_with_session(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_mcp00000-0000-0000-0000-000000000001"
+        sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
+        sv3.history[sid] = acp_mod._History()
+        return sv3, sid
+
+    def _conn_v3(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _cleanup_registry(self, acp_mod):
+        for conn in tuple(acp_mod._registry.connections):
+            acp_mod._registry.detach(conn)
+        acp_mod._registry.connections.clear()
+        acp_mod._registry.subscribers.clear()
+        acp_mod._registry.loading.clear()
+
+    def _mcp_status_msg(self, sid, servers):
+        """Build a ``_kiro/mcp/status`` notification message."""
+        return {
+            "method": "_kiro/mcp/status",
+            "params": {
+                "sessionId": sid,
+                "servers": servers,
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_mcp_status_stores_servers_in_meta(self, monkeypatch):
+        """``_kiro/mcp/status`` notification stores the servers list in
+        ``sessions[sid]["mcpServers"]``."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        servers = [
+            {"name": "github", "status": "connected", "tools": [{"name": "search"}]},
+            {"name": "jira", "status": "failed", "failedAuthorization": True,
+             "authorizationUrl": "https://auth.example.com/oauth"},
+        ]
+        try:
+            sv3._on_notification(self._mcp_status_msg(sid, servers))
+            assert sv3.sessions[sid]["mcpServers"] == servers
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_mcp_status_broadcasts_mcp_servers_frame(self, monkeypatch):
+        """``_kiro/mcp/status`` fires a ``mcp_servers`` frame to subscribers."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        conn = self._conn_v3(acp_mod, sid)
+        _queued(conn)  # drain any replay frames
+
+        servers = [{"name": "github", "status": "connected"}]
+        try:
+            sv3._on_notification(self._mcp_status_msg(sid, servers))
+
+            frames = _queued(conn)
+            mcp_frames = [f for f in frames if f["type"] == "mcp_servers"]
+            assert len(mcp_frames) == 1
+            assert mcp_frames[0]["payload"]["servers"] == servers
+            assert mcp_frames[0]["sessionId"] == sid
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_mcp_status_caps_servers_at_max_commands_count(self, monkeypatch):
+        """Server list is capped at ``MAX_COMMANDS_COUNT`` entries."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        conn = self._conn_v3(acp_mod, sid)
+        _queued(conn)  # drain replay
+
+        # Build a list slightly larger than the cap.
+        over_cap = acp_mod.MAX_COMMANDS_COUNT + 5
+        servers = [{"name": f"srv-{i}", "status": "connected"} for i in range(over_cap)]
+        try:
+            sv3._on_notification(self._mcp_status_msg(sid, servers))
+
+            stored = sv3.sessions[sid].get("mcpServers", [])
+            assert len(stored) == acp_mod.MAX_COMMANDS_COUNT
+
+            frames = _queued(conn)
+            mcp_frames = [f for f in frames if f["type"] == "mcp_servers"]
+            assert len(mcp_frames) == 1
+            assert len(mcp_frames[0]["payload"]["servers"]) == acp_mod.MAX_COMMANDS_COUNT
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_mcp_status_replace_all_on_second_notification(self, monkeypatch):
+        """A second ``_kiro/mcp/status`` replaces (not appends) the server list."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        conn = self._conn_v3(acp_mod, sid)
+        _queued(conn)  # drain replay
+
+        first_servers = [{"name": "github", "status": "connected"}]
+        second_servers = [
+            {"name": "jira", "status": "connecting"},
+            {"name": "confluence", "status": "disabled"},
+        ]
+        try:
+            sv3._on_notification(self._mcp_status_msg(sid, first_servers))
+            sv3._on_notification(self._mcp_status_msg(sid, second_servers))
+
+            # meta must reflect only the second notification
+            assert sv3.sessions[sid]["mcpServers"] == second_servers
+
+            frames = _queued(conn)
+            mcp_frames = [f for f in frames if f["type"] == "mcp_servers"]
+            assert len(mcp_frames) == 2  # one per notification, not accumulated
+            assert mcp_frames[0]["payload"]["servers"] == first_servers
+            assert mcp_frames[1]["payload"]["servers"] == second_servers
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_mcp_status_does_not_fall_through_to_log_info(self, monkeypatch, caplog):
+        """``_kiro/mcp/status`` handler returns before the ``log.info`` fallthrough,
+        so no "ACP notification _kiro/mcp/status" line is logged at INFO."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        try:
+            with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+                sv3._on_notification(self._mcp_status_msg(
+                    sid, [{"name": "github", "status": "connected"}]))
+
+            # The fallthrough log line reads: "ACP notification %s (%s): ..."
+            # with the method as the first argument.
+            assert not any(
+                "_kiro/mcp/status" in record.message
+                and "ACP notification" in record.message
+                for record in caplog.records
+            ), "Expected no fallthrough log.info for _kiro/mcp/status"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+
 def _noop_death(self, proc):
     """No-op replacement for _on_agent_death in watchdog tests."""
