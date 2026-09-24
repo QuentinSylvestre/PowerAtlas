@@ -24,7 +24,8 @@ Project-specific terms. Each entry names the rejected synonyms too, so a future 
 re-litigate a settled word. General programming vocabulary does not belong here.
 
 - **login code** — the one-time credential PowerAtlas mints into the URL when it opens its own web UI
-  (tray, peek double-tap, peek webview), exchanged exactly once for the loopback session cookie.
+  (tray, peek double-tap, peek webview) or when the tray's **Copy login link** is used, exchanged
+  exactly once for the loopback session cookie `pa_local`.
   **Not "nonce"**: `_acp_csp` in `web.py` already uses that word for the per-response CSP nonce, and
   the two appear within a few lines of each other. **Not "token"**: `_ACP_TOKEN` meant a different,
   per-launch mechanism that the login code replaces. Settled 2026-09-21,
@@ -38,5 +39,7 @@ re-litigate a settled word. General programming vocabulary does not belong here.
   regenerated at startup and on settings change while the ACP permission setting is on, and **deleted**
   (not written as an allow-all file) while it is off — writing an allow-all file even when off would
   have made it selectable from kiro-cli's own terminal agent picker, widening posture for a user whose
-  own baseline is narrower than allow-all. Editing it directly is always the wrong move — change
+  own baseline is narrower than allow-all. Deleting it also moves sessions still using it to
+  kiro-cli's `vibe` fallback (measured live 2026-09-23), so turning the setting off affects running
+  sessions, not only new ones. Editing it directly is always the wrong move — change
   the base agent or the overlay instead.
