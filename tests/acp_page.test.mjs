@@ -3447,12 +3447,24 @@ check("the rail's chrome is gated on the device, not the window width", () => {
        + "the whole page");
   assert(/\.acp-rail-menu-wrap \{ opacity: 0/.test(hover),
          "the row menu is not hidden by that block at all");
-  assert(/:focus-within/.test(hover),
+  assert(/:focus-visible/.test(hover),
          "the menu is revealed by pointing with no keyboard route to it, so "
          + "Delete becomes unreachable without a mouse");
   assert(/aria-expanded="true"/.test(hover),
          "nothing keeps the menu visible while its own popup is open, and the "
          + "pointer leaves the button the moment the popup is used");
+
+  // Row padding must be wide enough at rest (for always-visible more-btn) and on
+  // hover (for the full 3-button wrap) without creating a blank gap at rest.
+  assert(/\.acp-rail-item .acp-rail-row \{ padding-right: 4[04]px/.test(css),
+         "base row padding-right is too narrow -- title bleeds under the /acp "
+         + "kebab button wrap on hover");
+  assert(/\.acp-rail-item:has\(.acp-rail-menu-wrap-ghost\) .acp-rail-row \{ padding-right: 3\dpx/.test(css),
+         "ghost-wrap rest padding-right should be small (just more-btn width) -- "
+         + "100px at rest creates a visible blank gap between the date and the button");
+  assert(/\.acp-rail-item:has\(.acp-rail-menu-wrap-ghost\):hover .acp-rail-row[^}]*padding-right: 1\d\dpx/.test(css),
+         "ghost-wrap hover padding-right is too narrow -- title bleeds under "
+         + "the dashboard's 3-button wrap on hover");
 
   const fine = after("@media (pointer: fine)", 260);
   assert(fine && /\.acp-rail-row \{[^}]*min-height/.test(fine),
@@ -16585,6 +16597,118 @@ check("dashboard: eager-connect — stale-arrival re-enables composer for B afte
   const loads = p.sentOf("load").filter(f => f.sid === "sess-B");
   assertEqual(loads.length, 1,
     "stale-arrival guard must auto-retry B's prompt via dashSendPrompt (FW-1 fix)");
+});
+
+// ---- Phase 7: MCP status panel (SC-4) ------------------------------------
+
+// mcpServersFrameShowsIndicatorWithConnectedCount
+// Delivering a mcp_servers frame un-hides the indicator and shows connected count.
+check("mcpServersFrameShowsIndicatorWithConnectedCount", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "mcp_servers",
+    sessionId: live,
+    payload: { servers: [
+      { name: "github", status: "connected" },
+      { name: "jira",   status: "connected" },
+      { name: "confluence", status: "disabled" },
+    ]},
+  });
+  const indicator = page.el("acpMcpIndicator");
+  assert(!indicator.hidden, "indicator should be visible after mcp_servers frame");
+  const compact = page.el("acpMcpCompact");
+  assert(compact.textContent.includes("connected"),
+    "compact text should include 'connected'; got: " + compact.textContent);
+  assert(compact.textContent.includes("2"),
+    "compact text should show 2 connected servers; got: " + compact.textContent);
+});
+
+// mcpServersFrameWithFailedAuthShowsConnectButton
+// A server with failedAuthorization:true and a https URL gets a Connect button.
+check("mcpServersFrameWithFailedAuthShowsConnectButton", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "mcp_servers",
+    sessionId: live,
+    payload: { servers: [
+      { name: "atlassian", status: "failed",
+        failedAuthorization: true,
+        authorizationUrl: "https://mcp.atlassian.com/oauth" },
+    ]},
+  });
+  const toggle = page.el("acpMcpToggle");
+  assert(toggle.classList.contains("acp-mcp-warn"),
+    "toggle should have acp-mcp-warn class when failedAuthorization is present");
+  // Open the panel.
+  toggle.dispatch("click", {});
+  const list = page.el("acpMcpList");
+  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
+  assert(connectBtns.length === 1,
+    "Connect button should be rendered for failedAuthorization server");
+});
+
+// mcpServersFrameAllConnectedHasNoConnectButton
+// When all servers are connected there should be no connect button and no warn class.
+check("mcpServersFrameAllConnectedHasNoConnectButton", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "mcp_servers",
+    sessionId: live,
+    payload: { servers: [
+      { name: "github", status: "connected" },
+      { name: "gitlab", status: "connected" },
+    ]},
+  });
+  const toggle = page.el("acpMcpToggle");
+  assert(!toggle.classList.contains("acp-mcp-warn"),
+    "toggle should NOT have acp-mcp-warn when no failed servers");
+  toggle.dispatch("click", {});
+  const list = page.el("acpMcpList");
+  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
+  assert(connectBtns.length === 0,
+    "no Connect button when all servers connected");
+});
+
+// mcpServersNullHidesIndicator
+// Resetting via null (session change / resetCommandPalette) hides the indicator.
+check("mcpServersNullHidesIndicator", (tpl) => {
+  const { page, live } = connected(tpl);
+  // First populate.
+  page.deliver({
+    type: "mcp_servers",
+    sessionId: live,
+    payload: { servers: [{ name: "github", status: "connected" }] },
+  });
+  assert(!page.el("acpMcpIndicator").hidden, "indicator should be visible first");
+  // Session change resets indicator via 'session' frame → resetCommandPalette.
+  const newSid = "sess-mcp-reset";
+  page.deliver({
+    type: "session", sessionId: newSid,
+    payload: { sessionId: newSid, cwd: "C:\\tmp", created: true,
+               turnActive: false, contextPercent: null },
+  });
+  assert(page.el("acpMcpIndicator").hidden,
+    "indicator should be hidden after session change");
+});
+
+// mcpServersNonHttpsUrlNoConnectButton
+// An authorizationUrl without https:// scheme must not render a Connect button.
+check("mcpServersNonHttpsUrlNoConnectButton", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "mcp_servers",
+    sessionId: live,
+    payload: { servers: [
+      { name: "evil", status: "failed",
+        failedAuthorization: true,
+        authorizationUrl: "javascript:alert(1)" },
+    ]},
+  });
+  page.el("acpMcpToggle").dispatch("click", {});
+  const list = page.el("acpMcpList");
+  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
+  assert(connectBtns.length === 0,
+    "no Connect button for non-https authorizationUrl");
 });
 
 let failed = 0;

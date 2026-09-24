@@ -640,7 +640,7 @@ function _renderMcpIndicator() {
 
   // Expanded list.
   if (!listEl) return;
-  listEl.innerHTML = '';
+  listEl.textContent = ''; // clear children without innerHTML (no-innerHTML rule)
   var _VALID_STATUSES = {connected: 1, connecting: 1, failed: 1, disabled: 1};
   servers.forEach(function (srv) {
     var li = document.createElement('li');
