@@ -353,10 +353,10 @@ if mcp_servers is not None:
 Both sites mirror the pattern at `acp.py:5773–5778` / `acp.py:5955–5960` exactly, placed inside the existing `if meta is not None:` block that already guards the commands/skills resend. Add inline comment: `# See also: commands/skills resend above — same pattern.`
 
 **Exit criteria**:
-- [ ] `_handle_subscribe` resends `meta.get("mcpServers")` when non-None
-- [ ] `_handle_new` resends `meta.get("mcpServers")` when non-None
-- [ ] Neither site resends when `meta["mcpServers"]` is absent (session never received a `_kiro/mcp/status`) — indicator correctly stays hidden
-- [ ] `pytest tests/test_web.py -k "mcp_servers" --timeout=60` passes with new tests: (a) subscribe when `meta["mcpServers"]` set → `mcp_servers` frame delivered; (b) subscribe when absent → no `mcp_servers` frame; (c) `_handle_new` mirrors same behavior
+- [x] `_handle_subscribe` resends `meta.get("mcpServers")` when non-None
+- [x] `_handle_new` resends `meta.get("mcpServers")` when non-None
+- [x] Neither site resends when `meta["mcpServers"]` is absent (session never received a `_kiro/mcp/status`) — indicator correctly stays hidden
+- [x] `pytest tests/test_web.py -k "mcp_servers" --timeout=60` passes with new tests: (a) subscribe when `meta["mcpServers"]` set → `mcp_servers` frame delivered; (b) subscribe when absent → no `mcp_servers` frame; (c) `_handle_new` mirrors same behavior
 
 ### Phase 5: MCP toolbar HTML/CSS [QA]
 
@@ -732,6 +732,10 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 - Three pre-existing test fixtures (`TestAcpLifespanWiring`, `TestGenerationRunsAtStartup._fake_acp`, `_run_lifespan_capturing_gate`) needed `start_watchdog` stub added — they broke because lifespan now calls `acp.start_watchdog()`. Added stubs.
 - `test_watchdog_fires_on_crashed_process`: tracking stub clears `_proc` after first call to simulate `_on_agent_death/_detach` behavior and prevent repeated fires across ticks.
 
+### Phase 4 (2026-09-24, code: da4639b, fix: 0082414)
+
+No divergences from plan.
+
 ### Phase 3 (2026-09-24, code: a62ce27, fix: 21d13dc)
 
 No divergences from plan.
@@ -747,6 +751,20 @@ No divergences from plan.
 3. **`_kiro/governance/state`, `_kiro/tools/didChange`, `_kiro/powers/items_changed` notification handling.** Three new notification types observed during Phase 3 probing; params shapes unknown; currently logged as INFO. Investigate in a future session. Source: qexplore Discovery.
 
 ## Review Log
+
+### 2026-09-24 — Phase 4 review (full effort, 4 personas)
+
+Senior engineer, Reliability engineer, Maintainability reviewer, End-user advocate. 1 auto-fix cycle.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F4-1 | High | `test_handle_new_resends_mcp_servers_when_set` was a phantom — manually inlined the resend block; removing the 3-line `_handle_new` resend would leave the test green | Fixed — rewrote to call `asyncio.run(_handle_new(...))` with mocked `new_session`, `_derived_mode_in_effect`, and `_resolve_session_cwd` (commit 0082414) |
+| F4-2 | Low | Duplicate string literal in `_noop_death` function | Fixed — removed duplicate docstring (commit 0082414) |
+| F4-3 | Low | SC-1 race window rationale missing from inline comment | Fixed — expanded comment on both resend sites (commit 0082414) |
+
+Reliability: no findings. End-user advocate: finding dismissed (tests present and passing; `history is None` gap is pre-existing, not Phase 4).
+
+Health: **Green** (1 High fixed). 1812 tests passing.
 
 ### 2026-09-24 — Phase 3 review (full effort, 4 personas)
 
