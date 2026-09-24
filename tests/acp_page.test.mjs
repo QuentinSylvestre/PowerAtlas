@@ -16689,6 +16689,11 @@ check("mcpServersNullHidesIndicator", (tpl) => {
   });
   assert(page.el("acpMcpIndicator").hidden,
     "indicator should be hidden after session change");
+  // Panel must not re-open on next session's first MCP frame (F6-1 fix).
+  const toggle = page.el("acpMcpToggle");
+  assert(toggle.getAttribute("aria-expanded") === "false",
+    "aria-expanded should be reset to false on session change; got: " +
+    toggle.getAttribute("aria-expanded"));
 });
 
 // mcpServersNonHttpsUrlNoConnectButton
@@ -16709,6 +16714,46 @@ check("mcpServersNonHttpsUrlNoConnectButton", (tpl) => {
   const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
   assert(connectBtns.length === 0,
     "no Connect button for non-https authorizationUrl");
+});
+
+// mcpServersHttpUrlNoConnectButton
+// http:// URL must also be rejected — only https:// is allowed.
+check("mcpServersHttpUrlNoConnectButton", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "mcp_servers",
+    sessionId: live,
+    payload: { servers: [
+      { name: "downgrade", status: "failed",
+        failedAuthorization: true,
+        authorizationUrl: "http://evil.com/oauth" },
+    ]},
+  });
+  page.el("acpMcpToggle").dispatch("click", {});
+  const list = page.el("acpMcpList");
+  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
+  assert(connectBtns.length === 0,
+    "no Connect button for http:// authorizationUrl");
+});
+
+// mcpServersDataUrlNoConnectButton
+// data: URL must also be rejected.
+check("mcpServersDataUrlNoConnectButton", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "mcp_servers",
+    sessionId: live,
+    payload: { servers: [
+      { name: "xss", status: "failed",
+        failedAuthorization: true,
+        authorizationUrl: "data:text/html,<script>alert(1)</script>" },
+    ]},
+  });
+  page.el("acpMcpToggle").dispatch("click", {});
+  const list = page.el("acpMcpList");
+  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
+  assert(connectBtns.length === 0,
+    "no Connect button for data: authorizationUrl");
 });
 
 let failed = 0;

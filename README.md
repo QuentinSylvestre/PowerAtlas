@@ -438,7 +438,7 @@ elements you'd expect, fed by the protocol's own notification frames — nothing
 separately.
 
 **An MCP connection or authorization failure surfaces inline in the transcript**, as a plain-text
-error message attached to the turn — there's no separate "Connect" prompt or MCP status panel.
+error message attached to the turn, and via the **MCP status indicator** in the session toolbar — a persistent indicator showing per-server connection state that appears when kiro-cli reports server status. Servers with OAuth authorization failures show a "Connect" button that opens the provider's authorization URL in a new tab.
 
 **The slash-command palette lists the agent's own catalogue.** Selecting a skill entry works the same
 way as typing its name; kiro-default (the palette's own "switch agent" entry, meaningless here because

@@ -5979,6 +5979,7 @@
     // Close MCP panel before status menu.
     if (_mcpToggleEl && _mcpToggleEl.getAttribute('aria-expanded') === 'true') {
       _mcpToggleEl.setAttribute('aria-expanded', 'false');
+      _mcpToggleEl.focus(); // restore focus per ARIA Disclosure Button pattern
       return;
     }
     // Focus does not move into the menu when it opens, so the button keeps it

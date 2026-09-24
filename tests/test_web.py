@@ -26419,6 +26419,10 @@ class TestAcpCloseSessionWire:
 
 
 
+def _noop_death(self, proc):
+    """No-op replacement for _on_agent_death in watchdog tests."""
+
+
 class TestAcpCrashWatchdog:
     """Phase 2 — crash-detection watchdog.
 
@@ -26576,6 +26580,7 @@ class TestAcpCrashWatchdog:
         stopped = []
 
         async def run_until_done():
+            _saved_interval = acp_mod.WATCHDOG_INTERVAL_SECONDS
             acp_mod.WATCHDOG_INTERVAL_SECONDS = 0.01
             try:
                 with patch.object(
@@ -26599,7 +26604,7 @@ class TestAcpCrashWatchdog:
                             pass
                         stopped.append("timeout")
             finally:
-                acp_mod.WATCHDOG_INTERVAL_SECONDS = 5.0
+                acp_mod.WATCHDOG_INTERVAL_SECONDS = _saved_interval
 
         try:
             asyncio.run(run_until_done())
@@ -26888,7 +26893,3 @@ class TestAcpMcpStatusNotification:
             assert mcp_frames[0]["payload"]["servers"] == servers
         finally:
             self._cleanup_registry(acp_mod)
-
-
-def _noop_death(self, proc):
-    """No-op replacement for _on_agent_death in watchdog tests."""

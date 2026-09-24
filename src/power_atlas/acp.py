@@ -797,7 +797,7 @@ MAX_SESSIONS = 8
 # field. Both are rebound by `apply_config`/rebindable by tests.
 ACP_IDLE_TTL_SECONDS = 1800.0
 SWEEP_INTERVAL_SECONDS = 60.0
-WATCHDOG_INTERVAL_SECONDS: "Final[float]" = 5.0
+WATCHDOG_INTERVAL_SECONDS = 5.0
 _WATCHDOG_MAX_ERRORS = 3  # consecutive exceptions before the watchdog cancels itself
 # Wire-close timeout: how long to wait for session/delete before giving up and
 # proceeding with local cleanup. Small because a non-answer is indistinguishable

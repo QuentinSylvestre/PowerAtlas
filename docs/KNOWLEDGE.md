@@ -158,7 +158,7 @@ PowerAtlas removed v2 support in this plan. The `~/.kiro/sessions/cli/` director
 
 **`session/delete` (v3 2.23.1)**: Returns `{}` on first call; returns `-32000 "Something went wrong with the cloud session service"` on a second call (not idempotent). After a successful delete, the session is gone from kiro-cli's registry — subsequent calls referencing the session id return "Session not found". Advertised in `agentCapabilities.sessionCapabilities.delete` from `initialize` (confirmed present in 2.23.1 response).
 
-**Current PowerAtlas code is out of date**: `CLOSE_METHOD = None` in `acp.py:645` was set when v3 first launched and no method worked. `session/delete` was not available then. It now needs to be implemented as `CLOSE_METHOD = "session/delete"` with error handling for the non-idempotent failure mode (treat `-32000` on re-delete as success).
+**Current status**: Implemented in plan `260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS` (2026-09-24). `session/delete` is now sent by `close_session()` when `sessionCapabilities.delete` was advertised at `initialize` time. `-32000` on re-delete is treated as success (local cleanup always runs).
 
 **v3 process model context**: In v3, all sessions share ONE process tree (kiro-cli.exe → bun.exe → node.exe). The ~3 processes / ~161 MB per session figure from v2 does NOT apply. With 27 sessions, the tree is 3 processes / ~655 MB total. Session delete frees kiro-cli's internal session registry; whether it frees per-session in-process memory (within bun/node) is unverified but the process count is unchanged regardless. The sweeper's memory value on v3 is freeing PowerAtlas's own data structures (history ring buffers, session meta dict), not kiro-cli processes.
 
