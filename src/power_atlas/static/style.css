@@ -1036,6 +1036,46 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-context-fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.3s; }
 .acp-context-label { font-variant-numeric: tabular-nums; }
 
+/* MCP server status indicator — SC-4, plan 260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS */
+/* Prevent .acp-mcp-indicator { display: inline-flex } from overriding [hidden] (review finding H2) */
+#acpMcpIndicator[hidden] { display: none !important; }
+.acp-mcp-indicator { position: relative; display: inline-flex; align-items: center; }
+.acp-mcp-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; line-height: 1; color: var(--text-muted);
+  background: transparent; border: none; padding: 4px 6px;
+  border-radius: var(--radius-sm); cursor: pointer; font-family: inherit;
+}
+.acp-mcp-toggle:hover { color: var(--text); background: var(--surface-hover); }
+.acp-mcp-toggle.acp-mcp-warn { color: #ef4444; }
+.acp-mcp-toggle.acp-mcp-caution { color: var(--amber); }
+.acp-mcp-toggle[aria-expanded="true"] ~ .acp-mcp-panel { display: block; }
+.acp-mcp-panel {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 100;
+  display: none; min-width: 220px; max-width: 340px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 6px 0;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.acp-mcp-list { list-style: none; margin: 0; padding: 0; }
+.acp-mcp-server {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; font-size: 13px;
+}
+.acp-mcp-server-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acp-mcp-badge { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.acp-mcp-badge-connected  { background: var(--success); }
+.acp-mcp-badge-connecting { background: var(--amber); }
+.acp-mcp-badge-failed     { background: #ef4444; }
+.acp-mcp-badge-disabled   { background: var(--text-muted); }
+.acp-mcp-connect-btn {
+  margin-left: auto; flex-shrink: 0; font-size: 11px; padding: 2px 8px;
+  border-radius: 4px; border: 1px solid var(--border);
+  background: transparent; color: var(--accent); cursor: pointer;
+  font-family: inherit; white-space: nowrap;
+}
+.acp-mcp-connect-btn:hover { background: var(--accent-dim); }
+
 /* Transcript is the primary pane; the transport log below it is a fixed strip,
    because once chunks stream the conversation is what the page is for. */
 /* Wrapper holds the scrollable transcript + the floating nav overlay. flex: 1
@@ -1876,11 +1916,17 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-row:disabled { opacity: 0.45; cursor: default; }
 .acp-rail-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acp-rail-row-when { flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-/* Room for the always-visible ⋯ button at rest, and the pin indicator when
-   pinned (both sit in .acp-rail-menu-wrap at right: 4px). 32px clears ⋯
-   alone; 64px clears ⋯ + pin (two 28px buttons plus the 4px gap and offset). */
-.acp-rail-item .acp-rail-row { padding-right: 32px; }
-.acp-rail-item:has(.acp-rail-pin-btn.pinned) .acp-rail-row { padding-right: 64px; }
+/* Reserve space for the always-visible button(s) at rest so the `when`
+   timestamp does not overlap them, and for the full wrap on hover so the
+   title does not bleed under it when all buttons appear.
+   /acp kebab (wrap 36px + right:4px = 40px): 44px covers rest and hover.
+   Dashboard ghost (more-btn only at rest: 28px + right:4px = 32px): 36px at rest.
+   Dashboard ghost on hover (3 buttons + right:4px = 96px): 100px. */
+.acp-rail-item .acp-rail-row { padding-right: 44px; }
+.acp-rail-item:has(.acp-rail-menu-wrap-ghost) .acp-rail-row { padding-right: 36px; }
+.acp-rail-item:has(.acp-rail-menu-wrap-ghost):hover .acp-rail-row,
+.acp-rail-item:has(.acp-rail-menu-wrap-ghost):has(:focus-visible) .acp-rail-row,
+.acp-rail-item:has(.acp-rail-menu-wrap-ghost [aria-expanded="true"]) .acp-rail-row { padding-right: 100px; }
 /* The row's actions menu. Present for loopback viewers and authenticated remote
    desktop browsers (non-mobile UA); absent for remote mobile browsers
    (ACP_CAN_DELETE=false). 32x40 keeps the row's touch height while taking as
@@ -1986,57 +2032,40 @@ body:has(> .acp-shell) { height: 100dvh; }
    the row's `title`. */
 .acp-rail-row-gone .acp-rail-row-title { color: var(--text-muted); font-style: italic; }
 
-/* The row menu is revealed by pointing rather than always drawn. Three arms,
-   each load-bearing: `:focus-within` keeps it reachable by keyboard, without
-   which hiding the button would delete the only route to Delete for anyone not
-   using a mouse; the `aria-expanded` arm keeps it visible while its own menu is
-   open, since by then the pointer has left the button for the popup; and the
-   whole block sits behind `hover: hover`, so a touch device — which has no
-   hover to reveal anything with — keeps the button it has always had.
+/* The row menu is hidden on hover-capable devices until the pointer enters
+   the row. Three arms keep it reachable without a pointer: `:focus-within`
+   for keyboard; the `aria-expanded` arm while the button's own popup is open;
+   and `@media (hover: hover)` so touch devices always see the button.
 
-   That query keys on the *input device*, not on viewport width. This file made
-   the opposite mistake once (see the `.acp-banner, .acp-title` block, which
-   carries the account: a rule about who the viewer was got written as a rule
-   about how wide their window was, and hid the dashboard link), and a
-   loopback viewer on a tablet is exactly the reader that mistake would strand
-   here — the menu is loopback-only, so a width-keyed rule would look correct
-   on every device that never sees it. */
+   The query keys on the input device, not viewport width -- a loopback viewer
+   on a tablet must still reach Delete, and a width-keyed rule would look
+   correct on every device that never sees it. */
 @media (hover: hover) {
   .acp-rail-menu-wrap { opacity: 0; }
   .acp-rail-item:hover .acp-rail-menu-wrap,
-  .acp-rail-item:focus-within .acp-rail-menu-wrap,
+  .acp-rail-item:has(:focus-visible) .acp-rail-menu-wrap,
   .acp-rail-menu-wrap:has(> [aria-expanded="true"]) { opacity: 1; }
-  /* Session rows only (the double-class selector beats the single-class
-     base rule just above regardless of source order, matching the
-     .acp-rail-menu-wrap.acp-rail-menu-wrap-ghost background override a few
-     rules up): opacity moves from the wrap as a whole to each button
-     inside it, because the pin button needs to stay visible at rest
-     exactly when pinned while its siblings (resume/acp/⋯) stay hidden
-     until hover -- something a single wrap-level toggle can't express.
-     /acp's own kebab pill never renders a pin button, so its base rule
-     above is untouched. */
+  /* Session rows only (ghost wrap): opacity per-button so the pinned
+     pin button can stay visible at rest while its siblings stay hidden. */
   .acp-rail-menu-wrap.acp-rail-menu-wrap-ghost { opacity: 1; }
   .acp-rail-menu-wrap-ghost > .acp-rail-ghost-btn { opacity: 0; }
   .acp-rail-item:hover .acp-rail-menu-wrap-ghost > .acp-rail-ghost-btn,
-  .acp-rail-item:focus-within .acp-rail-menu-wrap-ghost > .acp-rail-ghost-btn,
+  .acp-rail-item:has(:focus-visible) .acp-rail-menu-wrap-ghost > .acp-rail-ghost-btn,
   .acp-rail-menu-wrap-ghost:has(> [aria-expanded="true"]) > .acp-rail-ghost-btn { opacity: 1; }
   .acp-rail-menu-wrap-ghost > .acp-rail-pin-btn.pinned { opacity: 1; }
 
-  /* The last-activity timestamp ("15:29") sits at the row's own right edge,
-     a normal flex child after the title rather than overlaid the way the
-     workspace count is -- but the hover-revealed .acp-rail-menu-wrap still
-     lands on top of it, since *that* is absolutely positioned to the same
-     right: 4px edge regardless of the row's own flow. Same fix as the
-     workspace count below: hidden while the actions it would collide with
-     are visible, rather than reserving space for both. */
+  /* The last-activity timestamp sits at the row's right edge as a flex child,
+     but the button wrap is absolute at the same right: 4px spot. Removed from
+     layout (display: none, not opacity: 0) so the title expands to fill the
+     recovered space -- opacity: 0 keeps the phantom flex width, leaving a
+     visible gap between the title and the button. */
   .acp-rail-item:hover .acp-rail-row-when,
-  .acp-rail-item:focus-within .acp-rail-row-when,
-  .acp-rail-item:has(.acp-rail-menu-wrap > [aria-expanded="true"]) .acp-rail-row-when { opacity: 0; }
+  .acp-rail-item:has(:focus-visible) .acp-rail-row-when,
+  .acp-rail-item:has([aria-expanded="true"]) .acp-rail-row-when { display: none; }
 
-  /* Workspace-group quick actions (rail QA follow-up): same reasoning as
-     the session row's own menu-wrap just above -- a viewer whose primary
-     input cannot hover must still be able to reach these, so the whole
-     block stays inert outside this query. */
+  /* Workspace-group quick actions: same hidden-until-hover reasoning as
+     the session rows. Kept inside this query so touch devices always
+     have access without any reveal gesture. */
   .acp-rail-group-head .acp-rail-ghost-btn { opacity: 0; }
   .acp-rail-group-head:hover .acp-rail-ghost-btn,
   .acp-rail-group-actions:focus-within .acp-rail-ghost-btn,
@@ -2049,10 +2078,8 @@ body:has(> .acp-shell) { height: 100dvh; }
      `:has` arm the group-count rule just below already uses for the same
      "a trigger's own menu is open" condition. */
   .acp-rail-group-head:has(.acp-rail-group-actions [aria-expanded="true"]) .acp-rail-ghost-btn { opacity: 1; }
-  /* Pinned override, the workspace-group equivalent of the session row's
-     .acp-rail-menu-wrap-ghost > .acp-rail-pin-btn.pinned rule above --
-     stays visible at rest even though the ghost-btn rule just above hides
-     every other action, pin included, until hover. */
+  /* Pinned override: stays visible at rest even though the ghost-btn rule
+     just above hides every other action, pin included, until hover. */
   .acp-rail-group-head .acp-rail-pin-btn.pinned { opacity: 1; }
 
   /* The count ("3 of 38") sits at the toggle's own right edge
