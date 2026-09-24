@@ -1,7 +1,7 @@
 # ACP v3: Session Delete, Watchdog, and MCP Status Panel
 
 > **Date**: 2026-09-23
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Three improvements to the ACP supervisor and /acp UI — `session/delete` wire close, crash-detection watchdog, and `_kiro/mcp/status` toolbar panel with OAuth connect flow.
 > **Estimated effort**: 3–5 days
@@ -161,14 +161,14 @@ Update `_sweep_once` docstring (`acp.py:6568–6582`): remove "frees the session
 Also update `close_session()` docstring (`acp.py:4916–4919`) to describe the wire call.
 
 **Exit criteria**:
-- [ ] `CLOSE_TIMEOUT_SECONDS = 5.0` constant added to `acp.py`
-- [ ] `self._close_method` field present in `_Supervisor.__init__`
-- [ ] `ensure_started()` reads `sessionCapabilities.delete` and sets `self._close_method`; uses truthiness test (`if _session_caps.get("delete"):` not `is not None`); log line confirms enable/disable
-- [ ] `close_session()` attempts `self._close_method` wire call when set and `alive()` is True; uses `CLOSE_TIMEOUT_SECONDS`
-- [ ] `AgentRejected` logged as WARNING; local cleanup always runs
-- [ ] Other `AcpError` (including timeout) silently swallowed; local cleanup always runs
-- [ ] `_sweep_once` docstring no longer claims "frees 3 processes / 161 MB"
-- [ ] `pytest tests/test_web.py -k "close_session" --timeout=60` passes with new tests covering: (a) wire call sent when `_close_method` set and `alive()`, (b) `-32000` response swallowed (local cleanup runs), (c) `sessionCapabilities.delete` absent → `_close_method` stays `None`
+- [x] `CLOSE_TIMEOUT_SECONDS = 5.0` constant added to `acp.py`
+- [x] `self._close_method` field present in `_Supervisor.__init__`
+- [x] `ensure_started()` reads `sessionCapabilities.delete` and sets `self._close_method`; uses truthiness test (`if _session_caps.get("delete"):` not `is not None`); log line confirms enable/disable
+- [x] `close_session()` attempts `self._close_method` wire call when set and `alive()` is True; uses `CLOSE_TIMEOUT_SECONDS`
+- [x] `AgentRejected` logged as WARNING; local cleanup always runs
+- [x] Other `AcpError` (including timeout) silently swallowed; local cleanup always runs
+- [x] `_sweep_once` docstring no longer claims "frees 3 processes / 161 MB"
+- [x] `pytest tests/test_web.py -k "close_session" --timeout=60` passes with new tests covering: (a) wire call sent when `_close_method` set and `alive()`, (b) `-32000` response swallowed (local cleanup runs), (c) `sessionCapabilities.delete` absent → `_close_method` stays `None`
 
 ### Phase 2: Crash detection watchdog [QA]
 
@@ -723,7 +723,11 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 
 ## 9) Implementation Divergences from Plan
 
-*Reserved — filled during /qdev execution.*
+### Phase 1 (2026-09-24, code: d0faa33, fix: 93c4a71)
+
+- `self._close_method = None` also added to `_discard()` (plan only specified `__init__` and `ensure_started`): prevents stale wire-close attempt after process teardown. `_discard` calls `_detach` which directly resets the field — sound addition, no plan text prohibits it.
+
+*Remaining phases reserved — filled during /qdev execution.*
 
 ## Follow-up Work (Deferred)
 
@@ -734,6 +738,27 @@ Python changes require a PowerAtlas restart; HTML/CSS/JS changes need only a har
 3. **`_kiro/governance/state`, `_kiro/tools/didChange`, `_kiro/powers/items_changed` notification handling.** Three new notification types observed during Phase 3 probing; params shapes unknown; currently logged as INFO. Investigate in a future session. Source: qexplore Discovery.
 
 ## Review Log
+
+### 2026-09-24 — Phase 1 review (full effort, 4 personas)
+
+Senior engineer, Reliability engineer, Security auditor, Maintainability reviewer. 1 auto-fix cycle.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F1-1 | Medium | `CancelledError` from `_request` bypasses both `except` clauses — local cleanup not guaranteed on task cancellation | Fixed — introduced `_wire_exc: BaseException \| None = None` capture pattern; cleanup runs unconditionally, `CancelledError` re-raised after (commit 93c4a71) |
+| F1-2 | Medium | Two stale docstrings (`_Supervisor` class, `_handle_close`) still said "no wire call / no JSON-RPC close method" | Fixed — both updated to describe conditional `session/delete` behavior (commit 93c4a71) |
+| F1-3 | Medium | Inline comment above wire-call block: "any error logged as WARNING" — wrong; only `AgentRejected` is WARNING, `AcpError` is silently swallowed | Fixed — comment clarified to distinguish the two paths (commit 93c4a71) |
+| F1-4 | Medium | No test for truthy non-bool `sessionCapabilities.delete` values (1, `"session/delete"`) — truthiness test contract not executable | Fixed — added `test_close_session_close_method_set_when_delete_capability_truthy_nonbool` (commit 93c4a71) |
+| F1-5 | Medium | `CLOSE_METHOD` module constant is dead code — nothing reads it; creates confusing dual-existence with `self._close_method` | Fixed — constant removed; AS-5 historical note moved to `close_session` docstring (commit 93c4a71) |
+| F1-6 | Low | No test for `CancelledError` from wire call not preventing cleanup | Fixed — added `test_close_session_cancelled_error_from_wire_does_not_skip_cleanup` (commit 93c4a71) |
+| F1-7 | Low | Four stale test comments said "no wire call at all" unconditionally | Fixed — updated to "no wire call in this test because `_close_method` is None" (commit 93c4a71) |
+| F1-8 | Low | `__init__` comment said "reset to `None` by `_discard`" — actually `_detach` | Fixed — corrected to `_detach` (commit 93c4a71) |
+| F1-9 | Low | `acp_session` fixture teardown did not reset `_close_method` | Fixed — added `_close_method = None` reset to `acp_session` and `acp_store` teardowns (commit 93c4a71) |
+| F1-10 | Low | `test_other_acp_error_swallowed` did not assert no WARNING emitted (silent path not pinned) | Fixed — added `caplog` + `assert not any(r.levelno == WARNING ...)` (commit 93c4a71) |
+
+Security auditor: no findings.
+
+Health after auto-fix: **Green** (0 High, all Medium/Low fixed). 1798 tests passing.
 
 ### 2026-09-23 — Plan Creation (via /qplan, full effort)
 
