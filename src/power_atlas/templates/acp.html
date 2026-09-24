@@ -5939,12 +5939,14 @@
     });
   }
 
-  document.addEventListener('click', function () {
+  document.addEventListener('click', function (event) {
     if (_statusMenuGuard) { _statusMenuGuard = false; return; }
     if (!statusMenu.hidden) _statusMenuClose();
-    // Close MCP panel when clicking outside it.
+    // Close MCP panel when clicking outside indicator+panel.
     if (_mcpGuard) { _mcpGuard = false; return; }
     if (_mcpToggleEl && _mcpToggleEl.getAttribute('aria-expanded') === 'true') {
+      // Ignore clicks inside the panel itself (e.g., Connect button).
+      if (_mcpPanelEl && event && _mcpPanelEl.contains(event.target)) return;
       _mcpToggleEl.setAttribute('aria-expanded', 'false');
     }
   });

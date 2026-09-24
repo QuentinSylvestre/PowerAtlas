@@ -602,6 +602,8 @@ function _renderMcpIndicator() {
 
   if (!sessionMcpServers) {
     indicatorEl.hidden = true;
+    var t = document.getElementById('acpMcpToggle');
+    if (t) t.setAttribute('aria-expanded', 'false'); // don't re-open on next session's frame
     return;
   }
 
