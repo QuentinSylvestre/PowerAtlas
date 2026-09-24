@@ -9,6 +9,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -73,10 +74,41 @@ class _FileInfo:
     size: int
 
 
+@lru_cache(maxsize=1024)
+def _expand_short_path(p: str) -> str:
+    """Expand Windows 8.3 short names (``QSYLVE~1.POL``) to their long form.
+
+    The same directory reaches us in both forms -- ``%TEMP%`` is commonly the
+    short form, so a kiro-cli session started from it records a short cwd --
+    and without this they key as two different workspaces. The path itself may
+    no longer exist (a deleted probe dir), so the deepest *existing* ancestor is
+    expanded and the missing tail re-appended as-is. Returns ``p`` unchanged if
+    no ancestor resolves.
+    """
+    import ctypes
+    get_long = ctypes.windll.kernel32.GetLongPathNameW
+    head, tail = p, ""
+    while True:
+        buf = ctypes.create_unicode_buffer(32768)
+        if get_long(head, buf, len(buf)):
+            return buf.value + tail
+        parent, name = head.rsplit("\\", 1) if "\\" in head else ("", head)
+        if not parent or not name:
+            return p
+        head, tail = parent, "\\" + name + tail
+
+
 def _normalize_path(p: str) -> str:
-    """Normalize path for cache keying: backslash + casefold on Windows, strip trailing sep."""
+    """Normalize path for cache keying: backslash + casefold on Windows, strip trailing sep.
+
+    On Windows, 8.3 short names are also expanded so the short and long spelling
+    of one directory key identically. Gated on ``~`` so the common path never
+    touches the filesystem.
+    """
     if sys.platform == "win32":
         normalized = p.replace("/", "\\").rstrip("\\")
+        if "~" in normalized:
+            normalized = _expand_short_path(normalized)
         return normalized.casefold()
     return p.rstrip("/") or "/"
 

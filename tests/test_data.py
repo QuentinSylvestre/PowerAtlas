@@ -4,6 +4,7 @@ import contextlib
 import itertools
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -152,6 +153,21 @@ class TestNormalizePath:
         from power_atlas.data import _normalize_path
         if sys.platform == "win32":
             assert _normalize_path("C:\\Users\\Test") == _normalize_path("C:\\users\\test")
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="8.3 short names are Windows-only")
+    def test_short_name_matches_long_name(self, tmp_path):
+        import ctypes
+        from power_atlas.data import _normalize_path
+        long_dir = tmp_path / "Long Directory Name"
+        long_dir.mkdir()
+        buf = ctypes.create_unicode_buffer(32768)
+        ctypes.windll.kernel32.GetShortPathNameW(str(long_dir), buf, len(buf))
+        if "~" not in buf.value:
+            pytest.skip("8.3 name generation disabled on this volume")
+        assert _normalize_path(buf.value) == _normalize_path(str(long_dir))
+        # A missing tail under a short-named ancestor still matches.
+        assert (_normalize_path(buf.value + "\\gone\\sub")
+                == _normalize_path(str(long_dir / "gone" / "sub")))
 
 
 
