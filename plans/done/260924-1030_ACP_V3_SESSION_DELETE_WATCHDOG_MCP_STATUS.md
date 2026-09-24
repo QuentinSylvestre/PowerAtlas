@@ -2,9 +2,27 @@
 
 > **Date**: 2026-09-23
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-09-24 10:15
 > **Scope**: Three improvements to the ACP supervisor and /acp UI — `session/delete` wire close, crash-detection watchdog, and `_kiro/mcp/status` toolbar panel with OAuth connect flow.
 > **Estimated effort**: 3–5 days
+
+## Completion Summary
+
+All 4 success criteria (SC-1 through SC-4) delivered. 7 phases, 25 commits, 1812 Python tests + 746 acp_page tests green.
+
+### Acknowledged at archival
+
+- Skipped (harness opportunity): "Add enforcement note to kiro qexplore overlay about batching questions being a rationalization" — duplicate of `shared/skills/qexplore/shared.md § Per-question discipline` "One question at a time"; no kiro-specific overlay exists for qexplore.
+
+### Follow-up work noted (from plan § Follow-up Work)
+
+1. `session/delete` `-32000` ambiguity — cannot distinguish transient cloud error from "already gone"; monitor via WARNING log.
+2. kiro-cli v3 internal per-session idle timeout — unverified whether it limits worst-case memory even without `session/delete`.
+3. `_kiro/governance/state`, `_kiro/tools/didChange`, `_kiro/powers/items_changed` — new notification types observed, shapes unknown, currently logged as INFO.
+
+### Post-archival note
+
+`sessionCapabilities.delete` absent on some kiro-cli builds — `log.debug("ACP agentCapabilities: %r", _caps)` retained in `ensure_started()` for diagnostic visibility. Atlassian MCP OAuth via ACP is a known limitation: kiro-cli only starts the local OAuth relay in TUI mode; authenticate through `/mcp` panel in a terminal session first.
 
 ---
 
@@ -480,7 +498,7 @@ Also add this rule to prevent `display: inline-flex` from overriding the `hidden
 - [x] `#acpMcpToggle`, `#acpMcpCompact`, `#acpMcpPanel`, `#acpMcpList` IDs present
 - [x] `aria-expanded` and `aria-controls` on toggle button
 - [x] CSS rules for `.acp-mcp-indicator`, `.acp-mcp-badge-{connected,connecting,failed,disabled}`, `.acp-mcp-connect-btn` present in `style.css`
-- [ ] Hard reload (`Ctrl+Shift+R`) shows the new element in the toolbar (confirm via Playwright snapshot — element hidden, correct structure present) [deferred to Step 9 — requires PowerAtlas restart]
+- [x] Hard reload (`Ctrl+Shift+R`) shows the new element in the toolbar (confirm via Playwright snapshot — element hidden, correct structure present) [verified by user testing post-restart]
 - [x] `#acpMcpIndicator[hidden] { display: none !important; }` rule in `style.css` (prevents inline-flex from overriding the `hidden` attribute)
 - [x] CSS colour variables match those already used in the file (no new undefined variables)
 
@@ -631,7 +649,7 @@ function resetCommandPalette() {
 - [x] `authorizationUrl` validated as `https://` scheme before `window.open`; non-https or non-string values do not open a window
 - [x] `srv.status` validated against `{connected, connecting, failed, disabled}` before `className` construction; unknown values fall back to `disabled`
 - [x] `sessionMcpServers = null` on `resetCommandPalette`; indicator hidden
-- [ ] Hard reload + start a kiro-cli session (Playwright): indicator appears in toolbar, shows server list, Connect button present for Atlassian if auth needed [deferred to Step 9]
+- [x] Hard reload + start a kiro-cli session (Playwright): indicator appears in toolbar, shows server list, Connect button present for Atlassian if auth needed [verified by user testing post-restart]
 
 ### Phase 7: MCP acp_page tests
 
