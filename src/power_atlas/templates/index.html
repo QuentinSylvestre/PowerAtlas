@@ -6225,8 +6225,26 @@ topbarSettingsBtn.addEventListener('click', function(){
     loadRestartKeys();
   }
 });
-document.addEventListener('click', function(){
+// Whether a click landed in one of the menu's text-entry controls (an input,
+// textarea, select, anything contenteditable, or the `.hotkey-field` box that
+// focuses its input). Closing the menu on those clicks hid the field the user
+// had just focused, so the base-agent and Peek hotkey fields could not be
+// typed into with a mouse. Toggles and buttons still close the menu.
+// Walks parentNode by hand rather than closest() with a selector list.
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+function topbarMenuTextEntryClick(target){
+  var entry = false;
+  for (var n = target; n; n = n.parentNode) {
+    if (n === topbarSettingsMenu) return entry;
+    var tag = n.tagName;
+    if (n.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+        || (n.classList && n.classList.contains('hotkey-field'))) entry = true;
+  }
+  return false;
+}
+document.addEventListener('click', function(e){
   if (topbarMenuGuard) { topbarMenuGuard = false; return; }
+  if (e && topbarMenuTextEntryClick(e.target)) return;
   if (!topbarSettingsMenu.hidden) closeTopbarSettings();
 });
 document.addEventListener('keydown', function(e){

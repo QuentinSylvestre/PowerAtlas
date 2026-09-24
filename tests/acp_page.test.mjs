@@ -11402,6 +11402,64 @@ check("settings: a real click on 'Sign out other browsers' keeps the menu open o
     `the open menu does not show the result: ${note.textContent}`);
 });
 
+check("settings: clicking into the menu's text fields keeps it open; a toggle or an outside click still closes it (final QA)", () => {
+  // The QA observed in Chromium that a click in the base-agent or Peek hotkey
+  // field reached the document-level closer, which hid the field just focused.
+  // Driven through the real topbar wiring with the click's target, as a
+  // bubbling click delivers it.
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+  const p = loadPanel({ topbarMenu: true });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  // The markup's nesting: menu > .topbar-menu-row > .hotkey-field > input.
+  function fieldInMenu(input) {
+    const row = new El("div");
+    row.className = "topbar-menu-row";
+    const box = new El("div");
+    box.className = "hotkey-field";
+    box.appendChild(input);
+    row.appendChild(box);
+    p.topbarMenu.appendChild(row);
+    return box;
+  }
+  const baseAgent = $("acpPermBaseAgent");
+  const baseBox = fieldInMenu(baseAgent);
+  const peek = new El("input");
+  const peekBox = fieldInMenu(peek);
+  const toggle = $("acpPermToggle");
+  p.topbarMenu.appendChild(toggle);
+  const outside = new El("div");
+  const menuOpen = () => !p.topbarMenu.hidden
+    && p.topbarBtn.getAttribute("aria-expanded") === "true";
+  const open = () => {
+    if (menuOpen()) return;
+    const ev = { type: "click", target: p.topbarBtn, stopPropagation() {} };
+    p.topbarBtn.dispatch("click", ev);
+    p.fireDoc("click", ev);
+    assert(menuOpen(), "the gear did not open the menu");
+  };
+  const clickOn = (target) => p.fireDoc("click", { type: "click", target, stopPropagation() {} });
+
+  open();
+  clickOn(baseAgent);
+  assert(menuOpen(), "clicking into the base-agent field closed the settings menu");
+  clickOn(baseBox);
+  assert(menuOpen(), "clicking the base-agent field's box closed the settings menu");
+  clickOn(peek);
+  assert(menuOpen(), "clicking into the Peek hotkey field closed the settings menu");
+  clickOn(peekBox);
+  assert(menuOpen(), "clicking the Peek hotkey field's box closed the settings menu");
+
+  clickOn(outside);
+  assert(!menuOpen(), "an outside click no longer closes the settings menu");
+  open();
+  // An input that is not in the menu is an outside click too.
+  clickOn(new El("input"));
+  assert(!menuOpen(), "a click in a text field outside the menu kept it open");
+  open();
+  clickOn(toggle);
+  assert(!menuOpen(), "a toggle click no longer closes the menu, unlike the Startup toggles");
+});
+
 check("settings: a refused rotation says so and does not claim success (F3)", async () => {
   const p = loadPanel({ answer: (url) => url === "/api/local-secret/rotate"
     ? { body: { ok: false, error: "Could not write the key file; the previous local secret is still in effect" } }
