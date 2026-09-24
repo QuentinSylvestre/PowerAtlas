@@ -794,6 +794,8 @@ MAX_SESSIONS = 8
 # field. Both are rebound by `apply_config`/rebindable by tests.
 ACP_IDLE_TTL_SECONDS = 1800.0
 SWEEP_INTERVAL_SECONDS = 60.0
+WATCHDOG_INTERVAL_SECONDS: "Final[float]" = 5.0
+_WATCHDOG_MAX_ERRORS = 3  # consecutive exceptions before the watchdog cancels itself
 # Wire-close timeout: how long to wait for session/delete before giving up and
 # proceeding with local cleanup. Small because a non-answer is indistinguishable
 # from a dead agent, and local cleanup must always run regardless.
@@ -5255,6 +5257,53 @@ class _Supervisor:
         except Exception:
             log.exception("ACP: publishing the live session set failed")
 
+    async def _watchdog_loop(self) -> None:
+        """Detect a dead kiro-cli.exe before the reader thread sees EOF.
+
+        kiro-cli.exe spawns bun.exe which spawns node.exe; both grandchildren
+        inherit the stdout pipe write handle. When kiro-cli.exe crashes the
+        reader thread's ``read1()`` blocks indefinitely rather than seeing EOF.
+        ``proc.poll()`` on the kiro-cli.exe Popen object correctly detects the
+        crash regardless of grandchild state, because ``_proc`` refers to the
+        wrapper, not the node subprocess.
+
+        Calls ``_on_agent_death`` directly (not via ``_post``) because this
+        coroutine already runs on the event loop. ``_post`` is only for the
+        OS-thread reader.
+
+        Sleep-first: avoids a spurious check immediately after spawn, same
+        discipline as ``_sweep_loop``.
+        """
+        _errors = 0
+        while True:
+            try:
+                await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
+                proc = self._proc
+                if proc is None or not self._ready:
+                    _errors = 0
+                    continue
+                rc = proc.poll()  # bind once — avoids double syscall in log format
+                if rc is not None:
+                    log.warning(
+                        "ACP watchdog: kiro-cli.exe (pid %d) has exited "
+                        "(rc=%s) before the reader thread saw EOF; "
+                        "triggering agent death cleanup",
+                        proc.pid, rc)
+                    self._on_agent_death(proc)
+                _errors = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _errors += 1
+                log.exception(
+                    "ACP watchdog: unexpected error (consecutive=%d/%d)",
+                    _errors, _WATCHDOG_MAX_ERRORS)
+                if _errors >= _WATCHDOG_MAX_ERRORS:
+                    log.error(
+                        "ACP watchdog: too many consecutive errors — "
+                        "stopping watchdog; crash detection inactive")
+                    return
+
 
 _supervisor = _Supervisor()
 
@@ -7069,6 +7118,15 @@ def start_sweeper() -> asyncio.Task:
     cancellation.
     """
     return asyncio.create_task(_sweep_loop())
+
+
+def start_watchdog() -> asyncio.Task:
+    """Start the crash-detection watchdog. Called from ``web.py``'s ``lifespan``.
+
+    Returns the asyncio.Task so the caller can cancel and await it.
+    """
+    return asyncio.create_task(
+        _supervisor._watchdog_loop(), name="acp-watchdog")
 
 
 def apply_config(config) -> None:

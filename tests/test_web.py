@@ -9327,13 +9327,15 @@ def acp_fast(acp_store):
     saved = {name: getattr(acp_mod, name) for name in (
         "PROMPT_TICK_SECONDS", "PROMPT_SILENCE_SECONDS",
         "PROMPT_ABSOLUTE_MAX_SECONDS", "CANCEL_GRACE_SECONDS",
-        "ACP_IDLE_TTL_SECONDS", "SWEEP_INTERVAL_SECONDS", "MAX_SESSIONS")}
+        "ACP_IDLE_TTL_SECONDS", "SWEEP_INTERVAL_SECONDS", "MAX_SESSIONS",
+        "WATCHDOG_INTERVAL_SECONDS")}
     acp_mod.PROMPT_TICK_SECONDS = 0.01
     acp_mod.PROMPT_SILENCE_SECONDS = 0.08
     acp_mod.PROMPT_ABSOLUTE_MAX_SECONDS = 30.0
     acp_mod.CANCEL_GRACE_SECONDS = 0.05
     acp_mod.ACP_IDLE_TTL_SECONDS = 0.05
     acp_mod.SWEEP_INTERVAL_SECONDS = 0.01
+    acp_mod.WATCHDOG_INTERVAL_SECONDS = 0.01
     try:
         yield acp_mod, store
     finally:
@@ -11155,7 +11157,18 @@ class TestAcpLifespanWiring:
         hooked = []
         notify_hooked = []
         gate_hooked = []
+
+        async def never():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise
+
+        def start_watchdog():
+            return asyncio.ensure_future(never())
+
         fake = types.SimpleNamespace(start_sweeper=start_sweeper,
+                                     start_watchdog=start_watchdog,
                                      shutdown=shutdown,
                                      set_sessions_changed_hook=hooked.append,
                                      set_notify_hook=notify_hooked.append,
@@ -24162,7 +24175,8 @@ class TestGenerationRunsAtStartup:
     def _fake_acp():
         import types
         return types.SimpleNamespace(
-            start_sweeper=lambda: None, shutdown=lambda: None,
+            start_sweeper=lambda: None, start_watchdog=lambda: None,
+            shutdown=lambda: None,
             set_sessions_changed_hook=lambda h: None,
             set_notify_hook=lambda h: None,
             set_mode_gate_hook=lambda h: None)
@@ -24180,7 +24194,8 @@ class TestGenerationRunsAtStartup:
         import types
         gates = []
         fake = types.SimpleNamespace(
-            start_sweeper=lambda: None, shutdown=lambda: None,
+            start_sweeper=lambda: None, start_watchdog=lambda: None,
+            shutdown=lambda: None,
             set_sessions_changed_hook=lambda h: None,
             set_notify_hook=lambda h: None,
             set_mode_gate_hook=gates.append)
@@ -26401,3 +26416,201 @@ class TestAcpCloseSessionWire:
 
         # Local cleanup must have run regardless of the CancelledError
         assert sid not in acp_mod._supervisor.sessions
+
+
+
+class TestAcpCrashWatchdog:
+    """Phase 2 — crash-detection watchdog.
+
+    260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS Phase 2 adds a periodic
+    asyncio watchdog that polls ``proc.poll()`` every ``WATCHDOG_INTERVAL_SECONDS``
+    and calls ``_on_agent_death`` when kiro-cli.exe has exited. These tests pin
+    the watchdog behaviour: firing on crashed process, idempotency, skip when
+    _proc is None, skip when _ready is False, and self-halt after too many errors.
+    """
+
+    def _run_watchdog_ticks(self, acp_mod, n_ticks, *, on_death=None,
+                             interval=0.01):
+        """Run the supervisor's _watchdog_loop for a bounded number of ticks.
+
+        ``n_ticks`` is used to derive a sleep duration large enough to run at
+        least that many ticks: ``(n_ticks + 1) * interval``. The watchdog task
+        is cancelled afterwards.
+
+        ``on_death``, if given, is a callable patched over ``_on_agent_death``
+        for the duration of the run.
+        """
+        saved_interval = acp_mod.WATCHDOG_INTERVAL_SECONDS
+        acp_mod.WATCHDOG_INTERVAL_SECONDS = interval
+
+        async def run():
+            with patch.object(
+                    acp_mod._Supervisor, "_on_agent_death", on_death or _noop_death):
+                task = asyncio.create_task(
+                    acp_mod._supervisor._watchdog_loop())
+                try:
+                    await asyncio.sleep((n_ticks + 1) * interval)
+                finally:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+        try:
+            asyncio.run(run())
+        finally:
+            acp_mod.WATCHDOG_INTERVAL_SECONDS = saved_interval
+
+    def test_watchdog_fires_on_crashed_process(self, acp_store):
+        """proc.poll() returning non-None triggers _on_agent_death within one tick."""
+        acp_mod, _ = acp_store
+        from unittest.mock import MagicMock
+
+        proc = MagicMock()
+        proc.poll.return_value = -9  # killed by signal
+        proc.pid = 1234
+
+        death_calls = []
+
+        def track_death(self, p):
+            death_calls.append(p)
+            # Simulate what _detach does: clear _proc so subsequent ticks skip
+            self._proc = None
+            self._ready = False
+
+        acp_mod._supervisor._proc = proc
+        acp_mod._supervisor._ready = True
+        try:
+            self._run_watchdog_ticks(acp_mod, 2, on_death=track_death)
+        finally:
+            acp_mod._supervisor._proc = None
+            acp_mod._supervisor._ready = False
+
+        assert death_calls == [proc], (
+            "expected exactly one _on_agent_death call with the process object")
+
+    def test_watchdog_proc_none_skips_without_error(self, acp_store):
+        """_proc is None → watchdog skips the check without calling _on_agent_death."""
+        acp_mod, _ = acp_store
+
+        death_calls = []
+
+        def track_death(self, p):
+            death_calls.append(p)
+
+        # _proc is already None (default state); _ready is False
+        assert acp_mod._supervisor._proc is None
+        self._run_watchdog_ticks(acp_mod, 3, on_death=track_death)
+
+        assert death_calls == [], "expected no death calls when _proc is None"
+
+    def test_watchdog_not_ready_skips_without_error(self, acp_store):
+        """_ready is False → watchdog skips the check even when _proc is set."""
+        acp_mod, _ = acp_store
+        from unittest.mock import MagicMock
+
+        proc = MagicMock()
+        proc.poll.return_value = 0
+        proc.pid = 5678
+
+        death_calls = []
+
+        def track_death(self, p):
+            death_calls.append(p)
+
+        acp_mod._supervisor._proc = proc
+        acp_mod._supervisor._ready = False  # not ready
+        try:
+            self._run_watchdog_ticks(acp_mod, 3, on_death=track_death)
+        finally:
+            acp_mod._supervisor._proc = None
+
+        assert death_calls == [], "expected no death calls when _ready is False"
+
+    def test_watchdog_double_fire_is_idempotent(self, acp_store):
+        """After _on_agent_death sets _proc = None, the watchdog's own guard
+        (proc is None → continue) prevents a second call on the next tick."""
+        acp_mod, _ = acp_store
+        from unittest.mock import MagicMock
+
+        proc = MagicMock()
+        proc.poll.return_value = 1
+        proc.pid = 9999
+
+        death_calls = []
+
+        def track_and_clear_proc(self, p):
+            death_calls.append(p)
+            # Simulate what _detach does: clear _proc so the next tick skips
+            self._proc = None
+            self._ready = False
+
+        acp_mod._supervisor._proc = proc
+        acp_mod._supervisor._ready = True
+        try:
+            # Run enough ticks that a second fire would be visible
+            self._run_watchdog_ticks(acp_mod, 5, on_death=track_and_clear_proc)
+        finally:
+            acp_mod._supervisor._proc = None
+            acp_mod._supervisor._ready = False
+
+        assert death_calls == [proc], (
+            "expected exactly one death call even across multiple ticks after "
+            "proc was cleared by the first call")
+
+    def test_watchdog_halts_after_max_consecutive_errors(self, acp_store):
+        """When poll() raises _WATCHDOG_MAX_ERRORS times in a row, the watchdog
+        task exits cleanly (the coroutine returns) rather than running forever."""
+        acp_mod, _ = acp_store
+        from unittest.mock import MagicMock
+
+        max_errors = acp_mod._WATCHDOG_MAX_ERRORS
+        proc = MagicMock()
+        proc.poll.side_effect = RuntimeError("simulated poll failure")
+        proc.pid = 11
+
+        acp_mod._supervisor._proc = proc
+        acp_mod._supervisor._ready = True
+
+        stopped = []
+
+        async def run_until_done():
+            acp_mod.WATCHDOG_INTERVAL_SECONDS = 0.01
+            try:
+                with patch.object(
+                        acp_mod._Supervisor, "_on_agent_death", _noop_death):
+                    task = asyncio.create_task(
+                        acp_mod._supervisor._watchdog_loop())
+                    # Wait up to (max_errors + 2) * (interval + buffer) seconds
+                    # for the task to complete on its own.
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(task),
+                            timeout=(max_errors + 2) * 0.1)
+                        # Task completed (returned) — that is the expected outcome
+                        stopped.append("done")
+                    except asyncio.TimeoutError:
+                        # Task did not stop — this is the failure case
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                        stopped.append("timeout")
+            finally:
+                acp_mod.WATCHDOG_INTERVAL_SECONDS = 5.0
+
+        try:
+            asyncio.run(run_until_done())
+        finally:
+            acp_mod._supervisor._proc = None
+            acp_mod._supervisor._ready = False
+
+        assert stopped == ["done"], (
+            f"watchdog should stop after {max_errors} consecutive errors, "
+            f"but it did not exit within the allotted time")
+
+
+def _noop_death(self, proc):
+    """No-op replacement for _on_agent_death in watchdog tests."""

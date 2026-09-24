@@ -650,20 +650,23 @@ async def lifespan(app_instance):
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K5).
         acp.set_mode_gate_hook(_derived_agent_in_effect)
     sweeper =acp.start_sweeper() if acp is not None else None
+    watchdog = acp.start_watchdog() if acp is not None else None
     try:
         yield
     finally:
         task.cancel()
         if sweeper is not None:
             sweeper.cancel()
+        if watchdog is not None:
+            watchdog.cancel()
         try:
-            # One gather for both, with `return_exceptions=True`, and inside
-            # this block rather than as two bare awaits. That is what makes the
-            # nested teardown below unconditional: `gather` in this mode cannot
-            # propagate whatever either task raised on its way out, so there is
-            # no exception here that could skip `acp.shutdown()`.
+            # One gather for all background tasks, with `return_exceptions=True`,
+            # and inside this block rather than as bare awaits. That is what makes
+            # the nested teardown below unconditional: `gather` in this mode cannot
+            # propagate whatever any task raised on its way out, so there is no
+            # exception here that could skip `acp.shutdown()`.
             await asyncio.gather(
-                *(t for t in (task, sweeper) if t is not None),
+                *(t for t in (task, sweeper, watchdog) if t is not None),
                 return_exceptions=True)
         finally:
             # Nested, so that the ACP teardown is not conditional on how the
