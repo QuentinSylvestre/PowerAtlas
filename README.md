@@ -400,6 +400,8 @@ topbar). It is off by default.
 Turning the setting on applies to sessions created afterwards. Turning it off deletes the derived
 agent, and kiro-cli then moves any session that was using it to its `vibe` agent, which runs under your
 own permission settings. So turning it off also stops sessions that were already running from asking.
+Measured 2026-09-23: a session that had just asked before a shell command ran the next one with no
+prompt once the setting was turned off, without being reopened.
 
 If the derived agent cannot be written, for example because the base agent is missing or cannot be
 read, PowerAtlas keeps a derived agent it wrote earlier, if one is still valid, and the settings menu
@@ -430,8 +432,9 @@ separately.
 error message attached to the turn — there's no separate "Connect" prompt or MCP status panel.
 
 **The slash-command palette lists the agent's own catalogue.** Selecting a skill entry works the same
-way as typing its name; kiro-default (the palette's own "switch agent" entry, meaningless while this
-page is hardcoded to one agent) and three built-in steering documents (`architecture-selection`,
+way as typing its name; kiro-default (the palette's own "switch agent" entry, meaningless here because
+a session's agent is fixed when it is created, from the task mode and, for Default, the server's
+choice between `poweratlas-acp` and `kiro_default`) and three built-in steering documents (`architecture-selection`,
 `quick-spec`, `bug-fix`) are not offered — no working trigger exists for those three via anything the
 page could click, so they're left out rather than shown broken.
 

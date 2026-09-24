@@ -29,7 +29,7 @@
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described
 - **Reach the operator away from the machine** — the desktop half shipped 2026-09-19; reaching a phone needs a secure context on the remote bind, i.e. the TLS decision
 - **Decide permission requests by rule for unattended sessions** — the real Automation keystone, split out 2026-09-21; an `ask` rule alone leaves an unattended session waiting on the 30-minute silence ceiling rather than deciding
-- **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured); now the agent-definition half of the permission-policy item
+- **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured); now the agent-definition half of *Decide permission requests by rule for unattended sessions* (the interactive permission item shipped 2026-09-23 in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`)
 - **A "needs you" inbox** — one cross-session list of pending permission requests, unanswered clarifying questions and finished turns, borrowed from Kiro Crew's activity view
 - **A fresh git worktree per session** — a checkbox in the new-session picker; table stakes in Conductor, Crystal and Vibe Kanban, and two `/acp` sessions in one workspace share a working tree today
 - **Spike: drive Claude Code over ACP through an adapter** — would make `/acp` multi-provider, which Kiro Crew is not; not covered by the closed takeover investigations, which concern sessions already live in a terminal
@@ -69,7 +69,8 @@
 > or closed item shifts it. Re-rank rather than trusting a stale order — the reasoning for each item
 > lives in the item itself, and this table only records the comparison between them. The previous
 > ranking (2026-08-04) is in `git log -- plans/ROADMAP.md`; it was retired because its keystone rested
-> on a premise the code no longer has (see item 1 below). The 2026-09-19 ranking opened with the
+> on a premise the code no longer has (that sessions run with `-a`; see "The kiro-cli permission
+> model" in `docs/KNOWLEDGE.md`). The 2026-09-19 ranking opened with the
 > notification item; it shipped the same day and has been removed from the table. Items 1 and 2,
 > the interactive permission policy and the `[SECURITY]` loopback token, shipped together on
 > 2026-09-23 in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL` and have been removed too.
@@ -85,8 +86,9 @@
 > execution-boundary permission model, Crew's single "needs you" view, and the tools' worktree per
 > session. Memory, lessons, apps and chat integrations stay out.
 >
-> **What would invalidate it**: the keystone shipping (it gates all six `## Automation & Workflows`
-> items); or kiro-cli gaining — or being found to already have — a per-request permission mechanism on
+> **What would invalidate it**: the unattended keystone shipping — *Decide permission requests by rule for unattended sessions*, under
+> `## Session Control & Integration`, which is not in this table and gates all six
+> `## Automation & Workflows` items; or kiro-cli gaining — or being found to already have — a per-request permission mechanism on
 > `acp` + v3, which would restore the keystone to a design problem rather than a question for the
 > vendor. The `$ARGUMENTS` re-check has been run (negative, 2026-09-19) and is no longer pending.
 
@@ -120,8 +122,8 @@ condition).
 > blank.
 
 - **Dispatch no-interactive tasks** — fire a kiro-cli task without a terminal; `--no-interactive` leaves no session trail so ACP is the right path, but unattended safety is still unsettled.
-  - *Unattended posture, corrected twice — 2026-09-19* — this bullet first said an unattended session runs with `-a`; that was corrected to "it stalls at its first shell or write request, waiting for a human". **Direct measurement falsified the correction too.** `acp.py` indeed never passes `-a` (the v3 engine rejects it), but nothing else gates the session either *as this machine is configured*: a probe drove shell, read and write — plus a write to an absolute path outside the cwd — with zero `session/request_permission` frames, because `~/.kiro/settings/permissions.yaml` allows every capability. A headless session today does not stall and does not wait; it executes. That is fixable per session from an agent profile — see the permission-policy item under `## Session Control & Integration`.
-  - *Exit condition for this item* — the permission-policy item under `## Session Control & Integration` (item 1 in the ranking): a per-tool auto-approve rule with deny patterns and a bounded wait. Once that exists, dispatch is a prompt plus a session close on turn end.
+  - *Unattended posture, corrected twice — 2026-09-19* — this bullet first said an unattended session runs with `-a`; that was corrected to "it stalls at its first shell or write request, waiting for a human". **Direct measurement falsified the correction too.** `acp.py` indeed never passes `-a` (the v3 engine rejects it), but nothing else gates the session either *as this machine is configured*: a probe drove shell, read and write — plus a write to an absolute path outside the cwd — with zero `session/request_permission` frames, because `~/.kiro/settings/permissions.yaml` allows every capability. A headless session today does not stall and does not wait; it executes. That is now fixable per session from an agent profile: the interactive permission profile shipped 2026-09-23 in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL` as an opt-in setting. Deciding requests with nobody watching is still open, as *Decide permission requests by rule for unattended sessions* under `## Session Control & Integration`.
+  - *Exit condition for this item* — *Decide permission requests by rule for unattended sessions* under `## Session Control & Integration` (split out of the interactive permission item, which shipped 2026-09-23 in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`): a per-tool auto-approve rule with deny patterns and a bounded wait. Once that exists, dispatch is a prompt plus a session close on turn end.
 
 - **Open session with a prompt or skill** — prompt delivery and skill loading are proven; passing skill arguments (`$ARGUMENTS`) was negative on 2.14.2 and is due a one-prompt re-check on the current build.
   - *`$ARGUMENTS` — measured on kiro-cli 2.14.2, 2026-07-26.* Slash-command argument passing uses `$ARGUMENTS` in the SKILL.md body (e.g. `/qdev plans/my-plan.md` expands to `$ARGUMENTS` → `plans/my-plan.md`). The expansion is handled by kiro-cli's own command parser, not by PowerAtlas. Whether a prompt string containing `$ARGUMENTS` is expanded by the model or by the CLI is unverified — a test session reliably received the literal string `$ARGUMENTS`. Until this is verified, skill invocations with arguments are not reliably deliverable.
@@ -133,7 +135,7 @@ condition).
 
 - **Scheduled tasks** — cron-like recurring kiro-cli launches; mechanism is measured and process cost is known, but the auto-permissions gate must come first.
   - *Process cost* — measured 2026-07-26: each kiro-cli ACP session costs ~161 MB RSS and 3 processes. A scheduled task that accumulates open sessions will exhaust memory; sessions need to be closed when their tasks complete. Closure via `session/terminate` or idle-TTL is measured and works.
-  - *Auto-permissions gate* — a scheduled task has no human watching, and as configured today nothing prompts, so it runs its tools unsupervised rather than stalling. The permission-policy item under `## Session Control & Integration` remains the gate; its mechanism is now measured working (agent-profile `ask` rules), so this is waiting on that item shipping rather than on an unknown.
+  - *Auto-permissions gate* — a scheduled task has no human watching, and as configured today nothing prompts, so it runs its tools unsupervised rather than stalling. *Decide permission requests by rule for unattended sessions* under `## Session Control & Integration` is the gate. Its mechanism is measured working (agent-profile `ask` rules, shipped for interactive sessions 2026-09-23 in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`), so this is waiting on that item shipping rather than on an unknown.
 
 - **Chained launches** — when a session finishes, automatically start the next one; works for sessions PowerAtlas drives, not for terminal sessions.
   - *For ACP sessions* — `get_semantic_status` returns `WAITING` when an assistant turn completes. PowerAtlas can watch for that transition and immediately send the next prompt. No open technical question for ACP-driven sessions.
@@ -186,7 +188,7 @@ condition).
   - *What it must decide* — the allow/deny pattern set, and whether "unattended" is a property of the session, the dispatch, or the agent definition. Also where the bounded wait lives, given a pending request today rides the prompt's own 30-minute silence ceiling (`PROMPT_SILENCE_SECONDS`) rather than a request-specific timer.
   - *It also absorbs the lean dispatch agent* (below). Narrowing `resources:` is right for a dispatched narrow task and wrong for an interactive session, so that folding belongs here rather than in the interactive item.
 
-- **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured). As of 2026-09-19 this is the agent-definition half of the permission-policy item above, not a separate deliverable: the same agent file that narrows `resources` is where the tool allow-list lives.
+- **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured). As of 2026-09-19 this is the agent-definition half of the permission-policy work, not a separate deliverable; since the interactive item shipped (2026-09-23, `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`) it belongs to *Decide permission requests by rule for unattended sessions* above, which absorbs it: the same agent file that narrows `resources` is where the tool allow-list lives.
   - *What is measured* — a `resources: []` agent costs ~46k tokens (the floor from cwd-driven context), versus ~73k for `kiro_default`. The delta is ~27k tokens, confirmed on kiro-cli 2.16.0. **Stale-when**: kiro-cli moves off 2.16.0 — re-measure before building on this figure (currently at 2.22.0).
   - *One open question* — whether skills the dispatched task invokes (e.g. `/qplan`, `/qdev`) still load correctly with a stripped `resources` list. Untested; the skills themselves arrive via `skill://` resolvers and may not depend on the resources list.
 

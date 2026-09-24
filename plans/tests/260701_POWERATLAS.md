@@ -151,7 +151,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 > promoted it to product, so that ground is gone. What survives is the *other* half of the original
 > reason, which is the one that actually governs: exercising it spawns a real `kiro-cli acp -a` and
 > writes a permanent session into the user's ~13,300-entry store — a side-effecting surface this plan's
-> probe style assumes away. **`GET /acp?sid=` is itself state-changing**, so even "just load the page"
+> probe style assumes away. *(Corrected 2026-09-23: the agent is not spawned with `-a`; the v3 engine rejects the flag and `acp.py` never passes it. It is a real `kiro-cli acp --agent-engine v3` process whose posture follows the ACP permission setting (`260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`); with the setting off, the default, it runs under the machine's allow-all `permissions.yaml`, so the side-effect reasoning still holds.)* **`GET /acp?sid=` is itself state-changing**, so even "just load the page"
 > is not a read-only probe. Anyone writing briefs for it must budget store accounting (enumerate by
 > `cwd` before and after) and process teardown, not just navigation.
 >
@@ -573,7 +573,7 @@ Scoped-out: native tray clicks, peek native behavior, all Linux paths (see above
 (`/acp`, `/ws/acp`, `GET /api/acp/sessions`, `/remote-auth`, `/api/remote-access*`) — see the note under
 §2, whose *reason* changed on 2026-08-01 while the scoping did not: that surface is product now, not a
 prototype, and it stays out because probing it spawns a real `-a` agent and writes to the user's session
-store, not because it is disposable. **2.1–2.25 is the dashboard web surface, not the whole web
+store, not because it is disposable. *(Corrected 2026-09-23: not `-a`; see the dated note under §2.)* **2.1–2.25 is the dashboard web surface, not the whole web
 surface**; a run that covers all of §2 must not report the web layer as fully covered. Two further
 scoping notes for anyone widening this: the remote authorization controls are inert from loopback by
 design, so covering them means driving a non-loopback peer with the user's explicit authorization; and
