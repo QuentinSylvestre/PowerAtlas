@@ -24,6 +24,20 @@ All 4 success criteria (SC-1 through SC-4) delivered. 7 phases, 25 commits, 1812
 
 `sessionCapabilities.delete` absent on some kiro-cli builds — `log.debug("ACP agentCapabilities: %r", _caps)` retained in `ensure_started()` for diagnostic visibility. Atlassian MCP OAuth via ACP is a known limitation: kiro-cli only starts the local OAuth relay in TUI mode; authenticate through `/mcp` panel in a terminal session first.
 
+### Post-archival QA (2026-09-24, /qqa)
+
+- **SC-1 withdrawn.** The wire close never fired in production. kiro-cli 2.24.0 advertises `sessionCapabilities.delete: {}`, and the truthiness check (plan-review finding 7) read the empty object as absent. The Post-archival note's "absent on some builds" was that bug; the capability is present. Measured with the check bypassed: `session/delete` deletes `~/.kiro/sessions/<hash>/sess_<id>` from disk, so enabling it would have made the Close button and the idle sweeper destroy session history. With the user's approval, the wire path was removed. `close_session` is local only again, and a regression test pins that. `docs/KNOWLEDGE.md` records the measurement.
+- **SC-2 (watchdog) passed live.** A parent-only kill of kiro-cli.exe was detected in 4.1 s, and both grandchildren were reaped.
+- **SC-3 and SC-4 on /acp passed live**, including replay after a reload and Escape restoring focus. Fixed on the dashboard copy added by commit 42a7bfb: the id-scoped `[hidden]` rule left `#dashMcpIndicator` visible with no session attached, and Escape did not close its panel. Fixed on both pages: server status was colour-only for screen readers.
+- **Unreviewed divergence from SC-4.** Commit 42a7bfb widened the Connect allowlist from `https://` only to `https://` plus `http://localhost`. The regex is anchored. Superseded by the follow-up below, which removes the button.
+- **Follow-up changes, approved by the user after the QA report:**
+  - The Connect button is replaced by an instruction to sign in from a terminal (`kiro-cli`, then `/mcp`). The button opened a sign-in whose redirect nothing receives in ACP mode.
+  - `_kiro/mcp/status` entries are projected server-side to `{name, status, failedAuthorization, toolCount}`. Full tool schemas and `authorizationUrl` are no longer stored, broadcast or replayed.
+  - The panel's toggle, outside-click and Escape handling moved into `initMcpIndicatorDom` (`composer-chrome.js`), shared by both pages.
+  - The sweeper stops an agent that has had no session for `AGENT_IDLE_RECYCLE_SECONDS` (900 s). This releases the sessions kiro-cli keeps loaded, now that close is local only.
+  - UI: the label is now "MCP connected/active". Sign-in needed is amber, and red is kept for real failures. Disabled servers sort last and are dimmed. The panel has a heading and a state line under each server.
+  - Using `session/delete` for the explicit Delete action was considered and dropped.
+
 ---
 
 ## Intent

@@ -68,13 +68,41 @@ var _mcpRefPanel     = null;
 var _mcpRefList      = null;
 
 /** Called once by each host page so _renderMcpIndicator knows which elements
- *  to update. Mirrors initContextDom's pattern: no page-lifecycle accessor. */
+ *  to update, and to wire the disclosure behaviour -- toggle, outside click,
+ *  Escape -- in one place. It used to be copied into each page, and the
+ *  dashboard's copy shipped without Escape (QA 2026-09-24). Mirrors
+ *  initContextDom's pattern: no page-lifecycle accessor.
+ *
+ *  The panel's visibility is `aria-expanded` on the toggle, read by the CSS
+ *  sibling selector; nothing here sets `.hidden` on the panel. */
 function initMcpIndicatorDom(refs) {
   _mcpRefIndicator = refs.indicatorEl;
   _mcpRefToggle    = refs.toggleEl;
   _mcpRefCompact   = refs.compactEl;
   _mcpRefPanel     = refs.panelEl;
   _mcpRefList      = refs.listEl;
+  var toggle = _mcpRefToggle;
+  var indicator = _mcpRefIndicator;
+  if (!toggle || !indicator) return;
+  function isOpen() { return toggle.getAttribute('aria-expanded') === 'true'; }
+  toggle.addEventListener('click', function () {
+    toggle.setAttribute('aria-expanded', isOpen() ? 'false' : 'true');
+    if (isOpen()) _positionMcpPanel();
+  });
+  // A click anywhere outside the indicator closes the panel. Containment
+  // rather than a guard flag: the toggle's own click bubbles here too, and it
+  // is inside the indicator, so it never closes what it just opened.
+  document.addEventListener('click', function (event) {
+    if (!isOpen()) return;
+    if (event && event.target && indicator.contains(event.target)) return;
+    toggle.setAttribute('aria-expanded', 'false');
+  });
+  // ARIA disclosure pattern: Escape closes and returns focus to the toggle.
+  document.addEventListener('keydown', function (event) {
+    if (!event || event.key !== 'Escape' || !isOpen()) return;
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.focus();
+  });
 }
 
 function setContext(percent) {
@@ -603,17 +631,58 @@ function resetCommandPalette() {
   hideCommandDropdown();
 }
 
+/** Keep the just-opened panel on screen. The CSS right-aligns it under the
+ *  toggle, which suits a toolbar ending at the right edge; at phone widths the
+ *  toolbar wraps and the indicator can land anywhere in its row — /acp puts it
+ *  on the left, the dashboard on the right — so no one CSS anchor fits both
+ *  (measured at 390 px: x = -52 on /acp). Right-aligned when that fits,
+ *  otherwise clamped 8 px inside the viewport. */
+function _positionMcpPanel() {
+  var panel = _mcpRefPanel, indicator = _mcpRefIndicator;
+  if (!panel || !indicator || typeof panel.getBoundingClientRect !== 'function') return;
+  // Measured left-anchored at the viewport's left edge: an absolutely placed
+  // box shrinks to fit the room on its anchored side, so measured anywhere
+  // with less room than it will end up with it reports a narrower width than
+  // it renders at (220 vs 228 px, measured on the dashboard at 768 px).
+  var anchor = indicator.getBoundingClientRect();
+  panel.style.right = 'auto';
+  panel.style.left = (-anchor.left) + 'px';
+  var vw = document.documentElement.clientWidth;
+  var width = panel.getBoundingClientRect().width;
+  var want = anchor.right - width;  // right-aligned, as the CSS places it
+  var left = Math.max(8, Math.min(want, vw - width - 8));
+  panel.style.left = (left - anchor.left) + 'px';
+}
+
 /** Store the MCP server list from a `mcp_servers` frame and update the indicator.
  *  Called by acp.html and the dashboard when a `mcp_servers` frame arrives.
+ *  Each entry is the server's projection (acp.py `_project_mcp_server`):
+ *  `{name, status, failedAuthorization, toolCount}`.
  *  SC-4, plan 260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS. */
 function setSessionMcpServers(list) {
   sessionMcpServers = Array.isArray(list) ? list : null;
   _renderMcpIndicator();
 }
 
-/** Render or hide the MCP indicator from the current `sessionMcpServers` value.
- *  `#acpMcpPanel` visibility is driven exclusively by `aria-expanded` on
- *  `#acpMcpToggle` via the CSS sibling selector — never via `.hidden`. */
+/** One server's display state. `auth` is its own state rather than `failed`:
+ *  kiro-cli reports a server that needs sign-in as failed, and in ACP mode
+ *  that stays true until the user signs in from a terminal -- shown in red it
+ *  would be a warning that never clears, and a permanent warning trains
+ *  people to ignore the real ones. */
+function _mcpState(srv) {
+  if (srv.failedAuthorization === true) return 'auth';
+  var s = srv.status;
+  return (s === 'connected' || s === 'connecting' || s === 'failed') ? s : 'disabled';
+}
+
+var _MCP_DETAIL = {
+  auth: 'Sign in from a terminal: run kiro-cli, then /mcp',
+  failed: 'Failed to start',
+  connecting: 'Connecting\u2026',
+  disabled: 'Disabled',
+};
+
+/** Render or hide the MCP indicator from the current `sessionMcpServers` value. */
 function _renderMcpIndicator() {
   var indicatorEl = _mcpRefIndicator;
   if (!indicatorEl) return;
@@ -629,73 +698,70 @@ function _renderMcpIndicator() {
   var toggleEl  = _mcpRefToggle;
   var compactEl = _mcpRefCompact;
   var listEl    = _mcpRefList;
-  var servers = sessionMcpServers;
 
-  // Count connected servers; flag failed / auth-needed state.
-  var connected = 0;
-  var needsAction = false;
-  var nonDisabled = 0;
-  servers.forEach(function (srv) {
-    if (srv.status === 'connected') connected++;
-    if (srv.status !== 'disabled') nonDisabled++;
-    if (srv.status === 'failed' || srv.failedAuthorization) needsAction = true;
+  // Disabled servers last: the user cannot act on them from here, so they
+  // should not sit between the ones that matter. Stable order otherwise.
+  var servers = sessionMcpServers.map(function (srv, i) {
+    return { srv: srv, state: _mcpState(srv), i: i };
+  });
+  servers.sort(function (a, b) {
+    var da = a.state === 'disabled' ? 1 : 0, db = b.state === 'disabled' ? 1 : 0;
+    return (da - db) || (a.i - b.i);
   });
 
-  // Compact label + accessible name (F5-3 fix: title alone degrades to bare text).
-  var label = connected + ' connected';
-  if (compactEl) compactEl.textContent = label;
+  var connected = 0, active = 0, failed = 0, auth = 0;
+  servers.forEach(function (e) {
+    if (e.state === 'connected') connected++;
+    if (e.state !== 'disabled') active++;
+    if (e.state === 'failed') failed++;
+    if (e.state === 'auth') auth++;
+  });
+
+  // "MCP 1/2": names what the hexagon is, and the ratio says how many of the
+  // servers that should be running are, where "1 connected" in red read as a
+  // contradiction.
+  if (compactEl) compactEl.textContent = 'MCP ' + connected + '/' + active;
   if (toggleEl) {
-    // Set aria-label so screen readers announce context, not just the raw count.
-    var ariaLabel = needsAction
-      ? 'MCP servers — action needed (' + label + ')'
-      : 'MCP servers — ' + label;
-    toggleEl.setAttribute('aria-label', ariaLabel);
-    toggleEl.title = ariaLabel;
-    toggleEl.classList.toggle('acp-mcp-warn', needsAction);
-    toggleEl.classList.toggle('acp-mcp-caution',
-      !needsAction && connected < nonDisabled);
+    var parts = [connected + ' of ' + active + ' connected'];
+    if (failed) parts.push(failed + ' failed');
+    if (auth) parts.push(auth + (auth === 1 ? ' needs' : ' need') + ' sign-in');
+    var label = 'MCP servers \u2014 ' + parts.join(', ');
+    toggleEl.setAttribute('aria-label', label);
+    toggleEl.title = label;
+    // Red only for a real failure; amber for sign-in needed or still starting.
+    toggleEl.classList.toggle('acp-mcp-warn', failed > 0);
+    toggleEl.classList.toggle('acp-mcp-caution', !failed && connected < active);
   }
 
-  // Expanded list.
   if (!listEl) return;
   listEl.textContent = ''; // clear children without innerHTML (no-innerHTML rule)
-  var _VALID_STATUSES = {connected: 1, connecting: 1, failed: 1, disabled: 1};
-  servers.forEach(function (srv) {
+  servers.forEach(function (e) {
+    var srv = e.srv;
     var li = document.createElement('li');
-    li.className = 'acp-mcp-server';
+    li.className = 'acp-mcp-server' + (e.state === 'disabled' ? ' acp-mcp-server-disabled' : '');
 
     var badge = document.createElement('span');
-    var safeStatus = _VALID_STATUSES[srv.status] ? srv.status : 'disabled';
-    badge.className = 'acp-mcp-badge acp-mcp-badge-' + safeStatus;
+    badge.className = 'acp-mcp-badge acp-mcp-badge-' + e.state;
     badge.setAttribute('aria-hidden', 'true');
     li.appendChild(badge);
 
+    var text = document.createElement('span');
+    text.className = 'acp-mcp-server-text';
     var nameEl = document.createElement('span');
     nameEl.className = 'acp-mcp-server-name';
-    nameEl.textContent = srv.name || '?';
-    li.appendChild(nameEl);
-
-    if (srv.failedAuthorization && srv.authorizationUrl) {
-      var url = srv.authorizationUrl;
-      // Security: allow https:// (any host) or http://localhost (kiro-cli's
-      // local OAuth relay for MCP auth flows). Reject all other schemes.
-      var _isHttpsAny = typeof url === 'string' && url.indexOf('https://') === 0;
-      var _isLocalHttp = typeof url === 'string' &&
-                         /^http:\/\/localhost(:\d+)?\//.test(url);
-      if (!(_isHttpsAny || _isLocalHttp)) {
-        url = null;
-      }
-      if (url) {
-        var btn = document.createElement('button');
-        btn.className = 'acp-mcp-connect-btn';
-        btn.type = 'button';
-        btn.textContent = 'Connect';
-        btn.addEventListener('click', function () {
-          window.open(url, '_blank', 'noopener,noreferrer');
-        });
-        li.appendChild(btn);
-      }
+    nameEl.textContent = (typeof srv.name === 'string' && srv.name) || '?';
+    text.appendChild(nameEl);
+    // The state in words, visible: the badge is colour only.
+    var detail = document.createElement('span');
+    detail.className = 'acp-mcp-server-detail';
+    if (e.state === 'connected') {
+      var n = typeof srv.toolCount === 'number' ? srv.toolCount : 0;
+      detail.textContent = n + (n === 1 ? ' tool' : ' tools');
+    } else {
+      detail.textContent = _MCP_DETAIL[e.state];
     }
+    text.appendChild(detail);
+    li.appendChild(text);
     listEl.appendChild(li);
   });
 }

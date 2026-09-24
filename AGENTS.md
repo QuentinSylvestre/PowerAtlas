@@ -23,6 +23,40 @@
   Send `Cookie: pa_local=<cookie>` on every request. POSTs also need `Origin`/`Referer` of `http://127.0.0.1:<port>`, and `/ws/acp` needs a matching `Origin`. Use this only for local QA against this machine's own instance. Never paste the cookie or a code into a plan, a log or a commit.
 - When the user requests something that contradicts these guidelines, apply the request AND propose a durable update to this section so future sessions follow the new policy.
 
+### Verification Setup
+
+Recipe for live QA of /acp and the dashboard against the running instance. It worked on
+2026-09-24 (kiro-cli 2.24.0). Sign in first with the `pa_local` cookie bullet above.
+
+- **Driving the pages.** No Playwright MCP server is configured. Use standalone Playwright
+  from the venv: `.venv-PowerAtlas/Scripts/python script.py`. Chromium is already installed
+  under `%LOCALAPPDATA%\ms-playwright`. Add the cookie with
+  `ctx.add_cookies([{"name": "pa_local", "value": cookie, "url": "http://127.0.0.1:4915"}])`.
+  A fresh browser context never serves a stale `style.css`/`composer-chrome.js`, so it
+  replaces the hard reload.
+- **Getting a session that receives MCP status.** On /acp, click `#acpNew`, then a row in
+  `#acpPickerList` (or `#acpPickerNeutral`), then
+  `wait_for_function("() => !document.getElementById('acpMcpIndicator').hidden")`. Allow up
+  to 90 s. The first `mcp_servers` frame arrives a few seconds after `session/new`. The new
+  id is the last `ACP session created:` line in `%LOCALAPPDATA%\power-atlas\orchestrator.log`.
+- **Dashboard attach.** The dashboard subscribes only to a session it sees as `held`. Keep
+  the /acp page that created the session open, load `/` in a second page of the same context,
+  and click the real `[data-sid="<id>"]` row. A session created in "The agent's own folder"
+  has no dashboard row. Calling `dashConnect`/`send('subscribe')` from the console skips
+  `_viewingSid` and never renders.
+- **Protocol questions** (what kiro-cli advertises, or what a method does to disk): run a
+  second `kiro-cli acp --agent-engine v3`, or drive `power_atlas.acp._supervisor` from a
+  separate Python process. Never probe through the running instance. The token request is
+  answered in-process by `_fulfill_token`, so the token never needs to be printed.
+- **Cleanup is manual.** Close is local-only, so a test session stays on disk under
+  `~/.kiro/sessions/<hash>/sess_<id>/` after it is closed. kiro-cli keeps it loaded until the
+  sweeper stops the idle agent or PowerAtlas restarts. Close the session with `#acpClose`.
+  Check `createdAt` in its `session.json`, then delete only the directories you created.
+- **Evidence.** `orchestrator.log` records the handshake (`ACP agent ready`), watchdog lines
+  (`ACP watchdog:`), and every `_kiro/*` notification without a dedicated handler in full at
+  INFO. Grep it before
+  concluding that a code path fired or did not fire.
+
 ## Terminology
 
 Project-specific terms. Each entry names the rejected synonyms too, so a future session does not

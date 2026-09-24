@@ -393,7 +393,8 @@
           <span class="acp-mcp-compact" id="dashMcpCompact"></span>
         </button>
         <div class="acp-mcp-panel" id="dashMcpPanel">
-          <ul class="acp-mcp-list" id="dashMcpList" aria-label="MCP servers"></ul>
+          <div class="acp-mcp-panel-head" aria-hidden="true">MCP servers for this session</div>
+          <ul class="acp-mcp-list" id="dashMcpList" aria-label="MCP servers for this session"></ul>
         </div>
       </div>
       <button class="acp-btn acp-log-toggle" id="dashLogToggle" type="button"
@@ -868,24 +869,8 @@ initMcpIndicatorDom({
   panelEl:     document.getElementById('dashMcpPanel'),
   listEl:      document.getElementById('dashMcpList'),
 });
-// MCP toggle: open/close panel via aria-expanded (CSS drives visibility).
-var _dashMcpToggleEl = document.getElementById('dashMcpToggle');
-var _dashMcpPanelEl  = document.getElementById('dashMcpPanel');
-var _dashMcpGuard = false;
-if (_dashMcpToggleEl) {
-  _dashMcpToggleEl.addEventListener('click', function () {
-    var expanded = _dashMcpToggleEl.getAttribute('aria-expanded') === 'true';
-    _dashMcpGuard = true;
-    _dashMcpToggleEl.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-  });
-  document.addEventListener('click', function (ev) {
-    if (_dashMcpGuard) { _dashMcpGuard = false; return; }
-    if (_dashMcpToggleEl.getAttribute('aria-expanded') === 'true') {
-      if (_dashMcpPanelEl && ev && _dashMcpPanelEl.contains(ev.target)) return;
-      _dashMcpToggleEl.setAttribute('aria-expanded', 'false');
-    }
-  });
-}
+// Toggle, outside-click and Escape for the MCP panel are wired by
+// initMcpIndicatorDom itself (composer-chrome.js), shared with /acp.
 // ---- prompt navigation arrows ---------------------------------------------
 //
 // acp.html wires its own copy of this (same shared transcriptEl/promptUpBtn/

@@ -2262,7 +2262,6 @@ def acp_session():
         acp_mod._supervisor.crew_spawn_toolcallids.clear()
         acp_mod._supervisor._reserved = 0
         acp_mod._supervisor._pending_commands = None
-        acp_mod._supervisor._close_method = None
 
 
 class TestAcpServerTypeGuard:
@@ -4648,7 +4647,6 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor.crew_spawn_anchors.clear()
         acp_mod._supervisor.crew_spawn_toolcallids.clear()
         acp_mod._supervisor._compacting.clear()
-        acp_mod._supervisor._close_method = None
         acp_mod._bubbles.clear()
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
@@ -6147,8 +6145,7 @@ class TestAcpSessionClose:
     # `_handle_close` sends `CLOSE_METHOD` ("_kiro.dev/session/terminate")
     # over the wire before dropping the session record. The sole surviving
     # `close_session` (renamed from _SupervisorV3.close_session, Phase 1)
-    # makes no wire call in this context — `_close_method` is `None`
-    # (capability not advertised) — so both the literal string this test
+    # makes no wire call at all (local-only close) — so both the literal string this test
     # pinned and the "ask before dropping" ordering it verified are gone,
     # not merely renamed. Removed rather than renamed; the remaining
     # "close succeeds and cleans up" coverage is carried by
@@ -6185,8 +6182,7 @@ class TestAcpSessionClose:
         Exception`/`finally: _supervisor.closing.discard(...)` cleanup path
         -- lost along with the wire-handshake tests above, which exercised
         a *wire* refusal this v3-descended `close_session` can no longer
-        produce in this test context (no wire call because `_close_method`
-        is `None` — capability not advertised). Forcing `close_session`
+        produce (it makes no wire call). Forcing `close_session`
         itself to raise is the only way left to reach that branch.
 
         The claim `_handle_close` takes (`_supervisor.closing.add`)
@@ -6719,7 +6715,7 @@ class TestAcpPromptDuringAnInFlightClose:
         `_request`, keyed off `method == acp_mod.CLOSE_METHOD`. The sole surviving
         `close_session` (renamed from `_SupervisorV3.close_session`, Phase 1
         of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call in this
-        test context — `_close_method` is `None` (capability not advertised)
+        test context — it is local-only
         and the function is patched directly, so the old `_request` mock
         was never reached and this test hung indefinitely rather than
         failing. Rewritten to patch `close_session` itself with the
@@ -10755,8 +10751,7 @@ class TestAcpIdleSweeper:
 
         Pre-cutover this attached the socket "mid-flight" during a mocked
         wire terminate call. The sole surviving `close_session` (Phase 1)
-        makes no wire call in this test context (`_close_method` is `None`
-        — capability not advertised), so there is no window between
+        makes no wire call (local-only close), so there is no window between
         `_sweepable`'s check and the close itself to attach into any more —
         attaching is instead injected via a `close_session` patch that
         attaches immediately before delegating to the real implementation,
@@ -10788,8 +10783,7 @@ class TestAcpIdleSweeper:
         Pre-cutover this simulated the failure by refusing the wire
         terminate call `close_session` used to make. The sole surviving
         `close_session` (renamed from `_SupervisorV3.close_session`, Phase
-        1 of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call in this
-        test context (`_close_method` is `None` — capability not advertised),
+        1 of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call,
         so there is nothing left to refuse that way -- the failure is
         injected by patching `close_session` itself instead, which is
         exactly the boundary `_sweep_once`'s own try/except sits at."""
@@ -20341,8 +20335,8 @@ class TestSupervisor:
     # -- _handle_close --
 
     def test_handle_close_releases_the_session_locally_no_wire_call(self, monkeypatch):
-        """v3 close makes no wire call when `_close_method` is None (capability
-        not advertised) — unlike v2's close, nothing must ever be written to the agent."""
+        """v3 close makes no wire call — unlike v2's close, nothing must ever
+        be written to the agent."""
         import asyncio
         from power_atlas import acp as acp_mod
 
@@ -26136,287 +26130,127 @@ class TestLoopbackGateRefusalLogging:
 
 
 
-class TestAcpCloseSessionWire:
-    """Phase 1 — session/delete wire close.
+class TestAcpCloseSessionNoWireDelete:
+    """``close_session`` never sends ``session/delete``.
 
-    260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS Phase 1 adds a wire call
-    to ``close_session`` when the agent advertises ``sessionCapabilities.delete``
-    at handshake time. These tests pin the new behaviour: capability detection,
-    wire dispatch, error swallowing, and skip-when-dead.
+    260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS Phase 1 sent it as the
+    wire close. QA on 2026-09-24 (kiro-cli 2.24.0) measured that it deletes the
+    session's ``~/.kiro/sessions/<hash>/sess_<id>`` directory, so a Close
+    button press or an idle sweep would destroy history the dashboard lists
+    and resumes. The wire path was removed; this pins that it stays removed,
+    with the agent alive — the condition under which the removed code fired.
     """
 
-    # ------------------------------------------------------------------
-    # ensure_started / capability detection
-    # ------------------------------------------------------------------
-
-    def _run_ensure_started(self, acp_mod, initialize_result):
-        """Run ensure_started with a mocked _spawn and _request.
-
-        Patches _spawn to a no-op, _request to return the given result.
-        Returns the _close_method value captured right after ensure_started
-        completes (before teardown clears it).
-        """
-        captured = {}
-
-        async def fake_request(self, method, params,
-                               timeout=acp_mod.REQUEST_TIMEOUT_SECONDS):
-            return initialize_result
-
-        def fake_spawn(self):
-            # Set _proc to something non-None so alive() guard can work, but
-            # also to a mock that won't crash _discard/_dispose's proc.poll().
-            from unittest.mock import MagicMock
-            self._proc = MagicMock()
-            self._proc.poll.return_value = 0  # "process exited already"
-            self._proc.pid = 9999
-
-        async def run():
-            acp_mod._supervisor._loop = asyncio.get_running_loop()
-            try:
-                with patch.object(acp_mod._Supervisor, "_spawn", fake_spawn), \
-                        patch.object(acp_mod._Supervisor, "_request", fake_request):
-                    await acp_mod._supervisor.ensure_started()
-                # Capture before _discard resets it
-                captured["_close_method"] = acp_mod._supervisor._close_method
-            finally:
-                acp_mod._supervisor._discard("test teardown")
-                acp_mod._supervisor._loop = None
-                acp_mod._supervisor._pending.clear()
-
-        asyncio.run(run())
-        return captured.get("_close_method")
-
-    def test_close_session_close_method_set_when_delete_capability_present(
-            self, acp_store):
-        """When initialize returns sessionCapabilities.delete: true, _close_method
-        is set to 'session/delete'."""
-        acp_mod, _ = acp_store
-        result = {
-            "agentCapabilities": {
-                "sessionCapabilities": {"delete": True}
-            }
-        }
-        close_method = self._run_ensure_started(acp_mod, result)
-        assert close_method == "session/delete"
-
-    def test_close_session_close_method_none_when_delete_capability_absent(
-            self, acp_store):
-        """When initialize returns no sessionCapabilities, _close_method stays None."""
-        acp_mod, _ = acp_store
-        result = {"agentCapabilities": {}}
-        close_method = self._run_ensure_started(acp_mod, result)
-        assert close_method is None
-
-    def test_close_session_close_method_none_when_delete_capability_falsy(
-            self, acp_store):
-        """A falsy delete value (False, 0, '') is treated as absent — truthiness
-        test not `is not None`."""
-        acp_mod, _ = acp_store
-        for falsy in (False, 0, ""):
-            result = {
-                "agentCapabilities": {
-                    "sessionCapabilities": {"delete": falsy}
-                }
-            }
-            close_method = self._run_ensure_started(acp_mod, result)
-            assert close_method is None, \
-                f"expected None for delete={falsy!r}"
-
-    def test_close_session_close_method_none_when_agent_caps_absent(
-            self, acp_store):
-        """When initialize returns no agentCapabilities at all, _close_method is None."""
-        acp_mod, _ = acp_store
-        close_method = self._run_ensure_started(acp_mod, {})
-        assert close_method is None
-
-    # ------------------------------------------------------------------
-    # close_session wire call
-    # ------------------------------------------------------------------
-
-    def test_close_session_sends_wire_call_when_close_method_set(self, acp_session):
-        """When _close_method is set and the agent is alive, close_session sends
-        the wire call with the session id."""
-        acp_mod, sid = acp_session
-        calls = []
-
-        async def fake_request(self, method, params, timeout=None):
-            calls.append((method, params))
-            return {}
-
-        acp_mod._supervisor._close_method = "session/delete"
-        try:
-            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
-                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
-                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
-        finally:
-            acp_mod._supervisor._close_method = None
-
-        assert calls == [("session/delete", {"sessionId": sid})]
-        assert sid not in acp_mod._supervisor.sessions
-
-    def test_close_session_wire_call_uses_close_timeout_seconds(self, acp_session):
-        """The wire call passes CLOSE_TIMEOUT_SECONDS, not REQUEST_TIMEOUT_SECONDS."""
-        acp_mod, sid = acp_session
-        timeouts_seen = []
-
-        async def fake_request(self, method, params, timeout=None):
-            timeouts_seen.append(timeout)
-            return {}
-
-        acp_mod._supervisor._close_method = "session/delete"
-        try:
-            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
-                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
-                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
-        finally:
-            acp_mod._supervisor._close_method = None
-
-        assert timeouts_seen == [acp_mod.CLOSE_TIMEOUT_SECONDS]
-
-    def test_close_session_agent_rejected_swallowed_and_local_cleanup_runs(
+    def test_close_session_sends_no_wire_call_after_delete_is_advertised(
             self, acp_session):
-        """AgentRejected from the wire call is swallowed; local cleanup runs."""
+        """A real handshake advertising ``delete`` (both ``{}``, the measured
+        wire shape, and ``True``), then a close with the agent alive: only
+        ``initialize`` may reach the wire. Against the Phase 1 code this fails
+        for ``True``, where the wire close fired."""
+        from unittest.mock import MagicMock
         acp_mod, sid = acp_session
+        sup = acp_mod._supervisor
 
-        async def fake_request(self, method, params, timeout=None):
-            raise acp_mod.AgentRejected("-32000 Session not found")
+        for delete_cap in ({}, True):
+            calls = []
 
-        acp_mod._supervisor._close_method = "session/delete"
-        try:
-            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
-                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
-                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
-        finally:
-            acp_mod._supervisor._close_method = None
+            async def fake_request(self_inner, method, params, timeout=None):
+                calls.append(method)
+                if method == "initialize":
+                    return {"agentCapabilities": {
+                        "sessionCapabilities": {"delete": delete_cap}}}
+                return {}
 
-        # Local cleanup ran: session is gone
-        assert sid not in acp_mod._supervisor.sessions
+            def fake_spawn(self_inner):
+                # poll() == 0 so the teardown below never tree-kills a real pid.
+                self_inner._proc = MagicMock()
+                self_inner._proc.poll.return_value = 0
+                self_inner._proc.pid = 9999
 
-    def test_close_session_agent_rejected_is_logged_as_warning(
-            self, acp_session, caplog):
-        """AgentRejected is logged at WARNING level (not silently discarded)."""
-        acp_mod, sid = acp_session
+            async def go():
+                with patch.object(acp_mod._Supervisor, "_spawn", fake_spawn),                         patch.object(acp_mod._Supervisor, "_request", fake_request):
+                    await sup.ensure_started()
+                    sup.sessions.setdefault(sid, {"cwd": "C:/x"})
+                    try:
+                        with patch.object(acp_mod._Supervisor, "alive",
+                                          lambda self_inner: True):
+                            await sup.close_session(sid)
+                    finally:
+                        sup._discard("test teardown")
 
-        async def fake_request(self, method, params, timeout=None):
-            raise acp_mod.AgentRejected("-32000 Session not found")
+            _run_bound(acp_mod, go)
+            assert calls == ["initialize"], (delete_cap, calls)
+            assert sid not in sup.sessions
 
-        acp_mod._supervisor._close_method = "session/delete"
-        try:
-            import logging as _logging
-            with caplog.at_level(_logging.WARNING, logger="power_atlas.acp"), \
-                    patch.object(acp_mod._Supervisor, "_request", fake_request), \
-                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
-                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
-        finally:
-            acp_mod._supervisor._close_method = None
 
-        assert any("proceeding with local cleanup" in r.getMessage()
-                   for r in caplog.records if r.levelno == _logging.WARNING)
+class TestAcpIdleAgentRecycle:
+    """The sweeper stops an agent that has had no session for
+    ``AGENT_IDLE_RECYCLE_SECONDS``. Close is local only, so kiro-cli keeps
+    every closed session loaded until its process ends; this is what releases
+    them. Anything still using the agent must reset the clock."""
 
-    def test_close_session_other_acp_error_swallowed_and_local_cleanup_runs(
-            self, acp_session, caplog):
-        """AcpError (e.g. AgentDied) from the wire call is silently swallowed;
-        local cleanup runs and no WARNING is emitted."""
-        acp_mod, sid = acp_session
+    def _setup(self, acp_mod, monkeypatch):
+        sup = acp_mod._supervisor
+        discards = []
+        monkeypatch.setattr(acp_mod._Supervisor, "alive", lambda self: True)
+        monkeypatch.setattr(acp_mod._Supervisor, "_discard",
+                            lambda self, reason: discards.append(reason))
+        monkeypatch.setattr(acp_mod, "AGENT_IDLE_RECYCLE_SECONDS", 100.0)
+        monkeypatch.setattr(sup, "_idle_since", None)
+        return sup, discards
 
-        async def fake_request(self, method, params, timeout=None):
-            raise acp_mod.AgentDied("process died")
-
-        acp_mod._supervisor._close_method = "session/delete"
-        try:
-            import logging as _logging
-            with caplog.at_level(_logging.DEBUG, logger="power_atlas.acp"), \
-                    patch.object(acp_mod._Supervisor, "_request", fake_request), \
-                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
-                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
-        finally:
-            acp_mod._supervisor._close_method = None
-
-        assert sid not in acp_mod._supervisor.sessions
-        # AcpError is silently swallowed, not logged at WARNING
-        import logging as _logging
-        assert not any(r.levelno == _logging.WARNING for r in caplog.records)
-
-    def test_close_session_wire_call_skipped_when_agent_not_alive(self, acp_session):
-        """When alive() is False, the wire call is skipped entirely; local cleanup runs."""
-        acp_mod, sid = acp_session
-        calls = []
-
-        async def fake_request(self, method, params, timeout=None):
-            calls.append((method, params))
-            return {}
-
-        acp_mod._supervisor._close_method = "session/delete"
-        try:
-            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
-                    patch.object(acp_mod._Supervisor, "alive", lambda self: False):
-                _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
-        finally:
-            acp_mod._supervisor._close_method = None
-
-        assert calls == []
-        assert sid not in acp_mod._supervisor.sessions
-
-    def test_close_session_wire_call_skipped_when_close_method_is_none(
-            self, acp_session):
-        """When _close_method is None, the wire call is skipped; local cleanup runs."""
-        acp_mod, sid = acp_session
-        calls = []
-
-        async def fake_request(self, method, params, timeout=None):
-            calls.append((method, params))
-            return {}
-
-        # _close_method is None by default
-        assert acp_mod._supervisor._close_method is None
-        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
-            _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
-
-        assert calls == []
-        assert sid not in acp_mod._supervisor.sessions
-
-    def test_close_session_close_method_set_when_delete_capability_truthy_nonbool(
-            self, acp_store):
-        """A truthy non-bool value for delete (1, 'session/delete') also enables wire close."""
+    def test_recycles_after_threshold_with_nothing_live(self, acp_store, monkeypatch):
         acp_mod, _ = acp_store
-        for truthy_nonbool in (1, "session/delete", {"supported": True}):
-            result = {
-                "agentCapabilities": {
-                    "sessionCapabilities": {"delete": truthy_nonbool}
-                }
-            }
-            close_method = self._run_ensure_started(acp_mod, result)
-            assert close_method == "session/delete", \
-                f"expected 'session/delete' for delete={truthy_nonbool!r}"
+        sup, discards = self._setup(acp_mod, monkeypatch)
+        assert sup._maybe_recycle_idle(1000.0) is False   # starts the clock
+        assert sup._maybe_recycle_idle(1099.0) is False   # under threshold
+        assert sup._maybe_recycle_idle(1100.0) is True
+        assert len(discards) == 1
+        assert sup._idle_since is None
 
-    def test_close_session_cancelled_error_from_wire_does_not_skip_cleanup(
-            self, acp_session):
-        """If CancelledError propagates from _request, local cleanup still runs.
-
-        Finding 1 of the Phase 1 review: the original implementation had no
-        BaseException guard, so CancelledError bypassed all local cleanup lines.
-        After the fix, cleanup always runs before the CancelledError is re-raised.
-        """
-        acp_mod, sid = acp_session
-
-        async def fake_request(self_inner, method, params, timeout=None):
-            raise asyncio.CancelledError()
-
-        acp_mod._supervisor._close_method = "session/delete"
+    def test_anything_in_use_resets_the_clock(self, acp_store, monkeypatch):
+        acp_mod, _ = acp_store
+        sup, discards = self._setup(acp_mod, monkeypatch)
+        for attr, busy in (("_reserved", 1), ("_pending", {1: object()}),
+                           ("subagent_sessions", {"c": {}})):
+            idle = type(getattr(sup, attr))()
+            sup._maybe_recycle_idle(0.0)
+            monkeypatch.setattr(sup, attr, busy)
+            assert sup._maybe_recycle_idle(500.0) is False, attr
+            assert sup._idle_since is None, attr
+            monkeypatch.setattr(sup, attr, idle)
+        sid = _live_session(acp_mod)
         try:
-            with patch.object(acp_mod._Supervisor, "_request", fake_request), \
-                    patch.object(acp_mod._Supervisor, "alive", lambda self_inner: True):
-                try:
-                    _run_bound(acp_mod, lambda: acp_mod._supervisor.close_session(sid))
-                except (asyncio.CancelledError, Exception):
-                    pass  # cancellation may re-raise after cleanup; that is correct
+            sup._maybe_recycle_idle(0.0)
+            assert sup._maybe_recycle_idle(500.0) is False
         finally:
-            acp_mod._supervisor._close_method = None
+            sup.sessions.pop(sid, None)
+            sup.history.pop(sid, None)
+        assert discards == []
 
-        # Local cleanup must have run regardless of the CancelledError
-        assert sid not in acp_mod._supervisor.sessions
+    def test_not_alive_is_left_alone(self, acp_store, monkeypatch):
+        acp_mod, _ = acp_store
+        sup, discards = self._setup(acp_mod, monkeypatch)
+        monkeypatch.setattr(acp_mod._Supervisor, "alive", lambda self: False)
+        sup._maybe_recycle_idle(0.0)
+        assert sup._maybe_recycle_idle(500.0) is False
+        assert discards == []
 
+    def test_sweep_loop_checks_even_with_zero_sessions(self, acp_fast, monkeypatch):
+        """The loop skips ``_sweep_once`` when no session exists — the exact
+        state recycling is for — so the check must run before that guard."""
+        acp_mod, _ = acp_fast
+        seen = []
+
+        def fake_check(self, now):
+            seen.append(now)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(acp_mod._Supervisor, "_maybe_recycle_idle", fake_check)
+        assert not acp_mod._supervisor.sessions
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(asyncio.wait_for(acp_mod._sweep_loop(), 5))
+        assert len(seen) == 1
 
 
 def _noop_death(self, proc):
@@ -26661,6 +26495,12 @@ class TestAcpMcpStatusNotification:
         acp_mod._registry.subscribers.clear()
         acp_mod._registry.loading.clear()
 
+    @staticmethod
+    def _proj(servers):
+        """What the handler stores for plain ``{name, status}`` entries."""
+        return [{"name": s["name"], "status": s["status"],
+                 "failedAuthorization": False, "toolCount": 0} for s in servers]
+
     def _mcp_status_msg(self, sid, servers):
         """Build a ``_kiro/mcp/status`` notification message."""
         return {
@@ -26687,7 +26527,30 @@ class TestAcpMcpStatusNotification:
         ]
         try:
             sv3._on_notification(self._mcp_status_msg(sid, servers))
-            assert sv3.sessions[sid]["mcpServers"] == servers
+            # Projected to the four rendered fields: the tool list becomes a
+            # count, and authorizationUrl is not forwarded at all.
+            assert sv3.sessions[sid]["mcpServers"] == [
+                {"name": "github", "status": "connected",
+                 "failedAuthorization": False, "toolCount": 1},
+                {"name": "jira", "status": "failed",
+                 "failedAuthorization": True, "toolCount": 0},
+            ]
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_mcp_status_projects_malformed_entries_safely(self, monkeypatch):
+        """Non-dict entries are dropped; wrong-typed fields fall back rather
+        than reaching the page as-is."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        servers = ["x", None,
+                   {"name": 7, "status": ["connected"], "failedAuthorization": "yes",
+                    "tools": {"a": 1}}]
+        try:
+            sv3._on_notification(self._mcp_status_msg(sid, servers))
+            assert sv3.sessions[sid]["mcpServers"] == [
+                {"name": "?", "status": "", "failedAuthorization": False,
+                 "toolCount": 0}]
         finally:
             self._cleanup_registry(acp_mod)
 
@@ -26705,7 +26568,7 @@ class TestAcpMcpStatusNotification:
             frames = _queued(conn)
             mcp_frames = [f for f in frames if f["type"] == "mcp_servers"]
             assert len(mcp_frames) == 1
-            assert mcp_frames[0]["payload"]["servers"] == servers
+            assert mcp_frames[0]["payload"]["servers"] == self._proj(servers)
             assert mcp_frames[0]["sessionId"] == sid
         finally:
             self._cleanup_registry(acp_mod)
@@ -26750,13 +26613,13 @@ class TestAcpMcpStatusNotification:
             sv3._on_notification(self._mcp_status_msg(sid, second_servers))
 
             # meta must reflect only the second notification
-            assert sv3.sessions[sid]["mcpServers"] == second_servers
+            assert sv3.sessions[sid]["mcpServers"] == self._proj(second_servers)
 
             frames = _queued(conn)
             mcp_frames = [f for f in frames if f["type"] == "mcp_servers"]
             assert len(mcp_frames) == 2  # one per notification, not accumulated
-            assert mcp_frames[0]["payload"]["servers"] == first_servers
-            assert mcp_frames[1]["payload"]["servers"] == second_servers
+            assert mcp_frames[0]["payload"]["servers"] == self._proj(first_servers)
+            assert mcp_frames[1]["payload"]["servers"] == self._proj(second_servers)
         finally:
             self._cleanup_registry(acp_mod)
 
@@ -26807,7 +26670,7 @@ class TestAcpMcpStatusNotification:
             for _msg in _buffered:
                 sv3._on_notification(_msg)
 
-            assert sv3.sessions[sid].get("mcpServers") == servers
+            assert sv3.sessions[sid].get("mcpServers") == self._proj(servers)
         finally:
             sv3._reserved = 0
             self._cleanup_registry(acp_mod)

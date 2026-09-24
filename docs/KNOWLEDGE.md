@@ -144,7 +144,7 @@ PowerAtlas removed v2 support in this plan. The `~/.kiro/sessions/cli/` director
 
 > Three structural findings about kiro-cli v3's ACP protocol. None is a to-do — they are hard limits of the current binary that constrain what PowerAtlas can do from the client side. Recorded together because they were all surface-level items in the same "ACP v3 Follow-up" roadmap section and have the same evidence pattern: a probe attempted a wire call, it returned -32601/-32603, and no alternative was found.
 
-### Session close — `session/delete` works on v3 2.23.1; prior methods fail
+### Session close — no v3 method unloads a session; `session/delete` deletes it
 
 **Measured on kiro-cli 2.23.1 (v3), 2026-09-23.** Wire close method status by build:
 
@@ -156,13 +156,15 @@ PowerAtlas removed v2 support in this plan. The `~/.kiro/sessions/cli/` director
 | `session/terminate` | — | `-32601` | `-32601` |
 | `_kiro.dev/session/close` | — | `-32601` | `-32601` |
 
-**`session/delete` (v3 2.23.1)**: Returns `{}` on first call; returns `-32000 "Something went wrong with the cloud session service"` on a second call (not idempotent). After a successful delete, the session is gone from kiro-cli's registry — subsequent calls referencing the session id return "Session not found". Advertised in `agentCapabilities.sessionCapabilities.delete` from `initialize` (confirmed present in 2.23.1 response).
+**`session/delete` (v3 2.23.1)**: Returns `{}` on first call; returns `-32000 "Something went wrong with the cloud session service"` on a second call (not idempotent). After a successful delete, the session is gone from kiro-cli's registry — subsequent calls referencing the session id return "Session not found".
 
-**Current status**: Implemented in plan `260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS` (2026-09-24). `session/delete` is now sent by `close_session()` when `sessionCapabilities.delete` was advertised at `initialize` time. `-32000` on re-delete is treated as success (local cleanup always runs).
+**`session/delete` deletes the session from disk** (measured 2026-09-24, kiro-cli 2.24.0). Right after the call, `~/.kiro/sessions/<hash>/sess_<id>` was gone and kiro-cli emitted `_kiro/sessions/changed {"upserted": [], "deleted": ["sess_<id>"]}`. It is a delete, not a close: the dashboard can no longer list or resume the session. It is advertised in `initialize` as `agentCapabilities.sessionCapabilities.delete: {}` — an empty object, the ACP capability shape, which Python reads as falsy.
 
-**v3 process model context**: In v3, all sessions share ONE process tree (kiro-cli.exe → bun.exe → node.exe). The ~3 processes / ~161 MB per session figure from v2 does NOT apply. With 27 sessions, the tree is 3 processes / ~655 MB total. Session delete frees kiro-cli's internal session registry; whether it frees per-session in-process memory (within bun/node) is unverified but the process count is unchanged regardless. The sweeper's memory value on v3 is freeing PowerAtlas's own data structures (history ring buffers, session meta dict), not kiro-cli processes.
+**Current status**: `close_session()` is local only and sends no wire call. Plan `260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS` Phase 1 briefly sent `session/delete` from `close_session()` when the capability was advertised; it never fired in production, because its truthiness check read `{}` as absent. The 2026-09-24 QA of that plan measured the disk deletion and removed the wire path, because both callers (the Close button and the idle sweeper) mean "stop holding it", never "destroy its history". Not used anywhere, for close or for delete: the dashboard's Delete removes the session directory itself (`data_kiro_v3.delete_session`).
 
-**`_kiro.dev/session/terminate` dead on v3**: Kept working through v2's lifetime. The v3 error message "Ext method has no persistence classification" suggests the extension method registry was not updated when the v3 engine was built. Do not attempt to revive it; use `session/delete` instead.
+**v3 process model context**: In v3, all sessions share ONE process tree (kiro-cli.exe → bun.exe → node.exe). The ~3 processes / ~161 MB per session figure from v2 does NOT apply. With 27 sessions, the tree is 3 processes / ~655 MB total. Because the close is local only, kiro-cli keeps a closed session loaded for as long as its process lives; whether that holds meaningful in-process memory (within bun/node) is unverified. The sweeper therefore stops the agent once it has had no session for `AGENT_IDLE_RECYCLE_SECONDS` (900 s), which releases everything; the next session spawns a fresh one, as on first use after startup. The sweeper's memory value on v3 is freeing PowerAtlas's own data structures (history ring buffers, session meta dict), not kiro-cli processes.
+
+**`_kiro.dev/session/terminate` dead on v3**: Kept working through v2's lifetime. The v3 error message "Ext method has no persistence classification" suggests the extension method registry was not updated when the v3 engine was built. Do not attempt to revive it, and do not substitute `session/delete`, which deletes the session (above).
 
 **What `session/cancel` does** (distinct from close): cancels a running turn. Works as a notification; `stopReason: "cancelled"` arrives in ~0.11 s. Does not release session resources. Not a substitute for delete.
 

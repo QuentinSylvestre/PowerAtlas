@@ -205,7 +205,8 @@
         <span class="acp-mcp-compact" id="acpMcpCompact"></span>
       </button>
       <div class="acp-mcp-panel" id="acpMcpPanel">
-        <ul class="acp-mcp-list" id="acpMcpList" aria-label="MCP servers"></ul>
+        <div class="acp-mcp-panel-head" aria-hidden="true">MCP servers for this session</div>
+        <ul class="acp-mcp-list" id="acpMcpList" aria-label="MCP servers for this session"></ul>
       </div>
     </div>
     <!-- In the toolbar rather than its own row below the composer: a debugging
@@ -5922,28 +5923,11 @@
     statusEl.setAttribute('aria-expanded', 'true');
   });
 
-  // MCP indicator toggle: open/close via aria-expanded (CSS drives visibility).
-  var _acpMcpToggleEl = document.getElementById('acpMcpToggle');
-  var _acpMcpPanelEl  = document.getElementById('acpMcpPanel');
-  var _mcpGuard = false;
-  if (_acpMcpToggleEl && _acpMcpPanelEl) {
-    _acpMcpToggleEl.addEventListener('click', function () {
-      var expanded = _acpMcpToggleEl.getAttribute('aria-expanded') === 'true';
-      _mcpGuard = true;
-      _acpMcpToggleEl.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-    });
-  }
-
-  document.addEventListener('click', function (event) {
+  // The MCP indicator's toggle, outside-click and Escape handling live in
+  // composer-chrome.js (initMcpIndicatorDom), shared with the dashboard.
+  document.addEventListener('click', function () {
     if (_statusMenuGuard) { _statusMenuGuard = false; return; }
     if (!statusMenu.hidden) _statusMenuClose();
-    // Close MCP panel when clicking outside indicator+panel.
-    if (_mcpGuard) { _mcpGuard = false; return; }
-    if (_acpMcpToggleEl && _acpMcpToggleEl.getAttribute('aria-expanded') === 'true') {
-      // Ignore clicks inside the panel itself (e.g., Connect button).
-      if (_acpMcpPanelEl && event && _acpMcpPanelEl.contains(event.target)) return;
-      _acpMcpToggleEl.setAttribute('aria-expanded', 'false');
-    }
   });
 
   restartBtn.addEventListener('click', function () {
@@ -5971,12 +5955,6 @@
     // The picker first: it is the thing on top, and a single Escape should
     // dismiss one layer rather than both.
     if (!picker.hidden) { pickerClose(); return; }
-    // Close MCP panel before status menu.
-    if (_acpMcpToggleEl && _acpMcpToggleEl.getAttribute('aria-expanded') === 'true') {
-      _acpMcpToggleEl.setAttribute('aria-expanded', 'false');
-      _acpMcpToggleEl.focus(); // restore focus per ARIA Disclosure Button pattern
-      return;
-    }
     // Focus does not move into the menu when it opens, so the button keeps it
     // and Escape returns the keyboard user exactly where they were — which is
     // the whole reason the menu is toggled in place rather than re-rendered.

@@ -338,6 +338,12 @@ class El {
   // exists to configure. Recorded rather than ignored so a check can see it.
   select() { this.selected = true; ACTIVE = this; }
   focus() { ACTIVE = this; }
+  // Node containment, inclusive like the DOM's: the MCP indicator's
+  // outside-click handler asks whether the click landed inside it.
+  contains(node) {
+    for (let n = node; n; n = n.parentNode) if (n === this) return true;
+    return false;
+  }
   // A real `<textarea>`/`<input>` method: positions the caret (or selects the
   // range between the two offsets when they differ). The skill-completion
   // path calls this to land the caret after the text it just inserted.
@@ -16600,178 +16606,149 @@ check("dashboard: eager-connect — stale-arrival re-enables composer for B afte
 });
 
 // ---- Phase 7: MCP status panel (SC-4) ------------------------------------
+// Frames carry acp.py's projection: {name, status, failedAuthorization, toolCount}.
 
-// mcpServersFrameShowsIndicatorWithConnectedCount
-// Delivering a mcp_servers frame un-hides the indicator and shows connected count.
-check("mcpServersFrameShowsIndicatorWithConnectedCount", (tpl) => {
+function mcpDeliver(page, live, servers) {
+  page.deliver({ type: "mcp_servers", sessionId: live, payload: { servers } });
+}
+function mcpRows(page) {
+  return page.el("acpMcpList").querySelectorAll(".acp-mcp-server");
+}
+
+check("mcp: frame shows the indicator with connected/active ratio", (tpl) => {
   const { page, live } = connected(tpl);
-  page.deliver({
-    type: "mcp_servers",
-    sessionId: live,
-    payload: { servers: [
-      { name: "github", status: "connected" },
-      { name: "jira",   status: "connected" },
-      { name: "confluence", status: "disabled" },
-    ]},
-  });
-  const indicator = page.el("acpMcpIndicator");
-  assert(!indicator.hidden, "indicator should be visible after mcp_servers frame");
-  const compact = page.el("acpMcpCompact");
-  assert(compact.textContent.includes("connected"),
-    "compact text should include 'connected'; got: " + compact.textContent);
-  assert(compact.textContent.includes("2"),
-    "compact text should show 2 connected servers; got: " + compact.textContent);
+  mcpDeliver(page, live, [
+    { name: "github", status: "connected", toolCount: 3 },
+    { name: "jira", status: "connected", toolCount: 1 },
+    { name: "confluence", status: "disabled" },
+  ]);
+  assert(!page.el("acpMcpIndicator").hidden, "indicator hidden after an mcp_servers frame");
+  assertEqual(page.el("acpMcpCompact").textContent, "MCP 2/2",
+    "disabled servers must not count toward the ratio");
+  const toggle = page.el("acpMcpToggle");
+  assert(!toggle.classList.contains("acp-mcp-warn") &&
+         !toggle.classList.contains("acp-mcp-caution"),
+    "all active servers connected: no warning colour");
+  assertEqual(toggle.getAttribute("aria-label"), "MCP servers \u2014 2 of 2 connected",
+    "accessible name");
 });
 
-// mcpServersFrameWithFailedAuthShowsConnectButton
-// A server with failedAuthorization:true and a https URL gets a Connect button.
-check("mcpServersFrameWithFailedAuthShowsConnectButton", (tpl) => {
+check("mcp: sign-in needed is amber with a terminal instruction, never red or a button", (tpl) => {
   const { page, live } = connected(tpl);
-  page.deliver({
-    type: "mcp_servers",
-    sessionId: live,
-    payload: { servers: [
-      { name: "atlassian", status: "failed",
-        failedAuthorization: true,
-        authorizationUrl: "https://mcp.atlassian.com/oauth" },
-    ]},
-  });
+  mcpDeliver(page, live, [
+    { name: "playwright", status: "connected", toolCount: 21 },
+    { name: "atlassian", status: "failed", failedAuthorization: true },
+  ]);
   const toggle = page.el("acpMcpToggle");
-  assert(toggle.classList.contains("acp-mcp-warn"),
-    "toggle should have acp-mcp-warn class when failedAuthorization is present");
-  // Open the panel.
-  toggle.dispatch("click", {});
-  const list = page.el("acpMcpList");
-  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
-  assert(connectBtns.length === 1,
-    "Connect button should be rendered for failedAuthorization server");
-});
-
-// mcpServersFrameAllConnectedHasNoConnectButton
-// When all servers are connected there should be no connect button and no warn class.
-check("mcpServersFrameAllConnectedHasNoConnectButton", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver({
-    type: "mcp_servers",
-    sessionId: live,
-    payload: { servers: [
-      { name: "github", status: "connected" },
-      { name: "gitlab", status: "connected" },
-    ]},
-  });
-  const toggle = page.el("acpMcpToggle");
+  assert(toggle.classList.contains("acp-mcp-caution"), "sign-in needed must be amber");
   assert(!toggle.classList.contains("acp-mcp-warn"),
-    "toggle should NOT have acp-mcp-warn when no failed servers");
-  toggle.dispatch("click", {});
-  const list = page.el("acpMcpList");
-  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
-  assert(connectBtns.length === 0,
-    "no Connect button when all servers connected");
+    "sign-in needed must not be red: it never clears in ACP mode");
+  assert(/1 needs sign-in/.test(toggle.getAttribute("aria-label")),
+    "accessible name must say sign-in is needed: " + toggle.getAttribute("aria-label"));
+  const row = mcpRows(page)[1];
+  assert(row.querySelector(".acp-mcp-badge-auth"), "sign-in badge class missing");
+  const detail = row.querySelector(".acp-mcp-server-detail").textContent;
+  assert(/kiro-cli/.test(detail) && /\/mcp/.test(detail),
+    "detail must tell the user how to sign in: " + detail);
+  assertEqual(page.el("acpMcpList").querySelectorAll("button").length, 0,
+    "no Connect button: its OAuth redirect has no listener in ACP mode");
 });
 
-// mcpServersNullHidesIndicator
-// Resetting via null (session change / resetCommandPalette) hides the indicator.
-check("mcpServersNullHidesIndicator", (tpl) => {
+check("mcp: a real failure is red", (tpl) => {
   const { page, live } = connected(tpl);
-  // First populate.
-  page.deliver({
-    type: "mcp_servers",
-    sessionId: live,
-    payload: { servers: [{ name: "github", status: "connected" }] },
-  });
-  assert(!page.el("acpMcpIndicator").hidden, "indicator should be visible first");
-  // Session change resets indicator via 'session' frame → resetCommandPalette.
+  mcpDeliver(page, live, [{ name: "broken", status: "failed" }]);
+  assert(page.el("acpMcpToggle").classList.contains("acp-mcp-warn"), "failed must be red");
+  assertEqual(mcpRows(page)[0].querySelector(".acp-mcp-server-detail").textContent,
+    "Failed to start", "failed detail");
+});
+
+check("mcp: disabled servers sort last and are dimmed; states read as text", (tpl) => {
+  const { page, live } = connected(tpl);
+  mcpDeliver(page, live, [
+    { name: "zoho", status: "disabled" },
+    { name: "playwright", status: "connected", toolCount: 1 },
+    { name: "slow", status: "connecting" },
+    { name: "weird", status: "<b>x</b>" },
+  ]);
+  const rows = mcpRows(page);
+  const names = rows.map((r) => r.querySelector(".acp-mcp-server-name").textContent);
+  assertEqual(JSON.stringify(names), JSON.stringify(["playwright", "slow", "zoho", "weird"]),
+    "active servers first, in their own order, then disabled (unknown status counts as disabled)");
+  assert(rows[2].classList.contains("acp-mcp-server-disabled"), "disabled row not dimmed");
+  const details = rows.map((r) => r.querySelector(".acp-mcp-server-detail").textContent);
+  assertEqual(details[0], "1 tool", "singular tool count");
+  assertEqual(details[1], "Connecting\u2026", "connecting detail");
+  assertEqual(details[2], "Disabled", "disabled detail");
+  assert(rows[3].querySelector(".acp-mcp-badge-disabled"),
+    "an unknown status must not reach className as-is");
+});
+
+check("mcp: toggle opens, outside click closes, inside click does not", (tpl) => {
+  const { page, live } = connected(tpl);
+  // `byId` is flat (see loadPage), so nest the one relationship this check
+  // is about, as the markup does: indicator > panel > list.
+  page.el("acpMcpPanel").appendChild(page.el("acpMcpList"));
+  page.el("acpMcpIndicator").appendChild(page.el("acpMcpPanel"));
+  mcpDeliver(page, live, [{ name: "github", status: "connected" }]);
+  const toggle = page.el("acpMcpToggle");
+  toggle.dispatch("click", {});
+  assertEqual(toggle.getAttribute("aria-expanded"), "true", "toggle did not open the panel");
+  page.fireDoc("click", { target: mcpRows(page)[0] });
+  assertEqual(toggle.getAttribute("aria-expanded"), "true",
+    "a click inside the panel must not close it");
+  page.fireDoc("click", { target: page.el("acpLogToggle") });
+  assertEqual(toggle.getAttribute("aria-expanded"), "false", "outside click did not close it");
+});
+
+check("mcp: Escape closes the panel and returns focus to the toggle", (tpl) => {
+  const { page, live } = connected(tpl);
+  mcpDeliver(page, live, [{ name: "github", status: "connected" }]);
+  const toggle = page.el("acpMcpToggle");
+  toggle.dispatch("click", {});
+  ACTIVE = null;
+  page.fireDoc("keydown", { key: "Escape" });
+  assertEqual(toggle.getAttribute("aria-expanded"), "false", "Escape did not close the panel");
+  assert(ACTIVE === toggle, "focus must return to the toggle");
+});
+
+check("mcp: session change hides the indicator and closes the panel", (tpl) => {
+  const { page, live } = connected(tpl);
+  mcpDeliver(page, live, [{ name: "github", status: "connected" }]);
+  page.el("acpMcpToggle").dispatch("click", {});
   const newSid = "sess-mcp-reset";
   page.deliver({
     type: "session", sessionId: newSid,
     payload: { sessionId: newSid, cwd: "C:\\tmp", created: true,
                turnActive: false, contextPercent: null },
   });
-  assert(page.el("acpMcpIndicator").hidden,
-    "indicator should be hidden after session change");
-  // Panel must not re-open on next session's first MCP frame (F6-1 fix).
-  const toggle = page.el("acpMcpToggle");
-  assert(toggle.getAttribute("aria-expanded") === "false",
-    "aria-expanded should be reset to false on session change; got: " +
-    toggle.getAttribute("aria-expanded"));
+  assert(page.el("acpMcpIndicator").hidden, "indicator still shown after session change");
+  assertEqual(page.el("acpMcpToggle").getAttribute("aria-expanded"), "false",
+    "an open panel would re-open on the next session's first frame");
 });
 
-// mcpServersNonHttpsUrlNoConnectButton
-// An authorizationUrl without https:// scheme must not render a Connect button.
-check("mcpServersNonHttpsUrlNoConnectButton", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver({
-    type: "mcp_servers",
-    sessionId: live,
-    payload: { servers: [
-      { name: "evil", status: "failed",
-        failedAuthorization: true,
-        authorizationUrl: "javascript:alert(1)" },
-    ]},
-  });
-  page.el("acpMcpToggle").dispatch("click", {});
-  const list = page.el("acpMcpList");
-  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
-  assert(connectBtns.length === 0,
-    "no Connect button for non-https authorizationUrl");
+// Both pages get the panel's behaviour from the one module. The dashboard's
+// own copy once shipped without Escape; a page-local listener would fork it again.
+check("mcp: the dashboard wires the shared indicator and keeps no copy of its listeners", () => {
+  const html = fs.readFileSync(
+    path.join(HERE, "..", "src", "power_atlas", "templates", "index.html"), "utf8");
+  assert(/initMcpIndicatorDom\(\{[\s\S]*?toggleEl:\s*document\.getElementById\('dashMcpToggle'\)/.test(html),
+    "index.html does not pass #dashMcpToggle to initMcpIndicatorDom");
+  assert(!/getElementById\('dashMcpToggle'\)\.addEventListener|_dashMcpToggleEl/.test(html),
+    "index.html wires its own MCP toggle listener again");
 });
 
-// mcpServersLocalhostHttpUrlShowsConnectButton
-// http://localhost:PORT/ (kiro-cli OAuth relay) must show a Connect button.
-check("mcpServersLocalhostHttpUrlShowsConnectButton", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver({
-    type: "mcp_servers",
-    sessionId: live,
-    payload: { servers: [
-      { name: "atlassian", status: "failed",
-        failedAuthorization: true,
-        authorizationUrl: "http://localhost:49830/oauth/callback" },
-    ]},
-  });
-  page.el("acpMcpToggle").dispatch("click", {});
-  const list = page.el("acpMcpList");
-  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
-  assert(connectBtns.length === 1,
-    "Connect button must render for http://localhost OAuth relay URL");
-});
-// http:// URL must also be rejected — only https:// is allowed.
-check("mcpServersHttpUrlNoConnectButton", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver({
-    type: "mcp_servers",
-    sessionId: live,
-    payload: { servers: [
-      { name: "downgrade", status: "failed",
-        failedAuthorization: true,
-        authorizationUrl: "http://evil.com/oauth" },
-    ]},
-  });
-  page.el("acpMcpToggle").dispatch("click", {});
-  const list = page.el("acpMcpList");
-  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
-  assert(connectBtns.length === 0,
-    "no Connect button for http:// authorizationUrl");
-});
-
-// mcpServersDataUrlNoConnectButton
-// data: URL must also be rejected.
-check("mcpServersDataUrlNoConnectButton", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver({
-    type: "mcp_servers",
-    sessionId: live,
-    payload: { servers: [
-      { name: "xss", status: "failed",
-        failedAuthorization: true,
-        authorizationUrl: "data:text/html,<script>alert(1)</script>" },
-    ]},
-  });
-  page.el("acpMcpToggle").dispatch("click", {});
-  const list = page.el("acpMcpList");
-  const connectBtns = list.querySelectorAll(".acp-mcp-connect-btn");
-  assert(connectBtns.length === 0,
-    "no Connect button for data: authorizationUrl");
+// The [hidden] escape must cover every page that uses the indicator class. An
+// id-scoped `#acpMcpIndicator[hidden]` left the dashboard's #dashMcpIndicator
+// rendered (display:flex, an empty hexagon button) with no session attached —
+// measured in Chromium 2026-09-24. Source check: the DOM stand-in has no
+// cascade. Comments stripped so the prose above the rule cannot satisfy it.
+check("mcpIndicatorHiddenRuleIsClassScoped", () => {
+  const css = fs.readFileSync(
+    path.join(HERE, "..", "src", "power_atlas", "static", "style.css"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  assert(/^\.acp-mcp-indicator\[hidden\]\s*\{[^}]*display:\s*none\s*!important/m.test(css),
+    "style.css has no class-scoped `.acp-mcp-indicator[hidden] { display: none !important }` " +
+    "rule, so the dashboard's indicator ignores its hidden attribute");
 });
 
 let failed = 0;
