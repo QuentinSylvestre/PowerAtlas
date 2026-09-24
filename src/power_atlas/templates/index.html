@@ -4551,6 +4551,10 @@ var RAIL_ICON = {
     ['path', {d: 'M12 3 L14.5 9.5 L21 12 L14.5 14.5 L12 21 L9.5 14.5 L3 12 L9.5 9.5 Z',
       fill: 'currentColor', stroke: 'none'}]
   ]); },
+  copy: function(){ return dashRailBuildIcon([
+    ['rect', {x: '8.5', y: '8.5', width: '12', height: '12', rx: '2'}],
+    ['path', {d: 'M15.5 8.5V5.5a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3'}]
+  ]); },
   trash: function(){ return dashRailBuildIcon([
     ['path', {d: 'M4 7h16'}],
     ['path', {d: 'M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'}],
@@ -5089,82 +5093,104 @@ function dashRailRowNode(session, flat, workspace){
   pinBtn.appendChild(RAIL_ICON.pin());
   pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinSession(pinBtn); });
   actions.appendChild(pinBtn);
-  // ⋯ menu: only created when there is content.
-  // "Pin session" shown when not pinned (unpin is via the amber button).
-  // Delete shown for kiro-cli-v3 sessions.
-  var hasPinMenuItem = !session.pinned;
+  // ⋯ menu: "Copy session id" on every row, whatever the provider; Delete
+  // added for kiro-cli-v3 sessions. Pinning lives on the pin button alone.
   var hasDeleteMenuItem = ACP_AVAILABLE && session.provider === 'kiro-cli-v3';
-  if (hasPinMenuItem || hasDeleteMenuItem) {
-    var moreBtn = document.createElement('button');
-    moreBtn.type = 'button';
-    moreBtn.className = 'acp-rail-ghost-btn acp-rail-more-btn';
-    moreBtn.setAttribute('aria-haspopup', 'menu');
-    moreBtn.setAttribute('aria-expanded', 'false');
-    moreBtn.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
-    moreBtn.title = 'More';
-    moreBtn.appendChild(RAIL_ICON.more());
-    var moreMenu = document.createElement('div');
-    moreMenu.className = 'acp-rail-menu acp-rail-action-menu';
-    moreMenu.setAttribute('role', 'menu');
-    moreMenu.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
-    moreMenu.hidden = true;
-    if (hasPinMenuItem) {
-      var rowPinItem = document.createElement('button');
-      rowPinItem.type = 'button';
-      rowPinItem.className = 'acp-rail-menu-item acp-rail-action-item';
-      rowPinItem.setAttribute('role', 'menuitem');
-      rowPinItem.appendChild(RAIL_ICON.pin());
-      var rowPinLabel = document.createElement('span');
-      rowPinLabel.textContent = 'Pin session';
-      rowPinItem.appendChild(rowPinLabel);
-      rowPinItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); pinSession(pinBtn); });
-      moreMenu.appendChild(rowPinItem);
+  var moreBtn = document.createElement('button');
+  moreBtn.type = 'button';
+  moreBtn.className = 'acp-rail-ghost-btn acp-rail-more-btn';
+  moreBtn.setAttribute('aria-haspopup', 'menu');
+  moreBtn.setAttribute('aria-expanded', 'false');
+  moreBtn.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
+  moreBtn.title = 'More';
+  moreBtn.appendChild(RAIL_ICON.more());
+  var moreMenu = document.createElement('div');
+  moreMenu.className = 'acp-rail-menu acp-rail-action-menu';
+  moreMenu.setAttribute('role', 'menu');
+  moreMenu.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
+  moreMenu.hidden = true;
+  var copyIdItem = document.createElement('button');
+  copyIdItem.type = 'button';
+  copyIdItem.className = 'acp-rail-menu-item acp-rail-action-item';
+  copyIdItem.setAttribute('role', 'menuitem');
+  copyIdItem.appendChild(RAIL_ICON.copy());
+  var copyIdLabel = document.createElement('span');
+  copyIdLabel.textContent = 'Copy session id';
+  copyIdItem.appendChild(copyIdLabel);
+  copyIdItem.addEventListener('click', function(e){
+    e.stopPropagation();
+    _closeAllRailActionMenus();
+    dashCopySessionId(session.id);
+  });
+  moreMenu.appendChild(copyIdItem);
+  if (hasDeleteMenuItem) {
+    var deleteDivider = document.createElement('div');
+    deleteDivider.className = 'acp-rail-menu-divider';
+    moreMenu.appendChild(deleteDivider);
+    var delItem = document.createElement('button');
+    delItem.type = 'button';
+    delItem.className = 'acp-rail-menu-item acp-rail-action-item acp-rail-menu-danger';
+    delItem.setAttribute('role', 'menuitem');
+    delItem.appendChild(RAIL_ICON.trash());
+    var delLabel = document.createElement('span');
+    delLabel.textContent = 'Delete session';
+    delItem.appendChild(delLabel);
+    // A hint, not the gate -- `state` is read at fetch time and can be
+    // stale by the time it's clicked; the server re-checks held/locked on
+    // its own authority and refuses on its own terms either way.
+    if (state === 'held') {
+      delItem.disabled = true;
+      delItem.title = 'PowerAtlas has this session open. Close it in the transcript panel first.';
+    } else if (state === 'locked') {
+      delItem.disabled = true;
+      delItem.title = 'Another process is using this session.';
     }
-    if (hasDeleteMenuItem) {
-      if (hasPinMenuItem) {
-        var deleteDivider = document.createElement('div');
-        deleteDivider.className = 'acp-rail-menu-divider';
-        moreMenu.appendChild(deleteDivider);
-      }
-      var delItem = document.createElement('button');
-      delItem.type = 'button';
-      delItem.className = 'acp-rail-menu-item acp-rail-action-item acp-rail-menu-danger';
-      delItem.setAttribute('role', 'menuitem');
-      delItem.appendChild(RAIL_ICON.trash());
-      var delLabel = document.createElement('span');
-      delLabel.textContent = 'Delete session';
-      delItem.appendChild(delLabel);
-      // A hint, not the gate -- `state` is read at fetch time and can be
-      // stale by the time it's clicked; the server re-checks held/locked on
-      // its own authority and refuses on its own terms either way.
-      if (state === 'held') {
-        delItem.disabled = true;
-        delItem.title = 'PowerAtlas has this session open. Close it in the transcript panel first.';
-      } else if (state === 'locked') {
-        delItem.disabled = true;
-        delItem.title = 'Another process is using this session.';
-      }
-      delItem.addEventListener('click', function(e){
-        e.stopPropagation();
-        if (delItem.disabled) return;
-        _closeAllRailActionMenus();
-        dashDeleteSession(session);
-      });
-      moreMenu.appendChild(delItem);
-    }
-    _wireRailActionMenu(moreBtn, moreMenu);
-    actions.appendChild(moreBtn);
-    // Appended to `wrap`, not `actions`: `.acp-rail-menu-wrap` carries the
-    // same `transform: translateY(-50%)` centering trick
-    // `.acp-rail-group-actions` does above, which would misplace this
-    // `position: fixed` menu's viewport-relative coordinates. `wrap`
-    // (`.acp-rail-item`) has only `position: relative`, so it's a safe
-    // containing block for the menu while the trigger stays inside `actions`
-    // beside its sibling row buttons.
-    wrap.appendChild(moreMenu);
+    delItem.addEventListener('click', function(e){
+      e.stopPropagation();
+      if (delItem.disabled) return;
+      _closeAllRailActionMenus();
+      dashDeleteSession(session);
+    });
+    moreMenu.appendChild(delItem);
   }
+  _wireRailActionMenu(moreBtn, moreMenu);
+  actions.appendChild(moreBtn);
+  // Appended to `wrap`, not `actions`: `.acp-rail-menu-wrap` carries the
+  // same `transform: translateY(-50%)` centering trick
+  // `.acp-rail-group-actions` does above, which would misplace this
+  // `position: fixed` menu's viewport-relative coordinates. `wrap`
+  // (`.acp-rail-item`) has only `position: relative`, so it's a safe
+  // containing block for the menu while the trigger stays inside `actions`
+  // beside its sibling row buttons.
+  wrap.appendChild(moreMenu);
   wrap.appendChild(actions);
   return wrap;
+}
+
+// The clipboard API only exists in a secure context, and this page is served
+// over plain http -- only localhost makes that secure, a remote viewer does
+// not get it. The hidden-textarea execCommand path covers that case.
+function dashCopySessionId(sid){
+  var ok = function(){ showToast('<div class="toast toast-success">Session id copied<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>'); };
+  var fail = function(){ showToast('<div class="toast toast-error">Could not copy the session id<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>'); };
+  var fallback = function(){
+    var ta = document.createElement('textarea');
+    ta.value = sid;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    var copied = false;
+    try { copied = document.execCommand('copy'); } catch (e) {}
+    ta.remove();
+    (copied ? ok : fail)();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(sid).then(ok, fallback);
+  } else {
+    fallback();
+  }
 }
 
 // ---- group/day/status headers -----------------------------------------

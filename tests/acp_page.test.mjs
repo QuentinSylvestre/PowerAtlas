@@ -15814,11 +15814,25 @@ for (const available of [true, false]) {
   check(`ACP_AVAILABLE=${available}: a kiro-cli-v3 row's Delete session item ${want}`, () => {
     const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
     const { box } = runDashSentinel(slice, available);
-    // Pinned, so the only reason for a ⋯ menu to exist is the Delete item.
     const row = box.dashRailRowNode(
       { id: "s1", provider: "kiro-cli-v3", pinned: true, availability: "available" }, true, null);
     assertEqual(hasText(row, "Delete session"), available,
       `a kiro-cli-v3 row's Delete session item must ${available ? "exist" : "not exist"}`);
+  });
+
+  check(`ACP_AVAILABLE=${available}: every provider's row menu has Copy session id and no Pin session`, () => {
+    const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
+    const { box } = runDashSentinel(slice, available);
+    for (const provider of ["kiro-cli", "kiro-cli-v3", "claude-code", "kiro-ide", "codex", ""]) {
+      for (const pinned of [true, false]) {
+        const row = box.dashRailRowNode(
+          { id: "s1", provider, pinned, availability: "available" }, true, null);
+        assertEqual(hasText(row, "Copy session id"), true,
+          `a ${provider || "provider-less"} row (pinned=${pinned}) must offer Copy session id`);
+        assertEqual(hasText(row, "Pin session"), false,
+          `a ${provider || "provider-less"} row (pinned=${pinned}) must not offer Pin session in its menu`);
+      }
+    }
   });
 
   check(`ACP_AVAILABLE=${available}: a workspace's New kiro-cli v3 ACP session item ${want}`, () => {

@@ -1934,9 +1934,15 @@ body:has(> .acp-shell) { height: 100dvh; }
    title does not bleed under it when all buttons appear.
    /acp kebab (wrap 36px + right:4px = 40px): 44px covers rest and hover.
    Dashboard ghost (more-btn only at rest: 28px + right:4px = 32px): 36px at rest.
+   Dashboard ghost, pinned at rest (pin + more: 28 + 4 + 28 + right:4px =
+   64px): 68px, so the timestamp moves left of the amber pin rather than
+   sitting under it -- same as `.acp-rail-group-head`'s pinned padding does
+   for a project's "3 of 67" count. Declared before the hover rules, which
+   have equal specificity and must win on hover.
    Dashboard ghost on hover (3 buttons + right:4px = 96px): 100px. */
 .acp-rail-item .acp-rail-row { padding-right: 44px; }
 .acp-rail-item:has(.acp-rail-menu-wrap-ghost) .acp-rail-row { padding-right: 36px; }
+.acp-rail-item:has(.acp-rail-pin-btn.pinned) .acp-rail-row { padding-right: 68px; }
 .acp-rail-item:has(.acp-rail-menu-wrap-ghost):hover .acp-rail-row,
 .acp-rail-item:has(.acp-rail-menu-wrap-ghost):has(:focus-visible) .acp-rail-row,
 .acp-rail-item:has(.acp-rail-menu-wrap-ghost [aria-expanded="true"]) .acp-rail-row { padding-right: 100px; }
