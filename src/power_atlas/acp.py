@@ -13,8 +13,8 @@ wire method that unloads a session without deleting it (``session/delete``
 removes it from disk; see ``close_session``) — and the context-window
 telemetry that arrives alongside them.
 
-Isolation boundary — this module imports from exactly two other ``power_atlas``
-modules, three names in all: ``config.CONFIG_DIR``, to place the agent's
+Isolation boundary — this module imports from exactly three other
+``power_atlas`` modules, five names in all: ``config.CONFIG_DIR``, to place the agent's
 neutral cwd where every other PowerAtlas artifact lives;
 ``config.DERIVED_AGENT_NAME``, so the PowerAtlas-generated kiro-cli agent that
 ``_VALID_TASK_MODES`` accepts is named once in the package instead of copied
@@ -24,16 +24,22 @@ module that *writes* that agent, ``agent_profile``, is deliberately not
 imported); and ``launcher._SESSION_ID_RE``, so the guard in front of a
 client-supplied session id is the one the launch path already applies rather
 than a second copy free to drift from it. ``launcher`` imports one name from
-``config`` and nothing else. Two caches elsewhere in the
+``config`` and nothing else. The third is ``permission_rows.CARD_ROWS`` and
+``permission_rows.ROW_LABELS``, the rows a prompt card's "always" button can
+add to and their plain labels, shared with ``agent_profile`` rather than
+copied here (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL); ``permission_rows``
+is a leaf that imports nothing from the package. Two caches elsewhere in the
 package are plain unlocked ``OrderedDict``s, safe only because every current
 caller runs on the event loop — and this module now runs an OS reader thread
 that does not. Neither of the two modules holding them is imported here, and
-neither is reachable from importing ``config`` or ``launcher``: ``config``
+neither is reachable from importing ``config``, ``launcher`` or
+``permission_rows``: ``config``
 imports nothing from the package at module level. It does import at call time
 — ``agent_profile`` when a ``Config`` is built (its default rules) or loaded,
 and one of the two cache-holding modules inside ``load_config`` — but this
 module calls neither: it reads two constants from ``config`` and never loads
-a configuration. ``agent_profile`` in turn imports only ``config``. So the
+a configuration. ``agent_profile`` in turn imports only ``config`` and
+``permission_rows``. So the
 property is still held by the import graph rather than by discipline; it is
 just no longer stated as "imports nothing", and a test pins it (importing this
 module and building a ``Config`` loads neither cache-holding module;
@@ -104,6 +110,7 @@ except ImportError:
 
 from .config import CONFIG_DIR, DERIVED_AGENT_NAME
 from .launcher import _SESSION_ID_RE
+from .permission_rows import CARD_ROWS, ROW_LABELS
 
 log = logging.getLogger("power_atlas.acp")
 
@@ -1606,23 +1613,6 @@ def _as_text(value) -> str:
 _CONSENT_TEXT_FIELDS: Final[tuple[str, ...]] = (
     "capability", "resource", "triggeringResource", "scope", "source")
 
-# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-31: the rule rows a prompt
-# card's "Allow, and always in new sessions…" button can add to, with the
-# plain label the card shows. A mirror of `agent_profile.ROW_LABELS` (a test
-# pins it), kept here so this module does not import `agent_profile`. Left
-# out: `web_fetch` (P-0.5: `consent.resource` is the host, so a URL pattern
-# never matches; the button is hidden), and `web_search` and `power`, whose
-# prompt resource was never measured to match an allow pattern (P-0.9
-# covered `mcp`, `subagent` and `skill` only).
-_RULE_ROWS: Final[dict[str, str]] = {
-    "fs_read": "Read files",
-    "fs_write": "Write files",
-    "shell": "Run commands",
-    "mcp": "MCP tools",
-    "subagent": "Sub-agents",
-    "skill": "Skills",
-}
-
 # The fields of a `consent.matchedRule` object that are forwarded. Measured
 # shape is exactly these two (probe P4, 2026-09-21, and Phase 0 § 9's
 # per-capability table), but a rule in the permissions schema can also carry
@@ -1646,7 +1636,8 @@ def _rule_row(consent, bound_mode) -> str:
     * the matched rule is an ``ask`` with no ``match`` list — a row's catch-all
       ask (D-13). A Protected ask carries its folder patterns as ``match``
       (P-0.4), and a Protected prompt asks under any row;
-    * the capability names a row in `_RULE_ROWS` and the matched rule is that
+    * the capability names a row in `CARD_ROWS` (the rows a card can offer,
+      in the leaf module `permission_rows`) and the matched rule is that
       same row;
     * the session was bound to the derived agent. A vendor task mode runs its
       own agent, which these rules never reach.
@@ -1660,7 +1651,7 @@ def _rule_row(consent, bound_mode) -> str:
     if (consent.get("source") != "agent-profile"
             or rule.get("effect") != "ask"
             or not isinstance(capability, str)
-            or capability not in _RULE_ROWS
+            or capability not in CARD_ROWS
             or rule.get("capability") != capability):
         return ""
     return capability
@@ -2834,8 +2825,8 @@ def _get_tool_diffs_v3(session_id: str) -> "dict[str, dict]":
     """Extract fs_write / str_replace diffs from a v3 session's messages.jsonl.
 
     Returns {toolCallId: {"path": ..., "oldText": ..., "newText": ...}}.
-    Inlined in acp.py per the isolation boundary constraint (acp.py imports only
-    config.CONFIG_DIR and launcher._SESSION_ID_RE from the package).
+    Inlined in acp.py per the isolation boundary constraint (see the module
+    docstring for the few names acp.py imports from the package).
     """
     if not _SESSION_ID_RE.fullmatch(session_id):
         return {}
@@ -5429,7 +5420,7 @@ class _Supervisor:
             # requires a loopback viewer (D-9); the route refuses remote peers.
             "ruleEligible": bool(rule_row),
             "ruleRow": rule_row or None,
-            "ruleRowLabel": _RULE_ROWS.get(rule_row, ""),
+            "ruleRowLabel": ROW_LABELS.get(rule_row, ""),
             # Phase 3 review (M2): for a file row, the folder a relative
             # resource is relative to, so the card prefills an absolute path;
             # null otherwise.

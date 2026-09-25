@@ -11263,8 +11263,14 @@ check("rule button: absent on a remote page, an ineligible prompt, without allow
     ["no ruleEligible at all", ruleFrame(live, 612, shellConsent("echo x"), { ruleEligible: undefined })],
     ["no allow_once option", ruleFrame(live, 613, shellConsent("echo x"),
       { options: [{ optionId: "reject", name: "No", kind: "reject_once" }] })],
-    ["a web fetch prompt", ruleFrame(live, 614, fileConsent("web_fetch", "example.com"))],
+    // As the server sends it: `_rule_row` never marks web fetch eligible (P-0.5).
+    ["a web fetch prompt", ruleFrame(live, 614, fileConsent("web_fetch", "example.com"),
+      { ruleEligible: false, ruleRow: null, ruleRowLabel: "" })],
     ["an unknown row", ruleFrame(live, 615, shellConsent("echo x"), { ruleRow: "constructor" })],
+    // The label comes from the frame alone (permission_rows.ROW_LABELS, sent
+    // as `ruleRowLabel`); the page keeps no copy of it to fall back on.
+    ["no ruleRowLabel", ruleFrame(live, 616, shellConsent("echo x"), { ruleRowLabel: undefined })],
+    ["an empty ruleRowLabel", ruleFrame(live, 617, shellConsent("echo x"), { ruleRowLabel: "" })],
   ];
   for (const [label, frame] of cases) {
     page.deliver(frame);
@@ -11710,8 +11716,11 @@ check("dashboard: a prompt resolved while saving is not answered again", async (
 
 check("dashboard: no rule button on a web fetch prompt or with ACP_LOCAL false", () => {
   const d = loadDashCard(() => ({ body: {} }));
+  // Which rows a card offers is the server's call (permission_rows.CARD_ROWS
+  // via acp.py `_rule_row`, pinned in tests/test_web.py): a web fetch prompt
+  // arrives not eligible, with no row and no label, and the page follows it.
   const fetchRow = d.sandbox.addPermissionRequest(9, "sess-1", "example.com", RULE_OPTIONS,
-    fileConsent("web_fetch", "example.com"), { eligible: true, row: "web_fetch", label: "Web fetch" });
+    fileConsent("web_fetch", "example.com"), { eligible: false, row: null, label: "" });
   assertEqual(ruleButton(fetchRow), null, "the dashboard offered the button on a web fetch prompt");
   d.sandbox.ACP_LOCAL = false;
   const remote = d.sandbox.addPermissionRequest(10, "sess-1", "echo x", RULE_OPTIONS,

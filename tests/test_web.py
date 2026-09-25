@@ -22521,28 +22521,51 @@ class TestSupervisor:
         for shape in (None, "shell", ["shell"], 7, True):
             assert acp_mod._rule_row(shape, DERIVED_AGENT_NAME) == "", shape
 
-    def test_rule_rows_mirror_the_compilers_row_labels(self):
-        """`_RULE_ROWS` is a copy kept so acp.py does not import agent_profile;
-        this keeps it honest. Web fetch, web search and powers are left out."""
+    def test_card_rows_are_the_compilers_rows_less_three(self):
+        """One source (`permission_rows`) for the rows and labels that
+        `agent_profile` compiles and `acp` offers on a card. Web fetch, web
+        search and powers are left out of the card rows; every card row has a
+        label, and each module uses the leaf's objects, not copies."""
         from power_atlas import acp as acp_mod
         from power_atlas import agent_profile as ap
-        for row, label in acp_mod._RULE_ROWS.items():
-            assert ap.ROW_LABELS[row] == label, row
-        assert set(ap.PERMISSION_ROWS) - set(acp_mod._RULE_ROWS) == {
+        from power_atlas import permission_rows as pr
+        assert set(pr.PERMISSION_ROWS) - set(pr.CARD_ROWS) == {
             "web_fetch", "web_search", "power"}
+        assert set(pr.CARD_ROWS) <= set(pr.PERMISSION_ROWS)
+        assert list(pr.ROW_LABELS) == list(pr.PERMISSION_ROWS)
+        assert ap.ROW_LABELS is pr.ROW_LABELS
+        assert ap.PERMISSION_ROWS is pr.PERMISSION_ROWS
+        assert acp_mod.ROW_LABELS is pr.ROW_LABELS
+        assert acp_mod.CARD_ROWS is pr.CARD_ROWS
 
-    def test_the_renderers_rule_rows_match_the_servers(self):
-        """Phase 3 review (L6): the card's own row set and labels
-        (`PERMISSION_RULE_ROWS` in transcript-renderer.js) are a third copy;
-        a row the server marks eligible but the card does not know would hide
-        the button silently."""
-        from power_atlas import acp as acp_mod
-        src = (Path(acp_mod.__file__).parent / "static"
+    def test_the_renderers_capability_words_match_the_row_labels(self):
+        """Phase 3 review (L6), final review (EU8): the consent block's words
+        for a capability (`PERMISSION_CAPABILITY_WORDS` in
+        transcript-renderer.js) are the one client-side copy of the row
+        labels; the card's own rule label comes from the frame. They must
+        name every row exactly as the rule editor does, and the card's
+        eligibility check also keys on them, so a missing row would hide the
+        button silently."""
+        from power_atlas import permission_rows as pr
+        src = (Path(pr.__file__).parent / "static"
                / "transcript-renderer.js").read_text(encoding="utf-8")
-        block = re.search(r"var PERMISSION_RULE_ROWS = \{(.*?)\};", src,
+        block = re.search(r"var PERMISSION_CAPABILITY_WORDS = \{(.*?)\};", src,
                           re.S).group(1)
         rows = dict(re.findall(r"(\w+): '([^']*)'", block))
-        assert rows == acp_mod._RULE_ROWS
+        assert rows == pr.ROW_LABELS
+        assert "PERMISSION_RULE_ROWS" not in src
+
+    def test_the_frames_rule_label_is_the_row_label_for_every_card_row(self):
+        """The card shows `ruleRowLabel` as sent, so the frame must carry the
+        rule editor's name for each row a card can offer."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import permission_rows as pr
+        from power_atlas.config import DERIVED_AGENT_NAME
+        for row in pr.CARD_ROWS:
+            consent = {"capability": row, "source": "agent-profile",
+                       "matchedRule": {"capability": row, "effect": "ask"}}
+            assert acp_mod._rule_row(consent, DERIVED_AGENT_NAME) == row
+            assert acp_mod.ROW_LABELS.get(row, "") == pr.ROW_LABELS[row] != ""
 
     @pytest.mark.parametrize("consent, record, want", [
         ({"workspaceRoot": "C:\\ws\\proj\\"}, {"cwd": "C:\\other"}, "C:/ws/proj"),
@@ -25767,6 +25790,21 @@ class TestPermissionNoticesFinalReview:
         assert out.returncode == 0, out.stderr
         assert out.stdout.strip() == "", out.stdout
 
+    def test_permission_rows_is_a_leaf(self):
+        """`acp.py` imports `permission_rows`, so the isolation above holds
+        only while that module imports nothing from the package. Run in a
+        fresh interpreter for the same reason."""
+        import subprocess
+        import sys as _sys
+        code = ("import sys\n"
+                "import power_atlas.permission_rows\n"
+                "print(','.join(sorted(m for m in sys.modules "
+                "if m.startswith('power_atlas'))))\n")
+        out = subprocess.run([_sys.executable, "-c", code], capture_output=True,
+                             text=True, timeout=120)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "power_atlas,power_atlas.permission_rows"
+
 
 class TestPermissionNoticesCycle2:
     """260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review, cycle 2:
@@ -26688,7 +26726,7 @@ class TestAllowRuleRoute:
         "", None, 1, ["shell"]])
     def test_a_row_outside_the_rule_rows_is_refused(
             self, client, isolated_config, row):
-        """The rows a card can offer (`acp._RULE_ROWS`) only (Phase 3 review,
+        """The rows a card can offer (`permission_rows.CARD_ROWS`) only (Phase 3 review,
         L3): not Web fetch (P-0.5: the prompt names a host), and not Web search
         or Powers, which the card never offers."""
         resp = client.post(self.URL, json={"capability": row,

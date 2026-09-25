@@ -1819,14 +1819,17 @@ var PERMISSION_CONSENT_FIELDS = [
 // plain words for the identifiers a prompt most often carries, so a prompt
 // reads "Write or delete files (fs_write)" rather than a bare `fs_write`. The
 // capability names are the rows the permission compiler names
-// (`PERMISSION_ROWS` in src/power_atlas/agent_profile.py,
+// (`PERMISSION_ROWS` in src/power_atlas/permission_rows.py,
 // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-11); `agent-profile` is the source
 // measured in probe P4. Anything else falls back to the raw value. Looked up
 // with hasOwnProperty, because the value is agent-authored and "constructor"
 // or "__proto__" must not resolve to something on Object.prototype.
 // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (EU8, A5): the
-// rule editor's row names (`ROW_LABELS`), so the card and the editor call a
-// row by one name. `agent-profile` is the derived agent's own rules, which
+// rule editor's row names (`ROW_LABELS` in src/power_atlas/permission_rows.py),
+// so the card and the editor call a row by one name. The one client-side copy
+// of them, kept because the consent block names two capabilities
+// (`capability` and `matchedRule.capability`) that no frame field labels;
+// tests/test_web.py pins it to `ROW_LABELS`. `agent-profile` is the derived agent's own rules, which
 // only ask in Manual.
 var PERMISSION_CAPABILITY_WORDS = {
   fs_read: 'Read files',
@@ -1913,19 +1916,6 @@ function permissionConsentBlock(consent) {
 // pattern to that row's "Allow without asking" list and answer this prompt
 // with its `allow_once` option. The rule reaches new sessions only: kiro-cli
 // reads the agent file when a session starts (probe P-C).
-
-// The rows the button can add to, with their plain labels (the rule editor's
-// words, agent_profile.ROW_LABELS), used when the frame carries no label. The
-// same set as acp.py `_RULE_ROWS`: no Web fetch (P-0.5, the prompt names a
-// host), Web search or Powers (never measured to match, P-0.9).
-var PERMISSION_RULE_ROWS = {
-  fs_read: 'Read files',
-  fs_write: 'Write files',
-  shell: 'Run commands',
-  mcp: 'MCP tools',
-  subagent: 'Sub-agents',
-  skill: 'Skills',
-};
 
 // D-20's list, by what allowing it amounts to. Compared lower-case, after
 // dropping a folder, a trailing `.exe`, `*`s and quotes from each word. Shared
@@ -2131,13 +2121,17 @@ function permissionRuleWarnings(row, pattern, root) {
 }
 
 /** Whether a card may offer the button: a loopback page (D-9; the route
- *  refuses remote peers anyway), and a frame the server marked eligible for
- *  a row this button can add to. */
+ *  refuses remote peers anyway), and a frame the server marked eligible, with
+ *  the row and its label. Which rows a card can offer is the server's call
+ *  alone (permission_rows.CARD_ROWS, via acp.py `_rule_row`); the page only
+ *  refuses a row that is not a permission row at all, since `row` goes on to
+ *  pick the prefill, the warnings and the request body. */
 function permissionRuleOffered(rule) {
   return typeof window !== 'undefined' && window.ACP_LOCAL === true
     && !!rule && typeof rule === 'object' && rule.eligible === true
     && typeof rule.row === 'string'
-    && Object.prototype.hasOwnProperty.call(PERMISSION_RULE_ROWS, rule.row);
+    && Object.prototype.hasOwnProperty.call(PERMISSION_CAPABILITY_WORDS, rule.row)
+    && typeof rule.label === 'string' && rule.label !== '';
 }
 
 // Numbers the inline fields, so each label's `for` names exactly one field.
@@ -2155,8 +2149,9 @@ var _permissionRuleSeq = 0;
  *  answered again, and the card says the rule was still saved. */
 function addPermissionRuleButton(ctx) {
   var ruleRow = ctx.rule.row;
-  var label = (typeof ctx.rule.label === 'string' && ctx.rule.label)
-    ? ctx.rule.label : PERMISSION_RULE_ROWS[ruleRow];
+  // The server's words for the row (`ruleRowLabel`, permission_rows.ROW_LABELS);
+  // permissionRuleOffered has already required a non-empty one.
+  var label = ctx.rule.label;
   var root = (typeof ctx.rule.root === 'string') ? ctx.rule.root : '';
   var consent = (ctx.consent && typeof ctx.consent === 'object') ? ctx.consent : {};
   var resource = typeof consent.resource === 'string' ? consent.resource : '';

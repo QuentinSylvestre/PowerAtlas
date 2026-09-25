@@ -46,6 +46,7 @@ from .config import (load_config, save_config, ConfigUnreadableError,
                      local_secret_status, rotate_local_secret,
                      ACP_PERMISSION_MODES)
 from . import agent_profile, autostart, data, icons, launcher, notifications, presence
+from . import permission_rows
 from .status_classifier import get_semantic_status, SemanticStatus
 
 # `acp` is throwaway prototype code and is imported under a guard, unlike every
@@ -4538,13 +4539,11 @@ async def set_acp_permissions(request: Request):
 # remote peer gets a 403; a POST also needs the `pa_local` cookie and a
 # same-origin Origin or Referer, like every loopback write.
 #
-# Accepted only for the rows a card can offer, `acp._RULE_ROWS` (Phase 3
-# review, L3): not `web_fetch` (P-0.5: the prompt names a host, and a pattern
-# added from it would be mistaken for a URL), `web_search` or `power` (never
-# measured to match). Refused too for a row whose default is Allow — its allow
-# list is not compiled (D-13), so the pattern would silence nothing.
-def _allow_rule_rows() -> dict:
-    return getattr(acp, "_RULE_ROWS", None) or {}
+# Accepted only for the rows a card can offer, `permission_rows.CARD_ROWS`
+# (Phase 3 review, L3): not `web_fetch` (P-0.5: the prompt names a host, and a
+# pattern added from it would be mistaken for a URL), `web_search` or `power`
+# (never measured to match). Refused too for a row whose default is Allow — its
+# allow list is not compiled (D-13), so the pattern would silence nothing.
 
 
 def _allow_rule_refusal(rules: dict, row: str, pattern: str) -> str:
@@ -4578,7 +4577,7 @@ async def add_acp_allow_rule(request: Request):
     row = body.get("capability")
     pattern = body.get("pattern")
     if (not isinstance(row, str) or row not in agent_profile.PERMISSION_ROWS
-            or row not in _allow_rule_rows()):
+            or row not in permission_rows.CARD_ROWS):
         return {"ok": False,
                 "error": "This kind of action cannot take a rule from a prompt."}
     reason = (agent_profile.pattern_error(pattern, new=True)

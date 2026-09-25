@@ -90,6 +90,7 @@ from pathlib import Path
 
 from .config import (DERIVED_AGENT_NAME, load_config, parse_permission_mode,
                      save_config, save_permission_migration)
+from .permission_rows import PERMISSION_ROWS, ROW_LABELS
 
 log = logging.getLogger(__name__)
 
@@ -488,21 +489,10 @@ def acknowledge_notice(kind: str) -> bool:
 #
 #   * `fs_write` rules govern the file-writing tools only: a shell redirection
 #     writes any path unchecked (P-0.8, F-6).
-
-PERMISSION_ROWS = ("fs_read", "fs_write", "shell", "web_fetch", "web_search",
-                   "mcp", "subagent", "skill", "power")
-
-ROW_LABELS = {
-    "fs_read": "Read files",
-    "fs_write": "Write files",
-    "shell": "Run commands",
-    "web_fetch": "Web fetch",
-    "web_search": "Web search",
-    "mcp": "MCP tools",
-    "subagent": "Sub-agents",
-    "skill": "Skills",
-    "power": "Powers",
-}
+#
+# The rows and their labels (`PERMISSION_ROWS`, `ROW_LABELS`) live in the leaf
+# module `permission_rows`, imported above, so `acp` can share them without
+# importing this module.
 
 ROW_DEFAULTS = ("allow", "ask", "block")
 
