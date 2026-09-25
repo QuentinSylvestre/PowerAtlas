@@ -11,13 +11,20 @@
     <h2 id="acpRulesTitle">Manual rules</h2>
     <button type="button" class="modal-close" onclick="closeAcpRulesEditor()" aria-label="Close">&times;</button>
   </div>
-  <p id="acpRulesIntro" class="acp-rules-intro">These rules apply when the permission mode is Manual. For each kind of action, choose what happens when no pattern matches, then list the exceptions. The Always blocked list and the Protected items below apply on top of them.</p>
+  <p id="acpRulesIntro" class="acp-rules-intro">These rules apply when the permission mode is Manual. For each kind of action, choose what happens when no pattern matches, then list the exceptions. A pattern under Always block wins over one under Allow without asking. The Always blocked list and the Protected items below apply on top of both.</p>
   <div id="acpRulesModeNote" class="acp-rules-note topbar-menu-warn" role="status" hidden></div>
   <div id="acpRulesBody" class="acp-rules-body"></div>
-  <div id="acpRulesError" class="acp-rules-error" role="alert" hidden></div>
+  <div id="acpRulesError" class="acp-rules-error" role="alert" tabindex="-1" hidden></div>
+  <!-- Phase 2 review, U1: asked in the dialog, not with window.confirm, when
+       Esc, the close button or Cancel would drop unsaved changes. -->
+  <div id="acpRulesDiscard" class="acp-rules-discard" role="alert" hidden>
+    <span class="acp-rules-discard-text">Discard your changes?</span>
+    <button type="button" id="acpRulesDiscardYes" class="modal-cancel-btn" onclick="acpRulesDiscard()">Discard</button>
+    <button type="button" id="acpRulesDiscardKeep" class="btn-primary" onclick="acpRulesKeepEditing()">Keep editing</button>
+  </div>
   <div class="acp-rules-footer">
     <span class="acp-rules-footnote">Applies to sessions created afterwards.</span>
     <button type="button" class="modal-cancel-btn" onclick="closeAcpRulesEditor()">Cancel</button>
-    <button type="button" id="acpRulesSave" class="btn-primary" onclick="saveAcpRules()">Save</button>
+    <button type="button" id="acpRulesSave" class="btn-primary" aria-disabled="false" onclick="saveAcpRules()">Save</button>
   </div>
 </dialog>

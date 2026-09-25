@@ -415,7 +415,7 @@ sessions keep their own posture.
   `git diff`, `git branch`, `pwd`, `whoami` and `uname`. Everything else asks: other shell commands,
   file writes, reads outside the session's folder, web fetches and searches, MCP tools, sub-agents,
   skills and powers. `git` commands carrying `--output`, `--no-index` or `--ext-diff` are refused.
-  Writes to **Protected** items — agent definitions, steering files, skills and hooks under `.kiro`
+  Writes to **Protected** items — agent definitions, steering files, skill files and hooks under `.kiro`
   — always ask. A configuration migrated from the old on setting also keeps its old rule that
   refuses writes to `**/.kiro/agents/**` outright. Sub-agents run under the parent session's rules
   (measured 2026-09-24). Nothing asks when a session starts.
@@ -427,19 +427,26 @@ commands, Web fetch, Web search, MCP tools, Sub-agents, Skills and Powers. Each 
 anything no pattern matches — **Allow** (run without asking), **Ask** (show a permission prompt) or
 **Block** (refuse without asking) — and two pattern lists: **Allow without asking** (not shown when the
 default is Allow, since everything already runs) and **Always block**, which wins over everything else
-in the row. `./**` is shown as "the session folder". Patterns are file globs for the two file rows,
+in the row, including the same pattern under Allow without asking. The Always blocked list and the
+Protected items apply on top of both lists. `./**` is shown as "the session folder". Patterns are file globs for the two file rows,
 exact commands for Run commands (see the limits below; `/` and `\` are different characters, and
 patterns are not mirrored for you), site host names such as `example.com` for Web fetch (not full
 addresses), `server/tool` for MCP tools, and names for sub-agents, skills and powers, as the
-permission prompt shows them. The editor warns, without refusing, when a command pattern allows an
-interpreter or shell such as `python`, `node`, `pwsh`, `cmd` or `bash` (equivalent to allowing
-everything), a deleting or downloading command such as `rm` or `curl`, or any `*` (which also allows
-output redirection); and when a Write files pattern covers the whole session folder, a drive root or
-the home folder. Save checks every row and pattern and refuses the whole save, naming the row and the
-pattern, when one is not usable: a pattern must be 1-200 printable characters and not a bare `*`,
-`**` or anything else made only of `*`, `/` and `\`, and a list holds at most 100 patterns.
+permission prompt shows them. The editor warns, without refusing, when a command pattern names an
+interpreter or shell such as `python`, `node`, `pwsh`, `cmd` or `bash` anywhere (equivalent to
+allowing everything), starts with a deleting or downloading command such as `rm` or `curl`, or holds
+any `*` (which also allows output redirection); when Write files is set to Allow, or a Write files
+pattern covers the whole session folder, a drive root or the home folder; when a Web fetch pattern is
+typed as an address (`https://example.com/x` never matches; use `example.com`); and when a pattern is
+in both lists of a row. Save checks every row and pattern and refuses the whole save when one is not
+usable: a pattern must be 1-200 printable characters, must not match everything (a bare `*` or `**`,
+or anything else with no literal character besides `*`, `?`, `/`, `\`, `.`, `:` and spaces, such as
+`*.*` or `?:/**`; `./**` names the session folder and is fine), and a list holds at most 100
+patterns. The refused pattern is marked in its row with the reason. Closing the editor with unsaved
+changes asks whether to discard them. The editor does not open while a stored Always block list in
+`config.toml` is not a list, since saving from it would drop that list; fix the file first.
 
-The editor also shows the **Protected** items (agent definitions, steering files, skills and hooks
+The editor also shows the **Protected** items (agent definitions, steering files, skill files and hooks
 in any `.kiro` folder), each with a **Block outright** switch that
 turns its always-ask into a refusal, and, per item, the links inside it that point elsewhere and are
 therefore not covered, with their targets. The Always blocked list is shown read-only. A saved change

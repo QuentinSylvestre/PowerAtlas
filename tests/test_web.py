@@ -80,6 +80,7 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_profile_mod, "_status",
                         agent_profile_mod.GenerationStatus())
     monkeypatch.setattr(agent_profile_mod, "_posture_notice", None)
+    monkeypatch.setattr(agent_profile_mod, "_saved_fingerprint", "")
     # Once-per-process log sets (Phase 1 review, findings 7 and 8), reset so
     # a "logged once" test does not depend on test order.
     monkeypatch.setattr(agent_profile_mod, "_rule_problems_logged", set())
@@ -25359,6 +25360,193 @@ class TestAcpPermissionRoutes:
         rules["shell"]["allow"].append("npm test")
         client.post("/api/acp-permissions", json={"rules": rules})
         assert ap.posture_notice() is None
+
+    # ---- Phase 2 review fixes -------------------------------------------
+
+    @staticmethod
+    def _stored_rules(client) -> dict:
+        return client.get("/api/acp-permissions").json()["rules"]
+
+    def test_a_rules_save_over_an_outside_mode_change_raises_the_notice(
+            self, client, isolated_config):
+        """S1: config.toml hand-set to Yolo, not yet healed; a rules-only save
+        adopts it, so it must say so rather than regenerate silently."""
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        path = isolated_config / "config.toml"
+        text = path.read_text(encoding="utf-8")
+        assert 'acp_permission_mode = "manual"' in text
+        path.write_text(text.replace('acp_permission_mode = "manual"',
+                                     'acp_permission_mode = "yolo"'),
+                        encoding="utf-8")
+        assert ap.posture_notice() is None
+        rules = self._stored_rules(client)
+        rules["web_fetch"]["allow"].append("example.com")
+        resp = client.post("/api/acp-permissions", json={"rules": rules}).json()
+        assert resp["ok"] is True
+        notice = ap.posture_notice()
+        assert notice is not None and notice["mode"] == "yolo"
+        assert resp["posture_notice"] == notice
+
+    def test_a_rules_save_over_an_outside_rule_change_raises_the_notice(
+            self, client, isolated_config):
+        """S1: an interpreter added to shell.allow in config.toml, then an
+        editor save of another row: the save widens nothing itself, but it
+        puts the outside change in force."""
+        from power_atlas import config as config_mod
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        config = config_mod.load_config()
+        config.acp_permission_rules["shell"]["allow"].append("python *")
+        config_mod.save_config(config)
+        rules = self._stored_rules(client)
+        assert "python *" in rules["shell"]["allow"]
+        rules["mcp"]["allow"].append("s/t")
+        assert client.post("/api/acp-permissions",
+                           json={"rules": rules}).json()["ok"] is True
+        notice = ap.posture_notice()
+        assert notice is not None and notice["mode"] == "manual"
+        assert '"python *"' in ap.derived_agent_path().read_text(encoding="utf-8")
+
+    def test_a_base_agent_rename_over_an_outside_change_raises_the_notice(
+            self, client, isolated_config):
+        """S1: the base-agent route runs through the same save."""
+        from power_atlas import config as config_mod
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        config = config_mod.load_config()
+        config.acp_permission_mode = "yolo"
+        config_mod.save_config(config)
+        resp = client.post("/api/save-setting",
+                           json={"key": "acp_permission_base_agent",
+                                 "value": "other"}).json()
+        assert resp["ok"] is True
+        assert ap.posture_notice()["mode"] == "yolo"
+
+    def test_the_dashboards_own_unapplied_change_raises_no_notice(
+            self, client, isolated_config, monkeypatch):
+        """S1: a save whose generation failed leaves the file behind the
+        config; the next dashboard save starts from the dashboard's own
+        settings, which is not an outside change."""
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        real = ap._generate
+
+        def fail(status, config):
+            raise ap.AgentProfileError("disk full")
+
+        monkeypatch.setattr(ap, "_generate", fail)
+        rules = self._stored_rules(client)
+        rules["mcp"]["allow"].append("s/t")
+        resp = client.post("/api/acp-permissions", json={"rules": rules}).json()
+        assert resp["ok"] is True and "disk full" in resp["warning"]
+        monkeypatch.setattr(ap, "_generate", real)
+        rules["mcp"]["allow"].append("s/u")
+        client.post("/api/acp-permissions", json={"rules": rules})
+        assert ap.posture_notice() is None
+        # A mode chosen here clears a notice as before.
+        ap._record_notice("yolo", "test")
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        assert ap.posture_notice() is None
+
+    def test_the_state_names_a_stored_block_list_that_is_not_a_list(
+            self, client, isolated_config):
+        """S2: the editor cannot show it, so the GET says which row it is in."""
+        _write_config(isolated_config,
+                      'acp_permission_mode = "manual"\n'
+                      '[acp_permission_rules.shell]\n'
+                      'default = "ask"\n'
+                      'block = "git push"\n')
+        body = client.get("/api/acp-permissions").json()
+        assert body["rules"]["shell"]["block"] == "git push"
+        assert list(body["rule_problems"]) == ["shell"]
+        assert "not a list" in body["rule_problems"]["shell"][0]
+        assert "not a list" in body["rules_warning"]
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        clean = client.get("/api/acp-permissions").json()
+        assert clean["rule_problems"] == {}
+
+    @pytest.mark.parametrize("change, named", [
+        (lambda r: r["mcp"].pop("block"), "MCP tools (mcp): the block list is missing"),
+        (lambda r: r["mcp"].pop("allow"), "MCP tools (mcp): the allow list is missing"),
+        (lambda r: r["mcp"].pop("default"), "MCP tools (mcp): the default is missing"),
+        (lambda r: r.pop("protected_block"), "protected_block is missing"),
+    ])
+    def test_a_rule_set_missing_a_key_is_refused(
+            self, client, isolated_config, change, named):
+        """S3: nothing is filled in on the save path."""
+        ap = _agent_profile()
+        rules = copy.deepcopy(ap.SEED_RULES)
+        change(rules)
+        resp = client.post("/api/acp-permissions", json={"rules": rules}).json()
+        assert resp["ok"] is False and named in resp["error"], resp
+        assert not (isolated_config / "config.toml").exists()
+
+    @pytest.mark.parametrize("pattern", ["?*", "* *", "*.*", "?:/**", "**/?*",
+                                         "*:/**", " ** "])
+    def test_patterns_that_match_everything_are_refused(
+            self, client, isolated_config, pattern):
+        """S4: no literal character but wildcards, separators, `.`, `:` and
+        spaces: every path, host or command."""
+        ap = _agent_profile()
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["fs_write"]["allow"].append(pattern)
+        resp = client.post("/api/acp-permissions", json={"rules": rules}).json()
+        assert resp["ok"] is False and "matches everything" in resp["error"]
+        assert resp["detail"]["pattern"] == pattern
+
+    def test_folder_scoped_patterns_are_not_match_all(self, client, isolated_config):
+        """S4: `./**` is the seed's session folder; `../x/**` names a folder."""
+        ap = _agent_profile()
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["fs_write"]["allow"] = ["./**", "../shared/**", ".\\out\\**", "*.com"]
+        resp = client.post("/api/acp-permissions", json={"rules": rules}).json()
+        assert resp["ok"] is True, resp
+        assert ap.normalise_rules({})["fs_read"]["allow"] == ["./**"]
+
+    def test_a_refusal_carries_the_row_list_and_pattern_in_the_editors_words(
+            self, client, isolated_config):
+        """U2: `detail` names what the editor marks; its message uses the
+        editor's labels and describes the character instead of a code point.
+        `error` keeps the API's wording."""
+        ap = _agent_profile()
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["shell"]["block"].append("rm\tx")
+        resp = client.post("/api/acp-permissions", json={"rules": rules}).json()
+        assert resp["ok"] is False
+        assert "Run commands (shell)" in resp["error"] and "U+0009" in resp["error"]
+        detail = resp["detail"]
+        assert (detail["row"], detail["list"], detail["pattern"]) == ("shell", "block", "rm\tx")
+        assert detail["message"].startswith("Run commands, Always block: ")
+        assert "an invisible tab character" in detail["message"]
+        assert "U+" not in detail["message"]
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["web_fetch"]["default"] = "sometimes"
+        detail = client.post("/api/acp-permissions",
+                             json={"rules": rules}).json()["detail"]
+        assert (detail["row"], detail["list"], detail["pattern"]) == ("web_fetch", None, None)
+        assert detail["message"].startswith("Web fetch: choose Allow, Ask or Block")
+        # A lone surrogate cannot be UTF-8 encoded; the answer escapes it, so
+        # the editor gets back the same string it sent.
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["fs_read"]["allow"].append("a\ud800b")
+        resp = client.post("/api/acp-permissions", content=json.dumps({"rules": rules}),
+                           headers={"content-type": "application/json"}).json()
+        assert resp["detail"]["pattern"] == "a\ud800b"
+        assert "a broken character" in resp["detail"]["message"]
+        # A fault in no row carries no row.
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["protected_block"] = ["nope"]
+        detail = client.post("/api/acp-permissions",
+                             json={"rules": rules}).json()["detail"]
+        assert detail["row"] is None
+
+    def test_the_protected_skills_item_is_named_skill_files(self, client, isolated_config):
+        """U11: not "Skills", which is also the name of a row."""
+        body = client.get("/api/acp-permissions").json()
+        labels = {row["id"]: row["label"] for row in body["protected"]}
+        assert labels["skills"] == "Skill files"
+        assert {r["id"]: r["label"] for r in body["rule_rows"]}["skill"] == "Skills"
 
 
 class TestGenerationRunsAtStartup:

@@ -171,6 +171,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .acp-perm-details > summary { cursor: pointer; color: var(--text); padding: 2px 0; }
 .acp-perm-details > .topbar-menu-note { padding-left: 0; }
 .acp-perm-summary-hint { color: var(--text-muted); }
+.acp-perm-summary-hint.acp-perm-summary-warn { color: var(--amber); }  /* U13's linked-item count */
 .acp-perm-list { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
 .acp-perm-item { line-height: 1.4; }
 .acp-perm-item-label { font-weight: 600; }
@@ -197,7 +198,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .acp-rules-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 2px 1px 8px; font-size: 11.5px; max-width: 100%; }
 .acp-rules-chip-text { font-family: var(--mono, ui-monospace, monospace); overflow-wrap: anywhere; }
 .acp-rules-list-block .acp-rules-chip { border-color: rgba(248,113,113,0.5); }
-.acp-rules-chip-remove { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 5px; border-radius: 999px; }
+/* The pattern a refused save named (U2). */
+.acp-rules-chip.acp-rules-chip-bad { border: 2px solid #f87171; background: rgba(248,113,113,0.12); }
+/* 24x24 px, the WCAG 2.2 minimum target size (Phase 2 review, U9). */
+.acp-rules-chip-remove { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; min-height: 24px; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0; border-radius: 999px; }
 .acp-rules-chip-remove:hover, .acp-rules-chip-remove:focus-visible { color: var(--text); background: rgba(148,163,184,0.2); }
 .acp-rules-empty { font-size: 11.5px; color: var(--text-muted); }
 .acp-rules-add-row { display: flex; gap: 6px; align-items: center; }
@@ -208,6 +212,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .acp-rules-protected-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .acp-rules-protected-name { font-weight: 600; }
 .acp-rules-protected-hint { color: var(--text-muted); }
+.acp-rules-protected-action { color: var(--text-muted); }
+.acp-rules-row-error { font-size: 12px; }
+.acp-rules-discard { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding: 8px 10px; border: 1px solid var(--amber); border-radius: var(--radius-sm); font-size: 12px; }
+.acp-rules-discard[hidden] { display: none; }
+.acp-rules-discard-text { flex: 1; font-weight: 600; }
+/* Busy while saving, but still focusable, so the focus is not dropped (U4). */
+.acp-rules-footer .btn-primary[aria-disabled="true"] { opacity: 0.6; cursor: progress; }
 .acp-rules-error { margin-top: 8px; font-size: 12px; color: #f87171; overflow-wrap: anywhere; }
 .acp-rules-footer { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .acp-rules-footnote { flex: 1; font-size: 11.5px; color: var(--text-muted); }
@@ -748,7 +759,9 @@ script { display: none; }
 .color-picker-field { margin-bottom: 10px; }
 
 /* Profile modal */
-.profile-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 20px; max-width: 480px; width: 90vw; }
+/* `margin: auto` restores the native <dialog> centring that `* { margin: 0 }`
+   removes (Phase 2 review, U8); every modal sharing this class is centred. */
+.profile-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 20px; max-width: 480px; width: 90vw; margin: auto; }
 .profile-modal::backdrop { background: rgba(0,0,0,0.5); }
 .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .modal-header h2 { font-size: 15px; margin: 0; }

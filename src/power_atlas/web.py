@@ -4345,6 +4345,11 @@ def _acp_permission_state(config) -> dict:
         "rules": agent_profile.normalise_rules(config.acp_permission_rules),
         "rule_rows": [{"id": row, "label": agent_profile.ROW_LABELS[row]}
                       for row in agent_profile.PERMISSION_ROWS],
+        # Phase 2 review, S2: per row, what loading could not use as stored.
+        # The editor refuses to open on a row whose block list is not a list,
+        # since a save from it would drop that list.
+        "rule_problems": agent_profile.rule_problems_by_row(
+            config.acp_permission_rules),
     }
 
 
@@ -4426,7 +4431,21 @@ async def set_acp_permissions(request: Request):
         try:
             rules = agent_profile.validate_rules(body.get("rules"))
         except agent_profile.AgentProfileError as exc:
-            return {"ok": False, "error": f"The rules were not saved: {exc}."}
+            answer = {"ok": False, "error": f"The rules were not saved: {exc}."}
+            # Phase 2 review, U2: `{row, list, pattern, message}`, so the
+            # editor can mark the offending chip and explain it in its own
+            # words. `error` stays the API's summary.
+            if exc.detail:
+                answer["detail"] = exc.detail
+                # ASCII-escaped: `pattern` is the text the browser sent, and
+                # a lone surrogate in it (refused for exactly that) cannot be
+                # encoded as UTF-8. As a `\ud800` escape it reaches the
+                # editor as the same string, so the chip still matches.
+                import json as json_mod
+                from fastapi.responses import Response
+                return Response(json_mod.dumps(answer, ensure_ascii=True),
+                                media_type="application/json")
+            return answer
 
     def mutate(config) -> None:
         # The instance `load_config` returned inside the lock, so unknown

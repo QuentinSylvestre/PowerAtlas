@@ -139,7 +139,7 @@
         <div id="acpPermFloorList" class="acp-perm-list"></div>
       </details>
       <details id="acpPermProtected" class="acp-perm-details topbar-menu-keep">
-        <summary>Protected <span class="acp-perm-summary-hint">(Manual)</span></summary>
+        <summary>Protected <span class="acp-perm-summary-hint">(Manual)</span> <span id="acpPermProtectedCount" class="acp-perm-summary-hint acp-perm-summary-warn" hidden></span></summary>
         <div class="topbar-menu-note">In Manual, file-tool writes to these always ask, even when writing files is allowed. A link inside one of these folders that points elsewhere is not covered, in a project's own .kiro folder too.</div>
         <div id="acpPermProtectedList" class="acp-perm-list"></div>
       </details>
@@ -7613,6 +7613,19 @@ function _acpPermRenderProtected(rows, links) {
   var host = document.getElementById('acpPermProtectedList');
   if (!host || !Array.isArray(rows)) return;
   host.textContent = '';
+  // Phase 2 review, U13: the total on the collapsed summary, so the gap is
+  // visible without opening it.
+  var total = 0;
+  rows.forEach(function (row) {
+    var found = row && links && typeof links === 'object' ? links[row.id] : null;
+    if (found && typeof found.count === 'number' && found.count > 0) total += found.count;
+  });
+  var countEl = document.getElementById('acpPermProtectedCount');
+  if (countEl) {
+    countEl.hidden = total === 0;
+    countEl.textContent = total === 0 ? '' : '(' + total
+      + (total === 1 ? ' linked item' : ' linked items') + ' not covered)';
+  }
   rows.forEach(function (row) {
     if (!row || typeof row !== 'object') return;
     var item = _acpPermEl('div', 'acp-perm-item');
@@ -7818,18 +7831,32 @@ function _acpPermRestoreBase(input) {
 // permission state in the background, and that must never repaint rows the
 // user is halfway through editing. Save sends the whole rule set; the server
 // checks every row and pattern and refuses the save with the first fault
-// (D-14), which is shown inline while the dialog stays open.
+// (D-14). Its `detail` names the row, list and pattern, so the chip is marked
+// and the reason shown on its row as well as in the footer (Phase 2 review,
+// U2). Closing with unsaved changes asks first, inside the dialog (U1).
 //
-// Warnings are advice, never refusals: an interpreter or shell as the first
-// word of a command pattern (D-20, D-35), any `*` in a command pattern (D-38e)
-// and a Write files pattern that covers the session folder, a drive root or
-// the home folder.
+// Warnings are advice, never refusals: an interpreter or shell anywhere in a
+// command pattern (D-20, D-35; U5 of the review), any `*` in a command pattern
+// (D-38e), Write files set to Allow or covering the session folder, a drive
+// root or the home folder, a Web fetch pattern typed as a web address (D-38d),
+// and a pattern in both lists of a row (D-13: Always block wins).
 
 var _acpRulesDraft = null;
 var _acpRulesState = null;
 var _acpRulesSaving = false;
-// Row id -> the element its controls are drawn into, so one row can be
-// redrawn without touching the others (or the focus in them).
+// The draft as it was opened, for the unsaved-changes check (U1).
+var _acpRulesLoaded = '';
+// Set once Discard, Save or a clean close lets the dialog close for good.
+var _acpRulesDiscardOk = false;
+var _acpRulesWired = false;
+// What the focus returns to on close (U5): the settings gear, since the menu
+// holding "Edit rules…" is hidden before the dialog opens.
+var _acpRulesOpener = null;
+// The row, list and pattern the server last refused, marked until that row
+// is edited (U2).
+var _acpRulesBad = null;
+// Row id -> {host, content, live, said, badChip}. `content` is redrawn on
+// every change; `live` is the row's one persistent status region (U12).
 var _acpRulesRowHosts = {};
 
 var _ACP_RULES_SESSION_FOLDER = './**';
@@ -7861,11 +7888,23 @@ var _ACP_RULES_HELP = {
   power: ['Power names, as the permission prompt shows them.', 'power name'],
 };
 // D-20's list, by what allowing it amounts to. Compared lower-case, after
-// dropping a folder, a trailing `.exe` and trailing `*`s from the first word.
+// dropping a folder, a trailing `.exe`, `*`s and quotes from each word.
 var _ACP_RULES_INTERPRETERS = ['py', 'node', 'powershell', 'pwsh', 'cmd',
   'bash', 'sh', 'iex', 'invoke-expression'];
 var _ACP_RULES_DELETERS = ['rm', 'del', 'remove-item', 'rmdir', 'rd'];
 var _ACP_RULES_DOWNLOADERS = ['curl', 'iwr', 'invoke-webrequest'];
+// D-14's character check, in the words the server's refusal uses (U7).
+var _ACP_RULES_CHAR_WORDS = {
+  '\t': 'an invisible tab character',
+  '\n': 'a line break',
+  '\r': 'a line break',
+  '\u007f': 'an invisible delete character',
+  '\u00a0': 'a non-breaking space',
+  '\u200b': 'an invisible zero-width space',
+  '\u2028': 'a line separator',
+  '\u2029': 'a paragraph separator',
+  '\ufeff': 'an invisible byte-order mark',
+};
 
 /** How a pattern is shown: `./**` is "the session folder" (D-11). */
 function _acpRulesDisplay(pattern) {
@@ -7881,26 +7920,47 @@ function _acpRulesLabel(row) {
   return row;
 }
 
-/** The first word of a command pattern, as D-20's list names programs. */
-function _acpRulesFirstWord(pattern) {
-  var word = String(pattern).trim().split(/\s+/)[0] || '';
-  word = word.replace(/^["']+|["']+$/g, '');
-  word = word.split(/[\\/]/).pop().toLowerCase();
-  word = word.replace(/\*+$/, '').replace(/\.exe$/, '');
-  return word;
+/** The words of a command pattern, as D-20's list names programs: split on
+ *  spaces and command separators, without `*`s, quotes, a folder or `.exe`,
+ *  so `*python*`, `& python x` and `C:/Tools/PWSH.exe` are all found. */
+function _acpRulesWords(pattern) {
+  return String(pattern).split(/[\s;|&()]+/).map(function (w) {
+    w = w.replace(/[*"'`]/g, '');
+    w = w.split(/[\\/]/).pop().toLowerCase();
+    return w.replace(/\.exe$/, '');
+  }).filter(function (w) { return !!w; });
 }
 
-/** What a Write files pattern covers, when it is one of the broad places. */
+/** The interpreter or shell a command pattern names anywhere, or ''. */
+function _acpRulesInterpreter(pattern) {
+  var words = _acpRulesWords(pattern);
+  for (var i = 0; i < words.length; i++) {
+    if (words[i].indexOf('python') === 0 || _ACP_RULES_INTERPRETERS.indexOf(words[i]) >= 0) {
+      return words[i];
+    }
+  }
+  return '';
+}
+
+/** What a Write files pattern covers, when it is one of the broad places.
+ *  `?:` and `*:` are any drive (S4). */
 function _acpRulesBroadWrite(pattern) {
   var p = String(pattern).trim().replace(/\\/g, '/');
   var stem = p.replace(/(\/\*+)+$/, '').replace(/\/+$/, '');
   if (stem === '.' || stem === '') return 'the whole session folder';
-  if (/^[A-Za-z]:$/.test(stem)) return 'a whole drive';
+  if (/^[A-Za-z?*]:$/.test(stem)) return 'a whole drive';
   if (stem === '~' || stem === '%USERPROFILE%' || stem === '$HOME'
-      || /^[A-Za-z]:\/Users\/[^/]+$/i.test(stem) || /^\/(home|Users)\/[^/]+$/.test(stem)) {
+      || /^[A-Za-z?*]:\/Users\/[^/]+$/i.test(stem) || /^\/(home|Users)\/[^/]+$/.test(stem)) {
     return 'the whole home folder';
   }
   return '';
+}
+
+/** The host name inside a pattern typed as a web address, or ''. */
+function _acpRulesHost(pattern) {
+  var s = String(pattern).trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+  s = s.split('/')[0].replace(/^[^@]*@/, '');
+  return s;
 }
 
 /** The warnings for one row as it stands in the draft. Advice only: the
@@ -7909,6 +7969,7 @@ function _acpRulesWarnings(row, spec) {
   var out = [];
   if (!spec || typeof spec !== 'object') return out;
   var allow = Array.isArray(spec.allow) ? spec.allow : [];
+  var block = Array.isArray(spec.block) ? spec.block : [];
   var allowInForce = spec.default !== 'allow';
   if (row === 'shell') {
     if (spec.default === 'allow') {
@@ -7918,15 +7979,16 @@ function _acpRulesWarnings(row, spec) {
     }
     if (allowInForce) {
       allow.forEach(function (p) {
-        var word = _acpRulesFirstWord(p);
-        if (word.indexOf('python') === 0 || _ACP_RULES_INTERPRETERS.indexOf(word) >= 0) {
-          out.push('"' + p + '": allowing ' + word + ' is equivalent to allow-all — '
+        var interp = _acpRulesInterpreter(p);
+        var first = _acpRulesWords(p)[0] || '';
+        if (interp) {
+          out.push('"' + p + '": allowing ' + interp + ' is equivalent to allow-all — '
             + 'it can run any program, including one that changes these rules.');
-        } else if (_ACP_RULES_DELETERS.indexOf(word) >= 0) {
-          out.push('"' + p + '": allowing ' + word + ' lets the agent delete '
+        } else if (_ACP_RULES_DELETERS.indexOf(first) >= 0) {
+          out.push('"' + p + '": allowing ' + first + ' lets the agent delete '
             + 'files without asking.');
-        } else if (_ACP_RULES_DOWNLOADERS.indexOf(word) >= 0) {
-          out.push('"' + p + '": allowing ' + word + ' lets the agent download '
+        } else if (_ACP_RULES_DOWNLOADERS.indexOf(first) >= 0) {
+          out.push('"' + p + '": allowing ' + first + ' lets the agent download '
             + 'from, and send data to, any site without asking.');
         }
         if (String(p).indexOf('*') >= 0) {
@@ -7936,32 +7998,113 @@ function _acpRulesWarnings(row, spec) {
       });
     }
   }
-  if (row === 'fs_write' && allowInForce) {
+  if (row === 'fs_write') {
+    if (spec.default === 'allow') {
+      out.push('File-tool writes anywhere run without asking, except what is '
+        + 'listed under Always block, the Protected items and the Always '
+        + 'blocked list.');
+    } else {
+      allow.forEach(function (p) {
+        if (p === _ACP_RULES_SESSION_FOLDER) {
+          out.push('The session folder: file-tool writes anywhere in it run '
+            + 'without asking.');
+          return;
+        }
+        var what = _acpRulesBroadWrite(p);
+        if (what) {
+          out.push('"' + p + '" covers ' + what + ', so '
+            + 'file-tool writes anywhere in it run without asking.');
+        }
+      });
+    }
+  }
+  if (row === 'web_fetch') {
+    // D-38d: kiro-cli matches Web fetch patterns against the host name, so a
+    // pattern typed as an address never matches (P-0.5).
+    [['allow', allowInForce ? allow : []], ['block', block]].forEach(function (pair) {
+      pair[1].forEach(function (p) {
+        if (String(p).indexOf('/') < 0) return;
+        var host = _acpRulesHost(p);
+        out.push('"' + p + '" looks like a web address, but Web fetch patterns '
+          + 'are host names, so this '
+          + (pair[0] === 'block' ? 'blocks nothing as typed' : 'never matches')
+          + (host ? '. Use ' + host + ' instead.' : '.'));
+      });
+    });
+  }
+  if (allowInForce) {
     allow.forEach(function (p) {
-      var what = _acpRulesBroadWrite(p);
-      if (what) {
-        out.push('"' + _acpRulesDisplay(p) + '" covers ' + what + ', so '
-          + 'file-tool writes anywhere in it run without asking.');
+      if (block.indexOf(p) >= 0) {
+        out.push('"' + _acpRulesDisplay(p) + '" is in both lists. Always block '
+          + 'wins, so it is blocked.');
       }
     });
   }
   return out;
 }
 
+/** Whether a pattern holds no literal character that could narrow it — the
+ *  server's `_matches_everything` (D-14, S4). `./**` names the session folder. */
+function _acpRulesMatchesAll(pattern) {
+  var s = String(pattern).trim();
+  return /^[*?\/\\.: ]+$/.test(s) && !/^\.{1,2}([\/\\]|$)/.test(s);
+}
+
+/** The first character D-14 refuses, in words, or '' (U7). */
+function _acpRulesBadChar(pattern) {
+  for (var i = 0; i < pattern.length; i++) {
+    var ch = pattern.charAt(i);
+    var code = pattern.charCodeAt(i);
+    if (ch === ' ') continue;
+    if (code >= 0xD800 && code <= 0xDFFF) {
+      var next = pattern.charCodeAt(i + 1);
+      if (code <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) {
+        return 'an emoji or another character PowerAtlas cannot store in a rule';
+      }
+      return 'a broken character (half of an emoji or symbol)';
+    }
+    if (_ACP_RULES_CHAR_WORDS[ch]) return _ACP_RULES_CHAR_WORDS[ch];
+    if (/[\p{C}\p{Z}]/u.test(ch)) {
+      return code < 0x20 || (code >= 0x7f && code <= 0x9f)
+        ? 'an invisible control character' : 'an invisible or unsupported character';
+    }
+  }
+  return '';
+}
+
 /** A quick check before a pattern joins a list; the server checks again,
  *  fully, on Save. */
 function _acpRulesPatternProblem(list, pattern) {
   if (!pattern) return 'Type a pattern first.';
+  if (list.indexOf(pattern) >= 0) return 'Already listed.';
   if (pattern.length > _ACP_RULES_MAX_CHARS) {
     return 'A pattern can be at most ' + _ACP_RULES_MAX_CHARS + ' characters.';
   }
-  if (/^[*/\\]+$/.test(pattern)) {
+  if (_acpRulesMatchesAll(pattern)) {
     return 'That pattern matches everything; choose the default above instead.';
   }
-  if (list.indexOf(pattern) < 0 && list.length >= _ACP_RULES_MAX_PATTERNS) {
+  var bad = _acpRulesBadChar(pattern);
+  if (bad) {
+    return 'This pattern contains ' + bad + ', which is not allowed. Retype it '
+      + 'without that character.';
+  }
+  if (list.length >= _ACP_RULES_MAX_PATTERNS) {
     return 'A list can hold at most ' + _ACP_RULES_MAX_PATTERNS + ' patterns.';
   }
   return '';
+}
+
+/** Say `text` in the row's status region, once per change (U12). */
+function _acpRulesAnnounce(row, text) {
+  var slot = _acpRulesRowHosts[row];
+  if (!slot || slot.said === text) return;
+  slot.said = text;
+  slot.live.textContent = text;
+}
+
+/** A row the user changed: a refusal marked on it no longer applies. */
+function _acpRulesEdited(row) {
+  if (_acpRulesBad && _acpRulesBad.row === row) _acpRulesBad = null;
 }
 
 function _acpRulesAddFrom(row, which, input, problemEl) {
@@ -7971,9 +8114,11 @@ function _acpRulesAddFrom(row, which, input, problemEl) {
   if (problem) {
     problemEl.textContent = problem;
     problemEl.hidden = false;
+    _acpRulesAnnounce(row, problem);
     return;
   }
-  if (list.indexOf(pattern) < 0) list.push(pattern);
+  list.push(pattern);
+  _acpRulesEdited(row);
   _acpRulesRenderRow(row, {which: which, focus: 'input'});
 }
 
@@ -7981,6 +8126,9 @@ function _acpRulesAddFrom(row, which, input, problemEl) {
 function _acpRulesList(row, which, title) {
   var rowLabel = _acpRulesLabel(row);
   var list = _acpRulesDraft[row][which];
+  var bad = _acpRulesBad && _acpRulesBad.row === row && _acpRulesBad.list === which
+    ? _acpRulesBad : null;
+  var badChip = null;
   var wrap = _acpPermEl('div', 'acp-rules-list acp-rules-list-' + which);
   var head = _acpPermEl('div', 'acp-rules-list-label', title);
   head.id = 'acpRules-' + row + '-' + which + '-label';
@@ -7988,8 +8136,9 @@ function _acpRulesList(row, which, title) {
   var chips = _acpPermEl('ul', 'acp-rules-chips');
   chips.setAttribute('aria-labelledby', head.id);
   if (!list.length) chips.appendChild(_acpPermEl('li', 'acp-rules-empty', 'None'));
-  list.forEach(function (pattern, i) {
-    var chip = _acpPermEl('li', 'acp-rules-chip');
+  list.forEach(function (pattern) {
+    var isBad = !!bad && bad.pattern === pattern;
+    var chip = _acpPermEl('li', 'acp-rules-chip' + (isBad ? ' acp-rules-chip-bad' : ''));
     var text = _acpPermEl('span', 'acp-rules-chip-text', _acpRulesDisplay(pattern));
     text.title = pattern;
     chip.appendChild(text);
@@ -7997,9 +8146,14 @@ function _acpRulesList(row, which, title) {
     remove.type = 'button';
     remove.setAttribute('aria-label', 'Remove ' + _acpRulesDisplay(pattern)
       + ' from ' + title + ' for ' + rowLabel);
+    if (isBad) {
+      remove.setAttribute('aria-describedby', 'acpRules-' + row + '-error');
+      badChip = remove;
+    }
     remove.addEventListener('click', function () {
       var at = _acpRulesDraft[row][which].indexOf(pattern);
       if (at >= 0) _acpRulesDraft[row][which].splice(at, 1);
+      _acpRulesEdited(row);
       _acpRulesRenderRow(row, {which: which, focus: 'input'});
     });
     chip.appendChild(remove);
@@ -8018,8 +8172,8 @@ function _acpRulesList(row, which, title) {
   var addBtn = _acpPermEl('button', 'acp-rules-add btn-sm', 'Add');
   addBtn.type = 'button';
   addBtn.setAttribute('aria-label', 'Add to ' + title + ' for ' + rowLabel);
+  // Visual only: the row's status region announces it (U12).
   var problem = _acpPermEl('div', 'acp-rules-problem');
-  problem.setAttribute('role', 'status');
   problem.hidden = true;
   addBtn.addEventListener('click', function () { _acpRulesAddFrom(row, which, input, problem); });
   input.addEventListener('keydown', function (e) {
@@ -8032,14 +8186,16 @@ function _acpRulesList(row, which, title) {
   add.appendChild(addBtn);
   wrap.appendChild(add);
   wrap.appendChild(problem);
-  return {el: wrap, input: input};
+  return {el: wrap, input: input, badChip: badChip};
 }
 
 /** Draw (or redraw) one row. `after.focus` puts the focus back on the
- *  control the user was on, which the redraw replaced. */
+ *  control the user was on, which the redraw replaced; `after.initial`
+ *  records the row's warnings without announcing them. */
 function _acpRulesRenderRow(row, after) {
-  var host = _acpRulesRowHosts[row];
-  if (!host) return;
+  var slot = _acpRulesRowHosts[row];
+  if (!slot) return;
+  var host = slot.content;
   var spec = _acpRulesDraft[row];
   var label = _acpRulesLabel(row);
   host.textContent = '';
@@ -8059,6 +8215,7 @@ function _acpRulesRenderRow(row, after) {
   sel.value = spec.default;
   sel.addEventListener('change', function () {
     _acpRulesDraft[row].default = sel.value;
+    _acpRulesEdited(row);
     _acpRulesRenderRow(row, {focus: 'select'});
   });
   pick.appendChild(selLabel);
@@ -8066,6 +8223,14 @@ function _acpRulesRenderRow(row, after) {
   host.appendChild(pick);
   var help = _ACP_RULES_HELP[row];
   if (help) host.appendChild(_acpPermEl('div', 'acp-rules-help', help[0]));
+  // What loading config.toml had to change in this row (D-26): the editor
+  // shows the repaired row, and saving stores it that way.
+  var loadProblems = _acpRulesState && _acpRulesState.rule_problems
+    && Array.isArray(_acpRulesState.rule_problems[row]) ? _acpRulesState.rule_problems[row] : [];
+  loadProblems.forEach(function (text) {
+    host.appendChild(_acpPermEl('div', 'acp-rules-help acp-rules-load-problem',
+      'When config.toml was read: ' + String(text) + '.'));
+  });
   // Under default Allow the allow list compiles to nothing (D-13), so it is
   // not offered; the patterns stay in the draft and come back with Ask/Block.
   var allow = _acpRulesList(row, 'allow', 'Allow without asking');
@@ -8077,15 +8242,25 @@ function _acpRulesRenderRow(row, after) {
   }
   var block = _acpRulesList(row, 'block', 'Always block');
   host.appendChild(block.el);
+  var bad = _acpRulesBad && _acpRulesBad.row === row ? _acpRulesBad : null;
+  if (bad) {
+    var err = _acpPermEl('div', 'acp-rules-problem acp-rules-row-error', bad.message);
+    err.id = 'acpRules-' + row + '-error';
+    host.appendChild(err);
+  }
+  slot.badChip = allow.badChip || block.badChip;
   var warnings = _acpRulesWarnings(row, spec);
   if (warnings.length) {
     var box = _acpPermEl('ul', 'acp-rules-warn');
-    box.setAttribute('role', 'status');
     warnings.forEach(function (w) { box.appendChild(_acpPermEl('li', '', w)); });
     host.appendChild(box);
   }
+  var say = (bad ? [bad.message] : []).concat(warnings).join(' ');
+  if (after && after.initial) slot.said = say;
+  else _acpRulesAnnounce(row, say);
   if (after && after.focus === 'select') sel.focus();
   if (after && after.focus === 'input') (after.which === 'block' ? block : allow).input.focus();
+  if (after && after.focus === 'bad') (slot.badChip || sel).focus();
 }
 
 /** The Protected items, each with its Block outright switch (D-5, D-23) and
@@ -8102,13 +8277,14 @@ function _acpRulesRenderProtected(host) {
     + 'folders that points elsewhere is not covered.'));
   rows.forEach(function (row) {
     if (!row || typeof row !== 'object' || typeof row.id !== 'string') return;
+    var name = String(row.label || row.id);
     var item = _acpPermEl('div', 'acp-rules-protected-item');
     var toggle = _acpPermEl('label', 'acp-rules-protected-toggle');
     var box = _acpPermEl('input', 'acp-rules-protected-box');
     box.type = 'checkbox';
     box.id = 'acpRules-protected-' + row.id;
     box.checked = _acpRulesDraft.protected_block.indexOf(row.id) >= 0;
-    box.setAttribute('aria-label', 'Block ' + String(row.label || row.id) + ' outright');
+    box.setAttribute('aria-label', 'Block ' + name + ' outright');
     box.addEventListener('change', function () {
       var list = _acpRulesDraft.protected_block;
       var at = list.indexOf(row.id);
@@ -8117,8 +8293,10 @@ function _acpRulesRenderProtected(host) {
     });
     toggle.setAttribute('for', box.id);
     toggle.appendChild(box);
-    toggle.appendChild(_acpPermEl('span', 'acp-rules-protected-name', String(row.label || row.id)));
-    toggle.appendChild(_acpPermEl('span', 'acp-rules-protected-hint', 'Block outright'));
+    // The action first (U11): "Block outright: Agent definitions (otherwise asks)".
+    toggle.appendChild(_acpPermEl('span', 'acp-rules-protected-action', 'Block outright:'));
+    toggle.appendChild(_acpPermEl('span', 'acp-rules-protected-name', name));
+    toggle.appendChild(_acpPermEl('span', 'acp-rules-protected-hint', '(otherwise asks)'));
     item.appendChild(toggle);
     if (Array.isArray(row.patterns) && row.patterns.length) {
       item.appendChild(_acpPermEl('div', 'acp-perm-patterns', row.patterns.join('   ')));
@@ -8132,8 +8310,8 @@ function _acpRulesRenderProtected(host) {
       (Array.isArray(found.links) ? found.links : []).forEach(function (link) {
         if (!link || typeof link !== 'object') return;
         var where = link.target ? ' → ' + link.target : ' (' + (link.error || 'unresolvable') + ')';
-        var name = String(link.name || '') + (link.folder === true ? ' (the whole folder)' : '');
-        list.appendChild(_acpPermEl('li', '', name + where));
+        var linkName = String(link.name || '') + (link.folder === true ? ' (the whole folder)' : '');
+        list.appendChild(_acpPermEl('li', '', linkName + where));
       });
       item.appendChild(list);
     }
@@ -8158,9 +8336,15 @@ function _acpRulesRender() {
     if (!r || typeof r.id !== 'string' || !_acpRulesDraft[r.id]) return;
     var host = _acpPermEl('section', 'acp-rules-row');
     host.dataset.row = r.id;
+    var content = _acpPermEl('div', 'acp-rules-row-content');
+    var live = _acpPermEl('div', 'sr-only acp-rules-live');
+    live.setAttribute('role', 'status');
+    live.setAttribute('aria-live', 'polite');
+    host.appendChild(content);
+    host.appendChild(live);
     body.appendChild(host);
-    _acpRulesRowHosts[r.id] = host;
-    _acpRulesRenderRow(r.id);
+    _acpRulesRowHosts[r.id] = {host: host, content: content, live: live, said: null, badChip: null};
+    _acpRulesRenderRow(r.id, {initial: true});
   });
   var prot = _acpPermEl('section', 'acp-rules-section acp-rules-protected');
   prot.appendChild(_acpPermEl('h3', 'acp-rules-row-title', 'Protected'));
@@ -8176,7 +8360,8 @@ function _acpRulesRender() {
   body.appendChild(floor);
 }
 
-/** A copy of the server's rows the editor can change freely. */
+/** A copy of the server's rows the editor can change freely. Only called
+ *  on rules whose lists are all lists (`_acpRulesUnreadable`). */
 function _acpRulesCopy(rules) {
   var out = {};
   Object.keys(rules).forEach(function (key) {
@@ -8195,6 +8380,32 @@ function _acpRulesCopy(rules) {
   return out;
 }
 
+/** The draft as a string that ignores Protected switch order, for the
+ *  unsaved-changes check (U1). */
+function _acpRulesSnapshot(rules) {
+  var copy = _acpRulesCopy(rules);
+  copy.protected_block = copy.protected_block.slice().sort();
+  return JSON.stringify(copy);
+}
+
+function _acpRulesDirty() {
+  return !!_acpRulesDraft && _acpRulesSnapshot(_acpRulesDraft) !== _acpRulesLoaded;
+}
+
+/** S2: rows whose stored Always block list is not a list. The editor cannot
+ *  show one, and a save from it would replace it with nothing, silently
+ *  dropping the protection; so it does not open on them. */
+function _acpRulesUnreadable(d) {
+  var out = [];
+  (d.rule_rows || []).forEach(function (r) {
+    var spec = r && d.rules[r.id];
+    if (spec && typeof spec === 'object' && spec.block != null && !Array.isArray(spec.block)) {
+      out.push(String(r.label || r.id));
+    }
+  });
+  return out;
+}
+
 function _acpRulesShowError(text) {
   var el = document.getElementById('acpRulesError');
   if (!el) return;
@@ -8202,10 +8413,50 @@ function _acpRulesShowError(text) {
   el.hidden = !text;
 }
 
+function _acpRulesShowDiscard(show) {
+  var bar = document.getElementById('acpRulesDiscard');
+  if (bar) bar.hidden = !show;
+  if (show) {
+    var keep = document.getElementById('acpRulesDiscardKeep');
+    if (keep) keep.focus();
+  }
+  return !!bar;
+}
+
+/** Listened for once, on the first open (the dialog sits after this script,
+ *  so it is looked up then rather than at parse time). Esc raises `cancel`;
+ *  with unsaved changes the close is stopped and the question asked (U1). A
+ *  browser may still close on a repeated Esc, so `close` reopens the dialog,
+ *  draft intact, while the answer is pending. */
+function _acpRulesWire(modal) {
+  if (_acpRulesWired || !modal || !modal.addEventListener) return;
+  _acpRulesWired = true;
+  modal.addEventListener('cancel', function (e) {
+    if (_acpRulesDirty() && !_acpRulesDiscardOk && _acpRulesShowDiscard(true)) {
+      if (e && e.preventDefault) e.preventDefault();
+    }
+  });
+  modal.addEventListener('close', function () {
+    if (_acpRulesDirty() && !_acpRulesDiscardOk && document.getElementById('acpRulesDiscard')) {
+      modal.showModal();
+      _acpRulesShowDiscard(true);
+      return;
+    }
+    _acpRulesShowDiscard(false);
+    _acpRulesBad = null;
+    var opener = _acpRulesOpener;
+    _acpRulesOpener = null;
+    if (opener && opener.focus) opener.focus();
+  });
+}
+
 /** "Edit rules…". Reads the stored rules fresh (and the Protected links,
  *  which only the GET carries) and opens only when that read succeeds:
  *  opening on nothing would let Save replace the stored rules with nothing. */
 function openAcpRulesEditor() {
+  // U5: the gear, not the menu row this was clicked from, which the menu
+  // hides as the dialog opens.
+  _acpRulesOpener = document.getElementById('topbarSettingsBtn') || null;
   return fetch('/api/acp-permissions')
     .then(function (r) {
       if (!r || !r.ok) throw new Error('HTTP ' + (r && r.status));
@@ -8223,11 +8474,24 @@ function openAcpRulesEditor() {
         _acpPermToast(_acpPermConfigError(d) + '.');
         return;
       }
+      var unreadable = _acpRulesUnreadable(d);
+      if (unreadable.length) {
+        _acpPermToast('The rule editor did not open: the Always block list for '
+          + unreadable.join(', ') + ' in config.toml is not a list, and saving '
+          + 'from the editor would remove it. Fix acp_permission_rules in '
+          + 'config.toml, then try again.');
+        return;
+      }
       _acpRulesState = d;
       _acpRulesDraft = _acpRulesCopy(d.rules);
+      _acpRulesLoaded = _acpRulesSnapshot(_acpRulesDraft);
+      _acpRulesDiscardOk = false;
+      _acpRulesBad = null;
       _acpRulesShowError('');
+      _acpRulesShowDiscard(false);
       _acpRulesRender();
       var modal = document.getElementById('acpRulesModal');
+      _acpRulesWire(modal);
       if (modal && !modal.open) modal.showModal();
       var first = document.getElementById('acpRules-' + d.rule_rows[0].id + '-default');
       if (first) first.focus();
@@ -8238,23 +8502,48 @@ function openAcpRulesEditor() {
     });
 }
 
+/** × and Cancel. With unsaved changes, asks first (U1). */
 function closeAcpRulesEditor() {
+  var modal = document.getElementById('acpRulesModal');
+  if (!modal || !modal.open) return;
+  if (_acpRulesDirty() && !_acpRulesDiscardOk && _acpRulesShowDiscard(true)) return;
+  _acpRulesDiscardOk = true;
+  modal.close();
+}
+
+/** "Discard" in the unsaved-changes question. */
+function acpRulesDiscard() {
+  _acpRulesDiscardOk = true;
+  _acpRulesShowDiscard(false);
   var modal = document.getElementById('acpRulesModal');
   if (modal && modal.open) modal.close();
 }
 
+/** "Keep editing": back to the Save button. */
+function acpRulesKeepEditing() {
+  _acpRulesShowDiscard(false);
+  var save = document.getElementById('acpRulesSave');
+  if (save) save.focus();
+}
+
 /** Save: the whole rule set, as a full replacement. `ok: false` keeps the
- *  dialog open with the server's reason; `ok: true` with a `warning` is
- *  saved but not yet in effect (D-32), raised as a toast after closing. */
+ *  dialog open with the server's reason, marked on the row when the answer
+ *  names one (U2); `ok: true` with a `warning` is saved but not yet in effect
+ *  (D-32), raised as a toast after closing. Save stays focusable while busy
+ *  (`aria-disabled`, not `disabled`), so the focus is not dropped (U4). */
 function saveAcpRules() {
   if (_acpRulesSaving || !_acpRulesDraft) return;
   _acpRulesSaving = true;
   var saveBtn = document.getElementById('acpRulesSave');
-  if (saveBtn) saveBtn.disabled = true;
+  if (saveBtn) saveBtn.setAttribute('aria-disabled', 'true');
   _acpRulesShowError('');
+  _acpRulesShowDiscard(false);
+  var before = _acpRulesBad;
+  _acpRulesBad = null;
+  if (before) _acpRulesRenderRow(before.row);
   var done = function () {
     _acpRulesSaving = false;
-    if (saveBtn) saveBtn.disabled = false;
+    if (saveBtn) saveBtn.setAttribute('aria-disabled', 'false');
   };
   return fetch('/api/acp-permissions', {
     method: 'POST',
@@ -8265,17 +8554,35 @@ function saveAcpRules() {
     .then(function (d) {
       done();
       if (d && d.ok) {
+        _acpRulesDiscardOk = true;
         closeAcpRulesEditor();
         renderAcpPermissions(d);
         if (typeof d.warning === 'string' && d.warning) _acpPermToast(d.warning);
+        return;
+      }
+      var detail = d && d.detail && typeof d.detail === 'object' ? d.detail : null;
+      var message = detail && typeof detail.message === 'string' && detail.message
+        ? 'The rules were not saved: ' + detail.message + '.'
+        : (d && d.error) || 'The rules were not saved.';
+      _acpRulesShowError(message);
+      if (detail && typeof detail.row === 'string' && _acpRulesRowHosts[detail.row]) {
+        _acpRulesBad = {row: detail.row, list: detail.list, pattern: detail.pattern,
+                        message: String(detail.message || '')};
+        _acpRulesRenderRow(detail.row, {focus: 'bad'});
+        var slot = _acpRulesRowHosts[detail.row];
+        var target = slot.badChip || slot.host;
+        if (target && target.scrollIntoView) target.scrollIntoView({block: 'center'});
       } else {
-        _acpRulesShowError((d && d.error) || 'The rules were not saved.');
+        var err = document.getElementById('acpRulesError');
+        if (err) err.focus();
       }
     })
     .catch(function () {
       done();
       _acpRulesShowError('The rules were not saved: PowerAtlas did not answer. '
         + 'Try again.');
+      var err = document.getElementById('acpRulesError');
+      if (err) err.focus();
     });
 }
 

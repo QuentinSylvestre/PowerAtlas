@@ -4776,6 +4776,7 @@ const PANEL_NAMES = [
   "saveAcpPermissionBaseAgent",
   // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2: the rule editor.
   "openAcpRulesEditor", "closeAcpRulesEditor", "saveAcpRules", "_acpRulesWarnings",
+  "acpRulesDiscard", "acpRulesKeepEditing",
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review.
   "renderLocalSecret", "rotateLocalSecret",
 ];
@@ -4873,6 +4874,16 @@ function loadPanel(opts = {}) {
   byId.set("acpRulesBody", new El("div"));
   byId.set("acpRulesError", rulesError);
   byId.set("acpRulesSave", new El("button"));
+  // Phase 2 review, U1: the in-dialog unsaved-changes question; U13: the
+  // Protected summary's linked-item count. Hidden, as in the markup.
+  const rulesDiscard = new El("div");
+  rulesDiscard.hidden = true;
+  byId.set("acpRulesDiscard", rulesDiscard);
+  byId.set("acpRulesDiscardYes", new El("button"));
+  byId.set("acpRulesDiscardKeep", new El("button"));
+  const protectedCount = new El("span");
+  protectedCount.hidden = true;
+  byId.set("acpPermProtectedCount", protectedCount);
   // G4 (Phase 3 review): the settings gear's dot, shared with restart drift.
   const pendingDot = new El("span");
   pendingDot.hidden = true;
@@ -11585,7 +11596,7 @@ check("rules editor: warns on an interpreter, on a * in a command and on a broad
   e.add("fs_write", "allow", "~/**");
   e.add("fs_write", "allow", "src/**");
   const w = e.warnings("fs_write");
-  assert(/"the session folder" covers the whole session folder/.test(w), `no session-folder warning: ${w}`);
+  assert(/The session folder: file-tool writes anywhere in it run without asking/.test(w), `no session-folder warning: ${w}`);
   assert(/"C:\\\*\*" covers a whole drive/.test(w), `no drive-root warning: ${w}`);
   assert(/"~\/\*\*" covers the whole home folder/.test(w), `no home-folder warning: ${w}`);
   assert(!/src\/\*\*/.test(w), "a narrow write pattern was warned about");
@@ -11658,6 +11669,216 @@ check("rules editor: the dialog is on the dashboard only and carries its names a
   assert(/aria-label="Close"/.test(modal), "the close button has no name");
   assert(/role="alert"/.test(modal), "save errors are not announced");
   assert(modal.includes("Applies to sessions created afterwards."), "the footer does not say when changes apply");
+});
+
+// ---- Phase 2 review fixes (S2, S4, S5, U1-U4, U6, U7, U10-U14) -------------
+
+check("rules editor: a stored Always block that is not a list keeps the editor closed (S2)", async () => {
+  const rules = seedRules();
+  rules.shell.block = "git push";
+  const p = loadPanel({ answer: () => ({ body: rulesState({ rules,
+    rule_problems: { shell: ["shell: the block list is not a list ('git push')"] } }) }) });
+  await p.sandbox.openAcpRulesEditor();
+  assertEqual(p.sandbox.document.getElementById("acpRulesModal").open, false,
+    "the editor opened on a block list it cannot show, so Save would drop it");
+  assert(p.toasts.some((t) => t.includes("Run commands") && t.includes("not a list")),
+    `the refusal does not name the row: ${p.toasts.join(" | ")}`);
+  assertEqual(p.fetches.filter((f) => f.init.method === "POST").length, 0, "something was saved");
+});
+
+check("rules editor: rows show what loading config.toml changed in them", async () => {
+  const e = await openRules({ rule_problems: { mcp: ["mcp: allow pattern '***' matches everything, so it was ignored"] } });
+  assert(/When config\.toml was read: mcp: allow pattern '\*\*\*'/.test(e.row("mcp").textContent),
+    `the load problem is not on its row: ${e.row("mcp").textContent}`);
+  assert(!/When config\.toml was read/.test(e.row("shell").textContent), "a clean row shows a load problem");
+});
+
+check("rules editor: an interpreter anywhere in a command, and Write files set to Allow, are warned about (S5)", async () => {
+  const e = await openRules();
+  e.add("shell", "allow", "*python*");
+  assert(/"\*python\*": allowing python is equivalent to allow-all/.test(e.warnings("shell")),
+    `*python* hid the interpreter: ${e.warnings("shell")}`);
+  e.add("shell", "allow", "& python x");
+  assert(/"& python x": allowing python is equivalent to allow-all/.test(e.warnings("shell")),
+    `& python hid the interpreter: ${e.warnings("shell")}`);
+  e.add("shell", "allow", "git log");
+  assert(!/"git log"/.test(e.warnings("shell")), "a plain command was warned about");
+  e.choose("fs_write", "allow");
+  assert(/File-tool writes anywhere run without asking/.test(e.warnings("fs_write")),
+    `Write files set to Allow carries no note: ${e.warnings("fs_write")}`);
+});
+
+check("rules editor: patterns that match everything are stopped, the session folder is not (S4)", async () => {
+  const e = await openRules();
+  for (const p of ["?*", "* *", "*.*", "?:/**", "**/?*"]) {
+    e.add("fs_write", "allow", p);
+    assert(/matches everything/.test(e.list("fs_write", "allow").querySelector(".acp-rules-problem").textContent),
+      `${p} was not stopped`);
+  }
+  assertEqual(e.chips("fs_write", "allow").length, 0, "a match-everything pattern was added");
+  e.add("fs_write", "allow", "./**");
+  e.add("fs_write", "allow", "../shared/**");
+  assertEqual(e.chips("fs_write", "allow").join("|"), "the session folder|../shared/**",
+    "a folder-scoped pattern was refused");
+  e.add("fs_write", "allow", "?:/Users/me/**");
+  assert(/"\?:\/Users\/me\/\*\*" covers the whole home folder/.test(e.warnings("fs_write")),
+    `a ?: drive stem got no breadth warning: ${e.warnings("fs_write")}`);
+});
+
+check("rules editor: Esc, the close button and Cancel ask before dropping unsaved changes (U1, U5)", async () => {
+  // Nothing changed: Cancel closes at once, and the focus goes back to the gear.
+  let e = await openRules();
+  e.p.sandbox.closeAcpRulesEditor();
+  assertEqual(e.$("acpRulesModal").open, false, "an unchanged editor did not close");
+  e.$("acpRulesModal").dispatch("close");
+  assert(ACTIVE === e.$("topbarSettingsBtn"), "the focus did not go back to the settings gear");
+  // Changed: Cancel (and the close button, which calls the same function) asks in the dialog.
+  e = await openRules();
+  e.add("shell", "allow", "npm test");
+  e.p.sandbox.closeAcpRulesEditor();
+  assertEqual(e.$("acpRulesModal").open, true, "Cancel dropped unsaved changes");
+  assertEqual(e.$("acpRulesDiscard").hidden, false, "no Discard question");
+  assert(ACTIVE === e.$("acpRulesDiscardKeep"), "the question did not take the focus");
+  assertEqual(e.p.confirms.length, 0, "window.confirm was used");
+  e.p.sandbox.acpRulesKeepEditing();
+  assertEqual(e.$("acpRulesDiscard").hidden, true, "Keep editing left the question up");
+  assertEqual(e.$("acpRulesModal").open, true, "Keep editing closed the editor");
+  assertEqual(e.chips("shell", "allow").join("|"), "git status|pwd|npm test", "Keep editing lost the draft");
+  // Esc raises `cancel`; with changes it is stopped and the question asked.
+  let prevented = false;
+  e.$("acpRulesModal").dispatch("cancel", { preventDefault: () => { prevented = true; } });
+  assertEqual(prevented, true, "Esc was not stopped while changes were unsaved");
+  assertEqual(e.$("acpRulesDiscard").hidden, false, "Esc did not ask");
+  // A browser that closes anyway (a repeated Esc) gets the dialog back, draft intact.
+  e.$("acpRulesModal").open = false;
+  e.$("acpRulesModal").dispatch("close");
+  assertEqual(e.$("acpRulesModal").open, true, "a forced close dropped unsaved changes");
+  assertEqual(e.chips("shell", "allow").join("|"), "git status|pwd|npm test", "the reopened editor lost the draft");
+  e.p.sandbox.acpRulesDiscard();
+  assertEqual(e.$("acpRulesModal").open, false, "Discard did not close");
+  e.$("acpRulesModal").dispatch("close");
+  assertEqual(e.$("acpRulesModal").open, false, "Discard was asked again");
+  assertEqual(e.p.fetches.filter((f) => f.init.method === "POST").length, 0, "Discard saved");
+  // Esc with nothing changed is not stopped.
+  e = await openRules();
+  prevented = false;
+  e.$("acpRulesModal").dispatch("cancel", { preventDefault: () => { prevented = true; } });
+  assertEqual(prevented, false, "Esc was stopped with nothing to lose");
+});
+
+check("rules editor: a refused save marks the chip, explains it on its row and keeps the focus (U2, U4)", async () => {
+  let reply = { ok: false,
+    error: "The rules were not saved: Run commands (shell): block pattern 'rm\\tx' contains the character U+0009, which is not allowed.",
+    detail: { row: "shell", list: "block", pattern: "rm\tx",
+      message: "Run commands, Always block: “rm\tx” contains an invisible tab character, which is not allowed" } };
+  const e = await openRules(null, () => ({ body: reply }));
+  // The client stops this at Add; put it in the draft as a stored rule would be.
+  e.p.sandbox._acpRulesDraft.shell.block.push("rm\tx");
+  const saving = e.p.sandbox.saveAcpRules();
+  assertEqual(e.$("acpRulesSave").disabled, false, "Save was disabled, which drops the focus");
+  assertEqual(e.$("acpRulesSave").getAttribute("aria-disabled"), "true", "Save is not marked busy");
+  await saving;
+  assertEqual(e.$("acpRulesSave").getAttribute("aria-disabled"), "false", "Save stayed busy");
+  assertEqual(e.$("acpRulesModal").open, true, "a refused save closed the editor");
+  const bad = e.list("shell", "block").querySelectorAll(".acp-rules-chip-bad");
+  assertEqual(bad.length, 1, "the refused pattern is not marked");
+  assertEqual(bad[0].querySelector(".acp-rules-chip-text").title, "rm\tx", "the wrong chip is marked");
+  const rowError = e.row("shell").querySelector(".acp-rules-row-error");
+  assert(rowError && /an invisible tab character/.test(rowError.textContent), "the reason is not on the row");
+  assert(!/U\+0009/.test(rowError.textContent), "the row shows a code point, not words");
+  assert(/^The rules were not saved: Run commands, Always block/.test(e.$("acpRulesError").textContent),
+    `the footer summary is not in the editor's words: ${e.$("acpRulesError").textContent}`);
+  assert(ACTIVE === bad[0].querySelector(".acp-rules-chip-remove"), "the focus is not on the marked chip");
+  assert(/invisible tab character/.test(e.row("shell").querySelector(".acp-rules-live").textContent),
+    "the reason was not announced on the row");
+  // Removing the chip clears the mark.
+  bad[0].querySelector(".acp-rules-chip-remove").click();
+  assertEqual(e.row("shell").querySelectorAll(".acp-rules-chip-bad").length, 0, "the mark outlived the chip");
+  assertEqual(e.row("shell").querySelector(".acp-rules-row-error"), null, "the row error outlived the chip");
+  // A refusal with no row: the footer only, and the focus goes to it.
+  reply = { ok: false, error: "The rules were not saved: protected_block is missing." };
+  await e.p.sandbox.saveAcpRules();
+  assertEqual(e.$("acpRulesError").textContent, reply.error, "a row-less refusal was not shown as sent");
+  assert(ACTIVE === e.$("acpRulesError"), "the focus did not move to the refusal");
+});
+
+check("rules editor: a Web fetch pattern typed as an address is flagged, in both lists (U3)", async () => {
+  const e = await openRules();
+  e.add("web_fetch", "allow", "https://evil.com/x");
+  assert(/"https:\/\/evil\.com\/x" looks like a web address.*never matches\. Use evil\.com instead\./.test(e.warnings("web_fetch")),
+    `no address warning on the allow list: ${e.warnings("web_fetch")}`);
+  e.add("web_fetch", "block", "evil.com/path");
+  assert(/"evil\.com\/path" looks like a web address.*blocks nothing as typed\. Use evil\.com instead\./.test(e.warnings("web_fetch")),
+    `no address warning on the block list: ${e.warnings("web_fetch")}`);
+  e.add("web_fetch", "allow", "example.com");
+  assert(!/"example\.com"/.test(e.warnings("web_fetch")), "a host name was warned about");
+});
+
+check("rules editor: a duplicate says Already listed and keeps the text; a control character is refused in words (U6, U7)", async () => {
+  const e = await openRules();
+  const input = e.list("shell", "allow").querySelector(".acp-rules-input");
+  e.add("shell", "allow", "pwd");
+  assert(/Already listed/.test(e.list("shell", "allow").querySelector(".acp-rules-problem").textContent),
+    "a duplicate was not reported");
+  assertEqual(input.value, "pwd", "the duplicate's text was cleared");
+  assertEqual(e.chips("shell", "allow").join("|"), "git status|pwd", "the list changed");
+  e.add("shell", "allow", "echo\ta");
+  const problem = e.list("shell", "allow").querySelector(".acp-rules-problem").textContent;
+  assert(/invisible tab character/.test(problem) && !/U\+/.test(problem), `the tab was not refused in words: ${problem}`);
+  e.add("shell", "allow", "echo  x");
+  assert(/non-breaking space/.test(e.list("shell", "allow").querySelector(".acp-rules-problem").textContent),
+    "a non-breaking space was accepted, which the server refuses");
+  e.add("shell", "allow", "echo \u{1F600}");
+  assert(/emoji/.test(e.list("shell", "allow").querySelector(".acp-rules-problem").textContent),
+    "an emoji was accepted, which the server refuses");
+  assertEqual(e.chips("shell", "allow").join("|"), "git status|pwd", "a refused pattern was added");
+  e.add("shell", "allow", "echo café");
+  assertEqual(e.chips("shell", "allow").join("|"), "git status|pwd|echo café", "a printable accent was refused");
+});
+
+check("rules editor: the session folder warning reads plainly; a pattern in both lists is flagged (U10, U14)", async () => {
+  const e = await openRules();
+  e.add("fs_write", "allow", "./**");
+  assert(/The session folder: file-tool writes anywhere in it run without asking\./.test(e.warnings("fs_write")),
+    `the session-folder warning is not special-cased: ${e.warnings("fs_write")}`);
+  assert(!/covers the whole session folder/.test(e.warnings("fs_write")), "the old repetitive wording is back");
+  e.add("shell", "block", "pwd");
+  assert(/"pwd" is in both lists\. Always block wins, so it is blocked\./.test(e.warnings("shell")),
+    `no both-lists warning: ${e.warnings("shell")}`);
+  const modal = fs.readFileSync(path.join(HERE, "..", "src", "power_atlas", "templates", "partials",
+    "acp_permission_rules_modal.html"), "utf8");
+  assert(/Always block wins over one under Allow without asking/.test(modal), "the intro does not explain precedence");
+});
+
+check("rules editor: Protected switches lead with the action (U11); a row's live region is kept across redraws (U12)", async () => {
+  const e = await openRules();
+  const toggles = e.$("acpRulesBody").querySelectorAll(".acp-rules-protected-toggle").map((t) => t.textContent);
+  assertEqual(toggles[0], "Block outright:Agent definitions(otherwise asks)", `the switch does not lead with the action: ${toggles[0]}`);
+  const live = e.row("shell").querySelector(".acp-rules-live");
+  assertEqual(live.getAttribute("role"), "status", "the row's live region has no role");
+  assertEqual(live.textContent, "", "the live region spoke before anything changed");
+  e.add("shell", "allow", "python x");
+  assert(e.row("shell").querySelector(".acp-rules-live") === live, "the live region was recreated on redraw");
+  assert(/equivalent to allow-all/.test(live.textContent), "the new warning was not announced");
+  assertEqual(e.row("shell").querySelector(".acp-rules-warn").getAttribute("role"), null,
+    "the visual warning list is also a live region, so it would be announced twice");
+});
+
+check("settings: the Protected summary counts the linked items not covered (U13)", () => {
+  const p = loadPanel();
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  p.sandbox.renderAcpPermissions(permState({ protected: [
+      { id: "agents", label: "Agent definitions", patterns: [], effect: "ask" },
+      { id: "steering", label: "Steering files", patterns: [], effect: "ask" }],
+    protected_links: { agents: { count: 1, links: [] }, steering: { count: 2, links: [] } } }));
+  assertEqual($("acpPermProtectedCount").hidden, false, "no count on the summary");
+  assertEqual($("acpPermProtectedCount").textContent, "(3 linked items not covered)", "the summary count is wrong");
+  const q = loadPanel();
+  q.sandbox.renderAcpPermissions(permState({ protected_links: {} }));
+  assertEqual(q.sandbox.document.getElementById("acpPermProtectedCount").hidden, true,
+    "a count shows with no linked items");
+  const idx = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  assert(/<summary>Protected[^\n]*id="acpPermProtectedCount"/.test(idx), "the count is not in the summary");
 });
 
 // ---- Browser sign-in: the local key --------------------------------------

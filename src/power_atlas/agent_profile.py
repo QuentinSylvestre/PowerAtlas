@@ -101,7 +101,15 @@ class AgentProfileError(Exception):
     `Exception` broadly so that neither startup nor a settings write can be
     aborted by either kind, but only this type carries a message worth showing
     the user in the settings panel.
+
+    `detail`, when set, is `validate_rules`'s structured reason for the rule
+    editor: `{row, list, pattern, message}`, with `message` in the editor's own
+    words (Phase 2 review, U2).
     """
+
+    def __init__(self, message: str = "", detail: dict | None = None):
+        super().__init__(message)
+        self.detail = detail
 
 
 # `~/.kiro/agents` as a module-level constant rather than a function reading
@@ -217,6 +225,10 @@ _status = GenerationStatus()
 # changes the rules (`apply_settings`). `None` when there is nothing to report.
 # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-35
 _posture_notice: dict | None = None
+# The fingerprint of the settings `apply_settings` last saved in this process
+# (Phase 2 review, S1), so a later save can tell the dashboard's own change,
+# not yet generated, from one made outside it.
+_saved_fingerprint = ""
 
 
 def last_generation() -> GenerationStatus:
@@ -379,7 +391,9 @@ KIRO_BUILTIN_DENIES = (
 PROTECTED = {
     "agents": ("Agent definitions", ("**/.kiro/agents/**", "**/kiro~*/agents/**")),
     "steering": ("Steering files", ("**/.kiro/steering/**", "**/kiro~*/steering/**")),
-    "skills": ("Skills", ("**/.kiro/skills/**", "**/kiro~*/skills/**")),
+    # "Skill files", not "Skills": the rule editor also has a Skills row (the
+    # skill capability), and the two are different things (Phase 2 review, U11).
+    "skills": ("Skill files", ("**/.kiro/skills/**", "**/kiro~*/skills/**")),
     "hooks": ("Hooks", ("**/.kiro/hooks/**", "**/kiro~*/hooks/**")),
 }
 
@@ -431,35 +445,88 @@ MINIMAL_BASE = (
 )
 
 
-_MATCH_ALL_CHARS = frozenset("*/\\")
+# Characters that match no text of their own: wildcards, separators, and the
+# `.`, `:` and space that sit between them in `*.*`, `?:/**` or `* *`.
+_MATCH_ALL_CHARS = frozenset("*?/\\.: ")
+# `.`, `..`, `./…` and `../…` name a folder (`./**` is the session folder the
+# seed allows), so a pattern that starts with one is scoped, not match-all.
+_RELATIVE_ANCHOR_RE = re.compile(r"\.{1,2}(?:[/\\]|$)")
+
+# How the rule editor names a character a pattern cannot hold (Phase 2 review,
+# U2): in words, since the character is usually invisible where it was typed.
+_CHAR_WORDS = {
+    "\t": "an invisible tab character",
+    "\n": "a line break",
+    "\r": "a line break (carriage return)",
+    "\x7f": "an invisible delete character",
+    " ": "a non-breaking space",
+    "​": "an invisible zero-width space",
+    " ": "a line separator",
+    " ": "a paragraph separator",
+    "﻿": "an invisible byte-order mark",
+}
+
+
+def _char_words(ch: str) -> str:
+    code = ord(ch)
+    if ch in _CHAR_WORDS:
+        return _CHAR_WORDS[ch]
+    if 0xD800 <= code <= 0xDFFF:
+        return "a broken character (half of an emoji or symbol)"
+    if code > 0xFFFF:
+        return "an emoji or another character PowerAtlas cannot store in a rule"
+    if code < 0x20 or 0x7F <= code <= 0x9F:
+        return "an invisible control character"
+    return "an invisible or unsupported character"
+
+
+def _matches_everything(pattern: str) -> bool:
+    """Whether `pattern` holds no literal character that could narrow it.
+
+    `*`, `**`, `**/*`, `?*`, `* *`, `*.*`, `?:/**` and `**/?*` each match every
+    command, host or path (or every path on every drive), which is the row's
+    default in disguise (D-14; Phase 1 review, finding 9; Phase 2 review, S4).
+    """
+    text = pattern.strip()
+    return set(text) <= _MATCH_ALL_CHARS and not _RELATIVE_ANCHOR_RE.match(text)
+
+
+def _pattern_fault(pattern: object) -> tuple[str, str]:
+    """`(technical, words)` reasons `pattern` cannot be used, or `("", "")`.
+
+    The technical reason (`pattern_error`) names a character by code point, for
+    logs and the generation error; the words are the rule editor's (U2).
+    """
+    if not isinstance(pattern, str):
+        return "is not text", "is not text"
+    if not pattern.strip():
+        return "is blank", "is blank"
+    if len(pattern) > MAX_PATTERN_CHARS:
+        why = f"is longer than {MAX_PATTERN_CHARS} characters"
+        return why, why
+    if _matches_everything(pattern):
+        return ("matches everything; set the row's default instead",
+                "matches everything; choose the row's default instead")
+    for ch in pattern:
+        # `isprintable` is False for Cc (C0, DEL, C1), Cs (surrogates), Zl/Zp
+        # (U+2028/U+2029), Cf (U+FEFF) and every separator but the ASCII space.
+        if ord(ch) > 0xFFFF or not (ch == " " or ch.isprintable()):
+            return (f"contains the character U+{ord(ch):04X}, which is not allowed",
+                    f"contains {_char_words(ch)}, which is not allowed")
+    return "", ""
 
 
 def pattern_error(pattern: object) -> str:
     """Why `pattern` cannot be used, or `""` when it can (D-14).
 
-    1-200 characters, not blank, not made only of `*`, `/` and `\\`, and printable BMP
-    characters only: no C0 or C1 controls, DEL, surrogates, U+2028/U+2029 or
-    U+FEFF. Emission uses `json.dumps(s, ensure_ascii=False)`, and a surrogate
-    escape or a raw control character can make kiro-cli reject the frontmatter,
-    which fails open silently.
+    1-200 characters, not blank, not a pattern that matches everything
+    (`_matches_everything`), and printable BMP characters only: no C0 or C1
+    controls, DEL, surrogates, U+2028/U+2029 or U+FEFF. Emission uses
+    `json.dumps(s, ensure_ascii=False)`, and a surrogate escape or a raw
+    control character can make kiro-cli reject the frontmatter, which fails
+    open silently.
     """
-    if not isinstance(pattern, str):
-        return "is not text"
-    if not pattern.strip():
-        return "is blank"
-    if len(pattern) > MAX_PATTERN_CHARS:
-        return f"is longer than {MAX_PATTERN_CHARS} characters"
-    # Only wildcards and separators (`*`, `**`, `***`, `**/*`, `*/**`, `/`):
-    # each matches everything, or everything under a root, which is the row's
-    # default in disguise (D-14; Phase 1 review, finding 9).
-    if set(pattern.strip()) <= _MATCH_ALL_CHARS:
-        return "matches everything; set the row's default instead"
-    for ch in pattern:
-        # `isprintable` is False for Cc (C0, DEL, C1), Cs (surrogates), Zl/Zp
-        # (U+2028/U+2029), Cf (U+FEFF) and every separator but the ASCII space.
-        if ord(ch) > 0xFFFF or not (ch == " " or ch.isprintable()):
-            return f"contains the character U+{ord(ch):04X}, which is not allowed"
-    return ""
+    return _pattern_fault(pattern)[0]
 
 
 def _seed_row(row: str) -> dict:
@@ -503,48 +570,74 @@ def normalise_rules_report(raw: object) -> tuple[dict, list[str]]:
     A missing row filled from the seed is not a problem: it is how a config
     without rules reads.
     """
+    out, problems, _by_row = _normalise_rules_full(raw)
+    return out, problems
+
+
+def rule_problems_by_row(raw: object) -> dict[str, list[str]]:
+    """`normalise_rules_report`'s problems, keyed by the row they are in.
+
+    Phase 2 review, S2: the rule editor must not open a row whose stored block
+    list it cannot show — saving from it would replace that list with `[]` and
+    drop the protection silently. Rows with no problem are absent.
+    """
+    return _normalise_rules_full(raw)[2]
+
+
+def _normalise_rules_full(raw: object) -> tuple[dict, list[str], dict[str, list[str]]]:
     src = raw if isinstance(raw, dict) else {}
     out: dict = {}
     problems: list[str] = []
+    by_row: dict[str, list[str]] = {}
+
+    def note(row: str, text: str) -> None:
+        problems.append(text)
+        by_row.setdefault(row, []).append(text)
+
     for row in PERMISSION_ROWS:
         raw_row = src.get(row)
         if not isinstance(raw_row, dict):
             if raw_row is not None:
-                problems.append(f"{row}: the row is not a table, so the default "
-                                "rules are used for it")
+                note(row, f"{row}: the row is not a table, so the default "
+                          "rules are used for it")
             out[row] = _seed_row(row)
             continue
         raw_default = raw_row.get("default")
         default = raw_default.strip().lower() if isinstance(raw_default, str) else ""
         if default not in ROW_DEFAULTS:
-            problems.append(f"{row}: default {str(raw_default)[:40]!r} is not "
-                            "allow, ask or block, so it asks")
+            note(row, f"{row}: default {str(raw_default)[:40]!r} is not "
+                      "allow, ask or block, so it asks")
             default = "ask"
         allow: list = []
         raw_allow = raw_row.get("allow")
         if isinstance(raw_allow, list):
             for pattern in raw_allow:
                 if len(allow) >= MAX_PATTERNS_PER_LIST:
-                    problems.append(f"{row}: only the first "
-                                    f"{MAX_PATTERNS_PER_LIST} allow patterns "
-                                    "are used")
+                    note(row, f"{row}: only the first "
+                              f"{MAX_PATTERNS_PER_LIST} allow patterns "
+                              "are used")
                     break
                 reason = pattern_error(pattern)
                 if reason:
-                    problems.append(f"{row}: allow pattern {str(pattern)[:60]!r} "
-                                    f"{reason}, so it was ignored")
+                    note(row, f"{row}: allow pattern {str(pattern)[:60]!r} "
+                              f"{reason}, so it was ignored")
                 elif pattern not in allow:
                     allow.append(pattern)
         elif raw_allow is not None:
-            problems.append(f"{row}: the allow list is not a list, so it was "
-                            "ignored")
+            note(row, f"{row}: the allow list is not a list, so it was "
+                      "ignored")
         raw_block = raw_row.get("block")
         if raw_block is None:
             block = []
         elif isinstance(raw_block, list):
             block = list(raw_block)
         else:
+            # Kept as stored, so `compile_block` refuses it by name; named
+            # here too, so the rule editor refuses to open on it (S2).
             block = raw_block
+            note(row, f"{row}: the block list is not a list "
+                      f"({str(raw_block)[:60]!r}), so the rules are not "
+                      "applied until it is fixed in config.toml")
         out[row] = {"default": default, "allow": allow, "block": block}
     raw_protected = src.get("protected_block")
     if isinstance(raw_protected, str):
@@ -563,10 +656,31 @@ def normalise_rules_report(raw: object) -> tuple[dict, list[str]]:
         if problem not in _rule_problems_logged:
             _rule_problems_logged.add(problem)
             log.warning("acp_permission_rules: %s", problem)
-    return out, problems
+    return out, problems, by_row
 
 
 _ROW_KEYS = frozenset(("default", "allow", "block"))
+
+# The rule editor's names for a row's two lists (Phase 2 review, U2).
+LIST_LABELS = {"allow": "Allow without asking", "block": "Always block"}
+
+
+def _refuse(error: str, row: str | None = None, which: str | None = None,
+            pattern: object = None, words: str = "") -> AgentProfileError:
+    """A `validate_rules` refusal: `error` for the API, `detail` for the editor.
+
+    `detail.message` names the row and list the way the editor labels them and
+    describes a bad character in words (U2); `error` keeps the row key and the
+    code point, which is what logs and API callers have always read.
+    """
+    where = ROW_LABELS.get(row, "") if row else ""
+    if where and which:
+        where += ", " + LIST_LABELS[which]
+    message = (where + ": " if where else "") + (words or error)
+    detail = {"row": row, "list": which,
+              "pattern": pattern if isinstance(pattern, str) else None,
+              "message": message}
+    return AgentProfileError(error, detail)
 
 
 def validate_rules(raw: object) -> dict:
@@ -575,57 +689,79 @@ def validate_rules(raw: object) -> dict:
     260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2 (D-11, D-14, D-26).
     `normalise_rules` repairs a stored rule set so that loading never fails;
     this is the other direction — a full replacement the user is saving right
-    now — so nothing is repaired or dropped. An unknown or missing row, a
-    default other than allow/ask/block, an invalid pattern and a list over
+    now — so nothing is repaired, dropped or filled in: every row needs its
+    `default`, `allow` and `block`, and the set needs `protected_block`
+    (Phase 2 review, S3). An unknown or missing row or key, a default other
+    than allow/ask/block, an invalid pattern and a list over
     `MAX_PATTERNS_PER_LIST` each raise `AgentProfileError` naming the row (by
-    its label and key) and the pattern. Returns the rule set in the shape
-    `normalise_rules` produces, with duplicate patterns removed.
+    its label and key) and the pattern, with a `detail` for the editor (U2).
+    Returns the rule set in the shape `normalise_rules` produces, with
+    duplicate patterns removed.
     """
     if not isinstance(raw, dict):
-        raise AgentProfileError("rules must be a table of rows")
+        raise _refuse("rules must be a table of rows")
     known = set(PERMISSION_ROWS) | {"protected_block"}
     for key in raw:
         if key not in known:
-            raise AgentProfileError(f"{str(key)[:40]!r} is not a kind of action")
+            raise _refuse(f"{str(key)[:40]!r} is not a kind of action")
     out: dict = {}
     for row in PERMISSION_ROWS:
         name = f"{ROW_LABELS[row]} ({row})"
         spec = raw.get(row)
         if not isinstance(spec, dict):
-            raise AgentProfileError(f"{name}: the row is missing or not a table")
+            raise _refuse(f"{name}: the row is missing or not a table", row,
+                          words="this row is missing")
         for key in spec:
             if key not in _ROW_KEYS:
-                raise AgentProfileError(
-                    f"{name}: {str(key)[:40]!r} is not default, allow or block")
-        default = spec.get("default")
+                raise _refuse(
+                    f"{name}: {str(key)[:40]!r} is not default, allow or block",
+                    row, words=f"{str(key)[:40]!r} is not a setting of this row")
+        if "default" not in spec:
+            raise _refuse(f"{name}: the default is missing", row,
+                          words="choose Allow, Ask or Block for when no "
+                                "pattern matches")
+        default = spec["default"]
         if default not in ROW_DEFAULTS:
-            raise AgentProfileError(
-                f"{name}: default {str(default)[:40]!r} is not allow, ask or block")
+            raise _refuse(
+                f"{name}: default {str(default)[:40]!r} is not allow, ask or block",
+                row, words="choose Allow, Ask or Block for when no pattern "
+                           "matches")
         lists: dict = {}
         for which in ("allow", "block"):
-            patterns = spec.get(which, [])
+            if which not in spec:
+                raise _refuse(f"{name}: the {which} list is missing", row,
+                              which, words="the list is missing")
+            patterns = spec[which]
             if not isinstance(patterns, list):
-                raise AgentProfileError(f"{name}: the {which} list is not a list")
+                raise _refuse(f"{name}: the {which} list is not a list", row,
+                              which, words="the list is not a list")
             if len(patterns) > MAX_PATTERNS_PER_LIST:
-                raise AgentProfileError(
+                raise _refuse(
                     f"{name}: the {which} list has {len(patterns)} patterns; at "
-                    f"most {MAX_PATTERNS_PER_LIST} are allowed")
+                    f"most {MAX_PATTERNS_PER_LIST} are allowed", row, which,
+                    words=f"this list has {len(patterns)} patterns; at most "
+                          f"{MAX_PATTERNS_PER_LIST} are allowed")
             kept: list = []
             for pattern in patterns:
-                reason = pattern_error(pattern)
+                reason, words = _pattern_fault(pattern)
                 if reason:
-                    raise AgentProfileError(
-                        f"{name}: {which} pattern {str(pattern)[:60]!r} {reason}")
+                    shown = str(pattern)[:60]
+                    raise _refuse(
+                        f"{name}: {which} pattern {shown!r} {reason}", row,
+                        which, pattern,
+                        words=f"“{shown}” {words}")
                 if pattern not in kept:
                     kept.append(pattern)
             lists[which] = kept
         out[row] = {"default": default, **lists}
-    blocked = raw.get("protected_block", [])
+    if "protected_block" not in raw:
+        raise _refuse("protected_block is missing")
+    blocked = raw["protected_block"]
     if not isinstance(blocked, list):
-        raise AgentProfileError("protected_block is not a list")
+        raise _refuse("protected_block is not a list")
     for item in blocked:
         if not (isinstance(item, str) and item in PROTECTED):
-            raise AgentProfileError(
+            raise _refuse(
                 f"protected_block: {str(item)[:40]!r} is not a Protected item")
     out["protected_block"] = [key for key in PROTECTED if key in blocked]
     return out
@@ -1321,7 +1457,13 @@ def apply_settings(mutate: Callable[[object], None] | None = None, *,
     self-heal does (finding 3a). A mutation clears it only when it chooses the
     posture — `sets_posture=True` (the mode route, which is also how the
     dashboard acknowledges the change) or a mutation that moved the mode or
-    rules. A base-agent rename leaves it (finding 3b).
+    rules. A base-agent rename leaves it (finding 3b). A mutation that does
+    not choose the posture (a rules-only save, a base-agent rename) raises it
+    when the settings it started from had changed outside the dashboard and
+    not yet been healed: it would otherwise adopt that change silently
+    (Phase 2 review, S1). "Outside" means different from the file on disk and
+    from what this process last saved, so a save after a failed generation of
+    the dashboard's own change raises nothing.
 
     Returns `{saved, generation_ok, generation_error}` (plus `error` when
     nothing was saved) and never raises: `saved` False means nothing changed
@@ -1330,7 +1472,7 @@ def apply_settings(mutate: Callable[[object], None] | None = None, *,
     `ok: true` and a warning). The settings state the route returns is
     computed after this releases the lock.
     """
-    global _posture_notice, _status
+    global _posture_notice, _status, _saved_fingerprint
     if lock_timeout is None:
         _generation_lock.acquire()
     elif not _generation_lock.acquire(timeout=lock_timeout):
@@ -1354,6 +1496,13 @@ def apply_settings(mutate: Callable[[object], None] | None = None, *,
         before_disk = _fingerprint_on_disk()
         if mutate is not None:
             before = settings_fingerprint(*_compiled_settings(config))
+            # Phase 2 review, S1: the settings this save starts from are not
+            # what the file on disk was compiled from, and not what the
+            # dashboard itself last saved, so they changed outside it (a hand
+            # edit of config.toml, not yet healed). A save that does not
+            # choose the posture adopts that change, so it must say so.
+            outside = (bool(before_disk) and before_disk != before
+                       and before != _saved_fingerprint)
             try:
                 mutate(config)
                 save_config(config)
@@ -1363,11 +1512,16 @@ def apply_settings(mutate: Callable[[object], None] | None = None, *,
                         "generation_error": "",
                         "error": f"The setting was not saved: {exc}"}
             saved = True
+            after = settings_fingerprint(*_compiled_settings(config))
+            _saved_fingerprint = after
             # A posture chosen here is the dashboard's own; the notice was
             # about one that was not.
-            if sets_posture or before != settings_fingerprint(
-                    *_compiled_settings(config)):
+            if sets_posture or before != after:
                 _posture_notice = None
+            if outside and not sets_posture:
+                _record_notice(_compiled_settings(config)[0],
+                               "found by a settings save that did not choose "
+                               "the mode")
         try:
             _apply_locked(config)
         except Exception:  # noqa: BLE001 - logged and recorded by _apply_locked
