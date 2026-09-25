@@ -300,6 +300,20 @@ class El {
     this.parentNode = null;
     if (ACTIVE === this) ACTIVE = null;
   }
+  // The dashboard keeps a copy of its empty-pane placeholder and appends a
+  // clone of it on every return to the Overview
+  // (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE). Copies what this
+  // class models: tag, class, dataset, attributes, text, hidden, children.
+  cloneNode(deep) {
+    const c = new El(this.tagName.toLowerCase());
+    c.className = this.className;
+    c.dataset = { ...this.dataset };
+    c._attrs = Object.assign(Object.create(null), this._attrs);
+    c._text = this._text;
+    c.hidden = this.hidden;
+    if (deep) for (const child of this.childNodes) c.appendChild(child.cloneNode(true));
+    return c;
+  }
   // Required by flushToolGroups() (Phase 3) which moves tool-call rows into
   // group containers via transcriptEl.removeChild(row). Returns the removed child.
   removeChild(child) {
@@ -12909,9 +12923,32 @@ const DASH_OPEN_TRANSCRIPT_NAMES = ["function openSessionTranscript"];
 // openSessionTranscriptRegion above -- a standalone function declaration
 // with no top-level side effects.
 const DASH_RAIL_FORGET_NAMES = ["function dashRailForgetSession"];
+// Overview panel-mode region (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+// D15/D18/D19): the mode switch, the Overview entry/exit, the Home wiring and
+// the capture-phase Escape listener. Run for real, not stubbed, by every
+// check that deletes, closes or signs out.
+const DASH_OVERVIEW_NAMES = [
+  "function dashSetPanelMode", "function dashShowOverview", "function dashShowPane",
+  "function dashOverviewStart", "function dashOverviewStop", "function dashOverviewFetch",
+  "function dashEscapeMayLeave", "_dashUserClosedSid", "_dashTranscriptLoaded",
+  "_dashEmptyPlaceholder", "send('unsubscribe')",
+];
 
 function dashPickerSource() {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+
+  // Overview panel-mode region: from its slug-named marker through
+  // openSessionTranscript's declaration, which immediately follows it.
+  const overviewFrom = src.indexOf("// ---- 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE: panel mode");
+  if (overviewFrom < 0) throw new Error("index.html no longer has the Overview panel-mode marker");
+  const overviewTo = src.indexOf("function openSessionTranscript", overviewFrom);
+  if (overviewTo < 0) throw new Error("openSessionTranscript no longer follows the Overview panel-mode region");
+  const overviewRegion = src.slice(overviewFrom, overviewTo);
+  for (const name of DASH_OVERVIEW_NAMES) {
+    if (!overviewRegion.includes(name)) {
+      throw new Error(`the extracted Overview panel-mode region does not contain ${name}; it has moved`);
+    }
+  }
 
   // Composer-controls region (SC5, dashboard/ACP feature-parity plan Phase
   // 3): from dashRefreshComposerControls's declaration (which governs
@@ -13121,7 +13158,7 @@ function dashPickerSource() {
   return {
     composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion,
     crewSubagentRegion, handleRegion, pickerRegion, connectRegion, closeBtnRegion,
-    openSessionTranscriptRegion, railForgetRegion,
+    openSessionTranscriptRegion, railForgetRegion, overviewRegion,
   };
 }
 
@@ -13129,7 +13166,7 @@ function loadDashPicker(opts = {}) {
   const {
     composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion,
     crewSubagentRegion, handleRegion, pickerRegion, connectRegion, closeBtnRegion,
-    openSessionTranscriptRegion, railForgetRegion,
+    openSessionTranscriptRegion, railForgetRegion, overviewRegion,
   } = dashPickerSource();
 
   // All picker-element IDs that must exist in the byId map for parse-time
@@ -13216,6 +13253,25 @@ function loadDashPicker(opts = {}) {
   // openSessionTranscript()/dashRailForgetSession() (Fix 3, Step 9 review)
   // both look this up by id to clear/replace the transcript panel's content.
   byId.set("dashTranscript", new El("div"));
+  // The markup's empty-pane placeholder, which the Overview region captures
+  // at load and restores on every return to the Overview
+  // (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE).
+  const dashEmpty = new El("div");
+  dashEmpty.className = "acp-system-msg";
+  dashEmpty.setAttribute("data-empty", "");
+  dashEmpty.textContent = "Select a session to view its transcript.";
+  byId.get("dashTranscript").appendChild(dashEmpty);
+  // The Overview's panel-mode furniture, matching the markup's initial state:
+  // the panel starts in overview mode, titled "Overview", Home hidden.
+  byId.set("sessions-panel", new El("section"));
+  byId.get("sessions-panel").className = "right-panel dash-mode-overview";
+  byId.set("dashPanelTitle", new El("span"));
+  byId.get("dashPanelTitle").textContent = "Overview";
+  byId.set("dashHome", new El("button"));
+  byId.get("dashHome").hidden = true;
+  for (const id of ["dashOverview", "dashOvLive", "dashOvPlans", "dashOvUsage"]) {
+    byId.set(id, new El("div"));
+  }
 
   const fetches = [];
   const sentFrames = [];
@@ -13408,6 +13464,17 @@ function loadDashPicker(opts = {}) {
     // index.html's transcript-panel metadata strip; DOM-only, no behaviour
     // these tests assert on.
     dashSessionMetaRender: () => {},
+    // The main socket, read by dashShowOverview() before it sends
+    // `unsubscribe`. connectRegion declares the real one only under
+    // realConnect; a check sets {readyState: 1} to model an open socket.
+    // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D18
+    _dashWs: null,
+    // The menus the Escape guard (dashEscapeMayLeave, D19) checks, all
+    // declared outside every extracted region. Closed, as at page load.
+    dashRailSettingsMenu: Object.assign(new El("div"), { hidden: true }),
+    topbarSettingsMenu: Object.assign(new El("div"), { hidden: true }),
+    wsFilterMenu: Object.assign(new El("div"), { hidden: true }),
+    _railOpenActionMenus: [],
     _dashLoadingSid: null,
     _dashEagerLoadPending: false,  // eager-connect plan
     _dashEagerFocusSuppressed: false,  // eager-connect plan
@@ -13760,6 +13827,12 @@ function loadDashPicker(opts = {}) {
   // captures the wrapped version, not the raw one. Then queue/steer click
   // wiring, then dashHandle, then the picker section (which also executes
   // the parse-time event-listener wiring against the byId map above).
+  // Overview panel mode (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE) --
+  // real file order puts it before every region below. Its top level captures
+  // the dashTranscript placeholder and wires Home/Escape/DOMContentLoaded, all
+  // against the byId entries and document stand-in set above; every other
+  // name it reads resolves at call time.
+  vm.runInContext(overviewRegion, sandbox, { filename: "index.html#dash-overview" });
   vm.runInContext(composerControlsRegion, sandbox, { filename: "index.html#dash-composer-controls" });
   // Close-button click wiring (Fix 3, Phase 6 review) -- self-contained
   // (reads send/_dashAttachedSid/showToast/dashCloseBtn as free variables,
@@ -16483,6 +16556,335 @@ check("dashboard: deleting the currently-viewed session (dashRailForgetSession) 
     "deleting the viewed session must explicitly close and null dashSubWs, not just hide the panel");
 });
 
+// ---- Overview panel mode and its return paths ------------------------------
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE Phase 1 (D3, D14, D15, D18,
+// D19, D20). The panel-mode region runs for real in every check below.
+
+/** Whether the right panel is in overview mode (the one mode flag, D15). */
+function dashInOverview(p) {
+  return p.el("sessions-panel").classList.contains("dash-mode-overview");
+}
+
+/** The pane holds exactly one child, the `[data-empty]` placeholder -- the
+ *  shape the J4 signed-out check replaces rather than appends to. */
+function assertLonePlaceholder(p, what) {
+  const kids = p.el("dashTranscript").childNodes;
+  assertEqual(kids.length, 1, `${what}: the pane must hold exactly one child`);
+  assertEqual(kids[0].className, "acp-system-msg", `${what}: the lone child must be the system line`);
+  assert(kids[0].getAttribute("data-empty") !== null, `${what}: the lone child must be the [data-empty] placeholder`);
+}
+
+/** Open a session the way a rail click does, so the panel is in pane mode. */
+async function dashOpenFixture(p, sid = "sess-1") {
+  const row = new El("button");
+  row.className = "acp-rail-row";
+  row.dataset = { sid, provider: "claude-code", cwd: "/ws" };
+  p.sandbox.openSessionTranscript(row);
+  await settleStaging();
+  return row;
+}
+
+/** An Escape keydown on `target` (the page body when omitted). */
+function dashEscape(p, target) {
+  p.fireDoc("keydown", { key: "Escape", target: target || new El("body"), defaultPrevented: false });
+}
+
+check("dashboard overview: the panel starts in overview mode, titled Overview, with Home hidden", () => {
+  const p = loadDashPicker();
+  assert(dashInOverview(p), "the panel must start in overview mode");
+  assertEqual(p.el("dashPanelTitle").textContent, "Overview");
+  assertEqual(p.el("dashHome").hidden, true, "Home is for leaving a session; nothing is open");
+  assertLonePlaceholder(p, "at load");
+});
+
+check("dashboard overview: opening a session switches to the pane, shows Home and marks the transcript loaded", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  assert(!dashInOverview(p), "opening a session must leave overview mode");
+  assertEqual(p.el("dashPanelTitle").textContent, "Transcript");
+  assertEqual(p.el("dashHome").hidden, false, "Home must show while a session is open");
+  assertEqual(p.sandbox._viewingSid, "sess-1");
+  assertEqual(p.sandbox._dashTranscriptLoaded, true, "a successful fetch marks the transcript loaded (D20)");
+});
+
+check("dashboard overview: a failed transcript load is not 'loaded', so clicking the row again retries (D20)", async () => {
+  const p = loadDashPicker({ sessionTranscriptFails: true });
+  await dashOpenFixture(p);
+  assertEqual(p.sandbox._dashTranscriptLoaded, false);
+});
+
+check("dashboard overview: Home returns to the Overview and restores the lone placeholder", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.el("dashHome").dispatch("click");
+  assert(dashInOverview(p), "Home must enter overview mode");
+  assertEqual(p.sandbox._viewingSid, null, "Home must clear _viewingSid");
+  assertEqual(p.el("dashHome").hidden, true);
+  assertEqual(p.el("dashPanelTitle").textContent, "Overview");
+  assertEqual(p.sandbox.dashComposerEl.hidden, true, "the composer belongs to the session just left");
+  assertLonePlaceholder(p, "after Home");
+});
+
+check("dashboard overview: deleting the viewed session returns to the Overview with exactly one placeholder (D3)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.sandbox.dashRailForgetSession("sess-1");
+  assert(dashInOverview(p), "deleting the open session must enter overview mode");
+  assertEqual(p.sandbox._viewingSid, null);
+  assertLonePlaceholder(p, "after delete");
+  assert(!/deleted/.test(p.el("dashTranscript").textContent),
+    "the old 'This session was deleted.' message is replaced by the Overview");
+});
+
+check("dashboard overview: deleting a session that is not open leaves the pane alone", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.sandbox.dashRailForgetSession("sess-other");
+  assert(!dashInOverview(p), "deleting another session must not leave the open one");
+  assertEqual(p.sandbox._viewingSid, "sess-1");
+});
+
+check("dashboard overview: session_closed after the user's own Close enters the Overview and clears the flag (D3)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashShowPane();
+  p.sandbox.dashCloseBtn.dispatch("click");
+  assertEqual(p.sentOf("close").length, 1, "fixture: Close must send the close frame");
+  assertEqual(p.sandbox._dashUserClosedSid, "sess-1", "a sent Close marks the close as the user's");
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  assert(dashInOverview(p), "the user's own close must return to the Overview");
+  assertEqual(p.sandbox._dashUserClosedSid, null, "the flag must be consumed");
+  assertEqual(p.sandbox._viewingSid, null);
+  assertLonePlaceholder(p, "after the user's Close");
+});
+
+check("dashboard overview: a Close whose frame never left does not mark the close as the user's", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.send = () => false;
+  p.sandbox.dashCloseBtn.dispatch("click");
+  assertEqual(p.sandbox._dashUserClosedSid, null);
+});
+
+check("dashboard overview: a close the user did not ask for keeps 'This session was closed.' on screen (D3)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashShowPane();
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  assert(!dashInOverview(p), "a sweeper or remote close must stay on the pane");
+  assertEqual(p.sandbox._viewingSid, "sess-1");
+  assert(p.addMessageCalls.some((c) => c.text === "This session was closed."),
+    "the closed message must still be shown");
+});
+
+check("dashboard overview: a user Close of one session does not turn another session's close into a return", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashShowPane();
+  p.sandbox._dashUserClosedSid = "sess-other";
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  assert(!dashInOverview(p), "only the flagged sid returns to the Overview");
+  assertEqual(p.sandbox._dashUserClosedSid, "sess-other");
+});
+
+check("dashboard overview: opening a session clears a pending user-close flag", async () => {
+  const p = loadDashPicker();
+  p.sandbox._dashUserClosedSid = "sess-old";
+  await dashOpenFixture(p, "sess-new");
+  assertEqual(p.sandbox._dashUserClosedSid, null);
+});
+
+check("dashboard overview: a socket drop (dashCloseSubagentView) in overview mode keeps the overview mode (D15)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.sandbox.dashShowOverview();
+  p.el("dashTranscriptWrap").hidden = true; // as a sub-agent view would leave it
+  p.sandbox.dashCloseSubagentView(); // the onclose teardown
+  assertEqual(p.el("dashTranscriptWrap").hidden, false, "fixture: the teardown still owns the wrap's hidden");
+  assert(dashInOverview(p), "a socket drop must not reveal the pane behind the Overview");
+});
+
+check("dashboard overview: entering the Overview while attached sends unsubscribe on the open socket (D18)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.sandbox._dashAttachedSid = "sess-1";
+  p.sandbox._dashOrigin = "joined";
+  p.sandbox._dashWs = { readyState: 1 };
+  p.sandbox.dashShowOverview();
+  assertEqual(p.sentOf("unsubscribe").length, 1, "the Overview must release the server-side subscription");
+  assertEqual(p.sentOf("close").length, 0, "a joined session is left open, as on any switch");
+  assertEqual(p.sandbox._dashAttachedSid, null);
+});
+
+check("dashboard overview: no unsubscribe goes out while the socket is not open", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.sandbox._dashAttachedSid = "sess-1";
+  p.sandbox._dashWs = null;
+  p.sandbox.dashShowOverview();
+  assertEqual(p.sentOf("unsubscribe").length, 0);
+  p.sandbox._dashWs = { readyState: 3 };
+  p.sandbox.dashShowOverview();
+  assertEqual(p.sentOf("unsubscribe").length, 0);
+});
+
+check("dashboard overview: an abandoned dashboard-created session is closed, not unsubscribed (the close needs the attachment)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.sandbox._dashAttachedSid = "sess-1";
+  p.sandbox._dashOrigin = "dashboard";
+  p.sandbox._dashSent = false;
+  p.sandbox._dashWs = { readyState: 1 };
+  p.sandbox.dashShowOverview();
+  assertEqual(p.sentOf("close").length, 1, "an unprompted dashboard session is closed, as on any switch");
+  assertEqual(p.sentOf("unsubscribe").length, 0,
+    "`close` refuses a socket that is no longer attached, so no unsubscribe may overtake it");
+});
+
+check("dashboard overview: Escape on the page body with a session open returns to the Overview (D19)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  dashEscape(p);
+  assert(dashInOverview(p));
+  assertEqual(p.sandbox._viewingSid, null);
+});
+
+check("dashboard overview: Escape with only rail groups expanded still returns -- aria-expanded is never consulted (D19)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  // Expanded rail groups, #dashLogToggle and #dashMcpToggle: aria-expanded is
+  // true somewhere on the page nearly always.
+  p.sandbox.document.querySelectorAll = (sel) =>
+    (/aria-expanded/.test(String(sel)) ? [new El("button")] : []);
+  dashEscape(p);
+  assert(dashInOverview(p), "an expanded rail group must not block Escape");
+});
+
+check("dashboard overview: Escape with the rail settings menu open leaves the session (D19)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.sandbox.dashRailSettingsMenu.hidden = false;
+  dashEscape(p);
+  assertEqual(p.sandbox._viewingSid, "sess-1", "Escape belongs to the open menu");
+  assert(!dashInOverview(p));
+});
+
+check("dashboard overview: Escape with #dashPicker open leaves the session (D19)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.el("dashPicker").hidden = false;
+  dashEscape(p);
+  assertEqual(p.sandbox._viewingSid, "sess-1", "Escape belongs to the picker");
+});
+
+check("dashboard overview: Escape with a rail action menu, the mode menu, or a modal open leaves the session (D19)", async () => {
+  const cases = {
+    "a rail action menu": (p) => { p.sandbox._railOpenActionMenus = [{}]; },
+    "the send-mode menu": (p) => { p.sandbox.dashModeMenu.hidden = false; },
+    "the topbar settings menu": (p) => { p.sandbox.topbarSettingsMenu.hidden = false; },
+    "the workspace filter menu": (p) => { p.sandbox.wsFilterMenu.hidden = false; },
+    "the delete modal": (p) => {
+      p.sandbox.document.querySelectorAll = (sel) =>
+        (String(sel) === ".acp-ws-delete-modal" ? [new El("div")] : []);
+    },
+    "an open <dialog>": (p) => {
+      p.sandbox.document.querySelectorAll = (sel) =>
+        (/dialog\[open\]/.test(String(sel)) ? [new El("dialog")] : []);
+    },
+  };
+  for (const [what, arrange] of Object.entries(cases)) {
+    const p = loadDashPicker();
+    await dashOpenFixture(p);
+    arrange(p);
+    // Only the Overview's own capture listener: the mode menu's bubble
+    // listener would close that menu, which is its job, not this check's.
+    p.sandbox.dashEscapeMayLeave(new El("body")) && p.sandbox.dashShowOverview();
+    assertEqual(p.sandbox._viewingSid, "sess-1", `Escape must belong to ${what}`);
+  }
+});
+
+check("dashboard overview: Escape in the composer, the search field or any editable field leaves the session (D19)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  for (const tag of ["textarea", "input", "select"]) {
+    dashEscape(p, new El(tag));
+    assertEqual(p.sandbox._viewingSid, "sess-1", `Escape in a <${tag}> must not leave the session`);
+  }
+  const editable = new El("div");
+  editable.isContentEditable = true;
+  dashEscape(p, editable);
+  assertEqual(p.sandbox._viewingSid, "sess-1", "Escape in a contenteditable must not leave the session");
+});
+
+check("dashboard overview: Escape with nothing open does nothing", () => {
+  const p = loadDashPicker();
+  dashEscape(p);
+  assertEqual(p.sentOf("unsubscribe").length, 0);
+  assert(dashInOverview(p));
+});
+
+check("dashboard overview: the create paths switch to the pane so 'Creating session…' is visible", () => {
+  for (const path of ["quick create", "picker create"]) {
+    const p = loadDashPicker();
+    p.sandbox._dashPickerCapacity = { held: 0, max: 8 };
+    if (path === "quick create") {
+      p.sandbox.dashRailQuickCreate("/proj");
+    } else {
+      p.sandbox.dashPickerOpen("");
+      p.sandbox._dashPickerTrapRemove = null;
+      p.sandbox.dashPickerCreate("/proj");
+    }
+    assert(!dashInOverview(p), `${path} must leave overview mode`);
+    assert(/Creating session/.test(p.el("dashTranscript").textContent), `${path}: fixture`);
+  }
+});
+
+check("dashboard overview: a created session is shown even if the user went back to the Overview meanwhile", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashHandle({ type: "session", sessionId: "sess-new", payload: { created: true, cwd: "/ws" } });
+  assert(!dashInOverview(p), "the new session must be on screen");
+  assertEqual(p.sandbox._viewingSid, "sess-new");
+  assertEqual(p.sandbox._dashTranscriptLoaded, true,
+    "an attached new session counts as loaded, so clicking it again returns to the Overview (D20)");
+});
+
+check("dashboard overview: a signed-out 403 from an Overview fetch is reported once and shown in the pane", async () => {
+  const p = loadDashPicker();
+  let reported = 0;
+  p.sandbox.dashReportSignedOut = () => { reported++; };
+  p.sandbox.fetch = () => Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({}) });
+  for (let i = 0; i < 3; i++) {
+    await p.sandbox.dashOverviewFetch("/api/dashboard/overview/live").then(
+      () => { throw new Error("a 403 must reject"); }, () => {});
+  }
+  assertEqual(reported, 1, "signed out is reported once, not on every poll");
+});
+
+check("dashboard overview: the real signed-out note switches to the pane and replaces the lone placeholder (J4 shape)", async () => {
+  const p = loadDashPicker({ realConnect: true, pageStatus: 403 });
+  p.sandbox.dashSetComposerNote = () => {};
+  assert(dashInOverview(p), "fixture: starts on the Overview");
+  p.sandbox.dashReportSignedOut();
+  assert(!dashInOverview(p), "the note is in the pane, so the pane must show");
+  const kids = p.el("dashTranscript").childNodes;
+  assertEqual(kids.length, 1, "the lone placeholder is replaced, not appended to");
+  assert(/signed out/i.test(kids[0].textContent));
+});
+
+check("dashboard overview: clicking the open row again returns to the Overview only once its transcript loaded (D20)", () => {
+  const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
+  for (const loaded of [true, false]) {
+    const calls = [];
+    const { box } = runDashSentinel(slice, true, {
+      _viewingSid: "s1",
+      _dashTranscriptLoaded: loaded,
+      dashShowOverview: () => calls.push("overview"),
+      openSessionTranscript: () => calls.push("open"),
+    });
+    const wrap = box.dashRailRowNode({ id: "s1", provider: "claude-code", availability: "available" }, true, null);
+    const row = wrap.querySelector(".acp-rail-row") || wrap;
+    row.dispatch("click");
+    assertEqual(calls.join(","), loaded ? "overview" : "open",
+      loaded ? "a loaded open row toggles back to the Overview" : "a loading or failed row reloads");
+  }
+});
+
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
   assertEqual(typeof p.sandbox.dashHandleSub, "function");
@@ -17137,13 +17539,29 @@ for (const available of [true, false]) {
 
   check(`ACP_AVAILABLE=${available}: dashMaybeAttach ${available ? "peeks" : "does not peek"} a kiro-cli-v3 session's availability`, () => {
     const slice = dashSentinelSlice("function dashMaybeAttach", "// ---- Image paste-to-attach");
-    const { box, fetches } = runDashSentinel(slice, available);
+    // dashMaybeAttach takes a row or a {sid, provider, cwd} descriptor through
+    // dashDesc(), which lives in the openSessionTranscript region; its real
+    // source is loaded alongside rather than restated.
+    // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D14
+    const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+    const descFrom = src.indexOf("function dashDesc(");
+    const descTo = src.indexOf("// ---- Phase 3: live-attach wiring", descFrom);
+    if (descFrom < 0 || descTo < 0) throw new Error("index.html no longer defines dashDesc before the live-attach marker");
+    const { box, fetches } = runDashSentinel(slice + "\n" + src.slice(descFrom, descTo), available);
+    // A plain descriptor, as an Overview tile passes...
+    box.dashMaybeAttach({ sid: "s1", provider: "kiro-cli-v3", cwd: "/ws" }, "s1");
+    // ...and a rail row, read through its dataset.
     const row = new El("button");
+    row.dataset.sid = "s1";
     row.dataset.provider = "kiro-cli-v3";
     row.dataset.cwd = "/ws";
     box.dashMaybeAttach(row, "s1");
-    assertEqual(fetches.some((u) => u.startsWith("/api/session-availability")), available,
-      `the live-attach availability peek must ${available ? "run" : "not run"}`);
+    const peeks = fetches.filter((u) => u.startsWith("/api/session-availability"));
+    assertEqual(peeks.length, available ? 2 : 0,
+      `the live-attach availability peek must ${available ? "run for both forms" : "not run"}`);
+    if (available) {
+      for (const u of peeks) assert(u.includes("cwd=%2Fws"), `the peek must carry the cwd; got ${u}`);
+    }
   });
 
   check(`ACP_AVAILABLE=${available}: dashPickerOpen ${available ? "opens" : "does not open"} the picker`, () => {

@@ -1260,6 +1260,27 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .dash-session-meta-line { display: flex; align-items: center; gap: 0; min-width: 0; font-size: 11.5px; color: var(--text-dim); padding-left: 24px; }
 .dash-session-meta-line > span { white-space: nowrap; flex-shrink: 0; }
 .dash-session-meta-line > span + span::before { content: '\00b7'; margin: 0 7px; color: var(--text-dim); opacity: 0.7; }
+/* Dashboard Overview: the right panel while no session is open. One mode flag,
+   `dash-mode-overview` on #sessions-panel, set by dashSetPanelMode(); the
+   transcript pane's own `hidden` stays owned by the sub-agent view, which
+   resets it on every socket drop. #dashOverview is toggled by that class,
+   never by `hidden`. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D15 */
+#dashOverview { display: none; }
+#sessions-panel.dash-mode-overview #dashOverview { display: flex; }
+#sessions-panel.dash-mode-overview #dashTranscriptWrap,
+#sessions-panel.dash-mode-overview #dashSessionMeta,
+#sessions-panel.dash-mode-overview #dashComposer,
+#sessions-panel.dash-mode-overview #dashPromptNav,
+#sessions-panel.dash-mode-overview #dashSubPanel { display: none; }
+.dash-overview { flex: 1; min-height: 0; flex-direction: column; gap: 12px; overflow-y: auto; }
+.dash-ov-section { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 10px 14px 12px; }
+.dash-ov-title { margin: 0 0 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
+.dash-ov-loading { font-size: 12px; font-style: italic; color: var(--text-dim); }
+/* Home: back to the Overview, shown only while a session is open. Its
+   inline-flex would beat the UA's [hidden] rule, hence the explicit pair. */
+.dash-home-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; }
+.dash-home-btn svg { width: 14px; height: 14px; display: block; }
+#dashHome[hidden] { display: none; }
 .dash-session-meta-ws { color: var(--text-muted); font-weight: 500; }
 .dash-session-meta-line > .dash-session-meta-path { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 10.5px; }
 .dash-session-meta-status { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); }

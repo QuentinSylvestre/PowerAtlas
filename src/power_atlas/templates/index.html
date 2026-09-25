@@ -401,9 +401,13 @@
        chat for a held/available kiro-cli-v3 session, not parity with the
        full agent orchestrator page. Hidden until a selected session's
        availability peek says there is something live to talk to. -->
-  <section class="right-panel" id="sessions-panel">
+  <!-- dash-mode-overview: the panel's one mode flag. The Overview shows while
+       no session is open; dashSetPanelMode() swaps it for the transcript pane.
+       Set in the markup as well as at DOMContentLoaded so the first paint is
+       already the Overview. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D15 -->
+  <section class="right-panel dash-mode-overview" id="sessions-panel">
     <div class="section-label">
-      <span>Transcript</span>
+      <span id="dashPanelTitle">Overview</span>
       <div class="topbar-spacer"></div>
       <!-- Context-window usage indicator (SC2, dashboard/ACP feature-parity
            plan Phase 1) -- mirrors acp.html's #acpContext, wired through the
@@ -451,6 +455,15 @@
           <ul class="acp-mcp-list" id="dashMcpList" aria-label="MCP servers for this session"></ul>
         </div>
       </div>
+      <!-- Back to the Overview from an open session. Shown only in pane mode.
+           260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE -->
+      <button class="acp-btn dash-home-btn" id="dashHome" type="button" hidden
+              aria-label="Back to overview" title="Back to overview (Esc)">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <path d="M2.5 7.5 8 3l5.5 4.5"/><path d="M4 6.5V13h3v-3.5h2V13h3V6.5"/>
+        </svg>
+      </button>
       <button class="acp-btn acp-log-toggle" id="dashLogToggle" type="button"
               aria-expanded="false" aria-controls="dashLog">Debug log<span
               class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
@@ -481,6 +494,25 @@
          own session object by dashSessionMetaRender(); hidden when nothing
          is open. The session id is not repeated here, #dashSid shows it. -->
     <div class="dash-session-meta" id="dashSessionMeta" hidden></div>
+    <!-- The Overview: what shows while no session is open. A sibling of the
+         transcript pane, never inside it: #dashTranscript is wiped on every
+         load, and the signed-out check counts its children. Its sections are
+         placeholders until their own phases fill them.
+         260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D15 -->
+    <div class="dash-overview" id="dashOverview">
+      <section class="dash-ov-section" id="dashOvLive" aria-labelledby="dashOvLiveTitle">
+        <h3 class="dash-ov-title" id="dashOvLiveTitle">Live now</h3>
+        <div class="dash-ov-body"><div class="dash-ov-loading">Loading…</div></div>
+      </section>
+      <section class="dash-ov-section" id="dashOvPlans" aria-labelledby="dashOvPlansTitle">
+        <h3 class="dash-ov-title" id="dashOvPlansTitle">Active plans</h3>
+        <div class="dash-ov-body"><div class="dash-ov-loading">Loading…</div></div>
+      </section>
+      <section class="dash-ov-section" id="dashOvUsage" aria-labelledby="dashOvUsageTitle">
+        <h3 class="dash-ov-title" id="dashOvUsageTitle">Usage</h3>
+        <div class="dash-ov-body"><div class="dash-ov-loading">Loading…</div></div>
+      </section>
+    </div>
     <div class="acp-transcript-wrap" id="dashTranscriptWrap">
       <div class="acp-transcript" id="dashTranscript" role="log" aria-live="polite"
            aria-label="Conversation">
@@ -1041,13 +1073,183 @@ function dashSessionMetaRender(session, workspace){
   el.appendChild(line);
   el.hidden = false;
 }
-function openSessionTranscript(row, session, workspace){
-  var sid = row.dataset.sid;
+// ---- 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE: panel mode ----------
+//
+// The right panel has two modes: the Overview (no session open) and the
+// transcript pane. The one mode flag is the `dash-mode-overview` class on
+// #sessions-panel (D15); style.css hides the pane, the metadata strip and the
+// composer under it and shows #dashOverview. #dashTranscriptWrap's own
+// `hidden` stays owned by the sub-agent view, whose teardown resets it on
+// every socket drop -- a flag shared with it would reveal the pane behind the
+// Overview.
+//
+// The sid the user asked to close with the Close button. Its session_closed
+// returns to the Overview; any other close (idle sweeper, another tab) keeps
+// "This session was closed." on screen (D3). Set only after the close frame
+// actually left, cleared when consumed, on opening a session and on entering
+// the Overview.
+var _dashUserClosedSid = null;
+// Whether the pane holds a transcript, as opposed to "Loading transcript…" or
+// "Could not load this transcript.". Clicking the open row again returns to
+// the Overview only when it does; otherwise the click reloads, as before (D20).
+// Set on a successful transcript fetch and on attach (`session` frame).
+var _dashTranscriptLoaded = false;
+// The server markup's empty-pane placeholder, kept so the Overview can put
+// exactly one back: the signed-out check in dashReportSignedOut() replaces a
+// pane holding a single `.acp-system-msg` child and appends to anything else.
+// `children || childNodes` for the same reason that check uses it.
+var _dashEmptyPlaceholder = (function(){
+  var pane = document.getElementById('dashTranscript');
+  var kids = pane ? (pane.children || pane.childNodes || []) : [];
+  for (var i = 0; i < kids.length; i++) {
+    var n = kids[i];
+    if (n && typeof n.getAttribute === 'function' && n.getAttribute('data-empty') !== null) {
+      return n.cloneNode(true);
+    }
+  }
+  return null;
+})();
+function dashEmptyPlaceholderNode(){
+  if (_dashEmptyPlaceholder) return _dashEmptyPlaceholder.cloneNode(true);
+  var n = document.createElement('div');
+  n.className = 'acp-system-msg';
+  n.setAttribute('data-empty', '');
+  n.textContent = 'Select a session to view its transcript.';
+  return n;
+}
+function dashSetPanelMode(mode){
+  var overview = mode === 'overview';
+  var panel = document.getElementById('sessions-panel');
+  if (panel) panel.classList.toggle('dash-mode-overview', overview);
+  var title = document.getElementById('dashPanelTitle');
+  if (title) title.textContent = overview ? 'Overview' : 'Transcript';
+  var home = document.getElementById('dashHome');
+  if (home) home.hidden = overview;
+}
+// Start and stop the Overview's pollers. Nothing polls yet: the sections get
+// their data in the plan's later phases.
+function dashOverviewStart(){}
+function dashOverviewStop(){}
+// Every Overview request goes through here. A plain fetch 403 never reaches
+// the htmx signed-out handling, so a 403 is reported here, once, and the
+// pollers stop: repeating it on every poll would say nothing new.
+var _dashOverviewSignedOut = false;
+function dashOverviewFetch(url){
+  return fetch(url).then(function(r){
+    if (r.status === 403) {
+      dashOverviewStop();
+      if (!_dashOverviewSignedOut) {
+        _dashOverviewSignedOut = true;
+        dashReportSignedOut();
+      }
+      throw new Error('signed out');
+    }
+    if (!r.ok) throw new Error(String(r.status));
+    return r.json();
+  });
+}
+// The transcript pane. Called before anything is drawn into it: opening a
+// session, creating one, and the signed-out note.
+function dashShowPane(){
+  dashSetPanelMode('pane');
+  dashOverviewStop();
+}
+// Leave whatever session is open and show the Overview. Reached from Home,
+// Escape, clicking the open row again, a user-initiated Close, and deleting
+// the open session.
+function dashShowOverview(){
+  // A dashboard-created session nothing was sent to is closed here, as on
+  // any session switch. close_session detaches every socket itself.
+  var closing = dashCloseIfAbandoned();
+  // Release the server-side subscription (D18): a watched session gets no
+  // notifications and the idle sweeper skips it. dashCloseIfAbandoned() has
+  // already cleared _dashAttachedSid, and a subscribe still in flight has not
+  // set it yet, so this goes out whenever the socket is open; the server
+  // treats a socket watching nothing as a no-op. Not sent while a close is
+  // pending on this socket: `close` runs as a task and refuses a socket that
+  // is no longer attached, and a completed close has detached it anyway.
+  if (!closing && !_dashUserClosedSid && typeof _dashWs !== 'undefined' && _dashWs &&
+      _dashWs.readyState === WebSocket.OPEN) {
+    send('unsubscribe');
+  }
+  _dashAttachedSid = null;
+  dashUpdateCloseButton();
+  _dashUserClosedSid = null;
+  _dashTranscriptLoaded = false;
+  dashCloseSubagentView();
+  dashRemoveAllCrewPanels();
+  dashCloseSubWs();
+  document.querySelectorAll('.acp-rail-row.viewing').forEach(function(r){ r.classList.remove('viewing'); });
+  _viewingSid = null;
+  dashSessionMetaRender(null);
+  dashComposerEl.hidden = true;
+  // clearTranscript() resets the renderer's per-conversation state (tool
+  // rows, timers, prompt-nav targets); the pane is then emptied and given
+  // back its single placeholder.
+  if (typeof clearTranscript === 'function') clearTranscript();
+  var pane = document.getElementById('dashTranscript');
+  if (pane) {
+    pane.textContent = '';
+    pane.appendChild(dashEmptyPlaceholderNode());
+  }
+  dashSetPanelMode('overview');
+  dashOverviewStart();
+}
+(function(){
+  var home = document.getElementById('dashHome');
+  if (home) home.addEventListener('click', function(){ dashShowOverview(); });
+})();
+// Whether Escape may leave the open session (D19). Menus and dialogs close
+// on Escape in their own bubble-phase listeners; this runs in the capture
+// phase, before them, so an open one is still open here and wins. It never
+// consults aria-expanded: expanded rail groups and the log toggle make that
+// true nearly always. The page's modals are divs (#dashPicker, the delete
+// modal) and also <dialog>s opened with showModal(), so both are checked.
+function dashEscapeMayLeave(target){
+  if (!_viewingSid) return false;
+  var t = target;
+  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(String(t.tagName || '')))) return false;
+  function open(el){ return !!el && !el.hidden; }
+  if (typeof dashRailSettingsMenu !== 'undefined' && open(dashRailSettingsMenu)) return false;
+  if (typeof _railOpenActionMenus !== 'undefined' && _railOpenActionMenus && _railOpenActionMenus.length) return false;
+  if (typeof dashModeMenu !== 'undefined' && open(dashModeMenu)) return false;
+  if (typeof topbarSettingsMenu !== 'undefined' && open(topbarSettingsMenu)) return false;
+  if (typeof wsFilterMenu !== 'undefined' && open(wsFilterMenu)) return false;
+  if (open(document.getElementById('dashPicker'))) return false;
+  if (document.querySelectorAll('.acp-ws-delete-modal').length) return false;
+  if (document.querySelectorAll('[role="dialog"]:not([hidden]), dialog[open]').length) return false;
+  return true;
+}
+document.addEventListener('keydown', function(e){
+  if (e.key !== 'Escape' || e.defaultPrevented) return;
+  if (!dashEscapeMayLeave(e.target)) return;
+  dashShowOverview();
+}, true);
+document.addEventListener('DOMContentLoaded', function(){
+  // Nothing is attached at load, so the detach steps are skipped.
+  if (!_viewingSid) {
+    dashSetPanelMode('overview');
+    dashOverviewStart();
+  }
+});
+
+function openSessionTranscript(target, session, workspace){
+  var desc = dashDesc(target);
+  var sid = desc && desc.sid;
   if(!sid) return;
+  dashShowPane();
+  _dashUserClosedSid = null;
+  _dashTranscriptLoaded = false;
   dashCloseIfAbandoned();
   document.querySelectorAll('.acp-rail-row.viewing').forEach(function(r){r.classList.remove('viewing')});
-  row.classList.add('viewing');
   _viewingSid = sid;
+  // Every rail row for this session, not only the one clicked: a session
+  // opened from an Overview tile has no clicked row, and would otherwise wait
+  // for the next rail render (up to 60 s) to be highlighted (D14).
+  document.querySelectorAll('.acp-rail-row').forEach(function(r){
+    if (r.dataset && r.dataset.sid === sid) r.classList.add('viewing');
+  });
+  if (desc.el && desc.el.classList) desc.el.classList.add('viewing');
   dashSessionMetaRender(session || null, workspace);
   dashComposerEl.hidden = true;
   var el = document.getElementById('dashTranscript');
@@ -1057,8 +1259,8 @@ function openSessionTranscript(row, session, workspace){
   loading.textContent = 'Loading transcript…';
   el.appendChild(loading);
   var qs = 'sid=' + encodeURIComponent(sid) +
-    '&provider=' + encodeURIComponent(row.dataset.provider || '') +
-    '&cwd=' + encodeURIComponent(row.dataset.cwd || '');
+    '&provider=' + encodeURIComponent(desc.provider || '') +
+    '&cwd=' + encodeURIComponent(desc.cwd || '');
   fetch('/api/session-transcript?' + qs).then(function(r){
     if(!r.ok) throw new Error(r.status);
     return r.json();
@@ -1074,7 +1276,8 @@ function openSessionTranscript(row, session, workspace){
     } finally {
       _dashReplaying = false;
     }
-    dashMaybeAttach(row, sid);
+    _dashTranscriptLoaded = true;
+    dashMaybeAttach(desc, sid);
   }).catch(function(){
     if(_viewingSid !== sid) return;
     // Fix 3 (Step 9 review): a failed transcript load never reaches
@@ -1095,6 +1298,17 @@ function openSessionTranscript(row, session, workspace){
     err.textContent = 'Could not load this transcript.';
     el.appendChild(err);
   });
+}
+// A session to open, from either a rail row (its dataset) or a plain
+// {sid, provider, cwd} descriptor, which is what an Overview tile has. Both
+// openSessionTranscript() and dashMaybeAttach() read only these three fields.
+// Kept inside this region so the node test's slice of it stays
+// self-contained. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D14
+function dashDesc(t){
+  if (t && t.dataset) {
+    return {sid: t.dataset.sid, provider: t.dataset.provider || '', cwd: t.dataset.cwd || '', el: t};
+  }
+  return t || null;
 }
 
 // ---- Phase 3: live-attach wiring -----------------------------------------
@@ -1178,6 +1392,9 @@ function dashReportSignedOut() {
   // names the one step that brings this tab back once the tray has signed the
   // browser in again. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
   // final review (F7)
+  // The note lands in the transcript pane, so the pane must be showing.
+  // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+  dashShowPane();
   var msg = 'Signed out — open PowerAtlas from its tray icon to sign this '
     + 'browser back in, then reload this tab.';
   logLine('error', 'handshake refused and the page itself answers 403: ' + msg);
@@ -1576,6 +1793,9 @@ dashCloseBtn.addEventListener('click', function(){
     showToast('<div class="toast toast-error">Not connected — nothing sent<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
     return;
   }
+  // Only a close the user asked for returns to the Overview when its
+  // session_closed arrives. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D3
+  _dashUserClosedSid = _dashAttachedSid;
   dashCloseBtn.disabled = true;
   dashCloseBtn.textContent = 'Closing…';
 });
@@ -1958,10 +2178,11 @@ dashSendModeBtn.addEventListener('click', function () {
  *  8-session cap on curiosity alone. Skipped entirely for a non-kiro-cli-v3
  *  provider (no composer, ever) or when ACP_AVAILABLE is false (acp failed
  *  to import). */
-function dashMaybeAttach(row, sid){
-  if (!ACP_AVAILABLE || row.dataset.provider !== 'kiro-cli-v3') return;
+function dashMaybeAttach(target, sid){
+  var desc = dashDesc(target);
+  if (!ACP_AVAILABLE || !desc || desc.provider !== 'kiro-cli-v3') return;
   fetch('/api/session-availability?sid=' + encodeURIComponent(sid) +
-        '&cwd=' + encodeURIComponent(row.dataset.cwd || ''))
+        '&cwd=' + encodeURIComponent(desc.cwd || ''))
     .then(function(r){ if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function(data){
       if (_viewingSid !== sid) return; // superseded by a later click
@@ -3088,8 +3309,12 @@ function dashCloseIfAbandoned(){
   if (pickerEl && !pickerEl.hidden && typeof dashPickerClose === 'function') {
     dashPickerClose();
   }
+  // Whether a close left here: dashShowOverview() must then not unsubscribe,
+  // since `close` refuses a socket that is no longer attached.
+  // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D18
+  var closing = false;
   if (_dashAttachedSid && _dashOrigin === 'dashboard' && !_dashSent) {
-    send('close', {}, _dashAttachedSid);
+    closing = send('close', {}, _dashAttachedSid) === true;
   }
   _dashAttachedSid = null;
   _dashOrigin = null;
@@ -3149,6 +3374,7 @@ function dashCloseIfAbandoned(){
   // screen (review finding, Phase 1 fix cycle).
   setContext(null);
   dashUpdateCloseButton();
+  return closing;
 }
 window.addEventListener('pagehide', dashCloseIfAbandoned);
 
@@ -3163,6 +3389,9 @@ function dashHandle(frame){
     // Phase 4: plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md
     if (payload && payload.created) {
       _dashCreateInFlight = false;
+      // The new session is shown even if the user went back to the Overview
+      // while it was being created. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+      dashShowPane();
       _viewingSid = sid;
       dashSessionMetaRender(null); // no rail row yet; the next rail render fills it
       _dashEagerLoadPending = false; // creation is not an eager load
@@ -3279,6 +3508,9 @@ function dashHandle(frame){
     }
     _dashReconnectQueueSnapshot = null;
     _dashAttachedSid = sid;
+    // Attached: clicking this row again now returns to the Overview (D20).
+    // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    _dashTranscriptLoaded = true;
     _dashTurnActive = !!payload.turnActive;
     _dashEagerLoadPending = false;
     _dashLoadingSid = null;
@@ -3781,6 +4013,14 @@ function dashHandle(frame){
     dashClearAttachments();
     dashReleasePendingAttachments();
     dashUpdateCloseButton();
+    // A close the user asked for with the Close button returns to the
+    // Overview; any other close keeps the message above (D3). Before
+    // dashPickerRunPending(), so a pending create still shows its session.
+    // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    if (sid && sid === _dashUserClosedSid) {
+      dashShowOverview();
+      _dashUserClosedSid = null;
+    }
     dashRailRefreshSoon(); // session just released — update the dot promptly
     dashPickerRunPending(); // fire pending close-then-create if any
     return;
@@ -4340,6 +4580,9 @@ function dashPickerCreate(cwd) {
     if (noteEl) noteEl.textContent = _dashPickerCapacity.held + ' of ' + _dashPickerCapacity.max + ' sessions are already open, which is the limit. Close one to make room.';
     return;
   }
+  // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE: "Creating session…" is
+  // drawn into the pane below, so the pane must be showing.
+  dashShowPane();
   var wantsClose = !!(
     document.getElementById('dashPickerCloseCurrent').checked &&
     _dashAttachedSid &&
@@ -4391,6 +4634,7 @@ function dashRailQuickCreate(cwd){
     dashPickerOpen(cwd);
     return;
   }
+  dashShowPane(); // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE, as in dashPickerCreate
   var transcriptEl = document.getElementById('dashTranscript');
   if (transcriptEl) {
     transcriptEl.textContent = '';
@@ -5344,6 +5588,13 @@ function dashRailRowNode(session, flat, workspace){
 
   row.addEventListener('click', function(){
     if (state === 'locked') return;
+    // Clicking the open row again returns to the Overview once its
+    // transcript has loaded; while it is loading or failed, the click
+    // reloads it, as before (D20). 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    if (_viewingSid === session.id && _dashTranscriptLoaded) {
+      dashShowOverview();
+      return;
+    }
     dashRailFocus = {sid: session.id};
     openSessionTranscript(row, session, workspace);
   });
@@ -5960,26 +6211,13 @@ function dashRailForgetSession(sid){
     }
   });
   if (_viewingSid === sid) {
-    _viewingSid = null;
-    dashSessionMetaRender(null);
-    dashCloseIfAbandoned();
-    // Fix 3 (Step 9 review): same gap as openSessionTranscript()'s .catch()
-    // branch above -- deleting the session currently on screen never reaches
-    // renderTranscriptHistory()/clearTranscript() (there is no new session's
-    // transcript to render here), so a sub-agent panel or crew state
-    // belonging to the just-deleted session would otherwise survive
-    // underneath the "session was deleted" message. Mirrors the established
-    // 3-call pattern at the `created:true` branch/agent_died/session_closed.
-    dashCloseSubagentView();
-    dashRemoveAllCrewPanels();
-    dashCloseSubWs();
-    var el = document.getElementById('dashTranscript');
-    el.textContent = '';
-    var msg = document.createElement('div');
-    msg.className = 'acp-system-msg';
-    msg.textContent = 'This session was deleted.';
-    el.appendChild(msg);
-    dashComposerEl.hidden = true;
+    // Deleting the open session returns to the Overview (D3).
+    // dashShowOverview() does the whole teardown this branch used to do by
+    // hand, including the sub-agent panel, crew state and dashSubWs that
+    // Fix 3 (Step 9 review) added here: deleting never reaches
+    // renderTranscriptHistory()/clearTranscript(), the chain that normally
+    // tears them down. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    dashShowOverview();
   }
 }
 

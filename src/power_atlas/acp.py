@@ -192,6 +192,9 @@ CLIENT_TYPES = frozenset({
     "subscribe", "new", "load", "prompt", "cancel", "close", "steer",
     "commands_options", "commands_execute", "permission_response",
     "mcp_signin",  # the MCP panel's Connect; see `_handle_mcp_signin`
+    # The dashboard's Overview: stop watching without closing the socket.
+    # See `_handle_unsubscribe`. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D18
+    "unsubscribe",
 })
 SERVER_TYPES = frozenset({
     "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
@@ -6188,6 +6191,9 @@ def _dispatch(conn: _Connection, frame: dict) -> None:
     if type_ == "new":
         _spawn_task(_handle_new(conn, payload))
         return
+    if type_ == "unsubscribe":
+        _handle_unsubscribe(conn)
+        return
     if type_ == "subscribe":
         _handle_subscribe(conn, session_id)
         return
@@ -6501,6 +6507,32 @@ def _session_closed_frame(session_id: str) -> dict:
         "message": "This session was closed. Its agent-side processes and its "
                    "replay buffer are gone; create a new session to carry on.",
     }, session_id)
+
+
+def _handle_unsubscribe(conn):
+    """Detach this socket from whatever session it watches; answer nothing.
+
+    The dashboard sends this when it returns to its Overview. The socket stays
+    open for the next session the user opens, but it must stop counting as
+    "watched": a watched session gets no ``turn_end``/``agent_error``
+    notifications and the idle sweeper skips it. ``detach`` also stamps the
+    idle clock, exactly as a closing tab does.
+
+    The socket is also dropped from any ``session/load`` waiter list, or a
+    subscribe deferred behind a load would attach it when the load lands,
+    after the page has already moved on. Idempotent: a socket watching nothing
+    is left as it is. Sync, like ``_handle_subscribe``, so frame order on one
+    socket is the order of effect: a ``subscribe`` then an ``unsubscribe``
+    always ends detached.
+    260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D18
+    """
+    sid = conn.session_id
+    for waiters in _registry.loading.values():
+        if conn in waiters:
+            waiters.remove(conn)
+    _registry.detach(conn)
+    if sid is not None:
+        log.info("ACP unsubscribe: socket=%s session=%s", conn.cid, sid)
 
 
 def _handle_subscribe(conn, session_id):

@@ -2635,6 +2635,79 @@ class TestAcpReplayOnSubscribe:
         assert any("unknown_session" in r.getMessage() for r in caplog.records)
 
 
+class TestAcpUnsubscribe:
+    """The dashboard's Overview sends ``unsubscribe`` so the session it leaves
+    stops counting as watched, which would otherwise suppress its
+    notifications and exempt it from the idle sweeper.
+    260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D18"""
+
+    def _watched(self, acp_mod, sid, monkeypatch):
+        """``watched`` as the notification hook receives it."""
+        seen = []
+        monkeypatch.setattr(acp_mod, "notify_hook",
+                            lambda *args: seen.append(args[-1]))
+        acp_mod._notify("turn_end", sid, "end_turn")
+        return seen[-1]
+
+    def test_unsubscribe_detaches_and_answers_nothing(self, acp_session,
+                                                      monkeypatch):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._dispatch(conn, {"type": "subscribe", "sessionId": sid})
+        assert conn in acp_mod._registry.subscribers.get(sid, ())
+        assert self._watched(acp_mod, sid, monkeypatch) is True  # positive control
+        _queued(conn)  # drain the subscribe's replay
+
+        acp_mod._dispatch(conn, {"type": "unsubscribe"})
+        assert conn not in acp_mod._registry.subscribers.get(sid, ())
+        assert conn.session_id is None
+        assert self._watched(acp_mod, sid, monkeypatch) is False
+        assert _queued(conn) == []
+
+    def test_a_second_unsubscribe_is_a_no_op(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._dispatch(conn, {"type": "subscribe", "sessionId": sid})
+        acp_mod._dispatch(conn, {"type": "unsubscribe"})
+        _queued(conn)
+        acp_mod._dispatch(conn, {"type": "unsubscribe"})
+        assert conn.session_id is None
+        assert sid not in acp_mod._registry.subscribers
+        assert _queued(conn) == []
+
+    def test_unsubscribe_leaves_other_watchers_attached(self, acp_session):
+        acp_mod, sid = acp_session
+        mine, other = (acp_mod._Connection(_SinkWs()) for _ in range(2))
+        for conn in (mine, other):
+            acp_mod._registry.connections.add(conn)
+            acp_mod._dispatch(conn, {"type": "subscribe", "sessionId": sid})
+        acp_mod._dispatch(mine, {"type": "unsubscribe"})
+        assert acp_mod._registry.subscribers[sid] == {other}
+
+    def test_unsubscribe_drops_a_subscribe_parked_behind_a_load(
+            self, acp_session):
+        """A subscribe deferred behind a ``session/load`` would otherwise
+        attach the socket when the load lands, after the page moved on."""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.loading[sid] = []
+        acp_mod._dispatch(conn, {"type": "subscribe", "sessionId": sid})
+        assert acp_mod._registry.loading[sid] == [conn]  # positive control
+        acp_mod._dispatch(conn, {"type": "unsubscribe"})
+        assert acp_mod._registry.loading[sid] == []
+
+    def test_unsubscribe_is_synchronous(self):
+        """Frame order on one socket is the order of effect only while this
+        handler never awaits: ``subscribe`` then ``unsubscribe`` must end
+        detached."""
+        import inspect
+        from power_atlas import acp as acp_mod
+        assert not inspect.iscoroutinefunction(acp_mod._handle_unsubscribe)
+
+
 class TestAcpNotificationFanout:
     def test_agent_message_chunk_reaches_subscribers_and_the_buffer(self, acp_session):
         acp_mod, sid = acp_session
