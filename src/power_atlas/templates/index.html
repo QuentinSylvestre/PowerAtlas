@@ -1239,9 +1239,22 @@ function dashEscapeMayLeave(target){
 }
 // No defaultPrevented check: a capture-phase listener on document runs
 // before every bubble-phase handler that could set it.
+//
+// Escape steps back one level at a time. With the sub-agent view open, it
+// closes that view first, exactly as "‹ Back to main" does, and stays in the
+// session; the next Escape returns to the Overview. Both steps sit behind the
+// same guards (editable target, open menu, dialog or MCP panel). No
+// preventDefault(): no other Escape handler on the page acts on the
+// sub-agent view or reads defaultPrevented, so there is nothing to stop.
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D19 (user decision)
 document.addEventListener('keydown', function(e){
   if (e.key !== 'Escape') return;
   if (!dashEscapeMayLeave(e.target)) return;
+  var subPanel = document.getElementById('dashSubPanel');
+  if (subPanel && !subPanel.hidden) {
+    dashCloseSubagentView();
+    return;
+  }
   dashShowOverview();
 }, true);
 document.addEventListener('DOMContentLoaded', function(){

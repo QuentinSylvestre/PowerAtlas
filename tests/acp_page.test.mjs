@@ -17070,6 +17070,39 @@ check("dashboard overview: Escape with the MCP panel open closes the panel, not 
   assert(dashInOverview(p), "with the panel closed, the next Escape leaves the session");
 });
 
+/** A session open with the sub-agent view showing over it. */
+async function dashSubViewFixture() {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.el("dashSubPanel").hidden = false;
+  p.el("dashTranscriptWrap").hidden = true;
+  return p;
+}
+
+check("dashboard overview: Escape with the sub-agent view open closes that view and stays in the session (D19)", async () => {
+  const p = await dashSubViewFixture();
+  dashEscape(p);
+  assertEqual(p.el("dashSubPanel").hidden, true, "Escape must close the sub-agent view, as Back to main does");
+  assertEqual(p.el("dashTranscriptWrap").hidden, false, "the main transcript comes back");
+  assertEqual(p.sandbox._viewingSid, "sess-1", "the session stays open");
+  assert(!dashInOverview(p), "the first Escape does not leave the session");
+});
+
+check("dashboard overview: a second Escape after closing the sub-agent view returns to the Overview", async () => {
+  const p = await dashSubViewFixture();
+  dashEscape(p);
+  dashEscape(p);
+  assert(dashInOverview(p), "the second Escape leaves the session");
+  assertEqual(p.sandbox._viewingSid, null);
+});
+
+check("dashboard overview: Escape in the composer with the sub-agent view open does neither", async () => {
+  const p = await dashSubViewFixture();
+  dashEscape(p, new El("textarea"));
+  assertEqual(p.el("dashSubPanel").hidden, false, "Escape while typing must not close the sub-agent view");
+  assertEqual(p.sandbox._viewingSid, "sess-1", "nor leave the session");
+});
+
 check("dashboard overview: a create refusal after Home is shown in the pane, not written behind the Overview", () => {
   const p = loadDashPicker();
   p.sandbox._dashPickerCapacity = { held: 0, max: 8 };
