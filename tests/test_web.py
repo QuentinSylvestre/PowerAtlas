@@ -13002,6 +13002,22 @@ class TestSettingsSurface:
         assert not (config_mod.CONFIG_PATH).exists(), (
             "a remote peer changed the permission rules")
 
+    def test_the_prompt_card_allow_rule_write_is_loopback_only(self, remote_enabled):
+        """SC-7, D-9: the Phase 3 prompt-card route is not on the remote
+        allowlist either, so a remote card cannot widen new sessions."""
+        from power_atlas import config as config_mod
+        status, body, _ = _peer_http(
+            "/api/acp-permissions/allow-rule",
+            [self._both_cookies(),
+             (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode()),
+             (b"content-type", b"application/json")],
+            method="POST",
+            body=json.dumps({"capability": "shell", "pattern": "npm test"}).encode())
+        assert status == 403
+        assert b"Forbidden" in body
+        assert not (config_mod.CONFIG_PATH).exists(), (
+            "a remote peer added a permission rule")
+
     def test_rotating_replaces_the_stored_secret(self, client, tmp_path):
         from power_atlas import config as config_mod
         first = config_mod.ensure_remote_secret()
@@ -22316,6 +22332,174 @@ class TestSupervisor:
         assert acp_mod._project_consent(
             {"matchedRule": {"capability": 1, "effect": None}}) == {}
 
+    # ---- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3 ----------------
+
+    # The measured shape of a Manual Ask-row shell prompt (P-0.7 step 2, P-B):
+    # the row's catch-all ask carries `exclude` and no `match`.
+    _ASK_ROW_CONSENT = {
+        "capability": "shell",
+        "resource": "git status && echo x",
+        "triggeringResource": "echo x",
+        "askType": "explicit",
+        "scope": "agent",
+        "source": "agent-profile",
+        "matchedRule": {"capability": "shell", "effect": "ask",
+                        "exclude": ["git status"]},
+    }
+
+    def test_project_consent_forwards_the_triggering_resource(self):
+        """The split sub-command reaches the card ("Triggered by") and the
+        button's prefill; a non-string one is dropped like any other field."""
+        from power_atlas import acp as acp_mod
+        projected = acp_mod._project_consent(self._ASK_ROW_CONSENT)
+        assert projected == {
+            "capability": "shell",
+            "resource": "git status && echo x",
+            "triggeringResource": "echo x",
+            "scope": "agent",
+            "source": "agent-profile",
+            "matchedRule": {"capability": "shell", "effect": "ask"},
+        }, f"got {projected!r}"
+        for bad in ({"cmd": "x"}, ["echo x"], 7, None, True):
+            assert "triggeringResource" not in acp_mod._project_consent(
+                {"triggeringResource": bad, "capability": "shell"}), bad
+
+    def test_rule_row_is_the_ask_rows_capability_in_a_derived_session(self):
+        from power_atlas import acp as acp_mod
+        from power_atlas.config import DERIVED_AGENT_NAME
+        assert acp_mod._rule_row(self._ASK_ROW_CONSENT, DERIVED_AGENT_NAME) == "shell"
+        # A row with an empty allow list compiles to a bare ask (D-13).
+        bare = dict(self._ASK_ROW_CONSENT,
+                    matchedRule={"capability": "shell", "effect": "ask"})
+        assert acp_mod._rule_row(bare, DERIVED_AGENT_NAME) == "shell"
+        for cap, resource in (("fs_write", "notes.md"), ("fs_read", "a/b.txt"),
+                              ("mcp", "paecho/pa_echo"),
+                              ("subagent", "kiro_default"),
+                              ("skill", "pa-probe-skill")):
+            consent = {"capability": cap, "resource": resource,
+                       "source": "agent-profile",
+                       "matchedRule": {"capability": cap, "effect": "ask"}}
+            assert acp_mod._rule_row(consent, DERIVED_AGENT_NAME) == cap, cap
+
+    @pytest.mark.parametrize("change, why", [
+        # Protected: the ask carries its folder patterns (P-0.4).
+        ({"capability": "fs_write",
+          "matchedRule": {"capability": "fs_write", "effect": "ask",
+                          "match": ["**/.kiro/steering/**"]}},
+         "a Protected ask"),
+        # kiro-cli's own built-in ask (P-0.10), which no row overrides.
+        ({"source": "kiro-scope"}, "a kiro-scope built-in"),
+        ({"source": None}, "no source"),
+        ({"matchedRule": {"capability": "shell", "effect": "deny"}}, "a deny"),
+        ({"matchedRule": "ask"}, "a non-dict rule"),
+        ({"matchedRule": None}, "no rule"),
+        ({"matchedRule": {"capability": "fs_read", "effect": "ask"}},
+         "a rule of another row"),
+        # P-0.5: the prompt names a host, so the button is hidden.
+        ({"capability": "web_fetch",
+          "matchedRule": {"capability": "web_fetch", "effect": "ask"}},
+         "web fetch"),
+        ({"capability": "web_search",
+          "matchedRule": {"capability": "web_search", "effect": "ask"}},
+         "web search (never measured)"),
+        ({"capability": "power",
+          "matchedRule": {"capability": "power", "effect": "ask"}},
+         "powers (never measured)"),
+        ({"capability": "all",
+          "matchedRule": {"capability": "all", "effect": "ask"}},
+         "not a row"),
+        ({"capability": ["shell"]}, "a non-string capability"),
+    ])
+    def test_rule_row_is_empty_where_a_row_rule_cannot_silence_the_prompt(
+            self, change, why):
+        from power_atlas import acp as acp_mod
+        from power_atlas.config import DERIVED_AGENT_NAME
+        consent = dict(self._ASK_ROW_CONSENT, **change)
+        assert acp_mod._rule_row(consent, DERIVED_AGENT_NAME) == "", why
+
+    @pytest.mark.parametrize("mode", [
+        "kiro_default", "spec", "vibe", None, "", "POWERATLAS-ACP"])
+    def test_rule_row_is_empty_outside_a_derived_agent_session(self, mode):
+        """D-31: a vendor task mode or the fallback agent runs its own rules,
+        which a row rule never reaches."""
+        from power_atlas import acp as acp_mod
+        assert acp_mod._rule_row(self._ASK_ROW_CONSENT, mode) == ""
+
+    def test_rule_row_tolerates_every_non_dict_consent(self):
+        from power_atlas import acp as acp_mod
+        from power_atlas.config import DERIVED_AGENT_NAME
+        for shape in (None, "shell", ["shell"], 7, True):
+            assert acp_mod._rule_row(shape, DERIVED_AGENT_NAME) == "", shape
+
+    def test_rule_rows_mirror_the_compilers_row_labels(self):
+        """`_RULE_ROWS` is a copy kept so acp.py does not import agent_profile;
+        this keeps it honest. Web fetch, web search and powers are left out."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import agent_profile as ap
+        for row, label in acp_mod._RULE_ROWS.items():
+            assert ap.ROW_LABELS[row] == label, row
+        assert set(ap.PERMISSION_ROWS) - set(acp_mod._RULE_ROWS) == {
+            "web_fetch", "web_search", "power"}
+
+    @pytest.mark.parametrize("bound, eligible", [
+        ("poweratlas-acp", True), ("kiro_default", False), ("spec", False)])
+    def test_permission_request_frame_carries_rule_eligibility(
+            self, monkeypatch, bound, eligible):
+        """The frame's `ruleEligible`/`ruleRow`/`ruleRowLabel`, computed from
+        the raw consent (whose `match` list the projection drops) and the mode
+        the session record says was bound."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permruleelig-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch", bound)
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            sv3._on_agent_request(self._permission_request_msg(
+                21, sid, title="echo x",
+                meta={"kiro": {"consent": self._ASK_ROW_CONSENT}},
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            payload = [f for f in _queued(conn)
+                       if f["type"] == "permission_request"][0]["payload"]
+            assert payload["ruleEligible"] is eligible
+            if eligible:
+                assert payload["ruleRow"] == "shell"
+                assert payload["ruleRowLabel"] == "Run commands"
+            else:
+                assert payload["ruleRow"] is None
+                assert payload["ruleRowLabel"] == ""
+            assert payload["consent"]["triggeringResource"] == "echo x"
+            assert "exclude" not in payload["consent"]["matchedRule"]
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_a_protected_prompt_frame_is_not_rule_eligible(self, monkeypatch):
+        """The measured Protected shape (P-0.4): its `match` list is dropped by
+        the projection, so only the raw consent can tell it from a row ask."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permruleprot-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record(
+            "C:\\scratch", "poweratlas-acp")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        consent = {"capability": "fs_write",
+                   "resource": ".kiro/steering/probe.md",
+                   "scope": "agent", "source": "agent-profile",
+                   "matchedRule": {"capability": "fs_write", "effect": "ask",
+                                   "match": ["**/.kiro/steering/**"]}}
+        try:
+            sv3._on_agent_request(self._permission_request_msg(
+                22, sid, title="Write File", meta={"kiro": {"consent": consent}},
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            payload = [f for f in _queued(conn)
+                       if f["type"] == "permission_request"][0]["payload"]
+            assert payload["consent"]["matchedRule"] == {
+                "capability": "fs_write", "effect": "ask"}
+            assert payload["ruleEligible"] is False and payload["ruleRow"] is None
+        finally:
+            self._cleanup_registry(acp_mod)
+
     def test_permission_request_with_a_truthy_non_dict_meta_still_emits(
             self, monkeypatch):
         """The `or {}` chain this could have been written as raises here.
@@ -25547,6 +25731,198 @@ class TestAcpPermissionRoutes:
         labels = {row["id"]: row["label"] for row in body["protected"]}
         assert labels["skills"] == "Skill files"
         assert {r["id"]: r["label"] for r in body["rule_rows"]}["skill"] == "Skills"
+
+
+class TestAllowRuleRoute:
+    """`POST /api/acp-permissions/allow-rule`, the prompt card's "Allow, and
+    always in new sessions…" (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL
+    Phase 3, D-19, D-32, SC-6, SC-7)."""
+
+    URL = "/api/acp-permissions/allow-rule"
+
+    @staticmethod
+    def _rules(client) -> dict:
+        return client.get("/api/acp-permissions").json()["rules"]
+
+    def test_a_pattern_is_appended_and_compiled(self, client, isolated_config):
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        resp = client.post(self.URL, json={"capability": "shell",
+                                           "pattern": "echo pa-button"}).json()
+        assert resp == {"ok": True}
+        allow = self._rules(client)["shell"]["allow"]
+        assert allow[-1] == "echo pa-button"
+        assert allow[:-1] == ap.SEED_RULES["shell"]["allow"], (
+            "the rest of the row changed")
+        text = ap.derived_agent_path().read_text(encoding="utf-8")
+        assert '"echo pa-button"' in text
+        state = client.get("/api/acp-permissions").json()
+        assert state["in_effect"] is True and state["mode"] == "manual"
+
+    def test_each_eligible_row_takes_its_resource_as_is(self, client, isolated_config):
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        for row, pattern in (("fs_read", "C:/work/repo/src/**"),
+                             ("fs_write", "notes.md"),
+                             ("mcp", "paecho/pa_echo"),
+                             ("subagent", "kiro_default"),
+                             ("skill", "pa-probe-skill")):
+            resp = client.post(self.URL, json={"capability": row,
+                                               "pattern": pattern}).json()
+            assert resp["ok"] is True, (row, resp)
+            assert pattern in self._rules(client)[row]["allow"], row
+
+    def test_a_repeated_pattern_is_stored_once(self, client, isolated_config):
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        for _ in range(2):
+            assert client.post(self.URL, json={
+                "capability": "shell", "pattern": "npm test"}).json()["ok"] is True
+        # A seed entry too: already there, so not added again.
+        assert client.post(self.URL, json={
+            "capability": "shell", "pattern": "git status"}).json()["ok"] is True
+        allow = self._rules(client)["shell"]["allow"]
+        assert allow.count("npm test") == 1 and allow.count("git status") == 1
+
+    @pytest.mark.parametrize("pattern", [
+        "", "   ", "*", "**", "*/*", "a\x7fb", "a\tb", "a\u2028b",
+        "x" * 201, 7, None, ["echo"], {"p": 1}])
+    def test_an_invalid_pattern_is_refused_and_nothing_is_saved(
+            self, client, isolated_config, pattern):
+        """D-14, the rule editor's own check (`pattern_error`)."""
+        resp = client.post(self.URL, json={"capability": "shell",
+                                           "pattern": pattern}).json()
+        assert resp["ok"] is False and "not saved" in resp["error"]
+        assert not (isolated_config / "config.toml").exists()
+
+    def test_a_lone_surrogate_is_refused_as_json(self, client, isolated_config):
+        resp = client.post(self.URL, content=json.dumps(
+            {"capability": "shell", "pattern": "a\ud800b"}),
+            headers={"content-type": "application/json"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is False
+        assert not (isolated_config / "config.toml").exists()
+
+    @pytest.mark.parametrize("row", [
+        "web_fetch", "all", "protected_block", "Shell", "", None, 1, ["shell"]])
+    def test_a_row_outside_the_rule_rows_or_web_fetch_is_refused(
+            self, client, isolated_config, row):
+        """D-11 rows only, and not Web fetch (P-0.5: the prompt names a host,
+        so the card hides the button there)."""
+        resp = client.post(self.URL, json={"capability": row,
+                                           "pattern": "example.com"}).json()
+        assert resp["ok"] is False and resp["error"]
+        assert not (isolated_config / "config.toml").exists()
+
+    @pytest.mark.parametrize("body", [[], "x", 1, None])
+    def test_a_non_object_body_is_refused(self, client, isolated_config, body):
+        resp = client.post(self.URL, json=body).json()
+        assert resp["ok"] is False
+        assert not (isolated_config / "config.toml").exists()
+
+    def test_a_row_set_to_allow_is_refused(self, client, isolated_config):
+        """Its allow list is not compiled (D-13), so the pattern would change
+        nothing; the rules are left exactly as they were."""
+        ap = _agent_profile()
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["shell"]["default"] = "allow"
+        assert client.post("/api/acp-permissions",
+                           json={"mode": "manual", "rules": rules}).json()["ok"]
+        before = (isolated_config / "config.toml").read_bytes()
+        resp = client.post(self.URL, json={"capability": "shell",
+                                           "pattern": "npm test"}).json()
+        assert resp["ok"] is False and "set to Allow" in resp["error"]
+        assert (isolated_config / "config.toml").read_bytes() == before
+
+    def test_a_row_set_to_allow_inside_the_lock_is_still_refused(
+            self, client, isolated_config, monkeypatch):
+        """The check is repeated inside `apply_settings`: a row switched to
+        Allow between the pre-check and the lock is refused, not appended."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        calls = []
+        real = web_mod._allow_rule_refusal
+
+        def flip(rules, row):
+            calls.append(row)
+            return "" if len(calls) == 1 else real(
+                dict(rules, **{row: dict(rules[row], default="allow")}), row)
+
+        monkeypatch.setattr(web_mod, "_allow_rule_refusal", flip)
+        resp = client.post(self.URL, json={"capability": "shell",
+                                           "pattern": "npm test"}).json()
+        assert len(calls) == 2
+        assert resp["ok"] is False and "set to Allow" in resp["error"]
+        assert "npm test" not in self._rules(client)["shell"]["allow"]
+        assert '"npm test"' not in ap.derived_agent_path().read_text(encoding="utf-8")
+
+    def test_a_full_allow_list_is_refused(self, client, isolated_config):
+        ap = _agent_profile()
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["mcp"]["allow"] = [f"s/t{i}" for i in range(ap.MAX_PATTERNS_PER_LIST)]
+        assert client.post("/api/acp-permissions",
+                           json={"rules": rules}).json()["ok"] is True
+        resp = client.post(self.URL, json={"capability": "mcp",
+                                           "pattern": "s/new"}).json()
+        assert resp["ok"] is False and "Edit rules" in resp["error"]
+
+    def test_it_goes_through_apply_settings_with_a_bounded_lock(
+            self, client, isolated_config, monkeypatch):
+        """D-16: saved and regenerated under the generation lock, with the
+        routes' bounded wait, and never as a choice of the mode (D-35)."""
+        ap = _agent_profile()
+        seen = []
+        real = ap.apply_settings
+
+        def spy(mutate=None, **kwargs):
+            seen.append(kwargs)
+            return real(mutate, **kwargs)
+
+        monkeypatch.setattr(ap, "apply_settings", spy)
+        assert client.post(self.URL, json={"capability": "shell",
+                                           "pattern": "npm test"}).json()["ok"]
+        assert seen and seen[0]["lock_timeout"] > 0
+        assert seen[0]["sets_posture"] is False
+
+    def test_a_generation_failure_answers_ok_true_with_a_warning(
+            self, client, isolated_config):
+        """D-32: stored but not in effect; the card shows the warning."""
+        ap = _agent_profile()
+        ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
+        ap.derived_agent_path().write_bytes(b"---\ndescription: mine\n---\nx\n")
+        resp = client.post(self.URL, json={"capability": "shell",
+                                           "pattern": "npm test"}).json()
+        assert resp["ok"] is True
+        assert "not yet in effect" in resp["warning"]
+        assert "npm test" in self._rules(client)["shell"]["allow"]
+
+    def test_an_unreadable_config_is_refused_and_left_alone(
+            self, client, isolated_config):
+        """Phase 1 finding 1: a config.toml that did not parse is never saved
+        over; its in-memory reading is the defaults."""
+        path = isolated_config / "config.toml"
+        path.write_bytes(b"this is = = not toml [\n")
+        resp = client.post(self.URL, json={"capability": "shell",
+                                           "pattern": "npm test"}).json()
+        assert resp["ok"] is False and resp["error"]
+        assert path.read_bytes() == b"this is = = not toml [\n"
+
+    def test_a_post_without_origin_is_refused(self, isolated_config):
+        """A loopback write like any other: a cross-site page cannot add a
+        rule through the viewer's cookie."""
+        bare = TestClient(app, base_url="http://127.0.0.1",
+                          client=("127.0.0.1", 50000))
+        resp = bare.post(self.URL, json={"capability": "shell",
+                                         "pattern": "npm test"})
+        assert resp.status_code == 403
+        assert not (isolated_config / "config.toml").exists()
+
+    def test_a_post_without_the_local_cookie_is_refused(
+            self, anonymous_client, isolated_config):
+        resp = anonymous_client.post(
+            self.URL, json={"capability": "shell", "pattern": "npm test"},
+            headers={"Origin": "http://127.0.0.1"})
+        assert resp.status_code == 403
+        assert not (isolated_config / "config.toml").exists()
 
 
 class TestGenerationRunsAtStartup:

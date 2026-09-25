@@ -485,7 +485,9 @@ Python; in Manual, allowing an interpreter is equivalent to allowing everything.
 When a session does ask, the request renders inline in the transcript and the turn pauses until you
 answer, from any tab or after a reload, the same way a clarifying question does. The prompt shows the
 full command or tool title, plus what kiro-cli reports about the request: the capability, the resource
-(for a write, the file name), the rule that matched, and where that rule came from. kiro-cli offers
+(for a write, the file name), the rule that matched, and where that rule came from. When kiro-cli split
+a command and only one part of it asked (`git status && echo x` asks about `echo x`), that part is shown
+as **Triggered by**. kiro-cli offers
 **Allow** (this once), **Deny** (this once) and **Always deny**; it offers no "always allow".
 **Always deny** lasts for the current session only, and the button says so: kiro-cli keeps the rule in
 memory, writes nothing to disk, and a new session asks again. Denying
@@ -493,6 +495,25 @@ leaves the tool call failed with nothing written. Nothing answers on your behalf
 watching waits at its first such request until the silence timeout above cancels the turn.
 `plans/ROADMAP.md`'s item on deciding permission requests by rule for unattended sessions is what would
 change that.
+
+**Allow, and always in new sessions…** appears on a prompt that a Manual row raised because nothing
+in its Allow without asking list matched. It opens a small field under the prompt, labelled with the
+row, holding a pattern you can edit before saving: for a command, the exact command (the part shown
+as Triggered by, if any), never a `*` pattern, since that would also allow output redirection; for a
+file, its folder followed by `/**`, or the exact file when it sits directly in the session folder, a
+drive root or your home folder; for an MCP tool, a sub-agent or a skill, its name as the prompt shows
+it. The same warnings as the rule editor appear as you type, such as the one for an interpreter.
+**Save** adds the pattern to that row's Allow without asking list and then allows this prompt once;
+the prompt then says "Rule added — new sessions will not ask". The rule applies to sessions created
+afterwards; the current session keeps asking, because kiro-cli reads its rules when a session starts.
+If the prompt was answered elsewhere while you were saving, the rule is still saved and the prompt says
+so. If the rule is refused (for example an empty or match-everything pattern) the reason is shown and
+the prompt stays open; if the rule was saved but the derived agent could not be written, the warning
+is shown with it. The button does not appear in Yolo (nothing there asks through a row), on Protected
+prompts or kiro-cli's own built-in prompts (no row can silence those), in task modes such as Spec or
+Plan, on a remote page (rules change only from this computer; a remote request is refused), or for web
+fetches, web searches and powers (their prompts do not name something a pattern can match reliably;
+add web fetch host names in the rule editor instead).
 
 **The agent can ask a clarifying question mid-turn, and the page answers it inline.** When the agent
 needs you to choose between options before continuing, the question and its choices render as buttons

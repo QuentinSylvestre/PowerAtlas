@@ -3680,7 +3680,13 @@ function dashHandle(frame){
     if ((typeof reqId === 'string' || typeof reqId === 'number') && options.length) {
       // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: consent
       // passed through as-is; transcript-renderer.js validates each field.
-      addPermissionRequest(reqId, sid, title, options, payload && payload.consent);
+      // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3: the server's
+      // verdict on the "always in new sessions" button (D-31).
+      addPermissionRequest(reqId, sid, title, options, payload && payload.consent, {
+        eligible: !!payload && payload.ruleEligible === true,
+        row: payload && payload.ruleRow,
+        label: payload && payload.ruleRowLabel,
+      });
     }
     return;
   }
@@ -7892,12 +7898,11 @@ var _ACP_RULES_HELP = {
   skill: ['Skill names, as the permission prompt shows them.', 'skill name'],
   power: ['Power names, as the permission prompt shows them.', 'power name'],
 };
-// D-20's list, by what allowing it amounts to. Compared lower-case, after
-// dropping a folder, a trailing `.exe`, `*`s and quotes from each word.
-var _ACP_RULES_INTERPRETERS = ['py', 'node', 'powershell', 'pwsh', 'cmd',
-  'bash', 'sh', 'iex', 'invoke-expression'];
-var _ACP_RULES_DELETERS = ['rm', 'del', 'remove-item', 'rmdir', 'rd'];
-var _ACP_RULES_DOWNLOADERS = ['curl', 'iwr', 'invoke-webrequest'];
+// D-20's interpreter, delete and download lists, and the warnings they raise,
+// live in /static/transcript-renderer.js (`permissionRuleShellWarnings`,
+// `permissionRuleBroadPlace`), shared with the prompt card's "Allow, and
+// always in new sessions…" row so both warn in the same words
+// (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3).
 // D-14's character check, in the words the server's refusal uses (U7).
 var _ACP_RULES_CHAR_WORDS = {
   '\t': 'an invisible tab character',
@@ -7925,42 +7930,6 @@ function _acpRulesLabel(row) {
   return row;
 }
 
-/** The words of a command pattern, as D-20's list names programs: split on
- *  spaces and command separators, without `*`s, quotes, a folder or `.exe`,
- *  so `*python*`, `& python x` and `C:/Tools/PWSH.exe` are all found. */
-function _acpRulesWords(pattern) {
-  return String(pattern).split(/[\s;|&()]+/).map(function (w) {
-    w = w.replace(/[*"'`]/g, '');
-    w = w.split(/[\\/]/).pop().toLowerCase();
-    return w.replace(/\.exe$/, '');
-  }).filter(function (w) { return !!w; });
-}
-
-/** The interpreter or shell a command pattern names anywhere, or ''. */
-function _acpRulesInterpreter(pattern) {
-  var words = _acpRulesWords(pattern);
-  for (var i = 0; i < words.length; i++) {
-    if (words[i].indexOf('python') === 0 || _ACP_RULES_INTERPRETERS.indexOf(words[i]) >= 0) {
-      return words[i];
-    }
-  }
-  return '';
-}
-
-/** What a Write files pattern covers, when it is one of the broad places.
- *  `?:` and `*:` are any drive (S4). */
-function _acpRulesBroadWrite(pattern) {
-  var p = String(pattern).trim().replace(/\\/g, '/');
-  var stem = p.replace(/(\/\*+)+$/, '').replace(/\/+$/, '');
-  if (stem === '.' || stem === '') return 'the whole session folder';
-  if (/^[A-Za-z?*]:$/.test(stem)) return 'a whole drive';
-  if (stem === '~' || stem === '%USERPROFILE%' || stem === '$HOME'
-      || /^[A-Za-z?*]:\/Users\/[^/]+$/i.test(stem) || /^\/(home|Users)\/[^/]+$/.test(stem)) {
-    return 'the whole home folder';
-  }
-  return '';
-}
-
 /** The host name inside a pattern typed as a web address, or ''. */
 function _acpRulesHost(pattern) {
   var s = String(pattern).trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
@@ -7984,22 +7953,8 @@ function _acpRulesWarnings(row, spec) {
     }
     if (allowInForce) {
       allow.forEach(function (p) {
-        var interp = _acpRulesInterpreter(p);
-        var first = _acpRulesWords(p)[0] || '';
-        if (interp) {
-          out.push('"' + p + '": allowing ' + interp + ' is equivalent to allow-all — '
-            + 'it can run any program, including one that changes these rules.');
-        } else if (_ACP_RULES_DELETERS.indexOf(first) >= 0) {
-          out.push('"' + p + '": allowing ' + first + ' lets the agent delete '
-            + 'files without asking.');
-        } else if (_ACP_RULES_DOWNLOADERS.indexOf(first) >= 0) {
-          out.push('"' + p + '": allowing ' + first + ' lets the agent download '
-            + 'from, and send data to, any site without asking.');
-        }
-        if (String(p).indexOf('*') >= 0) {
-          out.push('"' + p + '": a * also matches an output redirection such '
-            + 'as > file, so this also lets the command write to any file.');
-        }
+        // Shared with the prompt card (transcript-renderer.js).
+        out.push.apply(out, permissionRuleShellWarnings(p));
       });
     }
   }
@@ -8015,7 +7970,7 @@ function _acpRulesWarnings(row, spec) {
             + 'without asking.');
           return;
         }
-        var what = _acpRulesBroadWrite(p);
+        var what = permissionRuleBroadPlace(p);
         if (what) {
           out.push('"' + p + '" covers ' + what + ', so '
             + 'file-tool writes anywhere in it run without asking.');

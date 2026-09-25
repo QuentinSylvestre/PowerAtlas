@@ -4978,6 +4978,12 @@ function loadPanel(opts = {}) {
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
+  // index.html loads transcript-renderer.js before its inline scripts, and the
+  // rule editor's warnings call its shared pattern helpers
+  // (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3), so it runs first
+  // here too, as the real page orders them.
+  vm.runInContext(transcriptRendererSource(), sandbox,
+                  { filename: "transcript-renderer.js" });
   vm.runInContext(panelSource(), sandbox, { filename: "index.html#remote-panel" });
   if (opts.topbarMenu) {
     vm.runInContext(topbarMenuSource(), sandbox, { filename: "index.html#topbar-menu" });
@@ -11159,6 +11165,371 @@ check("dashboard: a permission_request frame passes its consent block to the ren
   assertEqual(calls.length, 1, "the dashboard drew no permission row");
   assertEqual(JSON.stringify(calls[0][4]), JSON.stringify(consent),
     "the dashboard dropped the consent block on the way to the renderer");
+});
+
+// ---- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3 -------------------
+// "Allow, and always in new sessions…" on the permission card (D-19, D-20,
+// D-31, D-35, SC-6, SC-7). The card lives in transcript-renderer.js, which
+// /acp's harness runs for real; the dashboard's harness does not load it, so
+// the dashboard is covered twice: `dashHandle` forwards the server's verdict,
+// and the real renderer is run beside index.html's own `ACP_LOCAL` global.
+
+const RULE_OPTIONS = [
+  // `optionId` differs from `kind` on purpose: the card answers by kind.
+  { optionId: "accept", name: "Yes", kind: "allow_once" },
+  { optionId: "reject", name: "No", kind: "reject_once" },
+];
+const RULE_URL = "/api/acp-permissions/allow-rule";
+
+function ruleFrame(live, requestId, consent, over = {}) {
+  const payload = Object.assign({
+    requestId, sessionId: live, toolCall: { title: consent.resource || "x" },
+    options: RULE_OPTIONS, consent,
+    ruleEligible: true, ruleRow: consent.capability,
+    ruleRowLabel: { shell: "Run commands", fs_write: "Write files", fs_read: "Read files",
+                    mcp: "MCP tools", subagent: "Sub-agents", skill: "Skills" }[consent.capability] || "",
+  }, over);
+  return { type: "permission_request", sessionId: live, payload };
+}
+
+function shellConsent(command, trig) {
+  const c = { capability: "shell", resource: command, scope: "agent", source: "agent-profile",
+              matchedRule: { capability: "shell", effect: "ask" } };
+  if (trig !== undefined) c.triggeringResource = trig;
+  return c;
+}
+
+function fileConsent(cap, resource) {
+  return { capability: cap, resource, scope: "agent", source: "agent-profile",
+           matchedRule: { capability: cap, effect: "ask" } };
+}
+
+function ruleButton(row) { return row.querySelector(".acp-permission-rule-open"); }
+
+/** Open the inline row on the last card and return its parts. */
+function openRule(page) {
+  const row = lastPermRow(page);
+  const trigger = ruleButton(row);
+  assert(trigger, "the card has no 'Allow, and always in new sessions…' button");
+  trigger.dispatch("click");
+  const input = row.querySelector(".acp-permission-rule-input");
+  assert(input, "the button opened no field");
+  return {
+    row, trigger, input,
+    save: row.querySelector(".acp-permission-rule-save"),
+    cancel: row.querySelector(".acp-permission-rule-cancel"),
+    warnings: () => row.querySelectorAll(".acp-permission-rule-warn-line").map((n) => n.textContent),
+    status: () => row.querySelector(".acp-permission-rule-status"),
+  };
+}
+
+function ruleAnswer(body, extra = {}) {
+  return (url) => (url === RULE_URL ? Object.assign({ body }, extra) : null);
+}
+
+check("rule button: shown on a loopback page for an eligible prompt with an allow_once option", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(ruleFrame(live, 601, shellConsent("echo pa-button")));
+  const btn = ruleButton(lastPermRow(page));
+  assert(btn, "no button on an eligible loopback card");
+  assertEqual(btn.textContent, "Allow, and always in new sessions\u2026", "the button's words changed");
+  assertEqual(btn.getAttribute("aria-expanded"), "false", "the button does not say it is collapsed");
+  assertEqual(page.sandbox.window.ACP_LOCAL, true,
+    "acp.html does not expose ACP_LOCAL on window, so the shared renderer cannot see it");
+});
+
+check("rule button: absent on a remote page, an ineligible prompt, without allow_once, and for web fetch", (tpl) => {
+  const remote = connected(tpl, { local: false });
+  remote.page.deliver(ruleFrame(remote.live, 602, shellConsent("echo x")));
+  assertEqual(ruleButton(lastPermRow(remote.page)), null, "a remote page offered the button (D-9, SC-7)");
+  assertEqual(remote.page.sandbox.window.ACP_LOCAL, false, "a remote page exposed ACP_LOCAL as true");
+
+  const { page, live } = connected(tpl);
+  const cases = [
+    ["ruleEligible false", ruleFrame(live, 610, shellConsent("echo x"), { ruleEligible: false })],
+    ["ruleEligible a string", ruleFrame(live, 611, shellConsent("echo x"), { ruleEligible: "true" })],
+    ["no ruleEligible at all", ruleFrame(live, 612, shellConsent("echo x"), { ruleEligible: undefined })],
+    ["no allow_once option", ruleFrame(live, 613, shellConsent("echo x"),
+      { options: [{ optionId: "reject", name: "No", kind: "reject_once" }] })],
+    ["a web fetch prompt", ruleFrame(live, 614, fileConsent("web_fetch", "example.com"))],
+    ["an unknown row", ruleFrame(live, 615, shellConsent("echo x"), { ruleRow: "constructor" })],
+  ];
+  for (const [label, frame] of cases) {
+    page.deliver(frame);
+    const row = lastPermRow(page);
+    assertEqual(row.dataset.requestId, String(frame.payload.requestId), `no card for ${label}`);
+    assertEqual(ruleButton(row), null, `the button appeared for ${label}`);
+  }
+});
+
+check("rule button: the field is prefilled per D-20 and warns per D-35", (tpl) => {
+  const { page, live } = connected(tpl);
+  const cases = [
+    [shellConsent("git status --short"), "git status --short", 0],
+    [shellConsent("git status && echo x", "echo x"), "echo x", 0],
+    [shellConsent("python -m pytest"), "python -m pytest", 1],
+    [fileConsent("fs_write", "notes.md"), "notes.md", 0],
+    [fileConsent("fs_write", "./notes.md"), "./notes.md", 0],
+    [fileConsent("fs_write", "src\\app\\main.py"), "src/app/**", 0],
+    [fileConsent("fs_read", "C:\\work\\repo\\src\\a.py"), "C:/work/repo/src/**", 0],
+    [fileConsent("fs_write", "C:\\notes.md"), "C:/notes.md", 0],
+    [fileConsent("fs_write", "C:\\Users\\bob\\notes.md"), "C:/Users/bob/notes.md", 0],
+    [fileConsent("mcp", "paecho/pa_echo"), "paecho/pa_echo", 0],
+    [fileConsent("subagent", "kiro_default"), "kiro_default", 0],
+    [fileConsent("skill", "pa-probe-skill"), "pa-probe-skill", 0],
+  ];
+  cases.forEach(([consent, want, warnings], i) => {
+    page.deliver(ruleFrame(live, 620 + i, consent));
+    const r = openRule(page);
+    assertEqual(r.input.value, want, `prefill for ${consent.capability} ${consent.resource}`);
+    assertEqual(r.warnings().length, warnings, `warnings for ${want}: ${r.warnings().join(" | ")}`);
+    if (warnings) {
+      assert(/equivalent to allow-all/.test(r.warnings()[0]),
+        `the interpreter warning is missing for ${want}`);
+    }
+    assertEqual(page.focused(), r.input, "opening the row did not move the focus into the field");
+  });
+  // Editing re-runs the warnings: a * warns about redirection (D-38e).
+  page.deliver(ruleFrame(live, 690, shellConsent("npm test")));
+  const r = openRule(page);
+  r.input.value = "npm *";
+  r.input.dispatch("input");
+  assert(r.warnings().some((w) => /redirection/.test(w)), "no redirection warning for a * pattern");
+  // The row is labelled, and the label names the plain row.
+  const label = r.row.querySelector(".acp-permission-rule-label");
+  assertEqual(label.getAttribute("for"), r.input.getAttribute("id"), "the field has no label");
+  assert(/^Run commands/.test(label.textContent), `the label does not name the row: ${label.textContent}`);
+});
+
+check("rule button: 'Triggered by' shows only when it differs from the resource", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(ruleFrame(live, 700, shellConsent("git status && echo x", "echo x")));
+  assertEqual(consentValue(lastPermRow(page), "triggeringResource"), "echo x",
+    "the split sub-command is not shown");
+  page.deliver(ruleFrame(live, 701, shellConsent("echo x", "echo x")));
+  assertEqual(consentValue(lastPermRow(page), "triggeringResource"), null,
+    "the same text was shown twice");
+  const label = lastPermRow(page).querySelectorAll(".acp-permission-consent-label")
+    .map((n) => n.textContent);
+  assert(!label.includes("Triggered by"), "an empty 'Triggered by' row was drawn");
+});
+
+check("rule button: Save posts the rule, then answers with the allow_once option by kind", async (tpl) => {
+  const { page, live } = connected(tpl, { answer: ruleAnswer({ ok: true }) });
+  page.deliver(ruleFrame(live, 710, shellConsent("echo pa-button")));
+  const r = openRule(page);
+  r.input.value = "echo pa-button";
+  r.save.dispatch("click");
+  const posts = page.fetches.filter((f) => f.url === RULE_URL);
+  assertEqual(posts.length, 1, "Save sent no request");
+  assertEqual(posts[0].init.method, "POST", "the rule was not POSTed");
+  assertEqual(posts[0].init.body, JSON.stringify({ capability: "shell", pattern: "echo pa-button" }),
+    "the posted body is not {capability, pattern}");
+  assertEqual(page.sentOf("permission_response").length, 0,
+    "the prompt was answered before the rule was saved");
+  await settleStaging();
+  const sent = page.sentOf("permission_response");
+  assertEqual(sent.length, 1, "the prompt was not answered after the rule was saved");
+  assertEqual(sent[0].payload.optionId, "accept", "the answer was not the allow_once option");
+  assertEqual(sent[0].payload.requestId, 710, "the answer names another request");
+  assertEqual(r.status().textContent, "Rule added \u2014 new sessions will not ask",
+    "the card does not say the rule was added");
+  assertEqual(r.row.querySelector(".acp-permission-rule"), null, "the inline row stayed open");
+  assertEqual(r.trigger.disabled, true, "the button can be pressed again");
+  assertEqual(page.focused(), r.status(), "the focus did not land on the outcome");
+  const chosen = r.row.querySelectorAll(".acp-permission-option")
+    .filter((b) => b.classList.contains("acp-permission-chosen"));
+  assertEqual(chosen.length, 1, "the allow_once button is not marked chosen");
+  assertEqual(chosen[0].textContent, "Yes", "another option was marked chosen");
+});
+
+check("rule button: Enter saves, Escape and Cancel close and return the focus", async (tpl) => {
+  const { page, live } = connected(tpl, { answer: ruleAnswer({ ok: true }) });
+  page.deliver(ruleFrame(live, 720, shellConsent("echo a")));
+  let r = openRule(page);
+  r.input.dispatch("keydown", { key: "Escape", preventDefault() {}, stopPropagation() {} });
+  assertEqual(r.row.querySelector(".acp-permission-rule"), null, "Escape did not close the row");
+  assertEqual(page.focused(), r.trigger, "Escape did not return the focus to the button");
+  assertEqual(r.trigger.getAttribute("aria-expanded"), "false", "the button still says expanded");
+  r = openRule(page);
+  r.cancel.dispatch("click");
+  assertEqual(r.row.querySelector(".acp-permission-rule"), null, "Cancel did not close the row");
+  assertEqual(page.focused(), r.trigger, "Cancel did not return the focus to the button");
+  assertEqual(page.fetches.filter((f) => f.url === RULE_URL).length, 0, "closing posted a rule");
+  r = openRule(page);
+  r.input.dispatch("keydown", { key: "Enter", preventDefault() {} });
+  await settleStaging();
+  assertEqual(page.fetches.filter((f) => f.url === RULE_URL).length, 1, "Enter did not save");
+  assertEqual(page.sentOf("permission_response").length, 1, "Enter's save did not answer");
+});
+
+check("rule button: a refusal or a failed request leaves the prompt open with the reason", async (tpl) => {
+  const cases = [
+    ["a refusal", ruleAnswer({ ok: false, error: "The rule was not saved: 'x' is blank." }),
+      "The rule was not saved: 'x' is blank."],
+    ["a 403", ruleAnswer({ error: "Forbidden" }, { ok: false, status: 403 }), "Forbidden"],
+    ["a 409 without a reason", ruleAnswer(null, { ok: false, status: 409 }),
+      "The rule was not saved (HTTP 409)."],
+    ["no answer", (url) => (url === RULE_URL ? { reject: "down" } : null),
+      "The rule was not saved: PowerAtlas could not be reached."],
+  ];
+  for (const [label, answer, want] of cases) {
+    const { page, live } = connected(tpl, { answer });
+    page.deliver(ruleFrame(live, 730, shellConsent("echo a")));
+    const r = openRule(page);
+    r.save.dispatch("click");
+    await settleStaging();
+    assertEqual(page.sentOf("permission_response").length, 0, `${label}: the prompt was answered`);
+    const error = r.row.querySelector(".acp-permission-rule-error");
+    assertEqual(error.hidden, false, `${label}: no reason shown`);
+    assertEqual(error.textContent, want, `${label}: wrong reason`);
+    assertEqual(r.save.disabled, false, `${label}: Save stayed disabled`);
+    assert(r.row.querySelectorAll(".acp-permission-option").every((b) => !b.disabled),
+      `${label}: the answer buttons were disabled`);
+    assertEqual(page.focused(), r.input, `${label}: the focus did not go back to the field`);
+  }
+});
+
+check("rule button: a prompt resolved while saving is not answered, and the card says so", async (tpl) => {
+  const { page, live } = connected(tpl, { answer: ruleAnswer({ ok: true }) });
+  page.deliver(ruleFrame(live, 740, shellConsent("echo a")));
+  const r = openRule(page);
+  r.save.dispatch("click");
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: 740 } });
+  await settleStaging();
+  assertEqual(page.sentOf("permission_response").length, 0, "a resolved prompt was answered again");
+  assertEqual(r.status().textContent, "Rule saved; this prompt was already answered",
+    "the card does not say the prompt was already answered");
+});
+
+check("rule button: an open row stays usable after the prompt resolves; the button does not", async (tpl) => {
+  const { page, live } = connected(tpl, { answer: ruleAnswer({ ok: true }) });
+  page.deliver(ruleFrame(live, 750, shellConsent("echo a")));
+  const r = openRule(page);
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: 750 } });
+  assertEqual(r.save.disabled, false, "resolving the prompt disabled the open row's Save");
+  assertEqual(r.trigger.disabled, true, "resolving the prompt left the button enabled");
+  r.save.dispatch("click");
+  await settleStaging();
+  assertEqual(page.fetches.filter((f) => f.url === RULE_URL).length, 1, "the rule was not saved");
+  assertEqual(page.sentOf("permission_response").length, 0, "a resolved prompt was answered");
+  assertEqual(r.status().textContent, "Rule saved; this prompt was already answered",
+    "the outcome is wrong for a resolved prompt");
+  // A card resolved before the row was opened offers nothing.
+  page.deliver(ruleFrame(live, 751, shellConsent("echo b")));
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: 751 } });
+  assertEqual(ruleButton(lastPermRow(page)).disabled, true, "a resolved card's button is enabled");
+});
+
+check("rule button: answering by an option first means Save does not answer again", async (tpl) => {
+  const { page, live } = connected(tpl, { answer: ruleAnswer({ ok: true }) });
+  page.deliver(ruleFrame(live, 760, shellConsent("echo a")));
+  const r = openRule(page);
+  r.row.querySelectorAll(".acp-permission-option")[1].dispatch("click");
+  assertEqual(page.sentOf("permission_response").length, 1, "the option did not answer");
+  r.save.dispatch("click");
+  await settleStaging();
+  assertEqual(page.sentOf("permission_response").length, 1, "Save sent a second answer");
+  assertEqual(r.status().textContent, "Rule saved; this prompt was already answered",
+    "the card claims it answered");
+});
+
+check("rule button: a D-32 generation warning is shown with the outcome", async (tpl) => {
+  const warning = "Saved, but not yet in effect: the agent file was not written. " +
+    "New Default sessions are refused until this is fixed.";
+  const { page, live } = connected(tpl, { answer: ruleAnswer({ ok: true, warning }) });
+  page.deliver(ruleFrame(live, 770, shellConsent("echo a")));
+  const r = openRule(page);
+  r.save.dispatch("click");
+  await settleStaging();
+  assertEqual(page.sentOf("permission_response").length, 1, "a saved rule did not answer the prompt");
+  const shown = r.status().querySelector(".acp-permission-rule-warning");
+  assert(shown, "the warning was swallowed");
+  assertEqual(shown.textContent, warning, "the warning was altered");
+});
+
+check("rule button: agent text in the prefill stays text", (tpl) => {
+  const { page, live } = connected(tpl);
+  const hostile = "echo \"<img src=x onerror=alert(1)>\"";
+  page.deliver(ruleFrame(live, 780, shellConsent(hostile)));
+  const r = openRule(page);
+  assertEqual(r.input.value, hostile, "the prefill was altered");
+  assertEqual(r.row.querySelectorAll("img").length, 0, "agent text became markup");
+});
+
+check("dashboard: a permission_request frame forwards the rule verdict to the renderer", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const calls = [];
+  p.sandbox.addPermissionRequest = function () { calls.push([...arguments]); };
+  p.sandbox.dashHandle({ type: "permission_request", sessionId: "sess-1", payload: {
+    requestId: 9, sessionId: "sess-1", toolCall: { title: "echo x" },
+    consent: shellConsent("echo x"), options: RULE_OPTIONS,
+    ruleEligible: true, ruleRow: "shell", ruleRowLabel: "Run commands" } });
+  p.sandbox.dashHandle({ type: "permission_request", sessionId: "sess-1", payload: {
+    requestId: 10, sessionId: "sess-1", toolCall: { title: "echo y" },
+    consent: shellConsent("echo y"), options: RULE_OPTIONS, ruleEligible: "yes" } });
+  assertEqual(calls.length, 2, "the dashboard drew no permission row");
+  assertEqual(JSON.stringify(calls[0][5]),
+    JSON.stringify({ eligible: true, row: "shell", label: "Run commands" }),
+    "the dashboard dropped the rule verdict");
+  assertEqual(calls[1][5].eligible, false, "a non-boolean ruleEligible was taken as true");
+});
+
+/** The real transcript-renderer.js beside index.html's own `ACP_LOCAL`
+ *  declaration and a dashboard-shaped `send`, as the dashboard page runs them. */
+function loadDashCard(answer) {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const decl = src.match(/^var ACP_LOCAL = true;$/m);
+  assert(decl, "index.html does not declare ACP_LOCAL = true");
+  const fetches = [];
+  const sent = [];
+  ACTIVE = null;
+  const sandbox = {
+    document: { createElement: (tag) => new El(tag), createElementNS: (_n, tag) => new El(tag) },
+    fetch: (url, init) => {
+      fetches.push({ url: String(url), init: init || {} });
+      const got = answer(String(url));
+      if (got.reject) return Promise.reject(new Error(got.reject));
+      return Promise.resolve({ ok: got.ok !== false, status: got.status || 200,
+                               json: () => Promise.resolve(got.body) });
+    },
+    setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+    console: { log() {}, warn() {}, error() {} },
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(transcriptRendererSource(), sandbox, { filename: "transcript-renderer.js" });
+  vm.runInContext(decl[0], sandbox, { filename: "index.html#ACP_LOCAL" });
+  sandbox._dashSent = sent;
+  vm.runInContext("function send(type, payload, sid) { _dashSent.push({type: type, payload: payload, sid: sid}); return true; }",
+                  sandbox, { filename: "index.html#send" });
+  const transcript = new El("div");
+  sandbox.initTranscriptDom({ transcriptEl: transcript, promptNavEl: null,
+                              promptUpBtn: null, promptDownBtn: null });
+  return { sandbox, transcript, fetches, sent };
+}
+
+check("dashboard: the real renderer offers the rule button and answers by kind", async () => {
+  const d = loadDashCard((url) => (url === RULE_URL ? { body: { ok: true } } : { body: {} }));
+  const consent = shellConsent("git status --short");
+  const row = d.sandbox.addPermissionRequest(5, "sess-1", "git status --short", RULE_OPTIONS,
+    consent, { eligible: true, row: "shell", label: "Run commands" });
+  const trigger = ruleButton(row);
+  assert(trigger, "the dashboard's card has no rule button although ACP_LOCAL is true");
+  trigger.dispatch("click");
+  const input = row.querySelector(".acp-permission-rule-input");
+  assertEqual(input.value, "git status --short", "the dashboard's prefill differs");
+  row.querySelector(".acp-permission-rule-save").dispatch("click");
+  await settleStaging();
+  assertEqual(d.fetches.filter((f) => f.url === RULE_URL).length, 1, "the dashboard posted no rule");
+  assertEqual(d.sent.length, 1, "the dashboard did not answer the prompt");
+  assertEqual(d.sent[0].payload.optionId, "accept", "the dashboard answered by id, not by kind");
+  assertEqual(d.sent[0].sid, "sess-1", "the answer went to another session");
+  // Not offered on an ineligible card.
+  const other = d.sandbox.addPermissionRequest(6, "sess-1", "x", RULE_OPTIONS, consent,
+    { eligible: false, row: "shell", label: "Run commands" });
+  assertEqual(ruleButton(other), null, "the dashboard offered the button on an ineligible card");
 });
 
 // The dashboard settings rows. They live in the same <script> region as the

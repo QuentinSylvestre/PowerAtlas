@@ -33,7 +33,9 @@
 // (optional — colouring degrades to plain text without it, never fails),
 // `navigator.clipboard` (optional, code-block copy button), `setTimeout`,
 // and `logLine` (an optional page-provided log/status sink — guarded, since
-// the dashboard panel has no debug log panel of its own).
+// the dashboard panel has no debug log panel of its own). The permission
+// card's "Allow, and always in new sessions…" button also reads
+// `window.ACP_LOCAL` (true only on a loopback page) and calls `fetch`.
 //
 // No innerHTML anywhere in this file, matching the rest of /acp's XSS
 // control: every node is built with createElement/createElementNS and filled
@@ -1713,8 +1715,15 @@ function appendChunk(role, text) {
  *  is the frame's allowlisted projection of kiro-cli's consent block — what
  *  capability is asked for, against which resource, and which rule matched.
  *  Optional, and every field in it is optional: a frame without one, or with
- *  `{}`, renders exactly as before. See permissionConsentBlock below. */
-function addPermissionRequest(requestId, sid, title, options, consent) {
+ *  `{}`, renders exactly as before. See permissionConsentBlock below.
+ *
+ *  `rule` (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3) is
+ *  `{eligible, row, label}` from the frame's `ruleEligible`, `ruleRow` and
+ *  `ruleRowLabel`, computed by the server (acp.py `_rule_row`, D-31). With it,
+ *  on a loopback page (`window.ACP_LOCAL === true`, D-9) and when an option of
+ *  kind `allow_once` exists, the card adds "Allow, and always in new
+ *  sessions…". See addPermissionRuleButton below. */
+function addPermissionRequest(requestId, sid, title, options, consent, rule) {
   var stick = stuckToBottom();
   var row = document.createElement('div');
   row.className = 'acp-msg acp-msg-permission';
@@ -1737,6 +1746,22 @@ function addPermissionRequest(requestId, sid, title, options, consent) {
   if (consentBlock) body.appendChild(consentBlock);
   var btnRow = document.createElement('div');
   btnRow.className = 'acp-permission-options';
+  // Set once this tab has sent an answer, by an option button or by the rule
+  // button's Save, so the other path never sends a second one.
+  var answered = false;
+  // Send `opt` as this prompt's answer, exactly as clicking its button does.
+  function choose(opt, btn) {
+    answered = true;
+    var buttons = btnRow.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
+    if (btn) btn.classList.add('acp-permission-chosen');
+    if (typeof send === 'function') {
+      send('permission_response',
+           {requestId: requestId, optionId: opt.optionId}, sid);
+    }
+  }
+  var allowOnce = null;
+  var allowOnceBtn = null;
   (options || []).forEach(function (opt) {
     var btn = document.createElement('button');
     btn.type = 'button';
@@ -1750,19 +1775,24 @@ function addPermissionRequest(requestId, sid, title, options, consent) {
       btn.title = 'Applies until this session ends. Nothing is saved; ' +
                   'a new session asks again.';
     }
+    if (!allowOnce && opt && opt.kind === 'allow_once') {
+      allowOnce = opt;
+      allowOnceBtn = btn;
+    }
     btn.addEventListener('click', function () {
       if (btn.disabled) return;
-      var buttons = btnRow.querySelectorAll('button');
-      for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
-      btn.classList.add('acp-permission-chosen');
-      if (typeof send === 'function') {
-        send('permission_response',
-             {requestId: requestId, optionId: opt.optionId}, sid);
-      }
+      choose(opt, btn);
     });
     btnRow.appendChild(btn);
   });
   body.appendChild(btnRow);
+  if (allowOnce && permissionRuleOffered(rule)) {
+    addPermissionRuleButton({
+      row: row, body: body, btnRow: btnRow, rule: rule, consent: consent,
+      answered: function () { return answered; },
+      answer: function () { choose(allowOnce, allowOnceBtn); },
+    });
+  }
   row.appendChild(who);
   row.appendChild(body);
   transcriptEl.appendChild(row);
@@ -1774,9 +1804,13 @@ function addPermissionRequest(requestId, sid, title, options, consent) {
 // fields shown under a permission question, in reading order. The server
 // allowlists exactly these (acp.py `_project_consent`); anything else on the
 // object is ignored here too rather than rendered, so the two allowlists agree.
+// `triggeringResource` (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3)
+// is the sub-command that raised a split shell prompt, shown only when it
+// differs from `resource` (see permissionConsentBlock).
 var PERMISSION_CONSENT_FIELDS = [
   ['capability', 'Capability'],
   ['resource', 'Resource'],
+  ['triggeringResource', 'Triggered by'],
   ['scope', 'Scope'],
   ['source', 'Source'],
 ];
@@ -1832,6 +1866,8 @@ function permissionConsentBlock(consent) {
   PERMISSION_CONSENT_FIELDS.forEach(function (f) {
     var v = consent[f[0]];
     if (typeof v !== 'string' || v === '') return;
+    // The whole command is already the resource; the same text twice says nothing.
+    if (f[0] === 'triggeringResource' && v === consent.resource) return;
     if (f[0] === 'capability') v = permissionLabelled(PERMISSION_CAPABILITY_WORDS, v);
     else if (f[0] === 'source') v = permissionLabelled(PERMISSION_SOURCE_WORDS, v);
     rows.push([f[0], f[1], v]);
@@ -1865,6 +1901,345 @@ function permissionConsentBlock(consent) {
   return block;
 }
 
+// ---- "Allow, and always in new sessions…" ------------------------------
+//
+// 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3 (D-19, D-20, D-35, SC-6).
+// A permission card the server marked eligible (acp.py `_rule_row`: a Manual
+// row's own ask, in a session bound to the derived agent) offers to add a
+// pattern to that row's "Allow without asking" list and answer this prompt
+// with its `allow_once` option. The rule reaches new sessions only: kiro-cli
+// reads the agent file when a session starts (probe P-C).
+
+// The rows the button can add to, with their plain labels (the rule editor's
+// words, agent_profile.ROW_LABELS), used when the frame carries no label. The
+// same set as acp.py `_RULE_ROWS`: no Web fetch (P-0.5, the prompt names a
+// host), Web search or Powers (never measured to match, P-0.9).
+var PERMISSION_RULE_ROWS = {
+  fs_read: 'Read files',
+  fs_write: 'Write files',
+  shell: 'Run commands',
+  mcp: 'MCP tools',
+  subagent: 'Sub-agents',
+  skill: 'Skills',
+};
+
+// D-20's list, by what allowing it amounts to. Compared lower-case, after
+// dropping a folder, a trailing `.exe`, `*`s and quotes from each word. Shared
+// with the dashboard's rule editor (index.html `_acpRulesWarnings`), so the
+// card and the editor warn about the same patterns in the same words.
+var PERMISSION_RULE_INTERPRETERS = ['py', 'node', 'powershell', 'pwsh', 'cmd',
+  'bash', 'sh', 'iex', 'invoke-expression'];
+var PERMISSION_RULE_DELETERS = ['rm', 'del', 'remove-item', 'rmdir', 'rd'];
+var PERMISSION_RULE_DOWNLOADERS = ['curl', 'iwr', 'invoke-webrequest'];
+
+/** The words of a command pattern, as D-20's list names programs: split on
+ *  spaces and command separators, without `*`s, quotes, a folder or `.exe`,
+ *  so `*python*`, `& python x` and `C:/Tools/PWSH.exe` are all found. */
+function permissionRuleWords(pattern) {
+  return String(pattern).split(/[\s;|&()]+/).map(function (w) {
+    w = w.replace(/[*"'`]/g, '');
+    w = w.split(/[\\/]/).pop().toLowerCase();
+    return w.replace(/\.exe$/, '');
+  }).filter(function (w) { return !!w; });
+}
+
+/** The interpreter or shell a command pattern names anywhere, or ''. */
+function permissionRuleInterpreter(pattern) {
+  var words = permissionRuleWords(pattern);
+  for (var i = 0; i < words.length; i++) {
+    if (words[i].indexOf('python') === 0 || PERMISSION_RULE_INTERPRETERS.indexOf(words[i]) >= 0) {
+      return words[i];
+    }
+  }
+  return '';
+}
+
+/** The warnings for one "Run commands" allow pattern (D-35, D-38e). Advice
+ *  only: the server stores the pattern as written. */
+function permissionRuleShellWarnings(pattern) {
+  var out = [];
+  var p = String(pattern);
+  var interp = permissionRuleInterpreter(p);
+  var first = permissionRuleWords(p)[0] || '';
+  if (interp) {
+    out.push('"' + p + '": allowing ' + interp + ' is equivalent to allow-all — '
+      + 'it can run any program, including one that changes these rules.');
+  } else if (PERMISSION_RULE_DELETERS.indexOf(first) >= 0) {
+    out.push('"' + p + '": allowing ' + first + ' lets the agent delete '
+      + 'files without asking.');
+  } else if (PERMISSION_RULE_DOWNLOADERS.indexOf(first) >= 0) {
+    out.push('"' + p + '": allowing ' + first + ' lets the agent download '
+      + 'from, and send data to, any site without asking.');
+  }
+  if (p.indexOf('*') >= 0) {
+    out.push('"' + p + '": a * also matches an output redirection such '
+      + 'as > file, so this also lets the command write to any file.');
+  }
+  return out;
+}
+
+/** What a file pattern covers, when it is one of the broad places: the
+ *  session folder, a whole drive or the home folder; '' otherwise. `?:` and
+ *  `*:` are any drive. */
+function permissionRuleBroadPlace(pattern) {
+  var p = String(pattern).trim().replace(/\\/g, '/');
+  var stem = p.replace(/(\/\*+)+$/, '').replace(/\/+$/, '');
+  if (stem === '.' || stem === '') return 'the whole session folder';
+  if (/^[A-Za-z?*]:$/.test(stem)) return 'a whole drive';
+  if (stem === '~' || stem === '%USERPROFILE%' || stem === '$HOME'
+      || /^[A-Za-z?*]:\/Users\/[^/]+$/i.test(stem) || /^\/(home|Users)\/[^/]+$/.test(stem)) {
+    return 'the whole home folder';
+  }
+  return '';
+}
+
+/** The pattern the field starts with (D-20, revised by Phase 0). Always
+ *  editable, and never the broadest rule, since it comes from agent-authored
+ *  text:
+ *  - Run commands: the exact command, `triggeringResource` else `resource` —
+ *    never a `*` prefix, which would also allow `> file` (P-0.8);
+ *  - files: the parent folder plus `/**`, with `/` separators (P-0.6), unless
+ *    the parent is empty, `.`, a drive root or the home folder, where it is
+ *    the exact file;
+ *  - MCP tools, sub-agents, skills: `resource` exactly (P-0.9). */
+function permissionRulePrefill(row, consent) {
+  var c = (consent && typeof consent === 'object' && !Array.isArray(consent)) ? consent : {};
+  var resource = typeof c.resource === 'string' ? c.resource : '';
+  if (row === 'shell') {
+    var trig = typeof c.triggeringResource === 'string' ? c.triggeringResource : '';
+    return trig || resource;
+  }
+  if (row === 'fs_read' || row === 'fs_write') {
+    var path = resource.replace(/\\/g, '/');
+    var trimmed = path.replace(/\/+$/, '');
+    var cut = trimmed.lastIndexOf('/');
+    var parent = cut >= 0 ? trimmed.slice(0, cut) : '';
+    if (permissionRuleBroadPlace(parent)) return path;
+    return parent + '/**';
+  }
+  return resource;
+}
+
+/** The card's warnings for `pattern` in `row`. */
+function permissionRuleWarnings(row, pattern) {
+  if (row === 'shell') return permissionRuleShellWarnings(pattern);
+  if (row === 'fs_write') {
+    var what = permissionRuleBroadPlace(pattern);
+    if (what) {
+      return ['"' + pattern + '" covers ' + what + ', so file-tool writes '
+        + 'anywhere in it run without asking.'];
+    }
+  }
+  return [];
+}
+
+/** Whether a card may offer the button: a loopback page (D-9; the route
+ *  refuses remote peers anyway), and a frame the server marked eligible for
+ *  a row this button can add to. */
+function permissionRuleOffered(rule) {
+  return typeof window !== 'undefined' && window.ACP_LOCAL === true
+    && !!rule && typeof rule === 'object' && rule.eligible === true
+    && typeof rule.row === 'string'
+    && Object.prototype.hasOwnProperty.call(PERMISSION_RULE_ROWS, rule.row);
+}
+
+// Numbers the inline fields, so each label's `for` names exactly one field.
+var _permissionRuleSeq = 0;
+
+/** The button, its inline row and its status line, added to one card.
+ *  `ctx`: `{row, body, btnRow, rule, consent, answered(), answer()}`, where
+ *  `answer()` sends the card's `allow_once` option (chosen by `kind`, never by
+ *  id) and `answered()` says whether this tab already answered.
+ *
+ *  Save posts the pattern first and answers only after the server stored it:
+ *  a rule that failed to save leaves the prompt open, with the reason. A
+ *  prompt answered or resolved while the request was in flight is not
+ *  answered again, and the card says the rule was still saved. */
+function addPermissionRuleButton(ctx) {
+  var ruleRow = ctx.rule.row;
+  var label = (typeof ctx.rule.label === 'string' && ctx.rule.label)
+    ? ctx.rule.label : PERMISSION_RULE_ROWS[ruleRow];
+  var trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'acp-btn acp-permission-rule-open';
+  trigger.textContent = 'Allow, and always in new sessions…';
+  trigger.title = 'Allow this now, and add a pattern to ' + label
+    + ' so new sessions run it without asking.';
+  trigger.setAttribute('aria-expanded', 'false');
+  ctx.btnRow.appendChild(trigger);
+  var status = document.createElement('div');
+  status.className = 'acp-permission-rule-status';
+  status.setAttribute('role', 'status');
+  status.setAttribute('tabindex', '-1');
+  ctx.body.appendChild(status);
+  var editor = null;
+
+  function close(refocus) {
+    if (!editor) return;
+    editor.wrap.remove();
+    editor = null;
+    trigger.setAttribute('aria-expanded', 'false');
+    if (refocus && !trigger.disabled) trigger.focus();
+  }
+
+  function showWarnings() {
+    var list = permissionRuleWarnings(ruleRow, editor.input.value);
+    editor.warn.textContent = '';
+    list.forEach(function (text) {
+      var line = document.createElement('div');
+      line.className = 'acp-permission-rule-warn-line';
+      line.textContent = text;
+      editor.warn.appendChild(line);
+    });
+    editor.warn.hidden = !list.length;
+  }
+
+  function fail(message) {
+    if (!editor) return;
+    editor.busy = false;
+    editor.save.disabled = false;
+    editor.cancel.disabled = false;
+    editor.error.textContent = message;
+    editor.error.hidden = false;
+    editor.input.focus();
+  }
+
+  function succeeded(answer) {
+    var already = ctx.answered() || ctx.row.classList.contains('acp-permission-resolved');
+    if (!already) ctx.answer();
+    close(false);
+    trigger.disabled = true;
+    status.textContent = '';
+    var line = document.createElement('div');
+    line.textContent = already
+      ? 'Rule saved; this prompt was already answered'
+      : 'Rule added — new sessions will not ask';
+    status.appendChild(line);
+    // D-32: stored, but the agent file was not written, so new Default
+    // sessions are refused until that is fixed. Said, never swallowed.
+    if (typeof answer.warning === 'string' && answer.warning) {
+      var warning = document.createElement('div');
+      warning.className = 'acp-permission-rule-warning';
+      warning.textContent = answer.warning;
+      status.appendChild(warning);
+    }
+    status.focus();
+  }
+
+  function submit() {
+    if (!editor || editor.busy) return;
+    editor.busy = true;
+    editor.save.disabled = true;
+    editor.cancel.disabled = true;
+    editor.error.hidden = true;
+    var sent = {capability: ruleRow, pattern: editor.input.value};
+    var request;
+    try {
+      request = fetch('/api/acp-permissions/allow-rule', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(sent),
+      });
+    } catch (e) {
+      fail('The rule was not saved: PowerAtlas could not be reached.');
+      return;
+    }
+    Promise.resolve(request).then(function (res) {
+      return Promise.resolve(res.json()).then(
+        function (data) { return {res: res, data: data}; },
+        function () { return {res: res, data: null}; });
+    }).then(function (got) {
+      var data = got.data;
+      if (got.res.ok && data && data.ok === true) {
+        succeeded(data);
+        return;
+      }
+      fail((data && typeof data.error === 'string' && data.error)
+        ? data.error
+        : 'The rule was not saved (HTTP ' + got.res.status + ').');
+    }, function () {
+      fail('The rule was not saved: PowerAtlas could not be reached.');
+    });
+  }
+
+  function open() {
+    var id = 'acpPermissionRule' + (++_permissionRuleSeq);
+    var wrap = document.createElement('div');
+    wrap.className = 'acp-permission-rule';
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', 'Always allow in new sessions');
+    var lab = document.createElement('label');
+    lab.className = 'acp-permission-rule-label';
+    lab.htmlFor = id;
+    lab.setAttribute('for', id);
+    lab.textContent = label + ' — allow without asking in new sessions:';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.id = id;
+    input.setAttribute('id', id);
+    input.className = 'acp-permission-rule-input';
+    input.setAttribute('spellcheck', 'false');
+    input.setAttribute('autocomplete', 'off');
+    input.value = permissionRulePrefill(ruleRow, ctx.consent);
+    var hint = document.createElement('div');
+    hint.className = 'acp-permission-rule-hint';
+    hint.textContent = 'Saved to Manual mode’s rules. Sessions created afterwards '
+      + 'run a match without asking; this prompt is allowed once.';
+    var warn = document.createElement('div');
+    warn.className = 'acp-permission-rule-warn';
+    warn.setAttribute('aria-live', 'polite');
+    var error = document.createElement('div');
+    error.className = 'acp-permission-rule-error';
+    error.setAttribute('role', 'alert');
+    error.hidden = true;
+    var actions = document.createElement('div');
+    actions.className = 'acp-permission-rule-actions';
+    var save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'acp-btn acp-permission-rule-save';
+    save.textContent = 'Save';
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'acp-btn acp-permission-rule-cancel';
+    cancel.textContent = 'Cancel';
+    actions.appendChild(save);
+    actions.appendChild(cancel);
+    wrap.appendChild(lab);
+    wrap.appendChild(input);
+    wrap.appendChild(hint);
+    wrap.appendChild(warn);
+    wrap.appendChild(error);
+    wrap.appendChild(actions);
+    editor = {wrap: wrap, input: input, warn: warn, error: error,
+              save: save, cancel: cancel, busy: false};
+    input.addEventListener('input', showWarnings);
+    input.addEventListener('keydown', function (ev) {
+      if (ev && ev.key === 'Enter') {
+        if (ev.preventDefault) ev.preventDefault();
+        submit();
+      } else if (ev && ev.key === 'Escape') {
+        if (ev.preventDefault) ev.preventDefault();
+        if (ev.stopPropagation) ev.stopPropagation();
+        if (!editor.busy) close(true);
+      }
+    });
+    save.addEventListener('click', function () { submit(); });
+    cancel.addEventListener('click', function () {
+      if (!editor.busy) close(true);
+    });
+    ctx.body.insertBefore(wrap, status);
+    showWarnings();
+    trigger.setAttribute('aria-expanded', 'true');
+    input.focus();
+  }
+
+  trigger.addEventListener('click', function () {
+    if (trigger.disabled || editor) return;
+    status.textContent = '';
+    open();
+  });
+}
+
 /** Find the transcript row `addPermissionRequest` built for `requestId`,
  *  or null. A plain child scan rather than a CSS attribute-selector
  *  lookup, so an unusual requestId value never needs escaping into a
@@ -1896,7 +2271,23 @@ function markPermissionResolved(requestId) {
   if (!row || row.classList.contains('acp-permission-resolved')) return;
   row.classList.add('acp-permission-resolved');
   var buttons = row.querySelectorAll('button');
-  for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
+  for (var i = 0; i < buttons.length; i++) {
+    // An open "always in new sessions" row stays usable: the rule is about
+    // new sessions, so saving it still means something once this prompt is
+    // settled, and its Save then says the prompt was already answered
+    // (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-19). The button that
+    // opens one is disabled with the rest.
+    if (insidePermissionRuleEditor(buttons[i], row)) continue;
+    buttons[i].disabled = true;
+  }
+}
+
+/** Whether `node` sits inside an open rule row of permission card `row`. */
+function insidePermissionRuleEditor(node, row) {
+  for (var n = node.parentNode; n && n !== row; n = n.parentNode) {
+    if (n.classList && n.classList.contains('acp-permission-rule')) return true;
+  }
+  return false;
 }
 
 // ---- the "thinking…" placeholder ---------------------------------------

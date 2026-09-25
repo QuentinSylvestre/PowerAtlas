@@ -4469,6 +4469,84 @@ async def set_acp_permissions(request: Request):
     return {**answer, **(await _current_acp_permission_state())}
 
 
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3 (D-19, SC-6): the prompt
+# card's "Allow, and always in new sessions…" button. Adds one pattern to one
+# Manual row's allow list, under the same lock, validation and D-32 result as
+# the rule editor's save. Not in `_REMOTE_ALLOWED_PATHS` (D-9, SC-7), so a
+# remote peer gets a 403; a POST also needs the `pa_local` cookie and a
+# same-origin Origin or Referer, like every loopback write.
+#
+# Refused for `web_fetch` (P-0.5: the prompt names a host, and a pattern added
+# from it would be mistaken for a URL; the card hides the button there), for a
+# row outside D-11, and for a row whose default is Allow — its allow list is
+# not compiled (D-13), so the pattern would silence nothing.
+_ALLOW_RULE_REFUSED_ROWS = frozenset({"web_fetch"})
+
+
+def _allow_rule_refusal(rules: dict, row: str) -> str:
+    """Why `row` of `rules` cannot take another allow pattern, or `""`."""
+    label = agent_profile.ROW_LABELS[row]
+    spec = rules.get(row) or {}
+    if spec.get("default") == "allow":
+        return (f"{label} is set to Allow, so it never asks; a pattern there "
+                "would change nothing")
+    if len(spec.get("allow") or []) >= agent_profile.MAX_PATTERNS_PER_LIST:
+        return (f"{label} already has {agent_profile.MAX_PATTERNS_PER_LIST} "
+                "patterns without asking; remove one in Edit rules first")
+    return ""
+
+
+@app.post("/api/acp-permissions/allow-rule")
+async def add_acp_allow_rule(request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return {"ok": False, "error": "Invalid JSON body"}
+    if not isinstance(body, dict):
+        body = {}
+    row = body.get("capability")
+    pattern = body.get("pattern")
+    if (not isinstance(row, str) or row not in agent_profile.PERMISSION_ROWS
+            or row in _ALLOW_RULE_REFUSED_ROWS):
+        return {"ok": False,
+                "error": "This kind of action cannot take a rule from a prompt."}
+    reason = agent_profile.pattern_error(pattern)
+    if reason:
+        # ASCII-escaped for the same reason as the rules save: a lone
+        # surrogate (refused for exactly that) cannot be encoded as UTF-8.
+        shown = str(pattern)[:60]
+        return Response(json.dumps(
+            {"ok": False, "error": f"The rule was not saved: {shown!r} {reason}."},
+            ensure_ascii=True), media_type="application/json")
+
+    def precheck() -> str:
+        rules = agent_profile.normalise_rules(load_config().acp_permission_rules)
+        return _allow_rule_refusal(rules, row)
+
+    # Checked before the lock for a plain answer, and again inside it, where a
+    # refusal is a raise that `apply_settings` reports as "not saved".
+    refusal = await asyncio.to_thread(precheck)
+    if refusal:
+        return {"ok": False, "error": f"The rule was not saved: {refusal}."}
+
+    def mutate(config) -> None:
+        rules = agent_profile.normalise_rules(config.acp_permission_rules)
+        refusal = _allow_rule_refusal(rules, row)
+        if refusal:
+            raise agent_profile.AgentProfileError(refusal)
+        if pattern not in rules[row]["allow"]:
+            rules[row]["allow"].append(pattern)
+        config.acp_permission_rules = rules
+
+    # `sets_posture=False`: a rule added from a prompt does not choose the
+    # mode, like the editor's rules-only save.
+    result = await asyncio.to_thread(
+        lambda: agent_profile.apply_settings(
+            mutate, lock_timeout=_SETTINGS_LOCK_TIMEOUT_SECONDS,
+            sets_posture=False))
+    return _apply_result(result)
+
+
 @app.post("/api/open-folder", response_class=HTMLResponse)
 async def api_open_folder(request: Request):
     body = await request.json()

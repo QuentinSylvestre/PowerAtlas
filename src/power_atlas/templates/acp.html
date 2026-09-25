@@ -717,6 +717,12 @@
   // transcriptEl et al. -- no window.logLine assignment needed, and the one
   // this comment used to describe has been removed.
   window.send = send;
+  // ACP_LOCAL, exposed for the same closure reason: the shared renderer's
+  // permission card offers "Allow, and always in new sessions…" only when
+  // `window.ACP_LOCAL === true` (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL
+  // Phase 3, D-9). A remote viewer's page carries `false`, and the route the
+  // button posts to refuses a remote peer whatever this says.
+  window.ACP_LOCAL = ACP_LOCAL;
   // removeAllCrewPanels/closeSubagentView, exposed the same way and for the
   // same reason: clearTranscript() (also moved to transcript-renderer.js,
   // Phase 2 slice 5) calls both, guarded, to tear down the crew/sub-agent
@@ -5048,8 +5054,15 @@
       // allowlisted consent projection (capability, resource, ...). Optional;
       // addPermissionRequest renders nothing extra for a missing or empty one.
       var _permConsent = payload && payload.consent;
+      // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3: the server's
+      // verdict on the "always in new sessions" button (D-31).
+      var _permRule = {
+        eligible: !!payload && payload.ruleEligible === true,
+        row: payload && payload.ruleRow,
+        label: payload && payload.ruleRowLabel,
+      };
       if ((typeof _reqId === 'string' || typeof _reqId === 'number') && _permOptions.length) {
-        addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions, _permConsent);
+        addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions, _permConsent, _permRule);
         // The notification takes a `!replaying` gate even though the row above
         // deliberately does not. The two want opposite things from a reload:
         // the buttons must come back (the request may still be unanswered

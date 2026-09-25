@@ -1365,6 +1365,19 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    still shows the question was asked. */
 .acp-msg-permission.acp-permission-resolved { opacity: 0.55; }
 .acp-msg-permission.acp-permission-resolved .acp-permission-option { cursor: default; }
+/* 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3: the "Allow, and always
+   in new sessions…" inline row. The prefilled pattern comes from agent text,
+   so it wraps and never widens the transcript. */
+.acp-permission-rule { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
+.acp-permission-rule-label { font-size: 12px; color: var(--text-muted); }
+.acp-permission-rule-input { width: 100%; box-sizing: border-box; min-width: 0; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; padding: 4px 6px; background: var(--surface); color: inherit; border: 1px solid var(--border); border-radius: 4px; }
+.acp-permission-rule-hint { font-size: 12px; color: var(--text-muted); }
+.acp-permission-rule-warn:empty { display: none; }
+.acp-permission-rule-warn, .acp-permission-rule-warning { font-size: 12px; color: var(--amber); overflow-wrap: anywhere; }
+.acp-permission-rule-error { font-size: 12px; color: #f87171; overflow-wrap: anywhere; }
+.acp-permission-rule-actions { display: flex; gap: 8px; }
+.acp-permission-rule-status { font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+.acp-permission-rule-status:empty { display: none; }
 /* Process chrome, not a message — dimmer than a note and pulsing rather than
    coloured, so a turn's own answer (once it starts streaming) reads as the
    thing that changed rather than one more tinted row among several. The same

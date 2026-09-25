@@ -1540,10 +1540,31 @@ def _as_text(value) -> str:
 
 
 # The plain-string fields of an agent-authored `_meta.kiro.consent` payload
-# that a `permission_request` frame forwards. `matchedRule` is the fifth
+# that a `permission_request` frame forwards. `matchedRule` is the sixth
 # allowlisted field and is nested, so `_project_consent` rebuilds it separately.
+# `triggeringResource` is the sub-command that raised a shell prompt when the
+# command was split (`git status && echo x` asks about `echo x`; probes P-B and
+# P-0.8, 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3), shown on the
+# card as "Triggered by" and used to prefill the rule button.
 _CONSENT_TEXT_FIELDS: Final[tuple[str, ...]] = (
-    "capability", "resource", "scope", "source")
+    "capability", "resource", "triggeringResource", "scope", "source")
+
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-31: the rule rows a prompt
+# card's "Allow, and always in new sessions…" button can add to, with the
+# plain label the card shows. A mirror of `agent_profile.ROW_LABELS` (a test
+# pins it), kept here so this module does not import `agent_profile`. Left
+# out: `web_fetch` (P-0.5: `consent.resource` is the host, so a URL pattern
+# never matches; the button is hidden), and `web_search` and `power`, whose
+# prompt resource was never measured to match an allow pattern (P-0.9
+# covered `mcp`, `subagent` and `skill` only).
+_RULE_ROWS: Final[dict[str, str]] = {
+    "fs_read": "Read files",
+    "fs_write": "Write files",
+    "shell": "Run commands",
+    "mcp": "MCP tools",
+    "subagent": "Sub-agents",
+    "skill": "Skills",
+}
 
 # The fields of a `consent.matchedRule` object that are forwarded. Measured
 # shape is exactly these two (probe P4, 2026-09-21, and Phase 0 § 9's
@@ -1553,8 +1574,43 @@ _CONSENT_TEXT_FIELDS: Final[tuple[str, ...]] = (
 _CONSENT_RULE_FIELDS: Final[tuple[str, ...]] = ("capability", "effect")
 
 
+def _rule_row(consent, bound_mode) -> str:
+    """The rule row a prompt's "always" button would add to, or ``""``.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-31. Computed from the raw
+    consent, before `_project_consent` drops the rule's ``match`` list, because
+    that list is what tells a row rule from a Protected one. Eligible only
+    when a pattern added to a Manual row can silence this prompt in a new
+    session:
+
+    * ``source`` is ``agent-profile`` — the derived agent's own rules. A
+      ``kiro-scope`` prompt is one of kiro-cli's built-in asks (P-0.10), which
+      no rule of ours overrides;
+    * the matched rule is an ``ask`` with no ``match`` list — a row's catch-all
+      ask (D-13). A Protected ask carries its folder patterns as ``match``
+      (P-0.4), and a Protected prompt asks under any row;
+    * the capability names a row in `_RULE_ROWS` and the matched rule is that
+      same row;
+    * the session was bound to the derived agent. A vendor task mode runs its
+      own agent, which these rules never reach.
+    """
+    if bound_mode != DERIVED_AGENT_NAME or not isinstance(consent, dict):
+        return ""
+    rule = consent.get("matchedRule")
+    if not isinstance(rule, dict) or "match" in rule:
+        return ""
+    capability = consent.get("capability")
+    if (consent.get("source") != "agent-profile"
+            or rule.get("effect") != "ask"
+            or not isinstance(capability, str)
+            or capability not in _RULE_ROWS
+            or rule.get("capability") != capability):
+        return ""
+    return capability
+
+
 def _project_consent(consent) -> dict[str, Any]:
-    """The five allowlisted fields of a permission request's consent payload.
+    """The six allowlisted fields of a permission request's consent payload.
 
     kiro-cli puts *why* a permission is being asked for under
     ``params._meta.kiro.consent`` — the capability, the resource, the rule that
@@ -1580,7 +1636,7 @@ def _project_consent(consent) -> dict[str, Any]:
     A field is omitted rather than emitted empty, at both levels: a key that
     is missing, or present with a non-string value, is skipped, and a
     ``matchedRule`` left with neither of its two fields is dropped whole. So a
-    prompt that carries three of the five (measured: ``web_fetch``) does not
+    prompt that carries three of the six (measured: ``web_fetch``) does not
     render two blank rows.
     """
     if not isinstance(consent, dict):
@@ -5223,6 +5279,9 @@ class _Supervisor:
         meta = params.get("_meta")
         kiro_meta = meta.get("kiro") if isinstance(meta, dict) else None
         consent = kiro_meta.get("consent") if isinstance(kiro_meta, dict) else None
+        # D-31: from the raw consent, and from the mode this session was bound
+        # to (the record's `mode`, set at `session/new` and `session/load`).
+        rule_row = _rule_row(consent, self.sessions[session_id].get("mode"))
         _emit(session_id, envelope("permission_request", {
             "requestId": opaque_id,
             "sessionId": session_id,
@@ -5239,6 +5298,14 @@ class _Supervisor:
             # shape does not depend on the agent's payload.
             "consent": _project_consent(consent),
             "options": options,
+            # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3: whether the
+            # card may offer "Allow, and always in new sessions…", and the row
+            # it adds to, so the page never guesses the row from the
+            # capability. `ruleRow` is null when not eligible. The page also
+            # requires a loopback viewer (D-9); the route refuses remote peers.
+            "ruleEligible": bool(rule_row),
+            "ruleRow": rule_row or None,
+            "ruleRowLabel": _RULE_ROWS.get(rule_row, ""),
         }, session_id))
         # Notified unconditionally, unlike turn end: this request has stopped
         # the turn and will keep it stopped until a human answers or the
