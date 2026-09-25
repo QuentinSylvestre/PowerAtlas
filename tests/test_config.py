@@ -1084,3 +1084,28 @@ def test_a_read_error_is_retried_and_never_called_corrupt(tmp_path, monkeypatch)
     assert "by hand" not in message and ".bak" not in message
     with pytest.raises(config_mod.ConfigUnreadableError):
         save_config(cfg)
+
+
+def test_a_persistent_read_error_logs_once_and_waits_outside_the_lock(
+        tmp_path, monkeypatch, caplog):
+    """Cycle 2, C-L6: a config.toml that stays unreadable logs one WARNING
+    per distinct error, not one per call, and the wait before the retry does
+    not hold `_lock`."""
+    import logging
+    import power_atlas.config as config_mod
+    (tmp_path / "config.toml").write_text('peek_hotkey = "ctrl+q"\n',
+                                          encoding="utf-8")
+    monkeypatch.setattr(config_mod, "_read_errors_logged", set())
+    held_during_sleep = []
+    monkeypatch.setattr(config_mod.time, "sleep",
+                        lambda _s: held_during_sleep.append(config_mod._lock.locked()))
+
+    def locked():
+        raise PermissionError(13, "The process cannot access the file")
+
+    monkeypatch.setattr(config_mod, "_read_config_file", locked)
+    with caplog.at_level(logging.WARNING, logger="power_atlas.config"):
+        for _ in range(3):
+            assert load_config()._load_error
+    assert held_during_sleep == [False, False, False]
+    assert sum("could not be read" in r.getMessage() for r in caplog.records) == 1

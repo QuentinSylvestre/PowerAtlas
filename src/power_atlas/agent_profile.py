@@ -89,7 +89,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .config import (DERIVED_AGENT_NAME, load_config, parse_permission_mode,
-                     save_config)
+                     save_config, save_permission_migration)
 
 log = logging.getLogger(__name__)
 
@@ -201,13 +201,22 @@ _BASE_DIGEST_RE = re.compile(r"#\s*Base agent digest: ([0-9a-f]{16})\b")
 # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-16: `apply_settings` holds it
 # across `load_config`, the mutation, `save_config` and generation, so
 # config.toml is never ahead of the derived agent for a session-creation check
-# to see. The **only** other acquirer is `web._derived_agent_in_effect`, with a
-# bounded `acquire(timeout=...)`, so a stalled generation refuses a session
-# rather than hanging it. The routes' `apply_settings` calls are bounded too
-# (`lock_timeout`); only the startup pass waits unbounded. `compile_block`,
+# to see. There are exactly three acquirers (final review, cycle 2, C-M3):
+#
+# * `apply_settings` (and `sync_from_config`, which is `apply_settings(None)`),
+#   for the save and the generation.
+# * `web._derived_agent_in_effect`, the session gate, with a bounded
+#   `acquire(timeout=...)`, so a stalled generation refuses a session rather
+#   than hanging it; it heals a stale or absent file while holding it.
+# * `acknowledge_notice`, bounded, and only to serialise its write of the
+#   notices against the heal and the startup pass, which set the same notices
+#   and the same notice file while holding it. It never generates.
+#
+# The routes' `apply_settings` calls are bounded too (`lock_timeout`); only
+# the startup pass waits unbounded. `compile_block`,
 # `derived_block_state`, `_apply_locked` and `heal_stale_locked` never acquire
-# it: a plain `threading.Lock` is not reentrant, and the two acquirers call
-# them while holding it. The gate may hand its hold to a worker thread that
+# it: a plain `threading.Lock` is not reentrant, and the first two acquirers
+# call them while holding it. The gate may hand its hold to a worker thread that
 # runs the heal and releases it (a plain `Lock` may be released by any thread),
 # so the gate's own wait stays inside its budget (D-30).
 _generation_lock = threading.Lock()
@@ -259,7 +268,18 @@ _upgrade_notice: dict | None = None
 # `_posture_key` of the settings `apply_settings` last saved (Phase 2 review,
 # S1), so a later save — or a heal, final review M-1 — can tell the
 # dashboard's own change, not yet generated, from one made outside it.
+# Set only while that save's generation has not succeeded: any successful
+# generation clears it, in memory and on disk (cycle 2, C-H1). Kept any
+# longer, it would silence an outside change back to an earlier dashboard
+# choice.
 _saved_fingerprint = ""
+# What the last successful generation wrote, read back from the file:
+# `{fingerprint, mode, base, digest}` as the block's header records them, or
+# `None` before the first one (cycle 2, C-H2, C-L1). Kept across a restart.
+# It stands in for the file when the file is absent, so a heal of a deleted
+# file can still tell a posture changed outside the dashboard, and it says
+# whether this installation's files carry a base digest line.
+_last_generated: dict | None = None
 
 
 def last_generation() -> GenerationStatus:
@@ -279,15 +299,17 @@ def upgrade_notice() -> dict | None:
 
 # ---- The notices, kept across a restart (final review, M-2) ------------------
 #
-# The two notices and `_saved_fingerprint` live in memory and in a small JSON
-# file beside config.toml, so a restart neither loses a notice the user has not
-# seen nor turns the dashboard's own unapplied change into one (M-1). Nothing
-# in it is secret: a mode, a few words and two short digests. Written
-# atomically when a notice or the saved fingerprint changes, removed when there
-# is nothing left in it, and read by the startup pass.
+# The two notices, `_saved_fingerprint` and `_last_generated` live in memory
+# and in a small JSON file beside config.toml, so a restart neither loses a
+# notice the user has not seen nor turns the dashboard's own unapplied change
+# into one (M-1). Nothing in it is secret: a mode, a few words and short
+# digests. Written atomically when one of them changes, removed when there is
+# nothing left in it, and read by the startup pass.
 
 _NOTICE_FILE = "permission-notice.json"
 _NOTICE_WHATS = frozenset(("mode", "rules", "base", "file"))
+_NOTICE_MODES = frozenset(("yolo", "manual"))
+_HEX16_RE = re.compile(r"[0-9a-f]{16}")
 
 
 def _notice_path() -> Path:
@@ -296,34 +318,73 @@ def _notice_path() -> Path:
     return config_mod.CONFIG_DIR / _NOTICE_FILE
 
 
-def _persist_notices() -> None:
-    """Write the notices and saved fingerprint, or remove the file. Never raises."""
+def _persist_notices() -> bool:
+    """Write the notices and records, or remove the file; whether that worked.
+
+    Never raises. A failed write removes its own `.tmp` file (cycle 2, C-L5).
+    """
     path = _notice_path()
+    tmp = path.with_name(path.name + ".tmp")
     payload = {key: value for key, value in (
         ("posture", _posture_notice), ("upgrade", _upgrade_notice),
-        ("saved_fingerprint", _saved_fingerprint)) if value}
+        ("saved_fingerprint", _saved_fingerprint),
+        ("generated", _last_generated)) if value}
     try:
         if not payload:
             path.unlink(missing_ok=True)
-            return
+            return True
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+        return True
     except OSError as exc:
         log.warning("could not store the permission notices in %s: %s", path, exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
 
 
 def _clean_notice(raw: object, keys: tuple[str, ...]) -> dict | None:
-    """A stored notice with only its known text fields, or `None`."""
-    if not isinstance(raw, dict) or not isinstance(raw.get("mode"), str):
+    """A stored notice with only its known fields, or `None`.
+
+    Cycle 2, C-L3: `mode` and `previous` must be a mode and `what` one of
+    `_NOTICE_WHATS`; a notice with any other value there is dropped with one
+    warning, since the dashboard would render its text.
+    """
+    if raw is None:
         return None
-    out = {key: raw[key][:200] for key in keys if isinstance(raw.get(key), str)}
-    if "what" in keys and out.get("what") not in _NOTICE_WHATS:
-        out["what"] = "rules"
+    ok = isinstance(raw, dict) and raw.get("mode") in _NOTICE_MODES
+    if ok and "previous" in keys:
+        ok = raw.get("previous", "") in _NOTICE_MODES | {""}
+    if ok and "what" in keys:
+        ok = raw.get("what") in _NOTICE_WHATS
+    if not ok:
+        log.warning("a stored permission notice was not recognised and was "
+                    "dropped")
+        return None
+    return {key: raw[key][:200] for key in keys if isinstance(raw.get(key), str)}
+
+
+def _clean_generated(raw: object) -> dict | None:
+    """A stored `_last_generated` record, or `None` when it is not one."""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for key in ("fingerprint", "digest"):
+        value = raw.get(key, "")
+        if not isinstance(value, str) or (value and not _HEX16_RE.fullmatch(value)):
+            return None
+        out[key] = value
+    mode, base = raw.get("mode", ""), raw.get("base", "")
+    if mode not in _NOTICE_MODES | {""} or not isinstance(base, str) or (
+            base and not _AGENT_NAME_RE.fullmatch(base)):
+        return None
+    out.update(mode=mode, base=base)
     return out
 
 
@@ -331,7 +392,7 @@ def _load_persisted_notices() -> None:
     """Restore what `_persist_notices` stored, without replacing what this
     process already holds. A missing file is the normal case; an unreadable
     one is logged and ignored."""
-    global _posture_notice, _upgrade_notice, _saved_fingerprint
+    global _posture_notice, _upgrade_notice, _saved_fingerprint, _last_generated
     path = _notice_path()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -351,15 +412,19 @@ def _load_persisted_notices() -> None:
     saved = raw.get("saved_fingerprint")
     if not _saved_fingerprint and isinstance(saved, str):
         _saved_fingerprint = saved[:120]
+    if _last_generated is None:
+        _last_generated = _clean_generated(raw.get("generated"))
 
 
 def acknowledge_notice(kind: str) -> bool:
-    """Clear the `"posture"` or `"upgrade"` notice; whether `kind` was known.
+    """Clear the `"posture"` or `"upgrade"` notice; whether that worked.
 
     The dashboard's Acknowledge button (final review, M-3, M-6). Takes the
     generation lock with a bounded wait, because the heal and the startup pass
     set the same notices while holding it; a wait that runs out clears
-    nothing and returns False.
+    nothing and returns False. So does a notice file that could not be
+    rewritten (cycle 2, C-L5): the notice is kept in memory too, so the panel
+    does not show it cleared while the next start would restore it.
     """
     global _posture_notice, _upgrade_notice
     if kind not in ("posture", "upgrade"):
@@ -367,12 +432,15 @@ def acknowledge_notice(kind: str) -> bool:
     if not _generation_lock.acquire(timeout=5.0):
         return False
     try:
+        kept = (_posture_notice, _upgrade_notice)
         if kind == "posture":
             _posture_notice = None
         else:
             _upgrade_notice = None
-        _persist_notices()
-        return True
+        if _persist_notices():
+            return True
+        _posture_notice, _upgrade_notice = kept
+        return False
     finally:
         _generation_lock.release()
 
@@ -1478,7 +1546,15 @@ def _base_text(config) -> tuple[str, str]:
         raise AgentProfileError(
             f"base agent {name!r} is the derived agent; pick a different base")
     if source.exists():
-        return _read_text(source), ""
+        try:
+            return _read_text(source), ""
+        except AgentProfileError:
+            # Cycle 2, C-M1: the same single short retry `load_config` gives
+            # config.toml, for a sharing violation from a sync client or a
+            # virus scan. A second failure is raised.
+            from . import config as config_mod
+            time.sleep(config_mod._READ_RETRY_SECONDS)
+            return _read_text(source), ""
     # D-28: a clean kiro-cli install has no `kiro_default.md` unless
     # agent-playbook deployed it. Generating from a minimal agent keeps the
     # floor there; refusing would leave Default sessions refused (D-34).
@@ -1502,13 +1578,17 @@ def _inspect(config) -> dict:
     One read of the derived agent and one of the base agent.
     """
     info = {"state": "unknown", "error": "", "fingerprint": "", "mode": "",
-            "base": "", "tampered": False}
+            "base": "", "digest": "", "tampered": False, "base_changed": False}
     path = derived_agent_path()
     if not path.exists():
         info["state"] = "absent"
         return info
     try:
         raw = path.read_bytes()
+    except FileNotFoundError:
+        # Cycle 2, C-L9: deleted between the check above and the read.
+        info["state"] = "absent"
+        return info
     except OSError as exc:
         # RE4: a sharing violation or a permission problem, not a file that
         # is someone else's. Generation still will not overwrite it
@@ -1524,32 +1604,55 @@ def _inspect(config) -> dict:
     info["fingerprint"] = _header_value(_FINGERPRINT_RE, first)
     info["mode"] = _header_value(_MODE_LINE_RE, first).lower()
     info["base"] = _header_value(_BASE_NAME_RE, first)
+    recorded = _header_value(_BASE_DIGEST_RE, first)
+    info["digest"] = recorded
+    base_unreadable = False
     try:
-        base_kept = excise_permissions(_base_text(config)[0])[0]
+        base_text = _base_text(config)[0]
+    except AgentProfileError:
+        base_text = None
+        base_unreadable = True
+    try:
+        base_kept = (excise_permissions(base_text)[0]
+                     if base_text is not None else None)
     except AgentProfileError:
         # Cannot be compared; a PowerAtlas file then reads as stale, and the
         # regeneration that follows reports why the base agent is unusable.
         base_kept = None
+    if base_kept is not None:
+        digest = _digest(base_kept)
+    elif base_unreadable:
+        # Cycle 2, C-M1: the base agent could not be read (a sharing
+        # violation, or a name that cannot be used). The file is then judged
+        # against itself: compiled with the digest it records, the block must
+        # be exactly what the settings compile to, and the rest of the file
+        # must still be what that digest was taken of. Anything short of that
+        # stays "stale", so a read failure never makes a changed file pass.
+        digest = recorded
+    else:
+        digest = ""
     try:
-        expected = compile_block(
-            config, base_digest=_digest(base_kept) if base_kept is not None else "")
+        expected = compile_block(config, base_digest=digest)
     except AgentProfileError as exc:
         info["error"] = str(exc)
         return info
     except Exception as exc:  # noqa: BLE001 - never raises, by contract
         info["error"] = f"{type(exc).__name__}: {exc}"
         return info
+    same_block = _norm_block(first) == _norm_block(expected)
     # H-B: the whole file, not the block alone. Exactly one `permissions:`
     # block, the compiled one, and every other byte the base agent's — the
     # same comparison `_generate`'s pre-publish verification makes.
-    if (base_kept is not None and count == 1 and kept == base_kept
-            and _norm_block(first) == _norm_block(expected)):
+    if base_kept is not None and count == 1 and kept == base_kept and same_block:
+        info["state"] = "on"
+        return info
+    if (base_unreadable and recorded and count == 1
+            and _digest(kept) == recorded and same_block):
         info["state"] = "on"
         return info
     if _PROVENANCE_MARKER not in first:
         return info
     info["state"] = "stale"
-    recorded = _header_value(_BASE_DIGEST_RE, first)
     if recorded:
         consistent = count == 1 and _digest(kept) == recorded
         unchanged_inputs = (
@@ -1557,6 +1660,16 @@ def _inspect(config) -> dict:
             and info["fingerprint"] == settings_fingerprint(*_compiled_settings(config))
             and info["base"] == _base_name_or_empty(config))
         info["tampered"] = not consistent or unchanged_inputs
+        # Cycle 2, C-L2: the file is its own, and the base agent it was built
+        # from has changed since, so the regeneration carries that change to
+        # new sessions and says so.
+        info["base_changed"] = (consistent and base_kept is not None
+                                and recorded != _digest(base_kept))
+    elif (_last_generated or {}).get("digest"):
+        # Cycle 2, C-L1: this installation writes the digest line, so a file
+        # carrying PowerAtlas's marker without it was edited by hand, the
+        # line deleted along with whatever else changed.
+        info["tampered"] = True
     return info
 
 
@@ -1602,6 +1715,9 @@ def _target_is_ours() -> bool:
     if not derived_agent_path().exists():
         return True
     block = _block_on_disk()
+    if block is None and not derived_agent_path().exists():
+        # Cycle 2, C-L9: deleted between the check and the read.
+        return True
     return bool(block) and _PROVENANCE_MARKER in block
 
 
@@ -1766,12 +1882,46 @@ def _config_posture(config) -> tuple[str, str, str]:
     return settings_fingerprint(mode, rules), mode, _base_name_or_empty(config)
 
 
-def _disk_posture() -> dict:
-    """`{fingerprint, mode, base}` as the block on disk records them."""
+def _file_posture() -> dict:
+    """`{fingerprint, mode, base, digest}` as the block on disk records them."""
     block = _block_on_disk() or ""
     return {"fingerprint": _header_value(_FINGERPRINT_RE, block),
             "mode": _header_value(_MODE_LINE_RE, block).lower(),
-            "base": _header_value(_BASE_NAME_RE, block)}
+            "base": _header_value(_BASE_NAME_RE, block),
+            "digest": _header_value(_BASE_DIGEST_RE, block)}
+
+
+def _disk_posture(info: dict | None = None) -> dict:
+    """The posture a regeneration replaces: the block on disk's, or, for a
+    file that is absent, what the last successful generation wrote (cycle 2,
+    C-H2). `info` is `_inspect`'s, when the caller already has it."""
+    if info is None:
+        absent = not derived_agent_path().exists()
+        disk = _file_posture()
+    else:
+        absent = info["state"] == "absent"
+        disk = {key: info[key] for key in ("fingerprint", "mode", "base", "digest")}
+    if absent and _last_generated:
+        return dict(_last_generated)
+    return disk
+
+
+def _generation_succeeded() -> None:
+    """Record what a successful generation wrote, and drop the dashboard's
+    pending save (cycle 2, C-H1, C-H2). The lock must be held.
+
+    Called after the notice for the regeneration has been decided, since
+    that decision reads `_saved_fingerprint`. Any success clears it: either
+    the dashboard's save is now generated, or config.toml was changed again
+    outside it and the save is no longer pending.
+    """
+    global _saved_fingerprint, _last_generated
+    written = _file_posture()
+    record = written if written["fingerprint"] else None
+    if _saved_fingerprint or record != _last_generated:
+        _saved_fingerprint = ""
+        _last_generated = record
+        _persist_notices()
 
 
 def _settings_moved(disk: dict, fingerprint: str, base: str) -> bool:
@@ -1799,6 +1949,8 @@ def _changed_what(disk: dict, mode: str, base: str) -> str:
 
 def _record_notice(mode: str, what: str, why: str, previous: str = "") -> None:
     global _posture_notice
+    if previous not in _NOTICE_MODES:
+        previous = ""
     _posture_notice = {"mode": mode, "what": what, "previous": previous,
                        "reason": why,
                        "detected_at": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -1813,24 +1965,30 @@ def _record_notice(mode: str, what: str, why: str, previous: str = "") -> None:
 
 
 def _notice_after_regeneration(disk: dict, config, why: str,
-                               tampered: bool) -> None:
+                               tampered: bool, base_changed: bool = False) -> None:
     """D-35: raise the notice for a regeneration that replaced `disk`.
 
-    `disk` is what the replaced block recorded. A change of settings names
+    `disk` is what the replaced block recorded (`_disk_posture`: for an absent
+    file, the last generation's record, C-H2). A change of settings names
     what moved; a file edited outside `_generate` with the settings unchanged
-    names the file (final review, H-B). Nothing is raised when the settings
-    compiled now are the ones the dashboard itself last saved (final review,
-    M-1): that is the dashboard's own change, whose generation failed then
-    and succeeded now.
+    names the file (final review, H-B); a base agent file that changed since
+    names the base agent (cycle 2, C-L2). Nothing is raised for a settings
+    change when the settings compiled now are the ones the dashboard itself
+    saved and has not yet generated (final review, M-1): that is the
+    dashboard's own change, whose generation failed then and succeeded now.
+    `_saved_fingerprint` is set only while such a save is pending (C-H1).
     """
     fingerprint, mode, base = _config_posture(config)
     if _settings_moved(disk, fingerprint, base):
-        if _posture_key(fingerprint, base) == _saved_fingerprint:
+        if (_saved_fingerprint
+                and _posture_key(fingerprint, base) == _saved_fingerprint):
             return
         _record_notice(mode, _changed_what(disk, mode, base), why,
                        previous=disk["mode"])
     elif tampered:
         _record_notice(mode, "file", why)
+    elif base_changed:
+        _record_notice(mode, "base", why)
 
 
 NOTICE_CHOICES = ("choose", "adopt", "preserve")
@@ -1909,8 +2067,11 @@ def apply_settings(mutate: Callable[[object], None] | None = None, *,
             return {"saved": False, "generation_ok": False,
                     "generation_error": load_error, "error": load_error + "."}
         saved = False
-        disk = _disk_posture()
-        tampered = False
+        # Cycle 2, C-L8: a settings change may add or remove a Protected
+        # folder's links, so the next GET walks them again.
+        _links_cache.clear()
+        info = _inspect(config) if mutate is None else None
+        disk = _disk_posture(info)
         if mutate is not None:
             before, before_mode, before_base = _config_posture(config)
             # Phase 2 review, S1: the settings this save starts from are not
@@ -1952,17 +2113,17 @@ def apply_settings(mutate: Callable[[object], None] | None = None, *,
                                "found by a settings save that did not choose "
                                "the mode", previous=disk["mode"])
             _persist_notices()
-        else:
-            tampered = _inspect(config)["tampered"]
-            if config._migrated_from_switch:
-                _raise_upgrade_notice(config)
+        elif config._migrated_from_switch:
+            _raise_upgrade_notice(config)
         try:
             _apply_locked(config)
         except Exception:  # noqa: BLE001 - logged and recorded by _apply_locked
             return {"saved": saved, "generation_ok": False,
                     "generation_error": _status.error}
-        if mutate is None:
-            _notice_after_regeneration(disk, config, "found at startup", tampered)
+        if info is not None:
+            _notice_after_regeneration(disk, config, "found at startup",
+                                       info["tampered"], info["base_changed"])
+        _generation_succeeded()
         return {"saved": saved, "generation_ok": True, "generation_error": ""}
     finally:
         _generation_lock.release()
@@ -1972,10 +2133,11 @@ def _raise_upgrade_notice(config) -> None:
     """M-6: say once that the on/off switch became a mode, and store the mode.
 
     Called by the startup pass, with the lock held, when `load_config`
-    migrated `acp_permissions_enabled`. The save drops the retired key
-    (`config._LEGACY_KEYS`), which is what makes the notice one-time; a save
-    that fails leaves the key, and the next start raises the same notice
-    again rather than a second one.
+    migrated `acp_permissions_enabled`. The save drops the retired key,
+    which is what makes the notice one-time; a save that fails leaves the
+    key, and the next start raises the same notice again rather than a
+    second one. It writes only the permission keys (cycle 2, C-L7):
+    `save_config` would also store what loading sanitised in unrelated keys.
     """
     global _upgrade_notice
     mode = parse_permission_mode(config.acp_permission_mode)[0]
@@ -1986,7 +2148,7 @@ def _raise_upgrade_notice(config) -> None:
         log.warning("the ACP permission on/off switch is now a permission "
                     "mode: this installation is on %s", mode)
     try:
-        save_config(config)
+        save_permission_migration(config)
     except Exception as exc:  # noqa: BLE001 - the notice stands either way
         log.warning("the migrated permission mode was not saved: %s", exc)
 
@@ -1995,7 +2157,7 @@ def sync_from_config() -> dict:
     """Regenerate from the current settings; the startup entry point.
 
     `apply_settings` with no mutation, so the settings are read inside the
-    lock and it stays one of D-16's two acquirers.
+    lock and it is the same D-16 acquirer as `apply_settings`.
     """
     return apply_settings(None)
 
@@ -2011,10 +2173,12 @@ def heal_stale_locked(config) -> bool:
     was deleted (final review, H-A), without a restart.
 
     Raises D-35's notice when the block it replaced was compiled from other
-    settings, naming what moved, or when the file had been edited outside
-    PowerAtlas with the settings unchanged (final review, H-B) — unless the
-    settings are the ones the dashboard last saved (M-1). Returns whether the
-    regeneration succeeded.
+    settings, naming what moved, when the file had been edited outside
+    PowerAtlas with the settings unchanged (final review, H-B), or when the
+    base agent file changed since (cycle 2, C-L2) — unless the settings are
+    the ones the dashboard saved and has not yet generated (M-1). An absent
+    file is compared with what the last successful generation wrote (C-H2).
+    Returns whether the regeneration succeeded.
 
     Refuses a config whose config.toml did not parse (Phase 1 re-review,
     finding 5): it is the defaults, and healing from them would write the
@@ -2025,13 +2189,14 @@ def heal_stale_locked(config) -> bool:
         log.warning("derived agent not healed: config.toml could not be read")
         return False
     info = _inspect(config)
-    disk = {key: info[key] for key in ("fingerprint", "mode", "base")}
+    disk = _disk_posture(info)
     try:
         _apply_locked(config)
     except Exception:  # noqa: BLE001 - recorded by _apply_locked
         return False
     _notice_after_regeneration(disk, config, "found by the session check",
-                               info["tampered"])
+                               info["tampered"], info["base_changed"])
+    _generation_succeeded()
     return True
 
 
@@ -2144,7 +2309,10 @@ def find_protected_links(root: Path | None = None) -> dict:
     found: dict = {}
     for name in PROTECTED:
         found[name] = _links_in(base / name)
-    _links_cache[key] = (now, found)
+    # Cycle 2, C-L8: an answer with a folder that could not be listed is not
+    # kept, so the next read tries again; `apply_settings` also empties it.
+    if not any(entry["error"] for entry in found.values()):
+        _links_cache[key] = (now, found)
     return copy.deepcopy(found)
 
 

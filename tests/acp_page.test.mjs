@@ -18093,9 +18093,18 @@ check("settings: Apply again is offered only while something is wrong, and posts
     "Apply again did not post the checked mode");
   await p.settle();
   assertEqual($("acpPermApplyAgain").hidden, true, "Apply again stayed after the answer put it in effect");
-  // A pending notice or a junk stored mode offers it too.
+  // Cycle 2 (C-L4): a pending notice alone does not offer it — re-posting
+  // the checked mode would adopt the outside change under a "fix" label.
+  // With the mode also not in effect it does.
   p.sandbox.renderAcpPermissions(permState({ posture_notice: { mode: "yolo", what: "mode", detected_at: "t" } }));
-  assertEqual($("acpPermApplyAgain").hidden, false, "a pending notice does not offer Apply again");
+  assertEqual($("acpPermApplyAgain").hidden, true, "a pending notice with the mode in effect offers Apply again");
+  p.sandbox.renderAcpPermissions(permState({ posture_notice: { mode: "yolo", what: "mode", detected_at: "t" },
+    generation_ok: false, generation_error: "cannot write x" }));
+  assertEqual($("acpPermApplyAgain").hidden, true, "a pending notice with a failed generation but in effect offers Apply again");
+  p.sandbox.renderAcpPermissions(permState({ posture_notice: { mode: "yolo", what: "mode", detected_at: "t" },
+    in_effect: false, state: "stale" }));
+  assertEqual($("acpPermApplyAgain").hidden, false, "a pending notice with the mode not in effect does not offer Apply again");
+  // A junk stored mode offers it.
   p.sandbox.renderAcpPermissions(permState({ mode: "manual", mode_warning: "acp_permission_mode 'x' is not a permission mode; running as Manual" }));
   assertEqual($("acpPermApplyAgain").hidden, false, "a junk stored mode does not offer Apply again");
   // Never while config.toml cannot be read: the fix is the file.
@@ -18142,7 +18151,7 @@ check("settings: an outside change says what changed and offers Review rules and
     && /did not change/.test(notice.textContent), `the file notice is wrong: ${notice.textContent}`);
   p.sandbox.renderAcpPermissions(permState({
     posture_notice: { mode: "yolo", what: "base", detected_at: "t" } }));
-  assert(/Base agent setting was changed/.test(notice.textContent), `the base notice is wrong: ${notice.textContent}`);
+  assert(/base agent changed outside the dashboard \(the Base agent setting.*base agent file in ~\/\.kiro\/agents\)/.test(notice.textContent), `the base notice is wrong: ${notice.textContent}`);
   assertEqual(labels().join("|"), "Acknowledge: keep Yolo", "a base-agent notice offers Review rules");
   const ack = notice.querySelectorAll("button").pop();
   ack.onclick();

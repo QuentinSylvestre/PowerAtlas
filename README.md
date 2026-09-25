@@ -193,8 +193,8 @@ acp_prompt_silence_seconds = 1800  # 60-86400. A turn is cancelled after this mu
 # ACP permission mode. Set from the settings menu's "Agent permissions" section, without a restart.
 # A hand edit of the mode (or the rules) takes effect when the next new Default session is started, and
 # the dashboard then says the mode changed outside it; task-mode sessions (Spec, Plan, ...) are never
-# affected. A hand edit of the base agent takes effect at the next restart, or the next time the mode or
-# base agent is saved from the dashboard. See "Tool permissions" under "Agent sessions".
+# affected. A hand edit of the base agent takes effect the same way, and the dashboard says the base agent
+# changed. See "Tool permissions" under "Agent sessions".
 acp_permission_mode = "yolo"                # "yolo" or "manual". Anything else loads as "manual".
 acp_permission_base_agent = "kiro_default"  # the kiro-cli agent PowerAtlas's own agent is built from
 # acp_permission_rules holds Manual's rules. Edit them with "Edit rules…" under Agent permissions
@@ -489,7 +489,7 @@ has since changed, is also written again automatically the next time a session i
 If `config.toml` is changed while PowerAtlas runs, or while it is stopped, the next new session (or the
 next start) picks the change up and the settings menu says what changed outside the dashboard: the
 mode, Manual's rules or the base agent. It says so too when the derived agent file itself was edited
-and PowerAtlas rewrote it; an update of the base agent file is picked up without a notice. The notice
+and PowerAtlas rewrote it, and when the base agent file changed and new sessions now use it. The notice
 offers **Review rules** and **Acknowledge**, and it is kept across a restart (in
 `permission-notice.json` beside `config.toml`) until you acknowledge it or choose a mode. A change made
 through PowerAtlas's own settings API looks like one made in the dashboard and is not flagged.

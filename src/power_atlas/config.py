@@ -799,8 +799,31 @@ def _corrupt(exc: Exception) -> Config:
                        backed_up=backed_up)
 
 
+# Read errors already logged in this process (cycle 2, C-L6): a file that
+# stays unreadable is read by every route, and logs once per distinct error.
+_read_errors_logged: set[str] = set()
+
+
 def load_config() -> Config:
-    """Load config from TOML. Missing keys get defaults, unknown keys ignored, wrong types get defaults."""
+    """Load config from TOML. Missing keys get defaults, unknown keys ignored, wrong types get defaults.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (RE5): a read
+    that failed (a sharing violation from a sync client or an antivirus scan,
+    an ACL) says nothing about the file's content. It is retried once; if it
+    fails again the defaults stand in, as for a parse error, but the file is
+    not called corrupt and its `.bak` copy — possibly of the last unreadable
+    version — is left alone. The wait before the retry is outside `_lock`
+    (cycle 2, C-L6), so a locked file does not hold up every other caller.
+    """
+    config = _load_config_once(final=False)
+    if config is None:
+        time.sleep(_READ_RETRY_SECONDS)
+        config = _load_config_once(final=True)
+    return config
+
+
+def _load_config_once(final: bool) -> Config | None:
+    """One attempt of `load_config`; `None` when a read failed and `final` is False."""
     with _lock:
         if not CONFIG_PATH.exists():
             return _with_permission_defaults(Config())
@@ -809,26 +832,15 @@ def load_config() -> Config:
         except FileNotFoundError:
             # Removed between the check above and the read.
             return _with_permission_defaults(Config())
-        except OSError:
-            # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (RE5):
-            # a read that failed (a sharing violation from a sync client or an
-            # antivirus scan, an ACL) says nothing about the file's content.
-            # It is retried once; if it fails again the defaults stand in, as
-            # for a parse error, but the file is not called corrupt and its
-            # `.bak` copy — possibly of the last unreadable version — is left
-            # alone.
-            time.sleep(_READ_RETRY_SECONDS)
-            try:
-                data = _read_config_file()
-            except FileNotFoundError:
-                return _with_permission_defaults(Config())
-            except OSError as again:
+        except OSError as exc:
+            if not final:
+                return None
+            reason = f"{type(exc).__name__}: {exc}"
+            if reason not in _read_errors_logged:
+                _read_errors_logged.add(reason)
                 log.warning("config.toml could not be read (%s); using defaults "
-                            "until it can be", again)
-                return _unreadable(f"{type(again).__name__}: {again}", "read",
-                                   backed_up=False)
-            except (tomllib.TOMLDecodeError, UnicodeDecodeError) as bad:
-                return _corrupt(bad)
+                            "until it can be", exc)
+            return _unreadable(reason, "read", backed_up=False)
         except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
             return _corrupt(exc)
         defaults = Config()
@@ -1047,11 +1059,51 @@ def save_config(config: Config) -> None:
             # Restore unknown keys preserved at load time (object-identity constraint:
             # caller must pass the same Config instance returned by load_config).
             data.update(getattr(config, "_extra", {}) or {})
-            with open(tmp, "wb") as f:
-                tomli_w.dump(data, f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, CONFIG_PATH)
+            _write_locked(data)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+
+def _write_locked(data: dict) -> None:
+    """Write `data` as config.toml: .tmp → fsync → os.replace. `_lock` held."""
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        tomli_w.dump(data, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CONFIG_PATH)
+
+
+def save_permission_migration(config: Config) -> None:
+    """Store the permission mode migrated from `acp_permissions_enabled`.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (M-6), cycle 2
+    (C-L7). Rewrites config.toml as it is on disk with three changes only:
+    `acp_permission_mode` from `config`, `acp_permission_rules` from `config`
+    when the file holds no rules table (the seed, which may carry the
+    migrated `protected_block = ["agents"]` and would be lost with the
+    retired key otherwise), and `acp_permissions_enabled` dropped. Every
+    other stored value stays as written, where `save_config` would store what
+    loading sanitised (an invalid `remote_bind_address` as `""`, say).
+
+    Refuses, like `save_config`, a `config` loaded from an unreadable file;
+    raises when the file cannot be read or parsed now.
+    """
+    refusal = unreadable_config_message(config)
+    if refusal:
+        raise ConfigUnreadableError(refusal + ".")
+    with _lock:
+        tmp = CONFIG_PATH.with_suffix(".tmp")
+        try:
+            data = _read_config_file()
+            data.pop("acp_permissions_enabled", None)
+            data["acp_permission_mode"] = config.acp_permission_mode
+            stored = data.get("acp_permission_rules")
+            if not (isinstance(stored, dict) and stored):
+                data["acp_permission_rules"] = copy.deepcopy(
+                    config.acp_permission_rules)
+            _write_locked(data)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise

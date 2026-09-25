@@ -83,6 +83,8 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_profile_mod, "_posture_notice", None)
     monkeypatch.setattr(agent_profile_mod, "_upgrade_notice", None)
     monkeypatch.setattr(agent_profile_mod, "_saved_fingerprint", "")
+    monkeypatch.setattr(agent_profile_mod, "_last_generated", None)
+    monkeypatch.setattr(config_mod, "_read_errors_logged", set())
     # `find_protected_links` reuses its answer for 30 s (final review, RE8).
     monkeypatch.setattr(agent_profile_mod, "_links_cache", {})
     monkeypatch.setattr(agent_profile_mod, "_link_errors_logged", set())
@@ -24964,10 +24966,29 @@ class TestPermissionGate:
         _write_config(isolated_config, 'acp_permission_base_agent = "../x"\n')
         verdict = web_mod._derived_agent_in_effect()
         assert verdict["in_effect"] is False and verdict["state"] == "absent"
-        assert "writing it failed" in verdict["cause"]
+        # Cycle 2, C-M2: the base agent is the cause, so the fix names it
+        # rather than Apply again, which would fail the same way.
+        assert "could not be written from the base agent" in verdict["cause"]
         assert "invalid base agent name" in verdict["cause"]
-        assert "Apply again" in verdict["fix"]
+        assert "Apply again" not in verdict["fix"]
+        assert "base agent" in verdict["fix"]
+        assert "invalid base agent name" not in verdict["remote_cause"]
         assert not ap.derived_agent_path().exists()
+
+    def test_an_absent_file_whose_write_fails_names_the_failure(
+            self, isolated_config, monkeypatch):
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+
+        def boom(*_a, **_k):
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(ap, "_publish", boom)
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is False and verdict["state"] == "absent"
+        assert "writing it failed" in verdict["cause"]
+        assert "simulated disk failure" in verdict["cause"]
+        assert "Apply again" in verdict["fix"]
 
     def test_the_gate_never_writes_over_a_config_that_did_not_load(
             self, isolated_config):
@@ -25092,11 +25113,13 @@ class TestPermissionGate:
         assert path.read_bytes() == good
         assert ap.posture_notice()["what"] == "file"
 
-    def test_an_updated_base_agent_is_healed_without_a_notice(
+    def test_an_updated_base_agent_is_healed_with_a_base_notice(
             self, isolated_config):
         """Final review, H-B: a base agent updated since the file was written
         (agent-playbook redeploys it) reads stale and is regenerated, but the
-        file still matches the digest it records, so it is not a tamper."""
+        file still matches the digest it records, so it is not a tamper.
+        Cycle 2, C-L2: new sessions now get the updated base agent, so the
+        notice says the base agent changed."""
         from power_atlas import web as web_mod
         ap = _agent_profile()
         assert ap.apply_settings(None)["generation_ok"] is True
@@ -25106,12 +25129,14 @@ class TestPermissionGate:
         verdict = web_mod._derived_agent_in_effect()
         assert verdict["in_effect"] is True
         assert b"An updated base" in ap.derived_agent_path().read_bytes()
-        assert ap.posture_notice() is None
+        assert ap.posture_notice()["what"] == "base"
 
     def test_a_file_from_before_the_base_digest_is_healed_without_a_notice(
             self, isolated_config):
         """An upgrade: the file on disk was written before the header recorded
-        the base agent. It is regenerated, and nothing is noticed."""
+        the base agent. It is regenerated, and nothing is noticed. Cycle 2,
+        C-L1: once this installation has written a digest line, the same file
+        is a hand edit that deleted it, and says so."""
         from power_atlas import web as web_mod
         ap = _agent_profile()
         assert ap.apply_settings(None)["generation_ok"] is True
@@ -25119,10 +25144,16 @@ class TestPermissionGate:
         text = path.read_text(encoding="utf-8")
         old = "\n".join(line for line in text.split("\n")
                         if "Base agent" not in line)
+        # The release that wrote `old` kept no record of its generations.
+        ap._last_generated = None
         path.write_text(old, encoding="utf-8")
         assert ap.derived_block_state(web_mod.load_config()) == "stale"
         assert web_mod._derived_agent_in_effect()["in_effect"] is True
         assert ap.posture_notice() is None
+        assert ap._last_generated["digest"], "the heal recorded no digest"
+        path.write_text(old, encoding="utf-8")
+        assert web_mod._derived_agent_in_effect()["in_effect"] is True
+        assert ap.posture_notice()["what"] == "file"
 
     def test_an_unreadable_file_reads_unreadable_not_foreign(
             self, isolated_config, monkeypatch):
@@ -25450,6 +25481,7 @@ class TestPermissionNoticesFinalReview:
         ap._posture_notice = None
         ap._upgrade_notice = None
         ap._saved_fingerprint = ""
+        ap._last_generated = None
 
     def test_the_heal_after_the_dashboards_own_failed_save_raises_no_notice(
             self, isolated_config, monkeypatch):
@@ -25499,8 +25531,11 @@ class TestPermissionNoticesFinalReview:
         assert ap.posture_notice() == notice
         assert ap.acknowledge_notice("posture") is True
         assert ap.posture_notice() is None
-        # Nothing else is pending, so the file is gone.
-        assert not stored.exists()
+        # No notice is left in the file; it keeps the record of the last
+        # generation (cycle 2, C-H2).
+        kept = json.loads(stored.read_text(encoding="utf-8"))
+        assert "posture" not in kept and "saved_fingerprint" not in kept
+        assert kept["generated"]["mode"] == "manual"
         self._restart(ap)
         ap.sync_from_config()
         assert ap.posture_notice() is None
@@ -25731,6 +25766,235 @@ class TestPermissionNoticesFinalReview:
                              text=True, timeout=120)
         assert out.returncode == 0, out.stderr
         assert out.stdout.strip() == "", out.stdout
+
+
+class TestPermissionNoticesCycle2:
+    """260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review, cycle 2:
+    C-H1, C-H2, C-M1, C-M2, C-L3, C-L5, C-L7, C-L8 and C-L9."""
+
+    @staticmethod
+    def _outside(isolated_config, mode):
+        _write_config(isolated_config, f'acp_permission_mode = "{mode}"\n')
+
+    def test_an_outside_revert_to_an_earlier_dashboard_choice_is_noticed(
+            self, isolated_config):
+        """C-H1: the dashboard's saved fingerprint is dropped once its
+        generation succeeds, so it no longer silences a later outside change
+        back to that posture — in this process or after a restart."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        assert ap.sync_from_config()["generation_ok"] is True
+        assert ap.apply_settings(lambda c: setattr(c, "acp_permission_mode", "yolo"),
+                                 notice="choose")["generation_ok"] is True
+        assert ap._saved_fingerprint == ""
+        stored = json.loads((isolated_config / "permission-notice.json")
+                            .read_text(encoding="utf-8"))
+        assert "saved_fingerprint" not in stored
+        self._outside(isolated_config, "manual")
+        assert web_mod._derived_agent_in_effect()["in_effect"] is True
+        assert ap.acknowledge_notice("posture") is True
+        self._outside(isolated_config, "yolo")
+        assert web_mod._derived_agent_in_effect()["in_effect"] is True
+        notice = ap.posture_notice()
+        assert notice["mode"] == "yolo" and notice["previous"] == "manual"
+        # And at startup, from the file's own header.
+        assert ap.acknowledge_notice("posture") is True
+        self._outside(isolated_config, "manual")
+        ap._posture_notice = None
+        ap._saved_fingerprint = ""
+        ap._last_generated = None
+        assert ap.sync_from_config()["generation_ok"] is True
+        assert ap.posture_notice()["mode"] == "manual"
+
+    def test_a_deleted_file_healed_after_an_outside_change_is_noticed(
+            self, isolated_config):
+        """C-H2: an absent file is compared with what the last successful
+        generation wrote, at the gate and at startup."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        assert ap.apply_settings(lambda c: setattr(c, "acp_permission_mode", "manual"),
+                                 notice="choose")["generation_ok"] is True
+        ap.derived_agent_path().unlink()
+        self._outside(isolated_config, "yolo")
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is True and verdict["mode"] == "yolo"
+        notice = ap.posture_notice()
+        assert notice["mode"] == "yolo" and notice["previous"] == "manual"
+        assert notice["what"] == "mode"
+        # At startup, after a restart, from the stored record.
+        assert ap.acknowledge_notice("posture") is True
+        ap.derived_agent_path().unlink()
+        self._outside(isolated_config, "manual")
+        ap._posture_notice = None
+        ap._last_generated = None
+        assert ap.sync_from_config()["generation_ok"] is True
+        assert ap.posture_notice()["mode"] == "manual"
+
+    def test_a_deleted_file_after_the_dashboards_own_failed_save_is_quiet(
+            self, isolated_config, monkeypatch):
+        """C-H2 keeps M-1: the dashboard's pending save is not an outside
+        change even when the file is absent."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        assert ap.sync_from_config()["generation_ok"] is True
+        real = ap._publish
+
+        def boom(*_a, **_k):
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(ap, "_publish", boom)
+        assert ap.apply_settings(lambda c: setattr(c, "acp_permission_mode", "manual"),
+                                 notice="choose")["generation_ok"] is False
+        monkeypatch.setattr(ap, "_publish", real)
+        ap.derived_agent_path().unlink()
+        assert web_mod._derived_agent_in_effect()["in_effect"] is True
+        assert ap.posture_notice() is None
+
+    def test_a_base_agent_that_cannot_be_read_keeps_a_consistent_file_in_effect(
+            self, isolated_config, monkeypatch):
+        """C-M1: a base agent read failure (retried once) does not make a
+        correct file stale; a file changed since still is. C-M2: a heal that
+        then fails on the base agent names that file, not Apply again."""
+        from power_atlas import web as web_mod
+        from power_atlas import config as config_mod
+        ap = _agent_profile()
+        assert ap.sync_from_config()["generation_ok"] is True
+        monkeypatch.setattr(config_mod, "_READ_RETRY_SECONDS", 0)
+        base = ap.base_agent_path("kiro_default")
+        real = ap._read_text
+        calls = []
+
+        def locked(path):
+            if path == base:
+                calls.append(1)
+                raise ap.AgentProfileError(f"cannot read {path}: sharing violation")
+            return real(path)
+
+        monkeypatch.setattr(ap, "_read_text", locked)
+        assert ap.derived_block_state(web_mod.load_config()) == "on"
+        assert len(calls) == 2, "the base agent read was not retried once"
+        assert web_mod._derived_agent_in_effect()["in_effect"] is True
+        path = ap.derived_agent_path()
+        orig = path.read_bytes()
+        path.write_bytes(orig.replace(b"Body.", b"Changed."))
+        assert ap.derived_block_state(web_mod.load_config()) == "stale"
+        path.write_bytes(orig)
+        self._outside(isolated_config, "manual")
+        assert ap.derived_block_state(web_mod.load_config()) == "stale"
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is False and verdict["state"] == "stale"
+        assert "kiro_default.md" in verdict["cause"]
+        assert "Apply again" not in verdict["fix"]
+        assert "kiro_default.md" in verdict["fix"]
+        assert "sharing violation" not in verdict["remote_cause"]
+        assert "kiro_default.md" in verdict["remote_fix"]
+        monkeypatch.setattr(ap, "_read_text", real)
+        assert web_mod._derived_agent_in_effect()["in_effect"] is True
+
+    def test_a_forged_stored_notice_is_dropped(self, isolated_config, caplog):
+        """C-L3: only a mode, a known `what` and a mode or nothing as
+        `previous`; anything else is dropped with one warning."""
+        ap = _agent_profile()
+        (isolated_config / "permission-notice.json").write_text(json.dumps({
+            "posture": {"mode": "<img src=x>", "what": "mode"},
+            "upgrade": {"mode": "yolo", "detected_at": "t"}}), encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger="power_atlas.agent_profile"):
+            assert ap.sync_from_config()["generation_ok"] is True
+        assert ap.posture_notice() is None
+        assert ap.upgrade_notice() == {"mode": "yolo", "detected_at": "t"}
+        assert sum("was not recognised" in r.getMessage()
+                   for r in caplog.records) == 1
+        for bad in ({"mode": "yolo", "what": "evil"},
+                    {"mode": "yolo", "what": "mode", "previous": "<b>"}):
+            ap._posture_notice = None
+            (isolated_config / "permission-notice.json").write_text(
+                json.dumps({"posture": bad}), encoding="utf-8")
+            ap.sync_from_config()
+            assert ap.posture_notice() is None, bad
+
+    def test_an_acknowledgement_that_cannot_be_stored_is_reported(
+            self, isolated_config, client):
+        """C-L5: no `.tmp` is left behind, the notice stays, and the route
+        answers `ok: false`."""
+        ap = _agent_profile()
+        ap._record_notice("yolo", "file", "test")
+        stored = isolated_config / "permission-notice.json"
+        stored.unlink()
+        stored.mkdir()
+        try:
+            assert ap._persist_notices() is False
+            assert not (isolated_config / "permission-notice.json.tmp").exists()
+            assert ap.acknowledge_notice("posture") is False
+            assert ap.posture_notice()["what"] == "file"
+            resp = client.post("/api/acp-permissions/acknowledge",
+                               json={"notice": "posture"}).json()
+            assert resp["ok"] is False and "not cleared" in resp["error"]
+        finally:
+            stored.rmdir()
+        assert ap.acknowledge_notice("posture") is True
+
+    def test_the_upgrade_save_changes_only_the_permission_keys(
+            self, isolated_config):
+        """C-L7: a value loading sanitised elsewhere stays as it was stored."""
+        import tomllib
+        ap = _agent_profile()
+        _write_config(isolated_config,
+                      'remote_bind_address = "not an address"\n'
+                      'acp_permissions_enabled = true\n'
+                      'pinned_folders = ["a", 3]\n')
+        assert ap.sync_from_config()["generation_ok"] is True
+        with open(isolated_config / "config.toml", "rb") as fh:
+            stored = tomllib.load(fh)
+        assert stored["remote_bind_address"] == "not an address"
+        assert stored["pinned_folders"] == ["a", 3]
+        assert "acp_permissions_enabled" not in stored
+        assert stored["acp_permission_mode"] == "manual"
+        assert stored["acp_permission_rules"]["protected_block"] == ["agents"]
+        assert set(stored) == {"remote_bind_address", "pinned_folders",
+                               "acp_permission_mode", "acp_permission_rules"}
+
+    def test_a_links_answer_with_an_error_is_not_reused(
+            self, isolated_config, monkeypatch):
+        """C-L8: a folder that could not be listed is walked again on the next
+        read, and a settings change empties the cache."""
+        ap = _agent_profile()
+        calls = []
+        failing = [True]
+
+        def links_in(folder):
+            calls.append(folder)
+            return {"count": 0, "links": [],
+                    "error": "OSError: busy" if failing[0] else ""}
+
+        monkeypatch.setattr(ap, "_links_in", links_in)
+        ap.find_protected_links()
+        ap.find_protected_links()
+        assert len(calls) == 2 * len(ap.PROTECTED)
+        failing[0] = False
+        ap.find_protected_links()
+        ap.find_protected_links()
+        assert len(calls) == 3 * len(ap.PROTECTED), "an answer was not reused"
+        ap.apply_settings(lambda c: setattr(c, "acp_permission_mode", "manual"))
+        ap.find_protected_links()
+        assert len(calls) == 4 * len(ap.PROTECTED), "a settings change kept the cache"
+
+    def test_a_file_deleted_between_the_check_and_the_read_is_absent(
+            self, isolated_config, monkeypatch):
+        """C-L9."""
+        from pathlib import Path as _Path
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        assert ap.sync_from_config()["generation_ok"] is True
+        target = ap.derived_agent_path()
+        real = _Path.read_bytes
+
+        def gone(self):
+            if self == target:
+                raise FileNotFoundError(2, "No such file", str(self))
+            return real(self)
+
+        monkeypatch.setattr(_Path, "read_bytes", gone)
+        assert ap.derived_block_state(web_mod.load_config()) == "absent"
 
 
 class TestAcpPermissionRoutes:
@@ -26719,8 +26983,9 @@ class TestGenerationRunsAtStartup:
         _write_config(isolated_config, 'acp_permission_base_agent = "../x"\n')
         bound, errors = self._default_create(acp_store, monkeypatch, tmp_path)
         assert bound == "not called"
-        assert "has not been written" in errors[0]["message"]
-        assert "writing it failed" in errors[0]["message"]
+        # Cycle 2, C-M2: the base agent name is the cause, and is named.
+        assert "could not be written from the base agent" in errors[0]["message"]
+        assert "name another base agent" in errors[0]["message"]
 
     def test_default_is_refused_over_a_foreign_file(
             self, isolated_config, acp_store, monkeypatch, tmp_path):

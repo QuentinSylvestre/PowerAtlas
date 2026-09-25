@@ -7790,11 +7790,14 @@ function _acpPermNoticeText(notice) {
       + when + '. Review them in Edit rules…; choosing the mode again does not '
       + 'undo a change to the rules.';
   }
+  // Cycle 2 (C-L2): also raised when the base agent's own file changed.
   if (notice.what === 'base') {
-    return 'The Base agent setting was changed outside the dashboard (in '
-      + 'config.toml or through PowerAtlas\'s settings API), and new sessions '
-      + 'now use an agent built from it' + when + '. Check the Base agent name '
-      + 'below.';
+    return 'The base agent changed outside the dashboard (the Base agent '
+      + 'setting, in config.toml or through PowerAtlas\'s settings API, or the '
+      + 'base agent file in ~/.kiro/agents), and new sessions now use an agent '
+      + 'built from it' + when + '. Your mode and rules did not change; check '
+      + 'the Base agent name below, and if you did not expect this, what else '
+      + 'writes to ~/.kiro/agents.';
   }
   var previous = typeof notice.previous === 'string' && notice.previous
     && notice.previous !== notice.mode
@@ -7851,8 +7854,9 @@ function showAcpPermissionFloor() {
 }
 
 /** Final review (H-A): re-apply the mode that is checked. `setAcpPermissionMode`
- *  posts it even when it is unchanged, which regenerates the agent file and
- *  clears an outside-change notice. */
+ *  posts it even when it is unchanged, which regenerates the agent file. Not
+ *  offered while an outside-change notice is pending and the mode is in
+ *  effect (cycle 2, C-L4). */
 function applyAcpPermissionModeAgain() {
   var checked = null;
   ['Yolo', 'Manual'].forEach(function (m) {
@@ -7926,12 +7930,16 @@ function renderAcpPermissions(d) {
     ['Show the Always blocked list', showAcpPermissionFloor],
     ['Acknowledge', function () { acknowledgeAcpPermissionNotice('upgrade'); }],
   ] : []);
-  // H-A: offered while the mode is not working as set or an outside change is
-  // pending — never while config.toml cannot be read, where the fix is the
-  // file and the POST would be refused.
+  // H-A: offered while the mode is not working as set — never while
+  // config.toml cannot be read, where the fix is the file and the POST would
+  // be refused. Cycle 2 (C-L4): while an outside-change notice is pending it
+  // is offered only if the mode is also not in effect, since re-posting the
+  // checked mode would adopt that change under a "fix" label; the notice's
+  // own Acknowledge is the way to keep it.
   if (applyAgain) {
-    applyAgain.hidden = !!configError || !(notInEffect || _acpPermGenerationFailed(d)
-      || !!d.mode_warning || !!noticeText);
+    var wrong = noticeText ? notInEffect
+      : (notInEffect || _acpPermGenerationFailed(d) || !!d.mode_warning);
+    applyAgain.hidden = !!configError || !wrong;
   }
   if (d.protected_links && typeof d.protected_links === 'object') _acpPermLinks = d.protected_links;
   _acpPermRenderFloor(d.floor);

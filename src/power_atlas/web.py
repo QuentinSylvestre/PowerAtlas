@@ -613,6 +613,24 @@ def _not_in_effect_reason(state: str, compile_error: str, config,
                 f"{said(compile_error, ' ({})')}",
                 "Fix or remove acp_permission_rules in PowerAtlas's "
                 f"config.toml, then {settings_step}.")
+    if (state in ("absent", "stale") and healed is False
+            and last.error_kind == "base"):
+        # Cycle 2, C-M2: the regeneration failed because of the base agent,
+        # which Apply again would read the same way; name that file.
+        name = last.base_agent or getattr(config, "acp_permission_base_agent", "")
+        try:
+            base_path = str(agent_profile.base_agent_path(
+                agent_profile.validate_base_agent_name(name)))
+        except agent_profile.AgentProfileError:
+            base_path = ""
+        what = (f"the base agent file {base_path}" if base_path
+                else "the base agent named under Settings > Agent permissions")
+        verb = "written" if state == "absent" else "regenerated"
+        return (f"its agent file {path} could not be {verb} from {what}"
+                f"{said(last.error, ' ({})')}",
+                f"Fix or restore {what}, or name another base agent under "
+                "Settings > Agent permissions on the dashboard, then start "
+                "the session again.")
     if state == "absent":
         # H-A: the gate has just tried to write it; say why that failed.
         if healed is False and last.error:
@@ -702,9 +720,10 @@ def _derived_agent_in_effect() -> dict:
     compile to (`derived_block_state(config) == "on"`, D-15) — the same
     predicate the settings panel shows, so the two cannot disagree.
 
-    Takes `agent_profile._generation_lock` with a bounded wait (D-16): it is
-    the only acquirer besides `agent_profile.apply_settings`, so it never reads
-    a config.toml that is ahead of the file. A timeout raises, and `acp`
+    Takes `agent_profile._generation_lock` with a bounded wait (D-16): it and
+    `agent_profile.apply_settings` are the acquirers that generate (the third,
+    `acknowledge_notice`, only writes the notices), so it never reads a
+    config.toml that is ahead of the file. A timeout raises, and `acp`
     refuses on a raise. While holding the lock, a `"stale"` file whose config
     loaded cleanly is regenerated once and re-checked (D-30); a regeneration
     that compiled a different mode or rule set raises D-35's dashboard notice.
@@ -4622,9 +4641,10 @@ async def acknowledge_acp_permission_notice(request: Request):
     if kind not in ("posture", "upgrade"):
         return {"ok": False, "error": "notice must be \"posture\" or \"upgrade\""}
     if not await asyncio.to_thread(agent_profile.acknowledge_notice, kind):
+        # Either the settings were being applied, or the notice file could
+        # not be rewritten (cycle 2, C-L5); the log names which.
         return {"ok": False,
-                "error": "The permission settings are being applied; try "
-                         "again in a moment."}
+                "error": "The notice was not cleared; try again in a moment."}
     return {"ok": True, **(await _current_acp_permission_state())}
 
 
