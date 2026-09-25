@@ -151,7 +151,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 > promoted it to product, so that ground is gone. What survives is the *other* half of the original
 > reason, which is the one that actually governs: exercising it spawns a real `kiro-cli acp -a` and
 > writes a permanent session into the user's ~13,300-entry store — a side-effecting surface this plan's
-> probe style assumes away. *(Corrected 2026-09-23: the agent is not spawned with `-a`; the v3 engine rejects the flag and `acp.py` never passes it. It is a real `kiro-cli acp --agent-engine v3` process whose posture follows the ACP permission setting (`260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`); with the setting off, the default, it runs under the machine's allow-all `permissions.yaml`, so the side-effect reasoning still holds.)* **`GET /acp?sid=` is itself state-changing**, so even "just load the page"
+> probe style assumes away. *(Corrected 2026-09-23: the agent is not spawned with `-a`; the v3 engine rejects the flag and `acp.py` never passes it. It is a real `kiro-cli acp --agent-engine v3` process whose posture follows the ACP permission mode (`260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL`, updated 2026-09-25); in Yolo, the default, it runs every action without asking except the Always blocked list, so the side-effect reasoning still holds.)* **`GET /acp?sid=` is itself state-changing**, so even "just load the page"
 > is not a read-only probe. Anyone writing briefs for it must budget store accounting (enumerate by
 > `cwd` before and after) and process teardown, not just navigation.
 >
