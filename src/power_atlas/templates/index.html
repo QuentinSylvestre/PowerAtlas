@@ -1163,10 +1163,12 @@ function dashOverviewPoll(){
 }
 // Every Overview request goes through here. A plain fetch 403 never reaches
 // the htmx signed-out handling, so a 403 is reported here, once, and the
-// pollers stop: repeating it on every poll would say nothing new.
+// pollers stop: repeating it on every poll would say nothing new. `signal`,
+// optional, is an AbortSignal: the live poller aborts its request on halt and
+// on timeout. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 var _dashOverviewSignedOut = false;
-function dashOverviewFetch(url){
-  return fetch(url).then(function(r){
+function dashOverviewFetch(url, signal){
+  return fetch(url, signal ? {signal: signal} : undefined).then(function(r){
     if (r.status === 403) {
       dashOverviewStop();
       if (!_dashOverviewSignedOut) {
@@ -1372,15 +1374,24 @@ function dashOvPlansFailed(){
 var DASH_OV_LIVE_URL = '/api/dashboard/overview/live';
 var DASH_OV_LIVE_MS = 2000;
 var DASH_OV_LIVE_BACKOFF_MS = 10000;
+// A request not answered in this long is aborted and counts as a failed poll
+// (so it backs off); without it a hung request would freeze the tiles.
+var DASH_OV_LIVE_TIMEOUT_MS = 15000;
 var DASH_OV_IDLE_MS = 120000;
 var DASH_OV_FILTER_KEY = 'pa_dash_ov_filter';
 var DASH_OV_PROVIDERS = {'claude-code': true, 'kiro-cli-v3': true, 'kiro-ide': true};
 var _dashOvLiveGen = 0;
 var _dashOvLiveTimer = null;
 var _dashOvLiveBusy = false;
-// Tile elements by sid, reused across polls so a refresh does not rebuild the
-// grid from scratch.
+// The in-flight request's AbortController, one per request; halting a
+// generation aborts it, so a restart never leaves the old request running.
+var _dashOvLiveAbort = null;
+// Tile elements by sid, and the one grid that holds them, both reused across
+// polls: tiles are reordered in place and rebuilt only when their data
+// changed, so a focused tile keeps the focus through a refresh.
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 var _dashOvTileEls = Object.create(null);
+var _dashOvGrid = null;
 var _dashOvFilter = (function(){
   try {
     return localStorage.getItem(DASH_OV_FILTER_KEY) === 'poweratlas' ? 'poweratlas' : 'all';
@@ -1395,6 +1406,7 @@ function dashOvShowing(){
 function dashOvLiveHalt(){
   _dashOvLiveGen += 1;
   _dashOvLiveBusy = false;
+  if (_dashOvLiveAbort !== null) { _dashOvLiveAbort.abort(); _dashOvLiveAbort = null; }
   if (_dashOvLiveTimer !== null) { clearTimeout(_dashOvLiveTimer); _dashOvLiveTimer = null; }
 }
 // Start (or restart) the loop with a fetch now. A second start while one is
@@ -1416,12 +1428,24 @@ function dashOvLiveTick(gen){
   if (_dashOvLiveBusy) return;
   if (!dashOvShowing()) { dashOvLiveSchedule(gen, DASH_OV_LIVE_MS); return; }
   _dashOvLiveBusy = true;
-  dashOverviewFetch(DASH_OV_LIVE_URL + '?filter=' + encodeURIComponent(_dashOvFilter)).then(function(data){
+  var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  _dashOvLiveAbort = ctl;
+  var timeout = ctl ? setTimeout(function(){
+    if (_dashOvLiveAbort === ctl) ctl.abort();
+  }, DASH_OV_LIVE_TIMEOUT_MS) : null;
+  function settled(){
+    if (timeout !== null) clearTimeout(timeout);
+    if (_dashOvLiveAbort === ctl) _dashOvLiveAbort = null;
+  }
+  dashOverviewFetch(DASH_OV_LIVE_URL + '?filter=' + encodeURIComponent(_dashOvFilter),
+      ctl ? ctl.signal : undefined).then(function(data){
+    settled();
     if (gen !== _dashOvLiveGen) return;
     _dashOvLiveBusy = false;
     dashOvRenderLive(data && data.tiles);
     dashOvLiveSchedule(gen, DASH_OV_LIVE_MS);
   }, function(){
+    settled();
     if (gen !== _dashOvLiveGen) return;
     _dashOvLiveBusy = false;
     dashOvLiveFailed();
@@ -1490,7 +1514,8 @@ function dashOvTileNode(tile, now){
     _dashOvTileEls[sid] = el;
   }
   el._dashOvTile = tile;
-  el.textContent = '';
+  var key = null;
+  try { key = JSON.stringify(tile); } catch (e) { key = null; }
   var locked = tile.availability === 'locked';
   var t = Date.parse(String(tile.last_activity || tile.updated_at || ''));
   var quiet = isFinite(t) ? Math.max(0, now - t) : 0;
@@ -1500,6 +1525,15 @@ function dashOvTileNode(tile, now){
   if (locked) el.setAttribute('aria-disabled', 'true');
   else el.setAttribute('aria-disabled', 'false');
   el.title = locked ? 'This session is open elsewhere right now.' : '';
+  var ageText = idle ? dashOvIdleText(quiet) : dashOvAgo(tile.last_activity || tile.updated_at);
+  // The age depends on the clock, not the data: it is updated on every
+  // render; the rest is rebuilt only when the tile's data changed.
+  if (key !== null && el._dashOvKey === key && el._dashOvAge) {
+    el._dashOvAge.textContent = ageText;
+    return el;
+  }
+  el._dashOvKey = key;
+  el.textContent = '';
 
   var head = document.createElement('span');
   head.className = 'dash-ov-tile-head';
@@ -1517,8 +1551,8 @@ function dashOvTileNode(tile, now){
     head.appendChild(icon);
   }
   head.appendChild(dashOvText('span', 'dash-ov-tile-title', dashRailTitleText(tile)));
-  head.appendChild(dashOvText('span', 'dash-ov-tile-age',
-    idle ? dashOvIdleText(quiet) : dashOvAgo(tile.last_activity || tile.updated_at)));
+  el._dashOvAge = dashOvText('span', 'dash-ov-tile-age', ageText);
+  head.appendChild(el._dashOvAge);
   el.appendChild(head);
   var ws = dashOvText('span', 'dash-ov-tile-ws', tile.name);
   ws.title = tile.cwd == null ? '' : String(tile.cwd);
@@ -1537,22 +1571,48 @@ function dashOvRenderLive(tiles){
   if (!body) return;
   var shown = Array.isArray(tiles)
     ? tiles.filter(function(t){ return t && typeof t === 'object' && t.id; }).slice(0, 8) : [];
-  body.textContent = '';
   var keep = Object.create(null);
   if (!shown.length) {
     _dashOvTileEls = Object.create(null);
+    _dashOvGrid = null;
+    body.textContent = '';
     body.appendChild(dashOvText('div', 'dash-ov-empty', 'No live sessions'));
     return;
   }
-  var grid = document.createElement('div');
-  grid.className = 'dash-ov-tiles';
+  if (!_dashOvGrid || _dashOvGrid.parentNode !== body) {
+    body.textContent = '';
+    _dashOvGrid = document.createElement('div');
+    _dashOvGrid.className = 'dash-ov-tiles';
+    body.appendChild(_dashOvGrid);
+  }
+  var grid = _dashOvGrid;
   var now = Date.now();
+  var want = [];
   shown.forEach(function(t){
-    keep[String(t.id)] = true;
-    grid.appendChild(dashOvTileNode(t, now));
+    var sid = String(t.id);
+    if (keep[sid]) return;
+    keep[sid] = true;
+    want.push(dashOvTileNode(t, now));
   });
-  Object.keys(_dashOvTileEls).forEach(function(k){ if (!keep[k]) delete _dashOvTileEls[k]; });
-  body.appendChild(grid);
+  Object.keys(_dashOvTileEls).forEach(function(k){
+    if (keep[k]) return;
+    var gone = _dashOvTileEls[k];
+    if (gone.parentNode) gone.parentNode.removeChild(gone);
+    delete _dashOvTileEls[k];
+  });
+  // Put the tiles in order without moving the focused one: a browser drops
+  // the focus of a node that is moved. The tiles ahead of it go to the end
+  // instead, where the rest of the pass puts them in place.
+  var focused = document.activeElement;
+  want.forEach(function(el, i){
+    var at = grid.childNodes[i] || null;
+    if (at === el) return;
+    if (el === focused && el.parentNode === grid) {
+      while (grid.childNodes[i] !== el) grid.insertBefore(grid.childNodes[i], null);
+      return;
+    }
+    grid.insertBefore(el, at);
+  });
 }
 // A failed poll keeps the tiles already drawn; only a section that never
 // loaded says so.

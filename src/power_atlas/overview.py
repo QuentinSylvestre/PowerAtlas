@@ -23,6 +23,7 @@ import re
 import stat as stat_mod
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -351,9 +352,12 @@ _EVENT_TEXT_MAX = 240
 _TOOL_ARG_MAX = 80
 
 # Path-keyed memo of tail events (D22): path -> (mtime_ns, size, events). An
-# idle tile costs one stat. Pruned to the paths of the current poll's tiles, so
-# it holds at most `LIVE_MAX_TILES` entries between polls.
-_tail_memo: dict[str, tuple[int, int, list]] = {}
+# idle tile costs one stat. A least-recently-used bound of `_TAIL_MEMO_MAX`
+# paths rather than the current poll's tiles: two tabs on different filters, or
+# a filter toggled back and forth, would otherwise evict each other's entries
+# every poll. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+_TAIL_MEMO_MAX = 4 * LIVE_MAX_TILES
+_tail_memo: OrderedDict[str, tuple[int, int, list]] = OrderedDict()
 _tail_memo_lock = threading.Lock()
 
 
@@ -475,15 +479,23 @@ def _claude_events(obj: dict) -> list[dict]:
 
 
 def _line_events(line: bytes, provider: str) -> list[dict]:
+    """One transcript line as tile events; `[]` for a line that is not one.
+
+    Any failure skips this line only, never the tile: a line is data from a
+    file an agent writes, and a shape the readers do not expect (a `null`
+    `message`, JSON nested deeper than the recursion limit) must not cost the
+    other lines. Not logged: the poll runs every 2 s.
+    260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    """
     try:
         obj = json.loads(line)
-    except ValueError:
+        if not isinstance(obj, dict):
+            return []
+        if provider == "claude-code":
+            return _claude_events(obj)
+        return _v3_events(obj)
+    except Exception:
         return []
-    if not isinstance(obj, dict):
-        return []
-    if provider == "claude-code":
-        return _claude_events(obj)
-    return _v3_events(obj)
 
 
 def _parse_tail(path: Path, size: int, provider: str, n: int) -> list[dict]:
@@ -493,44 +505,66 @@ def _parse_tail(path: Path, size: int, provider: str, n: int) -> list[dict]:
     a large Claude transcript's last 64 KiB can hold no event at all (measured
     2026-09-24), so this loop widens by `TAIL_GROWTH` until it has `n` events,
     has read the whole file, or has reached `TAIL_MAX_BYTES`.
+
+    Each growth step reads and parses only the bytes the previous window did
+    not cover. A window that begins mid-line leaves its first line unparsed as
+    `carry`; the next step appends it to the bytes before it, so that line is
+    parsed whole once its start is inside the window, and never as a fragment.
+    260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
     """
+    if n <= 0:
+        return []
+    events: list[dict] = []
+    end = size          # everything from `end` on is parsed, bar `carry`
+    carry = b""
     window = TAIL_FIRST_BYTES
     while True:
-        length = min(window, size)
-        start = size - length
-        lines = _read_tail(path, start, length).split(b"\n")
+        start = size - min(window, size)
+        lines = (_read_tail(path, start, end - start) + carry).split(b"\n")
         if start > 0:
             # The window began mid-line.
+            carry = lines[0]
             lines = lines[1:]
-        events: list[dict] = []
+        else:
+            carry = b""
+        found: list[dict] = []
         for line in reversed(lines):
-            if len(events) >= n:
+            if len(events) + len(found) >= n:
                 break
             line = line.strip()
             if not line or len(line) > TAIL_MAX_LINE_BYTES:
                 continue
-            events[:0] = _line_events(line, provider)
+            found[:0] = _line_events(line, provider)
+        events = found + events
+        end = start
         if len(events) >= n or start == 0 or window >= TAIL_MAX_BYTES:
-            return events[-n:] if n > 0 else []
+            return events[-n:]
         window = min(window * TAIL_GROWTH, TAIL_MAX_BYTES)
 
 
-def tail_events(path, provider: str, n: int = TAIL_EVENTS) -> list[dict]:
+def tail_events(path, provider: str, n: int = TAIL_EVENTS, st=None) -> list[dict]:
     """The last `n` events of a transcript, for a live tile.
 
     Each event is one of `{"kind": "text", "role": "user"|"assistant",
     "text"}`, `{"kind": "tool", "name", "arg"}` or `{"kind": "result", "ok"}`.
-    Memoised per path on `(mtime_ns, size)` (D22). A missing or unreadable
-    file gives `[]`; a failure is logged with the path only, never content.
+    Memoised per path on `(mtime_ns, size)` (D22), in a least-recently-used
+    memo of at most `_TAIL_MEMO_MAX` paths. `st`, when given, is a `stat` of
+    `path` the caller already took this poll, reused instead of a second one.
+    A missing or unreadable file gives `[]`; a failure is logged with the path
+    only, never content. A line that cannot be read as an event is skipped and
+    the result is still memoised (`_line_events`).
     """
     path = Path(path)
     key = str(path)
-    try:
-        st = path.stat()
-    except (OSError, ValueError):
-        return []
+    if st is None:
+        try:
+            st = path.stat()
+        except (OSError, ValueError):
+            return []
     with _tail_memo_lock:
         hit = _tail_memo.get(key)
+        if hit is not None:
+            _tail_memo.move_to_end(key)
     if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
         return list(hit[2])
     try:
@@ -540,6 +574,9 @@ def tail_events(path, provider: str, n: int = TAIL_EVENTS) -> list[dict]:
         return []
     with _tail_memo_lock:
         _tail_memo[key] = (st.st_mtime_ns, st.st_size, events)
+        _tail_memo.move_to_end(key)
+        while len(_tail_memo) > _TAIL_MEMO_MAX:
+            _tail_memo.popitem(last=False)
     return list(events)
 
 
@@ -652,31 +689,54 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
                 if key not in cands and is_live(session, provider):
                     cands[key] = (session, original, False, True)
 
+    now = time.time()
     rows = []
     for (provider, sid), (session, cwd, is_held, live) in cands.items():
         path = None
+        st = None
         activity = 0.0
         try:
             path = _transcript_path(sid, provider, cwd)
             if path is not None:
-                activity = path.stat().st_mtime
+                st = path.stat()
+                activity = st.st_mtime
         except (OSError, ValueError):
-            path = None
+            path = st = None
         if not activity:
             activity = _epoch_of(session.updated_at)
-        rows.append((activity, provider, sid, session, cwd, is_held, path, live))
-    rows.sort(key=lambda r: r[0], reverse=True)
+        # A held session with no transcript and no record time is one just
+        # created: it sorts as active now, so the cap never cuts it. Its shown
+        # activity stays unknown. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+        order = activity or (now if is_held else 0.0)
+        rows.append((activity, provider, sid, session, cwd, is_held, path, live, st, order))
+    rows.sort(key=lambda r: r[9], reverse=True)
     rows = rows[:LIVE_MAX_TILES]
 
+    # Workspace-hash dirs for `acp_availability`, which reads one only for a
+    # `sess_` id that is not held. A v3 transcript is
+    # `<root>/<hash>/<sid>/messages.jsonl`, so the hash comes from the path
+    # already resolved; otherwise one lookup per distinct cwd per poll (each
+    # walks every v3 session dir). A wrong name is safe: `_lock_holder_v3`
+    # validates it and falls back to its full scan.
+    # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
     hashes: dict[str, str] = {}
-    for _a, _prov, sid, _s, cwd, _h, _p, _l in rows:
-        if sid.startswith("sess_") and cwd:
-            try:
-                wh = data_kiro_v3.hash_dir_for_cwd(cwd)
-            except Exception:
-                wh = None
-            if wh:
-                hashes[sid] = wh
+    by_cwd: dict[str, str | None] = {}
+    for _a, prov, sid, _s, cwd, is_held, path, _l, _st, _o in rows:
+        if is_held or not sid.startswith("sess_"):
+            continue
+        wh = None
+        if (prov == _HELD_PROVIDER and path is not None and path.name == "messages.jsonl"
+                and path.parent.name == sid):
+            wh = path.parent.parent.name or None
+        elif cwd:
+            if cwd not in by_cwd:
+                try:
+                    by_cwd[cwd] = data_kiro_v3.hash_dir_for_cwd(cwd)
+                except Exception:
+                    by_cwd[cwd] = None
+            wh = by_cwd[cwd]
+        if wh:
+            hashes[sid] = wh
     try:
         availability = deps.acp_availability([r[2] for r in rows], frozenset(held), hashes)
     except Exception:
@@ -689,13 +749,11 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
         statuses = {}
 
     tiles = []
-    keep_paths: set[str] = set()
-    for activity, provider, sid, session, cwd, is_held, path, live in rows:
+    for activity, provider, sid, session, cwd, is_held, path, live, st, _o in rows:
         events: list = []
         if path is not None:
-            keep_paths.add(str(path))
             try:
-                events = tail_events(path, provider)
+                events = tail_events(path, provider, st=st)
             except Exception:
                 log.exception("Overview: could not read the tail of %s", path)
         try:
@@ -717,7 +775,4 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
                               if activity else ""),
             "events": events,
         })
-    with _tail_memo_lock:
-        for key in [k for k in _tail_memo if k not in keep_paths]:
-            del _tail_memo[key]
     return tiles

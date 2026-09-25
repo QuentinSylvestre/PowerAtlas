@@ -320,6 +320,10 @@ class El {
     const i = this.childNodes.indexOf(child);
     if (i >= 0) this.childNodes.splice(i, 1);
     child.parentNode = null;
+    // A browser drops the focus of a node taken out of the document, even
+    // when insertBefore is only moving it; the live tiles rely on never
+    // moving the focused one. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    if (ACTIVE && (ACTIVE === child || child.descendants().includes(ACTIVE))) ACTIVE = null;
     return child;
   }
   // Required by flushToolGroups() which inserts group containers at their
@@ -13442,6 +13446,10 @@ function loadDashPicker(opts = {}) {
       },
       write: () => { throw new Error("document.write not allowed"); },
       get visibilityState() { return dashVisibility; },
+      // The harness's focus model, which the live tiles read so a refresh
+      // never moves the focused tile.
+      // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+      get activeElement() { return ACTIVE; },
     },
     // window.addEventListener('pagehide', dashCloseIfAbandoned) -- a bare,
     // top-level call now inside the extracted handleRegion (dashCloseIfAbandoned
@@ -17340,7 +17348,8 @@ check("dashboard overview plans: a phase the tracker does not mark in progress i
 
 check("dashboard overview plans: the rail's 60 s interval refreshes plans only while the Overview is showing and the tab is visible", async () => {
   const p = loadDashPicker();
-  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  // Line endings normalised first: a CRLF checkout has no "\n}\n".
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
   const from = src.indexOf("function dashRailInit(){");
   assert(from >= 0, "index.html no longer declares dashRailInit");
   const to = src.indexOf("\n}\n", from);
@@ -17642,6 +17651,77 @@ check("dashboard overview live: a failed poll backs off to 10 s and keeps the ti
   p.runTimers();
   await p.settle(); await p.settle();
   assertEqual(ovTiles(p).length, 1, "a failed refresh must not wipe the tiles");
+});
+
+check("dashboard overview live: a focused tile keeps the focus through a refresh, with the same, changed or reordered data", () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  const b = { id: "sess_22222222-2222-2222-2222-222222222222", title: "Second" };
+  p.sandbox.dashOvRenderLive([ovTile(), ovTile(b)]);
+  const [first, second] = ovTiles(p);
+  const grid = p.el("dashOvLiveBody").querySelector(".dash-ov-tiles");
+  second.focus();
+  assert(p.sandbox.document.activeElement === second);
+  p.sandbox.dashOvRenderLive([ovTile(), ovTile(b)]);
+  assert(p.sandbox.document.activeElement === second, "unchanged data: the focus stays");
+  assert(p.el("dashOvLiveBody").querySelector(".dash-ov-tiles") === grid, "the grid is kept");
+  const events = second.querySelector(".dash-ov-tile-events");
+  p.sandbox.dashOvRenderLive([ovTile(), ovTile(b)]);
+  assert(second.querySelector(".dash-ov-tile-events") === events, "unchanged data is not rebuilt");
+  p.sandbox.dashOvRenderLive([ovTile(), ovTile(Object.assign({}, b, {
+    events: [{ kind: "text", role: "assistant", text: "new event" }] }))]);
+  assert(p.sandbox.document.activeElement === second, "changed data: the focus stays");
+  assertEqual(second.querySelector(".dash-ov-ev").textContent, "new event", "changed data is redrawn");
+  // The focused tile moves first: the other tile moves around it instead.
+  p.sandbox.dashOvRenderLive([ovTile(Object.assign({}, b, { title: "Moved up" })), ovTile()]);
+  assert(p.sandbox.document.activeElement === second, "reordered: the focus stays");
+  assertEqual(ovTiles(p).map((t) => t.querySelector(".dash-ov-tile-title").textContent).join("|"),
+    "Moved up|Fix the rail");
+  assert(ovTiles(p)[1] === first, "the other tile element is reused");
+  // A tile that is no longer live goes, and the rest keep their order.
+  const c = { id: "sess_33333333-3333-3333-3333-333333333333", title: "Third" };
+  p.sandbox.dashOvRenderLive([ovTile(c), ovTile(Object.assign({}, b, { title: "Moved up" }))]);
+  assertEqual(ovTiles(p).map((t) => t.querySelector(".dash-ov-tile-title").textContent).join("|"),
+    "Third|Moved up");
+  assertEqual(grid.childNodes.length, 2, "the gone tile is removed");
+  assert(p.sandbox.document.activeElement === second, "the focus survives the insert");
+});
+
+check("dashboard overview live: halting aborts the request in flight, and a request that hangs times out and backs off", async () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  const signals = [];
+  p.sandbox.fetch = (url, init) => {
+    if (String(url).indexOf(OV_LIVE_URL) !== 0) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ plans: [] }) });
+    }
+    const signal = init && init.signal;
+    signals.push(signal);
+    return new Promise((_resolve, reject) => {
+      if (signal) signal.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+  };
+  p.sandbox.dashOverviewStart();
+  assertEqual(signals.length, 1);
+  assert(signals[0] && signals[0].aborted === false, "the live request carries a signal");
+  p.sandbox.dashOverviewStop();
+  assertEqual(signals[0].aborted, true, "leaving the Overview aborts the request");
+  await p.settle(); await p.settle();
+  assertEqual(p.timers.filter((t) => t.ms === 10000).length, 0, "an abort by halt is not a failed poll");
+  // A restart aborts the old generation's request before it sends the next.
+  p.sandbox.dashOverviewStart();
+  p.sandbox.dashOvSetFilter("poweratlas");
+  assertEqual(signals.length, 3);
+  assertEqual(signals[1].aborted, true, "a restart aborts the previous request");
+  assertEqual(signals[2].aborted, false);
+  // The timeout: fire it, the request aborts and the poll backs off.
+  const timeout = p.timers.filter((t) => t.ms === 15000);
+  assert(timeout.length >= 1, "a live request has a timeout");
+  timeout[timeout.length - 1].fn();
+  assertEqual(signals[2].aborted, true, "a hung request is aborted at the timeout");
+  await p.settle(); await p.settle();
+  assert(p.timers.some((t) => t.ms === 10000), "a timed-out poll backs off to 10 s");
+  assertEqual(p.el("dashOvLiveBody").textContent, "Could not load live sessions.");
 });
 
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {

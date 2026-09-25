@@ -30302,10 +30302,12 @@ class TestOverviewLive:
 
     @pytest.fixture(autouse=True)
     def _fresh(self):
-        from power_atlas import overview
+        from power_atlas import overview, web as web_mod
         overview._tail_memo.clear()
+        web_mod._overview_live_filters_cache[:] = [0.0, None]
         yield
         overview._tail_memo.clear()
+        web_mod._overview_live_filters_cache[:] = [0.0, None]
 
     # --- fixtures ----------------------------------------------------------
 
@@ -30355,7 +30357,7 @@ class TestOverviewLive:
         return s
 
     @staticmethod
-    def _deps(recent=(), hidden=(), disabled=(), seen=None):
+    def _deps(recent=(), hidden=(), disabled=(), seen=None, hashes_seen=None):
         """Fake rail helpers. Live is the rail's rule over fixture data: the id
         on a cmdline, or a live cwd plus a sid in `recent` (the stand-in for
         "transcript written within 300 s")."""
@@ -30370,6 +30372,8 @@ class TestOverviewLive:
         def availability(sids, held, workspace_hashes):
             if seen is not None:
                 seen.append(list(sids))
+            if hashes_seen is not None:
+                hashes_seen.append(dict(workspace_hashes))
             return {s: ("held" if s in held else "available") for s in sids}
 
         return overview.LiveDeps(
@@ -30424,18 +30428,26 @@ class TestOverviewLive:
         w_hidden = str(tmp_path / "Hidden")
         w_bad = str(tmp_path / "BadIds")
         held_sid = "sess_" + _ov_uuid(1)
+        held_hidden = "sess_" + _ov_uuid(9)             # held, hidden workspace
         store.add(_OV_CC, w_cmd, _ov_uuid(2))
         store.add(_OV_CC, w_cwd, _ov_uuid(3))            # recent: live
         store.add(_OV_CC, w_cwd, _ov_uuid(4), age_s=3600)  # old, same cwd: not live
         store.add(_OV_CC, w_hidden, _ov_uuid(5))
+        store.add(_OV_CC, w_hidden, _ov_uuid(6), age_s=3600)  # cmdline id, hidden workspace
+        store.add(_OV_V3, w_hidden, held_hidden)
         store.add(_OV_CC, w_bad, "not-a-uuid")
         snap = self._snap(
-            live_sids=[(_OV_CC, _ov_uuid(2), w_cmd), (_OV_CC, "not-a-uuid", w_bad)],
+            live_sids=[(_OV_CC, _ov_uuid(2), w_cmd), (_OV_CC, "not-a-uuid", w_bad),
+                       (_OV_CC, _ov_uuid(6), w_hidden)],
             live_cwds=[(_OV_CC, w_cwd), (_OV_CC, w_hidden)])
         # The non-UUID id's cwd is only reachable through the cmdline entry.
         from power_atlas import data
         snap._live_cwds.discard((_OV_CC, data._normalize_path(w_bad)))
-        tiles = self._live({held_sid: neutral}, snap,
+        # D8: hidden workspaces stay hidden everywhere -- through the held
+        # path (`held_hidden`), the cmdline path (uuid 6, old, so only its
+        # cmdline id makes it live) and the live-cwd path (uuid 5).
+        # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+        tiles = self._live({held_sid: neutral, held_hidden: w_hidden}, snap,
                            self._deps(recent={_ov_uuid(3), _ov_uuid(5)}, hidden={w_hidden}),
                            self._originals(w_cmd, w_cwd, w_hidden, w_bad))
         assert {t["id"] for t in tiles} == {held_sid, _ov_uuid(2), _ov_uuid(3)}
@@ -30548,10 +30560,10 @@ class TestOverviewLive:
         store.files[_ov_uuid(1)].unlink()
         real = overview.tail_events
 
-        def boom(path, provider, n=5):
+        def boom(path, provider, n=5, st=None):
             if _ov_uuid(2) in str(path):
                 raise OSError("vanished between stat and read")
-            return real(path, provider, n)
+            return real(path, provider, n, st=st)
 
         monkeypatch.setattr(overview, "tail_events", boom)
         tiles = self._live({}, self._snap(live_cwds=[(_OV_CC, ws)]),
@@ -30622,6 +30634,21 @@ class TestOverviewLive:
         got = overview.tail_events(f, _OV_CC)
         assert [e["text"] for e in got] == [f"event {i}" for i in range(5)]
         assert reads[0] == overview.TAIL_FIRST_BYTES and len(reads) == 2
+        assert reads[1] == f.stat().st_size - overview.TAIL_FIRST_BYTES, (
+            "a growth step reads only the bytes the last window did not cover")
+
+    def test_a_line_across_a_window_boundary_is_parsed_whole(self, tmp_path, monkeypatch):
+        """The line the first window cut is parsed once its start is read, as
+        one line. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE"""
+        from power_atlas import overview
+        lines = [_ov_cc_line("assistant", "first"),
+                 _ov_cc_line("assistant", "straddle " + "s" * 200),
+                 _ov_cc_line("assistant", "last")]
+        f = tmp_path / "s.jsonl"
+        f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        monkeypatch.setattr(overview, "TAIL_FIRST_BYTES", len(lines[2]) + 1 + 50)
+        got = overview.tail_events(f, _OV_CC, n=3)
+        assert [e["text"][:8] for e in got] == ["first", "straddle", "last"]
 
     def test_a_line_over_256_kib_is_skipped(self, tmp_path):
         from power_atlas import overview
@@ -30667,6 +30694,120 @@ class TestOverviewLive:
         from power_atlas import overview
         assert overview.tail_events(tmp_path / "gone.jsonl", _OV_CC) == []
 
+    def test_a_line_that_breaks_the_reader_skips_that_line_only(self, tmp_path):
+        """A `null` or string `message` and JSON nested past the recursion
+        limit each cost their own line, not the tile, and the result is still
+        memoised. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE"""
+        from power_atlas import overview
+        f = tmp_path / "s.jsonl"
+        f.write_text("\n".join([
+            _ov_cc_line("assistant", "before"),
+            json.dumps({"type": "user", "message": None}),
+            json.dumps({"type": "user", "message": "a string"}),
+            "[" * 5000 + "]" * 5000,
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "x"}]}})
+            .replace('"x"', "[" * 5000 + "]" * 5000),
+            _ov_cc_line("assistant", "after"),
+        ]) + "\n", encoding="utf-8")
+        assert [e["text"] for e in overview.tail_events(f, _OV_CC)] == ["before", "after"]
+        assert str(f) in overview._tail_memo, "a bad line must not stop the memo"
+        v3 = tmp_path / "messages.jsonl"
+        v3.write_text("\n".join([
+            _ov_v3_line("assistant", content="kept"),
+            "{" * 1 + '"payload": ' + "[" * 5000 + "]" * 5000 + "}",
+        ]) + "\n", encoding="utf-8")
+        assert [e["text"] for e in overview.tail_events(v3, _OV_V3)] == ["kept"]
+        assert str(v3) in overview._tail_memo
+
+    def test_the_memo_is_bounded_least_recently_used(self, tmp_path, monkeypatch):
+        """At most `_TAIL_MEMO_MAX` paths, evicting the least recently used.
+        260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE"""
+        from power_atlas import overview
+        reads = []
+        real = overview._read_tail
+        monkeypatch.setattr(overview, "_read_tail",
+                            lambda path, start, length: reads.append(str(path)) or real(path, start, length))
+        files = []
+        for i in range(overview._TAIL_MEMO_MAX + 5):
+            f = tmp_path / f"s{i}.jsonl"
+            f.write_text(_ov_cc_line("assistant", f"n{i}") + "\n", encoding="utf-8")
+            files.append(f)
+        overview.tail_events(files[0], _OV_CC)
+        for f in files[1:]:
+            overview.tail_events(f, _OV_CC)
+            # Touching the first file keeps it most recently used.
+            overview.tail_events(files[0], _OV_CC)
+            assert len(overview._tail_memo) <= overview._TAIL_MEMO_MAX
+        assert len(overview._tail_memo) == overview._TAIL_MEMO_MAX
+        assert str(files[0]) in overview._tail_memo, "a path in use is not evicted"
+        assert str(files[1]) not in overview._tail_memo, "the least recently used path is"
+        assert str(files[-1]) in overview._tail_memo
+        assert reads.count(str(files[0])) == 1, "a path kept in use is never read again"
+
+    def test_a_filter_toggle_does_not_evict_the_other_filters_tails(self, store, tmp_path,
+                                                                     monkeypatch):
+        """Two tabs on different filters share the memo: neither evicts the
+        other's paths. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE"""
+        from power_atlas import overview
+        ws = str(tmp_path / "Ws")
+        held_sid = "sess_" + _ov_uuid(1)
+        store.add(_OV_V3, ws, held_sid)
+        store.add(_OV_CC, ws, _ov_uuid(2))
+        snap = self._snap(live_sids=[(_OV_CC, _ov_uuid(2), ws)])
+        reads = []
+        real = overview._read_tail
+        monkeypatch.setattr(overview, "_read_tail",
+                            lambda path, start, length: reads.append(str(path)) or real(path, start, length))
+        deps = self._deps()
+        assert len(self._live({held_sid: ws}, snap, deps, self._originals(ws))) == 2
+        assert len(reads) == 2
+        self._live({held_sid: ws}, snap, deps, self._originals(ws), filter_="poweratlas")
+        self._live({held_sid: ws}, snap, deps, self._originals(ws))
+        assert len(reads) == 2, "the All tab's tails must still be memo hits"
+        assert str(store.files[_ov_uuid(2)]) in overview._tail_memo
+
+    def test_workspace_hashes_come_from_the_path_and_skip_held_sessions(
+            self, store, tmp_path, monkeypatch):
+        """A held id is never looked up (`acp_availability` answers it without
+        the hash); a v3 transcript path gives its hash dir; otherwise one
+        lookup per distinct cwd. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE"""
+        from power_atlas import data_kiro_v3
+        ws = str(tmp_path / "Ws")
+        held_sid, a, b, c = ("sess_" + _ov_uuid(i) for i in (1, 2, 3, 4))
+        for sid in (held_sid, a, b, c):
+            store.add(_OV_V3, ws, sid)
+        v3 = tmp_path / "v3" / "HASHA" / a / "messages.jsonl"
+        v3.parent.mkdir(parents=True)
+        v3.write_text(_ov_v3_line("assistant", content="hi") + "\n", encoding="utf-8")
+        store.files[a] = v3
+        lookups = []
+        monkeypatch.setattr(data_kiro_v3, "hash_dir_for_cwd",
+                            lambda cwd: lookups.append(cwd) or "HASHW")
+        hashes_seen = []
+        tiles = self._live({held_sid: ws}, self._snap(live_cwds=[(_OV_V3, ws)]),
+                           self._deps(recent={a, b, c}, hashes_seen=hashes_seen),
+                           self._originals(ws))
+        assert {t["id"] for t in tiles} == {held_sid, a, b, c}
+        assert hashes_seen == [{a: "HASHA", b: "HASHW", c: "HASHW"}]
+        assert lookups == [ws], "one lookup for the cwd, none for the held id or the path-derived one"
+
+    def test_a_held_new_session_without_a_transcript_is_never_cut(self, store, tmp_path):
+        """No transcript and no record time: it sorts first rather than last,
+        and its shown activity stays unknown.
+        260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE"""
+        ws = str(tmp_path / "Ws")
+        neutral = str(tmp_path / "agent-home")
+        ids = [_ov_uuid(i) for i in range(1, 10)]
+        for i, sid in enumerate(ids):
+            store.add(_OV_CC, ws, sid, age_s=5 + i)
+        held_sid = "sess_" + _ov_uuid(50)
+        tiles = self._live({held_sid: neutral}, self._snap(live_cwds=[(_OV_CC, ws)]),
+                           self._deps(recent=set(ids)), self._originals(ws))
+        assert len(tiles) == 8
+        assert tiles[0]["id"] == held_sid
+        assert tiles[0]["last_activity"] == ""
+        assert [t["id"] for t in tiles[1:]] == ids[:7]
+
     # --- the route ---------------------------------------------------------
 
     @pytest.fixture
@@ -30708,6 +30849,24 @@ class TestOverviewLive:
         [tile] = body["tiles"]
         assert (tile["id"], tile["title"], tile["availability"]) == (sid, "New session", "held")
         assert tile["name"] == "agent-home"
+
+    def test_route_reuses_the_rail_filters_for_a_few_seconds(self, client, quiet_host,
+                                                             monkeypatch):
+        """Each 2 s poll does not re-read config.toml.
+        260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE"""
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "acp", None)
+        with patch("power_atlas.web.load_config", return_value=self._config()) as cfg:
+            assert client.get("/api/dashboard/overview/live").status_code == 200
+            once = cfg.call_count
+            assert once >= 1
+            client.get("/api/dashboard/overview/live")
+            assert cfg.call_count == once, "a poll inside the window reuses the filters"
+            # Age the cache past the window rather than patching
+            # `time.monotonic`, which the test client's loop reads too.
+            web_mod._overview_live_filters_cache[0] -= web_mod._OVERVIEW_LIVE_FILTERS_REUSE_SECONDS + 1
+            client.get("/api/dashboard/overview/live")
+            assert cfg.call_count == once * 2, "an expired window reads the config again"
 
     def test_route_binds_the_filter_and_falls_back_to_all(self, client, monkeypatch):
         from power_atlas import web as web_mod

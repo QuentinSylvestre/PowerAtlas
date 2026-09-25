@@ -3397,6 +3397,29 @@ async def api_dashboard_overview_summary(response: Response):
 
 _DASHBOARD_OVERVIEW_LIVE_PATH = "/api/dashboard/overview/live"
 
+# How long the live route reuses `_overview_rail_filters()`. Each 2 s poll
+# would otherwise re-read config.toml; a hidden tag or a provider toggle shows
+# on the tiles within this many seconds.
+# 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+_OVERVIEW_LIVE_FILTERS_REUSE_SECONDS = 5.0
+# (monotonic time of the read, (providers, hidden)). Reset by the tests.
+_overview_live_filters_cache: list = [0.0, None]
+_overview_live_filters_lock = threading.Lock()
+
+
+def _overview_live_filters():
+    """`_overview_rail_filters()`, reused for `_OVERVIEW_LIVE_FILTERS_REUSE_SECONDS`.
+
+    The lock covers the read too, so concurrent polls share one config read.
+    Blocking; runs off the loop.
+    """
+    with _overview_live_filters_lock:
+        at, filters = _overview_live_filters_cache
+        if filters is None or time.monotonic() - at >= _OVERVIEW_LIVE_FILTERS_REUSE_SECONDS:
+            filters = _overview_rail_filters()
+            _overview_live_filters_cache[:] = [time.monotonic(), filters]
+        return filters
+
 
 def _overview_live(held: dict[str, str], filter_: str) -> dict:
     """The live tiles payload. Blocking; runs off the loop.
@@ -3408,7 +3431,7 @@ def _overview_live(held: dict[str, str], filter_: str) -> dict:
     `data.get_sessions` (see `overview.live_sessions`).
     """
     snapshot = presence.get_snapshot()
-    providers, hidden = _overview_rail_filters()
+    providers, hidden = _overview_live_filters()
     originals: dict[str, str] = {}
     for cwd, _count, _updated, _prov in data.discover_workspaces_with_counts(None):
         originals.setdefault(data._normalize_path(cwd), cwd)
@@ -5635,7 +5658,7 @@ async def api_session_transcript(sid: str = "", provider: str = "kiro-cli-v3", c
     (not polled), so this does no caching of its own beyond whatever
     `data.get_full_transcript`'s provider adapter already does.
     """
-    if not re.fullmatch(r'(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', sid):
+    if not overview.SESSION_ID_RE.fullmatch(sid):
         return JSONResponse({"error": "invalid session id"}, status_code=400)
     from . import transcript_translator
 
@@ -5667,7 +5690,7 @@ async def api_session_availability(response: Response, sid: str = "", cwd: str =
     liveness reading with a lifetime of seconds, not something to cache.
     """
     response.headers["Cache-Control"] = "no-store"
-    if not re.fullmatch(r'(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', sid):
+    if not overview.SESSION_ID_RE.fullmatch(sid):
         return JSONResponse({"error": "invalid session id"}, status_code=400)
 
     def _compute() -> tuple[str, str]:
