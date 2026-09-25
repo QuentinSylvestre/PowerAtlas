@@ -28,11 +28,18 @@ than a second copy free to drift from it. ``launcher`` imports one name from
 package are plain unlocked ``OrderedDict``s, safe only because every current
 caller runs on the event loop — and this module now runs an OS reader thread
 that does not. Neither of the two modules holding them is imported here, and
-neither is reachable from ``config`` (which imports nothing from the package at
-all) or from ``launcher``. So the property is still held by the import graph
-rather than by discipline; it is just no longer stated as "imports nothing".
-The plan's exit criterion greps this file for those two module names, which is
-why they are described here rather than spelled.
+neither is reachable from importing ``config`` or ``launcher``: ``config``
+imports nothing from the package at module level. It does import at call time
+— ``agent_profile`` when a ``Config`` is built (its default rules) or loaded,
+and one of the two cache-holding modules inside ``load_config`` — but this
+module calls neither: it reads two constants from ``config`` and never loads
+a configuration. ``agent_profile`` in turn imports only ``config``. So the
+property is still held by the import graph rather than by discipline; it is
+just no longer stated as "imports nothing", and a test pins it (importing this
+module and building a ``Config`` loads neither cache-holding module;
+260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review, M-9). The plan's
+exit criterion greps this file for those two module names, which is why they
+are described here rather than spelled.
 
 Wire contract, identical in both directions::
 
@@ -1210,12 +1217,18 @@ def _gate_verdict(answer) -> dict:
     """
     if not isinstance(answer, dict):
         return {"in_effect": False, "cause": "", "fix": "",
-                "remote_cause": "", "remote_fix": ""}
+                "remote_cause": "", "remote_fix": "", "mode": ""}
+    # `mode`: the permission mode the derived agent was compiled for, kept on
+    # the session record at bind (`permission_mode`, final review A7) so a
+    # later per-prompt decision — Auto's — reads the mode the session runs
+    # under without a config read on the loop. Only a known mode is kept.
+    mode = answer.get("mode")
     return {"in_effect": answer.get("in_effect") is True,
             "cause": str(answer.get("cause") or ""),
             "fix": str(answer.get("fix") or ""),
             "remote_cause": str(answer.get("remote_cause") or ""),
-            "remote_fix": str(answer.get("remote_fix") or "")}
+            "remote_fix": str(answer.get("remote_fix") or ""),
+            "mode": mode if mode in ("yolo", "manual") else ""}
 
 
 def _default_mode_binding(in_effect: bool) -> str:
@@ -1245,6 +1258,50 @@ def _conn_is_remote(conn) -> bool:
         return not ipaddress.ip_address(host).is_loopback
     except ValueError:
         return True
+
+
+# The fields of a `permission_request` frame that only a loopback page uses
+# (the "Allow, and always in new sessions…" button). SEC8.
+_RULE_FRAME_FIELDS: Final[frozenset[str]] = frozenset(
+    ("ruleEligible", "ruleRow", "ruleRowLabel", "ruleRoot"))
+
+
+def _without_rule_fields(frame: dict) -> dict:
+    """`frame` without `_RULE_FRAME_FIELDS`, in a prompt or in a replay of one.
+
+    A copy when anything is removed; the frame itself is shared with history
+    and with every other socket, so it is never changed in place.
+    """
+    kind = frame.get("type")
+    payload = frame.get("payload")
+    if not isinstance(payload, dict):
+        return frame
+    if kind == "permission_request":
+        if _RULE_FRAME_FIELDS.isdisjoint(payload):
+            return frame
+        return {**frame, "payload": {k: v for k, v in payload.items()
+                                     if k not in _RULE_FRAME_FIELDS}}
+    if kind == "history":
+        events = payload.get("events")
+        if not isinstance(events, list) or not any(
+                isinstance(e, dict) and e.get("type") == "permission_request"
+                for e in events):
+            return frame
+        return {**frame, "payload": {**payload, "events": [
+            _without_rule_fields(e) if isinstance(e, dict) else e
+            for e in events]}}
+    return frame
+
+
+def _log_hint(conn) -> str:
+    """Where to look for the details of a failure, for a message to `conn`.
+
+    Final review (EU10): the log's full path on this computer; nothing for a
+    remote viewer, who cannot open it.
+    """
+    if _conn_is_remote(conn):
+        return ""
+    return f" If it keeps failing, see {CONFIG_DIR / 'orchestrator.log'}."
 
 
 def _not_in_effect_message(verdict: dict, remote: bool) -> str:
@@ -2415,6 +2472,14 @@ class _Connection:
 
     def send(self, frame: dict) -> None:
         """Queue a frame for delivery. Never blocks and never raises."""
+        # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (SEC8): a
+        # remote viewer gets a permission prompt without the rule fields —
+        # rules change only from this computer (D-9), and `ruleRoot` is a
+        # local folder path. Per socket, at send time: the frame recorded in
+        # history and fanned out is shared by every viewer of the session.
+        if (frame.get("type") in ("permission_request", "history")
+                and _conn_is_remote(self)):
+            frame = _without_rule_fields(frame)
         weight = _frame_weight(frame)
         # Never refuses onto an empty queue: a single frame heavier than the
         # whole budget is still the only thing the socket is waiting for, and
@@ -6673,6 +6738,9 @@ async def _handle_new(conn, payload):
     # between the save and the file write. A wait that runs out raises, and the
     # create is refused below.
     bound_mode = raw_mode
+    # The permission mode the bound derived agent was compiled for, kept on
+    # the session record (final review, A7); "" for a vendor task mode.
+    permission_mode = ""
     if raw_mode is None or raw_mode in (DEFAULT_TASK_MODE, DERIVED_AGENT_NAME):
         try:
             verdict = _gate_verdict(await _derived_mode_in_effect())
@@ -6699,8 +6767,8 @@ async def _handle_new(conn, payload):
             conn.send(error_frame(
                 "bad_payload",
                 "PowerAtlas could not check whether its permission rules are "
-                "in effect, so no session was created. Try again in a moment; "
-                "if it keeps failing, see orchestrator.log. To start a session "
+                "in effect, so no session was created. Try again in a moment."
+                + _log_hint(conn) + " To start a session "
                 "now without PowerAtlas's rules, pick a task mode such as Spec "
                 "or Plan instead of Default."))
             return
@@ -6713,6 +6781,7 @@ async def _handle_new(conn, payload):
                 _not_in_effect_message(verdict, _conn_is_remote(conn))))
             return
         bound_mode = DERIVED_AGENT_NAME
+        permission_mode = verdict["mode"]
     if _supervisor.at_capacity():
         conn.send(error_frame(SessionLimit.code, _session_limit_message()))
         log.warning("ACP session/new refused: [%s] at the session cap",
@@ -6733,6 +6802,9 @@ async def _handle_new(conn, payload):
             "Creating the session failed; see orchestrator.log."))
         return
     session_id = info["sessionId"]
+    record = _supervisor.sessions.get(session_id)
+    if permission_mode and isinstance(record, dict):
+        record["permission_mode"] = permission_mode
     if conn not in _registry.connections:
         log.info("ACP session %s created after its socket went away", session_id)
         return

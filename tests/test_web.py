@@ -6,6 +6,7 @@ import copy
 import datetime as dt
 import errno
 import json
+import types
 import logging
 import os
 import re
@@ -7344,6 +7345,54 @@ class TestAcpTaskModeSelection:
         assert "computer running PowerAtlas" not in errors[0]["message"]
         assert self._NOT_IN_EFFECT["fix"] in errors[0]["message"]
         assert self._NOT_IN_EFFECT["cause"] in errors[0]["message"]
+
+    def test_a_broken_check_names_the_log_file_on_loopback_only(
+            self, acp_store, tmp_path, monkeypatch):
+        """Final review (EU10): the full path of orchestrator.log for a page
+        on this computer; no log hint for a remote one, who cannot open it."""
+        import types
+        acp_mod, _store = acp_store
+
+        def broken():
+            raise RuntimeError("the check broke")
+
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", broken)
+        log_path = str(acp_mod.CONFIG_DIR / "orchestrator.log")
+        local = _acp_conn(acp_mod)
+        local.ws.client = types.SimpleNamespace(host="127.0.0.1", port=1)
+        asyncio.run(acp_mod._handle_new(local, {"cwd": str(tmp_path)}))
+        said = [f["payload"]["message"] for f in _queued(local) if f.get("type") == "error"]
+        assert said and log_path in said[0], said
+        remote = _acp_conn(acp_mod)
+        asyncio.run(acp_mod._handle_new(remote, {"cwd": str(tmp_path)}))
+        said = [f["payload"]["message"] for f in _queued(remote) if f.get("type") == "error"]
+        assert said and "orchestrator.log" not in said[0], said
+        assert "task mode such as Spec or Plan" in said[0]
+
+    def test_the_bound_permission_mode_is_kept_on_the_session_record(
+            self, acp_store, tmp_path, monkeypatch):
+        """Final review (A7): the gate's `mode` is stored at bind, so a later
+        per-prompt decision can read the mode the session runs under."""
+        acp_mod, _store = acp_store
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", lambda: {
+            "in_effect": True, "state": "on", "mode": "manual",
+            "cause": "", "fix": ""})
+        sid = "sess_permmode-0000-0000-000001"
+
+        async def fake_new_session(self, cwd, mode=None):
+            self.sessions[sid] = acp_mod._new_session_record(cwd, mode)
+            return {"sessionId": sid, "cwd": cwd}
+
+        conn = _acp_conn(acp_mod)
+        try:
+            with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+                asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
+            assert acp_mod._supervisor.sessions[sid]["permission_mode"] == "manual"
+            assert acp_mod._supervisor.sessions[sid]["mode"] == "poweratlas-acp"
+        finally:
+            acp_mod._supervisor.sessions.pop(sid, None)
+            acp_mod._registry.detach(conn)
+            acp_mod._registry.connections.discard(conn)
 
     def test_a_remote_client_without_remote_wording_gets_the_generic_text(
             self, acp_store, tmp_path, monkeypatch):
@@ -20205,8 +20254,11 @@ class TestSupervisor:
         monkeypatch.setattr(acp_mod, "_supervisor", sv3)
         return sv3
 
-    def _conn_v3(self, acp_mod, sid=None):
+    def _conn_v3(self, acp_mod, sid=None, local=False):
         conn = acp_mod._Connection(_SinkWs())
+        if local:
+            # A loopback page; `_SinkWs` has no peer, which reads as remote.
+            conn.ws.client = types.SimpleNamespace(host="127.0.0.1", port=1)
         acp_mod._registry.connections.add(conn)
         if sid:
             acp_mod._registry.attach(conn, sid)
@@ -22517,7 +22569,7 @@ class TestSupervisor:
         sid = "sess_permruleelig-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch", bound)
         sv3.history[sid] = acp_mod._History()
-        conn = self._conn_v3(acp_mod, sid)
+        conn = self._conn_v3(acp_mod, sid, local=True)
         try:
             sv3._on_agent_request(self._permission_request_msg(
                 21, sid, title="echo x",
@@ -22549,7 +22601,7 @@ class TestSupervisor:
         sv3.sessions[sid] = acp_mod._new_session_record(
             "C:\\scratch", "poweratlas-acp")
         sv3.history[sid] = acp_mod._History()
-        conn = self._conn_v3(acp_mod, sid)
+        conn = self._conn_v3(acp_mod, sid, local=True)
         consent = {"capability": "fs_write", "resource": "other/a.txt",
                    "scope": "agent", "source": "agent-profile",
                    "workspaceRoot": "C:\\ws\\proj",
@@ -22575,7 +22627,7 @@ class TestSupervisor:
         sv3.sessions[sid] = acp_mod._new_session_record(
             "C:\\scratch", "poweratlas-acp")
         sv3.history[sid] = acp_mod._History()
-        conn = self._conn_v3(acp_mod, sid)
+        conn = self._conn_v3(acp_mod, sid, local=True)
         consent = {"capability": "fs_write",
                    "resource": ".kiro/steering/probe.md",
                    "scope": "agent", "source": "agent-profile",
@@ -22590,6 +22642,40 @@ class TestSupervisor:
             assert payload["consent"]["matchedRule"] == {
                 "capability": "fs_write", "effect": "ask"}
             assert payload["ruleEligible"] is False and payload["ruleRow"] is None
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_a_remote_viewer_gets_no_rule_fields_live_or_replayed(
+            self, monkeypatch):
+        """Final review (SEC8): the rule fields (and `ruleRoot`, a local
+        path) reach loopback pages only, on the live frame and in a replay,
+        and the shared frame in history is not changed."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permremote-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch", "poweratlas-acp")
+        sv3.history[sid] = acp_mod._History()
+        local = self._conn_v3(acp_mod, sid, local=True)
+        remote = self._conn_v3(acp_mod, sid)
+        fields = {"ruleEligible", "ruleRow", "ruleRowLabel", "ruleRoot"}
+        try:
+            sv3._on_agent_request(self._permission_request_msg(
+                31, sid, title="echo x",
+                meta={"kiro": {"consent": self._ASK_ROW_CONSENT}},
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            mine = [f for f in _queued(local) if f["type"] == "permission_request"][0]
+            theirs = [f for f in _queued(remote) if f["type"] == "permission_request"][0]
+            assert fields <= set(mine["payload"])
+            assert not fields & set(theirs["payload"])
+            assert theirs["payload"]["toolCall"] == mine["payload"]["toolCall"]
+            history = acp_mod.envelope("history", {"events": sv3.history[sid].events()}, sid)
+            replay = acp_mod._without_rule_fields(history)
+            events = [e for e in replay["payload"]["events"]
+                      if e.get("type") == "permission_request"]
+            assert events and not fields & set(events[0]["payload"])
+            kept = [e for e in sv3.history[sid].events()
+                    if e.get("type") == "permission_request"][0]
+            assert fields <= set(kept["payload"]), "the shared history was changed"
         finally:
             self._cleanup_registry(acp_mod)
 
