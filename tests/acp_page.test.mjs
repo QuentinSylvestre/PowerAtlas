@@ -4774,6 +4774,8 @@ const PANEL_NAMES = [
   // Phase 1.
   "renderAcpPermissions", "loadAcpPermissions", "setAcpPermissionMode",
   "saveAcpPermissionBaseAgent",
+  // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2: the rule editor.
+  "openAcpRulesEditor", "closeAcpRulesEditor", "saveAcpRules", "_acpRulesWarnings",
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review.
   "renderLocalSecret", "rotateLocalSecret",
 ];
@@ -4855,6 +4857,22 @@ function loadPanel(opts = {}) {
   byId.set("acpPermNotice", permNotice);
   byId.set("acpPermFloorList", new El("div"));
   byId.set("acpPermProtectedList", new El("div"));
+  // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2: the rule editor's
+  // shell (partials/acp_permission_rules_modal.html); its rows are drawn by
+  // the page. Initial `hidden` states match the markup.
+  const rulesModal = new El("dialog");
+  rulesModal.open = false;
+  rulesModal.showModal = () => { rulesModal.open = true; };
+  rulesModal.close = () => { rulesModal.open = false; };
+  const rulesModeNote = new El("div");
+  rulesModeNote.hidden = true;
+  const rulesError = new El("div");
+  rulesError.hidden = true;
+  byId.set("acpRulesModal", rulesModal);
+  byId.set("acpRulesModeNote", rulesModeNote);
+  byId.set("acpRulesBody", new El("div"));
+  byId.set("acpRulesError", rulesError);
+  byId.set("acpRulesSave", new El("button"));
   // G4 (Phase 3 review): the settings gear's dot, shared with restart drift.
   const pendingDot = new El("span");
   pendingDot.hidden = true;
@@ -11415,6 +11433,224 @@ check("settings: the base agent saves through /api/save-setting and shows the re
     "a rejected base-agent name was not reported");
   assertEqual(input.value, "kiro_default",
     "the field kept a name the server rejected, which is not the one in force");
+});
+
+// ---- The Manual rule editor -----------------------------------------------
+// 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2 (SC-5, D-7, D-11, D-20,
+// D-35, D-38e). The dialog's rows are drawn by the page from the state's
+// `rules` and `rule_rows`; these checks drive the real functions.
+
+const RULE_ROWS = [
+  ["fs_read", "Read files"], ["fs_write", "Write files"], ["shell", "Run commands"],
+  ["web_fetch", "Web fetch"], ["web_search", "Web search"], ["mcp", "MCP tools"],
+  ["subagent", "Sub-agents"], ["skill", "Skills"], ["power", "Powers"],
+].map(([id, label]) => ({ id, label }));
+function seedRules() {
+  const rules = {};
+  for (const { id } of RULE_ROWS) rules[id] = { default: "ask", allow: [], block: [] };
+  rules.fs_read.allow = ["./**"];
+  rules.shell.allow = ["git status", "pwd"];
+  rules.shell.block = ["git *--output*"];
+  rules.protected_block = ["agents"];
+  return rules;
+}
+function rulesState(over) {
+  return permState(Object.assign({ mode: "manual", rules: seedRules(), rule_rows: RULE_ROWS,
+    protected: [
+      { id: "agents", label: "Agent definitions", patterns: ["**/.kiro/agents/**"], effect: "block" },
+      { id: "steering", label: "Steering files", patterns: ["**/.kiro/steering/**"], effect: "ask" },
+    ],
+    protected_links: { steering: { count: 2, links: [
+      { name: "a.md", target: "C:/playbook/a.md", error: "" },
+      { name: "b.md", target: "", error: "unresolvable (FileNotFoundError)" }] } } }, over || {}));
+}
+async function openRules(over, answer) {
+  let state = rulesState(over);
+  let post = { ok: true, ...rulesState(over) };
+  const p = loadPanel({ answer: (url) => {
+    if (url !== "/api/acp-permissions") return { body: {} };
+    const last = p.fetches[p.fetches.length - 1];
+    if (last.init.method === "POST") return answer ? answer(last) : { body: post };
+    return { body: state };
+  } });
+  await p.sandbox.openAcpRulesEditor();
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  const row = (id) => $("acpRulesBody").querySelectorAll(".acp-rules-row").find((r) => r.dataset.row === id);
+  const list = (id, which) => row(id).querySelector(".acp-rules-list-" + which);
+  const chips = (id, which) => list(id, which).querySelectorAll(".acp-rules-chip-text").map((c) => c.textContent);
+  const add = (id, which, text) => {
+    list(id, which).querySelector(".acp-rules-input").value = text;
+    list(id, which).querySelector(".acp-rules-add").click();
+  };
+  const choose = (id, value) => {
+    const sel = row(id).querySelector(".acp-rules-select");
+    sel.value = value;
+    sel.dispatch("change");
+  };
+  const warnings = (id) => { const w = row(id).querySelector(".acp-rules-warn"); return w ? w.textContent : ""; };
+  return { p, $, row, list, chips, add, choose, warnings };
+}
+
+check("rules editor: opens on a fresh read and renders every normalised row in plain words", async () => {
+  const e = await openRules({ mode: "yolo" });
+  assertEqual(e.$("acpRulesModal").open, true, "the editor did not open");
+  assertEqual(e.p.fetches[0].url, "/api/acp-permissions", "the editor did not read the stored rules");
+  const rows = e.$("acpRulesBody").querySelectorAll(".acp-rules-row");
+  assertEqual(rows.map((r) => r.querySelector(".acp-rules-row-title").textContent).join("|"),
+    RULE_ROWS.map((r) => r.label).join("|"), "the rows are not the nine kinds of action, in order");
+  for (const r of rows) {
+    assertEqual(r.querySelector(".acp-rules-select").value, "ask", `row ${r.dataset.row} lost its default`);
+    assert(r.querySelector(".acp-rules-select").getAttribute("aria-label"), `row ${r.dataset.row}'s default has no label`);
+  }
+  // D-11: the seeded `./**` reads as the session folder, and keeps its pattern.
+  assertEqual(e.chips("fs_read", "allow").join("|"), "the session folder", "./** was not shown as the session folder");
+  assertEqual(e.list("fs_read", "allow").querySelector(".acp-rules-chip-text").title, "./**",
+    "the session folder chip lost its pattern");
+  assertEqual(e.chips("shell", "allow").join("|"), "git status|pwd", "the command allow list is wrong");
+  assertEqual(e.chips("shell", "block").join("|"), "git *--output*", "the command block list is wrong");
+  assert(/literally and case-sensitively/.test(e.row("shell").textContent)
+    && /\/ and \\ are different characters/.test(e.row("shell").textContent),
+    `the Run commands row does not say how matching works: ${e.row("shell").textContent}`);
+  assert(/host names, such as example\.com/.test(e.row("web_fetch").textContent),
+    "Web fetch patterns are not labelled as host names (D-38d)");
+  // Rules are edited in every mode; outside Manual the editor says they wait.
+  assertEqual(e.$("acpRulesModeNote").hidden, false, "no note that the rules are not in force in Yolo");
+  assert(/until Manual is selected/.test(e.$("acpRulesModeNote").textContent), "the mode note is wrong");
+  // Protected, with its Block outright switches and the D-39 links; the floor.
+  const body = e.$("acpRulesBody");
+  const boxes = body.querySelectorAll(".acp-rules-protected-box");
+  assertEqual(boxes.map((b) => b.checked).join(","), "true,false", "Block outright does not show protected_block");
+  assert(boxes.every((b) => /^Block .* outright$/.test(b.getAttribute("aria-label"))), "a Protected switch has no label");
+  const prot = body.querySelector(".acp-rules-protected").textContent;
+  assert(prot.includes("2 linked items not covered") && prot.includes("a.md → C:/playbook/a.md")
+    && prot.includes("b.md (unresolvable"), `the Protected links are not listed: ${prot}`);
+  const floor = body.querySelector(".acp-rules-floor").textContent;
+  assert(floor.includes("Reading credential stores") && floor.includes("**/.ssh/**"), `no Always blocked list: ${floor}`);
+  assert(e.row("shell").querySelectorAll(".acp-rules-chip-remove")
+    .every((b) => b.tagName === "BUTTON" && /^Remove /.test(b.getAttribute("aria-label"))),
+    "a chip cannot be removed with the keyboard, or its button has no name");
+});
+
+check("rules editor: in Manual, no mode note; a failed read does not open an empty editor", async () => {
+  const e = await openRules();
+  assertEqual(e.$("acpRulesModeNote").hidden, true, "the mode note shows in Manual");
+  const p = loadPanel({ answer: () => ({ reject: "offline" }) });
+  await p.sandbox.openAcpRulesEditor();
+  assertEqual(p.sandbox.document.getElementById("acpRulesModal").open, false,
+    "the editor opened on nothing, so Save could erase the stored rules");
+  assert(p.toasts.some((t) => /Could not read the permission rules/.test(t)), "the failed read was not reported");
+  const q = loadPanel({ answer: () => ({ body: permState() }) });
+  await q.sandbox.openAcpRulesEditor();
+  assertEqual(q.sandbox.document.getElementById("acpRulesModal").open, false,
+    "a state without rules opened the editor");
+});
+
+check("rules editor: default Allow hides the allow list and the patterns come back with Ask", async () => {
+  const e = await openRules();
+  e.choose("shell", "allow");
+  assertEqual(e.list("shell", "allow").hidden, true, "the allow list is offered under default Allow");
+  assertEqual(e.list("shell", "block").hidden, false, "the block list was hidden under default Allow");
+  assert(/Everything runs without asking, except/.test(e.row("shell").textContent), "default Allow is not explained");
+  assert(/equivalent to allow-all/.test(e.warnings("shell")), "allowing every command carries no warning");
+  e.choose("shell", "ask");
+  assertEqual(e.list("shell", "allow").hidden, false, "the allow list did not come back");
+  assertEqual(e.chips("shell", "allow").join("|"), "git status|pwd", "switching the default lost the allow list");
+});
+
+check("rules editor: warns on an interpreter, on a * in a command and on a broad write, without refusing", async () => {
+  const e = await openRules();
+  e.add("shell", "allow", "python -m pytest");
+  assert(/"python -m pytest": allowing python is equivalent to allow-all/.test(e.warnings("shell")),
+    `no interpreter warning (D-35): ${e.warnings("shell")}`);
+  e.add("shell", "allow", "C:/Tools/PWSH.exe -File x.ps1");
+  assert(/allowing pwsh is equivalent to allow-all/.test(e.warnings("shell")), "a path and .exe hid the interpreter");
+  e.add("shell", "allow", "npm test*");
+  assert(/"npm test\*": a \* also matches an output redirection/.test(e.warnings("shell")),
+    `no redirection warning (D-38e): ${e.warnings("shell")}`);
+  e.add("shell", "allow", "rm -rf build");
+  assert(/lets the agent delete files/.test(e.warnings("shell")), "a destructive verb carries no warning");
+  assertEqual(e.chips("shell", "allow").length, 6, "a warned pattern was refused rather than added");
+  // A blocked interpreter is not a widening.
+  e.add("shell", "block", "python*");
+  assert(!/"python\*"/.test(e.warnings("shell")), "a block pattern was warned about");
+  e.add("fs_write", "allow", "./**");
+  e.add("fs_write", "allow", "C:\\**");
+  e.add("fs_write", "allow", "~/**");
+  e.add("fs_write", "allow", "src/**");
+  const w = e.warnings("fs_write");
+  assert(/"the session folder" covers the whole session folder/.test(w), `no session-folder warning: ${w}`);
+  assert(/"C:\\\*\*" covers a whole drive/.test(w), `no drive-root warning: ${w}`);
+  assert(/"~\/\*\*" covers the whole home folder/.test(w), `no home-folder warning: ${w}`);
+  assert(!/src\/\*\*/.test(w), "a narrow write pattern was warned about");
+  // The same patterns on Read files carry no write warning.
+  e.add("fs_read", "allow", "C:/**");
+  assertEqual(e.warnings("fs_read"), "", "a read pattern got a write warning");
+  // The client refuses only what the server would refuse outright.
+  e.add("shell", "allow", "*");
+  assert(/matches everything/.test(e.list("shell", "allow").querySelector(".acp-rules-problem").textContent),
+    "a bare * was not stopped");
+  assertEqual(e.chips("shell", "allow").length, 6, "a bare * was added");
+});
+
+check("rules editor: Save posts the edited rule set as JSON, closes, and shows the result", async () => {
+  const e = await openRules();
+  e.row("shell").querySelectorAll(".acp-rules-chip-remove")[1].click();  // pwd
+  e.add("shell", "allow", "npm test");
+  e.add("shell", "block", "git push");
+  e.add("web_fetch", "allow", "example.com");
+  e.choose("mcp", "block");
+  const boxes = e.$("acpRulesBody").querySelectorAll(".acp-rules-protected-box");
+  boxes[0].checked = false; boxes[0].dispatch("change");
+  boxes[1].checked = true; boxes[1].dispatch("change");
+  await e.p.sandbox.saveAcpRules();
+  const post = e.p.fetches.find((f) => f.init.method === "POST");
+  assert(post, "Save sent nothing");
+  assertEqual(post.url, "/api/acp-permissions", "the rules posted to the wrong route");
+  const sent = JSON.parse(post.init.body);
+  assertEqual(Object.keys(sent).join(","), "rules", "Save sent more than the rules");
+  const want = seedRules();
+  want.shell.allow = ["git status", "npm test"];
+  want.shell.block = ["git *--output*", "git push"];
+  want.web_fetch.allow = ["example.com"];
+  want.mcp.default = "block";
+  want.protected_block = ["steering"];
+  for (const key of Object.keys(want)) {
+    assertEqual(JSON.stringify(sent.rules[key]), JSON.stringify(want[key]), `the posted ${key} is wrong`);
+  }
+  assertEqual(sent.rules.fs_read.allow[0], "./**", "the session folder was posted as its label");
+  assertEqual(e.$("acpRulesModal").open, false, "a saved editor stayed open");
+  assertEqual(e.p.toasts.length, 0, "a clean save raised a toast");
+});
+
+check("rules editor: a refused save stays open with the server's reason; a saved-but-not-applied one warns (D-32)", async () => {
+  let reply = { ok: false, error: "The rules were not saved: Run commands (shell): allow pattern 'x' contains the character U+007F, which is not allowed." };
+  const e = await openRules(null, () => ({ body: reply }));
+  await e.p.sandbox.saveAcpRules();
+  assertEqual(e.$("acpRulesModal").open, true, "a refused save closed the editor");
+  assertEqual(e.$("acpRulesError").hidden, false, "the refusal was not shown");
+  assert(e.$("acpRulesError").textContent.includes("Run commands (shell)"), "the refusal lost the row name");
+  reply = Object.assign({ ok: true, warning: "Saved, but not yet in effect: nope. New Default sessions are refused until this is fixed." },
+    rulesState({ in_effect: false, state: "stale", generation_ok: false, generation_error: "nope" }));
+  await e.p.sandbox.saveAcpRules();
+  assertEqual(e.$("acpRulesModal").open, false, "a saved change kept the editor open");
+  assert(e.p.toasts.some((t) => t.includes("not yet in effect")), "the D-32 warning was not shown");
+  assertEqual(e.$("acpPermWarn").hidden, false, "the panel was not redrawn from the answer");
+});
+
+check("rules editor: the dialog is on the dashboard only and carries its names and footer (SC-7, SC-10)", () => {
+  const idx = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  assert(idx.includes('{% include "partials/acp_permission_rules_modal.html" %}'), "index.html does not include the editor");
+  assert(/id="acpPermEditRules"[^>]*onclick="openAcpRulesEditor\(\)/.test(idx), "no Edit rules control in the settings menu");
+  assert(/The rules apply when Manual is selected/.test(idx), "the Edit rules control does not say when rules apply");
+  const acp = fs.readFileSync(path.join(HERE, "..", "src", "power_atlas", "templates", "acp.html"), "utf8");
+  assert(!acp.includes("acp_permission_rules_modal") && !acp.includes("openAcpRulesEditor"),
+    "/acp, which a remote client can open, carries the rule editor");
+  const modal = fs.readFileSync(path.join(HERE, "..", "src", "power_atlas", "templates", "partials",
+    "acp_permission_rules_modal.html"), "utf8");
+  assert(/<dialog id="acpRulesModal"[^>]*aria-labelledby="acpRulesTitle"/.test(modal), "the dialog has no accessible name");
+  assert(/aria-label="Close"/.test(modal), "the close button has no name");
+  assert(/role="alert"/.test(modal), "save errors are not announced");
+  assert(modal.includes("Applies to sessions created afterwards."), "the footer does not say when changes apply");
 });
 
 // ---- Browser sign-in: the local key --------------------------------------

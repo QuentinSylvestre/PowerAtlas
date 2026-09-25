@@ -12984,6 +12984,23 @@ class TestSettingsSurface:
             "a remote peer changed the permission mode")
         assert not (config_mod.CONFIG_PATH).exists()
 
+    def test_the_acp_permission_rules_write_is_loopback_only(self, remote_enabled):
+        """SC-7: the Phase 2 rules body is refused to a remote peer too."""
+        from power_atlas import agent_profile as ap
+        from power_atlas import config as config_mod
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["shell"]["default"] = "allow"
+        status, body, _ = _peer_http(
+            "/api/acp-permissions",
+            [self._both_cookies(),
+             (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode()),
+             (b"content-type", b"application/json")],
+            method="POST", body=json.dumps({"rules": rules}).encode())
+        assert status == 403
+        assert b"Forbidden" in body
+        assert not (config_mod.CONFIG_PATH).exists(), (
+            "a remote peer changed the permission rules")
+
     def test_rotating_replaces_the_stored_secret(self, client, tmp_path):
         from power_atlas import config as config_mod
         first = config_mod.ensure_remote_secret()
@@ -25193,6 +25210,155 @@ class TestAcpPermissionRoutes:
                   if "acp_permission_rules" in r.getMessage()]
         assert len(logged) == 3, logged
         assert first["mode"] == "manual"
+
+    # ---- Phase 2: custom Manual rules (the rule editor's route) ----------
+
+    @staticmethod
+    def _edited_rules() -> dict:
+        ap = _agent_profile()
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["shell"]["allow"] = ["git status", "type notes\\a.txt",
+                                   'echo "café"']
+        rules["shell"]["block"] = ["git push", "git push"]
+        rules["fs_write"] = {"default": "allow", "allow": [],
+                             "block": ["**/secret-dir/**"]}
+        rules["web_fetch"] = {"default": "block", "allow": ["example.com"],
+                              "block": []}
+        rules["protected_block"] = ["steering"]
+        return rules
+
+    def test_get_returns_the_normalised_rules_without_writing(
+            self, client, isolated_config):
+        """D-26: a read returns every row, seeded where missing, and never
+        persists them."""
+        ap = _agent_profile()
+        body = client.get("/api/acp-permissions").json()
+        assert body["rules"] == ap.normalise_rules({})
+        assert [r["id"] for r in body["rule_rows"]] == list(ap.PERMISSION_ROWS)
+        assert body["rule_rows"][2] == {"id": "shell", "label": "Run commands"}
+        assert not (isolated_config / "config.toml").exists()
+
+    def test_valid_rules_round_trip_through_the_file_and_the_agent(
+            self, client, isolated_config):
+        """Phase 2: a full replacement is stored as sent (duplicates dropped),
+        read back from disk, compiled into the derived agent, and leaves the
+        mode alone."""
+        from power_atlas import config as config_mod
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        resp = client.post("/api/acp-permissions",
+                           json={"rules": self._edited_rules()}).json()
+        assert resp["ok"] is True and "warning" not in resp, resp
+        assert resp["mode"] == "manual" and resp["in_effect"] is True
+        want = copy.deepcopy(self._edited_rules())
+        want["shell"]["block"] = ["git push"]
+        assert resp["rules"] == want
+        assert config_mod.load_config().acp_permission_rules == want
+        assert client.get("/api/acp-permissions").json()["rules"] == want
+        text = ap.derived_agent_path().read_text(encoding="utf-8")
+        assert 'match: ["git status", "type notes\\\\a.txt", "echo \\"café\\""]' in text
+        assert 'match: ["git push"]' in text
+        assert 'match: ["**/.kiro/steering/**", "**/kiro~*/steering/**"]\n      effect: deny' in text
+        protected = {row["id"]: row["effect"] for row in resp["protected"]}
+        assert protected["steering"] == "block" and protected["agents"] == "ask"
+
+    def test_rules_sent_in_yolo_are_stored_but_do_not_change_the_agent(
+            self, client, isolated_config):
+        """Rules are edited in every mode; Yolo does not compile them."""
+        from power_atlas import config as config_mod
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "yolo"})
+        before = ap.derived_agent_path().read_bytes()
+        resp = client.post("/api/acp-permissions",
+                           json={"rules": self._edited_rules()}).json()
+        assert resp["ok"] is True and resp["mode"] == "yolo"
+        assert config_mod.load_config().acp_permission_rules["web_fetch"]["default"] == "block"
+        assert ap.derived_agent_path().read_bytes() == before
+
+    @pytest.mark.parametrize("change, named", [
+        (lambda r: r.update(nope={"default": "ask"}), "'nope'"),
+        (lambda r: r.pop("mcp"), "MCP tools (mcp)"),
+        (lambda r: r.update(shell="ask"), "Run commands (shell)"),
+        (lambda r: r["skill"].update(default="sometimes"), "Skills (skill)"),
+        (lambda r: r["skill"].update(default="Allow"), "Skills (skill)"),
+        (lambda r: r["power"].update(extra=[]), "Powers (power)"),
+        (lambda r: r["shell"].update(allow="git status"), "Run commands (shell)"),
+        (lambda r: r["shell"]["allow"].append("echo \x01"), "'echo \\x01'"),
+        (lambda r: r["shell"]["allow"].append("echo \x7f"), "U+007F"),
+        (lambda r: r["fs_read"]["allow"].append("a\ud800b"), "U+D800"),
+        (lambda r: r["fs_read"]["block"].append("a b"), "U+2028"),
+        (lambda r: r["web_fetch"]["allow"].append("x" * 201), "longer than 200"),
+        (lambda r: r["mcp"].update(allow=[f"s/t{i}" for i in range(101)]), "101 patterns"),
+        (lambda r: r["mcp"].update(block=[f"s/t{i}" for i in range(101)]), "101 patterns"),
+        (lambda r: r["shell"]["allow"].append("*"), "matches everything"),
+        (lambda r: r["fs_write"]["block"].append("**"), "matches everything"),
+        (lambda r: r["shell"]["allow"].append("   "), "is blank"),
+        (lambda r: r["shell"]["allow"].append(7), "is not text"),
+        (lambda r: r.update(protected_block=["nope"]), "'nope' is not a Protected item"),
+        (lambda r: r.update(protected_block="agents"), "protected_block"),
+    ])
+    def test_an_invalid_rule_set_is_refused_by_name_and_changes_nothing(
+            self, client, isolated_config, change, named):
+        """D-11, D-14, D-26: the editor's save is never repaired or trimmed;
+        the first fault refuses it, naming the row and the pattern."""
+        from power_atlas import config as config_mod
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        stored = (isolated_config / "config.toml").read_bytes()
+        agent = ap.derived_agent_path().read_bytes()
+        rules = copy.deepcopy(ap.SEED_RULES)
+        change(rules)
+        # Encoded here, ASCII-escaped: a lone surrogate reaches the server as
+        # the `\ud800` escape a browser's JSON.stringify sends, which httpx's
+        # own UTF-8 encoder would refuse before sending.
+        resp = client.post("/api/acp-permissions",
+                           content=json.dumps({"rules": rules}),
+                           headers={"content-type": "application/json"}).json()
+        assert resp["ok"] is False, resp
+        assert resp["error"].startswith("The rules were not saved: ")
+        assert named in resp["error"], resp["error"]
+        assert (isolated_config / "config.toml").read_bytes() == stored
+        assert ap.derived_agent_path().read_bytes() == agent
+        assert config_mod.load_config().acp_permission_rules == ap.normalise_rules({})
+
+    @pytest.mark.parametrize("body", [
+        {"rules": None}, {"rules": []}, {"rules": "x"},
+        {"mode": "manual", "rules": {"x": 1}}, {"mode": "auto", "rules": {}},
+    ])
+    def test_a_malformed_rules_body_is_refused(self, client, isolated_config, body):
+        from power_atlas import config as config_mod
+        resp = client.post("/api/acp-permissions", json=body).json()
+        assert resp["ok"] is False and resp["error"]
+        assert config_mod.load_config().acp_permission_mode == "yolo"
+        assert not (isolated_config / "config.toml").exists()
+
+    def test_a_rules_save_on_a_corrupt_config_is_refused(
+            self, client, isolated_config):
+        """Phase 1's `_load_error`: the defaults never replace an unreadable
+        config.toml, through the rules path either."""
+        corrupt = b'acp_permission_mode = "manual"\nbroken = [\n'
+        (isolated_config / "config.toml").write_bytes(corrupt)
+        resp = client.post("/api/acp-permissions",
+                           json={"rules": self._edited_rules()}).json()
+        assert resp["ok"] is False and "config.toml" in resp["error"]
+        assert (isolated_config / "config.toml").read_bytes() == corrupt
+
+    def test_a_rules_save_clears_the_notice_only_when_manual_changes(
+            self, client, isolated_config):
+        """D-35: a rules-only save acknowledges an outside change when it
+        changes what Manual compiles; in Yolo the rows are not in force, so
+        it leaves a notice about the mode standing."""
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "yolo"})
+        ap._record_notice("yolo", "test")
+        client.post("/api/acp-permissions", json={"rules": self._edited_rules()})
+        assert ap.posture_notice() is not None
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        ap._record_notice("manual", "test")
+        rules = self._edited_rules()
+        rules["shell"]["allow"].append("npm test")
+        client.post("/api/acp-permissions", json={"rules": rules})
+        assert ap.posture_notice() is None
 
 
 class TestGenerationRunsAtStartup:

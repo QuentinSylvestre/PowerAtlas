@@ -566,6 +566,71 @@ def normalise_rules_report(raw: object) -> tuple[dict, list[str]]:
     return out, problems
 
 
+_ROW_KEYS = frozenset(("default", "allow", "block"))
+
+
+def validate_rules(raw: object) -> dict:
+    """A rule set sent by the rule editor, checked strictly. Raises on the first fault.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2 (D-11, D-14, D-26).
+    `normalise_rules` repairs a stored rule set so that loading never fails;
+    this is the other direction — a full replacement the user is saving right
+    now — so nothing is repaired or dropped. An unknown or missing row, a
+    default other than allow/ask/block, an invalid pattern and a list over
+    `MAX_PATTERNS_PER_LIST` each raise `AgentProfileError` naming the row (by
+    its label and key) and the pattern. Returns the rule set in the shape
+    `normalise_rules` produces, with duplicate patterns removed.
+    """
+    if not isinstance(raw, dict):
+        raise AgentProfileError("rules must be a table of rows")
+    known = set(PERMISSION_ROWS) | {"protected_block"}
+    for key in raw:
+        if key not in known:
+            raise AgentProfileError(f"{str(key)[:40]!r} is not a kind of action")
+    out: dict = {}
+    for row in PERMISSION_ROWS:
+        name = f"{ROW_LABELS[row]} ({row})"
+        spec = raw.get(row)
+        if not isinstance(spec, dict):
+            raise AgentProfileError(f"{name}: the row is missing or not a table")
+        for key in spec:
+            if key not in _ROW_KEYS:
+                raise AgentProfileError(
+                    f"{name}: {str(key)[:40]!r} is not default, allow or block")
+        default = spec.get("default")
+        if default not in ROW_DEFAULTS:
+            raise AgentProfileError(
+                f"{name}: default {str(default)[:40]!r} is not allow, ask or block")
+        lists: dict = {}
+        for which in ("allow", "block"):
+            patterns = spec.get(which, [])
+            if not isinstance(patterns, list):
+                raise AgentProfileError(f"{name}: the {which} list is not a list")
+            if len(patterns) > MAX_PATTERNS_PER_LIST:
+                raise AgentProfileError(
+                    f"{name}: the {which} list has {len(patterns)} patterns; at "
+                    f"most {MAX_PATTERNS_PER_LIST} are allowed")
+            kept: list = []
+            for pattern in patterns:
+                reason = pattern_error(pattern)
+                if reason:
+                    raise AgentProfileError(
+                        f"{name}: {which} pattern {str(pattern)[:60]!r} {reason}")
+                if pattern not in kept:
+                    kept.append(pattern)
+            lists[which] = kept
+        out[row] = {"default": default, **lists}
+    blocked = raw.get("protected_block", [])
+    if not isinstance(blocked, list):
+        raise AgentProfileError("protected_block is not a list")
+    for item in blocked:
+        if not (isinstance(item, str) and item in PROTECTED):
+            raise AgentProfileError(
+                f"protected_block: {str(item)[:40]!r} is not a Protected item")
+    out["protected_block"] = [key for key in PROTECTED if key in blocked]
+    return out
+
+
 def _check_block_lists(rules: dict) -> None:
     """Refuse a block list that cannot be compiled as stored (D-26, D-14)."""
     for row in PERMISSION_ROWS:

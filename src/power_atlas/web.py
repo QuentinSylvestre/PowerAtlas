@@ -4297,7 +4297,9 @@ async def toggle_notifications():
 # `pa_local` cookie, like every loopback write.
 #
 # **Set**, not toggled: the caller states the mode it wants, so a lost response
-# turning into a second click cannot land on the wrong mode.
+# turning into a second click cannot land on the wrong mode. Phase 2 adds
+# `{"rules": {...}}` to the same POST, a full replacement of Manual's rows from
+# the dashboard's rule editor, on the same lock and loopback-only terms.
 
 
 def _acp_permission_state(config) -> dict:
@@ -4337,6 +4339,12 @@ def _acp_permission_state(config) -> dict:
         "protected": agent_profile.protected_display(
             config.acp_permission_rules),
         "posture_notice": agent_profile.posture_notice(),
+        # Phase 2: Manual's rows for the rule editor, normalised the way
+        # `load_config` reads them (D-26) and never written back by a read.
+        # `rule_rows` carries the plain labels in compile order.
+        "rules": agent_profile.normalise_rules(config.acp_permission_rules),
+        "rule_rows": [{"id": row, "label": agent_profile.ROW_LABELS[row]}
+                      for row in agent_profile.PERMISSION_ROWS],
     }
 
 
@@ -4394,26 +4402,49 @@ async def set_acp_permissions(request: Request):
         body = await request.json()
     except (ValueError, UnicodeDecodeError):
         return {"ok": False, "error": "Invalid JSON body"}
-    mode = body.get("mode") if isinstance(body, dict) else None
+    if not isinstance(body, dict):
+        body = {}
+    has_mode = "mode" in body
+    has_rules = "rules" in body
+    if not (has_mode or has_rules):
+        return {"ok": False,
+                "error": "mode must be \"yolo\" or \"manual\""}
+    mode = body.get("mode")
     # Exactly the storable modes (D-2): Auto is shown but not selectable until
     # its decider exists, and a case variant or anything else is refused
     # rather than guessed at — this is the control that decides whether a
     # shell command asks.
-    if mode not in ACP_PERMISSION_MODES:
+    if has_mode and mode not in ACP_PERMISSION_MODES:
         return {"ok": False,
                 "error": "mode must be \"yolo\" or \"manual\""}
+    # Phase 2: `rules` is a full replacement of Manual's rows, checked before
+    # the lock is taken. Unlike loading (D-26), nothing is repaired or
+    # dropped here: the first fault refuses the whole save, naming the row
+    # and the pattern, so what the editor shows is exactly what is stored.
+    rules = None
+    if has_rules:
+        try:
+            rules = agent_profile.validate_rules(body.get("rules"))
+        except agent_profile.AgentProfileError as exc:
+            return {"ok": False, "error": f"The rules were not saved: {exc}."}
 
     def mutate(config) -> None:
         # The instance `load_config` returned inside the lock, so unknown
         # top-level keys riding on `_extra` survive the save.
-        config.acp_permission_mode = mode
+        if has_mode:
+            config.acp_permission_mode = mode
+        if rules is not None:
+            config.acp_permission_rules = rules
 
     # `sets_posture`: choosing the mode here is the dashboard's answer to
-    # D-35's notice, even when the mode is unchanged.
+    # D-35's notice, even when the mode is unchanged. A rules-only save clears
+    # the notice only when it changes what the mode compiles to (the
+    # fingerprint check in `apply_settings`): in Yolo the rows are not in
+    # force, so editing them does not acknowledge an outside mode change.
     result = await asyncio.to_thread(
         lambda: agent_profile.apply_settings(
             mutate, lock_timeout=_SETTINGS_LOCK_TIMEOUT_SECONDS,
-            sets_posture=True))
+            sets_posture=has_mode))
     answer = _apply_result(result)
     if not answer["ok"]:
         return answer

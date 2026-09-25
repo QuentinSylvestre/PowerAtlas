@@ -178,6 +178,39 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .acp-perm-item-detail, .acp-perm-item-note { color: var(--text-muted); overflow-wrap: anywhere; }
 .acp-perm-patterns { font-family: var(--mono, ui-monospace, monospace); font-size: 10.5px; color: var(--text-muted); overflow-wrap: anywhere; white-space: pre-wrap; }
 .acp-perm-links-marker { color: var(--amber); }
+/* The Manual rule editor (partials/acp_permission_rules_modal.html),
+   260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2. Scrolls inside the
+   dialog so the footer's Save stays in view. */
+.acp-rules-modal { max-width: 640px; }
+.acp-rules-intro { font-size: 12px; color: var(--text-muted); margin: 0 0 8px; line-height: 1.45; }
+.acp-rules-note { font-size: 12px; margin: 0 0 8px; }
+.acp-rules-body { max-height: 62vh; overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 10px; }
+.acp-rules-row, .acp-rules-section { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }
+.acp-rules-row-title { font-size: 13px; margin: 0 0 6px; }
+.acp-rules-default { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.acp-rules-select, .acp-rules-input { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 12px; padding: 4px 8px; }
+.acp-rules-select:focus, .acp-rules-input:focus { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
+.acp-rules-help { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+.acp-rules-list { margin-top: 6px; }
+.acp-rules-list-label { font-size: 12px; font-weight: 600; }
+.acp-rules-chips { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.acp-rules-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 2px 1px 8px; font-size: 11.5px; max-width: 100%; }
+.acp-rules-chip-text { font-family: var(--mono, ui-monospace, monospace); overflow-wrap: anywhere; }
+.acp-rules-list-block .acp-rules-chip { border-color: rgba(248,113,113,0.5); }
+.acp-rules-chip-remove { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 5px; border-radius: 999px; }
+.acp-rules-chip-remove:hover, .acp-rules-chip-remove:focus-visible { color: var(--text); background: rgba(148,163,184,0.2); }
+.acp-rules-empty { font-size: 11.5px; color: var(--text-muted); }
+.acp-rules-add-row { display: flex; gap: 6px; align-items: center; }
+.acp-rules-input { flex: 1; min-width: 0; font-family: var(--mono, ui-monospace, monospace); }
+.acp-rules-problem { font-size: 11.5px; color: #f87171; margin-top: 2px; }
+.acp-rules-warn { margin: 6px 0 0; padding-left: 16px; font-size: 11.5px; color: var(--amber); overflow-wrap: anywhere; }
+.acp-rules-protected-item { margin-top: 6px; font-size: 12px; }
+.acp-rules-protected-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.acp-rules-protected-name { font-weight: 600; }
+.acp-rules-protected-hint { color: var(--text-muted); }
+.acp-rules-error { margin-top: 8px; font-size: 12px; color: #f87171; overflow-wrap: anywhere; }
+.acp-rules-footer { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.acp-rules-footnote { flex: 1; font-size: 11.5px; color: var(--text-muted); }
 .acp-perm-links { margin: 2px 0 0 14px; padding: 0; color: var(--text-muted); overflow-wrap: anywhere; }
 /* 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F3):
    the local-key rotation button, and its armed (click again to confirm)

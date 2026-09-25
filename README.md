@@ -149,7 +149,8 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 - **Agent permissions** (gear icon in topbar) sets the permission mode for ACP sessions PowerAtlas
   creates: **Yolo** (the default; nothing asks, except a short Always blocked list that is refused in
   every mode) or **Manual** (common read-only actions run, everything else asks). **Auto** is shown but
-  not yet selectable. See *Tool permissions* under *Agent sessions* below
+  not yet selectable. **Edit rules…** opens Manual's rule editor. See *Tool permissions* under
+  *Agent sessions* below
 - Platform-aware terminal detection:
   - Windows: Windows Terminal › PowerShell › cmd
   - Linux: kitty › Alacritty › GNOME Terminal › Konsole › xterm
@@ -196,8 +197,12 @@ acp_prompt_silence_seconds = 1800  # 60-86400. A turn is cancelled after this mu
 # base agent is saved from the dashboard. See "Tool permissions" under "Agent sessions".
 acp_permission_mode = "yolo"                # "yolo" or "manual". Anything else loads as "manual".
 acp_permission_base_agent = "kiro_default"  # the kiro-cli agent PowerAtlas's own agent is built from
-# acp_permission_rules is written by PowerAtlas with Manual's rules; editing them comes in a later
-# release. An older config's `acp_permissions_enabled = true` becomes "manual", `false` becomes "yolo".
+# acp_permission_rules holds Manual's rules. Edit them with "Edit rules…" under Agent permissions
+# rather than by hand: the editor checks every pattern, while a hand-edited table is repaired on load
+# (a missing row gets the default rules, an unreadable default asks, an invalid allow pattern is
+# dropped, and an invalid block pattern stops the rules from being applied) and the settings menu says
+# what it changed. An older config's `acp_permissions_enabled = true` becomes "manual", `false`
+# becomes "yolo".
 
 [provider_settings.claude-code]
 default_args = ""
@@ -415,6 +420,31 @@ sessions keep their own posture.
   refuses writes to `**/.kiro/agents/**` outright. Sub-agents run under the parent session's rules
   (measured 2026-09-24). Nothing asks when a session starts.
 - **Auto** is shown but not selectable yet; when it arrives it will decide Manual's prompts itself.
+
+**Manual's rules** are edited with **Edit rules…** under Agent permissions, in any mode; they are used
+while Manual is selected. The editor has one row per kind of action: Read files, Write files, Run
+commands, Web fetch, Web search, MCP tools, Sub-agents, Skills and Powers. Each row has a default for
+anything no pattern matches — **Allow** (run without asking), **Ask** (show a permission prompt) or
+**Block** (refuse without asking) — and two pattern lists: **Allow without asking** (not shown when the
+default is Allow, since everything already runs) and **Always block**, which wins over everything else
+in the row. `./**` is shown as "the session folder". Patterns are file globs for the two file rows,
+exact commands for Run commands (see the limits below; `/` and `\` are different characters, and
+patterns are not mirrored for you), site host names such as `example.com` for Web fetch (not full
+addresses), `server/tool` for MCP tools, and names for sub-agents, skills and powers, as the
+permission prompt shows them. The editor warns, without refusing, when a command pattern allows an
+interpreter or shell such as `python`, `node`, `pwsh`, `cmd` or `bash` (equivalent to allowing
+everything), a deleting or downloading command such as `rm` or `curl`, or any `*` (which also allows
+output redirection); and when a Write files pattern covers the whole session folder, a drive root or
+the home folder. Save checks every row and pattern and refuses the whole save, naming the row and the
+pattern, when one is not usable: a pattern must be 1-200 printable characters and not a bare `*`,
+`**` or anything else made only of `*`, `/` and `\`, and a list holds at most 100 patterns.
+
+The editor also shows the **Protected** items (agent definitions, steering files, skills and hooks
+in any `.kiro` folder), each with a **Block outright** switch that
+turns its always-ask into a refusal, and, per item, the links inside it that point elsewhere and are
+therefore not covered, with their targets. The Always blocked list is shown read-only. A saved change
+applies to sessions created afterwards; if the derived agent cannot be written, the rules are still
+saved and a warning says they are not yet in effect.
 
 **Always blocked**, in every mode, is refused silently with kiro-cli's own denial text: reading SSH,
 AWS, Azure and gcloud credential folders, kiro-cli's token files and PowerAtlas's own sign-in

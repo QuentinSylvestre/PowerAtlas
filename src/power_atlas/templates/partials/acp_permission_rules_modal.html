@@ -1,0 +1,23 @@
+<!-- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2: the Manual rule
+     editor (SC-5), opened from "Edit rules…" under Agent permissions in the
+     settings menu. A thin shell: openAcpRulesEditor() in index.html builds
+     every row, chip and warning with createElement + textContent, because the
+     patterns are data. Included by index.html only — the dashboard is
+     loopback-only by construction, so the editor never reaches a remote
+     client (SC-7, D-9). A native modal <dialog> opened with showModal() keeps
+     focus inside it and closes on Esc. -->
+<dialog id="acpRulesModal" class="modal profile-modal acp-rules-modal" aria-labelledby="acpRulesTitle" aria-describedby="acpRulesIntro">
+  <div class="modal-header">
+    <h2 id="acpRulesTitle">Manual rules</h2>
+    <button type="button" class="modal-close" onclick="closeAcpRulesEditor()" aria-label="Close">&times;</button>
+  </div>
+  <p id="acpRulesIntro" class="acp-rules-intro">These rules apply when the permission mode is Manual. For each kind of action, choose what happens when no pattern matches, then list the exceptions. The Always blocked list and the Protected items below apply on top of them.</p>
+  <div id="acpRulesModeNote" class="acp-rules-note topbar-menu-warn" role="status" hidden></div>
+  <div id="acpRulesBody" class="acp-rules-body"></div>
+  <div id="acpRulesError" class="acp-rules-error" role="alert" hidden></div>
+  <div class="acp-rules-footer">
+    <span class="acp-rules-footnote">Applies to sessions created afterwards.</span>
+    <button type="button" class="modal-cancel-btn" onclick="closeAcpRulesEditor()">Cancel</button>
+    <button type="button" id="acpRulesSave" class="btn-primary" onclick="saveAcpRules()">Save</button>
+  </div>
+</dialog>
