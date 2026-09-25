@@ -11142,7 +11142,8 @@ const PERM_PROTECTED = [
   { id: "steering", label: "Steering files", patterns: ["**/.kiro/steering/**"], effect: "ask" },
 ];
 function permState(over) {
-  return Object.assign({ mode: "yolo", mode_warning: "", in_effect: true, state: "on",
+  return Object.assign({ mode: "yolo", mode_warning: "", config_error: "",
+    rules_warning: "", in_effect: true, state: "on",
     base_agent: "kiro_default", generation_ok: true, generation_error: "",
     generation_note: "", floor: PERM_FLOOR, protected: PERM_PROTECTED,
     posture_notice: null }, over || {});
@@ -11235,6 +11236,33 @@ check("settings: a failed change that kept the previous file, an unreadable mode
   assert($("acpPermWarn").textContent.includes("using a minimal agent"), "the minimal-agent note was not shown");
 });
 
+check("settings: an unreadable config.toml checks no mode and names the file; dropped rules are named (Phase 1 review, findings 1 and 7)", () => {
+  const p = loadPanel();
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  const dot = p.sandbox.document.getElementById("topbarPendingDot");
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual" }));
+  assertEqual(checkedMode(p), "manual", "setup: Manual was not checked");
+  const configError = "PowerAtlas's config.toml could not be read (TOMLDecodeError: x), so no "
+    + "setting was changed. Fix the file C:/c/config.toml by hand (a copy of the unreadable "
+    + "file was saved as C:/c/config.toml.bak)";
+  p.sandbox.renderAcpPermissions(permState({ mode: "yolo", in_effect: false, state: "stale",
+    config_error: configError, generation_ok: false, generation_error: configError }));
+  assertEqual(checkedMode(p), null, "the defaults' mode was checked while config.toml is unreadable");
+  const warn = $("acpPermWarn").textContent;
+  assertEqual($("acpPermWarn").hidden, false, "the unreadable config was not shown");
+  assert(warn.includes("config.toml.bak"), `the warning does not name the backup: ${warn}`);
+  assert(/New Default sessions are refused/.test(warn), "the warning does not say what that means");
+  assert(!/Check the Base agent name/.test(warn), `the warning points at the wrong fix: ${warn}`);
+  assertEqual($("acpPermBadge").hidden, false, "an unreadable config shows no badge");
+  assertEqual(dot.hidden, false, "an unreadable config did not light the gear dot");
+
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual",
+    rules_warning: "shell: default 'sometimes' is not allow, ask or block, so it asks" }));
+  assertEqual(checkedMode(p), "manual", "a rules warning unchecked the mode");
+  assert($("acpPermWarn").textContent.includes("'sometimes'"), "the rules warning was not shown");
+  assertEqual(dot.hidden, false, "a rules warning did not light the gear dot");
+});
+
 check("settings: the gear dot lights for a permission mode not working as set, and restart drift cannot hide it (G4)", () => {
   const p = loadPanel();
   const dot = p.sandbox.document.getElementById("topbarPendingDot");
@@ -11269,7 +11297,8 @@ check("settings: the Always blocked and Protected lists render as text, with the
   const p = loadPanel();
   const $ = (id) => p.sandbox.document.getElementById(id);
   const links = {
-    agents: { count: 0, links: [] },
+    agents: { count: 1, links: [
+      { name: "agents", target: "C:/elsewhere/agents", error: "", folder: true }] },
     steering: { count: 2, links: [
       { name: "a.md", target: "C:/playbook/a.md", error: "" },
       { name: "<img src=x>.md", target: "", error: "unresolvable (FileNotFoundError)" }] },
@@ -11285,8 +11314,11 @@ check("settings: the Always blocked and Protected lists render as text, with the
   assert(prot.includes("2 linked items not covered"), `no linked-items marker: ${prot}`);
   assert(prot.includes("a.md → C:/playbook/a.md"), "a link target is not shown");
   assert(prot.includes("<img src=x>.md (unresolvable"), "an unresolvable link is not shown as text");
+  // Finding 10: a Protected folder that is itself a link.
+  assert(prot.includes("agents (the whole folder) → C:/elsewhere/agents"),
+    `a linked folder is not shown as one: ${prot}`);
   const markers = $("acpPermProtectedList").querySelectorAll(".acp-perm-links-marker");
-  assertEqual(markers.length, 1, "a folder with no links got a marker");
+  assertEqual(markers.length, 2, "a linked folder got no marker");
   // A POST answer carries no links (the walk runs only on GET): the last
   // links found are kept rather than the marker vanishing.
   p.sandbox.renderAcpPermissions(permState({ mode: "manual" }));

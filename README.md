@@ -190,8 +190,10 @@ acp_prompt_silence_seconds = 1800  # 60-86400. A turn is cancelled after this mu
                                   # applies, so one chunk per window cannot run forever.
 
 # ACP permission mode. Set from the settings menu's "Agent permissions" section, without a restart.
-# A hand edit here is picked up by the next new session (and the dashboard then says the mode changed
-# outside it). See "Tool permissions" under "Agent sessions".
+# A hand edit of the mode (or the rules) takes effect when the next new Default session is started, and
+# the dashboard then says the mode changed outside it; task-mode sessions (Spec, Plan, ...) are never
+# affected. A hand edit of the base agent takes effect at the next restart, or the next time the mode or
+# base agent is saved from the dashboard. See "Tool permissions" under "Agent sessions".
 acp_permission_mode = "yolo"                # "yolo" or "manual". Anything else loads as "manual".
 acp_permission_base_agent = "kiro_default"  # the kiro-cli agent PowerAtlas's own agent is built from
 # acp_permission_rules is written by PowerAtlas with Manual's rules; editing them comes in a later

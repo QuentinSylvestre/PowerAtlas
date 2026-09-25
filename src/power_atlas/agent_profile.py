@@ -81,6 +81,7 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 import time
 from collections.abc import Callable
@@ -173,10 +174,13 @@ _FINGERPRINT_RE = re.compile(r"#\s*Settings fingerprint: ([0-9a-f]{16})\b")
 # config.toml is never ahead of the derived agent for a session-creation check
 # to see. The **only** other acquirer is `web._derived_agent_in_effect`, with a
 # bounded `acquire(timeout=...)`, so a stalled generation refuses a session
-# rather than hanging it. `compile_block`, `derived_block_state`,
-# `_apply_locked` and `heal_stale_locked` never acquire it: a plain
-# `threading.Lock` is not reentrant, and the two acquirers call them while
-# holding it.
+# rather than hanging it. The routes' `apply_settings` calls are bounded too
+# (`lock_timeout`); only the startup pass waits unbounded. `compile_block`,
+# `derived_block_state`, `_apply_locked` and `heal_stale_locked` never acquire
+# it: a plain `threading.Lock` is not reentrant, and the two acquirers call
+# them while holding it. The gate may hand its hold to a worker thread that
+# runs the heal and releases it (a plain `Lock` may be released by any thread),
+# so the gate's own wait stays inside its budget (D-30).
 _generation_lock = threading.Lock()
 
 
@@ -203,10 +207,10 @@ class GenerationStatus:
 
 _status = GenerationStatus()
 
-# A posture change the dashboard did not make: set by the D-30 self-heal when
-# the regeneration it ran compiled a different mode or rule set from the block
-# it replaced, cleared by the next change made through `apply_settings` with a
-# mutation. `None` when there is nothing to report.
+# A posture change the dashboard did not make: set by the D-30 self-heal or the
+# startup pass when the regeneration compiled a different mode or rule set from
+# the block it replaced, cleared when the dashboard next chooses the mode or
+# changes the rules (`apply_settings`). `None` when there is nothing to report.
 # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-35
 _posture_notice: dict | None = None
 
@@ -423,10 +427,13 @@ MINIMAL_BASE = (
 )
 
 
+_MATCH_ALL_CHARS = frozenset("*/\\")
+
+
 def pattern_error(pattern: object) -> str:
     """Why `pattern` cannot be used, or `""` when it can (D-14).
 
-    1-200 characters, not blank, not `*` or `**` alone, and printable BMP
+    1-200 characters, not blank, not made only of `*`, `/` and `\\`, and printable BMP
     characters only: no C0 or C1 controls, DEL, surrogates, U+2028/U+2029 or
     U+FEFF. Emission uses `json.dumps(s, ensure_ascii=False)`, and a surrogate
     escape or a raw control character can make kiro-cli reject the frontmatter,
@@ -438,7 +445,10 @@ def pattern_error(pattern: object) -> str:
         return "is blank"
     if len(pattern) > MAX_PATTERN_CHARS:
         return f"is longer than {MAX_PATTERN_CHARS} characters"
-    if pattern.strip() in ("*", "**"):
+    # Only wildcards and separators (`*`, `**`, `***`, `**/*`, `*/**`, `/`):
+    # each matches everything, or everything under a root, which is the row's
+    # default in disguise (D-14; Phase 1 review, finding 9).
+    if set(pattern.strip()) <= _MATCH_ALL_CHARS:
         return "matches everything; set the row's default instead"
     for ch in pattern:
         # `isprintable` is False for Cc (C0, DEL, C1), Cs (surrogates), Zl/Zp
@@ -467,26 +477,63 @@ def normalise_rules(raw: object) -> dict:
       included, so `compile_block` refuses it by name rather than dropping a
       protection silently;
     * unknown rows and unknown Protected names are dropped.
+
+    Every change that is not a plain fill-in is named by
+    `normalise_rules_report` and logged once per distinct problem per process.
+    """
+    return normalise_rules_report(raw)[0]
+
+
+# Problems `normalise_rules_report` has already logged in this process, so a
+# config read on every request does not repeat them (the D-25 pattern).
+_rule_problems_logged: set[str] = set()
+
+
+def normalise_rules_report(raw: object) -> tuple[dict, list[str]]:
+    """`normalise_rules(raw)` plus what it changed, in plain words.
+
+    Phase 1 review, finding 7: an unreadable default, a dropped allow pattern
+    and an unknown Protected name were silent. Each is now one line in the
+    returned list — `load_config` records them on the config for the settings
+    panel (`_rules_warning`) — and is logged at WARNING once per process.
+    A missing row filled from the seed is not a problem: it is how a config
+    without rules reads.
     """
     src = raw if isinstance(raw, dict) else {}
     out: dict = {}
+    problems: list[str] = []
     for row in PERMISSION_ROWS:
         raw_row = src.get(row)
         if not isinstance(raw_row, dict):
+            if raw_row is not None:
+                problems.append(f"{row}: the row is not a table, so the default "
+                                "rules are used for it")
             out[row] = _seed_row(row)
             continue
-        default = raw_row.get("default")
-        default = default.strip().lower() if isinstance(default, str) else ""
+        raw_default = raw_row.get("default")
+        default = raw_default.strip().lower() if isinstance(raw_default, str) else ""
         if default not in ROW_DEFAULTS:
+            problems.append(f"{row}: default {str(raw_default)[:40]!r} is not "
+                            "allow, ask or block, so it asks")
             default = "ask"
         allow: list = []
         raw_allow = raw_row.get("allow")
         if isinstance(raw_allow, list):
             for pattern in raw_allow:
                 if len(allow) >= MAX_PATTERNS_PER_LIST:
+                    problems.append(f"{row}: only the first "
+                                    f"{MAX_PATTERNS_PER_LIST} allow patterns "
+                                    "are used")
                     break
-                if not pattern_error(pattern) and pattern not in allow:
+                reason = pattern_error(pattern)
+                if reason:
+                    problems.append(f"{row}: allow pattern {str(pattern)[:60]!r} "
+                                    f"{reason}, so it was ignored")
+                elif pattern not in allow:
                     allow.append(pattern)
+        elif raw_allow is not None:
+            problems.append(f"{row}: the allow list is not a list, so it was "
+                            "ignored")
         raw_block = raw_row.get("block")
         if raw_block is None:
             block = []
@@ -498,10 +545,21 @@ def normalise_rules(raw: object) -> dict:
     raw_protected = src.get("protected_block")
     if isinstance(raw_protected, str):
         raw_protected = [raw_protected]
-    if not isinstance(raw_protected, list):
+    if raw_protected is not None and not isinstance(raw_protected, list):
+        problems.append("protected_block is not a list, so no Protected item "
+                        "is blocked outright")
         raw_protected = []
-    out["protected_block"] = [key for key in PROTECTED if key in raw_protected]
-    return out
+    for name in raw_protected or []:
+        # `isinstance` first: a TOML table in the list is unhashable.
+        if not (isinstance(name, str) and name in PROTECTED):
+            problems.append(f"protected_block: {str(name)[:40]!r} is not a "
+                            "Protected item, so it was ignored")
+    out["protected_block"] = [key for key in PROTECTED if key in (raw_protected or [])]
+    for problem in problems:
+        if problem not in _rule_problems_logged:
+            _rule_problems_logged.add(problem)
+            log.warning("acp_permission_rules: %s", problem)
+    return out, problems
 
 
 def _check_block_lists(rules: dict) -> None:
@@ -1068,9 +1126,17 @@ def _generate(status: GenerationStatus, config) -> GenerationStatus:
         _publish(target, derived_text, verify)
     except OSError as exc:
         raise AgentProfileError(f"cannot write {target}: {exc}") from exc
-    if note:
+    if note and note not in _notes_logged:
+        # Once per process (Phase 1 review, finding 8): every regeneration
+        # repeats the note, and the settings panel shows it for as long as it
+        # holds.
+        _notes_logged.add(note)
         log.warning("derived agent: %s", note)
     return replace(status, ok=True, error="", note=note)
+
+
+# D-28 notes `_generate` has already logged in this process.
+_notes_logged: set[str] = set()
 
 
 def _apply_locked(config) -> GenerationStatus:
@@ -1101,26 +1167,103 @@ def _apply_locked(config) -> GenerationStatus:
     return _status
 
 
-def apply_settings(mutate: Callable[[object], None] | None = None) -> dict:
+def config_load_error_message(config) -> str:
+    """The plain-words refusal for a config.toml that did not parse, or `""`.
+
+    Phase 1 review, finding 1. `load_config` answers an unreadable file with
+    the defaults, and the default mode is Yolo, the least restrictive one: a
+    generation or a save from those defaults would widen the posture the user
+    set. Paths are read from `config` at call time, because tests and
+    probes redirect `CONFIG_PATH`.
+    """
+    error = getattr(config, "_load_error", "")
+    if not error:
+        return ""
+    from . import config as config_mod
+    path = config_mod.CONFIG_PATH
+    backup = path.with_name(path.name + ".bak")
+    return (f"PowerAtlas's config.toml could not be read ({error}), so no "
+            "setting was changed and the permission settings were not applied. "
+            "Fix the file "
+            f"{path} by hand (a copy of the unreadable file was saved as "
+            f"{backup}), then save the mode again or restart PowerAtlas")
+
+
+def _record_notice(mode: str, why: str) -> None:
+    global _posture_notice
+    _posture_notice = {"mode": mode,
+                       "detected_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    log.warning("ACP permission settings changed outside the dashboard (%s); "
+                "the derived agent was regenerated for mode %s", why, mode)
+
+
+def _notice_if_changed(before: str, config, why: str) -> None:
+    """D-35: raise the notice when the file had been compiled from other settings.
+
+    `before` is the fingerprint the file carried before a regeneration. An
+    absent file, or one from before fingerprints existed, gives `""` and
+    raises nothing: there is no earlier posture to compare with.
+    """
+    mode, rules = _compiled_settings(config)
+    if before and before != settings_fingerprint(mode, rules):
+        _record_notice(mode, why)
+
+
+def apply_settings(mutate: Callable[[object], None] | None = None, *,
+                   lock_timeout: float | None = None,
+                   sets_posture: bool = False) -> dict:
     """Save a permission-settings change and regenerate, as one locked step.
 
     260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-16, D-32. Holds
     `_generation_lock` across `load_config`, `mutate(config)`, `save_config` and
-    generation, so the session gate — the only other acquirer — can never see
-    a config.toml that is ahead of the derived agent. `mutate=None` saves
-    nothing and only regenerates from the current settings (startup).
+    generation, so the session gate can never see a config.toml that is ahead
+    of the derived agent. `mutate=None` saves nothing and only regenerates from
+    the current settings (startup).
 
-    Returns `{saved, generation_ok, generation_error}` and never raises:
-    `saved` False means nothing changed (the route answers `ok: false`);
-    `saved` True with `generation_ok` False means the setting is stored but not
-    yet in effect (the route answers `ok: true` and a warning). The settings
-    state the route returns is computed after this releases the lock.
+    `lock_timeout` bounds the wait for the lock (the routes pass one, Phase 1
+    review finding 5); `None` waits as long as it takes (startup, which is
+    itself bounded by `lifespan`). A wait that runs out saves nothing.
+
+    A config.toml that did not parse is never generated from or saved over
+    (finding 1): its in-memory reading is the defaults, Yolo included.
+
+    D-35's notice: the startup pass (`mutate=None`) raises it when the file on
+    disk had been compiled from a different mode or rule set, as the gate's
+    self-heal does (finding 3a). A mutation clears it only when it chooses the
+    posture — `sets_posture=True` (the mode route, which is also how the
+    dashboard acknowledges the change) or a mutation that moved the mode or
+    rules. A base-agent rename leaves it (finding 3b).
+
+    Returns `{saved, generation_ok, generation_error}` (plus `error` when
+    nothing was saved) and never raises: `saved` False means nothing changed
+    (the route answers `ok: false`); `saved` True with `generation_ok` False
+    means the setting is stored but not yet in effect (the route answers
+    `ok: true` and a warning). The settings state the route returns is
+    computed after this releases the lock.
     """
-    global _posture_notice
-    with _generation_lock:
+    global _posture_notice, _status
+    if lock_timeout is None:
+        _generation_lock.acquire()
+    elif not _generation_lock.acquire(timeout=lock_timeout):
+        message = ("The permission settings are being applied; try again in a "
+                   "moment")
+        return {"saved": False, "generation_ok": False,
+                "generation_error": "", "error": message + "."}
+    try:
         config = load_config()
+        load_error = config_load_error_message(config)
+        if load_error:
+            base = getattr(config, "acp_permission_base_agent", "")
+            _status = GenerationStatus(
+                attempted=True, ok=False, error=load_error, mode="",
+                base_agent=base if isinstance(base, str) else "")
+            log.error("derived agent not updated: %s", load_error)
+            return {"saved": False, "generation_ok": False,
+                    "generation_error": load_error, "error": load_error + "."}
         saved = False
+        before_disk = _fingerprint_on_disk()
         if mutate is not None:
+            before = settings_fingerprint(*_compiled_settings(config))
             try:
                 mutate(config)
                 save_config(config)
@@ -1130,15 +1273,21 @@ def apply_settings(mutate: Callable[[object], None] | None = None) -> dict:
                         "generation_error": "",
                         "error": f"The setting was not saved: {exc}"}
             saved = True
-            # A change made here is the dashboard's own; the notice was about
-            # one that was not.
-            _posture_notice = None
+            # A posture chosen here is the dashboard's own; the notice was
+            # about one that was not.
+            if sets_posture or before != settings_fingerprint(
+                    *_compiled_settings(config)):
+                _posture_notice = None
         try:
             _apply_locked(config)
         except Exception:  # noqa: BLE001 - logged and recorded by _apply_locked
             return {"saved": saved, "generation_ok": False,
                     "generation_error": _status.error}
+        if mutate is None:
+            _notice_if_changed(before_disk, config, "found at startup")
         return {"saved": saved, "generation_ok": True, "generation_error": ""}
+    finally:
+        _generation_lock.release()
 
 
 def sync_from_config() -> dict:
@@ -1170,20 +1319,12 @@ def heal_stale_locked(config) -> bool:
     leaves the fingerprint alone and raises nothing. Returns whether the
     regeneration succeeded.
     """
-    global _posture_notice
     before = _fingerprint_on_disk()
     try:
         _apply_locked(config)
     except Exception:  # noqa: BLE001 - recorded by _apply_locked
         return False
-    mode, rules = _compiled_settings(config)
-    if before and before != settings_fingerprint(mode, rules):
-        _posture_notice = {
-            "mode": mode,
-            "detected_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        log.warning("ACP permission settings changed outside the dashboard; "
-                    "the derived agent was regenerated for mode %s", mode)
+    _notice_if_changed(before, config, "found by the session check")
     return True
 
 
@@ -1274,24 +1415,55 @@ def find_protected_links(root: Path | None = None) -> dict:
     the session gate, so a slow filesystem walk (these folders are often links
     into a synced folder) can never delay or refuse a session.
 
+    A Protected folder that is itself a link is listed first, with
+    `folder: True`, and counted: every write under it lands at its target
+    (Phase 1 review, finding 10).
+
     Returns `{folder: {"count": n, "links": [{name, path, target, error}]}}`.
-    Never raises: an unreadable folder reads as no links.
+    Never raises: an unreadable folder reads as no links, and an entry that
+    cannot be examined is skipped.
     """
     base = root if root is not None else KIRO_AGENTS_DIR.parent
     found: dict = {}
     for key in PROTECTED:
         links: list[dict] = []
+        folder = base / key
         try:
-            entries = sorted((base / key).iterdir(), key=lambda p: p.name.lower())
-        except OSError:
+            if _is_link(folder):
+                links.append({**_describe_link(folder), "folder": True})
+        except Exception:  # noqa: BLE001 - never raises, by contract
+            pass
+        try:
+            entries = sorted(folder.iterdir(), key=lambda p: p.name.lower())
+        except Exception:  # noqa: BLE001 - never raises, by contract
             entries = []
         for entry in entries:
             try:
-                linked = entry.is_symlink() or os.path.isjunction(entry)
-            except OSError:
+                if _is_link(entry):
+                    links.append(_describe_link(entry))
+            except Exception:  # noqa: BLE001 - never raises, by contract
                 continue
-            if linked:
-                links.append(_describe_link(entry))
         found[key] = {"count": len(links),
                       "links": links[:_LINKS_LISTED_PER_FOLDER]}
     return found
+
+
+def _is_junction(path: Path) -> bool:
+    """`os.path.isjunction`, which is Python 3.12+; the project allows 3.11.
+
+    Phase 1 review, finding 4. The fallback reads the reparse tag `lstat`
+    reports on Windows; elsewhere there are no junctions.
+    """
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None:
+        return bool(isjunction(path))
+    try:
+        tag = getattr(os.lstat(path), "st_reparse_tag", None)
+    except OSError:
+        return False
+    return tag is not None and tag == getattr(
+        stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+
+
+def _is_link(path: Path) -> bool:
+    return path.is_symlink() or _is_junction(path)

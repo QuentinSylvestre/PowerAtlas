@@ -1128,8 +1128,9 @@ def set_notify_hook(hook) -> None:
 # (`DEFAULT_TASK_MODE`, or no mode at all) or for the derived agent
 # (DERIVED_AGENT_NAME); answers whether the derived agent — PowerAtlas's
 # compiled permission mode, Always blocked floor included — is in effect right
-# now. `web.py` answers with a dict, `{in_effect, cause, fix, ...}`; a bare
-# bool is accepted too (`_gate_verdict`). While it is in effect Default binds
+# now. `web.py` answers with a dict, `{in_effect, cause, fix, remote_cause,
+# remote_fix, ...}`; anything else, a bare bool included, reads as not in
+# effect (`_gate_verdict`). While it is in effect Default binds
 # the derived agent. While it is not, **both** paths are refused, naming the
 # cause and the fix (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34, SC-3):
 # PowerAtlas never creates a Default session without the floor. The earlier
@@ -1195,17 +1196,26 @@ async def _derived_mode_in_effect():
 
 
 def _gate_verdict(answer) -> dict:
-    """`{in_effect, cause, fix}` from a gate answer, a dict or a bare bool.
+    """`{in_effect, cause, fix, remote_cause, remote_fix}` from a gate answer.
 
     260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34: the refusal names a
-    cause and a fix, which only `web.py` can know; a bare bool (no hook, or an
-    older caller) carries neither and gets generic wording in the refusal.
+    cause and a fix, which only `web.py` can know. Fails closed: only a dict
+    whose `in_effect` is `True` is in effect. Anything else — `False` when no
+    hook is installed, a bare bool, any other shape — is not, and carries no
+    cause, so the refusal uses generic wording.
+
+    `remote_cause`/`remote_fix` are the same text with the home folder shown
+    as `~` and no raw error text, for a client that is not on this computer
+    (Phase 1 review, finding 11).
     """
-    if isinstance(answer, dict):
-        return {"in_effect": answer.get("in_effect") is True,
-                "cause": str(answer.get("cause") or ""),
-                "fix": str(answer.get("fix") or "")}
-    return {"in_effect": answer is True, "cause": "", "fix": ""}
+    if not isinstance(answer, dict):
+        return {"in_effect": False, "cause": "", "fix": "",
+                "remote_cause": "", "remote_fix": ""}
+    return {"in_effect": answer.get("in_effect") is True,
+            "cause": str(answer.get("cause") or ""),
+            "fix": str(answer.get("fix") or ""),
+            "remote_cause": str(answer.get("remote_cause") or ""),
+            "remote_fix": str(answer.get("remote_fix") or "")}
 
 
 def _default_mode_binding(in_effect: bool) -> str:
@@ -1238,10 +1248,20 @@ def _conn_is_remote(conn) -> bool:
 
 
 def _not_in_effect_message(verdict: dict, remote: bool) -> str:
-    """The D-34 refusal: cause, fix, where the fix is made, and the way on."""
-    cause = verdict["cause"] or "PowerAtlas could not confirm its agent file"
-    fix = verdict["fix"] or ("Open Settings > Agent permissions on the "
-                             "dashboard to see why.")
+    """The D-34 refusal: cause, fix, where the fix is made, and the way on.
+
+    A remote client gets `remote_cause`/`remote_fix` — no absolute paths under
+    the user's home and no raw error text — or the generic wording when the
+    verdict has none; never the local text. The log line in `_handle_new`
+    keeps the full cause (Phase 1 review, finding 11).
+    """
+    if remote:
+        cause, fix = verdict.get("remote_cause", ""), verdict.get("remote_fix", "")
+    else:
+        cause, fix = verdict["cause"], verdict["fix"]
+    cause = cause or "PowerAtlas could not confirm its agent file"
+    fix = fix or ("Open Settings > Agent permissions on the dashboard to see "
+                  "why.")
     parts = [
         "PowerAtlas did not create this session: its permission rules, "
         "including the Always blocked list, are not in effect, because "
@@ -6519,6 +6539,20 @@ async def _handle_new(conn, payload):
     if raw_mode is None or raw_mode in (DEFAULT_TASK_MODE, DERIVED_AGENT_NAME):
         try:
             verdict = _gate_verdict(await _derived_mode_in_effect())
+        except TimeoutError as exc:
+            # The gate's bounded wait on the generation lock ran out: a
+            # settings change or a regeneration is still being applied. An
+            # expected, transient state, so no traceback, and the refusal says
+            # what is happening rather than "could not check" (Phase 1 review,
+            # finding 6). `asyncio.TimeoutError` is this class on 3.11+.
+            log.warning("ACP session/new refused (mode %r): %s", raw_mode, exc)
+            conn.send(error_frame(
+                "bad_payload",
+                "PowerAtlas did not create this session because its permission "
+                "settings are being applied right now. Try again in a moment. "
+                "To start a session now without PowerAtlas's rules, pick a task "
+                "mode such as Spec or Plan instead of Default."))
+            return
         except Exception:
             # Fails closed on both paths: the check that gates a Default
             # session broke, and a refusal the user can see and retry is

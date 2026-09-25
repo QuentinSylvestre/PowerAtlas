@@ -80,6 +80,10 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_profile_mod, "_status",
                         agent_profile_mod.GenerationStatus())
     monkeypatch.setattr(agent_profile_mod, "_posture_notice", None)
+    # Once-per-process log sets (Phase 1 review, findings 7 and 8), reset so
+    # a "logged once" test does not depend on test order.
+    monkeypatch.setattr(agent_profile_mod, "_rule_problems_logged", set())
+    monkeypatch.setattr(agent_profile_mod, "_notes_logged", set())
     # `lifespan` now creates the local secret at startup, so the path is
     # redirected with the same unconditional reach, and the D-22 fallback
     # state and the loaded key are reset because both are process-global.
@@ -105,7 +109,15 @@ def derived_agent_in_effect_by_default(monkeypatch):
     set explicitly where it is under test.
     """
     from power_atlas import acp as acp_mod
-    monkeypatch.setattr(acp_mod, "mode_gate_hook", lambda: True)
+    monkeypatch.setattr(acp_mod, "mode_gate_hook", _gate_in_effect)
+
+
+def _gate_in_effect() -> dict:
+    """A gate answer that says the derived agent is in effect, in the shape
+    `web._derived_agent_in_effect` returns. `acp._gate_verdict` fails closed on
+    any other shape, a bare `True` included (Phase 1 review, finding 13)."""
+    return {"in_effect": True, "state": "on", "mode": "yolo",
+            "cause": "", "fix": ""}
 
 
 # The loopback key every test runs under. `local_enabled` (Phase 4) loads the
@@ -4870,7 +4882,7 @@ class TestAcpSessionLoad:
         acp_mod, store = acp_store
         mode, frames = self._load_mode_sent(
             acp_mod, store, acp_store_dir_v3, monkeypatch,
-            lambda: True, "load-mode-on-01")
+            _gate_in_effect, "load-mode-on-01")
         assert mode == DERIVED_AGENT_NAME
         assert [f["type"] for f in frames][:2] == ["meta", "session"]
 
@@ -7142,7 +7154,7 @@ class TestAcpTaskModeSelection:
         acp_mod, _store = acp_store
         assert acp_mod.DERIVED_AGENT_NAME is DERIVED_AGENT_NAME
         assert DERIVED_AGENT_NAME in acp_mod._VALID_TASK_MODES
-        monkeypatch.setattr(acp_mod, "mode_gate_hook", lambda: True)
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", _gate_in_effect)
         conn = _acp_conn(acp_mod)
         seen = {}
 
@@ -7234,7 +7246,7 @@ class TestAcpTaskModeSelection:
             self, acp_store, tmp_path, monkeypatch, mode):
         acp_mod, _store = acp_store
         bound, errors, runs = self._new_with_gate(
-            acp_mod, tmp_path, monkeypatch, lambda: True, mode)
+            acp_mod, tmp_path, monkeypatch, _gate_in_effect, mode)
         assert bound == acp_mod.DERIVED_AGENT_NAME
         assert not errors, errors
         assert runs == 1
@@ -7245,6 +7257,8 @@ class TestAcpTaskModeSelection:
         "in_effect": False, "state": "unknown", "mode": "manual",
         "cause": "C:/x/poweratlas-acp.md was not written by PowerAtlas",
         "fix": "Remove or rename that file, then save the permission mode again.",
+        "remote_cause": "~/poweratlas-acp.md was not written by PowerAtlas",
+        "remote_fix": "Remove or rename that file (remote wording).",
     }
 
     @pytest.mark.parametrize("mode", ["kiro_default", _OMITTED])
@@ -7264,9 +7278,11 @@ class TestAcpTaskModeSelection:
         assert runs == 1
         assert [e["code"] for e in errors] == ["bad_payload"], errors
         message = errors[0]["message"]
-        assert self._NOT_IN_EFFECT["cause"] in message
-        assert self._NOT_IN_EFFECT["fix"] in message
-        # `_SinkWs` carries no transport address, which reads as remote.
+        # `_SinkWs` carries no transport address, which reads as remote, so
+        # the remote wording is sent and the local paths are not (finding 11).
+        assert self._NOT_IN_EFFECT["remote_cause"] in message
+        assert self._NOT_IN_EFFECT["remote_fix"] in message
+        assert "C:/x" not in message
         assert "computer running PowerAtlas" in message
         assert "task mode such as Spec or Plan" in message
         assert self.session_frames == []
@@ -7289,16 +7305,57 @@ class TestAcpTaskModeSelection:
         assert [e["code"] for e in errors] == ["bad_payload"]
         assert "computer running PowerAtlas" not in errors[0]["message"]
         assert self._NOT_IN_EFFECT["fix"] in errors[0]["message"]
+        assert self._NOT_IN_EFFECT["cause"] in errors[0]["message"]
 
-    def test_a_bare_false_gate_still_refuses_with_generic_words(
+    def test_a_remote_client_without_remote_wording_gets_the_generic_text(
             self, acp_store, tmp_path, monkeypatch):
-        """A bool answer carries no cause; the refusal still says what to do."""
+        """Finding 11: a verdict with no remote wording never falls back to
+        the local text, which may name paths under the home folder."""
+        acp_mod, _store = acp_store
+        local_only = {k: v for k, v in self._NOT_IN_EFFECT.items()
+                      if not k.startswith("remote_")}
+        _bound, errors, _runs = self._new_with_gate(
+            acp_mod, tmp_path, monkeypatch, lambda: dict(local_only),
+            "kiro_default")
+        message = errors[0]["message"]
+        assert "C:/x" not in message
+        assert "Settings > Agent permissions" in message
+
+    @pytest.mark.parametrize("answer", [False, True, None, "yes", 1,
+                                        {"in_effect": 1}, {"in_effect": "true"}])
+    def test_anything_but_the_in_effect_dict_refuses_with_generic_words(
+            self, acp_store, tmp_path, monkeypatch, answer):
+        """Finding 13: fails closed on any answer but a dict whose `in_effect`
+        is `True` -- a bare `True` included. No cause travels with those
+        shapes, so the refusal still says what to do."""
         acp_mod, _store = acp_store
         bound, errors, _runs = self._new_with_gate(
-            acp_mod, tmp_path, monkeypatch, lambda: False, "kiro_default")
+            acp_mod, tmp_path, monkeypatch, lambda: answer, "kiro_default")
         assert bound == "not called"
         assert "not in effect" in errors[0]["message"]
         assert "Settings > Agent permissions" in errors[0]["message"]
+
+    def test_a_gate_timeout_is_refused_as_settings_being_applied(
+            self, acp_store, tmp_path, monkeypatch, caplog):
+        """Finding 6: a lock timeout is a transient state, not a broken check:
+        WARNING without a traceback, and the refusal says what is happening
+        and to try again."""
+        acp_mod, _store = acp_store
+
+        def busy():
+            raise TimeoutError("the permission settings are being applied")
+
+        with caplog.at_level(logging.WARNING, logger=acp_mod.log.name):
+            bound, errors, _runs = self._new_with_gate(
+                acp_mod, tmp_path, monkeypatch, busy, "kiro_default")
+        assert bound == "not called"
+        message = errors[0]["message"]
+        assert "being applied" in message and "Try again in a moment" in message
+        assert "could not check" not in message
+        assert "task mode such as Spec or Plan" in message
+        records = [r for r in caplog.records if "being applied" in r.getMessage()]
+        assert [r.levelno for r in records] == [logging.WARNING]
+        assert records[0].exc_info is None
 
     def test_a_task_mode_create_succeeds_while_not_in_effect(
             self, acp_store, tmp_path, monkeypatch):
@@ -7335,7 +7392,7 @@ class TestAcpTaskModeSelection:
             self, acp_store, tmp_path, monkeypatch):
         acp_mod, _store = acp_store
         bound, errors, _runs = self._new_with_gate(
-            acp_mod, tmp_path, monkeypatch, lambda: True, "spec")
+            acp_mod, tmp_path, monkeypatch, _gate_in_effect, "spec")
         assert bound == "spec"
         assert [f["mode"] for f in self.session_frames] == ["spec"]
 
@@ -7362,7 +7419,7 @@ class TestAcpTaskModeSelection:
             self, acp_store, tmp_path, monkeypatch):
         acp_mod, _store = acp_store
         mode, errors, runs = self._new_with_gate(
-            acp_mod, tmp_path, monkeypatch, lambda: True,
+            acp_mod, tmp_path, monkeypatch, _gate_in_effect,
             acp_mod.DERIVED_AGENT_NAME)
         assert mode == acp_mod.DERIVED_AGENT_NAME
         assert not errors, errors
@@ -7418,7 +7475,7 @@ class TestAcpTaskModeSelection:
         with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
             asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
             assert "mode" not in seen, "an omitted mode skipped the gate"
-            monkeypatch.setattr(acp_mod, "mode_gate_hook", lambda: True)
+            monkeypatch.setattr(acp_mod, "mode_gate_hook", _gate_in_effect)
             asyncio.run(acp_mod._handle_new(_acp_conn(acp_mod),
                                             {"cwd": str(tmp_path)}))
         assert seen["mode"] == acp_mod.DERIVED_AGENT_NAME
@@ -23938,6 +23995,17 @@ class TestDerivedAgentAlwaysWritten:
         assert ap._norm_block(block) == ap._norm_block(_block(_cfg()))
         assert ap.derived_block_state(_cfg()) == "on"
 
+    def test_the_minimal_base_note_is_logged_once(self, isolated_config, caplog):
+        """Finding 8: every regeneration repeats the note; the log does not."""
+        ap = _agent_profile()
+        (isolated_config / "kiro-agents" / "kiro_default.md").unlink()
+        with caplog.at_level(logging.WARNING, logger=ap.log.name):
+            _regenerate(ap, _cfg())
+            _regenerate(ap, _cfg("manual"))
+        notes = [r for r in caplog.records if "minimal agent" in r.getMessage()]
+        assert len(notes) == 1
+        assert "minimal agent" in ap.last_generation().note
+
     def test_the_minimal_base_is_a_shape_the_splice_accepts(self):
         """No bare `: ` in a plain scalar -- the malformation that made
         kiro-cli fall open in the prior plan's Phase 0 -- and the column-0
@@ -24178,6 +24246,8 @@ class TestCompiledRuleInvariants:
     @pytest.mark.parametrize("pattern", [
         "rm\x7f", "echo \ud800", "a\u2028b", "a\u2029b", "\ufeffx", "a\x85b",
         "a\x00b", "a\tb", "a\nb", "*", "**", " * ", "", "   ", "x" * 201, 7, None,
+        # Only wildcards and separators (finding 9).
+        "***", "**/*", "*/**", "/", "\\", "*\\**", " **/** ",
     ])
     def test_d14_rejects_the_characters_that_can_fail_kiro_open(self, pattern):
         """DEL, surrogates, U+2028/U+2029, U+FEFF, C0/C1 controls, blank,
@@ -24370,6 +24440,53 @@ class TestFindProtectedLinks:
         assert all(l["target"] == "" and "unresolvable" in l["error"]
                    for l in loop["links"])
 
+    def test_junctions_are_found_without_os_path_isjunction(
+            self, tmp_path, monkeypatch):
+        """Finding 4: `os.path.isjunction` is Python 3.12+, and the project
+        allows 3.11. Without it the walk still runs and still names links."""
+        ap = _agent_profile()
+        root, outside = self._tree(tmp_path)
+        monkeypatch.delattr(os.path, "isjunction", raising=False)
+        found = ap.find_protected_links(root)
+        assert found["steering"]["count"] == 1
+        assert [l["name"] for l in found["skills"]["links"]] == ["linkdir"]
+        assert ap._is_junction(root / "steering" / "plain.md") is False
+
+    def test_an_entry_that_cannot_be_examined_is_skipped_not_raised(
+            self, tmp_path, monkeypatch):
+        ap = _agent_profile()
+        root, _outside = self._tree(tmp_path)
+
+        def broken(entry):
+            if entry.name == "linked.md":
+                raise ValueError("cannot describe")
+            return {"name": entry.name, "path": str(entry), "target": "", "error": ""}
+
+        monkeypatch.setattr(ap, "_describe_link", broken)
+        found = ap.find_protected_links(root)
+        assert found["steering"]["count"] == 0
+        assert found["skills"]["count"] == 1
+
+    def test_a_protected_folder_that_is_itself_a_link_is_named(self, tmp_path):
+        """Finding 10: every write under a linked Protected folder lands at its
+        target, so the folder is listed first, marked, and counted."""
+        ap = _agent_profile()
+        root = tmp_path / "kiro-home"
+        root.mkdir()
+        real = tmp_path / "real steering"
+        real.mkdir()
+        (real / "a.md").write_text("x", encoding="utf-8")
+        try:
+            os.symlink(real, root / "steering", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"cannot create symlinks here: {exc}")
+        found = ap.find_protected_links(root)
+        steering = found["steering"]
+        assert steering["count"] == 1
+        assert steering["links"][0]["folder"] is True
+        assert steering["links"][0]["name"] == "steering"
+        assert Path(steering["links"][0]["target"]) == real.resolve()
+
     def test_a_missing_folder_reads_as_no_links(self, tmp_path):
         ap = _agent_profile()
         found = ap.find_protected_links(tmp_path / "nowhere")
@@ -24476,7 +24593,7 @@ class TestPermissionGate:
             assert "mode" not in seen, "a session was created during generation"
             errors = [f["payload"] for f in _queued(conn) if f.get("type") == "error"]
             assert [e["code"] for e in errors] == ["bad_payload"]
-            assert "could not check" in errors[0]["message"]
+            assert "being applied" in errors[0]["message"]
 
             # A gate call that waits long enough is served once the lock frees.
             monkeypatch.setattr(web_mod, "_GATE_LOCK_TIMEOUT_SECONDS", 10.0)
@@ -24565,6 +24682,152 @@ class TestPermissionGate:
         assert "cannot be applied" in verdict["cause"]
         assert "acp_permission_rules" in verdict["fix"]
 
+    def test_a_corrupt_config_is_not_in_effect_even_when_the_file_matches(
+            self, isolated_config):
+        """Finding 1: a corrupt config.toml loads as the defaults. A derived
+        agent that happens to match them (Yolo) proves nothing about what the
+        user set, so the gate and the panel both read not in effect."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        assert ap.apply_settings(None)["generation_ok"] is True
+        _write_config(isolated_config, "this is = not [ toml\n")
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is False
+        assert "config.toml could not be read" in verdict["cause"]
+        assert "config.toml.bak" in verdict["fix"]
+        state = web_mod._acp_permission_state(web_mod.load_config())
+        assert state["in_effect"] is False
+        assert "config.toml" in state["config_error"]
+
+    def test_startup_on_a_corrupt_config_leaves_the_manual_file_alone(
+            self, isolated_config):
+        """Finding 1: the startup pass never regenerates from the defaults."""
+        import asyncio as _asyncio
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        assert ap.apply_settings(None)["generation_ok"] is True
+        manual = ap.derived_agent_path().read_bytes()
+        _write_config(isolated_config, "this is = not [ toml\n")
+        result = ap.sync_from_config()
+        assert result["saved"] is False and result["generation_ok"] is False
+        assert "config.toml" in result["generation_error"]
+        assert ".bak" in result["generation_error"]
+        _asyncio.run(web_mod._startup_sync_derived_agent())
+        assert ap.derived_agent_path().read_bytes() == manual
+        assert ap.last_generation().ok is False
+        assert "config.toml" in ap.last_generation().error
+        assert web_mod._derived_agent_in_effect()["in_effect"] is False
+
+    def test_the_heal_is_bounded_by_the_gate_budget(
+            self, isolated_config, monkeypatch):
+        """Finding 2 (D-30): the heal runs inside the gate's budget. A stalled
+        regeneration times the gate out; the regeneration then finishes in the
+        background, releases the lock, and the next gate sees it."""
+        import threading
+        import time as _time
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        assert ap.apply_settings(None)["generation_ok"] is True
+        path = ap.derived_agent_path()
+        good = path.read_bytes()
+        path.write_bytes(good.replace(b"effect: ask", b"effect: allow", 1))
+        monkeypatch.setattr(web_mod, "_GATE_LOCK_TIMEOUT_SECONDS", 0.3)
+        entered, release = threading.Event(), threading.Event()
+        real_generate = ap._generate
+
+        def stalled(status, config):
+            entered.set()
+            assert release.wait(10), "the test never released the generation"
+            return real_generate(status, config)
+
+        monkeypatch.setattr(ap, "_generate", stalled)
+        try:
+            started = _time.monotonic()
+            with pytest.raises(TimeoutError, match="regenerating"):
+                web_mod._derived_agent_in_effect()
+            elapsed = _time.monotonic() - started
+            assert entered.is_set()
+            assert elapsed < 1.5, elapsed
+            assert ap._generation_lock.locked(), "the heal lost its lock"
+        finally:
+            release.set()
+        assert ap._generation_lock.acquire(timeout=10), "the heal never released"
+        ap._generation_lock.release()
+        assert path.read_bytes() == good
+        assert web_mod._derived_agent_in_effect()["in_effect"] is True
+
+    def test_the_remote_wording_has_no_home_paths_or_error_text(
+            self, isolated_config, monkeypatch):
+        """Finding 11: the remote variant shows the home folder as `~` and
+        leaves raw error text out; the local variant keeps both."""
+        from power_atlas import config as config_mod
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        home = str(isolated_config)
+        real_expanduser = os.path.expanduser
+        monkeypatch.setattr(os.path, "expanduser",
+                            lambda p: home if p == "~" else real_expanduser(p))
+        ap.derived_agent_path().write_bytes(b"---\ndescription: mine\n---\nx\n")
+        verdict = web_mod._derived_agent_in_effect()
+        assert home in verdict["cause"]
+        assert home not in verdict["remote_cause"]
+        assert "~" in verdict["remote_cause"]
+        ap.derived_agent_path().unlink()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        ap.apply_settings(None)
+        config = config_mod.load_config()
+        config.acp_permission_rules["shell"]["block"] = ["rm\x7f"]
+        config_mod.save_config(config)
+        verdict = web_mod._derived_agent_in_effect()
+        assert "U+007F" in verdict["cause"]
+        assert "U+007F" not in verdict["remote_cause"]
+        assert "cannot be applied" in verdict["remote_cause"]
+
+
+class TestPostureNotice:
+    """D-35's notice, on the paths Phase 1 review finding 3 named."""
+
+    def test_the_startup_pass_notices_a_change_made_while_stopped(
+            self, isolated_config):
+        ap = _agent_profile()
+        assert ap.apply_settings(None)["generation_ok"] is True
+        assert ap.posture_notice() is None
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        assert ap.sync_from_config()["generation_ok"] is True
+        assert ap.posture_notice()["mode"] == "manual"
+
+    def test_the_first_startup_raises_no_notice(self, isolated_config):
+        ap = _agent_profile()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        assert ap.sync_from_config()["generation_ok"] is True
+        assert ap.posture_notice() is None
+
+    def test_a_base_agent_rename_keeps_the_notice_a_mode_change_clears_it(
+            self, isolated_config):
+        ap = _agent_profile()
+        _write_base(isolated_config, name="other_agent")
+        ap.apply_settings(None)
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        ap.sync_from_config()
+        assert ap.posture_notice()["mode"] == "manual"
+        ap.apply_settings(lambda c: setattr(c, "acp_permission_base_agent",
+                                            "other_agent"))
+        assert ap.posture_notice() is not None, "a rename cleared the notice"
+        ap.apply_settings(lambda c: setattr(c, "acp_permission_mode", "yolo"))
+        assert ap.posture_notice() is None
+
+    def test_choosing_the_same_mode_from_the_dashboard_clears_it(
+            self, isolated_config):
+        ap = _agent_profile()
+        ap.apply_settings(None)
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        ap.sync_from_config()
+        ap.apply_settings(lambda c: setattr(c, "acp_permission_mode", "manual"),
+                          sets_posture=True)
+        assert ap.posture_notice() is None
+
 
 class TestAcpPermissionRoutes:
     """`GET`/`POST /api/acp-permissions` and the base agent via
@@ -24640,9 +24903,9 @@ class TestAcpPermissionRoutes:
         seen = []
         real = ap.apply_settings
 
-        def spy(mutate=None):
+        def spy(mutate=None, **kwargs):
             seen.append(mutate)
-            return real(mutate)
+            return real(mutate, **kwargs)
 
         monkeypatch.setattr(ap, "apply_settings", spy)
         body = client.post("/api/save-setting",
@@ -24720,6 +24983,76 @@ class TestAcpPermissionRoutes:
                     json={"key": "acp_permission_base_agent",
                           "value": "other_agent"})
         assert config_mod.load_config().acp_permission_mode == "manual"
+
+    def test_a_write_on_a_corrupt_config_is_refused_and_changes_nothing(
+            self, client, isolated_config):
+        """Finding 1: the defaults stand in for an unreadable config.toml, so
+        no route saves them over it -- a mode change, a base-agent rename, or
+        any other setting."""
+        ap = _agent_profile()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        ap.apply_settings(None)
+        manual = ap.derived_agent_path().read_bytes()
+        corrupt = b'acp_permission_mode = "manual"\nbroken = [\n'
+        (isolated_config / "config.toml").write_bytes(corrupt)
+        for resp in (
+                client.post("/api/acp-permissions", json={"mode": "yolo"}),
+                client.post("/api/save-setting",
+                            json={"key": "acp_permission_base_agent",
+                                  "value": "kiro_default"}),
+                client.post("/api/save-setting",
+                            json={"key": "default_directory", "value": "C:/x"})):
+            body = resp.json()
+            assert body["ok"] is False, body
+            assert "config.toml" in body["error"]
+            assert (isolated_config / "config.toml").read_bytes() == corrupt
+        assert ap.derived_agent_path().read_bytes() == manual
+        state = client.get("/api/acp-permissions").json()
+        assert state["in_effect"] is False
+        assert "could not be read" in state["config_error"]
+
+    def test_a_route_waits_a_bounded_time_for_the_lock(
+            self, client, isolated_config, monkeypatch):
+        """Finding 5: a held generation lock answers "try again" rather than
+        holding the request open, and saves nothing."""
+        from power_atlas import config as config_mod
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        monkeypatch.setattr(web_mod, "_SETTINGS_LOCK_TIMEOUT_SECONDS", 0.1)
+        assert ap._generation_lock.acquire(timeout=5)
+        try:
+            body = client.post("/api/acp-permissions",
+                               json={"mode": "manual"}).json()
+            renamed = client.post("/api/save-setting",
+                                  json={"key": "acp_permission_base_agent",
+                                        "value": "other"}).json()
+        finally:
+            ap._generation_lock.release()
+        assert body["ok"] is False and "being applied" in body["error"]
+        assert renamed["ok"] is False and "being applied" in renamed["error"]
+        assert config_mod.load_config().acp_permission_mode == "yolo"
+
+    def test_rules_that_loading_had_to_change_are_reported_and_logged_once(
+            self, client, isolated_config, caplog):
+        """Finding 7: an unreadable default, a dropped allow pattern and an
+        unknown Protected name are named in the state and logged once."""
+        _write_config(isolated_config,
+                      'acp_permission_mode = "manual"\n'
+                      '[acp_permission_rules]\n'
+                      'protected_block = ["agents", "nope"]\n'
+                      '[acp_permission_rules.shell]\n'
+                      'default = "sometimes"\n'
+                      'allow = ["pwd", "***"]\n')
+        with caplog.at_level(logging.WARNING, logger="power_atlas.agent_profile"):
+            first = client.get("/api/acp-permissions").json()
+            client.get("/api/acp-permissions")
+        warning = first["rules_warning"]
+        assert "'sometimes'" in warning and "'***'" in warning
+        assert "'nope'" in warning
+        logged = [r.getMessage() for r in caplog.records
+                  if "acp_permission_rules" in r.getMessage()]
+        assert len(logged) == 3, logged
+        assert first["mode"] == "manual"
 
 
 class TestGenerationRunsAtStartup:
@@ -27466,7 +27799,7 @@ class TestAcpMcpStatusNotification:
             # In effect: a Default create is refused otherwise
             # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34).
             with patch.object(acp_mod, "_derived_mode_in_effect",
-                              AsyncMock(return_value=True)), \
+                              AsyncMock(return_value=_gate_in_effect())), \
                  patch.object(acp_mod, "_resolve_session_cwd",
                               return_value="C:\\scratch"), \
                  patch.object(sv3, "new_session",

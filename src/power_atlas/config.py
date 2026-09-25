@@ -635,6 +635,7 @@ def _default_permission_rules() -> dict:
 def _with_permission_defaults(config: Config) -> Config:
     """A config with no stored permission settings: Yolo and the seed rules."""
     config._mode_warning = ""
+    config._rules_warning = ""
     return config
 
 
@@ -656,7 +657,7 @@ def _migrate_permission_settings(config: Config, data: dict) -> None:
       raises. Imported here, not at module level: `agent_profile` imports this
       module, and the rule constants live beside the compiler (D-17).
     """
-    from .agent_profile import normalise_rules
+    from .agent_profile import normalise_rules_report
     migrated_manual = False
     if "acp_permission_mode" in data:
         raw_mode = data["acp_permission_mode"]
@@ -674,11 +675,21 @@ def _migrate_permission_settings(config: Config, data: dict) -> None:
     config._mode_warning = warning
 
     raw_rules = data.get("acp_permission_rules")
+    problems: list[str] = []
     if isinstance(raw_rules, dict) and raw_rules:
-        config.acp_permission_rules = normalise_rules(raw_rules)
+        config.acp_permission_rules, problems = normalise_rules_report(raw_rules)
     else:
+        if raw_rules is not None and not isinstance(raw_rules, dict):
+            problems = ["acp_permission_rules is not a table, so the default "
+                        "rules are used"]
+            if problems[0] not in _mode_values_warned:
+                _mode_values_warned.add(problems[0])
+                log.warning("%s", problems[0])
         seeded = {"protected_block": ["agents"]} if migrated_manual else {}
-        config.acp_permission_rules = normalise_rules(seeded)
+        config.acp_permission_rules = normalise_rules_report(seeded)[0]
+    # What normalisation changed, for the settings panel (Phase 1 review,
+    # finding 7); logged once per problem by `normalise_rules_report`.
+    config._rules_warning = "; ".join(problems)
 
 
 def load_config() -> Config:

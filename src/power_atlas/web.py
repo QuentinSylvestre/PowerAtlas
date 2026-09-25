@@ -501,7 +501,7 @@ async def _startup_sync_derived_agent() -> None:
     """`_sync_derived_agent`, bounded for `lifespan` (F5).
 
     On a timeout the posture is left as it is on disk: this process does not
-    touch the file, and `derived_block_state()` keeps reading whatever is there,
+    touch the file, and `derived_block_state(config)` keeps reading whatever is there,
     so the settings panel stays truthful. A sync still running in its thread
     may yet complete; it holds `agent_profile`'s lock, so a settings write
     queues behind it rather than racing it, and the session gate's bounded
@@ -567,34 +567,59 @@ async def _startup_load_local_secret() -> None:
 _GATE_LOCK_TIMEOUT_SECONDS = 2.0
 
 
+def _permission_in_effect(state: str, config) -> bool:
+    """The one in-effect predicate the gate and the settings panel share (SC-9).
+
+    The file must be exactly what the settings compile to (D-15), and the
+    settings must have been read: a config.toml that did not parse loads as the
+    defaults, so a file that happens to match them proves nothing about what
+    the user set (Phase 1 review, finding 1).
+    """
+    return state == "on" and not getattr(config, "_load_error", "")
+
+
 def _not_in_effect_reason(state: str, compile_error: str, config,
-                          healed: bool | None) -> tuple[str, str]:
+                          healed: bool | None, *,
+                          detail: bool = True) -> tuple[str, str]:
     """`(cause, fix)` for a derived agent that is not in effect (D-34).
 
     Plain words for the session refusal and the log: what is wrong, and the
     concrete step that fixes it. `healed` is the D-30 self-heal's outcome, or
-    None when it did not run.
+    None when it did not run. `detail=False` leaves out raw error text, for a
+    remote client (Phase 1 review, finding 11); `_for_remote` then shortens
+    the paths.
     """
     path = str(agent_profile.derived_agent_path())
     last = agent_profile.last_generation()
     settings_step = ("save the permission mode again in Settings > Agent "
                      "permissions on the dashboard, or restart PowerAtlas")
+
+    def said(text: str, fmt: str) -> str:
+        return fmt.format(text) if detail and text else ""
+
+    load_error = getattr(config, "_load_error", "")
+    if load_error:
+        from . import config as config_mod
+        cfg = config_mod.CONFIG_PATH
+        return (f"PowerAtlas's config.toml could not be read"
+                f"{said(load_error, ' ({})')}, so which permission mode is set "
+                "is unknown",
+                f"Fix {cfg} by hand (a copy of the unreadable file was saved as "
+                f"{cfg.name}.bak beside it), then start the session again.")
     if compile_error:
-        return (f"the permission rules in config.toml cannot be applied "
-                f"({compile_error})",
+        return (f"the permission rules in config.toml cannot be applied"
+                f"{said(compile_error, ' ({})')}",
                 "Fix or remove acp_permission_rules in PowerAtlas's "
                 f"config.toml, then {settings_step}.")
     if state == "absent":
-        why = f": {last.error}" if last.attempted and last.error else ""
+        why = said(last.error if last.attempted else "", ": {}")
         return (f"its agent file {path} has not been written{why}",
                 settings_step[0].upper() + settings_step[1:]
                 + "; if it keeps failing, the warning there names the error.")
     if state == "stale":
-        if getattr(config, "_load_error", ""):
-            why = ("; config.toml could not be read, so it was not "
-                   "regenerated")
-        elif healed is False and last.error:
-            why = f", and regenerating it failed ({last.error})"
+        if healed is False and last.error:
+            why = (said(last.error, ", and regenerating it failed ({})")
+                   or ", and regenerating it failed")
         else:
             why = ""
         return (f"its agent file {path} does not match the current permission "
@@ -603,6 +628,21 @@ def _not_in_effect_reason(state: str, compile_error: str, config,
     return (f"{path} was not written by PowerAtlas, or cannot be read, so "
             "PowerAtlas will not use or replace it",
             "Remove or rename that file, then " + settings_step + ".")
+
+
+def _for_remote(text: str) -> str:
+    """`text` with the user's home folder shown as `~` (finding 11).
+
+    Both separator spellings, case-insensitively on Windows, because the
+    paths in a refusal come from `Path` objects and from kiro-cli's error text.
+    """
+    home = os.path.expanduser("~")
+    if not home or home == "~":
+        return text
+    for spelling in {home, home.replace("\\", "/"), home.replace("/", "\\")}:
+        flags = re.IGNORECASE if sys.platform == "win32" else 0
+        text = re.sub(re.escape(spelling), "~", text, flags=flags)
+    return text
 
 
 def _derived_agent_in_effect() -> dict:
@@ -626,26 +666,71 @@ def _derived_agent_in_effect() -> dict:
     `acp`'s `load_session` consults it too, for the `modeId` a reload sends.
     There a raising call falls back to `kiro_default` instead of refusing the
     load. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K5).
+
+    The whole call, heal included, waits at most `_GATE_LOCK_TIMEOUT_SECONDS`
+    (D-30; Phase 1 review, finding 2). The heal runs in a worker thread that
+    takes over this call's hold on the lock and releases it when the
+    regeneration and its re-check finish; this call waits for it with what is
+    left of the budget and raises `TimeoutError` when that runs out. The
+    regeneration then completes in the background, and a later gate call sees
+    its result. A config.toml that did not parse is never in effect and never
+    healed (finding 1). When not in effect, `remote_cause`/`remote_fix` carry
+    the same words without raw error text and with `~` for the home folder,
+    for a remote client (finding 11).
     """
     lock = agent_profile._generation_lock
+    deadline = time.monotonic() + _GATE_LOCK_TIMEOUT_SECONDS
+
+    def timed_out(what: str) -> TimeoutError:
+        return TimeoutError(
+            f"the permission settings are being applied ({what}) and did not "
+            f"finish within {_GATE_LOCK_TIMEOUT_SECONDS:.0f} s")
+
     if not lock.acquire(timeout=_GATE_LOCK_TIMEOUT_SECONDS):
-        raise TimeoutError(
-            "the permission settings are being applied and did not finish "
-            f"within {_GATE_LOCK_TIMEOUT_SECONDS:.0f} s")
+        raise timed_out("waiting for a settings change")
+    handed_off = False
     try:
         config = load_config()
         state, compile_error = agent_profile.block_state_detail(config)
         healed = None
         if state == "stale" and not getattr(config, "_load_error", ""):
-            healed = agent_profile.heal_stale_locked(config)
-            state, compile_error = agent_profile.block_state_detail(config)
+            done = threading.Event()
+            box: dict = {}
+
+            def heal() -> None:
+                # Owns the lock from here on, and always releases it.
+                try:
+                    box["healed"] = agent_profile.heal_stale_locked(config)
+                    box["state"] = agent_profile.block_state_detail(config)
+                except BaseException as exc:  # noqa: BLE001 - re-raised below
+                    box["error"] = exc
+                finally:
+                    lock.release()
+                    done.set()
+
+            worker = threading.Thread(target=heal, daemon=True,
+                                      name="acp-permission-heal")
+            worker.start()
+            handed_off = True
+            if not done.wait(max(0.0, deadline - time.monotonic())):
+                raise timed_out("regenerating the agent file")
+            if "error" in box:
+                raise box["error"]
+            healed = box["healed"]
+            state, compile_error = box["state"]
     finally:
-        lock.release()
-    verdict = {"in_effect": state == "on", "state": state,
+        if not handed_off:
+            lock.release()
+    in_effect = _permission_in_effect(state, config)
+    verdict = {"in_effect": in_effect, "state": state,
                "mode": config.acp_permission_mode, "cause": "", "fix": ""}
-    if not verdict["in_effect"]:
+    if not in_effect:
         verdict["cause"], verdict["fix"] = _not_in_effect_reason(
             state, compile_error, config, healed)
+        remote_cause, remote_fix = _not_in_effect_reason(
+            state, compile_error, config, healed, detail=False)
+        verdict["remote_cause"] = _for_remote(remote_cause)
+        verdict["remote_fix"] = _for_remote(remote_fix)
     return verdict
 
 
@@ -4153,10 +4238,16 @@ def _acp_permission_state(config) -> dict:
     return {
         "mode": config.acp_permission_mode,
         "mode_warning": getattr(config, "_mode_warning", ""),
+        # Phase 1 review, finding 1: config.toml did not parse, so `mode` and
+        # the rules below are the defaults, not what the user set; the panel
+        # shows this instead of a mode.
+        "config_error": agent_profile.config_load_error_message(config),
+        # Finding 7: what loading had to change in the stored rules.
+        "rules_warning": getattr(config, "_rules_warning", ""),
         "base_agent": config.acp_permission_base_agent,
         "derived_agent": str(agent_profile.derived_agent_path()),
         "state": state,
-        "in_effect": state == "on",
+        "in_effect": _permission_in_effect(state, config),
         "generation_attempted": last.attempted,
         "generation_ok": last.ok and not compile_error,
         "generation_error": compile_error or last.error,
@@ -4190,6 +4281,12 @@ async def _current_acp_permission_state(*, links: bool = False) -> dict:
 @app.get("/api/acp-permissions")
 async def get_acp_permissions():
     return await _current_acp_permission_state(links=True)
+
+
+# How long a permission settings route waits for `agent_profile`'s generation
+# lock before it answers "try again" (Phase 1 review, finding 5): a stalled
+# regeneration must not hold an HTTP request, and its worker thread, forever.
+_SETTINGS_LOCK_TIMEOUT_SECONDS = 5.0
 
 
 def _apply_result(result: dict) -> dict:
@@ -4230,7 +4327,12 @@ async def set_acp_permissions(request: Request):
         # top-level keys riding on `_extra` survive the save.
         config.acp_permission_mode = mode
 
-    result = await asyncio.to_thread(agent_profile.apply_settings, mutate)
+    # `sets_posture`: choosing the mode here is the dashboard's answer to
+    # D-35's notice, even when the mode is unchanged.
+    result = await asyncio.to_thread(
+        lambda: agent_profile.apply_settings(
+            mutate, lock_timeout=_SETTINGS_LOCK_TIMEOUT_SECONDS,
+            sets_posture=True))
     answer = _apply_result(result)
     if not answer["ok"]:
         return answer
@@ -4774,6 +4876,12 @@ async def save_setting(request: Request):
         if any(ord(ch) < 0x20 for ch in value):
             return {"ok": False, "error": f"{key} contains invalid control characters"}
     config = load_config()
+    load_error = agent_profile.config_load_error_message(config)
+    if load_error:
+        # Phase 1 review, finding 1. `config` is the defaults stand-in for a
+        # config.toml that did not parse; saving it would write every default
+        # over the user's file, Yolo included, for any key.
+        return {"ok": False, "error": load_error + "."}
     if key == "remote_bind_address":
         # The named error SC-3b asks for, on the write path. `load_config`
         # sanitises the same value to "" and logs, because it may not raise;
@@ -4821,7 +4929,9 @@ async def save_setting(request: Request):
         def mutate(locked_config) -> None:
             locked_config.acp_permission_base_agent = value
 
-        result = await asyncio.to_thread(agent_profile.apply_settings, mutate)
+        result = await asyncio.to_thread(
+            lambda: agent_profile.apply_settings(
+                mutate, lock_timeout=_SETTINGS_LOCK_TIMEOUT_SECONDS))
         answer = _apply_result(result)
         if not answer["ok"]:
             return answer

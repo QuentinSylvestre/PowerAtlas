@@ -7496,11 +7496,28 @@ function _acpPermGenerationFailed(d) {
   return d.generation_ok === false && d.generation_attempted !== false;
 }
 
+/** config.toml did not parse: the mode and rules in the answer are the
+ *  defaults, not what was set (Phase 1 review, finding 1). */
+function _acpPermConfigError(d) {
+  return typeof d.config_error === 'string' && d.config_error !== '' ? d.config_error : '';
+}
+
 function _acpPermWarnText(d) {
   var parts = [];
+  var configError = _acpPermConfigError(d);
+  if (configError) {
+    // The server names the file, the backup and the next step; the rest of
+    // the reasons below would describe the defaults, so they are left out.
+    return configError + '. New Default sessions are refused until this is '
+      + 'fixed; task modes such as Spec or Plan still start.';
+  }
   // D-25: an unreadable stored mode loads as Manual and says so.
   if (typeof d.mode_warning === 'string' && d.mode_warning) {
     parts.push(d.mode_warning + '.');
+  }
+  // Finding 7: what loading had to change in the stored rules.
+  if (typeof d.rules_warning === 'string' && d.rules_warning) {
+    parts.push('Some stored rules were not used: ' + d.rules_warning + '.');
   }
   if (d.in_effect !== true) {
     var why, next;
@@ -7608,7 +7625,9 @@ function _acpPermRenderProtected(rows, links) {
       (Array.isArray(found.links) ? found.links : []).forEach(function (link) {
         if (!link || typeof link !== 'object') return;
         var where = link.target ? ' → ' + link.target : ' (' + (link.error || 'unresolvable') + ')';
-        list.appendChild(_acpPermEl('li', '', String(link.name || '') + where));
+        // `folder`: the Protected folder is itself a link (finding 10).
+        var name = String(link.name || '') + (link.folder === true ? ' (the whole folder)' : '');
+        list.appendChild(_acpPermEl('li', '', name + where));
       });
       item.appendChild(list);
     }
@@ -7636,7 +7655,9 @@ function renderAcpPermissions(d) {
   var base = document.getElementById('acpPermBaseAgent');
   var desc = document.getElementById('acpPermDesc');
   var notice = document.getElementById('acpPermNotice');
-  _acpPermSetMode(d.mode);
+  // No mode is checked while config.toml cannot be read: `d.mode` is then the
+  // default, and checking it would claim a posture nobody set (as G10).
+  _acpPermSetMode(_acpPermConfigError(d) ? null : d.mode);
   if (desc && _ACP_PERM_MODE_DESC[d.mode]) desc.textContent = _ACP_PERM_MODE_DESC[d.mode];
   // Not while the user is typing into it: a background refresh would replace
   // a half-typed name with the saved one.
@@ -7664,7 +7685,8 @@ function renderAcpPermissions(d) {
   // G4: visible without opening the menu, on the same gear dot the
   // restart-drift badge uses.
   var attention = notInEffect || _acpPermGenerationFailed(d)
-    || !!d.mode_warning || !!noticeText;
+    || !!d.mode_warning || !!d.rules_warning || !!_acpPermConfigError(d)
+    || !!noticeText;
   _topbarDotPerm = attention
     ? 'The permission mode is not working as set; see Agent permissions' : '';
   _syncTopbarDot();
