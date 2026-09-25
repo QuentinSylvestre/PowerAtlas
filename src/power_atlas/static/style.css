@@ -151,6 +151,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
    correctly hiding (no explicit `display` of its own) while these two,
    which do set one, stayed visible with `hidden` set. */
 .topbar-restart-note[hidden], .topbar-restart-btn[hidden] { display: none; }
+/* The same trap for .topbar-menu-row's `display: flex`: #acpPermApplyAgain
+   (Apply again) rendered with `hidden` set, measured in Chrome 2026-09-25,
+   and one click there adopts an outside change while a notice is pending. */
+.topbar-menu-row[hidden] { display: none; }
 /* 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the permission
    profile's scope line and its on-but-not-in-effect warning. The warning can
    carry a generation error naming a file path, so it wraps anywhere. */
