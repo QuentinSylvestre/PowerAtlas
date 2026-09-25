@@ -186,7 +186,7 @@
            created afterwards. The derived agent is never deleted any more, so
            the old "off also reaches running sessions" direction is gone. -->
       <div id="acpPermScopeNote" class="topbar-menu-note">Changes apply to sessions created afterwards. A reopened session keeps the agent it started with, so it is outside the Always blocked list if PowerAtlas's agent was not in effect when it started. Terminal sessions and task modes such as Spec or Plan are not covered.</div>
-      <div id="acpPermWarn" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
+      <div id="acpPermWarn" class="topbar-menu-note topbar-menu-warn" role="status" tabindex="-1" hidden></div>
 
       <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review
            (F2, F3): the loopback sign-in. The warning is D-22's "report in
@@ -7840,10 +7840,42 @@ function acknowledgeAcpPermissionNotice(kind) {
   })
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      if (d && d.ok) renderAcpPermissions(d);
-      else _acpPermToast((d && d.error) || 'The notice was not cleared.');
+      if (d && d.ok) {
+        renderAcpPermissions(d);
+        // QA 2026-09-25: the button just went away with its notice.
+        _acpPermFocusAfter(false);
+      } else {
+        _acpPermToast((d && d.error) || 'The notice was not cleared.');
+      }
     })
     .catch(function () { _acpPermToast('The notice was not cleared.'); });
+}
+
+/** The mode radio that is checked, or null. */
+function _acpPermCheckedRadio() {
+  var checked = null;
+  ['Yolo', 'Manual'].forEach(function (m) {
+    var el = document.getElementById('acpPermMode' + m);
+    if (el && el.checked) checked = el;
+  });
+  return checked;
+}
+
+/** QA 2026-09-25: Apply again and Acknowledge hide themselves on success, which
+ *  left the focus on <body>. Put it on the checked mode instead, or, when
+ *  `preferWarn` and the section still shows a warning, on that warning (a
+ *  live region, so its new text is also announced). Checked when the answer
+ *  arrives, so a menu closed meanwhile is left alone. */
+function _acpPermFocusAfter(preferWarn) {
+  var menu = document.getElementById('topbarSettingsMenu');
+  if (!menu || menu.hidden) return;
+  var warn = document.getElementById('acpPermWarn');
+  if (preferWarn && warn && !warn.hidden && warn.textContent) {
+    warn.focus();
+    return;
+  }
+  var checked = _acpPermCheckedRadio();
+  if (checked) checked.focus();
 }
 
 /** Final review (M-6): open the Always blocked list the upgrade notice
@@ -7858,16 +7890,12 @@ function showAcpPermissionFloor() {
  *  offered while an outside-change notice is pending and the mode is in
  *  effect (cycle 2, C-L4). */
 function applyAcpPermissionModeAgain() {
-  var checked = null;
-  ['Yolo', 'Manual'].forEach(function (m) {
-    var el = document.getElementById('acpPermMode' + m);
-    if (el && el.checked) checked = el;
-  });
+  var checked = _acpPermCheckedRadio();
   if (!checked) {
     _acpPermToast('Choose a permission mode first.');
     return;
   }
-  setAcpPermissionMode(checked);
+  setAcpPermissionMode(checked, function () { _acpPermFocusAfter(true); });
 }
 
 /** Draw the permission rows from a `GET`/`POST /api/acp-permissions` (or
@@ -7987,8 +8015,9 @@ function loadAcpPermissions() {
 /** A radio's `change`. `POST /api/acp-permissions` **sets** the mode, so the
  *  request states the one chosen. A refusal is `{ok: false, error}` with HTTP
  *  200, so success is read from the body, not the status. `ok: true` with a
- *  `warning` means saved but not yet in effect (D-32). */
-function setAcpPermissionMode(el) {
+ *  `warning` means saved but not yet in effect (D-32). `onSaved`, optional,
+ *  runs after a successful answer is drawn (Apply again's focus move). */
+function setAcpPermissionMode(el, onSaved) {
   var want = el && el.value;
   if (want !== 'yolo' && want !== 'manual') return;
   if (_acpPermSaving) {
@@ -8007,6 +8036,7 @@ function setAcpPermissionMode(el) {
       if (d && d.ok) {
         renderAcpPermissions(d);
         if (typeof d.warning === 'string' && d.warning) _acpPermToast(d.warning);
+        if (typeof onSaved === 'function') onSaved();
       } else {
         _acpPermToast((d && d.error) || 'The permission mode was not saved.');
         loadAcpPermissions();

@@ -18187,6 +18187,80 @@ check("settings: the one-time upgrade notice names the mode, opens Always blocke
   assertEqual(up.hidden, true, "the acknowledged upgrade notice stayed up");
 });
 
+// QA 2026-09-25 (real Chrome): Apply again and Acknowledge hide themselves on
+// success, and the focus fell to <body>. It now lands on the checked mode, or
+// on the warning while one is still shown; a failure or a closed menu leaves
+// it where it was.
+check("settings: Apply again keeps the focus in the section (QA 2026-09-25)", async () => {
+  let answer = Object.assign({ ok: true }, permState({ mode: "manual" }));
+  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: answer } : { body: {} } });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  $("topbarSettingsMenu").hidden = false;
+  const broken = permState({ mode: "manual", in_effect: false, state: "absent" });
+  // Success, now in effect: the checked radio.
+  p.sandbox.renderAcpPermissions(broken);
+  ACTIVE = $("acpPermApplyAgain");
+  p.sandbox.applyAcpPermissionModeAgain();
+  await p.settle();
+  assertEqual($("acpPermApplyAgain").hidden, true, "Apply again stayed after the fix");
+  assert(ACTIVE === $("acpPermModeManual"), "the focus did not land on the checked radio after Apply again");
+  // Success, still not in effect: the warning, which is focusable.
+  answer = Object.assign({ ok: true }, broken);
+  p.sandbox.renderAcpPermissions(broken);
+  ACTIVE = $("acpPermApplyAgain");
+  p.sandbox.applyAcpPermissionModeAgain();
+  await p.settle();
+  assert(ACTIVE === $("acpPermWarn"), "the focus did not land on the warning that is still shown");
+  // Failure: the focus stays on the button.
+  answer = { ok: false, error: "nope" };
+  p.sandbox.renderAcpPermissions(broken);
+  ACTIVE = $("acpPermApplyAgain");
+  p.sandbox.applyAcpPermissionModeAgain();
+  await p.settle();
+  assert(ACTIVE === $("acpPermApplyAgain"), "a refused Apply again moved the focus");
+  // Menu closed while the answer was out: nothing moves.
+  answer = Object.assign({ ok: true }, permState({ mode: "manual" }));
+  p.sandbox.renderAcpPermissions(broken);
+  ACTIVE = null;
+  p.sandbox.applyAcpPermissionModeAgain();
+  $("topbarSettingsMenu").hidden = true;
+  await p.settle();
+  assertEqual(ACTIVE, null, "the focus moved while the menu was closed");
+  // The warning can take the focus in a browser.
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  assert(/<div id="acpPermWarn"[^>]*tabindex="-1"/.test(src), "#acpPermWarn is not focusable");
+});
+
+check("settings: Acknowledge moves the focus to the checked mode (QA 2026-09-25)", async () => {
+  let answer = Object.assign({ ok: true }, permState({ mode: "yolo" }));
+  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions/acknowledge" ? { body: answer } : { body: {} } });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  $("topbarSettingsMenu").hidden = false;
+  const pending = permState({ mode: "yolo", posture_notice: { mode: "yolo", what: "mode", detected_at: "t" } });
+  p.sandbox.renderAcpPermissions(pending);
+  let ack = $("acpPermNotice").querySelectorAll("button").pop();
+  ACTIVE = ack;
+  ack.onclick();
+  await p.settle();
+  assertEqual($("acpPermNotice").hidden, true, "the acknowledged notice stayed up");
+  assert(ACTIVE === $("acpPermModeYolo"), "the focus did not land on the checked radio after Acknowledge");
+  // The upgrade notice's Acknowledge too.
+  p.sandbox.renderAcpPermissions(permState({ mode: "yolo", upgrade_notice: { mode: "yolo", detected_at: "t" } }));
+  ack = $("acpPermUpgrade").querySelectorAll("button").pop();
+  ACTIVE = ack;
+  ack.onclick();
+  await p.settle();
+  assert(ACTIVE === $("acpPermModeYolo"), "the focus did not land on the checked radio after the upgrade Acknowledge");
+  // Failure: the focus stays on the button.
+  answer = { ok: false, error: "nope" };
+  p.sandbox.renderAcpPermissions(pending);
+  ack = $("acpPermNotice").querySelectorAll("button").pop();
+  ACTIVE = ack;
+  ack.onclick();
+  await p.settle();
+  assert(ACTIVE === ack, "a refused Acknowledge moved the focus");
+});
+
 check("settings: Manual's description comes from the stored rules, never the seed's words (final review, M-5)", () => {
   const p = loadPanel();
   const desc = () => p.sandbox.document.getElementById("acpPermDescManual").textContent;
