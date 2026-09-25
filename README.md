@@ -512,8 +512,9 @@ the prompt stays open; if the rule was saved but the derived agent could not be 
 is shown with it. The button does not appear in Yolo (nothing there asks through a row), on Protected
 prompts or kiro-cli's own built-in prompts (no row can silence those), in task modes such as Spec or
 Plan, on a remote page (rules change only from this computer; a remote request is refused), or for web
-fetches, web searches and powers (their prompts do not name something a pattern can match reliably;
-add web fetch host names in the rule editor instead).
+fetches, web searches and powers. A web fetch prompt names the site by host, which a pattern saved
+from it could be mistaken for an address; add host names in the rule editor instead. Web search and
+power prompts have not been measured to match a pattern, so the button is not offered there.
 
 **The agent can ask a clarifying question mid-turn, and the page answers it inline.** When the agent
 needs you to choose between options before continuing, the question and its choices render as buttons
