@@ -4908,6 +4908,12 @@ function loadPanel(opts = {}) {
   topbarMenu.hidden = true;
   byId.set("topbarSettingsBtn", topbarBtn);
   byId.set("topbarSettingsMenu", topbarMenu);
+  // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2 QA: the "Edit
+  // rules…" row and its label, marked busy while the editor's read is out.
+  byId.set("acpPermEditRules", new El("button"));
+  const editRulesLabel = new El("span");
+  editRulesLabel.textContent = "Edit rules…";
+  byId.set("acpPermEditRulesLabel", editRulesLabel);
   // The two live controls in the dashboard topbar that `markRestartInputs`
   // reaches for by class. Present here because their absence is a passing
   // state in that function (`if (!host) return`), so a harness without them
@@ -11640,6 +11646,46 @@ check("rules editor: Save posts the edited rule set as JSON, closes, and shows t
   assertEqual(e.p.toasts.length, 0, "a clean save raised a toast");
 });
 
+check("rules editor: a successful save puts the focus back on the settings gear (Phase 2 QA)", async () => {
+  // Measured in Chrome: after Save the focus was on <body>. The stand-in
+  // dialog raises no `close` event of its own, so this checks the save path
+  // itself, not the `close` listener the Discard path relies on.
+  const e = await openRules();
+  e.add("shell", "allow", "npm test");
+  assert(ACTIVE !== e.$("topbarSettingsBtn"), "the gear had the focus before the save");
+  await e.p.sandbox.saveAcpRules();
+  assertEqual(e.$("acpRulesModal").open, false, "a saved editor stayed open");
+  assert(ACTIVE === e.$("topbarSettingsBtn"), "the focus did not go back to the settings gear after a save");
+  // The `close` event that follows keeps it there.
+  e.$("acpRulesModal").dispatch("close");
+  assert(ACTIVE === e.$("topbarSettingsBtn"), "the close event moved the focus off the gear");
+});
+
+check("rules editor: Edit rules says it is loading and opens once, however often it is clicked (Phase 2 QA)", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const p = loadPanel({ answer: () => ({ body: rulesState() }) });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  const realFetch = p.sandbox.fetch;
+  p.sandbox.fetch = (url, init) => gate.then(() => realFetch(url, init));
+  const first = p.sandbox.openAcpRulesEditor();
+  assertEqual($("acpPermEditRules").getAttribute("aria-busy"), "true", "the row is not marked busy");
+  assertEqual($("acpPermEditRulesLabel").textContent, "Loading rules…", "the row does not say it is loading");
+  const second = p.sandbox.openAcpRulesEditor();
+  release();
+  await first; await second;
+  assertEqual(p.fetches.filter((f) => f.url === "/api/acp-permissions").length, 1, "a second click read the rules again");
+  assertEqual($("acpRulesModal").open, true, "the editor did not open");
+  assertEqual($("acpPermEditRules").getAttribute("aria-busy"), "false", "the row stayed busy");
+  assertEqual($("acpPermEditRulesLabel").textContent, "Edit rules…", "the row kept its loading label");
+  // A failed read clears it too, and the next click reads again.
+  p.sandbox.fetch = () => Promise.reject(new Error("down"));
+  $("acpRulesModal").open = false;
+  await p.sandbox.openAcpRulesEditor();
+  assertEqual($("acpPermEditRules").getAttribute("aria-busy"), "false", "a failed read left the row busy");
+  assert(p.toasts.some((t) => t.includes("Could not read the permission rules")), "a failed read said nothing");
+});
+
 check("rules editor: a refused save stays open with the server's reason; a saved-but-not-applied one warns (D-32)", async () => {
   let reply = { ok: false, error: "The rules were not saved: Run commands (shell): allow pattern 'x' contains the character U+007F, which is not allowed." };
   const e = await openRules(null, () => ({ body: reply }));
@@ -11659,6 +11705,9 @@ check("rules editor: the dialog is on the dashboard only and carries its names a
   const idx = fs.readFileSync(INDEX_TEMPLATE, "utf8");
   assert(idx.includes('{% include "partials/acp_permission_rules_modal.html" %}'), "index.html does not include the editor");
   assert(/id="acpPermEditRules"[^>]*onclick="openAcpRulesEditor\(\)/.test(idx), "no Edit rules control in the settings menu");
+  // Phase 2 QA: the menu stays up, showing "Loading rules…", until the read answers.
+  assert(/id="acpPermEditRules" class="[^"]*\btopbar-menu-keep\b/.test(idx), "a click on Edit rules closes the menu before it can show it is loading");
+  assert(!/id="acpPermEditRules"[^>]*closeTopbarSettings/.test(idx), "Edit rules closes the menu before its read answers");
   assert(/The rules apply when Manual is selected/.test(idx), "the Edit rules control does not say when rules apply");
   const acp = fs.readFileSync(path.join(HERE, "..", "src", "power_atlas", "templates", "acp.html"), "utf8");
   assert(!acp.includes("acp_permission_rules_modal") && !acp.includes("openAcpRulesEditor"),

@@ -185,7 +185,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .profile-modal.acp-rules-modal { max-width: 640px; }  /* beats .profile-modal's 480px below */
 .acp-rules-intro { font-size: 12px; color: var(--text-muted); margin: 0 0 8px; line-height: 1.45; }
 .acp-rules-note { font-size: 12px; margin: 0 0 8px; }
-.acp-rules-body { max-height: 62vh; overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 10px; }
+/* Phase 2 QA: one scrollbar. Open only (a bare display would beat the UA's
+   dialog:not([open]) { display: none }): the dialog is a column capped at the
+   viewport, and only the rows region scrolls, so the header, notes, discard
+   question and footer stay in view. overflow-y stays auto as the fallback
+   for a viewport too short even for the rows' minimum. The rows region is
+   position: relative so each row's absolutely placed .sr-only live region is
+   laid out inside it: with the dialog as their containing block they sat at
+   the rows' unscrolled bottom and gave the dialog its own scrollbar. */
+.profile-modal.acp-rules-modal[open] { display: flex; flex-direction: column; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); overflow-y: auto; }
+.profile-modal.acp-rules-modal[open] > * { flex: none; }
+.profile-modal.acp-rules-modal[open] > .acp-rules-body { flex: 1 1 auto; min-height: 96px; max-height: none; }
+.acp-rules-body { position: relative; max-height: 62vh; overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 10px; }
 .acp-rules-row, .acp-rules-section { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }
 .acp-rules-row-title { font-size: 13px; margin: 0 0 6px; }
 .acp-rules-default { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }

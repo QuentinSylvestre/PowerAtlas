@@ -144,10 +144,12 @@
         <div id="acpPermProtectedList" class="acp-perm-list"></div>
       </details>
       <!-- Phase 2: the Manual rule editor (partials/acp_permission_rules_modal.html).
-           Offered in every mode; the hint says when the rules are in force. -->
-      <button type="button" id="acpPermEditRules" class="topbar-menu-row" onclick="openAcpRulesEditor();closeTopbarSettings()" aria-describedby="acpPermEditRulesHint">
+           Offered in every mode; the hint says when the rules are in force.
+           `topbar-menu-keep`: the menu stays up, the row reading "Loading
+           rules…", until openAcpRulesEditor() has its answer (Phase 2 QA). -->
+      <button type="button" id="acpPermEditRules" class="topbar-menu-row topbar-menu-keep" onclick="openAcpRulesEditor()" aria-describedby="acpPermEditRulesHint">
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 12h10"/><path d="M4 18h6"/></svg>
-        <span class="topbar-menu-label">Edit rules…</span>
+        <span id="acpPermEditRulesLabel" class="topbar-menu-label">Edit rules…</span>
         <svg class="topbar-ic topbar-menu-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
       </button>
       <div id="acpPermEditRulesHint" class="topbar-menu-note">What runs without asking, what asks and what is blocked, per kind of action. The rules apply when Manual is selected.</div>
@@ -7852,6 +7854,9 @@ var _acpRulesWired = false;
 // What the focus returns to on close (U5): the settings gear, since the menu
 // holding "Edit rules…" is hidden before the dialog opens.
 var _acpRulesOpener = null;
+// Phase 2 QA: set while "Edit rules…" waits for its read, so a second click
+// does not start a second one.
+var _acpRulesOpening = false;
 // The row, list and pattern the server last refused, marked until that row
 // is edited (U2).
 var _acpRulesBad = null;
@@ -8450,10 +8455,29 @@ function _acpRulesWire(modal) {
   });
 }
 
+/** The "Edit rules…" row while its read is in flight: marked busy and
+ *  relabelled, but left enabled so the focus stays on it. */
+function _acpRulesSetOpening(on) {
+  _acpRulesOpening = on;
+  var row = document.getElementById('acpPermEditRules');
+  if (row) row.setAttribute('aria-busy', on ? 'true' : 'false');
+  var label = document.getElementById('acpPermEditRulesLabel');
+  if (label) label.textContent = on ? 'Loading rules…' : 'Edit rules…';
+}
+
 /** "Edit rules…". Reads the stored rules fresh (and the Protected links,
  *  which only the GET carries) and opens only when that read succeeds:
  *  opening on nothing would let Save replace the stored rules with nothing. */
 function openAcpRulesEditor() {
+  // Phase 2 QA: one read at a time. The row stays up and says "Loading…"
+  // while the read is in flight (a slow server gave no sign for seconds);
+  // the menu closes once the dialog opens or the failure is shown.
+  if (_acpRulesOpening) return Promise.resolve();
+  _acpRulesSetOpening(true);
+  var finish = function () {
+    _acpRulesSetOpening(false);
+    if (typeof closeTopbarSettings === 'function') closeTopbarSettings();
+  };
   // U5: the gear, not the menu row this was clicked from, which the menu
   // hides as the dialog opens.
   _acpRulesOpener = document.getElementById('topbarSettingsBtn') || null;
@@ -8463,6 +8487,7 @@ function openAcpRulesEditor() {
       return r.json();
     })
     .then(function (d) {
+      finish();
       if (!d || typeof d !== 'object' || !d.rules || typeof d.rules !== 'object'
           || !Array.isArray(d.rule_rows)) {
         throw new Error('not a rules answer');
@@ -8497,6 +8522,7 @@ function openAcpRulesEditor() {
       if (first) first.focus();
     })
     .catch(function () {
+      finish();
       _acpPermToast('Could not read the permission rules, so the editor did '
         + 'not open. Reload the page to try again.');
     });
@@ -8554,10 +8580,16 @@ function saveAcpRules() {
     .then(function (d) {
       done();
       if (d && d.ok) {
+        var opener = _acpRulesOpener;
         _acpRulesDiscardOk = true;
         closeAcpRulesEditor();
         renderAcpPermissions(d);
         if (typeof d.warning === 'string' && d.warning) _acpPermToast(d.warning);
+        // Phase 2 QA: back to the gear here too, not only from the `close`
+        // listener (U5), which in Chrome left the focus on <body> after a
+        // save. Looked up afresh, the captured node as the fallback.
+        var gear = document.getElementById('topbarSettingsBtn') || opener;
+        if (gear && gear.focus) gear.focus();
         return;
       }
       var detail = d && d.detail && typeof d.detail === 'object' ? d.detail : null;
