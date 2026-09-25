@@ -1,7 +1,7 @@
 # ACP Permission Modes: Yolo, Auto and Manual
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phases 0-1 complete (Phase 1 QA pending a restart), Phases 2-4 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-1 complete, Phases 2-4 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the on/off ACP permission profile with three permission modes (Yolo, Auto, Manual), an always-on hard-deny floor, and a plain-language Manual-mode rule editor that compiles to the derived agent
 > **Tier**: Major
@@ -536,6 +536,26 @@ Implementation (2026-09-25, code: 682bbc7, 967267e, 687ee20 — review fixes and
 
 AGENTS.md Terminology applied after the user chose Save (2026-09-25): commit 5e719a5.
 
+QA (Step 5b, 2026-09-25): **PASS**. The user authorised the restart ("You can restart yourself and test freely");
+PowerAtlas was restarted through `/api/restart` at 23:01 after a copy of `config.toml` was saved as
+`config.toml.pre-permission-modes`. Startup migrated `acp_permissions_enabled = false` to Yolo and wrote the derived
+agent (Yolo, fingerprint header, floor first). Driven with standalone Playwright from the venv (AGENTS.md
+§ Verification Setup) and direct HTTP; the Claude-in-Chrome extension was not connected after three attempts.
+- API: GET state `mode=yolo, in_effect=true`, `protected_links` steering 9, skills 16, agents 0, hooks 0; POST
+  `{"mode":"auto"}` and a list-valued mode refused with `ok:false`; POST without the cookie or without `Origin` → 403;
+  derived agent unchanged by refused POSTs.
+- UI: `role="radiogroup"`, Yolo checked, Auto disabled with "coming soon — behaves like Manual", Yolo description names
+  kiro-cli's built-in asks and denies, scope note present, Always blocked list and Protected section render; the
+  expanded Protected section shows "9 linked items not covered" with each steering link and its agent-playbook target.
+  Clicking Manual switched the API state and the file to Manual; a reload kept Manual checked; clicking Yolo switched
+  both back. No console errors.
+- State probe: a hand edit of `poweratlas-acp.md` read as not in effect; creating a Default session on /acp healed
+  it (file back to Yolo, edit gone, `in_effect=true`, no D-35 notice) and the session bound `poweratlas-acp`
+  (log and `session.json` `agentMode`). The QA session was closed and its folder deleted after checking
+  `createdAt`/`agentMode`/`workspacePaths`. Final mode left as Yolo.
+- Observation (advisory): the "N linked items not covered" marker is visible only after expanding the Protected
+  disclosure; the collapsed summary does not show the count.
+
 ### Phase 2: Custom Manual rules and the rule editor [QA]
 
 **Goal**: The user edits Manual's rows in plain language; custom rules compile and validate.
@@ -678,7 +698,7 @@ answered". On error it shows the message and leaves the prompt open.
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
 | 0 | Pre-flight probes and gate | Done | 4 gates fired, follow-up F-1..F-7, applied as D-38; PD-6 decided as D-39 |
-| 1 | Modes, compiler and the mode picker | Done — QA pending restart | b4f579d, 682bbc7, 967267e, 687ee20; Terminology 5e719a5 |
+| 1 | Modes, compiler and the mode picker | Done | b4f579d, 682bbc7, 967267e, 687ee20; Terminology 5e719a5 |
 | 2 | Custom Manual rules and the rule editor | Pending | |
 | 3 | "Allow, and always in new sessions" | Pending | |
 | 4 | Documentation and final live check | Pending | |
@@ -938,8 +958,8 @@ Implementation health: Green.
 Contributing personas: #1 raised by all three; #2 Reliability and Senior engineer; #3 Reliability and Security; #4
 Security and Senior engineer; #10-12 Security; #6-9 Reliability; #13-16, #18 Senior engineer. The Security
 re-review returned "HIGH FIX: CLOSED" for #1 and raised R1-R6. No cycle-2 re-review of 687ee20 (user cap); the
-orchestrator re-ran the re-review's repro against it (Manual config preserved, gate not in effect). Step 5b QA is
-pending: Phase 1 changed Python, so `/qqa` needs the user to restart PowerAtlas.
+orchestrator re-ran the re-review's repro against it (Manual config preserved, gate not in effect). Step 5b QA: PASS
+(see the Phase 1 QA note).
 
 ## Harness Improvement Opportunities
 
@@ -956,6 +976,7 @@ pending: Phase 1 changed Python, so `/qqa` needs the user to restart PowerAtlas.
   suggested change: let cross-persona corroboration substitute for a verifier, and dispatch verifiers only for
   single-source findings.
 - An API session limit (HTTP 429) killed a council sub-agent mid-run; the council's partial-failure rule then halts the whole pipeline — cost: about an hour of wall-clock waiting on the reset and one re-dispatch — suggested change: none to the rule; a note in `/qcouncil` that a rate-limit failure is a Retry-after-reset case, with completed advocate briefs saved to scratch so they are reusable.
+- The Claude-in-Chrome MCP extension was not connected even after starting Chrome, while `/qqa`'s browser gate names Playwright MCP `browser_*` calls and the project has no Playwright MCP — cost: two tool round trips and a gate the evidence cannot literally satisfy — suggested change: let `/qqa`'s browser gate accept a project-documented standalone Playwright recipe (`AGENTS.md § Verification Setup`) as equivalent evidence.
 - `/qdev` has no shape for a probe-only phase (no code commit): the `feat`/`docs` pairing and "sub-agent commits code" steps did not apply — cost: small; the orchestrator improvised a docs-only commit and confirmed `commit-pairing` passes — suggested change: state in `/qdev` Step 4 that a results-only phase produces one `docs(<slug>): phase N progress (code: none)` commit.
 - The exploration's lower-stakes assumptions were shown at the checkpoint but not written as an
   `Assumptions (unconfirmed)` adjunct, so `/qplan` had no labelled list to route — cost: the planner folded them
