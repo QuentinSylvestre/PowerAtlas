@@ -30274,3 +30274,486 @@ class TestOverviewPlans:
         with patch("power_atlas.web.load_config", return_value=self._config()):
             body = client.get("/api/dashboard/overview/summary").json()
         assert body["plans"] == []
+
+
+# --- Overview: Live now tiles (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE) ---
+
+_OV_V3 = "kiro-cli-v3"
+_OV_CC = "claude-code"
+
+
+def _ov_uuid(n: int) -> str:
+    return f"{n:08x}-0000-4000-8000-000000000000"
+
+
+def _ov_v3_line(ptype, **payload) -> str:
+    return json.dumps({"id": "x", "timestamp": "2026-09-25T10:00:00Z",
+                       "payload": {"type": ptype, **payload}})
+
+
+def _ov_cc_line(otype, content, **extra) -> str:
+    return json.dumps({"type": otype, "timestamp": "2026-09-25T10:00:00Z",
+                       "message": {"role": otype, "content": content}, **extra})
+
+
+class TestOverviewLive:
+    """`overview.live_sessions`, `overview.tail_events`, the presence
+    accessors, and `GET /api/dashboard/overview/live`."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self):
+        from power_atlas import overview
+        overview._tail_memo.clear()
+        yield
+        overview._tail_memo.clear()
+
+    # --- fixtures ----------------------------------------------------------
+
+    @pytest.fixture
+    def store(self, monkeypatch, tmp_path):
+        """A fixture session store and transcript locator.
+
+        `add(provider, cwd, sid, age_s=..., transcript=True)` records a session
+        whose transcript was written `age_s` seconds ago. `calls` records every
+        `get_sessions(cwd, provider)`; `paths` every transcript lookup.
+        """
+        from power_atlas import data, overview
+
+        class Store:
+            sessions: dict = {}
+            files: dict = {}
+            calls: list = []
+            paths: list = []
+
+            def add(self, provider, cwd, sid, age_s=10, transcript=True,
+                    title=None, updated_at="2026-09-01T00:00:00+00:00"):
+                self.sessions.setdefault((provider, cwd), []).append(
+                    Session(sid, title if title is not None else f"title {sid[:8]}",
+                            cwd, "", updated_at, "", "", ""))
+                if transcript:
+                    f = tmp_path / "transcripts" / f"{sid}.jsonl"
+                    f.parent.mkdir(exist_ok=True)
+                    f.write_text(_ov_v3_line("assistant", content=f"hello from {sid[:8]}") + "\n",
+                                 encoding="utf-8")
+                    t = time.time() - age_s
+                    os.utime(f, (t, t))
+                    self.files[sid] = f
+
+        s = Store()
+        s.sessions, s.files, s.calls, s.paths = {}, {}, [], []
+
+        def get_sessions(cwd, provider="kiro-cli-v3"):
+            s.calls.append((cwd, provider))
+            return list(s.sessions.get((provider, cwd), []))
+
+        def transcript_path(sid, provider, cwd):
+            s.paths.append(sid)
+            return s.files.get(sid)
+
+        monkeypatch.setattr(data, "get_sessions", get_sessions)
+        monkeypatch.setattr(overview, "_transcript_path", transcript_path)
+        return s
+
+    @staticmethod
+    def _deps(recent=(), hidden=(), disabled=(), seen=None):
+        """Fake rail helpers. Live is the rail's rule over fixture data: the id
+        on a cmdline, or a live cwd plus a sid in `recent` (the stand-in for
+        "transcript written within 300 s")."""
+        from power_atlas import data, overview
+
+        def session_is_live(snapshot, session, provider):
+            if snapshot.is_live(provider, session.cwd, session.session_id):
+                return True
+            return (data._normalize_path(session.cwd) in snapshot.live_cwds({provider})
+                    and session.session_id in recent)
+
+        def availability(sids, held, workspace_hashes):
+            if seen is not None:
+                seen.append(list(sids))
+            return {s: ("held" if s in held else "available") for s in sids}
+
+        return overview.LiveDeps(
+            session_is_live=session_is_live,
+            acp_availability=availability,
+            acp_status_for_held=lambda sessions, snap: {s.session_id: "working" for s in sessions},
+            row_title=lambda s: s.title,
+            hidden=lambda cwd: cwd in hidden,
+            provider_shown=lambda p: p not in disabled,
+        )
+
+    @staticmethod
+    def _snap(live_sids=(), live_cwds=()):
+        """A presence snapshot: `live_sids` are `(provider, sid, cwd)`,
+        `live_cwds` are `(provider, cwd)`; cwds are normalised as a scan
+        normalises them."""
+        from power_atlas import data, presence
+        n = data._normalize_path
+        return presence.Snapshot(
+            live_sids={(p, s) for p, s, _c in live_sids},
+            live_cwds={(p, n(c)) for p, c in live_cwds} | {(p, n(c)) for p, _s, c in live_sids},
+            sid_to_cwd={(p, s): n(c) for p, s, c in live_sids},
+        )
+
+    @staticmethod
+    def _originals(*cwds):
+        from power_atlas import data
+        return {data._normalize_path(c): c for c in cwds}
+
+    @staticmethod
+    def _live(held, snap, deps, originals, filter_="all"):
+        from power_atlas import overview
+        return overview.live_sessions(held, snap, filter_, deps, originals)
+
+    # --- presence accessors -----------------------------------------------
+
+    def test_snapshot_accessors(self):
+        from power_atlas import presence
+        snap = presence.Snapshot({("claude-code", "a"), ("claude-code", "b")},
+                                 {("claude-code", "c:\\w"), ("kiro-cli-v3", "c:\\k")},
+                                 {("claude-code", "a"): "c:\\w"})
+        assert snap.live_sids() == [("claude-code", "a", "c:\\w")], "an id without a cwd is left out"
+        assert sorted(snap.live_cwd_pairs()) == [("claude-code", "c:\\w"), ("kiro-cli-v3", "c:\\k")]
+
+    # --- the rail's rule, by expected-set equality --------------------------
+
+    def test_the_rail_rule(self, store, tmp_path):
+        """Every inclusion and exclusion case at once, compared as a set."""
+        neutral = str(tmp_path / "agent-home")          # held, never discovered
+        w_cmd = str(tmp_path / "CmdWs")                 # sid on a cmdline
+        w_cwd = str(tmp_path / "Unloaded")              # live cwd, unloaded workspace
+        w_hidden = str(tmp_path / "Hidden")
+        w_bad = str(tmp_path / "BadIds")
+        held_sid = "sess_" + _ov_uuid(1)
+        store.add(_OV_CC, w_cmd, _ov_uuid(2))
+        store.add(_OV_CC, w_cwd, _ov_uuid(3))            # recent: live
+        store.add(_OV_CC, w_cwd, _ov_uuid(4), age_s=3600)  # old, same cwd: not live
+        store.add(_OV_CC, w_hidden, _ov_uuid(5))
+        store.add(_OV_CC, w_bad, "not-a-uuid")
+        snap = self._snap(
+            live_sids=[(_OV_CC, _ov_uuid(2), w_cmd), (_OV_CC, "not-a-uuid", w_bad)],
+            live_cwds=[(_OV_CC, w_cwd), (_OV_CC, w_hidden)])
+        # The non-UUID id's cwd is only reachable through the cmdline entry.
+        from power_atlas import data
+        snap._live_cwds.discard((_OV_CC, data._normalize_path(w_bad)))
+        tiles = self._live({held_sid: neutral}, snap,
+                           self._deps(recent={_ov_uuid(3), _ov_uuid(5)}, hidden={w_hidden}),
+                           self._originals(w_cmd, w_cwd, w_hidden, w_bad))
+        assert {t["id"] for t in tiles} == {held_sid, _ov_uuid(2), _ov_uuid(3)}
+        by_id = {t["id"]: t for t in tiles}
+        assert by_id[held_sid]["title"] == "New session"
+        assert by_id[held_sid]["cwd"] == neutral
+        assert by_id[held_sid]["availability"] == "held"
+        assert by_id[held_sid]["status"] == "working"
+        assert by_id[_ov_uuid(2)]["availability"] == "available"
+        assert by_id[_ov_uuid(2)]["status"] == ""
+        assert (w_bad, _OV_CC) not in store.calls, "a non-UUID id must not be looked up"
+        assert "not-a-uuid" not in store.paths
+        assert (neutral, _OV_V3) not in store.calls, "an undiscovered cwd is never loaded"
+
+    def test_a_disabled_provider_is_excluded_even_when_held(self, store, tmp_path):
+        """D8: the rail hides a disabled provider's sessions, so do the tiles."""
+        ws = str(tmp_path / "Ws")
+        held_sid = "sess_" + _ov_uuid(1)
+        store.add(_OV_V3, ws, held_sid)
+        store.add(_OV_V3, ws, "sess_" + _ov_uuid(2))
+        store.add(_OV_CC, ws, _ov_uuid(3))
+        snap = self._snap(live_cwds=[(_OV_V3, ws), (_OV_CC, ws)])
+        deps = self._deps(recent={"sess_" + _ov_uuid(2), _ov_uuid(3)})
+        assert {t["id"] for t in self._live({held_sid: ws}, snap, deps, self._originals(ws))} == {
+            held_sid, "sess_" + _ov_uuid(2), _ov_uuid(3)}
+        deps = self._deps(recent={"sess_" + _ov_uuid(2), _ov_uuid(3)}, disabled={_OV_V3})
+        assert {t["id"] for t in self._live({held_sid: ws}, snap, deps, self._originals(ws))} == {
+            _ov_uuid(3)}
+
+    def test_a_held_session_found_in_the_store_uses_its_record(self, store, tmp_path):
+        ws = str(tmp_path / "Ws")
+        held_sid = "sess_" + _ov_uuid(1)
+        store.add(_OV_V3, ws, held_sid, title="Real title")
+        [tile] = self._live({held_sid: ws}, self._snap(), self._deps(), self._originals(ws))
+        assert tile["title"] == "Real title"
+        assert tile["events"] == [{"kind": "text", "role": "assistant",
+                                   "text": f"hello from {held_sid[:8]}"}]
+
+    def test_original_case_cwd_is_preserved(self, store, tmp_path):
+        """A snapshot cwd is casefolded; the store is asked with the discovered
+        spelling, so SessionCache never records the casefolded one."""
+        ws = str(tmp_path / "MixedCase" / "MyProj")
+        store.add(_OV_CC, ws, _ov_uuid(7))
+        snap = self._snap(live_cwds=[(_OV_CC, ws)])
+        [tile] = self._live({}, snap, self._deps(recent={_ov_uuid(7)}), self._originals(ws))
+        assert store.calls == [(ws, _OV_CC)]
+        assert tile["cwd"] == ws and tile["name"] == "MyProj"
+
+    def test_original_case_reaches_the_real_session_cache(self, monkeypatch, tmp_path):
+        from power_atlas import data, overview
+        ws = str(tmp_path / "MixedCase" / "MyProj")
+        fake = types.SimpleNamespace(
+            load_sessions=lambda cwd: ([Session(_ov_uuid(8), "t", cwd, "", "", "", "", "")], {}),
+            is_available=lambda: True)
+        monkeypatch.setitem(data.PROVIDERS, _OV_CC, fake)
+        monkeypatch.setattr(overview, "_transcript_path", lambda *a: None)
+        norm = data._normalize_path(ws)
+        data.session_cache.forget(ws, _OV_CC)
+        try:
+            self._live({}, self._snap(live_cwds=[(_OV_CC, ws)]),
+                       self._deps(recent={_ov_uuid(8)}), self._originals(ws))
+            assert data.session_cache.get_original_cwd(norm, _OV_CC) == ws
+        finally:
+            data.session_cache.forget(ws, _OV_CC)
+
+    def test_the_poweratlas_filter_keeps_held_sessions_only(self, store, tmp_path):
+        ws = str(tmp_path / "Ws")
+        held_sid = "sess_" + _ov_uuid(1)
+        store.add(_OV_V3, ws, held_sid)
+        store.add(_OV_CC, ws, _ov_uuid(2))
+        snap = self._snap(live_sids=[(_OV_CC, _ov_uuid(2), ws)])
+        deps = self._deps()
+        assert {t["id"] for t in self._live({held_sid: ws}, snap, deps, self._originals(ws))} == {
+            held_sid, _ov_uuid(2)}
+        store.calls.clear()
+        assert [t["id"] for t in self._live({held_sid: ws}, snap, deps, self._originals(ws),
+                                            filter_="poweratlas")] == [held_sid]
+        assert (ws, _OV_CC) not in store.calls, "the filter skips the other providers' stores"
+
+    def test_at_most_eight_tiles_most_recent_first(self, store, tmp_path):
+        ws = str(tmp_path / "Ws")
+        ids = [_ov_uuid(i) for i in range(1, 11)]
+        for i, sid in enumerate(ids):
+            store.add(_OV_CC, ws, sid, age_s=10 * (i + 1))
+        # No transcript: falls back to `updated_at`, older than every file.
+        store.add(_OV_CC, ws, _ov_uuid(99), transcript=False, updated_at="2020-01-01T00:00:00Z")
+        seen = []
+        tiles = self._live({}, self._snap(live_cwds=[(_OV_CC, ws)]),
+                           self._deps(recent=set(ids) | {_ov_uuid(99)}, seen=seen),
+                           self._originals(ws))
+        assert [t["id"] for t in tiles] == ids[:8]
+        assert seen == [ids[:8]], "availability is read for the tiles shown, not every candidate"
+        assert tiles[0]["last_activity"] > tiles[1]["last_activity"]
+
+    def test_updated_at_orders_a_session_without_a_transcript(self, store, tmp_path):
+        ws = str(tmp_path / "Ws")
+        store.add(_OV_CC, ws, _ov_uuid(1), age_s=3600)
+        store.add(_OV_CC, ws, _ov_uuid(2), transcript=False,
+                  updated_at=datetime_now_iso(-60))
+        tiles = self._live({}, self._snap(live_cwds=[(_OV_CC, ws)]),
+                           self._deps(recent={_ov_uuid(1), _ov_uuid(2)}), self._originals(ws))
+        assert [t["id"] for t in tiles] == [_ov_uuid(2), _ov_uuid(1)]
+        assert tiles[0]["events"] == []
+
+    def test_a_deleted_transcript_gives_no_events_and_the_tile_stays(self, store, tmp_path, monkeypatch):
+        from power_atlas import overview
+        ws = str(tmp_path / "Ws")
+        store.add(_OV_CC, ws, _ov_uuid(1))
+        store.add(_OV_CC, ws, _ov_uuid(2))
+        store.files[_ov_uuid(1)].unlink()
+        real = overview.tail_events
+
+        def boom(path, provider, n=5):
+            if _ov_uuid(2) in str(path):
+                raise OSError("vanished between stat and read")
+            return real(path, provider, n)
+
+        monkeypatch.setattr(overview, "tail_events", boom)
+        tiles = self._live({}, self._snap(live_cwds=[(_OV_CC, ws)]),
+                           self._deps(recent={_ov_uuid(1), _ov_uuid(2)}), self._originals(ws))
+        assert {t["id"]: t["events"] for t in tiles} == {_ov_uuid(1): [], _ov_uuid(2): []}
+
+    # --- tail_events -------------------------------------------------------
+
+    def test_v3_events(self, tmp_path):
+        from power_atlas import overview
+        f = tmp_path / "messages.jsonl"
+        f.write_text("\n".join([
+            _ov_v3_line("session_start", content="x"),
+            _ov_v3_line("user", content="  please\n fix  it "),
+            _ov_v3_line("turn_start"),
+            _ov_v3_line("tool_call", toolName="read", title="Reading " + "p" * 200, toolCallId="1"),
+            _ov_v3_line("tool_result", toolCallId="1", success=True),
+            _ov_v3_line("tool_call", toolName="shell", title="ls", toolCallId="2"),
+            _ov_v3_line("tool_result", toolCallId="2", success=False),
+            _ov_v3_line("assistant", content=[{"type": "text", "text": "a" * 300}]),
+            _ov_v3_line("usage_summary", elapsedTime=1),
+        ]) + "\n", encoding="utf-8")
+        events = overview.tail_events(f, _OV_V3, n=6)
+        assert events[0] == {"kind": "text", "role": "user", "text": "please fix it"}
+        assert events[1]["kind"] == "tool" and events[1]["name"] == "read"
+        assert len(events[1]["arg"]) == 80 and events[1]["arg"].endswith("…")
+        assert events[2:5] == [{"kind": "result", "ok": True},
+                               {"kind": "tool", "name": "shell", "arg": "ls"},
+                               {"kind": "result", "ok": False}]
+        assert events[5]["role"] == "assistant" and len(events[5]["text"]) == 240
+
+    def test_claude_events(self, tmp_path):
+        from power_atlas import overview
+        f = tmp_path / "s.jsonl"
+        f.write_text("\n".join([
+            json.dumps({"type": "file-history-snapshot"}),
+            _ov_cc_line("user", "<command-name>/clear</command-name>"),
+            _ov_cc_line("user", "hidden meta", isMeta=True),
+            _ov_cc_line("user", "fix the bug"),
+            _ov_cc_line("assistant", [
+                {"type": "thinking", "thinking": "hmm"},
+                {"type": "text", "text": "Looking."},
+                {"type": "tool_use", "id": "t1", "name": "Read",
+                 "input": {"limit": 5, "file_path": "src/a.py"}},
+            ]),
+            _ov_cc_line("user", [{"type": "tool_result", "tool_use_id": "t1", "is_error": True}]),
+            _ov_cc_line("user", [{"type": "tool_result", "tool_use_id": "t2"}]),
+        ]) + "\n", encoding="utf-8")
+        assert overview.tail_events(f, _OV_CC) == [
+            {"kind": "text", "role": "user", "text": "fix the bug"},
+            {"kind": "text", "role": "assistant", "text": "Looking."},
+            {"kind": "tool", "name": "Read", "arg": "src/a.py"},
+            {"kind": "result", "ok": False},
+            {"kind": "result", "ok": True},
+        ]
+
+    def test_widens_when_the_first_window_holds_too_few_events(self, tmp_path, monkeypatch):
+        from power_atlas import overview
+        f = tmp_path / "s.jsonl"
+        events = [_ov_cc_line("assistant", f"event {i}") for i in range(5)]
+        padding = [json.dumps({"type": "progress", "data": "p" * 1000}) for _ in range(100)]
+        f.write_text("\n".join(events + padding) + "\n", encoding="utf-8")
+        assert f.stat().st_size > overview.TAIL_FIRST_BYTES
+        reads = []
+        real = overview._read_tail
+        monkeypatch.setattr(overview, "_read_tail",
+                            lambda path, start, length: reads.append(length) or real(path, start, length))
+        got = overview.tail_events(f, _OV_CC)
+        assert [e["text"] for e in got] == [f"event {i}" for i in range(5)]
+        assert reads[0] == overview.TAIL_FIRST_BYTES and len(reads) == 2
+
+    def test_a_line_over_256_kib_is_skipped(self, tmp_path):
+        from power_atlas import overview
+        f = tmp_path / "s.jsonl"
+        f.write_text("\n".join([
+            _ov_cc_line("assistant", "before"),
+            _ov_cc_line("assistant", "HUGE" + "x" * (overview.TAIL_MAX_LINE_BYTES + 10)),
+        ]) + "\n", encoding="utf-8")
+        assert overview.tail_events(f, _OV_CC) == [
+            {"kind": "text", "role": "assistant", "text": "before"}]
+
+    def test_a_partial_first_line_is_dropped(self, tmp_path, monkeypatch):
+        """The window starts mid-line, exactly where a valid JSON object begins:
+        that fragment must not be read as an event."""
+        from power_atlas import overview
+        fragment = _ov_cc_line("assistant", "FRAGMENT")
+        last = _ov_cc_line("assistant", "last")
+        f = tmp_path / "s.jsonl"
+        f.write_bytes(b"GARBAGE" + fragment.encode() + b"\n" + last.encode() + b"\n")
+        monkeypatch.setattr(overview, "TAIL_FIRST_BYTES", len(fragment) + len(last) + 2)
+        # n=2: read as a line, the fragment would satisfy the first window.
+        got = overview.tail_events(f, _OV_CC, n=2)
+        assert [e["text"] for e in got] == ["last"]
+
+    def test_memo_hit_costs_no_read_and_a_change_rereads(self, tmp_path, monkeypatch):
+        from power_atlas import overview
+        f = tmp_path / "s.jsonl"
+        f.write_text(_ov_cc_line("assistant", "one") + "\n", encoding="utf-8")
+        reads = []
+        real = overview._read_tail
+        monkeypatch.setattr(overview, "_read_tail",
+                            lambda path, start, length: reads.append(1) or real(path, start, length))
+        first = overview.tail_events(f, _OV_CC)
+        assert reads == [1]
+        assert overview.tail_events(f, _OV_CC) == first
+        assert reads == [1], "an unchanged file must not be read again"
+        with f.open("a", encoding="utf-8") as fh:
+            fh.write(_ov_cc_line("assistant", "two") + "\n")
+        assert [e["text"] for e in overview.tail_events(f, _OV_CC)] == ["one", "two"]
+        assert reads == [1, 1]
+
+    def test_a_missing_file_gives_no_events(self, tmp_path):
+        from power_atlas import overview
+        assert overview.tail_events(tmp_path / "gone.jsonl", _OV_CC) == []
+
+    # --- the route ---------------------------------------------------------
+
+    @pytest.fixture
+    def quiet_host(self, monkeypatch):
+        """No live processes and no discovered workspaces: no real psutil
+        scan and no real store discovery."""
+        from power_atlas import data, presence
+        monkeypatch.setattr(presence, "get_snapshot",
+                            lambda force=False: presence.Snapshot(set(), set(), {}))
+        monkeypatch.setattr(data, "discover_workspaces_with_counts", lambda provider=None: [])
+        monkeypatch.setattr(data, "available_providers", lambda: [_OV_CC, _OV_V3])
+
+    @staticmethod
+    def _config():
+        from power_atlas.config import Config
+        return Config()
+
+    def test_route_with_acp_none_has_no_held_sessions(self, client, quiet_host, monkeypatch):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "acp", None)
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            resp = client.get("/api/dashboard/overview/live")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.json() == {"filter": "all", "tiles": []}
+
+    def test_route_lists_a_held_session_in_a_neutral_folder(self, client, quiet_host,
+                                                             monkeypatch, tmp_path):
+        """End to end through the real rail helpers."""
+        from power_atlas import overview, web as web_mod
+        sid = "sess_" + _ov_uuid(1)
+        sup = types.SimpleNamespace(sessions={sid: {"cwd": str(tmp_path / "agent-home")}})
+        monkeypatch.setattr(web_mod, "acp", types.SimpleNamespace(_supervisor=sup))
+        monkeypatch.setattr(overview, "_transcript_path", lambda *a: None)
+        monkeypatch.setattr(web_mod, "get_semantic_status", lambda *a: None)
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            body = client.get("/api/dashboard/overview/live?filter=poweratlas").json()
+        assert body["filter"] == "poweratlas"
+        [tile] = body["tiles"]
+        assert (tile["id"], tile["title"], tile["availability"]) == (sid, "New session", "held")
+        assert tile["name"] == "agent-home"
+
+    def test_route_binds_the_filter_and_falls_back_to_all(self, client, monkeypatch):
+        from power_atlas import web as web_mod
+        got = []
+        monkeypatch.setattr(web_mod, "_overview_live",
+                            lambda held, filter_: got.append(filter_) or {"filter": filter_, "tiles": []})
+        client.get("/api/dashboard/overview/live?filter=poweratlas")
+        client.get("/api/dashboard/overview/live?filter=bogus")
+        client.get("/api/dashboard/overview/live")
+        assert got == ["poweratlas", "all", "all"]
+
+    def test_route_refused_without_the_cookie(self, anonymous_client, client, monkeypatch):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_overview_live",
+                            lambda held, filter_: {"filter": filter_, "tiles": []})
+        assert _is_json_403(anonymous_client.get("/api/dashboard/overview/live"))
+        assert client.get("/api/dashboard/overview/live").status_code == 200
+
+    def test_route_refused_to_a_remote_peer(self, remote_enabled, monkeypatch):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_overview_live",
+                            lambda held, filter_: {"filter": filter_, "tiles": ["LEAK"]})
+        status, body, _ = _peer_http("/api/dashboard/overview/live", [_cookie_header()])
+        assert status == 403
+        assert b"LEAK" not in body
+
+    def test_route_is_not_on_the_remote_surface(self):
+        from power_atlas import web as web_mod
+        assert web_mod._DASHBOARD_OVERVIEW_LIVE_PATH == "/api/dashboard/overview/live"
+        assert web_mod._DASHBOARD_OVERVIEW_LIVE_PATH not in web_mod._REMOTE_ALLOWED_PATHS
+
+    def test_the_route_takes_the_snapshot_in_the_worker_thread(self, client, quiet_host,
+                                                                monkeypatch):
+        """D24: the presence rescan never runs on the event loop."""
+        from power_atlas import presence, web as web_mod
+        threads = []
+        monkeypatch.setattr(presence, "get_snapshot",
+                            lambda force=False: threads.append(threading.current_thread())
+                            or presence.Snapshot(set(), set(), {}))
+        monkeypatch.setattr(web_mod, "acp", None)
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            assert client.get("/api/dashboard/overview/live").status_code == 200
+        # asyncio.to_thread runs on the default executor, whose threads are
+        # named "asyncio_N"; the loop's own thread is not.
+        assert threads and threads[0].name.startswith("asyncio_")
+
+
+def datetime_now_iso(offset_s: float) -> str:
+    return dt.datetime.fromtimestamp(time.time() + offset_s, tz=dt.timezone.utc).isoformat()

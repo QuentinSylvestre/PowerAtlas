@@ -12932,6 +12932,7 @@ const DASH_OVERVIEW_NAMES = [
   "function dashOverviewStart", "function dashOverviewStop", "function dashOverviewFetch",
   "function dashEscapeMayLeave", "_dashUserClosedSid", "_dashTranscriptLoaded",
   "_dashEmptyPlaceholder", "send('unsubscribe')",
+  "function dashOvLiveTick", "function dashOvRenderLive", "function dashOvOpenTile",
 ];
 
 function dashPickerSource() {
@@ -13281,6 +13282,17 @@ function loadDashPicker(opts = {}) {
     loading.textContent = "Loading…";
     byId.get("dashOvPlansBody").appendChild(loading);
   }
+  // The Live now body and its All/PowerAtlas filter buttons, as in the
+  // markup. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+  byId.set("dashOvLiveBody", new El("div"));
+  {
+    const loading = new El("div");
+    loading.className = "dash-ov-loading";
+    loading.textContent = "Loading…";
+    byId.get("dashOvLiveBody").appendChild(loading);
+  }
+  byId.set("dashOvLiveAll", new El("button"));
+  byId.set("dashOvLivePa", new El("button"));
   // The MCP status indicator, wired through composer-chrome.js's
   // initMcpIndicatorDom() below as index.html does. The Overview resets it
   // on leaving a session, and the Escape guard reads the toggle's
@@ -17383,6 +17395,253 @@ check("dashboard overview plans: a failed first load says so, a failed refresh k
   p.sandbox.dashOverviewRefreshSummary();
   await p.settle(); await p.settle();
   assertEqual(ovPlanRows(p).length, 1, "a failed refresh must not wipe the list");
+});
+
+// ---- Overview: Live now tiles (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE) ----
+
+const OV_LIVE_URL = "/api/dashboard/overview/live";
+
+/** The rail's own dot and title helpers, which live outside every extracted
+ *  region; the tiles call them, so the real source is loaded rather than a
+ *  stub that could agree with a wrong page. */
+function ovLoadRailHelpers(p) {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const a = src.indexOf("var DASH_RAIL_AVAILABILITY = Object.create(null);");
+  const b = src.indexOf("var DASH_STATUS_BUCKET_ORDER", a);
+  const c = src.indexOf("function dashRailTitleText(session){");
+  const d = src.indexOf("// ---- the session row", c);
+  assert(a >= 0 && b > a && c >= 0 && d > c, "index.html's rail helpers moved");
+  vm.runInContext(src.slice(a, b) + "\n" + src.slice(c, d), p.sandbox, { filename: "index.html#railHelpers" });
+}
+
+/** A live fetch the check controls. `answer(url)` returns the body, or
+ *  undefined to leave the request pending; every call is recorded. */
+function ovLiveFetch(p, answer) {
+  const calls = [];
+  const pending = [];
+  p.sandbox.fetch = (url) => {
+    const u = String(url);
+    calls.push(u);
+    if (u.indexOf(OV_LIVE_URL) !== 0) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ plans: [] }) });
+    }
+    const body = answer ? answer(u) : undefined;
+    if (body === undefined) {
+      return new Promise((resolve) => {
+        pending.push((b) => resolve({ ok: true, status: 200, json: () => Promise.resolve(b) }));
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+  };
+  return { calls, pending, live: () => calls.filter((u) => u.indexOf(OV_LIVE_URL) === 0) };
+}
+
+function ovTile(over = {}) {
+  return Object.assign({
+    id: "sess_11111111-1111-1111-1111-111111111111", provider: "kiro-cli-v3",
+    title: "Fix the rail", cwd: "C:\\ws\\proj", name: "proj",
+    created_at: "", updated_at: "", availability: "held", status: "working", live: true,
+    last_activity: new Date(Date.now() - 30000).toISOString(),
+    events: [
+      { kind: "text", role: "user", text: "please fix" },
+      { kind: "tool", name: "read", arg: "src/a.py" },
+      { kind: "result", ok: true },
+      { kind: "result", ok: false },
+      { kind: "text", role: "assistant", text: "Done." },
+    ],
+  }, over);
+}
+
+function ovTiles(p) {
+  return p.el("dashOvLiveBody").querySelectorAll(".dash-ov-tile");
+}
+
+check("dashboard overview live: entering the Overview fetches the tiles, then polls every 2 s, one request in flight", async () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  const f = ovLiveFetch(p); // pending until released
+  p.sandbox.dashOverviewStart();
+  assertEqual(f.live().length, 1, "the Overview fetches the tiles at once");
+  assertEqual(f.live()[0], OV_LIVE_URL + "?filter=all");
+  p.sandbox.dashOverviewStart();
+  f.pending[0]({ tiles: [] });
+  await p.settle(); await p.settle();
+  assertEqual(f.live().length, 2, "a restart replaces the loop: the stale answer is dropped, one new fetch");
+  f.pending[1]({ tiles: [ovTile()] });
+  await p.settle(); await p.settle();
+  assertEqual(ovTiles(p).length, 1);
+  const next = p.timers.filter((t) => t.ms === 2000);
+  assert(next.length >= 1, "the next poll is scheduled 2 s out");
+  next[next.length - 1].fn();
+  assertEqual(f.live().length, 3, "the 2 s tick fetches again");
+  next[next.length - 1].fn();
+  assertEqual(f.live().length, 3, "a tick while a request is in flight does not start a second one");
+});
+
+check("dashboard overview live: no fetch while a session is open or the tab is hidden", async () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  const f = ovLiveFetch(p, () => ({ tiles: [] }));
+  p.setVisibility("hidden");
+  p.sandbox.dashOverviewStart();
+  await p.settle(); await p.settle();
+  assertEqual(f.live().length, 0, "a hidden tab must not fetch");
+  p.runTimers();
+  await p.settle();
+  assertEqual(f.live().length, 0, "nor on the next tick");
+  p.setVisibility("visible");
+  p.runTimers();
+  await p.settle(); await p.settle();
+  assertEqual(f.live().length, 1, "visible again: the next tick fetches");
+  // Overview left for a session: nothing more, however many ticks fire.
+  p.sandbox.dashShowPane();
+  for (let i = 0; i < 3; i += 1) { p.runTimers(); await p.settle(); }
+  assertEqual(f.live().length, 1, "no fetch while a session is open");
+  // Still active by flag but the panel is not in overview mode: no fetch.
+  p.sandbox._dashOverviewActive = true;
+  p.sandbox.dashOvLiveTick(p.sandbox._dashOvLiveGen);
+  assertEqual(f.live().length, 1, "no fetch while the panel is not in overview mode");
+});
+
+check("dashboard overview live: a response that lands after the Overview closed is dropped", async () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  const f = ovLiveFetch(p);
+  p.sandbox.dashOverviewStart();
+  assertEqual(f.live().length, 1);
+  p.sandbox.dashOverviewStop();
+  f.pending[0]({ tiles: [ovTile()] });
+  await p.settle(); await p.settle();
+  assertEqual(ovTiles(p).length, 0, "a late answer must not draw tiles");
+  assertEqual(p.el("dashOvLiveBody").textContent, "Loading…");
+  assertEqual(p.timers.filter((t) => t.ms === 2000).length, 0, "and must not schedule another poll");
+});
+
+check("dashboard overview live: a tile shows dot, icon, title, workspace, age and its events", () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  p.sandbox.dashOvRenderLive([ovTile(), ovTile({
+    id: "0f0e0d0c-0000-4000-8000-000000000000", provider: "claude-code", availability: "available",
+    status: "", title: "", last_activity: new Date(Date.now() - 12 * 60000).toISOString(), events: [],
+  })]);
+  const [a, b] = ovTiles(p);
+  assertEqual(a.querySelector(".session-status").className, "session-status status-thinking");
+  assertEqual(a.querySelector(".dash-ov-tile-icon").src, "/api/launcher-icon/provider--kiro-cli-v3");
+  assertEqual(a.querySelector(".dash-ov-tile-title").textContent, "Fix the rail");
+  assertEqual(a.querySelector(".dash-ov-tile-ws").textContent, "proj");
+  assertEqual(a.querySelector(".dash-ov-tile-ws").title, "C:\\ws\\proj");
+  assertEqual(a.querySelector(".dash-ov-tile-age").textContent, "just now");
+  const evs = a.querySelectorAll(".dash-ov-ev");
+  assertEqual(evs.map((e) => e.textContent).join("|"), "please fix|›readsrc/a.py|✓|✗|Done.");
+  assert(evs[0].classList.contains("is-user"));
+  assert(evs[2].classList.contains("is-ok") && evs[3].classList.contains("is-err"));
+  assert(!a.classList.contains("idle"), "30 s quiet is not idle");
+  assert(b.classList.contains("idle"), "12 min quiet is idle (dimmed)");
+  assertEqual(b.querySelector(".dash-ov-tile-age").textContent, "idle 12m");
+  assertEqual(b.querySelector(".session-status").className, "session-status status-live");
+  assertEqual(b.querySelector(".dash-ov-tile-title").textContent, "untitled session");
+});
+
+check("dashboard overview live: no tiles reads No live sessions", async () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  ovLiveFetch(p, () => ({ tiles: [] }));
+  p.sandbox.dashOverviewStart();
+  await p.settle(); await p.settle();
+  assertEqual(p.el("dashOvLiveBody").textContent, "No live sessions");
+});
+
+check("dashboard overview live: markup in a title, event text or tool name stays text (D26)", () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  p.sandbox.dashOvRenderLive([ovTile({
+    title: OV_XSS, name: OV_XSS, cwd: OV_XSS, provider: OV_XSS, status: OV_XSS,
+    availability: OV_XSS, last_activity: OV_XSS, updated_at: OV_XSS,
+    events: [
+      { kind: "text", role: OV_XSS, text: OV_XSS },
+      { kind: "tool", name: OV_XSS, arg: OV_XSS },
+      { kind: "result", ok: OV_XSS },
+      { kind: OV_XSS, text: OV_XSS },
+    ],
+  })]);
+  const body = p.el("dashOvLiveBody");
+  const allowed = new Set(["DIV", "BUTTON", "SPAN"]);
+  for (const n of body.descendants()) {
+    assert(allowed.has(n.tagName), `no element may come from the data, got <${n.tagName}>`);
+    for (const [name, value] of Object.entries(n._attrs)) {
+      assert(name === "aria-hidden" || name === "aria-disabled", `no attribute may come from the data, got ${name}`);
+      assert(value === "true" || value === "false", `a fixed attribute value, got ${value}`);
+    }
+    assertEqual(Object.keys(n.style).length, 0, "no style is written from the data");
+    assert(!String(n.className).includes("<"), "no class comes from the data");
+  }
+  const [tile] = ovTiles(p);
+  assertEqual(tile.querySelector(".dash-ov-tile-icon"), null, "an unknown provider gets no icon");
+  assertEqual(tile.querySelector(".dash-ov-tile-title").textContent, OV_XSS, "shown as text");
+  assertEqual(tile.querySelector(".dash-ov-ev-name").textContent, OV_XSS, "shown as text");
+  assertEqual(tile.querySelector(".dash-ov-ev-text").textContent, OV_XSS, "shown as text");
+  assertEqual(tile.querySelectorAll(".dash-ov-ev").length, 3, "an unknown event kind is not drawn");
+});
+
+check("dashboard overview live: clicking a tile opens its session from a descriptor; a locked tile is inert (D14, D20)", () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  const opened = [];
+  p.sandbox.openSessionTranscript = (target, session, workspace) => opened.push({ target, session, workspace });
+  p.sandbox.dashOvRenderLive([ovTile(), ovTile({ id: "sess_22222222-2222-2222-2222-222222222222", availability: "locked" })]);
+  const [open, locked] = ovTiles(p);
+  open.dispatch("click");
+  assertEqual(opened.length, 1);
+  assertEqual(JSON.stringify(opened[0].target),
+    JSON.stringify({ sid: "sess_11111111-1111-1111-1111-111111111111", provider: "kiro-cli-v3", cwd: "C:\\ws\\proj" }));
+  assertEqual(opened[0].session.title, "Fix the rail");
+  assertEqual(JSON.stringify(opened[0].workspace), JSON.stringify({ cwd: "C:\\ws\\proj", name: "proj" }));
+  assertEqual(locked.disabled, true);
+  assertEqual(locked.getAttribute("aria-disabled"), "true");
+  assertEqual(locked.title, "This session is open elsewhere right now.");
+  locked.dispatch("click");
+  assertEqual(opened.length, 1, "a locked tile must not open");
+});
+
+check("dashboard overview live: the filter is stored, sent and restored", async () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  const f = ovLiveFetch(p, () => ({ tiles: [] }));
+  p.sandbox.dashOverviewStart();
+  await p.settle(); await p.settle();
+  p.el("dashOvLivePa").dispatch("click");
+  assertEqual(p.dashStored.pa_dash_ov_filter, "poweratlas");
+  assertEqual(f.live()[f.live().length - 1], OV_LIVE_URL + "?filter=poweratlas", "a change refetches at once");
+  assertEqual(p.el("dashOvLivePa").getAttribute("aria-pressed"), "true");
+  assertEqual(p.el("dashOvLiveAll").getAttribute("aria-pressed"), "false");
+  const q = loadDashPicker({ stored: { pa_dash_ov_filter: "poweratlas" } });
+  ovLoadRailHelpers(q);
+  const g = ovLiveFetch(q, () => ({ tiles: [] }));
+  q.sandbox.dashOverviewStart();
+  assertEqual(g.live()[0], OV_LIVE_URL + "?filter=poweratlas", "the stored filter is used on load");
+  const r = loadDashPicker({ stored: { pa_dash_ov_filter: "<x>" } });
+  assertEqual(r.sandbox._dashOvFilter, "all", "an unknown stored value falls back to all");
+});
+
+check("dashboard overview live: a failed poll backs off to 10 s and keeps the tiles", async () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  let fail = true;
+  p.sandbox.fetch = (url) => String(url).indexOf(OV_LIVE_URL) === 0 && fail
+    ? Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
+    : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ tiles: [ovTile()], plans: [] }) });
+  p.sandbox.dashOverviewStart();
+  await p.settle(); await p.settle();
+  assertEqual(p.el("dashOvLiveBody").textContent, "Could not load live sessions.");
+  assert(p.timers.some((t) => t.ms === 10000), "an error backs off to 10 s");
+  fail = false;
+  p.runTimers();
+  await p.settle(); await p.settle();
+  assertEqual(ovTiles(p).length, 1);
+  fail = true;
+  p.runTimers();
+  await p.settle(); await p.settle();
+  assertEqual(ovTiles(p).length, 1, "a failed refresh must not wipe the tiles");
 });
 
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {

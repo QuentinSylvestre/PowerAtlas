@@ -501,8 +501,16 @@
          260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D15 -->
     <div class="dash-overview" id="dashOverview">
       <section class="dash-ov-section" id="dashOvLive" aria-labelledby="dashOvLiveTitle">
-        <h3 class="dash-ov-title" id="dashOvLiveTitle">Live now</h3>
-        <div class="dash-ov-body"><div class="dash-ov-loading">Loading…</div></div>
+        <div class="dash-ov-head">
+          <h3 class="dash-ov-title" id="dashOvLiveTitle">Live now</h3>
+          <!-- All live sessions, or only the ones this PowerAtlas holds.
+               260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE -->
+          <div class="dash-ov-filter" role="group" aria-label="Which live sessions to show">
+            <button type="button" class="dash-ov-filter-btn" id="dashOvLiveAll" data-filter="all" aria-pressed="true">All</button>
+            <button type="button" class="dash-ov-filter-btn" id="dashOvLivePa" data-filter="poweratlas" aria-pressed="false">PowerAtlas</button>
+          </div>
+        </div>
+        <div class="dash-ov-body" id="dashOvLiveBody"><div class="dash-ov-loading">Loading…</div></div>
       </section>
       <section class="dash-ov-section" id="dashOvPlans" aria-labelledby="dashOvPlansTitle">
         <h3 class="dash-ov-title" id="dashOvPlansTitle">Active plans</h3>
@@ -1139,9 +1147,11 @@ var _dashOverviewActive = false;
 function dashOverviewStart(){
   _dashOverviewActive = true;
   dashOverviewRefreshSummary();
+  dashOvLiveRestart();
 }
 function dashOverviewStop(){
   _dashOverviewActive = false;
+  dashOvLiveHalt();
 }
 function dashOverviewPoll(){
   // Both callers (the rail's interval and its visibilitychange handler)
@@ -1344,6 +1354,215 @@ function dashOvPlansFailed(){
   if (kids.length === 1 && kids[0].className === 'dash-ov-loading') {
     body.textContent = '';
     body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load plans.'));
+  }
+}
+// ---- Live now (SC-4, SC-5) --------------------------------------------------
+// A tile per live session, polled about every 2 s from transcript files. The
+// poll never subscribes over /ws/acp, so a tile never makes a session
+// "watched" (D2). It fetches only while the Overview is showing and the tab is
+// visible; while either is not, the timer keeps ticking without fetching, and
+// dashOverviewStop() ends it. One request in flight; a response that arrives
+// after a stop or restart is dropped by the generation check. Errors back off
+// to 10 s; a 403 is dashOverviewFetch's to report.
+//
+// Rendering follows D26: every string is set with textContent or as a
+// property; the status dot's class comes from dashRailDotClass(), the icon
+// only for a provider in a fixed list, and no fetched string reaches a style.
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+var DASH_OV_LIVE_URL = '/api/dashboard/overview/live';
+var DASH_OV_LIVE_MS = 2000;
+var DASH_OV_LIVE_BACKOFF_MS = 10000;
+var DASH_OV_IDLE_MS = 120000;
+var DASH_OV_FILTER_KEY = 'pa_dash_ov_filter';
+var DASH_OV_PROVIDERS = {'claude-code': true, 'kiro-cli-v3': true, 'kiro-ide': true};
+var _dashOvLiveGen = 0;
+var _dashOvLiveTimer = null;
+var _dashOvLiveBusy = false;
+// Tile elements by sid, reused across polls so a refresh does not rebuild the
+// grid from scratch.
+var _dashOvTileEls = Object.create(null);
+var _dashOvFilter = (function(){
+  try {
+    return localStorage.getItem(DASH_OV_FILTER_KEY) === 'poweratlas' ? 'poweratlas' : 'all';
+  } catch (e) { return 'all'; }
+})();
+function dashOvShowing(){
+  if (!_dashOverviewActive) return false;
+  var panel = document.getElementById('sessions-panel');
+  if (panel && !panel.classList.contains('dash-mode-overview')) return false;
+  return document.visibilityState !== 'hidden';
+}
+function dashOvLiveHalt(){
+  _dashOvLiveGen += 1;
+  _dashOvLiveBusy = false;
+  if (_dashOvLiveTimer !== null) { clearTimeout(_dashOvLiveTimer); _dashOvLiveTimer = null; }
+}
+// Start (or restart) the loop with a fetch now. A second start while one is
+// running replaces it rather than adding a second loop.
+function dashOvLiveRestart(){
+  dashOvLiveHalt();
+  dashOvLiveTick(_dashOvLiveGen);
+}
+function dashOvLiveSchedule(gen, ms){
+  if (gen !== _dashOvLiveGen || !_dashOverviewActive) return;
+  if (_dashOvLiveTimer !== null) clearTimeout(_dashOvLiveTimer);
+  _dashOvLiveTimer = setTimeout(function(){
+    _dashOvLiveTimer = null;
+    dashOvLiveTick(gen);
+  }, ms);
+}
+function dashOvLiveTick(gen){
+  if (gen !== _dashOvLiveGen || !_dashOverviewActive || _dashOverviewSignedOut) return;
+  if (_dashOvLiveBusy) return;
+  if (!dashOvShowing()) { dashOvLiveSchedule(gen, DASH_OV_LIVE_MS); return; }
+  _dashOvLiveBusy = true;
+  dashOverviewFetch(DASH_OV_LIVE_URL + '?filter=' + encodeURIComponent(_dashOvFilter)).then(function(data){
+    if (gen !== _dashOvLiveGen) return;
+    _dashOvLiveBusy = false;
+    dashOvRenderLive(data && data.tiles);
+    dashOvLiveSchedule(gen, DASH_OV_LIVE_MS);
+  }, function(){
+    if (gen !== _dashOvLiveGen) return;
+    _dashOvLiveBusy = false;
+    dashOvLiveFailed();
+    dashOvLiveSchedule(gen, DASH_OV_LIVE_BACKOFF_MS);
+  });
+}
+function dashOvSetFilter(value){
+  _dashOvFilter = value === 'poweratlas' ? 'poweratlas' : 'all';
+  try { localStorage.setItem(DASH_OV_FILTER_KEY, _dashOvFilter); } catch (e) {}
+  dashOvFilterButtons();
+  if (_dashOverviewActive) dashOvLiveRestart();
+}
+function dashOvFilterButtons(){
+  [['dashOvLiveAll', 'all'], ['dashOvLivePa', 'poweratlas']].forEach(function(pair){
+    var b = document.getElementById(pair[0]);
+    if (b) b.setAttribute('aria-pressed', _dashOvFilter === pair[1] ? 'true' : 'false');
+  });
+}
+(function(){
+  dashOvFilterButtons();
+  [['dashOvLiveAll', 'all'], ['dashOvLivePa', 'poweratlas']].forEach(function(pair){
+    var b = document.getElementById(pair[0]);
+    if (b) b.addEventListener('click', function(){ dashOvSetFilter(pair[1]); });
+  });
+})();
+// "idle 12m" / "idle 3h" for a tile quiet longer than DASH_OV_IDLE_MS.
+function dashOvIdleText(ms){
+  var m = Math.floor(ms / 60000);
+  if (m < 60) return 'idle ' + m + 'm';
+  var h = Math.floor(m / 60);
+  if (h < 48) return 'idle ' + h + 'h';
+  return 'idle ' + Math.floor(h / 24) + 'd';
+}
+function dashOvEventNode(ev){
+  if (!ev || typeof ev !== 'object') return null;
+  if (ev.kind === 'tool') {
+    var tool = dashOvText('div', 'dash-ov-ev dash-ov-ev-tool', '');
+    tool.appendChild(dashOvText('span', 'dash-ov-ev-mark', '›'));
+    tool.appendChild(dashOvText('span', 'dash-ov-ev-name', ev.name));
+    if (ev.arg) tool.appendChild(dashOvText('span', 'dash-ov-ev-arg', ev.arg));
+    return tool;
+  }
+  if (ev.kind === 'result') {
+    var ok = ev.ok === true;
+    return dashOvText('div', 'dash-ov-ev dash-ov-ev-result ' + (ok ? 'is-ok' : 'is-err'), ok ? '✓' : '✗');
+  }
+  if (ev.kind === 'text') {
+    return dashOvText('div', 'dash-ov-ev dash-ov-ev-text' + (ev.role === 'user' ? ' is-user' : ''), ev.text);
+  }
+  return null;
+}
+// Open a tile's session, as clicking its rail row would (D14). Locked tiles
+// are inert like locked rail rows (D20).
+function dashOvOpenTile(tile){
+  if (!tile || !tile.id || tile.availability === 'locked') return;
+  openSessionTranscript({sid: String(tile.id), provider: String(tile.provider || ''), cwd: String(tile.cwd || '')},
+    tile, {cwd: tile.cwd, name: tile.name});
+}
+function dashOvTileNode(tile, now){
+  var sid = String(tile.id);
+  var el = _dashOvTileEls[sid];
+  if (!el) {
+    el = document.createElement('button');
+    el.type = 'button';
+    el.addEventListener('click', function(){ dashOvOpenTile(el._dashOvTile); });
+    _dashOvTileEls[sid] = el;
+  }
+  el._dashOvTile = tile;
+  el.textContent = '';
+  var locked = tile.availability === 'locked';
+  var t = Date.parse(String(tile.last_activity || tile.updated_at || ''));
+  var quiet = isFinite(t) ? Math.max(0, now - t) : 0;
+  var idle = isFinite(t) && quiet > DASH_OV_IDLE_MS;
+  el.className = 'dash-ov-tile' + (idle ? ' idle' : '') + (locked ? ' is-locked' : '');
+  el.disabled = locked;
+  if (locked) el.setAttribute('aria-disabled', 'true');
+  else el.setAttribute('aria-disabled', 'false');
+  el.title = locked ? 'This session is open elsewhere right now.' : '';
+
+  var head = document.createElement('span');
+  head.className = 'dash-ov-tile-head';
+  var dotClass = dashRailDotClass(tile);
+  var dot = document.createElement('span');
+  dot.className = dotClass ? 'session-status ' + dotClass : 'acp-rail-row-pad';
+  dot.setAttribute('aria-hidden', 'true');
+  head.appendChild(dot);
+  if (Object.prototype.hasOwnProperty.call(DASH_OV_PROVIDERS, tile.provider)) {
+    var icon = document.createElement('img');
+    icon.className = 'dash-ov-tile-icon';
+    icon.src = '/api/launcher-icon/provider--' + encodeURIComponent(tile.provider);
+    icon.alt = '';
+    icon.onerror = function(){ this.remove(); };
+    head.appendChild(icon);
+  }
+  head.appendChild(dashOvText('span', 'dash-ov-tile-title', dashRailTitleText(tile)));
+  head.appendChild(dashOvText('span', 'dash-ov-tile-age',
+    idle ? dashOvIdleText(quiet) : dashOvAgo(tile.last_activity || tile.updated_at)));
+  el.appendChild(head);
+  var ws = dashOvText('span', 'dash-ov-tile-ws', tile.name);
+  ws.title = tile.cwd == null ? '' : String(tile.cwd);
+  el.appendChild(ws);
+  var events = document.createElement('span');
+  events.className = 'dash-ov-tile-events';
+  (Array.isArray(tile.events) ? tile.events : []).forEach(function(ev){
+    var n = dashOvEventNode(ev);
+    if (n) events.appendChild(n);
+  });
+  el.appendChild(events);
+  return el;
+}
+function dashOvRenderLive(tiles){
+  var body = document.getElementById('dashOvLiveBody');
+  if (!body) return;
+  var shown = Array.isArray(tiles)
+    ? tiles.filter(function(t){ return t && typeof t === 'object' && t.id; }).slice(0, 8) : [];
+  body.textContent = '';
+  var keep = Object.create(null);
+  if (!shown.length) {
+    _dashOvTileEls = Object.create(null);
+    body.appendChild(dashOvText('div', 'dash-ov-empty', 'No live sessions'));
+    return;
+  }
+  var grid = document.createElement('div');
+  grid.className = 'dash-ov-tiles';
+  var now = Date.now();
+  shown.forEach(function(t){
+    keep[String(t.id)] = true;
+    grid.appendChild(dashOvTileNode(t, now));
+  });
+  Object.keys(_dashOvTileEls).forEach(function(k){ if (!keep[k]) delete _dashOvTileEls[k]; });
+  body.appendChild(grid);
+}
+// A failed poll keeps the tiles already drawn; only a section that never
+// loaded says so.
+function dashOvLiveFailed(){
+  var body = document.getElementById('dashOvLiveBody');
+  if (!body) return;
+  var kids = body.children || body.childNodes || [];
+  if (kids.length === 1 && kids[0].className === 'dash-ov-loading') {
+    body.textContent = '';
+    body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load live sessions.'));
   }
 }
 // The transcript pane. Called before anything is drawn into it: opening a

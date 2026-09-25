@@ -31,7 +31,7 @@ from urllib.parse import parse_qsl, urlparse
 
 import jinja2 as _jinja2
 
-from fastapi import (BackgroundTasks, FastAPI, HTTPException, Request,
+from fastapi import (BackgroundTasks, FastAPI, HTTPException, Query, Request,
                      Response, WebSocket)
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -3317,18 +3317,33 @@ _overview_plans_cache: list = [0.0, None]
 _overview_plans_lock = threading.Lock()
 
 
-def _overview_workspaces() -> list[tuple[str, str]]:
-    """`(cwd, name)` for every workspace the rail can show, once each.
+def _overview_rail_filters():
+    """The rail's own exclusions (D8), as `(providers, hidden)`.
 
-    The rail's own exclusions (D8): providers that are unavailable or disabled
-    in config, and workspaces tagged `hidden`. Rows are filtered by provider
-    **before** de-duplication, so a folder with sessions under both a disabled
-    and an enabled provider is kept. Blocking; runs off the loop.
+    `providers` is the set the rail lists: available on disk and enabled in
+    config. `hidden(cwd)` is true for a workspace tagged `hidden`; a folder with
+    no settings has no tags and is shown. One config read, shared by both.
+    Blocking; runs off the loop. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
     """
     from .config import get_workspace_settings
 
     config = load_config()
     providers = frozenset(p for p in data.available_providers() if _enabled(config, p))
+
+    def hidden(cwd: str) -> bool:
+        return "hidden" in get_workspace_settings(config, cwd)["tags"]
+
+    return providers, hidden
+
+
+def _overview_workspaces() -> list[tuple[str, str]]:
+    """`(cwd, name)` for every workspace the rail can show, once each.
+
+    The rail's own exclusions (`_overview_rail_filters`). Rows are filtered by
+    provider **before** de-duplication, so a folder with sessions under both a
+    disabled and an enabled provider is kept. Blocking; runs off the loop.
+    """
+    providers, hidden = _overview_rail_filters()
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for cwd, _count, _updated, prov in data.discover_workspaces_with_counts(None):
@@ -3338,7 +3353,7 @@ def _overview_workspaces() -> list[tuple[str, str]]:
         if key in seen:
             continue
         seen.add(key)
-        if "hidden" in get_workspace_settings(config, cwd)["tags"]:
+        if hidden(cwd):
             continue
         out.append((cwd, Path(cwd).name or cwd))
     return out
@@ -3370,6 +3385,62 @@ async def api_dashboard_overview_summary(response: Response):
     """
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(_overview_summary)
+
+
+# --- The dashboard Overview's live tiles ----------------------------------
+#
+# 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE (SC-4, SC-5). Polled about
+# every 2 s while the Overview and the tab are both visible. It reads
+# transcript files and never subscribes over /ws/acp, so a tile never makes a
+# session "watched" (D2). Loopback-only (SC-10): absent from
+# `_REMOTE_ALLOWED_PATHS`.
+
+_DASHBOARD_OVERVIEW_LIVE_PATH = "/api/dashboard/overview/live"
+
+
+def _overview_live(held: dict[str, str], filter_: str) -> dict:
+    """The live tiles payload. Blocking; runs off the loop.
+
+    The presence snapshot is taken here, in the worker thread, never as a
+    `to_thread` argument: a rescan takes 42-75 ms and would block the loop
+    (D24). `originals` maps each discovered workspace's normalised cwd to its
+    discovered spelling, so a casefolded snapshot cwd never reaches
+    `data.get_sessions` (see `overview.live_sessions`).
+    """
+    snapshot = presence.get_snapshot()
+    providers, hidden = _overview_rail_filters()
+    originals: dict[str, str] = {}
+    for cwd, _count, _updated, _prov in data.discover_workspaces_with_counts(None):
+        originals.setdefault(data._normalize_path(cwd), cwd)
+    deps = overview.LiveDeps(
+        session_is_live=_session_is_live,
+        acp_availability=_acp_availability,
+        acp_status_for_held=_acp_status_for_held,
+        row_title=_acp_row_title,
+        hidden=hidden,
+        provider_shown=lambda prov: prov in providers,
+    )
+    tiles = overview.live_sessions(held, snapshot, filter_, deps, originals)
+    return {"filter": filter_, "tiles": tiles}
+
+
+@app.get(_DASHBOARD_OVERVIEW_LIVE_PATH)
+async def api_dashboard_overview_live(response: Response,
+                                      filter_: str = Query("all", alias="filter")):
+    """Up to 8 live sessions with the tail of each, for the Overview.
+
+    `filter` is `all` (the default) or `poweratlas`, the sessions this
+    PowerAtlas holds; anything else falls back to `all`, as `project_sort`
+    does. `held` is captured here on the loop, where supervisor state lives
+    (D9, D24), with the listing routes' `acp is None` guard.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    if filter_ not in overview.LIVE_FILTERS:
+        filter_ = "all"
+    sup = getattr(acp, "_supervisor", None) if acp is not None else None
+    held = {sid: (m.get("cwd", "") if isinstance(m, dict) else "")
+            for sid, m in (sup.sessions.items() if sup is not None else [])}
+    return await asyncio.to_thread(_overview_live, held, filter_)
 
 
 # --- The create flow's workspace list ------------------------------------

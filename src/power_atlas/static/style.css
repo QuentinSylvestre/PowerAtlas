@@ -1307,6 +1307,37 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .dash-ov-tr.is-done .dash-ov-tr-status { color: var(--success); }
 .dash-ov-tr.is-active .dash-ov-tr-status { color: var(--accent); }
 .dash-ov-tr.is-pending .dash-ov-tr-status, .dash-ov-tr.is-other .dash-ov-tr-status { color: var(--text-dim); }
+/* Live now: a two-column grid of tiles, one per live session, each the tail
+   of its transcript under a top fade. Tiles idle for more than 2 min are
+   dimmed; locked ones are inert. None of these elements is toggled with
+   `hidden`. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE */
+.dash-ov-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.dash-ov-head .dash-ov-title { margin: 0; flex: 1 1 auto; }
+.dash-ov-filter { display: inline-flex; border: 1px solid var(--card-border); border-radius: var(--radius-sm); overflow: hidden; }
+.dash-ov-filter-btn { padding: 2px 8px; border: 0; background: none; color: var(--text-dim); font: inherit; font-size: 11px; cursor: pointer; }
+.dash-ov-filter-btn + .dash-ov-filter-btn { border-left: 1px solid var(--card-border); }
+.dash-ov-filter-btn[aria-pressed="true"] { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
+.dash-ov-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 700px) { .dash-ov-tiles { grid-template-columns: minmax(0, 1fr); } }
+.dash-ov-tile { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 8px 10px; border: 1px solid var(--card-border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.dash-ov-tile:hover { background: var(--surface-hover); }
+.dash-ov-tile.idle { opacity: 0.55; }
+.dash-ov-tile.is-locked { cursor: default; opacity: 0.55; }
+.dash-ov-tile.is-locked:hover { background: var(--surface); }
+.dash-ov-tile-head { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; }
+.dash-ov-tile-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.dash-ov-tile-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.dash-ov-tile-age { flex-shrink: 0; font-size: 11px; color: var(--text-dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dash-ov-tile-ws { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-muted); }
+.dash-ov-tile-events { display: flex; flex-direction: column; justify-content: flex-end; gap: 2px; height: 6.2em; overflow: hidden; font-size: 11.5px; line-height: 1.2; color: var(--text-muted);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 1.6em); mask-image: linear-gradient(to bottom, transparent 0, #000 1.6em); }
+.dash-ov-ev { flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-ov-ev-text.is-user { color: var(--text-dim); font-style: italic; }
+.dash-ov-ev-tool { font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 10.5px; }
+.dash-ov-ev-mark { margin-right: 4px; color: var(--text-dim); }
+.dash-ov-ev-arg { margin-left: 6px; color: var(--text-dim); }
+.dash-ov-ev-result.is-ok { color: var(--success); }
+.dash-ov-ev-result.is-err { color: var(--amber); }
 /* Home: back to the Overview, shown only while a session is open. Its
    inline-flex would beat the UA's [hidden] rule, hence the explicit pair. */
 .dash-home-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; }

@@ -438,6 +438,25 @@ class Snapshot:
             return {c for _p, c in self._live_cwds}
         return {c for p, c in self._live_cwds if p in providers}
 
+    def live_sids(self) -> list[tuple[str, str, str]]:
+        """``(provider, session_id, normalized_cwd)`` for every live session id
+        whose cwd is known. An id seen without a cwd is left out.
+
+        For the dashboard Overview's live tiles, which need each id's workspace
+        to find its record. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+        """
+        return [(prov, sid, self._sid_to_cwd[(prov, sid)])
+                for prov, sid in self._live_sids
+                if self._sid_to_cwd.get((prov, sid))]
+
+    def live_cwd_pairs(self) -> list[tuple[str, str]]:
+        """``(provider, normalized_cwd)`` for every cwd a provider process runs in.
+
+        ``live_cwds()`` drops the provider; the Overview's live tiles need it
+        to know which store to read. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+        """
+        return list(self._live_cwds)
+
     def live_session_ids_for_cwd(self, provider: str, cwd: str) -> list[str]:
         """Return session IDs of live processes running in the given cwd."""
         from .data import _normalize_path
