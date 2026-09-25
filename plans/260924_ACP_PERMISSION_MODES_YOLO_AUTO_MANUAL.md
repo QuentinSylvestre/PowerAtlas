@@ -879,6 +879,10 @@ Phase 4 (docs)
   `agentMode` is `poweratlas-acp`; saving from a card keeps a pending D-35 notice (`keeps_notice`).
 - **Phase 3 — shared helpers:** the rule editor's warning helpers moved into `transcript-renderer.js`;
   `markPermissionResolved` leaves an open rule row usable so a save can finish after the prompt resolved (D-19).
+- **Step 9 — SE7 fix (2c0025d):** new leaf module `src/power_atlas/permission_rows.py` (no package imports) holds the
+  row keys, labels and the six card rows; `web.py`'s allow-rule route now checks `permission_rows.CARD_ROWS` directly,
+  so a failed guarded `acp` import no longer refuses every row. Config backups created during QA were deleted at the
+  user's request (2026-09-25).
 - **Step 9 — `tests/permission_pattern_cases.json` is a new test data file** (a case table shared by the Python and JS
   tests for pattern validation parity). AGENTS.md discourages new test files; the orchestrator's fix brief asked for
   a shared table, which needs a shared file.
@@ -910,9 +914,6 @@ Phase 4 (docs)
    still saves non-permission keys outside the generation lock (Step 9 SEC7; user chose follow-up 2026-09-25).
    Source: R-13.
 10. **Runtime confirmation that kiro-cli bound the compiled block.** Source: R-17.
-12. **Row-label single source.** `acp._RULE_ROWS`, `agent_profile.ROW_LABELS`, the renderer's `PERMISSION_RULE_ROWS` and
-    `PERMISSION_CAPABILITY_WORDS` repeat the row names; pinned by tests. A leaf module would need `acp.py` to widen its
-    import boundary (Step 9 SE7, not fixed). Source: Step 9 review.
 11. **Stale plan paths.** `plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` is still cited at
     `docs/KNOWLEDGE.md` ~273, `acp.py` ~22 and ~896, `plans/ROADMAP.md` ~218 (AGENTS.md's is fixed in Phase 1).
     Pre-existing; reported, not in scope. Source: doc-impact scan.
@@ -1182,7 +1183,7 @@ Final state: pytest `tests/test_web.py tests/test_config.py` 2236 passed; `node 
 | M-10 | Medium | [Architect] Lock protocol split across `web.py` and `agent_profile.py` | Refuted by verifier — the split is D-16's recorded design and documented at the lock |
 | A10 | Low | [Architect] Unrelated saves persisted load-time-normalised rules and mode | Fixed — b95026a: raw stored values written back (user chose Fix, 2026-09-25) |
 | SEC7 | Low | [Security] `/api/save-setting` saves outside the generation lock (pre-existing R-13) | User: accepted — 2026-09-25, left for Follow-up 9 |
-| SE7 | Low | [Senior] Row-label map repeated four times | Orchestrator: proposed-accept — pending user decision; Follow-up 12 |
+| SE7 | Low | [Senior] Row-label map repeated four times | Fixed — 2c0025d (user chose Fix, 2026-09-25): leaf module `permission_rows.py`; card labels from the frame |
 | L-* | Low | [all] About 28 further Lows (EU8-14, SE4/6/9, RE4-10, A3/4/5/6/7/9, SEC3/4/5/6/8) | Fixed — b95026a, 561bdf7, 24a5904 |
 | C-H1 | High | [Security, cycle 2] Saved fingerprint never cleared, silencing outside reverts | Fixed — 6c0f8b9; reviewer probe re-run clean |
 | C-H2 | High | [Security, cycle 2] Absent-file heal raised no notice for an outside change | Fixed — 6c0f8b9: last generated posture persisted; probe re-run clean |
