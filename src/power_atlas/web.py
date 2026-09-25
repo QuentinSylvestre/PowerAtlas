@@ -577,7 +577,7 @@ def _permission_in_effect(state: str, config) -> bool:
     defaults, so a file that happens to match them proves nothing about what
     the user set (Phase 1 review, finding 1).
     """
-    return state == "on" and not getattr(config, "_load_error", "")
+    return state == "on" and not config._load_error
 
 
 def _not_in_effect_reason(state: str, compile_error: str, config,
@@ -593,32 +593,43 @@ def _not_in_effect_reason(state: str, compile_error: str, config,
     """
     path = str(agent_profile.derived_agent_path())
     last = agent_profile.last_generation()
-    settings_step = ("save the permission mode again in Settings > Agent "
-                     "permissions on the dashboard, or restart PowerAtlas")
+    # Final review, H-A: the settings panel's "Apply again" control, which
+    # re-applies the mode even when it is unchanged, on the dashboard.
+    settings_step = (agent_profile.APPLY_AGAIN_STEP
+                     + " on the dashboard, or restart PowerAtlas")
 
     def said(text: str, fmt: str) -> str:
         return fmt.format(text) if detail and text else ""
 
-    load_error = getattr(config, "_load_error", "")
+    load_error = config._load_error
     if load_error:
         from . import config as config_mod
-        cfg = config_mod.CONFIG_PATH
         return (f"PowerAtlas's config.toml could not be read"
                 f"{said(load_error, ' ({})')}, so which permission mode is set "
                 "is unknown",
-                f"Fix {cfg} by hand "
-                f"({config_mod.unreadable_backup_note(config)}), then start "
-                "the session again.")
+                config_mod.unreadable_fix(config, "start the session again."))
     if compile_error:
         return (f"the permission rules in config.toml cannot be applied"
                 f"{said(compile_error, ' ({})')}",
                 "Fix or remove acp_permission_rules in PowerAtlas's "
                 f"config.toml, then {settings_step}.")
     if state == "absent":
-        why = said(last.error if last.attempted else "", ": {}")
+        # H-A: the gate has just tried to write it; say why that failed.
+        if healed is False and last.error:
+            why = (said(last.error, ", and writing it failed ({})")
+                   or ", and writing it failed")
+        else:
+            why = said(last.error if last.attempted else "", ": {}")
         return (f"its agent file {path} has not been written{why}",
                 settings_step[0].upper() + settings_step[1:]
                 + "; if it keeps failing, the warning there names the error.")
+    if state == "unreadable":
+        # Final review, RE4: a read that failed says nothing about whose file
+        # it is, so the fix is to try again, not to remove it.
+        return (f"its agent file {path} could not be read just now",
+                "Start the session again in a moment; if it keeps failing, "
+                "close any program holding that file (a sync client or a "
+                "virus scan).")
     if state == "stale":
         if healed is False and last.error:
             why = (said(last.error, ", and regenerating it failed ({})")
@@ -729,7 +740,10 @@ def _derived_agent_in_effect() -> dict:
         config = load_config()
         state, compile_error = agent_profile.block_state_detail(config)
         healed = None
-        if state == "stale" and not getattr(config, "_load_error", ""):
+        # Final review, H-A: a file that was never written, or was deleted,
+        # is regenerated the same way as a stale one; `_target_is_ours` is
+        # True for an absent file.
+        if state in ("stale", "absent") and not config._load_error:
             done = threading.Event()
             box: dict = {}
 
@@ -4318,16 +4332,22 @@ def _acp_permission_state(config) -> dict:
     route adds that.
     """
     state, compile_error = agent_profile.block_state_detail(config)
+    if _permission_in_effect(state, config):
+        # Final review, RE10: config.toml reads cleanly again and the file
+        # already matches it, so a "could not be read" status from earlier no
+        # longer holds; the gate does the same with the lock held.
+        # `clear_unreadable_status` explains why the read may do it without.
+        agent_profile.clear_unreadable_status(config)
     last = agent_profile.last_generation()
     return {
         "mode": config.acp_permission_mode,
-        "mode_warning": getattr(config, "_mode_warning", ""),
+        "mode_warning": config._mode_warning,
         # Phase 1 review, finding 1: config.toml did not parse, so `mode` and
         # the rules below are the defaults, not what the user set; the panel
         # shows this instead of a mode.
         "config_error": agent_profile.config_load_error_message(config),
         # Finding 7: what loading had to change in the stored rules.
-        "rules_warning": getattr(config, "_rules_warning", ""),
+        "rules_warning": config._rules_warning,
         "base_agent": config.acp_permission_base_agent,
         "derived_agent": str(agent_profile.derived_agent_path()),
         "state": state,
@@ -4340,6 +4360,8 @@ def _acp_permission_state(config) -> dict:
         "protected": agent_profile.protected_display(
             config.acp_permission_rules),
         "posture_notice": agent_profile.posture_notice(),
+        # Final review, M-6: the one-time "permissions are now modes" notice.
+        "upgrade_notice": agent_profile.upgrade_notice(),
         # Phase 2: Manual's rows for the rule editor, normalised the way
         # `load_config` reads them (D-26) and never written back by a read.
         # `rule_rows` carries the plain labels in compile order.
@@ -4454,15 +4476,17 @@ async def set_acp_permissions(request: Request):
         if rules is not None:
             config.acp_permission_rules = rules
 
-    # `sets_posture`: choosing the mode here is the dashboard's answer to
-    # D-35's notice, even when the mode is unchanged. A rules-only save clears
-    # the notice only when it changes what the mode compiles to (the
-    # fingerprint check in `apply_settings`): in Yolo the rows are not in
-    # force, so editing them does not acknowledge an outside mode change.
+    # `notice="choose"`: choosing the mode here is the dashboard's answer to
+    # D-35's notice, even when the mode is unchanged ("Apply again", final
+    # review H-A, sends the mode already chosen). A rules-only save
+    # ("adopt") clears the notice only when it changes what the mode compiles
+    # to (the fingerprint check in `apply_settings`): in Yolo the rows are
+    # not in force, so editing them does not acknowledge an outside mode
+    # change.
     result = await asyncio.to_thread(
         lambda: agent_profile.apply_settings(
             mutate, lock_timeout=_SETTINGS_LOCK_TIMEOUT_SECONDS,
-            sets_posture=has_mode))
+            notice="choose" if has_mode else "adopt"))
     answer = _apply_result(result)
     if not answer["ok"]:
         return answer
@@ -4519,14 +4543,15 @@ async def add_acp_allow_rule(request: Request):
             or row not in _allow_rule_rows()):
         return {"ok": False,
                 "error": "This kind of action cannot take a rule from a prompt."}
-    reason = (agent_profile.pattern_error(pattern)
+    reason = (agent_profile.pattern_error(pattern, new=True)
               or agent_profile.fs_allow_error(row, pattern))
     if reason:
         # ASCII-escaped for the same reason as the rules save: a lone
         # surrogate (refused for exactly that) cannot be encoded as UTF-8.
-        shown = str(pattern)[:60]
+        # Quoted as typed, invisible characters escaped (final review, EU13).
+        shown = agent_profile.quote_pattern(pattern)
         return Response(json.dumps(
-            {"ok": False, "error": f"The rule was not saved: {shown!r} {reason}."},
+            {"ok": False, "error": f"The rule was not saved: {shown} {reason}."},
             ensure_ascii=True), media_type="application/json")
 
     def precheck() -> str:
@@ -4548,19 +4573,40 @@ async def add_acp_allow_rule(request: Request):
             rules[row]["allow"].append(pattern)
         config.acp_permission_rules = rules
 
-    # `sets_posture=False`: a rule added from a prompt does not choose the
-    # mode, like the editor's rules-only save. `keeps_notice=True` (Phase 3
-    # review, M3): the card does not show D-35's notice, so saving from it
-    # never clears one; only a mode choice or a rules-editor save does. The
-    # answer carries the notice, so the card can point at it.
+    # `notice="preserve"` (Phase 3 review, M3): a rule added from a prompt
+    # does not choose the mode, and the card does not show D-35's notice, so
+    # saving from it never clears one; only a mode choice or a rules-editor
+    # save does. The answer carries the notice, so the card can point at it.
     result = await asyncio.to_thread(
         lambda: agent_profile.apply_settings(
             mutate, lock_timeout=_SETTINGS_LOCK_TIMEOUT_SECONDS,
-            sets_posture=False, keeps_notice=True))
+            notice="preserve"))
     answer = _apply_result(result)
     if answer["ok"]:
         answer["posture_notice"] = agent_profile.posture_notice()
     return answer
+
+
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (M-3, M-6): the
+# settings panel's Acknowledge button on D-35's notice (`"posture"`) and on
+# the one-time upgrade notice (`"upgrade"`). Clears the notice and nothing
+# else: the mode and the rules stay as they are. Loopback-only like the other
+# permission routes (not in `_REMOTE_ALLOWED_PATHS`), and a POST needs the
+# `pa_local` cookie and a same-origin Origin or Referer.
+@app.post("/api/acp-permissions/acknowledge")
+async def acknowledge_acp_permission_notice(request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return {"ok": False, "error": "Invalid JSON body"}
+    kind = body.get("notice") if isinstance(body, dict) else None
+    if kind not in ("posture", "upgrade"):
+        return {"ok": False, "error": "notice must be \"posture\" or \"upgrade\""}
+    if not await asyncio.to_thread(agent_profile.acknowledge_notice, kind):
+        return {"ok": False,
+                "error": "The permission settings are being applied; try "
+                         "again in a moment."}
+    return {"ok": True, **(await _current_acp_permission_state())}
 
 
 @app.post("/api/open-folder", response_class=HTMLResponse)
@@ -5100,12 +5146,16 @@ async def save_setting(request: Request):
         if any(ord(ch) < 0x20 for ch in value):
             return {"ok": False, "error": f"{key} contains invalid control characters"}
     config = load_config()
-    load_error = agent_profile.config_load_error_message(config)
-    if load_error:
+    if config._load_error:
         # Phase 1 review, finding 1. `config` is the defaults stand-in for a
         # config.toml that did not parse; saving it would write every default
-        # over the user's file, Yolo included, for any key.
-        return {"ok": False, "error": load_error + "."}
+        # over the user's file, Yolo included, for any key. The permission
+        # wording only for the permission key (final review, A3): for the
+        # peek hotkey, "the permission settings were not applied" is noise.
+        load_error = (agent_profile.config_load_error_message(config)
+                      if key == "acp_permission_base_agent"
+                      else unreadable_config_message(config))
+        return {"ok": False, "error": load_error.rstrip(".") + "."}
     if key == "remote_bind_address":
         # The named error SC-3b asks for, on the write path. `load_config`
         # sanitises the same value to "" and logs, because it may not raise;
@@ -5145,7 +5195,6 @@ async def save_setting(request: Request):
                     "error": "Base agent must be 1-64 characters of "
                              "letters, digits, '_' or '-', and not a Windows "
                              "reserved device name"}
-    if key == "acp_permission_base_agent":
         # Saved and regenerated under the generation lock, like a mode change
         # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-33, D-16): the
         # derived agent is built from this file, and a save outside the lock

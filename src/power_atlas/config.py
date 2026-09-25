@@ -1,5 +1,6 @@
 """Thread-safe config persistence via TOML."""
 
+import copy
 import errno
 import ipaddress
 import logging
@@ -9,6 +10,7 @@ import secrets
 import shutil
 import sys
 import threading
+import time
 import tomllib
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -142,6 +144,60 @@ class Config:
     acp_permission_rules: dict = field(
         default_factory=lambda: _default_permission_rules())
     acp_permission_base_agent: str = "kiro_default"
+
+    # ---- What `load_config` found, never stored ---------------------------
+    # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (A9). Declared
+    # fields rather than attributes set on the instance, so a copy
+    # (`dataclasses.replace`, `copy.copy`) carries them: a copy that lost
+    # `_load_error` would read as a config that loaded cleanly, and the
+    # defaults stand-in for an unreadable file would then be generated from or
+    # saved over the user's file. Every name starts with `_`, which is what
+    # keeps it out of config.toml in both directions (`_STORED_FIELDS`).
+    #
+    # Why config.toml could not be read ("" when it was), and whether that was
+    # a parse error (`"parse"`, a `.bak` copy attempted) or a read error
+    # (`"read"`: a sharing violation or a permission problem, retried once and
+    # never called corrupt; RE5).
+    _load_error: str = field(default="", repr=False, compare=False)
+    _load_error_kind: str = field(default="", repr=False, compare=False)
+    _load_error_backed_up: bool = field(default=False, repr=False, compare=False)
+    # D-25 and Phase 1 review finding 7: what loading had to change in the
+    # stored mode and rules, for the settings panel.
+    _mode_warning: str = field(default="", repr=False, compare=False)
+    _rules_warning: str = field(default="", repr=False, compare=False)
+    # M-6: the mode was migrated from the retired on/off switch on this load.
+    _migrated_from_switch: bool = field(default=False, repr=False, compare=False)
+    # A10: `acp_permission_mode` and `acp_permission_rules` exactly as stored
+    # (`None` when absent). `save_config` writes these back, not the
+    # normalised values above, unless something assigned the field since the
+    # load, so an unrelated save (the peek hotkey) never erases an invalid
+    # allow pattern or a junk mode, and the warning that names it stays.
+    _raw_permission_mode: object = field(default=None, repr=False, compare=False)
+    _raw_permission_rules: object = field(default=None, repr=False, compare=False)
+    # The two fields as loaded (normalised), so a change made in place — a
+    # pattern appended to the loaded rules dict — counts as a change too.
+    _permission_loaded: object = field(default=None, repr=False, compare=False)
+    # Which of those two fields were assigned since the load. Declared last,
+    # so `__init__` resets it after assigning the fields it tracks.
+    _permission_touched: frozenset = field(default=frozenset(), repr=False,
+                                           compare=False)
+
+    def __setattr__(self, name, value):
+        # A10: an assignment is a change, even to an equal value. The mode
+        # route choosing Manual over a stored "AUTO" (which already reads as
+        # Manual) must still overwrite it.
+        if name in _PERMISSION_FIELDS:
+            touched = self.__dict__.get("_permission_touched", frozenset())
+            object.__setattr__(self, "_permission_touched", touched | {name})
+        object.__setattr__(self, name, value)
+
+
+# The two permission fields `save_config` writes back as stored unless
+# assigned (A10).
+_PERMISSION_FIELDS = frozenset(("acp_permission_mode", "acp_permission_rules"))
+# The fields config.toml holds: every `Config` field but the load diagnostics.
+_STORED_FIELDS = frozenset(name for name in Config.__dataclass_fields__
+                           if not name.startswith("_"))
 
 
 # The kiro-cli agent PowerAtlas generates, named without its `.md` extension —
@@ -636,6 +692,7 @@ def _with_permission_defaults(config: Config) -> Config:
     """A config with no stored permission settings: Yolo and the seed rules."""
     config._mode_warning = ""
     config._rules_warning = ""
+    config._permission_touched = frozenset()
     return config
 
 
@@ -671,6 +728,9 @@ def _migrate_permission_settings(config: Config, data: dict) -> None:
         warning = ""
         migrated_manual = data.get("acp_permissions_enabled") is True
         mode = "manual" if migrated_manual else "yolo"
+        # M-6: the one-time upgrade notice is raised by the startup pass
+        # (`agent_profile.apply_settings`), never here: loading stays a read.
+        config._migrated_from_switch = "acp_permissions_enabled" in data
     config.acp_permission_mode = mode
     config._mode_warning = warning
 
@@ -690,6 +750,53 @@ def _migrate_permission_settings(config: Config, data: dict) -> None:
     # What normalisation changed, for the settings panel (Phase 1 review,
     # finding 7); logged once per problem by `normalise_rules_report`.
     config._rules_warning = "; ".join(problems)
+    # A10: the stored values, for `save_config` to write back unchanged, and
+    # nothing assigned yet. `None` for a key config.toml does not hold.
+    config._raw_permission_mode = data.get("acp_permission_mode")
+    config._raw_permission_rules = raw_rules
+    config._permission_loaded = {
+        "acp_permission_mode": config.acp_permission_mode,
+        "acp_permission_rules": copy.deepcopy(config.acp_permission_rules)}
+    config._permission_touched = frozenset()
+
+
+# How long `load_config` waits before its one retry of a read that failed with
+# an `OSError` (RE5). Short: ~16 routes call `load_config` on the event loop.
+_READ_RETRY_SECONDS = 0.05
+
+
+def _read_config_file() -> dict:
+    with open(CONFIG_PATH, "rb") as f:
+        return tomllib.load(f)
+
+
+def _unreadable(error: str, kind: str, *, backed_up: bool) -> Config:
+    """The defaults stand-in for a config.toml that could not be used."""
+    config = _with_permission_defaults(Config())
+    # Whether the `.bak` copy exists, so no message claims one that was never
+    # written (Phase 1 re-review, finding 2).
+    config._load_error_backed_up = backed_up
+    # The permission gate's self-heal must not regenerate the derived agent
+    # from these defaults: they are not what the user set, and the default mode
+    # is the least restrictive one.
+    # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-30
+    config._load_error = error
+    config._load_error_kind = kind
+    return config
+
+
+def _corrupt(exc: Exception) -> Config:
+    """A config.toml that was read and did not parse: backed up, then defaults."""
+    backup = CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak")
+    try:
+        shutil.copy2(CONFIG_PATH, backup)
+        log.warning("Corrupt config backed up to %s; using defaults", backup)
+        backed_up = True
+    except Exception:
+        log.warning("Corrupt config; using defaults (backup failed)")
+        backed_up = False
+    return _unreadable(f"{type(exc).__name__}: {exc}", "parse",
+                       backed_up=backed_up)
 
 
 def load_config() -> Config:
@@ -698,28 +805,34 @@ def load_config() -> Config:
         if not CONFIG_PATH.exists():
             return _with_permission_defaults(Config())
         try:
-            with open(CONFIG_PATH, "rb") as f:
-                data = tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+            data = _read_config_file()
+        except FileNotFoundError:
+            # Removed between the check above and the read.
+            return _with_permission_defaults(Config())
+        except OSError:
+            # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (RE5):
+            # a read that failed (a sharing violation from a sync client or an
+            # antivirus scan, an ACL) says nothing about the file's content.
+            # It is retried once; if it fails again the defaults stand in, as
+            # for a parse error, but the file is not called corrupt and its
+            # `.bak` copy — possibly of the last unreadable version — is left
+            # alone.
+            time.sleep(_READ_RETRY_SECONDS)
             try:
-                shutil.copy2(CONFIG_PATH, CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak"))
-                log.warning("Corrupt config backed up to %s; using defaults", CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak"))
-                backed_up = True
-            except Exception:
-                log.warning("Corrupt config; using defaults (backup failed)")
-                backed_up = False
-            config = _with_permission_defaults(Config())
-            # Whether the `.bak` copy exists, so no message claims one that
-            # was never written (Phase 1 re-review, finding 2).
-            config._load_error_backed_up = backed_up
-            # The permission gate's self-heal must not regenerate the derived
-            # agent from these defaults: they are not what the user set, and
-            # the default mode is the least restrictive one.
-            # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-30
-            config._load_error = f"{type(exc).__name__}: {exc}"
-            return config
+                data = _read_config_file()
+            except FileNotFoundError:
+                return _with_permission_defaults(Config())
+            except OSError as again:
+                log.warning("config.toml could not be read (%s); using defaults "
+                            "until it can be", again)
+                return _unreadable(f"{type(again).__name__}: {again}", "read",
+                                   backed_up=False)
+            except (tomllib.TOMLDecodeError, UnicodeDecodeError) as bad:
+                return _corrupt(bad)
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+            return _corrupt(exc)
         defaults = Config()
-        fields = {f.name for f in Config.__dataclass_fields__.values()}
+        fields = set(_STORED_FIELDS)
         kwargs = {}
         for k, v in data.items():
             if k not in fields:
@@ -867,19 +980,34 @@ def unreadable_backup_note(config) -> str:
     probes redirect `CONFIG_PATH`.
     """
     backup = CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak")
-    if getattr(config, "_load_error_backed_up", False):
+    if config._load_error_backed_up:
         return f"a copy of the unreadable file was saved as {backup}"
     return "PowerAtlas could not save a backup copy of it, so keep one before editing"
 
 
+def unreadable_fix(config, then: str) -> str:
+    """The step that makes an unreadable config.toml readable, then `then`.
+
+    RE5: a parse error needs the file fixed by hand; a read error (the file
+    is locked or not accessible) needs nothing but a retry, and naming a
+    `.bak` copy or a hand edit there would send the user to fix a file that
+    is fine.
+    """
+    if config._load_error_kind == "read":
+        return (f"The file {CONFIG_PATH} exists but could not be opened; "
+                f"close any program holding it (a sync client or a virus "
+                f"scan), then {then}")
+    return (f"Fix the file {CONFIG_PATH} by hand "
+            f"({unreadable_backup_note(config)}), then {then}")
+
+
 def unreadable_config_message(config) -> str:
-    """The refusal for a write over a config.toml that did not parse, or `""`."""
-    error = getattr(config, "_load_error", "")
+    """The refusal for a write over a config.toml that could not be used, or `""`."""
+    error = config._load_error
     if not error:
         return ""
     return (f"PowerAtlas's config.toml could not be read ({error}), so the "
-            f"change was not saved. Fix the file {CONFIG_PATH} by hand "
-            f"({unreadable_backup_note(config)}), then try again")
+            f"change was not saved. {unreadable_fix(config, 'try again')}")
 
 
 def save_config(config: Config) -> None:
@@ -900,9 +1028,22 @@ def save_config(config: Config) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         tmp = CONFIG_PATH.with_suffix(".tmp")
         try:
-            data = asdict(config)
+            data = {k: v for k, v in asdict(config).items()
+                    if k in _STORED_FIELDS}
             for legacy in _LEGACY_KEYS:
                 data.pop(legacy, None)  # never write migrated legacy keys
+            # A10: the permission mode and rules as they were stored, unless
+            # this config's field was assigned or changed since it was
+            # loaded. An absent key (`None`) is written from the field, which
+            # is how a migrated setting is persisted.
+            loaded = config._permission_loaded or {}
+            for name, raw in (
+                    ("acp_permission_mode", config._raw_permission_mode),
+                    ("acp_permission_rules", config._raw_permission_rules)):
+                if (raw is not None and name not in config._permission_touched
+                        and name in loaded
+                        and getattr(config, name) == loaded[name]):
+                    data[name] = copy.deepcopy(raw)
             # Restore unknown keys preserved at load time (object-identity constraint:
             # caller must pass the same Config instance returned by load_config).
             data.update(getattr(config, "_extra", {}) or {})

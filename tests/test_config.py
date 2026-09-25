@@ -974,3 +974,113 @@ def test_the_backup_note_names_a_bak_only_when_one_was_written(
     note = config_mod.unreadable_backup_note(unsaved)
     assert ".bak" not in note and "could not save a backup" in note
     assert ".bak" not in config_mod.unreadable_config_message(unsaved)
+
+
+# --- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review ---
+
+
+def test_the_load_diagnostics_survive_a_copy_and_are_never_stored(tmp_path):
+    """A9: declared fields, so `dataclasses.replace` keeps `_load_error`, and
+    none of them reaches config.toml."""
+    import dataclasses
+    (tmp_path / "config.toml").write_text("not = [ toml", encoding="utf-8")
+    broken = load_config()
+    copied = dataclasses.replace(broken)
+    assert copied._load_error == broken._load_error != ""
+    assert copied._load_error_kind == "parse"
+    (tmp_path / "config.toml").write_text(
+        'acp_permission_mode = "AUTO"\n', encoding="utf-8")
+    cfg = load_config()
+    cfg.peek_hotkey = "ctrl+alt+p"
+    save_config(cfg)
+    text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "_load_error" not in text and "_raw_permission" not in text
+    assert "_mode_warning" not in text
+
+
+def test_an_unrelated_save_keeps_the_stored_mode_and_rules_as_written(tmp_path):
+    """A10 (user decision 2026-09-25): a peek-hotkey save writes the stored
+    permission values back byte for byte, so an invalid allow pattern and a
+    junk mode survive, and so do the warnings that name them."""
+    (tmp_path / "config.toml").write_text(
+        'acp_permission_mode = "AUTO"\n'
+        '[acp_permission_rules.shell]\n'
+        'default = "ask"\n'
+        'allow = ["git status", "*"]\n'
+        'block = []\n', encoding="utf-8")
+    cfg = load_config()
+    assert cfg.acp_permission_mode == "manual" and cfg._mode_warning
+    assert "*" not in cfg.acp_permission_rules["shell"]["allow"]
+    assert cfg._rules_warning
+    cfg.peek_hotkey = "ctrl+alt+p"
+    save_config(cfg)
+    with open(tmp_path / "config.toml", "rb") as f:
+        stored = tomllib.load(f)
+    assert stored["acp_permission_mode"] == "AUTO"
+    assert stored["acp_permission_rules"] == {
+        "shell": {"default": "ask", "allow": ["git status", "*"], "block": []}}
+    assert stored["peek_hotkey"] == "ctrl+alt+p"
+    again = load_config()
+    assert again._mode_warning and again._rules_warning
+
+
+def test_a_permission_change_is_stored_even_when_it_equals_the_loaded_value(
+        tmp_path):
+    """A10: an assignment is a change. Choosing Manual over a stored "AUTO"
+    (which already reads as Manual) overwrites it, and new rules replace an
+    invalid stored pattern; a change made in place counts as well."""
+    (tmp_path / "config.toml").write_text(
+        'acp_permission_mode = "AUTO"\n'
+        '[acp_permission_rules.shell]\n'
+        'default = "ask"\n'
+        'allow = ["*"]\n'
+        'block = []\n', encoding="utf-8")
+    cfg = load_config()
+    cfg.acp_permission_mode = "manual"
+    save_config(cfg)
+    with open(tmp_path / "config.toml", "rb") as f:
+        stored = tomllib.load(f)
+    assert stored["acp_permission_mode"] == "manual"
+    assert stored["acp_permission_rules"]["shell"]["allow"] == ["*"]
+    cfg = load_config()
+    cfg.acp_permission_rules["shell"]["allow"].append("git log")
+    save_config(cfg)
+    with open(tmp_path / "config.toml", "rb") as f:
+        stored = tomllib.load(f)
+    assert stored["acp_permission_rules"]["shell"]["allow"] == ["git log"]
+    assert load_config()._rules_warning == ""
+
+
+def test_a_read_error_is_retried_and_never_called_corrupt(tmp_path, monkeypatch):
+    """RE5: an `OSError` (a sharing violation) is retried once. A second
+    failure loads the defaults stand-in, but writes no `.bak` and says the
+    file could not be opened rather than asking for a hand fix."""
+    import power_atlas.config as config_mod
+    (tmp_path / "config.toml").write_text('peek_hotkey = "ctrl+q"\n',
+                                          encoding="utf-8")
+    monkeypatch.setattr(config_mod, "_READ_RETRY_SECONDS", 0)
+    real = config_mod._read_config_file
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "The process cannot access the file")
+        return real()
+
+    monkeypatch.setattr(config_mod, "_read_config_file", flaky)
+    cfg = load_config()
+    assert cfg._load_error == "" and cfg.peek_hotkey == "ctrl+q"
+
+    def locked():
+        raise PermissionError(13, "The process cannot access the file")
+
+    monkeypatch.setattr(config_mod, "_read_config_file", locked)
+    cfg = load_config()
+    assert cfg._load_error and cfg._load_error_kind == "read"
+    assert not (tmp_path / "config.toml.bak").exists()
+    message = config_mod.unreadable_config_message(cfg)
+    assert "could not be opened" in message
+    assert "by hand" not in message and ".bak" not in message
+    with pytest.raises(config_mod.ConfigUnreadableError):
+        save_config(cfg)
