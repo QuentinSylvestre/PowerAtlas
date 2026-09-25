@@ -449,8 +449,18 @@ MINIMAL_BASE = (
 # `.`, `:` and space that sit between them in `*.*`, `?:/**` or `* *`.
 _MATCH_ALL_CHARS = frozenset("*?/\\.: ")
 # `.`, `..`, `./…` and `../…` name a folder (`./**` is the session folder the
-# seed allows), so a pattern that starts with one is scoped, not match-all.
+# seed allows), so a pattern that starts with one is not match-all. A `..`
+# segment is still refused in a file row's allow list (`fs_allow_error`).
 _RELATIVE_ANCHOR_RE = re.compile(r"\.{1,2}(?:[/\\]|$)")
+
+# Phase 3 review (M1): a `..` path segment in a Read files or Write files
+# allow pattern. `../**` is every sibling of the session folder, and
+# `C:/Users/q/../../**` a whole drive spelled so no broadness check sees it.
+# Shell patterns keep `..` (`cd ..` is a command, not a path).
+_PARENT_SEGMENT_RE = re.compile(r"(?:^|[/\\])\.\.(?:[/\\]|$)")
+_FILE_ROWS = frozenset(("fs_read", "fs_write"))
+FS_PARENT_SEGMENT_ERROR = (
+    "goes up a folder with “..”; write the folder's full path instead")
 
 # How the rule editor names a character a pattern cannot hold (Phase 2 review,
 # U2): in words, since the character is usually invisible where it was typed.
@@ -527,6 +537,19 @@ def pattern_error(pattern: object) -> str:
     open silently.
     """
     return _pattern_fault(pattern)[0]
+
+
+def fs_allow_error(row: str, pattern: object) -> str:
+    """Why `pattern` cannot be an allow pattern of `row` beyond `pattern_error`.
+
+    Phase 3 review (M1): a Read files or Write files allow pattern with a
+    `..` segment. Checked on every way in: the prompt card's route,
+    `validate_rules` and loading (`normalise_rules` drops it, D-26).
+    """
+    if row in _FILE_ROWS and isinstance(pattern, str) \
+            and _PARENT_SEGMENT_RE.search(pattern):
+        return FS_PARENT_SEGMENT_ERROR
+    return ""
 
 
 def _seed_row(row: str) -> dict:
@@ -617,7 +640,7 @@ def _normalise_rules_full(raw: object) -> tuple[dict, list[str], dict[str, list[
                               f"{MAX_PATTERNS_PER_LIST} allow patterns "
                               "are used")
                     break
-                reason = pattern_error(pattern)
+                reason = pattern_error(pattern) or fs_allow_error(row, pattern)
                 if reason:
                     note(row, f"{row}: allow pattern {str(pattern)[:60]!r} "
                               f"{reason}, so it was ignored")
@@ -744,6 +767,8 @@ def validate_rules(raw: object) -> dict:
             kept: list = []
             for pattern in patterns:
                 reason, words = _pattern_fault(pattern)
+                if not reason and which == "allow":
+                    reason = words = fs_allow_error(row, pattern)
                 if reason:
                     shown = str(pattern)[:60]
                     raise _refuse(
@@ -1436,7 +1461,8 @@ def _notice_if_changed(before: str, config, why: str) -> None:
 
 def apply_settings(mutate: Callable[[object], None] | None = None, *,
                    lock_timeout: float | None = None,
-                   sets_posture: bool = False) -> dict:
+                   sets_posture: bool = False,
+                   keeps_notice: bool = False) -> dict:
     """Save a permission-settings change and regenerate, as one locked step.
 
     260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-16, D-32. Holds
@@ -1457,7 +1483,10 @@ def apply_settings(mutate: Callable[[object], None] | None = None, *,
     self-heal does (finding 3a). A mutation clears it only when it chooses the
     posture — `sets_posture=True` (the mode route, which is also how the
     dashboard acknowledges the change) or a mutation that moved the mode or
-    rules. A base-agent rename leaves it (finding 3b). A mutation that does
+    rules. A base-agent rename leaves it (finding 3b), and so does
+    `keeps_notice=True`, the prompt card's "always allow" (Phase 3 review,
+    M3): one click on a card, where the notice is not shown, must not erase
+    the only record of a change made outside the dashboard. A mutation that does
     not choose the posture (a rules-only save, a base-agent rename) raises it
     when the settings it started from had changed outside the dashboard and
     not yet been healed: it would otherwise adopt that change silently
@@ -1516,7 +1545,7 @@ def apply_settings(mutate: Callable[[object], None] | None = None, *,
             _saved_fingerprint = after
             # A posture chosen here is the dashboard's own; the notice was
             # about one that was not.
-            if sets_posture or before != after:
+            if (sets_posture or before != after) and not keeps_notice:
                 _posture_notice = None
             if outside and not sets_posture:
                 _record_notice(_compiled_settings(config)[0],

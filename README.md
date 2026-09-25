@@ -485,9 +485,10 @@ Python; in Manual, allowing an interpreter is equivalent to allowing everything.
 When a session does ask, the request renders inline in the transcript and the turn pauses until you
 answer, from any tab or after a reload, the same way a clarifying question does. The prompt shows the
 full command or tool title, plus what kiro-cli reports about the request: the capability, the resource
-(for a write, the file name), the rule that matched, and where that rule came from. When kiro-cli split
-a command and only one part of it asked (`git status && echo x` asks about `echo x`), that part is shown
-as **Triggered by**. kiro-cli offers
+(for a write, the file name), the rule that matched, and where that rule came from. When kiro-cli
+splits a command, it names the first part that needs asking (`git status && echo x` names `echo x`;
+`echo a && echo b` names `echo a`), and that part is shown as **Triggered by**. Other parts of the same
+command may need asking too. kiro-cli offers
 **Allow** (this once), **Deny** (this once) and **Always deny**; it offers no "always allow".
 **Always deny** lasts for the current session only, and the button says so: kiro-cli keeps the rule in
 memory, writes nothing to disk, and a new session asks again. Denying
@@ -498,21 +499,32 @@ change that.
 
 **Allow, and always in new sessions…** appears on a prompt that a Manual row raised because nothing
 in its Allow without asking list matched. It opens a small field under the prompt, labelled with the
-row, holding a pattern you can edit before saving: for a command, the exact command (the part shown
-as Triggered by, if any), never a `*` pattern, since that would also allow output redirection; for a
-file, its folder followed by `/**`, or the exact file when it sits directly in the session folder, a
-drive root or your home folder; for an MCP tool, a sub-agent or a skill, its name as the prompt shows
-it. The same warnings as the rule editor appear as you type, such as the one for an interpreter.
-**Save** adds the pattern to that row's Allow without asking list and then allows this prompt once;
-the prompt then says "Rule added — new sessions will not ask". The rule applies to sessions created
-afterwards; the current session keeps asking, because kiro-cli reads its rules when a session starts.
-If the prompt was answered elsewhere while you were saving, the rule is still saved and the prompt says
-so. If the rule is refused (for example an empty or match-everything pattern) the reason is shown and
-the prompt stays open; if the rule was saved but the derived agent could not be written, the warning
-is shown with it. The button does not appear in Yolo (nothing there asks through a row), on Protected
-prompts or kiro-cli's own built-in prompts (no row can silence those), in task modes such as Spec or
-Plan, on a remote page (rules change only from this computer; a remote request is refused), or for web
-fetches, web searches and powers. A web fetch prompt names the site by host, which a pattern saved
+row, holding a pattern you can edit before saving. For a command it is the exact command, or the part
+shown as Triggered by, and never a pattern with a wildcard, since `*`, `?` or `[` would also match
+output redirection. For a file it is the file's folder, as a full path followed by `/**`. kiro-cli
+reports a file inside the session folder by a relative name, and a relative pattern would match in the
+folder of every session, so the field joins it to the session folder. The field holds the exact file
+instead when its folder is the session folder or a folder above it, a drive root, your home folder or
+a folder above that (such as `C:\Users`), and when the path holds a wildcard, a `.` or `..` part, or
+a `\\?\` or network prefix. A file rule applies to that folder in every new session, whichever folder
+the session opens in. For an MCP tool, a sub-agent or a skill the field holds its name as the prompt
+shows it. The same warnings as the rule editor appear as you type, such as the one for an interpreter,
+a broad folder for reading or writing, or a relative file pattern. For a split command, the warnings
+for the whole command appear too, since the prompt is allowed as a whole. **Save** adds the pattern to
+that row's Allow without asking list and then allows this prompt once. The prompt then says "Rule
+added — new sessions will not ask", or, when the rule covers only the Triggered by part, that the rest
+may still ask. The rule applies to sessions created afterwards; the current session keeps asking,
+because kiro-cli reads its rules when a session starts. Saving from a prompt never clears the
+dashboard's notice that the settings changed outside it; while that notice is pending, the prompt
+points at it after saving. If the prompt was answered elsewhere while you were saving, the rule is
+still saved and the prompt says so. If the rule is refused (for example an empty or match-everything
+pattern, or a file pattern that goes up a folder with `..`) the reason is shown and the prompt stays
+open; if the rule was saved but the derived agent could not be written, the warning is shown with it.
+The button does not appear in Yolo (nothing there asks through a row), on Protected prompts or
+kiro-cli's own built-in prompts (no row can silence those), in task modes such as Spec or Plan, in a
+reopened session that kiro-cli runs under another agent or whose saved agent cannot be read, on a
+remote page (rules change only from this computer; a remote request is refused), or for web fetches,
+web searches and powers. A web fetch prompt names the site by host, which a pattern saved
 from it could be mistaken for an address; add host names in the rule editor instead. Web search and
 power prompts have not been measured to match a pattern, so the button is not offered there.
 

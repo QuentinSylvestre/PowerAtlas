@@ -3686,6 +3686,9 @@ function dashHandle(frame){
         eligible: !!payload && payload.ruleEligible === true,
         row: payload && payload.ruleRow,
         label: payload && payload.ruleRowLabel,
+        // Phase 3 review (M2): the session folder a file prompt's
+        // relative resource is relative to, for an absolute prefill.
+        root: payload && payload.ruleRoot,
       });
     }
     return;

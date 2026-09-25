@@ -4856,13 +4856,14 @@ class TestAcpSessionLoad:
         ]
 
     def _load_mode_sent(self, acp_mod, store, acp_store_dir_v3, monkeypatch,
-                        gate, sid):
+                        gate, sid, agent_mode=None):
         """Drive `_handle_load` with `gate` as `mode_gate_hook`; return the
         `_meta.kiro.modeId` the `session/load` request carried and the frames.
         260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7."""
         monkeypatch.setattr(acp_mod, "mode_gate_hook", gate)
         calls = []
-        acp_store_dir_v3(sid, cwd=str(Path(store).resolve()))
+        acp_store_dir_v3(sid, cwd=str(Path(store).resolve()),
+                         agent_mode=agent_mode)
         conn = _acp_conn(acp_mod)
         with patch.object(acp_mod._Supervisor, "_request",
                           self._replay(acp_mod, sid, [], calls)), \
@@ -4923,13 +4924,13 @@ class TestAcpSessionLoad:
             self, acp_store, acp_store_dir_v3, monkeypatch):
         """`web._derived_agent_in_effect` answers with a dict
         (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34); a reload reads its
-        `in_effect` and records the modeId it sent (D-31), never refusing."""
+        `in_effect`, never refusing."""
         from power_atlas.config import DERIVED_AGENT_NAME
         acp_mod, store = acp_store
         mode, _frames = self._load_mode_sent(
             acp_mod, store, acp_store_dir_v3, monkeypatch,
             lambda: {"in_effect": True, "cause": "", "fix": ""},
-            "load-mode-dict-01")
+            "load-mode-dict-01", agent_mode=DERIVED_AGENT_NAME)
         assert mode == DERIVED_AGENT_NAME
         assert acp_mod._supervisor.sessions["load-mode-dict-01"]["mode"] == \
             DERIVED_AGENT_NAME
@@ -4939,6 +4940,38 @@ class TestAcpSessionLoad:
             "load-mode-dict-02")
         assert mode == "kiro_default"
         assert "error" not in [f["type"] for f in frames], frames
+
+    @pytest.mark.parametrize("persisted, want", [
+        ("kiro_default", "kiro_default"),
+        ("poweratlas-acp", "poweratlas-acp"),
+        (None, ""),
+        (7, ""),
+    ])
+    def test_a_load_records_the_persisted_agent_not_the_sent_mode(
+            self, acp_store, acp_store_dir_v3, monkeypatch, persisted, want):
+        """260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3 review (L1):
+        kiro-cli binds a session with persisted metadata to its `agentMode`
+        and ignores the sent `modeId`, so the record (which the prompt card's
+        eligibility reads, D-31) holds what runs. Metadata with no readable
+        `agentMode` leaves it unknown: no card offers the button."""
+        from power_atlas.config import DERIVED_AGENT_NAME
+        acp_mod, store = acp_store
+        sid = f"load-mode-persist-{want or 'none'}-{type(persisted).__name__}"
+        mode, _frames = self._load_mode_sent(
+            acp_mod, store, acp_store_dir_v3, monkeypatch,
+            _gate_in_effect, sid, agent_mode=persisted)
+        assert mode == DERIVED_AGENT_NAME
+        assert acp_mod._supervisor.sessions[sid]["mode"] == want
+
+    def test_stored_agent_mode_is_none_without_a_session_file(
+            self, acp_store_dir_v3):
+        """No persisted metadata: the sent `modeId` binds (measured live
+        2026-09-23), so the caller keeps it."""
+        from power_atlas import acp as acp_mod
+        assert acp_mod._stored_session_agent_mode_v3("sess_absent-0001") is None
+        acp_store_dir_v3("sess_present-0001", agent_mode="spec")
+        assert acp_mod._stored_session_agent_mode_v3("sess_present-0001") == "spec"
+        assert acp_mod._stored_session_agent_mode_v3("../x") == ""
 
     def test_a_replayed_tool_call_survives_the_load(self, acp_store):
         """Tool calls already forward and render; a loaded history full of them
@@ -15827,17 +15860,18 @@ def acp_store_dir_v3(tmp_path, monkeypatch):
     monkeypatch.setattr(dv3_mod, "_session_path_cache", {})
 
     def _make(session_id, cwd="C:\\dev\\ws", *, hash_name=None,
-              with_sub_executions=False, status="idle"):
+              with_sub_executions=False, status="idle", agent_mode=None):
         if hash_name is None:
             hash_name = f"hash-{abs(hash(cwd)) % 100000:05d}"
         sess_dir = sessions_root / hash_name / session_id
         sess_dir.mkdir(parents=True)
         written = []
         meta = sess_dir / "session.json"
-        meta.write_text(json.dumps({
-            "id": session_id, "workspacePaths": [cwd],
-            "title": "a v3 session", "status": status,
-        }), encoding="utf-8")
+        fields = {"id": session_id, "workspacePaths": [cwd],
+                  "title": "a v3 session", "status": status}
+        if agent_mode is not None:
+            fields["agentMode"] = agent_mode
+        meta.write_text(json.dumps(fields), encoding="utf-8")
         written.append(meta)
         msgs = sess_dir / "messages.jsonl"
         msgs.write_text("", encoding="utf-8")
@@ -22441,6 +22475,34 @@ class TestSupervisor:
         assert set(ap.PERMISSION_ROWS) - set(acp_mod._RULE_ROWS) == {
             "web_fetch", "web_search", "power"}
 
+    def test_the_renderers_rule_rows_match_the_servers(self):
+        """Phase 3 review (L6): the card's own row set and labels
+        (`PERMISSION_RULE_ROWS` in transcript-renderer.js) are a third copy;
+        a row the server marks eligible but the card does not know would hide
+        the button silently."""
+        from power_atlas import acp as acp_mod
+        src = (Path(acp_mod.__file__).parent / "static"
+               / "transcript-renderer.js").read_text(encoding="utf-8")
+        block = re.search(r"var PERMISSION_RULE_ROWS = \{(.*?)\};", src,
+                          re.S).group(1)
+        rows = dict(re.findall(r"(\w+): '([^']*)'", block))
+        assert rows == acp_mod._RULE_ROWS
+
+    @pytest.mark.parametrize("consent, record, want", [
+        ({"workspaceRoot": "C:\\ws\\proj\\"}, {"cwd": "C:\\other"}, "C:/ws/proj"),
+        ({}, {"cwd": "C:\\ws\\proj"}, "C:/ws/proj"),
+        ({"workspaceRoot": ""}, {"cwd": "/home/q/proj/"}, "/home/q/proj"),
+        ({"workspaceRoot": 7}, {"cwd": "D:\\"}, "D:/"),
+        ({}, {}, ""),
+        (None, {"cwd": "  "}, ""),
+    ])
+    def test_rule_root_prefers_the_consents_workspace_root(
+            self, consent, record, want):
+        """Phase 3 review (M2): the base kiro-cli relativised the resource
+        against, else the cwd PowerAtlas sent; `/` separators, as a pattern."""
+        from power_atlas import acp as acp_mod
+        assert acp_mod._rule_root(consent, record) == want
+
     @pytest.mark.parametrize("bound, eligible", [
         ("poweratlas-acp", True), ("kiro_default", False), ("spec", False)])
     def test_permission_request_frame_carries_rule_eligibility(
@@ -22462,6 +22524,8 @@ class TestSupervisor:
             payload = [f for f in _queued(conn)
                        if f["type"] == "permission_request"][0]["payload"]
             assert payload["ruleEligible"] is eligible
+            # A shell row needs no folder to prefill (M2).
+            assert payload["ruleRoot"] is None
             if eligible:
                 assert payload["ruleRow"] == "shell"
                 assert payload["ruleRowLabel"] == "Run commands"
@@ -22470,6 +22534,33 @@ class TestSupervisor:
                 assert payload["ruleRowLabel"] == ""
             assert payload["consent"]["triggeringResource"] == "echo x"
             assert "exclude" not in payload["consent"]["matchedRule"]
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_a_file_prompt_frame_carries_the_rule_root(self, monkeypatch):
+        """Phase 3 review (M2): an eligible file prompt carries the folder its
+        relativised resource is relative to, from the raw `workspaceRoot`,
+        which the consent projection still drops."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permruleroot-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record(
+            "C:\\scratch", "poweratlas-acp")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        consent = {"capability": "fs_write", "resource": "other/a.txt",
+                   "scope": "agent", "source": "agent-profile",
+                   "workspaceRoot": "C:\\ws\\proj",
+                   "matchedRule": {"capability": "fs_write", "effect": "ask"}}
+        try:
+            sv3._on_agent_request(self._permission_request_msg(
+                23, sid, title="Write File", meta={"kiro": {"consent": consent}},
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            payload = [f for f in _queued(conn)
+                       if f["type"] == "permission_request"][0]["payload"]
+            assert payload["ruleEligible"] is True
+            assert payload["ruleRoot"] == "C:/ws/proj"
+            assert "workspaceRoot" not in payload["consent"]
         finally:
             self._cleanup_registry(acp_mod)
 
@@ -25680,10 +25771,13 @@ class TestAcpPermissionRoutes:
         assert resp["detail"]["pattern"] == pattern
 
     def test_folder_scoped_patterns_are_not_match_all(self, client, isolated_config):
-        """S4: `./**` is the seed's session folder; `../x/**` names a folder."""
+        """S4: `./**` is the seed's session folder; `../x/**` names a folder.
+        A file row's allow list refuses `..` for its own reason (Phase 3
+        review, M1), so `../x/**` is checked in a block list here."""
         ap = _agent_profile()
         rules = copy.deepcopy(ap.SEED_RULES)
-        rules["fs_write"]["allow"] = ["./**", "../shared/**", ".\\out\\**", "*.com"]
+        rules["fs_write"]["allow"] = ["./**", ".\\out\\**", "*.com"]
+        rules["fs_write"]["block"] = ["../shared/**"]
         resp = client.post("/api/acp-permissions", json={"rules": rules}).json()
         assert resp["ok"] is True, resp
         assert ap.normalise_rules({})["fs_read"]["allow"] == ["./**"]
@@ -25749,7 +25843,7 @@ class TestAllowRuleRoute:
         client.post("/api/acp-permissions", json={"mode": "manual"})
         resp = client.post(self.URL, json={"capability": "shell",
                                            "pattern": "echo pa-button"}).json()
-        assert resp == {"ok": True}
+        assert resp == {"ok": True, "posture_notice": None}
         allow = self._rules(client)["shell"]["allow"]
         assert allow[-1] == "echo pa-button"
         assert allow[:-1] == ap.SEED_RULES["shell"]["allow"], (
@@ -25802,11 +25896,13 @@ class TestAllowRuleRoute:
         assert not (isolated_config / "config.toml").exists()
 
     @pytest.mark.parametrize("row", [
-        "web_fetch", "all", "protected_block", "Shell", "", None, 1, ["shell"]])
-    def test_a_row_outside_the_rule_rows_or_web_fetch_is_refused(
+        "web_fetch", "web_search", "power", "all", "protected_block", "Shell",
+        "", None, 1, ["shell"]])
+    def test_a_row_outside_the_rule_rows_is_refused(
             self, client, isolated_config, row):
-        """D-11 rows only, and not Web fetch (P-0.5: the prompt names a host,
-        so the card hides the button there)."""
+        """The rows a card can offer (`acp._RULE_ROWS`) only (Phase 3 review,
+        L3): not Web fetch (P-0.5: the prompt names a host), and not Web search
+        or Powers, which the card never offers."""
         resp = client.post(self.URL, json={"capability": row,
                                            "pattern": "example.com"}).json()
         assert resp["ok"] is False and resp["error"]
@@ -25842,10 +25938,11 @@ class TestAllowRuleRoute:
         calls = []
         real = web_mod._allow_rule_refusal
 
-        def flip(rules, row):
+        def flip(rules, row, pattern):
             calls.append(row)
             return "" if len(calls) == 1 else real(
-                dict(rules, **{row: dict(rules[row], default="allow")}), row)
+                dict(rules, **{row: dict(rules[row], default="allow")}), row,
+                pattern)
 
         monkeypatch.setattr(web_mod, "_allow_rule_refusal", flip)
         resp = client.post(self.URL, json={"capability": "shell",
@@ -25864,6 +25961,77 @@ class TestAllowRuleRoute:
         resp = client.post(self.URL, json={"capability": "mcp",
                                            "pattern": "s/new"}).json()
         assert resp["ok"] is False and "Edit rules" in resp["error"]
+        # Phase 3 review (L5): a pattern already in the full list changes
+        # nothing, so it is accepted rather than refused as "full".
+        resp = client.post(self.URL, json={"capability": "mcp",
+                                           "pattern": "s/t7"}).json()
+        assert resp["ok"] is True, resp
+        assert self._rules(client)["mcp"]["allow"].count("s/t7") == 1
+
+    @pytest.mark.parametrize("row", ["fs_read", "fs_write"])
+    @pytest.mark.parametrize("pattern", [
+        "../**", "../../**", "..", "C:/Users/q/../../**", r"src\..\..\**",
+        "/home/q/../x"])
+    def test_a_file_pattern_that_goes_up_a_folder_is_refused(
+            self, client, isolated_config, row, pattern):
+        """Phase 3 review (M1): `..` in a file allow pattern names a place no
+        broadness check sees (`C:/Users/q/../../**` is a whole drive)."""
+        resp = client.post(self.URL, json={"capability": row,
+                                           "pattern": pattern}).json()
+        assert resp["ok"] is False and "“..”" in resp["error"], resp
+        assert not (isolated_config / "config.toml").exists()
+
+    def test_dots_that_are_not_a_parent_segment_are_accepted(
+            self, client, isolated_config):
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        for row, pattern in (("fs_write", "C:/work/a..b/**"),
+                             ("fs_read", "C:/work/.hidden/**"),
+                             ("shell", "cd .."),
+                             ("fs_write", "./notes.md")):
+            resp = client.post(self.URL, json={"capability": row,
+                                               "pattern": pattern}).json()
+            assert resp["ok"] is True, (row, pattern, resp)
+
+    def test_a_parent_segment_is_refused_by_the_editor_and_dropped_on_load(self):
+        """The same check on the other two ways in: `validate_rules` refuses
+        it naming the row, and `normalise_rules` drops a stored one with the
+        rules warning (D-26: dropping an allow pattern only narrows)."""
+        ap = _agent_profile()
+        rules = copy.deepcopy(ap.SEED_RULES)
+        rules["protected_block"] = []
+        rules["fs_write"]["allow"] = ["./**", "../**"]
+        with pytest.raises(ap.AgentProfileError) as err:
+            ap.validate_rules(rules)
+        assert err.value.detail["row"] == "fs_write"
+        assert err.value.detail["pattern"] == "../**"
+        assert "“..”" in err.value.detail["message"]
+        # A block pattern with `..` only narrows, so it is kept.
+        rules["fs_write"]["allow"] = ["./**"]
+        rules["fs_write"]["block"] = ["../secret/**"]
+        assert ap.validate_rules(rules)["fs_write"]["block"] == ["../secret/**"]
+        stored, problems = ap.normalise_rules_report(
+            {"fs_read": {"default": "ask", "allow": ["./**", "../../**"],
+                         "block": []}})
+        assert stored["fs_read"]["allow"] == ["./**"]
+        assert any("'../../**'" in p for p in problems), problems
+
+    def test_a_rule_from_a_card_keeps_a_pending_posture_notice(
+            self, client, isolated_config, monkeypatch):
+        """Phase 3 review (M3): the card never shows D-35's notice, so saving
+        from it must not clear the only record of an outside change. The
+        answer carries the notice, and it survives until the dashboard's own
+        mode choice clears it."""
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        notice = {"mode": "manual", "detected_at": "2026-09-25 00:00:00"}
+        monkeypatch.setattr(ap, "_posture_notice", dict(notice))
+        resp = client.post(self.URL, json={"capability": "shell",
+                                           "pattern": "npm test"}).json()
+        assert resp["ok"] is True
+        assert resp["posture_notice"] == notice
+        assert client.get("/api/acp-permissions").json()["posture_notice"] == notice
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        assert client.get("/api/acp-permissions").json()["posture_notice"] is None
 
     def test_it_goes_through_apply_settings_with_a_bounded_lock(
             self, client, isolated_config, monkeypatch):
@@ -25882,6 +26050,7 @@ class TestAllowRuleRoute:
                                            "pattern": "npm test"}).json()["ok"]
         assert seen and seen[0]["lock_timeout"] > 0
         assert seen[0]["sets_posture"] is False
+        assert seen[0]["keeps_notice"] is True
 
     def test_a_generation_failure_answers_ok_true_with_a_warning(
             self, client, isolated_config):

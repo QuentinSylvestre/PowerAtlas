@@ -4476,20 +4476,29 @@ async def set_acp_permissions(request: Request):
 # remote peer gets a 403; a POST also needs the `pa_local` cookie and a
 # same-origin Origin or Referer, like every loopback write.
 #
-# Refused for `web_fetch` (P-0.5: the prompt names a host, and a pattern added
-# from it would be mistaken for a URL; the card hides the button there), for a
-# row outside D-11, and for a row whose default is Allow — its allow list is
-# not compiled (D-13), so the pattern would silence nothing.
-_ALLOW_RULE_REFUSED_ROWS = frozenset({"web_fetch"})
+# Accepted only for the rows a card can offer, `acp._RULE_ROWS` (Phase 3
+# review, L3): not `web_fetch` (P-0.5: the prompt names a host, and a pattern
+# added from it would be mistaken for a URL), `web_search` or `power` (never
+# measured to match). Refused too for a row whose default is Allow — its allow
+# list is not compiled (D-13), so the pattern would silence nothing.
+def _allow_rule_rows() -> dict:
+    return getattr(acp, "_RULE_ROWS", None) or {}
 
 
-def _allow_rule_refusal(rules: dict, row: str) -> str:
-    """Why `row` of `rules` cannot take another allow pattern, or `""`."""
+def _allow_rule_refusal(rules: dict, row: str, pattern: str) -> str:
+    """Why `row` of `rules` cannot take `pattern` as an allow pattern, or `""`.
+
+    A pattern already in the list is accepted before the length check (Phase 3
+    review, L5): adding it changes nothing, so a full list is no reason to
+    refuse it.
+    """
     label = agent_profile.ROW_LABELS[row]
     spec = rules.get(row) or {}
     if spec.get("default") == "allow":
         return (f"{label} is set to Allow, so it never asks; a pattern there "
                 "would change nothing")
+    if pattern in (spec.get("allow") or []):
+        return ""
     if len(spec.get("allow") or []) >= agent_profile.MAX_PATTERNS_PER_LIST:
         return (f"{label} already has {agent_profile.MAX_PATTERNS_PER_LIST} "
                 "patterns without asking; remove one in Edit rules first")
@@ -4507,10 +4516,11 @@ async def add_acp_allow_rule(request: Request):
     row = body.get("capability")
     pattern = body.get("pattern")
     if (not isinstance(row, str) or row not in agent_profile.PERMISSION_ROWS
-            or row in _ALLOW_RULE_REFUSED_ROWS):
+            or row not in _allow_rule_rows()):
         return {"ok": False,
                 "error": "This kind of action cannot take a rule from a prompt."}
-    reason = agent_profile.pattern_error(pattern)
+    reason = (agent_profile.pattern_error(pattern)
+              or agent_profile.fs_allow_error(row, pattern))
     if reason:
         # ASCII-escaped for the same reason as the rules save: a lone
         # surrogate (refused for exactly that) cannot be encoded as UTF-8.
@@ -4521,7 +4531,7 @@ async def add_acp_allow_rule(request: Request):
 
     def precheck() -> str:
         rules = agent_profile.normalise_rules(load_config().acp_permission_rules)
-        return _allow_rule_refusal(rules, row)
+        return _allow_rule_refusal(rules, row, pattern)
 
     # Checked before the lock for a plain answer, and again inside it, where a
     # refusal is a raise that `apply_settings` reports as "not saved".
@@ -4531,7 +4541,7 @@ async def add_acp_allow_rule(request: Request):
 
     def mutate(config) -> None:
         rules = agent_profile.normalise_rules(config.acp_permission_rules)
-        refusal = _allow_rule_refusal(rules, row)
+        refusal = _allow_rule_refusal(rules, row, pattern)
         if refusal:
             raise agent_profile.AgentProfileError(refusal)
         if pattern not in rules[row]["allow"]:
@@ -4539,12 +4549,18 @@ async def add_acp_allow_rule(request: Request):
         config.acp_permission_rules = rules
 
     # `sets_posture=False`: a rule added from a prompt does not choose the
-    # mode, like the editor's rules-only save.
+    # mode, like the editor's rules-only save. `keeps_notice=True` (Phase 3
+    # review, M3): the card does not show D-35's notice, so saving from it
+    # never clears one; only a mode choice or a rules-editor save does. The
+    # answer carries the notice, so the card can point at it.
     result = await asyncio.to_thread(
         lambda: agent_profile.apply_settings(
             mutate, lock_timeout=_SETTINGS_LOCK_TIMEOUT_SECONDS,
-            sets_posture=False))
-    return _apply_result(result)
+            sets_posture=False, keeps_notice=True))
+    answer = _apply_result(result)
+    if answer["ok"]:
+        answer["posture_notice"] = agent_profile.posture_notice()
+    return answer
 
 
 @app.post("/api/open-folder", response_class=HTMLResponse)

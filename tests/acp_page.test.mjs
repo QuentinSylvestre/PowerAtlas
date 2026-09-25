@@ -11268,12 +11268,6 @@ check("rule button: the field is prefilled per D-20 and warns per D-35", (tpl) =
     [shellConsent("git status --short"), "git status --short", 0],
     [shellConsent("git status && echo x", "echo x"), "echo x", 0],
     [shellConsent("python -m pytest"), "python -m pytest", 1],
-    [fileConsent("fs_write", "notes.md"), "notes.md", 0],
-    [fileConsent("fs_write", "./notes.md"), "./notes.md", 0],
-    [fileConsent("fs_write", "src\\app\\main.py"), "src/app/**", 0],
-    [fileConsent("fs_read", "C:\\work\\repo\\src\\a.py"), "C:/work/repo/src/**", 0],
-    [fileConsent("fs_write", "C:\\notes.md"), "C:/notes.md", 0],
-    [fileConsent("fs_write", "C:\\Users\\bob\\notes.md"), "C:/Users/bob/notes.md", 0],
     [fileConsent("mcp", "paecho/pa_echo"), "paecho/pa_echo", 0],
     [fileConsent("subagent", "kiro_default"), "kiro_default", 0],
     [fileConsent("skill", "pa-probe-skill"), "pa-probe-skill", 0],
@@ -11299,6 +11293,130 @@ check("rule button: the field is prefilled per D-20 and warns per D-35", (tpl) =
   const label = r.row.querySelector(".acp-permission-rule-label");
   assertEqual(label.getAttribute("for"), r.input.getAttribute("id"), "the field has no label");
   assert(/^Run commands/.test(label.textContent), `the label does not name the row: ${label.textContent}`);
+  // Phase 3 review (M5): ? and [ are wildcards too.
+  for (const p of ["echo ????", "echo [ab]"]) {
+    r.input.value = p;
+    r.input.dispatch("input");
+    assert(r.warnings().some((w) => /redirection/.test(w)), `no redirection warning for ${p}`);
+  }
+});
+
+// Phase 3 review (H1, M1, M2): a file prompt's prefill is an absolute path
+// under the session's folder (`ruleRoot`), never a broad place, and the exact
+// resource whenever the resource cannot be read as a folder.
+const RULE_ROOT = "C:/ws/proj";
+const FILE_PREFILLS = [
+  // [row, resource, root, prefill, warnings matched in order]
+  ["fs_write", "notes.md", RULE_ROOT, "C:/ws/proj/notes.md", []],
+  ["fs_write", "./notes.md", RULE_ROOT, "C:/ws/proj/./notes.md", []],
+  ["fs_write", "src\\app\\main.py", RULE_ROOT, "C:/ws/proj/src/app/**", []],
+  ["fs_write", "other/x.txt", RULE_ROOT, "C:/ws/proj/other/**", []],
+  ["fs_read", "C:\\work\\repo\\src\\a.py", RULE_ROOT, "C:/work/repo/src/**", []],
+  ["fs_write", "C:\\notes.md", RULE_ROOT, "C:/notes.md", []],
+  ["fs_write", "C:\\Users\\bob\\notes.md", RULE_ROOT, "C:/Users/bob/notes.md", []],
+  // The review's escapes (probe2.js), each 0 warnings before the fix.
+  ["fs_read", "C:\\Users\\desktop.ini", RULE_ROOT, "C:/Users/desktop.ini", [/covers the whole home folder/]],
+  // An exact path of the home folder's shape still warns: without a /** a
+  // pattern may name that folder, and the warning costs nothing if it is a file.
+  ["fs_write", "/home/x", RULE_ROOT, "/home/x", [/covers the whole home folder/]],
+  ["fs_write", "/x", RULE_ROOT, "/x", []],
+  ["fs_write", "C:\\Users\\*\\x.txt", RULE_ROOT, "C:/Users/*/x.txt", [/holds a wildcard/]],
+  ["fs_write", "C:\\Users\\q\\.\\x", RULE_ROOT, "C:/Users/q/./x", []],
+  ["fs_write", "\\\\?\\C:\\x\\y", RULE_ROOT, "//?/C:/x/y", [/holds a wildcard/]],
+  ["fs_write", "\\\\server\\share\\x.txt", RULE_ROOT, "//server/share/x.txt", []],
+  ["fs_write", "C:\\Users\\QSYLVE~1.POL\\x", RULE_ROOT, "C:/Users/QSYLVE~1.POL/x", []],
+  ["fs_write", "C:\\Users\\q\\OneDrive\\x", RULE_ROOT, "C:/Users/q/OneDrive/**", []],
+  // M1: `..` stays literal; the server refuses it, and the card says why first.
+  ["fs_read", "../x.txt", RULE_ROOT, "C:/ws/proj/../x.txt", [/goes up a folder/]],
+  ["fs_read", "../../x.txt", RULE_ROOT, "C:/ws/proj/../../x.txt", [/goes up a folder/]],
+  ["fs_write", "C:/Users/q/../../x", RULE_ROOT, "C:/Users/q/../../x", [/goes up a folder/]],
+  // The session folder, or a folder above it, is never the prefill.
+  ["fs_write", "C:\\ws\\x.txt", RULE_ROOT, "C:/ws/x.txt", []],
+  ["fs_write", "c:\\WS\\PROJ\\x.txt", RULE_ROOT, "c:/WS/PROJ/x.txt", []],
+  // No root known: the exact relative resource, flagged as relative.
+  ["fs_write", "src/app/main.py", null, "src/app/main.py", [/is relative/]],
+];
+
+check("rule button: a file prompt prefills an absolute, narrow path and warns on the rest", (tpl) => {
+  const { page, live } = connected(tpl);
+  FILE_PREFILLS.forEach(([row, resource, root, want, warns], i) => {
+    page.deliver(ruleFrame(live, 800 + i, fileConsent(row, resource), { ruleRoot: root }));
+    const r = openRule(page);
+    assertEqual(r.input.value, want, `prefill for ${row} ${resource}`);
+    const got = r.warnings();
+    assertEqual(got.length, warns.length, `warnings for ${want}: ${got.join(" | ")}`);
+    warns.forEach((re, k) => assert(re.test(got[k]), `warning ${k} for ${want}: ${got[k]}`));
+    const hint = r.row.querySelector(".acp-permission-rule-hint").textContent;
+    assert(/applies to that folder in every new session/.test(hint),
+      `the file hint does not say where the rule applies: ${hint}`);
+  });
+});
+
+check("rule button: broad file patterns warn for reads as well as writes", (tpl) => {
+  const { page, live } = connected(tpl);
+  const cases = [
+    ["fs_read", "C:/Users/**", /covers every home folder, so file-tool reads/],
+    ["fs_read", "/home/**", /covers every home folder/],
+    ["fs_write", "C:/Users/q/**", /covers the whole home folder, so file-tool writes/],
+    ["fs_write", "/**", /covers a whole drive/],
+    ["fs_write", "C:/ws/proj/**", /covers the whole session folder/],
+    ["fs_read", "C:/ws/**", /covers a folder that contains the session folder/],
+    ["fs_write", "other/**", /is relative, so it matches in the folder of every session/],
+  ];
+  cases.forEach(([row, pattern, re], i) => {
+    page.deliver(ruleFrame(live, 860 + i, fileConsent(row, "C:\\ws\\proj\\a\\b.txt"),
+      { ruleRoot: RULE_ROOT }));
+    const r = openRule(page);
+    r.input.value = pattern;
+    r.input.dispatch("input");
+    assert(r.warnings().some((w) => re.test(w)), `${row} ${pattern}: ${r.warnings().join(" | ")}`);
+  });
+});
+
+check("rule button: a split command says the rule covers only its part, and warns on the whole", async (tpl) => {
+  // Phase 3 review (M4, L2): kiro-cli asked about one part of the command
+  // (`triggeringResource`); allow_once runs the whole command.
+  const { page, live } = connected(tpl, { answer: ruleAnswer({ ok: true }) });
+  page.deliver(ruleFrame(live, 880, shellConsent("echo pa-one && python evil.py", "echo pa-one")));
+  const r = openRule(page);
+  assertEqual(r.input.value, "echo pa-one", "the prefill is not the part that asked");
+  const hint = r.row.querySelector(".acp-permission-rule-hint").textContent;
+  assert(/covers only “echo pa-one”; other parts of the command may still ask/.test(hint),
+    `the hint overpromises: ${hint}`);
+  assert(r.warnings().some((w) => /^Save also allows the whole command once\. .*python/.test(w)),
+    `no warning for the whole command: ${r.warnings().join(" | ")}`);
+  r.save.dispatch("click");
+  await settleStaging();
+  assertEqual(r.status().textContent,
+    "Rule added for that part only \u2014 new sessions may still ask about the rest",
+    "the outcome overpromises for a split command");
+  // An unsplit command keeps the plain words and adds no whole-command line.
+  page.deliver(ruleFrame(live, 881, shellConsent("echo same", "echo same")));
+  const plain = openRule(page);
+  assert(!/covers only/.test(plain.row.querySelector(".acp-permission-rule-hint").textContent),
+    "an unsplit command claims to be partial");
+  assertEqual(plain.warnings().length, 0, "an unsplit command warned twice");
+});
+
+check("rule button: a pending posture notice is pointed at after a save", async (tpl) => {
+  // Phase 3 review (M3): the route never clears D-35's notice and answers with it.
+  const notice = { mode: "manual", detected_at: "2026-09-25 00:00:00" };
+  const { page, live } = connected(tpl, { answer: ruleAnswer({ ok: true, posture_notice: notice }) });
+  page.deliver(ruleFrame(live, 890, shellConsent("echo a")));
+  const r = openRule(page);
+  r.save.dispatch("click");
+  await settleStaging();
+  const line = r.status().querySelector(".acp-permission-rule-notice");
+  assert(line, "the notice was not pointed at");
+  assertEqual(line.textContent, "Settings changed outside the dashboard \u2014 review them",
+    "the notice line's words changed");
+  const quiet = connected(tpl, { answer: ruleAnswer({ ok: true, posture_notice: null }) });
+  quiet.page.deliver(ruleFrame(quiet.live, 891, shellConsent("echo a")));
+  const q = openRule(quiet.page);
+  q.save.dispatch("click");
+  await settleStaging();
+  assertEqual(q.status().querySelector(".acp-permission-rule-notice"), null,
+    "a notice line appeared with no notice pending");
 });
 
 check("rule button: 'Triggered by' shows only when it differs from the resource", (tpl) => {
@@ -11316,7 +11434,10 @@ check("rule button: 'Triggered by' shows only when it differs from the resource"
 
 check("rule button: Save posts the rule, then answers with the allow_once option by kind", async (tpl) => {
   const { page, live } = connected(tpl, { answer: ruleAnswer({ ok: true }) });
-  page.deliver(ruleFrame(live, 710, shellConsent("echo pa-button")));
+  // Phase 3 review (L7): reject_once first, so answering with the first
+  // option instead of the one of kind allow_once fails here.
+  page.deliver(ruleFrame(live, 710, shellConsent("echo pa-button"),
+    { options: [RULE_OPTIONS[1], RULE_OPTIONS[0]] }));
   const r = openRule(page);
   r.input.value = "echo pa-button";
   r.save.dispatch("click");
@@ -11415,6 +11536,19 @@ check("rule button: an open row stays usable after the prompt resolves; the butt
   assertEqual(page.sentOf("permission_response").length, 0, "a resolved prompt was answered");
   assertEqual(r.status().textContent, "Rule saved; this prompt was already answered",
     "the outcome is wrong for a resolved prompt");
+  // Phase 3 review (L4): closing the row now returns the focus to the card,
+  // since the button it came from is disabled; never to <body>.
+  page.deliver(ruleFrame(live, 752, shellConsent("echo c")));
+  const esc = openRule(page);
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: 752 } });
+  esc.cancel.dispatch("click");
+  assertEqual(page.focused(), esc.row, "Cancel on a resolved card lost the focus");
+  assertEqual(esc.row.getAttribute("tabindex"), "-1", "the card cannot take the focus");
+  page.deliver(ruleFrame(live, 753, shellConsent("echo d")));
+  const esc2 = openRule(page);
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: 753 } });
+  esc2.input.dispatch("keydown", { key: "Escape", preventDefault() {}, stopPropagation() {} });
+  assertEqual(page.focused(), esc2.row, "Escape on a resolved card lost the focus");
   // A card resolved before the row was opened offers nothing.
   page.deliver(ruleFrame(live, 751, shellConsent("echo b")));
   page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: 751 } });
@@ -11530,6 +11664,47 @@ check("dashboard: the real renderer offers the rule button and answers by kind",
   const other = d.sandbox.addPermissionRequest(6, "sess-1", "x", RULE_OPTIONS, consent,
     { eligible: false, row: "shell", label: "Run commands" });
   assertEqual(ruleButton(other), null, "the dashboard offered the button on an ineligible card");
+});
+
+check("dashboard: a refused rule leaves the prompt open with the reason", async () => {
+  // Phase 3 review (L8): the dashboard's card, not only /acp's.
+  const d = loadDashCard((url) => (url === RULE_URL
+    ? { body: { ok: false, error: "The rule was not saved: nope." } } : { body: {} }));
+  const row = d.sandbox.addPermissionRequest(7, "sess-1", "echo x", RULE_OPTIONS,
+    shellConsent("echo x"), { eligible: true, row: "shell", label: "Run commands" });
+  ruleButton(row).dispatch("click");
+  row.querySelector(".acp-permission-rule-save").dispatch("click");
+  await settleStaging();
+  assertEqual(d.sent.length, 0, "the dashboard answered a prompt whose rule was refused");
+  const error = row.querySelector(".acp-permission-rule-error");
+  assertEqual(error.hidden, false, "the dashboard showed no reason");
+  assertEqual(error.textContent, "The rule was not saved: nope.", "the dashboard's reason differs");
+  assert(row.querySelectorAll(".acp-permission-option").every((b) => !b.disabled),
+    "the dashboard disabled the answer buttons");
+});
+
+check("dashboard: a prompt resolved while saving is not answered again", async () => {
+  const d = loadDashCard((url) => (url === RULE_URL ? { body: { ok: true } } : { body: {} }));
+  const row = d.sandbox.addPermissionRequest(8, "sess-1", "echo x", RULE_OPTIONS,
+    shellConsent("echo x"), { eligible: true, row: "shell", label: "Run commands" });
+  ruleButton(row).dispatch("click");
+  row.querySelector(".acp-permission-rule-save").dispatch("click");
+  d.sandbox.markPermissionResolved(8);
+  await settleStaging();
+  assertEqual(d.sent.length, 0, "the dashboard answered a resolved prompt");
+  assertEqual(row.querySelector(".acp-permission-rule-status").textContent,
+    "Rule saved; this prompt was already answered", "the dashboard's outcome is wrong");
+});
+
+check("dashboard: no rule button on a web fetch prompt or with ACP_LOCAL false", () => {
+  const d = loadDashCard(() => ({ body: {} }));
+  const fetchRow = d.sandbox.addPermissionRequest(9, "sess-1", "example.com", RULE_OPTIONS,
+    fileConsent("web_fetch", "example.com"), { eligible: true, row: "web_fetch", label: "Web fetch" });
+  assertEqual(ruleButton(fetchRow), null, "the dashboard offered the button on a web fetch prompt");
+  d.sandbox.ACP_LOCAL = false;
+  const remote = d.sandbox.addPermissionRequest(10, "sess-1", "echo x", RULE_OPTIONS,
+    shellConsent("echo x"), { eligible: true, row: "shell", label: "Run commands" });
+  assertEqual(ruleButton(remote), null, "the dashboard offered the button with ACP_LOCAL false");
 });
 
 // The dashboard settings rows. They live in the same <script> region as the
@@ -11960,7 +12135,7 @@ check("rules editor: warns on an interpreter, on a * in a command and on a broad
   e.add("shell", "allow", "C:/Tools/PWSH.exe -File x.ps1");
   assert(/allowing pwsh is equivalent to allow-all/.test(e.warnings("shell")), "a path and .exe hid the interpreter");
   e.add("shell", "allow", "npm test*");
-  assert(/"npm test\*": a \* also matches an output redirection/.test(e.warnings("shell")),
+  assert(/"npm test\*": a wildcard \(\*, \? or \[\) also matches an output redirection/.test(e.warnings("shell")),
     `no redirection warning (D-38e): ${e.warnings("shell")}`);
   e.add("shell", "allow", "rm -rf build");
   assert(/lets the agent delete files/.test(e.warnings("shell")), "a destructive verb carries no warning");

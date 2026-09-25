@@ -1971,26 +1971,65 @@ function permissionRuleShellWarnings(pattern) {
     out.push('"' + p + '": allowing ' + first + ' lets the agent download '
       + 'from, and send data to, any site without asking.');
   }
-  if (p.indexOf('*') >= 0) {
-    out.push('"' + p + '": a * also matches an output redirection such '
-      + 'as > file, so this also lets the command write to any file.');
+  // D-38e, Phase 3 review (M5): `?` and `[` are wildcards to kiro-cli too
+  // (agent_profile `_MATCH_ALL_CHARS`), so each can stand for the `>`.
+  if (/[*?[]/.test(p)) {
+    out.push('"' + p + '": a wildcard (*, ? or [) also matches an output '
+      + 'redirection such as > file, so this also lets the command write to '
+      + 'any file.');
   }
   return out;
 }
 
-/** What a file pattern covers, when it is one of the broad places: the
- *  session folder, a whole drive or the home folder; '' otherwise. `?:` and
- *  `*:` are any drive. */
-function permissionRuleBroadPlace(pattern) {
+/** `path` with `/` separators and no trailing one, lower-case, for comparing
+ *  folders; a drive root keeps its `/` only in `permissionRuleBroadPlace`. */
+function permissionRuleFolderKey(path) {
+  return String(path).trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+/** What a file pattern covers, when it is one of the broad places; '' when
+ *  it is not (D-20, Phase 3 review H1). Broad: the session folder (`.`, or
+ *  `root` itself, the session's folder when known), a folder that contains
+ *  it, a whole drive (`X:`, `/`; `?:` and `*:` are any drive), and the home
+ *  folder or any folder above it (`C:/Users`, `/home`, `/Users`). */
+function permissionRuleBroadPlace(pattern, root) {
   var p = String(pattern).trim().replace(/\\/g, '/');
-  var stem = p.replace(/(\/\*+)+$/, '').replace(/\/+$/, '');
+  var stem = p.replace(/(\/\*+)+$/, '');
+  if (stem === '' && p.charAt(0) === '/') stem = '/';
+  if (stem !== '/') stem = stem.replace(/\/+$/, '');
   if (stem === '.' || stem === '') return 'the whole session folder';
-  if (/^[A-Za-z?*]:$/.test(stem)) return 'a whole drive';
-  if (stem === '~' || stem === '%USERPROFILE%' || stem === '$HOME'
-      || /^[A-Za-z?*]:\/Users\/[^/]+$/i.test(stem) || /^\/(home|Users)\/[^/]+$/.test(stem)) {
+  var low = stem.toLowerCase();
+  if (low === '/' || /^[a-z?*]:$/.test(low)) return 'a whole drive';
+  if (low === '~' || low === '%userprofile%' || low === '$home'
+      || /^[a-z?*]:\/users\/[^/]+$/.test(low) || /^\/(home|users)\/[^/]+$/.test(low)) {
     return 'the whole home folder';
   }
+  if (/^[a-z?*]:\/users$/.test(low) || /^\/(home|users)$/.test(low)) {
+    return 'every home folder';
+  }
+  var rootKey = (typeof root === 'string') ? permissionRuleFolderKey(root) : '';
+  if (rootKey) {
+    if (low === rootKey) return 'the whole session folder';
+    if (rootKey.indexOf(low + '/') === 0) return 'a folder that contains the session folder';
+  }
   return '';
+}
+
+/** Whether a file resource cannot be turned into a folder pattern, so the
+ *  field starts with the exact resource (Phase 3 review H1): it holds a
+ *  wildcard of its own (`*`, `?`, `[`, `{`), a `.` or `..` segment, or a
+ *  device or network prefix (`\\?\`, `\\.\`, `\\server\`). */
+function permissionRuleLiteralPath(raw) {
+  var p = String(raw).replace(/\\/g, '/');
+  return /[*?[{]/.test(p) || /^\/\//.test(p) || /(^|\/)\.{1,2}(\/|$)/.test(p);
+}
+
+/** Whether a file path is absolute: a drive (`C:/`, or `?:/` for any), a
+ *  leading `/`, or the home folder spelled `~`, `%USERPROFILE%` or `$HOME`. */
+function permissionRuleAbsolute(path) {
+  var p = String(path);
+  return /^[A-Za-z?*]:\//.test(p) || p.charAt(0) === '/'
+    || /^(~|%userprofile%|\$home)(\/|$)/i.test(p);
 }
 
 /** The pattern the field starts with (D-20, revised by Phase 0). Always
@@ -1998,11 +2037,17 @@ function permissionRuleBroadPlace(pattern) {
  *  text:
  *  - Run commands: the exact command, `triggeringResource` else `resource` —
  *    never a `*` prefix, which would also allow `> file` (P-0.8);
- *  - files: the parent folder plus `/**`, with `/` separators (P-0.6), unless
- *    the parent is empty, `.`, a drive root or the home folder, where it is
- *    the exact file;
+ *  - files: an absolute path, with `/` separators (P-0.6). kiro-cli sends a
+ *    path inside the workspace relative to it, and a relative pattern would
+ *    match that folder in every session's workspace (Phase 3 review M2), so
+ *    a relative resource is joined to `root`, the session's folder
+ *    (acp.py `_rule_root`). Then the parent folder plus `/**`, unless the
+ *    parent is a broad place (`permissionRuleBroadPlace`), where it is the
+ *    exact file. The exact resource when it cannot be read as a folder
+ *    (`permissionRuleLiteralPath`), and the exact relative resource when no
+ *    root is known;
  *  - MCP tools, sub-agents, skills: `resource` exactly (P-0.9). */
-function permissionRulePrefill(row, consent) {
+function permissionRulePrefill(row, consent, root) {
   var c = (consent && typeof consent === 'object' && !Array.isArray(consent)) ? consent : {};
   var resource = typeof c.resource === 'string' ? c.resource : '';
   if (row === 'shell') {
@@ -2010,27 +2055,50 @@ function permissionRulePrefill(row, consent) {
     return trig || resource;
   }
   if (row === 'fs_read' || row === 'fs_write') {
+    if (!resource) return '';
     var path = resource.replace(/\\/g, '/');
+    var base = (typeof root === 'string') ? root.trim().replace(/\\/g, '/') : '';
+    if (!permissionRuleAbsolute(path)) {
+      if (!base) return path;
+      path = base.replace(/\/+$/, '') + '/' + path;
+    }
+    if (permissionRuleLiteralPath(resource)) return path;
     var trimmed = path.replace(/\/+$/, '');
     var cut = trimmed.lastIndexOf('/');
-    var parent = cut >= 0 ? trimmed.slice(0, cut) : '';
-    if (permissionRuleBroadPlace(parent)) return path;
+    var parent = cut > 0 ? trimmed.slice(0, cut) : '/';
+    if (permissionRuleBroadPlace(parent, base)) return path;
     return parent + '/**';
   }
   return resource;
 }
 
-/** The card's warnings for `pattern` in `row`. */
-function permissionRuleWarnings(row, pattern) {
+/** The card's warnings for `pattern` in `row`; `root` is the session's
+ *  folder, when known. */
+function permissionRuleWarnings(row, pattern, root) {
   if (row === 'shell') return permissionRuleShellWarnings(pattern);
-  if (row === 'fs_write') {
-    var what = permissionRuleBroadPlace(pattern);
+  var out = [];
+  if (row === 'fs_write' || row === 'fs_read') {
+    var p = String(pattern);
+    var what = permissionRuleBroadPlace(p, root);
     if (what) {
-      return ['"' + pattern + '" covers ' + what + ', so file-tool writes '
-        + 'anywhere in it run without asking.'];
+      out.push('"' + p + '" covers ' + what + ', so file-tool '
+        + (row === 'fs_read' ? 'reads' : 'writes')
+        + ' anywhere in it run without asking.');
+    }
+    if (/(^|[\\/])\.\.([\\/]|$)/.test(p)) {
+      out.push('"' + p + '" goes up a folder with "..", which a rule cannot '
+        + 'hold; write the folder\'s full path instead.');
+    }
+    if (/[*?[{]/.test(p.replace(/\\/g, '/').replace(/\/\*\*$/, ''))) {
+      out.push('"' + p + '" holds a wildcard (*, ?, [ or {) besides a final '
+        + '/**; check what else it matches.');
+    }
+    if (p.trim() && !permissionRuleAbsolute(p.trim().replace(/\\/g, '/'))) {
+      out.push('"' + p + '" is relative, so it matches in the folder of every '
+        + 'session, not only this one.');
     }
   }
-  return [];
+  return out;
 }
 
 /** Whether a card may offer the button: a loopback page (D-9; the route
@@ -2049,7 +2117,8 @@ var _permissionRuleSeq = 0;
 /** The button, its inline row and its status line, added to one card.
  *  `ctx`: `{row, body, btnRow, rule, consent, answered(), answer()}`, where
  *  `answer()` sends the card's `allow_once` option (chosen by `kind`, never by
- *  id) and `answered()` says whether this tab already answered.
+ *  id) and `answered()` says whether this tab already answered. `rule.root`
+ *  is the session's folder for a file row (the frame's `ruleRoot`).
  *
  *  Save posts the pattern first and answers only after the server stored it:
  *  a rule that failed to save leaves the prompt open, with the reason. A
@@ -2059,6 +2128,14 @@ function addPermissionRuleButton(ctx) {
   var ruleRow = ctx.rule.row;
   var label = (typeof ctx.rule.label === 'string' && ctx.rule.label)
     ? ctx.rule.label : PERMISSION_RULE_ROWS[ruleRow];
+  var root = (typeof ctx.rule.root === 'string') ? ctx.rule.root : '';
+  var consent = (ctx.consent && typeof ctx.consent === 'object') ? ctx.consent : {};
+  var resource = typeof consent.resource === 'string' ? consent.resource : '';
+  // Phase 3 review (M4): kiro-cli split the command and asked about one part
+  // (`triggeringResource`), which is what the field starts with; a rule for it
+  // leaves the other parts free to ask. Read from the frame, not the field.
+  var trig = typeof consent.triggeringResource === 'string' ? consent.triggeringResource : '';
+  var partial = ruleRow === 'shell' && !!trig && !!resource && trig !== resource;
   var trigger = document.createElement('button');
   trigger.type = 'button';
   trigger.className = 'acp-btn acp-permission-rule-open';
@@ -2079,11 +2156,27 @@ function addPermissionRuleButton(ctx) {
     editor.wrap.remove();
     editor = null;
     trigger.setAttribute('aria-expanded', 'false');
-    if (refocus && !trigger.disabled) trigger.focus();
+    if (!refocus) return;
+    if (!trigger.disabled) {
+      trigger.focus();
+      return;
+    }
+    // Phase 3 review (L4): the prompt resolved while the row was open, so the
+    // button is disabled; the card itself takes the focus, never <body>.
+    ctx.row.setAttribute('tabindex', '-1');
+    ctx.row.focus();
   }
 
   function showWarnings() {
-    var list = permissionRuleWarnings(ruleRow, editor.input.value);
+    var pattern = editor.input.value;
+    var list = permissionRuleWarnings(ruleRow, pattern, root);
+    // Phase 3 review (L2): Save answers the prompt with allow_once, which
+    // runs the whole command, not only the pattern's part of it.
+    if (ruleRow === 'shell' && resource && resource !== pattern) {
+      permissionRuleShellWarnings(resource).forEach(function (text) {
+        list.push('Save also allows the whole command once. ' + text);
+      });
+    }
     editor.warn.textContent = '';
     list.forEach(function (text) {
       var line = document.createElement('div');
@@ -2113,8 +2206,18 @@ function addPermissionRuleButton(ctx) {
     var line = document.createElement('div');
     line.textContent = already
       ? 'Rule saved; this prompt was already answered'
-      : 'Rule added — new sessions will not ask';
+      : (partial
+        ? 'Rule added for that part only — new sessions may still ask about the rest'
+        : 'Rule added — new sessions will not ask');
     status.appendChild(line);
+    // Phase 3 review (M3): D-35's notice is shown on the dashboard only, and
+    // saving here does not clear it; point at it.
+    if (answer.posture_notice && typeof answer.posture_notice === 'object') {
+      var notice = document.createElement('div');
+      notice.className = 'acp-permission-rule-warning acp-permission-rule-notice';
+      notice.textContent = 'Settings changed outside the dashboard — review them';
+      status.appendChild(notice);
+    }
     // D-32: stored, but the agent file was not written, so new Default
     // sessions are refused until that is fixed. Said, never swallowed.
     if (typeof answer.warning === 'string' && answer.warning) {
@@ -2180,11 +2283,18 @@ function addPermissionRuleButton(ctx) {
     input.className = 'acp-permission-rule-input';
     input.setAttribute('spellcheck', 'false');
     input.setAttribute('autocomplete', 'off');
-    input.value = permissionRulePrefill(ruleRow, ctx.consent);
+    input.value = permissionRulePrefill(ruleRow, ctx.consent, root);
     var hint = document.createElement('div');
     hint.className = 'acp-permission-rule-hint';
     hint.textContent = 'Saved to Manual mode’s rules. Sessions created afterwards '
       + 'run a match without asking; this prompt is allowed once.';
+    if (ruleRow === 'fs_read' || ruleRow === 'fs_write') {
+      hint.textContent += ' The rule applies to that folder in every new session, '
+        + 'whichever folder the session opens in.';
+    } else if (partial) {
+      hint.textContent += ' It covers only “' + trig + '”; other parts of the '
+        + 'command may still ask.';
+    }
     var warn = document.createElement('div');
     warn.className = 'acp-permission-rule-warn';
     warn.setAttribute('aria-live', 'polite');

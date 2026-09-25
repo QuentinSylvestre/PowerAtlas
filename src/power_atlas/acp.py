@@ -1609,6 +1609,30 @@ def _rule_row(consent, bound_mode) -> str:
     return capability
 
 
+def _rule_root(consent, record) -> str:
+    """The folder a file prompt's relative ``resource`` is relative to, or ``""``.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3 review (M2). kiro-cli
+    relativises a path inside the workspace (probe P3: an absolute path there
+    arrives as ``sub/a.txt``), and a relative allow pattern matches that folder
+    in *every* session's workspace. The card joins this root to the resource
+    so the rule it offers names one folder.
+
+    The raw consent's ``workspaceRoot`` comes first: it is the base kiro-cli
+    relativised against (measured, Phase 0 S2 frames). The session record's
+    ``cwd``, which PowerAtlas itself sent at ``session/new``, is the fallback.
+    Forward slashes, no trailing separator, as a pattern is written (P-0.6).
+    Not part of `_project_consent`: the consent block would render it.
+    """
+    root = consent.get("workspaceRoot") if isinstance(consent, dict) else None
+    if not isinstance(root, str) or not root.strip():
+        root = record.get("cwd") if isinstance(record, dict) else None
+    if not isinstance(root, str) or not root.strip():
+        return ""
+    root = root.strip().replace("\\", "/")
+    return root if re.fullmatch(r"[A-Za-z]:/|/", root) else root.rstrip("/")
+
+
 def _project_consent(consent) -> dict[str, Any]:
     """The six allowlisted fields of a permission request's consent payload.
 
@@ -2717,9 +2741,11 @@ def _new_session_record(cwd: str, mode: str = DEFAULT_TASK_MODE) -> dict:
     ``last_activity`` are monotonic and only ever subtracted. Two clocks in one
     record, stated here rather than left to be rediscovered.
 
-    ``mode`` is the ``modeId`` PowerAtlas bound (``session/new``) or sent
-    (``session/load``; kiro-cli ignores it for a session with persisted
-    metadata, so there it is what was asked, not necessarily what runs).
+    ``mode`` is the agent the session runs: the ``modeId`` PowerAtlas bound
+    (``session/new``), or at ``session/load`` the persisted ``agentMode``
+    (kiro-cli ignores the sent ``modeId`` for a session with persisted
+    metadata), the sent ``modeId`` when there is none, and ``""`` when the
+    metadata cannot be read (`_stored_session_agent_mode_v3`).
     260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-31: a prompt card's
     "always allow" button is offered only in a session bound to the derived
     agent, since only there can a row rule silence the prompt.
@@ -2837,6 +2863,36 @@ def _stored_session_cwd_v3(session_id: str) -> str:
     except Exception:
         pass
     return ""
+
+
+def _stored_session_agent_mode_v3(session_id: str) -> str | None:
+    """The ``agentMode`` a v3 session persisted, for `load_session`.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3 review (L1). kiro-cli
+    binds a session with persisted metadata to ``metadata.agentMode`` and
+    ignores the ``modeId`` a ``session/load`` sends (probe P2, D-12), and it
+    writes that field as the agent's name (probe P3 cleanup: ``pa-probe-p3``).
+    Returns ``None`` when no ``session.json`` exists for the id, so the sent
+    ``modeId`` is what binds; ``""`` when one exists but its ``agentMode``
+    cannot be read, so the running agent is unknown; the name otherwise.
+    """
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return ""
+    sessions_root = Path.home() / ".kiro" / "sessions"
+    try:
+        for hash_dir in sessions_root.iterdir():
+            if not hash_dir.is_dir() or hash_dir.name == "cli":
+                continue
+            candidate = hash_dir / session_id / "session.json"
+            if candidate.is_file():
+                meta = json.loads(candidate.read_text(encoding="utf-8"))
+                mode = meta.get("agentMode") if isinstance(meta, dict) else None
+                return mode if isinstance(mode, str) else ""
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return ""
+    return None
 
 
 # v3 has no lock file with a pid the way v2 does (Current State: concurrent
@@ -5281,7 +5337,10 @@ class _Supervisor:
         consent = kiro_meta.get("consent") if isinstance(kiro_meta, dict) else None
         # D-31: from the raw consent, and from the mode this session was bound
         # to (the record's `mode`, set at `session/new` and `session/load`).
-        rule_row = _rule_row(consent, self.sessions[session_id].get("mode"))
+        record = self.sessions[session_id]
+        rule_row = _rule_row(consent, record.get("mode"))
+        rule_root = (_rule_root(consent, record)
+                     if rule_row in ("fs_read", "fs_write") else "")
         _emit(session_id, envelope("permission_request", {
             "requestId": opaque_id,
             "sessionId": session_id,
@@ -5306,6 +5365,10 @@ class _Supervisor:
             "ruleEligible": bool(rule_row),
             "ruleRow": rule_row or None,
             "ruleRowLabel": _RULE_ROWS.get(rule_row, ""),
+            # Phase 3 review (M2): for a file row, the folder a relative
+            # resource is relative to, so the card prefills an absolute path;
+            # null otherwise.
+            "ruleRoot": rule_root or None,
         }, session_id))
         # Notified unconditionally, unlike turn end: this request has stopped
         # the turn and will keep it stopped until a human answers or the
@@ -5550,10 +5613,17 @@ class _Supervisor:
                         "failed; sending modeId %r for session %s",
                         DEFAULT_TASK_MODE, session_id)
                     load_mode = DEFAULT_TASK_MODE
-                # D-31: what was sent, for the prompt card's eligibility.
+                # D-31: the agent that will actually run the session, for the
+                # prompt card's eligibility (Phase 3 review, L1). With
+                # persisted metadata that is its `agentMode`, whatever this
+                # load sends; without, the `modeId` sent here binds. Metadata
+                # that cannot be read leaves the mode unknown, so no card in
+                # this session offers the button.
+                persisted = await asyncio.to_thread(
+                    _stored_session_agent_mode_v3, session_id)
                 record = self.sessions.get(session_id)
                 if record is not None:
-                    record["mode"] = load_mode
+                    record["mode"] = load_mode if persisted is None else persisted
                 await self._request(
                     "session/load",
                     {"sessionId": session_id, "cwd": cwd, "mcpServers": [],
