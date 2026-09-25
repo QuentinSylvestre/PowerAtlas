@@ -42,10 +42,14 @@ _PLAN_STATES = ("In Progress", "Complete")
 _DETAIL_MAX = 140
 _NOTES_MAX = 120
 
+# The Status value is cut to this many characters before any further parsing.
+# A real one is well under 200; the cap bounds the work on a pathological line.
+_STATUS_MAX = 500
+
 _STATUS_RE = re.compile(r"^> \*\*Status\*\*:\s*(.+)$", re.MULTILINE)
-_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*$")
-# The state ends at the first " — " or " - "; everything after is the detail.
-_STATE_SPLIT_RE = re.compile(r" (?:—|-) ")
+# The state ends at the first " — ", " – " or " - "; everything after is the
+# detail.
+_STATE_SPLIT_RE = re.compile(r" (?:—|–|-) ")
 _TRACKER_HEAD_RE = re.compile(r"^## Progress Tracker\s*$")
 _H2_RE = re.compile(r"^## ")
 _PHASE_RE = re.compile(r"^### Phase (\d+)", re.MULTILINE)
@@ -59,12 +63,35 @@ _plan_memo: dict[str, tuple[int, int, dict | None]] = {}
 _plan_memo_lock = threading.Lock()
 
 
-def _read_plan_file(path: Path) -> str:
-    """The file's text. Invalid UTF-8 is replaced rather than raised (D21).
+def _read_plan_file(path: Path) -> str | None:
+    """The file's text, or None when it is larger than `PLAN_MAX_BYTES`.
+
+    Invalid UTF-8 is replaced rather than raised (D21). The read itself is
+    bounded, not only the `stat` before it: an agent appending to the file
+    between the two cannot make this read more than the cap.
 
     Module-level and called by name so a test can count the reads.
     """
-    return path.read_text(encoding="utf-8", errors="replace")
+    with path.open("rb") as fh:
+        raw = fh.read(PLAN_MAX_BYTES + 1)
+    if len(raw) > PLAN_MAX_BYTES:
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
+def _strip_status_comment(status: str) -> str:
+    """The Status value without a trailing `<!-- ... -->`.
+
+    Done with string methods, not a regex: a `\\s*<!--.*?-->\\s*$` pattern
+    backtracks quadratically over a long run of spaces, and the Status line is
+    free text from a file on disk. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    """
+    s = status.rstrip()
+    if s.endswith("-->"):
+        start = s.rfind("<!--")
+        if start >= 0:
+            s = s[:start]
+    return s.strip()
 
 
 def _trim(text: str, limit: int) -> str:
@@ -77,9 +104,11 @@ def _tracker_status(raw: str) -> str:
     s = raw.strip().strip("*_~`").strip().lower()
     if s.startswith(("done", "complete")):
         return "done"
-    if s.startswith(("in progress", "in-progress")):
+    # "Implemented, review pending" and "Review pending" are phases whose code
+    # exists and whose review has not run: under way, not waiting to start.
+    if s.startswith(("in progress", "in-progress", "implemented", "review pending")):
         return "in_progress"
-    if s.startswith("pending") or s == "":
+    if s.startswith(("pending", "not started")) or s == "":
         return "pending"
     return "other"
 
@@ -124,7 +153,7 @@ def parse_plan(text: str) -> dict | None:
     m = _STATUS_RE.search(text)
     if not m:
         return None
-    status = _COMMENT_RE.sub("", m.group(1)).strip()
+    status = _strip_status_comment(m.group(1)[:_STATUS_MAX])
     parts = _STATE_SPLIT_RE.split(status, maxsplit=1)
     state = parts[0].strip()
     if state not in _PLAN_STATES:
@@ -132,11 +161,20 @@ def parse_plan(text: str) -> dict | None:
     detail = parts[1].strip() if len(parts) > 1 else ""
     tracker = _tracker_rows(text.splitlines())
     if tracker:
+        # The phase to name under the bar. Trackers seldom mark a row In
+        # Progress, so the first row not yet done stands in for it; `state`
+        # tells the page which of the two it got, so it can word the label
+        # truthfully ("in progress" against "next").
         current = next((r for r in tracker if r["status"] == "in_progress"), None)
+        current_state = "in_progress"
+        if current is None:
+            current = next((r for r in tracker if r["status"] != "done"), None)
+            current_state = "next"
         progress: dict | None = {
             "done": sum(1 for r in tracker if r["status"] == "done"),
             "total": len(tracker),
-            "current": ({"id": current["id"], "name": current["name"]}
+            "current": ({"id": current["id"], "name": current["name"],
+                         "state": current_state}
                         if current else None),
         }
     else:
@@ -163,22 +201,43 @@ def _skip_cwd(cwd: str) -> bool:
             or not os.path.isabs(cwd))
 
 
+def _resolves_to_unc(real: str) -> bool:
+    """True when `real`, a `os.path.realpath` result, names a network path.
+
+    `realpath` can keep the `\\\\?\\` extended-length prefix on Windows: a
+    `\\\\?\\C:\\...` path is local, `\\\\?\\UNC\\...` is a share.
+    260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE (D21)
+    """
+    if real.startswith("\\\\?\\"):
+        return real[4:].upper().startswith("UNC\\")
+    return real.startswith("\\\\") or real.startswith("//")
+
+
 def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) -> list[dict]:
     """Active plans across `workspaces`, a list of `(cwd, name)` pairs.
 
     Blocking; runs in a worker thread. The caller has already applied the
     rail's filters (hidden tag, disabled providers) and de-duplicated the cwds.
 
-    Robust reads (D21): cwds that are UNC or not absolute are skipped; no
-    further cwd is scanned once `deadline_s` has passed (the first is always
-    scanned, as in `web._acp_exists_flags`; a single stalled call cannot be
-    interrupted, so the bound is one stalled cwd, not zero); only top-level
-    `plans/*.md` is read, which leaves `plans/done/` out; files over
-    `PLAN_MAX_BYTES` are skipped; one unreadable file skips that file only.
+    Robust reads (D21): cwds that are UNC or not absolute are skipped, and so
+    is a cwd whose `plans` folder resolves (a junction or symlink) to a UNC
+    target. Nothing more is read once `deadline_s` has passed; the deadline is
+    checked before each cwd and before each file, and the first file of the
+    first cwd is always read, as in `web._acp_exists_flags`. A single stalled
+    call cannot be interrupted, so the bound is one stalled call, not zero. A
+    mapped or `subst` drive letter that points at a dead share passes every
+    check here; no network workspace exists today, so that residual risk is
+    recorded rather than handled. Only top-level `plans/*.md` is read, which
+    leaves `plans/done/` out; anything that is not a regular file (a symlink
+    included) is skipped; files over `PLAN_MAX_BYTES` are skipped, and the
+    read itself is capped too; one unreadable file skips that file only.
 
     Parsed files are memoised per path on `(mtime_ns, size)` (D22), so a
     repeat scan of unchanged files costs one `stat` each. Paths not seen by a
     scan that ran to completion are evicted.
+
+    `now` is the wall-clock time the `stale` badge is measured against;
+    tests pass it to make that comparison deterministic.
     """
     now = time.time() if now is None else now
     deadline = time.monotonic() + deadline_s
@@ -186,6 +245,8 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
     seen: set[str] = set()
     complete = True
     for index, (cwd, name) in enumerate(workspaces):
+        if not complete:
+            break
         if index and time.monotonic() >= deadline:
             complete = False
             break
@@ -193,18 +254,25 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
             continue
         plans_dir = Path(cwd) / "plans"
         try:
+            if _resolves_to_unc(os.path.realpath(str(plans_dir))):
+                continue
             if not plans_dir.is_dir():
                 continue
             files = sorted(plans_dir.glob("*.md"))
-        except OSError:
+        except (OSError, ValueError):
             continue
-        for path in files:
+        for file_index, path in enumerate(files):
+            if (index or file_index) and time.monotonic() >= deadline:
+                complete = False
+                break
             if path.name.upper() in _PLAN_SKIP_NAMES:
                 continue
             key = str(path)
             seen.add(key)
             try:
-                st = path.stat()
+                # lstat: a symlink in `plans/` is not followed (it could point
+                # anywhere, a share included); it fails S_ISREG below.
+                st = path.lstat()
                 if not stat_mod.S_ISREG(st.st_mode) or st.st_size > PLAN_MAX_BYTES:
                     continue
                 with _plan_memo_lock:
@@ -212,7 +280,10 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
                 if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
                     parsed = hit[2]
                 else:
-                    parsed = parse_plan(_read_plan_file(path))
+                    text = _read_plan_file(path)
+                    if text is None:
+                        continue
+                    parsed = parse_plan(text)
                     with _plan_memo_lock:
                         _plan_memo[key] = (st.st_mtime_ns, st.st_size, parsed)
             except (OSError, UnicodeDecodeError, ValueError):

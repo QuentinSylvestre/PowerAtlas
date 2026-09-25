@@ -1144,6 +1144,10 @@ function dashOverviewStop(){
   _dashOverviewActive = false;
 }
 function dashOverviewPoll(){
+  // Both callers (the rail's interval and its visibilitychange handler)
+  // already skip a hidden tab; the check stays so a future caller cannot
+  // poll from a background tab by forgetting it.
+  // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
   if (!_dashOverviewActive || document.visibilityState === 'hidden') return;
   dashOverviewRefreshSummary();
 }
@@ -1221,6 +1225,10 @@ function dashOvPct(done, total){
   if (!(t > 0) || !isFinite(d)) return 0;
   return Math.max(0, Math.min(100, d / t * 100));
 }
+// The expand-state key of a plan: its folder and file name.
+function dashOvPlanKey(plan){
+  return String(plan.cwd) + '\n' + String(plan.file);
+}
 function dashOvPlanRow(plan){
   var li = document.createElement('li');
   li.className = 'dash-ov-plan';
@@ -1232,7 +1240,11 @@ function dashOvPlanRow(plan){
   head.className = 'dash-ov-plan-head';
   var top = document.createElement('span');
   top.className = 'dash-ov-plan-top';
-  top.appendChild(dashOvText('span', 'dash-ov-ws', plan.workspace));
+  var ws = dashOvText('span', 'dash-ov-ws', plan.workspace);
+  // Two folders can share a name; the full path tells them apart. Set as a
+  // property, so it is text whatever it holds (D26).
+  ws.title = plan.cwd == null ? '' : String(plan.cwd);
+  top.appendChild(ws);
   top.appendChild(dashOvText('span', 'dash-ov-plan-title', plan.title));
   var ready = plan.ready_to_close === true;
   top.appendChild(dashOvText('span',
@@ -1258,8 +1270,13 @@ function dashOvPlanRow(plan){
   }
   var phase = '';
   if (tracked && prog.current && typeof prog.current === 'object') {
-    phase = 'Phase ' + String(prog.current.id) + ' in progress' +
-      (prog.current.name ? ': ' + String(prog.current.name) : '');
+    // "in progress" only for a row the tracker marks so; otherwise the server
+    // sent the first row not yet done (state "next"), labelled as such.
+    // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    var curName = prog.current.name ? ': ' + String(prog.current.name) : '';
+    phase = prog.current.state === 'in_progress'
+      ? 'Phase ' + String(prog.current.id) + ' in progress' + curName
+      : 'Next: phase ' + String(prog.current.id) + curName;
   } else if (prog && prog.phases != null) {
     var k = dashOvCount(prog.phases);
     phase = k + (k === 1 ? ' phase' : ' phases');
@@ -1268,7 +1285,7 @@ function dashOvPlanRow(plan){
   if (plan.detail) head.appendChild(dashOvText('span', 'dash-ov-plan-detail', plan.detail));
   li.appendChild(head);
   if (rows.length) {
-    var key = String(plan.cwd) + '\n' + String(plan.file);
+    var key = dashOvPlanKey(plan);
     var list = document.createElement('ol');
     list.className = 'dash-ov-tracker';
     rows.forEach(function(r){
@@ -1306,6 +1323,13 @@ function dashOvRenderPlans(plans){
     body.appendChild(dashOvText('div', 'dash-ov-empty', 'No active plans'));
     return;
   }
+  // Forget the expand state of plans no longer listed, so the map does not
+  // keep every plan that was ever opened.
+  var keep = Object.create(null);
+  shown.forEach(function(p){ keep[dashOvPlanKey(p)] = true; });
+  Object.keys(_dashOvPlanOpen).forEach(function(k){
+    if (!keep[k]) delete _dashOvPlanOpen[k];
+  });
   var list = document.createElement('ul');
   list.className = 'dash-ov-plans';
   shown.forEach(function(p){ list.appendChild(dashOvPlanRow(p)); });

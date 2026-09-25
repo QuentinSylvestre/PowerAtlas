@@ -3345,14 +3345,18 @@ def _overview_workspaces() -> list[tuple[str, str]]:
 
 
 def _overview_summary() -> dict:
-    """The summary payload. Blocking; runs off the loop."""
-    now = time.monotonic()
+    """The summary payload. Blocking; runs off the loop.
+
+    Single-flight (D23): the lock is held across check, scan and store, so
+    concurrent requests with a stale cache run one scan between them; the
+    others wait for it and then find it fresh. The wait is bounded by the
+    scan's own deadline (`overview.scan_plans`, D21), and every caller is
+    already on a worker thread. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    """
     with _overview_plans_lock:
         at, plans = _overview_plans_cache
-        fresh = plans is not None and now - at < _OVERVIEW_PLANS_REUSE_SECONDS
-    if not fresh:
-        plans = overview.scan_plans(_overview_workspaces())
-        with _overview_plans_lock:
+        if plans is None or time.monotonic() - at >= _OVERVIEW_PLANS_REUSE_SECONDS:
+            plans = overview.scan_plans(_overview_workspaces())
             _overview_plans_cache[:] = [time.monotonic(), plans]
     return {"plans": plans, "usage": None, "usage_state": "cold"}
 

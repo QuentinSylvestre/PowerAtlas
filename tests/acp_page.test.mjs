@@ -13335,6 +13335,10 @@ function loadDashPicker(opts = {}) {
   // document-level listener). Mirrors loadPage()'s own docListeners Map +
   // fireDoc() helper (this file, ~line 1123) exactly.
   const dashDocListeners = new Map();
+  // document.visibilityState, which the rail's poll and the Overview's poll
+  // read; "visible" unless a check hides the tab with setVisibility().
+  // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+  let dashVisibility = "visible";
   // Image tray element (SC6, dashboard/ACP feature-parity plan Phase 4) --
   // pre-set exactly like dashComposerEl/dashPromptInput/dashSendBtn above.
   const dashTrayElEl = new El("div");
@@ -13425,6 +13429,7 @@ function loadDashPicker(opts = {}) {
         dashDocListeners.get(type).push(fn);
       },
       write: () => { throw new Error("document.write not allowed"); },
+      get visibilityState() { return dashVisibility; },
     },
     // window.addEventListener('pagehide', dashCloseIfAbandoned) -- a bare,
     // top-level call now inside the extracted handleRegion (dashCloseIfAbandoned
@@ -13999,6 +14004,8 @@ function loadDashPicker(opts = {}) {
      *  its `.length` reflects clearInterval() calls made since this harness
      *  was created. */
     intervals: dashIntervals,
+    /** Set document.visibilityState ("visible" or "hidden"). */
+    setVisibility(v) { dashVisibility = v; },
     /** How many independent sub-agent WebSockets dashConnectSubWs() has
      *  constructed so far. */
     subSocketCount() { return dashSubSockets.length; },
@@ -17180,7 +17187,7 @@ function ovPlan(over = {}) {
     cwd: "C:\\ws\\proj", workspace: "proj", file: "260920_ALPHA.md", title: "ALPHA",
     state: "In Progress", detail: "Phase 2 underway", mtime: new Date(Date.now() - 5 * 60000).toISOString(),
     stale: false, ready_to_close: false,
-    progress: { done: 1, total: 3, current: { id: "2", name: "Second" } },
+    progress: { done: 1, total: 3, current: { id: "2", name: "Second", state: "in_progress" } },
     tracker: [
       { id: "1", name: "First", status: "done", notes: "code abc" },
       { id: "2", name: "Second", status: "in_progress", notes: "" },
@@ -17275,7 +17282,7 @@ check("dashboard overview plans: clicking a row expands its tracker rows, and a 
 check("dashboard overview plans: markup in a title, detail or tracker note stays text (D26)", () => {
   const p = loadDashPicker();
   p.sandbox.dashOvRenderPlans([ovPlan({
-    workspace: OV_XSS, title: OV_XSS, detail: OV_XSS, mtime: OV_XSS, file: OV_XSS,
+    cwd: OV_XSS, workspace: OV_XSS, title: OV_XSS, detail: OV_XSS, mtime: OV_XSS, file: OV_XSS,
     progress: { done: OV_XSS, total: "3); background:url(x", current: { id: OV_XSS, name: OV_XSS } },
     tracker: [{ id: OV_XSS, name: OV_XSS, status: OV_XSS, notes: OV_XSS },
               { id: "2", name: "n", status: "__proto__", notes: "" }],
@@ -17294,6 +17301,9 @@ check("dashboard overview plans: markup in a title, detail or tracker note stays
     }
   }
   const [row] = ovPlanRows(p);
+  // The chip's tooltip is the `title` property, not an attribute, so the
+  // attribute allow-list above needs no widening for it.
+  assertEqual(row.querySelector(".dash-ov-ws").title, OV_XSS, "the chip's tooltip is the folder path, as text");
   assertEqual(row.querySelector(".dash-ov-plan-title").textContent, OV_XSS, "shown as text");
   assertEqual(row.querySelector(".dash-ov-plan-detail").textContent, OV_XSS, "shown as text");
   assertEqual(row.querySelector(".dash-ov-plan-fill").style.width, "0%");
@@ -17302,6 +17312,65 @@ check("dashboard overview plans: markup in a title, detail or tracker note stays
   assertEqual(items[0].className, "dash-ov-tr is-other", "an unknown status gets the fixed fallback class");
   assertEqual(items[1].className, "dash-ov-tr is-other", "a prototype key is not a status");
   assertEqual(items[0].querySelector(".dash-ov-tr-status").textContent, "Other");
+});
+
+check("dashboard overview plans: a phase the tracker does not mark in progress is labelled next, not in progress", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderPlans([
+    ovPlan({ progress: { done: 1, total: 3, current: { id: "2", name: "Second", state: "next" } } }),
+    ovPlan({ file: "B.md", progress: { done: 3, total: 3, current: null } }),
+  ]);
+  const [a, b] = ovPlanRows(p);
+  assertEqual(a.querySelector(".dash-ov-plan-phase").textContent, "Next: phase 2: Second");
+  assertEqual(a.querySelector(".dash-ov-ws").title, "C:\\ws\\proj", "the chip's tooltip is the full folder path");
+  assertEqual(b.querySelector(".dash-ov-plan-phase"), null, "every row done: no phase to name");
+});
+
+check("dashboard overview plans: the rail's 60 s interval refreshes plans only while the Overview is showing and the tab is visible", async () => {
+  const p = loadDashPicker();
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const from = src.indexOf("function dashRailInit(){");
+  assert(from >= 0, "index.html no longer declares dashRailInit");
+  const to = src.indexOf("\n}\n", from);
+  let railRefreshes = 0;
+  p.sandbox.dashRailLoadFirstPage = () => {};
+  p.sandbox.dashRailRefresh = () => { railRefreshes += 1; };
+  p.sandbox.DASH_RAIL_REFRESH_MS = 60000;
+  vm.runInContext(src.slice(from, to + 2), p.sandbox, { filename: "index.html#dashRailInit" });
+  const before = p.intervals.length;
+  p.sandbox.dashRailInit();
+  assertEqual(p.intervals.length, before + 1, "dashRailInit registers one interval");
+  const tick = p.intervals[p.intervals.length - 1];
+  assertEqual(tick.ms, 60000);
+  const calls = ovSummaryFetch(p, { plans: [] });
+  const summaries = () => calls.filter((u) => u === "/api/dashboard/overview/summary").length;
+  p.sandbox.dashOverviewStart();
+  await p.settle(); await p.settle();
+  const n = summaries();
+  tick.fn();
+  await p.settle(); await p.settle();
+  assertEqual(summaries(), n + 1, "the Overview is showing: the tick fetches the summary");
+  p.setVisibility("hidden");
+  tick.fn();
+  await p.settle(); await p.settle();
+  assertEqual(summaries(), n + 1, "a hidden tab: the tick must not fetch");
+  p.setVisibility("visible");
+  p.sandbox.dashOverviewStop();
+  const rails = railRefreshes;
+  tick.fn();
+  await p.settle(); await p.settle();
+  assertEqual(summaries(), n + 1, "the Overview is not showing: the tick must not fetch the summary");
+  assertEqual(railRefreshes, rails + 1, "the rail itself still refreshes");
+});
+
+check("dashboard overview plans: the expand state of a plan no longer listed is forgotten", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderPlans([ovPlan(), ovPlan({ file: "B.md" })]);
+  for (const row of ovPlanRows(p)) row.querySelector(".dash-ov-plan-head").dispatch("click");
+  assertEqual(Object.keys(p.sandbox._dashOvPlanOpen).length, 2);
+  p.sandbox.dashOvRenderPlans([ovPlan()]);
+  assertEqual(Object.keys(p.sandbox._dashOvPlanOpen).length, 1, "B.md is gone from the list");
+  assertEqual(ovPlanRows(p)[0].querySelector(".dash-ov-tracker").hidden, false, "the listed plan stays open");
 });
 
 check("dashboard overview plans: a failed first load says so, a failed refresh keeps the rows", async () => {

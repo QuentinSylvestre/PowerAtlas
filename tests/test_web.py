@@ -29909,7 +29909,8 @@ class TestOverviewPlans:
         assert [r["status"] for r in plan["tracker"]] == ["done", "in_progress", "pending"]
         assert plan["tracker"][0]["notes"] == "code abc"
         assert plan["progress"] == {"done": 1, "total": 3,
-                                    "current": {"id": "2", "name": "Second"}}
+                                    "current": {"id": "2", "name": "Second",
+                                                "state": "in_progress"}}
         assert plan["ready_to_close"] is False and plan["stale"] is False
 
     def test_no_tracker_counts_distinct_phase_headings(self, tmp_path):
@@ -29936,20 +29937,22 @@ class TestOverviewPlans:
 
     def test_complete_is_ready_to_close_and_never_stale(self, tmp_path):
         ws = self._ws(tmp_path, "proj", {"C.md": _OV_COMPLETE_PLAN})
-        old = time.time_ns() - 30 * 24 * 3600 * 10**9
-        os.utime(ws / "plans" / "C.md", ns=(old, old))
-        [plan] = self._scan(ws)
+        t = 1_700_000_000
+        os.utime(ws / "plans" / "C.md", (t, t))
+        [plan] = self._scan(ws, now=t + 30 * 24 * 3600)
         assert plan["ready_to_close"] is True
         assert plan["stale"] is False
 
     def test_eight_day_old_in_progress_plan_is_stale(self, tmp_path):
         ws = self._ws(tmp_path, "proj", {"old.md": _OV_PHASES_PLAN,
                                          "new.md": _OV_PHASES_PLAN})
-        old = time.time_ns() - 8 * 24 * 3600 * 10**9
-        os.utime(ws / "plans" / "old.md", ns=(old, old))
-        plans = {p["file"]: p for p in self._scan(ws)}
+        # `now` pinned: the boundary is exact, not subject to the test's speed.
+        now = 1_700_000_000
+        os.utime(ws / "plans" / "old.md", (now - 7 * 24 * 3600 - 1, now - 7 * 24 * 3600 - 1))
+        os.utime(ws / "plans" / "new.md", (now - 7 * 24 * 3600, now - 7 * 24 * 3600))
+        plans = {p["file"]: p for p in self._scan(ws, now=now)}
         assert plans["old.md"]["stale"] is True
-        assert plans["new.md"]["stale"] is False
+        assert plans["new.md"]["stale"] is False, "exactly 7 days is not yet stale"
 
     def test_order_is_in_progress_first_then_newest(self, tmp_path):
         ws = self._ws(tmp_path, "proj", {"a.md": _OV_PHASES_PLAN, "b.md": _OV_PHASES_PLAN,
@@ -30099,10 +30102,17 @@ class TestOverviewPlans:
         real = overview.scan_plans
         monkeypatch.setattr(overview, "scan_plans",
                             lambda ws, **kw: scans.append(1) or real(ws, **kw))
+        from power_atlas import web as web_mod
         with patch("power_atlas.web.load_config", return_value=self._config()):
             client.get("/api/dashboard/overview/summary")
             client.get("/api/dashboard/overview/summary")
-        assert len(scans) == 1
+            assert len(scans) == 1
+            # Age the cached scan past the reuse window: the next request
+            # scans again. The cache's clock is moved rather than
+            # `time.monotonic` patched, which the test client's loop reads too.
+            web_mod._overview_plans_cache[0] -= web_mod._OVERVIEW_PLANS_REUSE_SECONDS + 1
+            client.get("/api/dashboard/overview/summary")
+        assert len(scans) == 2
 
     def test_route_refused_without_the_cookie(self, anonymous_client, client, workspaces):
         assert _is_json_403(anonymous_client.get("/api/dashboard/overview/summary"))
@@ -30118,3 +30128,149 @@ class TestOverviewPlans:
         from power_atlas import web as web_mod
         assert web_mod._DASHBOARD_OVERVIEW_SUMMARY_PATH == "/api/dashboard/overview/summary"
         assert web_mod._DASHBOARD_OVERVIEW_SUMMARY_PATH not in web_mod._REMOTE_ALLOWED_PATHS
+
+    # --- review fixes (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE) ----
+
+    @pytest.mark.parametrize("tail", ["", "<!-- c", "-->", "<!-- a --> x"])
+    def test_a_long_whitespace_run_in_the_status_line_parses_fast(self, tail):
+        """A regex that backtracks over the run would take seconds here, per request."""
+        from power_atlas import overview
+        text = "> **Status**: In Progress" + " " * 100_000 + tail + "\n"
+        t0 = time.perf_counter()
+        plan = overview.parse_plan(text)
+        assert time.perf_counter() - t0 < 0.5
+        assert plan is not None and plan["state"] == "In Progress"
+
+    def test_a_trailing_comment_is_stripped_and_an_en_dash_splits(self):
+        from power_atlas import overview
+        plan = overview.parse_plan("> **Status**: In Progress – Phase 3 next <!-- grammar -->\n")
+        assert plan["state"] == "In Progress"
+        assert plan["detail"] == "Phase 3 next"
+
+    def test_tracker_status_vocabulary(self):
+        from power_atlas import overview
+        cases = {
+            "Done": "done", "**Complete**": "done",
+            "In Progress": "in_progress", "Implemented, review pending": "in_progress",
+            "Review pending": "in_progress",
+            "Pending": "pending", "Not started": "pending", "": "pending",
+            "Blocked": "other",
+        }
+        assert {raw: overview._tracker_status(raw) for raw in cases} == cases
+
+    def test_without_an_in_progress_row_the_first_row_not_done_is_next(self):
+        from power_atlas import overview
+        text = _OV_TRACKER_PLAN.replace("| 2 | Second | In Progress | half |",
+                                        "| 2 | Second | Pending | half |")
+        plan = overview.parse_plan(text)
+        assert plan["progress"]["current"] == {"id": "2", "name": "Second", "state": "next"}
+        every_done = (_OV_TRACKER_PLAN.replace("| 2 | Second | In Progress |", "| 2 | Second | Done |")
+                      .replace("| 3 | Third | Pending |", "| 3 | Third | Done |"))
+        assert overview.parse_plan(every_done)["progress"]["current"] is None
+
+    def test_a_stray_invalid_byte_is_replaced_and_the_plan_still_listed(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {
+            "p.md": b"> **Status**: In Progress \xe2\x80\x94 caf\x97 break\n\n### Phase 1\n"})
+        [plan] = self._scan(ws)
+        assert plan["state"] == "In Progress"
+        assert plan["detail"] == "caf\ufffd break"
+
+    def test_the_read_is_capped_even_if_the_file_grew_after_the_stat(self, tmp_path, monkeypatch):
+        from power_atlas import overview
+        ws = self._ws(tmp_path, "proj", {
+            "grew.md": b"> **Status**: In Progress\n" + b"x" * overview.PLAN_MAX_BYTES,
+            "ok.md": _OV_COMPLETE_PLAN})
+        grew = ws / "plans" / "grew.md"
+        real_lstat = Path.lstat
+
+        def small_lstat(self):
+            # The stat as it was before an agent appended to the file.
+            st = real_lstat(self)
+            if self == grew:
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                       st.st_uid, st.st_gid, 100, st.st_atime,
+                                       st.st_mtime, st.st_ctime))
+            return st
+
+        monkeypatch.setattr(overview.Path, "lstat", small_lstat)
+        assert [p["file"] for p in self._scan(ws)] == ["ok.md"]
+        assert overview._read_plan_file(grew) is None
+
+    def test_the_deadline_is_checked_between_files_of_one_cwd(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {"a.md": _OV_PHASES_PLAN, "b.md": _OV_PHASES_PLAN})
+        plans = self._scan(ws, deadline_s=0.0)
+        assert [p["file"] for p in plans] == ["a.md"], "only the first file is read after the deadline"
+
+    def test_a_deadline_cut_scan_does_not_evict_and_a_complete_one_does(self, tmp_path):
+        from power_atlas import overview
+        ws = self._ws(tmp_path, "proj", {"a.md": _OV_PHASES_PLAN, "b.md": _OV_PHASES_PLAN})
+        self._scan(ws)
+        key_b = str(ws / "plans" / "b.md")
+        (ws / "plans" / "b.md").unlink()
+        (ws / "plans" / "c.md").write_text(_OV_PHASES_PLAN, encoding="utf-8")
+        self._scan(ws, deadline_s=0.0)  # reads a.md only, then stops
+        assert key_b in overview._plan_memo, "an incomplete scan must not evict"
+        self._scan(ws)
+        assert key_b not in overview._plan_memo
+
+    def test_a_plans_folder_resolving_to_a_share_is_skipped(self, tmp_path, monkeypatch):
+        from power_atlas import overview
+        ws = self._ws(tmp_path, "proj", {"a.md": _OV_PHASES_PLAN})
+        real = os.path.realpath
+        target = str(ws / "plans")
+        monkeypatch.setattr(overview.os.path, "realpath",
+                            lambda p, *a, **kw: r"\\server\share\plans" if p == target
+                            else real(p, *a, **kw))
+        assert self._scan(ws) == []
+
+    def test_resolves_to_unc(self):
+        from power_atlas import overview
+        assert overview._resolves_to_unc(r"\\server\share\plans")
+        assert overview._resolves_to_unc("//server/share/plans")
+        assert overview._resolves_to_unc(r"\\?\UNC\server\share\plans")
+        assert not overview._resolves_to_unc(r"\\?\C:\work\plans")
+        assert not overview._resolves_to_unc(r"C:\work\plans")
+
+    def test_a_symlinked_plan_file_is_not_followed(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {})
+        outside = tmp_path / "outside.md"
+        outside.write_text(_OV_PHASES_PLAN, encoding="utf-8")
+        try:
+            os.symlink(outside, ws / "plans" / "link.md")
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlinks cannot be created here: {exc}")
+        assert self._scan(ws) == []
+
+    def test_concurrent_cold_requests_share_one_scan(self, monkeypatch):
+        """D23: two requests arriving while the cache is cold run one scan."""
+        from power_atlas import overview, web as web_mod
+        scans = []
+        started = threading.Event()
+
+        def slow_scan(ws, **kw):
+            scans.append(1)
+            started.set()
+            time.sleep(0.3)
+            return [{"file": "p.md"}]
+
+        monkeypatch.setattr(overview, "scan_plans", slow_scan)
+        monkeypatch.setattr(web_mod, "_overview_workspaces", lambda: [])
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(web_mod._overview_summary()))
+                   for _ in range(2)]
+        threads[0].start()
+        assert started.wait(5)
+        threads[1].start()
+        for t in threads:
+            t.join(10)
+        assert len(scans) == 1
+        assert [r["plans"] for r in results] == [[{"file": "p.md"}]] * 2
+
+    def test_route_excludes_a_provider_that_is_not_available(self, client, workspaces, monkeypatch):
+        from power_atlas import data
+        shown, _hidden = workspaces
+        monkeypatch.setattr(data, "discover_workspaces_with_counts",
+                            lambda provider=None: [(str(shown), 1, "", "gemini-cli")])
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            body = client.get("/api/dashboard/overview/summary").json()
+        assert body["plans"] == []
