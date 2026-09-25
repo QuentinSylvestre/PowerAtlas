@@ -105,11 +105,17 @@ class AgentProfileError(Exception):
     `detail`, when set, is `validate_rules`'s structured reason for the rule
     editor: `{row, list, pattern, message}`, with `message` in the editor's own
     words (Phase 2 review, U2).
+
+    `kind`, when set, is which fix the settings panel should name (final
+    review, M-8): `"base"` (the base agent), `"rules"` (a rule that does not
+    compile), `"foreign"` (a file PowerAtlas did not write) or `"write"`.
     """
 
-    def __init__(self, message: str = "", detail: dict | None = None):
+    def __init__(self, message: str = "", detail: dict | None = None,
+                 kind: str = ""):
         super().__init__(message)
         self.detail = detail
+        self.kind = kind
 
 
 # `~/.kiro/agents` as a module-level constant rather than a function reading
@@ -230,6 +236,8 @@ class GenerationStatus:
     # only that; `clear_unreadable_status` drops it once the file reads cleanly
     # and the agent file matches (Phase 1 re-review, finding 4).
     unreadable_config: bool = False
+    # `AgentProfileError.kind` of the failure, for the panel's next step (M-8).
+    error_kind: str = ""
 
 
 _status = GenerationStatus()
@@ -1605,24 +1613,38 @@ APPLY_AGAIN_STEP = "press Apply again under Settings > Agent permissions"
 
 def _generate(status: GenerationStatus, config) -> GenerationStatus:
     """Write the derived agent for `config`, or raise leaving the previous file alone."""
-    name = validate_base_agent_name(getattr(config, "acp_permission_base_agent", None))
-    status = replace(status, base_agent=name)
     target = derived_agent_path()
-    if base_agent_path(name) == target:
-        _base_text(config)  # raises, naming the problem
+    try:
+        name = validate_base_agent_name(
+            getattr(config, "acp_permission_base_agent", None))
+        if base_agent_path(name) == target:
+            _base_text(config)  # raises, naming the problem
+    except AgentProfileError as exc:
+        exc.kind = exc.kind or "base"
+        raise
+    status = replace(status, base_agent=name)
     if not _target_is_ours():
         raise AgentProfileError(
             f"{target} was not written by PowerAtlas, so it was left in place; "
-            f"remove or rename it, then {APPLY_AGAIN_STEP}")
+            f"remove or rename it, then {APPLY_AGAIN_STEP}", kind="foreign")
     # A rule set that does not compile is reported before the base agent is
     # read, so its error is the one named when both are wrong.
     mode, rules = _compiled_settings(config)
-    if mode != "yolo":
-        _check_block_lists(rules)
-    base_text, note = _base_text(config)
-    base_kept = excise_permissions(base_text)[0]
-    block = compile_block(config, base_digest=_digest(base_kept))
-    derived_text = inject_permissions(base_text, block)
+    try:
+        if mode != "yolo":
+            _check_block_lists(rules)
+    except AgentProfileError as exc:
+        exc.kind = exc.kind or "rules"
+        raise
+    try:
+        base_text, note = _base_text(config)
+        base_kept = excise_permissions(base_text)[0]
+        block = compile_block(config, base_digest=_digest(base_kept))
+        derived_text = inject_permissions(base_text, block)
+    except AgentProfileError as exc:
+        # Unreadable, not UTF-8, or a frontmatter the splice refuses.
+        exc.kind = exc.kind or "base"
+        raise
 
     def verify(written: str) -> None:
         """A structural confirmation of this module's own splice.
@@ -1639,12 +1661,13 @@ def _generate(status: GenerationStatus, config) -> GenerationStatus:
         if _norm_block(block_back) != _norm_block(block) or kept != base_kept:
             raise AgentProfileError(
                 f"the staged {target.name} does not match what was spliced; "
-                "the permission block may not be in effect")
+                "the permission block may not be in effect", kind="write")
 
     try:
         _publish(target, derived_text, verify)
     except OSError as exc:
-        raise AgentProfileError(f"cannot write {target}: {exc}") from exc
+        raise AgentProfileError(f"cannot write {target}: {exc}",
+                                kind="write") from exc
     if note and note not in _notes_logged:
         # Once per process (Phase 1 review, finding 8): every regeneration
         # repeats the note, and the settings panel shows it for as long as it
@@ -1670,7 +1693,7 @@ def _apply_locked(config) -> GenerationStatus:
         _clear_stage()
         status = _generate(status, config)
     except AgentProfileError as exc:
-        _status = replace(status, ok=False, error=str(exc))
+        _status = replace(status, ok=False, error=str(exc), error_kind=exc.kind)
         # A failure this module predicted and named (a file that is not
         # PowerAtlas's, a rule that does not compile): the panel reports it,
         # and a traceback adds nothing (final review, RE6).

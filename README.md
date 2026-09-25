@@ -439,10 +439,11 @@ any `*` (which also allows output redirection); when Write files is set to Allow
 pattern covers the whole session folder, a drive root or the home folder; when a Web fetch pattern is
 typed as an address (`https://example.com/x` never matches; use `example.com`); and when a pattern is
 in both lists of a row. Save checks every row and pattern and refuses the whole save when one is not
-usable: a pattern must be 1-200 printable characters, must not match everything (a bare `*` or `**`,
-or anything else with no literal character besides `*`, `?`, `/`, `\`, `.`, `:` and spaces, such as
-`*.*` or `?:/**`; `./**` names the session folder and is fine), and a list holds at most 100
-patterns. The refused pattern is marked in its row with the reason. Closing the editor with unsaved
+usable: a pattern must be 1-200 printable characters, must not start or end with a space, must not
+match everything (a bare `*` or `**`, or anything else with no literal character besides `*`, `?`,
+`/`, `\`, `.`, `:`, spaces and the glob characters `{`, `}`, `[`, `]`, `!` and `,`, such as `*.*`,
+`?:/**` or `{**}`; `./**` names the session folder and is fine), a Read files or Write files allow
+pattern must not go up a folder with `..`, and a list holds at most 100 patterns. The refused pattern is marked in its row with the reason. Closing the editor with unsaved
 changes asks whether to discard them. The editor does not open while a stored Always block list in
 `config.toml` is not a list, since saving from it would drop that list; fix the file first.
 
@@ -470,17 +471,37 @@ a rule matches a symlink's target, so a link inside a Protected folder that poin
 protected: the settings menu counts such links under each Protected item.
 
 A mode change applies to sessions created afterwards; kiro-cli keeps a running session on the rules it
-started with. Terminal sessions and the other task modes (Spec, Plan and so on) are not covered.
+started with. A reopened session keeps the agent it started with too, so a session that started while
+PowerAtlas's derived agent was not in effect (or before it existed) is outside the Always blocked list
+when it is reopened. Terminal sessions and the other task modes (Spec, Plan and so on) are not covered.
 
-If the derived agent cannot be written, or the file on disk is not what the current settings compile
-to — for example because a file of that name that PowerAtlas did not write is in the way — the menu
-shows a "not in effect" badge with the reason, and **new Default sessions are refused** with the cause
-and the fix until it is resolved. PowerAtlas never starts a Default session without the Always blocked
-list. A file edited by hand is regenerated automatically the next time a session is created. If
-`config.toml` is changed while PowerAtlas runs, the next new session picks the change up and the
-settings menu says the mode was changed outside the dashboard. Anything that can edit files on this
-machine as you can change the mode, including an agent you let run a shell or an interpreter such as
-Python; in Manual, allowing an interpreter is equivalent to allowing everything.
+The settings menu shows what each mode does under its own option, so the two can be compared before one
+is chosen; the Manual text is drawn from your own rules. If the derived agent cannot be written, or the
+whole file on disk is not what the current settings and base agent would produce — for example
+because a file of that name that PowerAtlas did not write is in the way, or a key was added beside
+the `permissions:` block — the menu shows a "not in effect" badge with the reason and a next step
+that fits it, and **new Default sessions are refused** with the cause and the fix until it is
+resolved. PowerAtlas never starts a Default session without the Always blocked list. **Apply again**
+appears in the menu while this is so; it re-applies the chosen mode and writes the file again (a mode
+that is already selected does nothing when clicked). A missing file, or one PowerAtlas wrote that
+has since changed, is also written again automatically the next time a session is created.
+
+If `config.toml` is changed while PowerAtlas runs, or while it is stopped, the next new session (or the
+next start) picks the change up and the settings menu says what changed outside the dashboard: the
+mode, Manual's rules or the base agent. It says so too when the derived agent file itself was edited
+and PowerAtlas rewrote it; an update of the base agent file is picked up without a notice. The notice
+offers **Review rules** and **Acknowledge**, and it is kept across a restart (in
+`permission-notice.json` beside `config.toml`) until you acknowledge it or choose a mode. A change made
+through PowerAtlas's own settings API looks like one made in the dashboard and is not flagged.
+Anything that can edit files on this machine as you can change the mode, including an agent you let
+run a shell or an interpreter such as Python; in Manual, allowing an interpreter is equivalent to
+allowing everything.
+
+Upgrading from the old on/off permission setting shows a one-time notice naming the mode it became
+(on became Manual, off became Yolo) and pointing at the Always blocked list, which now applies in every
+mode, until you acknowledge it. Saving an unrelated setting, such as the peek hotkey, leaves the stored
+mode and rules in `config.toml` exactly as written, including a value PowerAtlas could not use and
+reports in the menu.
 
 When a session does ask, the request renders inline in the transcript and the turn pauses until you
 answer, from any tab or after a reload, the same way a clarifying question does. The prompt shows the
@@ -500,8 +521,8 @@ change that.
 **Allow, and always in new sessions…** appears on a prompt that a Manual row raised because nothing
 in its Allow without asking list matched. It opens a small field under the prompt, labelled with the
 row, holding a pattern you can edit before saving. For a command it is the exact command, or the part
-shown as Triggered by, and never a pattern with a wildcard, since `*`, `?` or `[` would also match
-output redirection. For a file it is the file's folder, as a full path followed by `/**`. kiro-cli
+shown as Triggered by, and never a pattern with a wildcard, since `*`, `?`, `[` or `{` would also
+match output redirection. For a file it is the file's folder, as a full path followed by `/**`. kiro-cli
 reports a file inside the session folder by a relative name, and a relative pattern would match in the
 folder of every session, so the field joins it to the session folder. The field holds the exact file
 instead when its folder is the session folder or a folder above it, a drive root, your home folder or
@@ -509,7 +530,8 @@ a folder above that (such as `C:\Users`), and when the path holds a wildcard, a 
 a `\\?\` or network prefix. A file rule applies to that folder in every new session, whichever folder
 the session opens in. For an MCP tool, a sub-agent or a skill the field holds its name as the prompt
 shows it. The same warnings as the rule editor appear as you type, such as the one for an interpreter,
-a broad folder for reading or writing, or a relative file pattern. For a split command, the warnings
+a broad folder for reading or writing, PowerAtlas's own settings folder or `~/.kiro`, or a relative
+file pattern. For a split command, the warnings
 for the whole command appear too, since the prompt is allowed as a whole. **Save** adds the pattern to
 that row's Allow without asking list and then allows this prompt once. The prompt then says "Rule
 added — new sessions will not ask", or, when the rule covers only the Triggered by part, that the rest

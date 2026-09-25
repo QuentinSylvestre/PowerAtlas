@@ -25586,6 +25586,47 @@ class TestPermissionNoticesFinalReview:
         ap.find_protected_links(root)
         assert len(described) == 2, "the second read walked again"
 
+    @staticmethod
+    def _pattern_cases():
+        path = Path(__file__).with_name("permission_pattern_cases.json")
+        return json.loads(path.read_text(encoding="utf-8"))["cases"]
+
+    def test_the_server_agrees_with_the_shared_pattern_table(self):
+        """EU13, A4: the server's half of the case table that
+        `tests/acp_page.test.mjs` runs the rule editor's checks over, so the
+        two sides cannot drift (the `\\r` wording once did)."""
+        ap = _agent_profile()
+        for case in self._pattern_cases():
+            pattern, row, expect = case["pattern"], case["row"], case["expect"]
+            if case.get("list_size"):
+                rules = copy.deepcopy(ap.SEED_RULES)
+                rules[row]["allow"] = ([f"p{i}" for i in range(case["list_size"])]
+                                       + [pattern])
+                with pytest.raises(ap.AgentProfileError) as err:
+                    ap.validate_rules(rules)
+                assert "at most 100" in str(err.value), case
+                continue
+            technical, words = ap._pattern_fault(pattern, new=True)
+            if not technical:
+                technical = words = ap.fs_allow_error(row, pattern)
+            got = ("ok" if not technical
+                   else "match-all" if "matches everything" in technical
+                   else "edge-space" if "starts or ends with a space" in technical
+                   else "long" if "longer than" in technical
+                   else "parent" if "goes up a folder" in technical
+                   else "char" if technical.startswith("contains") else technical)
+            assert got == expect, (case, technical)
+            if expect == "char":
+                assert words == f"contains {case['words']}, which is not allowed", case
+
+    def test_a_refusal_quotes_the_pattern_as_typed(self):
+        """EU13: curly quotes, non-ASCII kept, only invisible characters
+        escaped — never Python's `repr`."""
+        ap = _agent_profile()
+        assert ap.quote_pattern("git status") == "“git status”"
+        assert ap.quote_pattern("café x") == "“café x”"
+        assert ap.quote_pattern("a\tb\x01") == "“a\\tb\\u0001”"
+
     def test_acp_and_a_config_never_load_the_unlocked_caches(self):
         """M-9: `acp.py`'s isolation property. Importing it and building a
         `Config` (whose default rules import `agent_profile`) never loads the

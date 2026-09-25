@@ -4848,14 +4848,26 @@ function loadPanel(opts = {}) {
     radio.disabled = value === "auto";
     byId.set(id, radio);
   }
-  const permDesc = new El("div");
   const permNotice = new El("div");
   permNotice.hidden = true;
   byId.set("acpPermBadge", permBadge);
   byId.set("acpPermWarn", permWarn);
   byId.set("acpPermBaseAgent", permBase);
-  byId.set("acpPermDesc", permDesc);
   byId.set("acpPermNotice", permNotice);
+  // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review: each mode's
+  // own description (M-4), the Apply again button (H-A), the upgrade notice
+  // (M-6) and the Always blocked details it opens. Hidden as in the markup.
+  byId.set("acpPermDescYolo", new El("div"));
+  byId.set("acpPermDescManual", new El("div"));
+  const applyAgain = new El("button");
+  applyAgain.hidden = true;
+  byId.set("acpPermApplyAgain", applyAgain);
+  const permUpgrade = new El("div");
+  permUpgrade.hidden = true;
+  byId.set("acpPermUpgrade", permUpgrade);
+  const permFloor = new El("details");
+  permFloor.open = false;
+  byId.set("acpPermFloor", permFloor);
   byId.set("acpPermFloorList", new El("div"));
   byId.set("acpPermProtectedList", new El("div"));
   // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2: the rule editor's
@@ -10861,15 +10873,15 @@ check("permission prompt: a consent block renders capability and resource", (tpl
   const row = lastPermRow(page);
   assert(row, "no permission row was drawn for a frame carrying a consent block");
   // G11 (Phase 3 review): known identifiers read as plain words, raw kept.
-  assertEqual(consentValue(row, "capability"), "Write or delete files (fs_write)",
+  assertEqual(consentValue(row, "capability"), "Write files (fs_write)",
     "the prompt does not say which capability is being asked for");
   assertEqual(consentValue(row, "resource"), "C:\\work\\repo\\src\\app.py",
     "the prompt does not name the file — the whole point of SC-4 is that a write " +
     "prompt stops reading as a bare 'Write File'");
   assertEqual(consentValue(row, "scope"), "agent", "scope was not rendered");
-  assertEqual(consentValue(row, "source"), "The agent\u2019s own permissions (agent-profile)",
+  assertEqual(consentValue(row, "source"), "PowerAtlas permission rules (Manual) (agent-profile)",
     "source was not rendered");
-  assertEqual(consentValue(row, "matchedRule"), "Write or delete files \u2192 ask",
+  assertEqual(consentValue(row, "matchedRule"), "Write files \u2192 ask",
     "the matched rule was not rendered as capability and effect");
   assertEqual(row.querySelectorAll(".acp-permission-option").length, 2,
     "the consent block displaced the answer buttons");
@@ -11408,7 +11420,7 @@ check("rule button: a pending posture notice is pointed at after a save", async 
   await settleStaging();
   const line = r.status().querySelector(".acp-permission-rule-notice");
   assert(line, "the notice was not pointed at");
-  assertEqual(line.textContent, "Settings changed outside the dashboard \u2014 review them",
+  assertEqual(line.textContent, "Settings changed outside the dashboard \u2014 review them in the dashboard\u2019s Settings > Agent permissions",
     "the notice line's words changed");
   const quiet = connected(tpl, { answer: ruleAnswer({ ok: true, posture_notice: null }) });
   quiet.page.deliver(ruleFrame(quiet.live, 891, shellConsent("echo a")));
@@ -11743,17 +11755,23 @@ check("settings: the mode picker checks the stored mode, describes it, and warns
   assertEqual(checkedMode(p), "yolo", "the stored Yolo mode was not the checked radio");
   assertEqual($("acpPermModeAuto").disabled, true, "Auto became selectable");
   assertEqual($("acpPermBaseAgent").value, "kiro_default", "the base agent was not shown");
-  assert(/^Yolo:/.test($("acpPermDesc").textContent), `no Yolo description: ${$("acpPermDesc").textContent}`);
+  const yoloDesc = $("acpPermDescYolo").textContent;
+  assert(/^New sessions run every action without asking/.test(yoloDesc), `no Yolo description: ${yoloDesc}`);
   // D-38c: kiro-cli's own built-in asks and the .kiroignore deny, in every mode.
   for (const word of [".git", ".vscode", "*.code-workspace", ".kiro/agents", ".kiro/hooks", ".kiroignore"]) {
-    assert($("acpPermDesc").textContent.includes(word), `the Yolo description does not name ${word}`);
+    assert(yoloDesc.includes(word), `the Yolo description does not name ${word}`);
   }
+  // Final review (M-4): Manual's description is shown while Yolo is chosen.
+  assert(/Manual rules/.test($("acpPermDescManual").textContent),
+    `Manual's description is not shown beside Yolo's: ${$("acpPermDescManual").textContent}`);
   assertEqual($("acpPermBadge").hidden, true, "a healthy state shows the badge");
   assertEqual($("acpPermWarn").hidden, true, "a healthy state shows a warning");
+  assertEqual($("acpPermApplyAgain").hidden, true, "a healthy state offers Apply again");
 
   p.sandbox.renderAcpPermissions(permState({ mode: "manual", base_agent: "my_agent" }));
   assertEqual(checkedMode(p), "manual", "Manual was not the checked radio");
-  assert(/^Manual:/.test($("acpPermDesc").textContent), "no Manual description");
+  assert(/Manual rules/.test($("acpPermDescManual").textContent), "no Manual description");
+  assertEqual($("acpPermDescYolo").textContent, yoloDesc, "Yolo's description went away under Manual");
   assertEqual($("acpPermBaseAgent").value, "my_agent", "the base agent did not update");
 
   // SC-9's UI half: the file is not what the settings compile to.
@@ -11778,17 +11796,38 @@ check("settings: the mode picker checks the stored mode, describes it, and warns
 check("settings: every permission warning names a next step, and none says to turn anything off and on (G9)", () => {
   const p = loadPanel();
   const warn = () => p.sandbox.document.getElementById("acpPermWarn").textContent;
+  // Final review (M-8): the step fits the cause the server names.
   p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "absent",
-    generation_ok: false, generation_error: "base agent 'x' is invalid" }));
-  assert(/Check the Base agent name below/.test(warn()), `no next step for a failed generation: ${warn()}`);
-  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "stale" }));
-  assert(/save the mode again or restart PowerAtlas/i.test(warn()), `no next step for a stale file: ${warn()}`);
+    generation_ok: false, generation_error: "invalid base agent name: 'x'", error_kind: "base" }));
+  assert(/Check the Base agent name below, then press Apply again/.test(warn()),
+    `no next step for a base agent failure: ${warn()}`);
   p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "unknown",
-    derived_agent: "C:/k/poweratlas-acp.md" }));
-  assert(/Remove or rename that file/.test(warn()), `no next step for a foreign file: ${warn()}`);
+    generation_ok: false, error_kind: "rules",
+    generation_error: "Run commands (shell): block pattern “x” is blank, so the rules were not applied" }));
+  assert(/Open Edit rules/.test(warn()), `no rules step for a rule that does not compile: ${warn()}`);
+  assert(!/Base agent/.test(warn()), `a rules error points at the base agent: ${warn()}`);
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "stale" }));
+  assert(/Press Apply again, or restart PowerAtlas/.test(warn()), `no next step for a stale file: ${warn()}`);
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "unknown",
+    derived_agent: "C:/k/poweratlas-acp.md", error_kind: "foreign" }));
+  assert(/Remove or rename that file, then press Apply again/.test(warn()),
+    `no next step for a foreign file: ${warn()}`);
   assert(warn().includes("C:/k/poweratlas-acp.md"), "the foreign file is not named");
+  // The server's own foreign-file error names its fix; no second one follows.
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "unknown",
+    generation_ok: false, error_kind: "foreign",
+    generation_error: "C:/k/poweratlas-acp.md was not written by PowerAtlas, so it was left in "
+      + "place; remove or rename it, then press Apply again under Settings > Agent permissions" }));
+  assertEqual((warn().match(/Apply again/g) || []).length, 1, `two fixes were named: ${warn()}`);
+  assert(!/Base agent/.test(warn()), `the base-agent step was appended: ${warn()}`);
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "unreadable",
+    derived_agent: "C:/k/poweratlas-acp.md", error_kind: "unreadable" }));
+  assert(/could not be read just now/.test(warn()) && /close any program/.test(warn()),
+    `no retry step for an unreadable file: ${warn()}`);
+  assert(!/Remove or rename/.test(warn()), "an unreadable file was called foreign");
   p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "absent" }));
   assert(/restart PowerAtlas/.test(warn()), `no next step for a missing file: ${warn()}`);
+  assert(!/save the mode again/i.test(warn()), "a warning still says to save the mode again");
   const src = panelSource();
   assert(!/off and on again|on and off again/.test(src),
     "the panel still tells the user to turn something off and on; there is no Off state");
@@ -12135,7 +12174,7 @@ check("rules editor: warns on an interpreter, on a * in a command and on a broad
   e.add("shell", "allow", "C:/Tools/PWSH.exe -File x.ps1");
   assert(/allowing pwsh is equivalent to allow-all/.test(e.warnings("shell")), "a path and .exe hid the interpreter");
   e.add("shell", "allow", "npm test*");
-  assert(/"npm test\*": a wildcard \(\*, \? or \[\) also matches an output redirection/.test(e.warnings("shell")),
+  assert(/"npm test\*": a wildcard \(\*, \?, \[ or \{\) also matches an output redirection/.test(e.warnings("shell")),
     `no redirection warning (D-38e): ${e.warnings("shell")}`);
   e.add("shell", "allow", "rm -rf build");
   assert(/lets the agent delete files/.test(e.warnings("shell")), "a destructive verb carries no warning");
@@ -12311,10 +12350,23 @@ check("rules editor: patterns that match everything are stopped, the session fol
       `${p} was not stopped`);
   }
   assertEqual(e.chips("fs_write", "allow").length, 0, "a match-everything pattern was added");
+  // Final review (SEC6): glob syntax is no literal either.
+  for (const p of ["{**}", "*{,}*", "**/{*}"]) {
+    e.add("fs_write", "allow", p);
+    assert(/matches everything/.test(e.list("fs_write", "allow").querySelector(".acp-rules-problem").textContent),
+      `${p} was not stopped`);
+  }
   e.add("fs_write", "allow", "./**");
   e.add("fs_write", "allow", "../shared/**");
-  assertEqual(e.chips("fs_write", "allow").join("|"), "the session folder|../shared/**",
+  // Final review (SE6): a `..` segment in a file allow pattern is stopped
+  // here, as the server's `fs_allow_error` refuses it on Save.
+  assert(/goes up a folder/.test(e.list("fs_write", "allow").querySelector(".acp-rules-problem").textContent),
+    "a `..` allow pattern was not stopped before Save");
+  e.add("fs_write", "block", "../shared/**");
+  assertEqual(e.chips("fs_write", "allow").join("|"), "the session folder",
     "a folder-scoped pattern was refused");
+  assertEqual(e.chips("fs_write", "block").join("|"), "../shared/**",
+    "a `..` block pattern, which only narrows, was stopped");
   e.add("fs_write", "allow", "?:/Users/me/**");
   assert(/"\?:\/Users\/me\/\*\*" covers the whole home folder/.test(e.warnings("fs_write")),
     `a ?: drive stem got no breadth warning: ${e.warnings("fs_write")}`);
@@ -12727,8 +12779,10 @@ check("settings: the permission rows are a radio group with Auto disabled, and s
   }
   const note = /id="acpPermScopeNote"[^>]*>([^<]*)</.exec(rows);
   assert(note, "the permission rows carry no scope note");
-  assertEqual(note[1], "Changes apply to sessions created afterwards. Terminal sessions and task " +
-    "modes such as Spec or Plan are not covered.", "the scope note (SC-10, D-3) changed");
+  assertEqual(note[1], "Changes apply to sessions created afterwards. A reopened session keeps " +
+    "the agent it started with, so it is outside the Always blocked list if PowerAtlas's agent " +
+    "was not in effect when it started. Terminal sessions and task " +
+    "modes such as Spec or Plan are not covered.", "the scope note (SC-10, D-3, SC-3) changed");
   assert(/<details id="acpPermFloor"[^>]*>\s*<summary>Always blocked<\/summary>/.test(rows),
     "there is no Always blocked disclosure");
   assert(/<details id="acpPermProtected"/.test(rows), "there is no Protected disclosure");
@@ -18018,6 +18072,223 @@ check("mcpIndicatorHiddenRuleIsClassScoped", () => {
   assert(/^\.acp-mcp-indicator\[hidden\]\s*\{[^}]*display:\s*none\s*!important/m.test(css),
     "style.css has no class-scoped `.acp-mcp-indicator[hidden] { display: none !important }` " +
     "rule, so the dashboard's indicator ignores its hidden attribute");
+});
+
+// ---- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review --------------
+
+check("settings: Apply again is offered only while something is wrong, and posts the checked mode (final review, H-A)", async () => {
+  const answer = Object.assign({ ok: true }, permState({ mode: "manual" }));
+  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: answer } : { body: {} } });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual" }));
+  assertEqual($("acpPermApplyAgain").hidden, true, "a healthy state offers Apply again");
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual", in_effect: false, state: "absent" }));
+  assertEqual($("acpPermApplyAgain").hidden, false, "not in effect does not offer Apply again");
+  assert(/press Apply again|Press Apply again/.test($("acpPermWarn").textContent),
+    `the warning does not name the button: ${$("acpPermWarn").textContent}`);
+  p.sandbox.applyAcpPermissionModeAgain();
+  assertEqual(p.fetches.length, 1, "Apply again sent nothing");
+  assertEqual(String(p.fetches[0].init.method).toUpperCase(), "POST", "Apply again did not POST");
+  assertEqual(JSON.stringify(JSON.parse(p.fetches[0].init.body)), JSON.stringify({ mode: "manual" }),
+    "Apply again did not post the checked mode");
+  await p.settle();
+  assertEqual($("acpPermApplyAgain").hidden, true, "Apply again stayed after the answer put it in effect");
+  // A pending notice or a junk stored mode offers it too.
+  p.sandbox.renderAcpPermissions(permState({ posture_notice: { mode: "yolo", what: "mode", detected_at: "t" } }));
+  assertEqual($("acpPermApplyAgain").hidden, false, "a pending notice does not offer Apply again");
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual", mode_warning: "acp_permission_mode 'x' is not a permission mode; running as Manual" }));
+  assertEqual($("acpPermApplyAgain").hidden, false, "a junk stored mode does not offer Apply again");
+  // Never while config.toml cannot be read: the fix is the file.
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "stale",
+    config_error: "PowerAtlas's config.toml could not be read (x)" }));
+  assertEqual($("acpPermApplyAgain").hidden, true, "Apply again was offered while config.toml cannot be read");
+  // With no radio checked there is nothing to apply.
+  const sent = p.fetches.length;
+  p.sandbox.applyAcpPermissionModeAgain();
+  assertEqual(p.fetches.length, sent, "Apply again posted with no mode checked");
+  assert(p.toasts.some((t) => t.includes("Choose a permission mode first")), "no mode checked went unexplained");
+  // The markup: a real button, in the Agent permissions section.
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  assert(/<button type="button" id="acpPermApplyAgain"[^>]*onclick="applyAcpPermissionModeAgain\(\)"[^>]*hidden>/.test(src),
+    "index.html has no hidden Apply again button wired to applyAcpPermissionModeAgain()");
+});
+
+check("settings: an outside change says what changed and offers Review rules and Acknowledge (final review, M-3, EU14)", async () => {
+  const cleared = Object.assign({ ok: true }, permState());
+  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions/acknowledge" ? { body: cleared } : { body: {} } });
+  const notice = p.sandbox.document.getElementById("acpPermNotice");
+  const labels = () => notice.querySelectorAll("button").map((b) => b.textContent);
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual",
+    posture_notice: { mode: "manual", what: "rules", previous: "manual", detected_at: "2026-09-25 10:00:00" } }));
+  assertEqual(notice.hidden, false, "a rules change was not shown");
+  assert(/Manual's rules were changed outside the dashboard/.test(notice.textContent),
+    `the notice does not say the rules changed: ${notice.textContent}`);
+  assert(/does not undo a change to the rules/.test(notice.textContent),
+    "the notice implies choosing the mode undoes a rules change");
+  assertEqual(labels().join("|"), "Review rules|Acknowledge: keep Manual with the current rules",
+    "the notice's buttons are not Review rules and Acknowledge");
+  // EU14: the same notice again is not redrawn (a live region re-announces).
+  const first = notice.childNodes[0];
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual",
+    posture_notice: { mode: "manual", what: "rules", previous: "manual", detected_at: "2026-09-25 10:00:00" } }));
+  assert(notice.childNodes[0] === first, "an unchanged notice was redrawn");
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual",
+    posture_notice: { mode: "manual", what: "mode", previous: "yolo", detected_at: "t" } }));
+  assert(/new sessions now use Manual instead of Yolo/.test(notice.textContent),
+    `the mode notice does not name both modes: ${notice.textContent}`);
+  p.sandbox.renderAcpPermissions(permState({
+    posture_notice: { mode: "yolo", what: "file", detected_at: "t" } }));
+  assert(/agent file \(poweratlas-acp.md\) was edited outside PowerAtlas/.test(notice.textContent)
+    && /did not change/.test(notice.textContent), `the file notice is wrong: ${notice.textContent}`);
+  p.sandbox.renderAcpPermissions(permState({
+    posture_notice: { mode: "yolo", what: "base", detected_at: "t" } }));
+  assert(/Base agent setting was changed/.test(notice.textContent), `the base notice is wrong: ${notice.textContent}`);
+  assertEqual(labels().join("|"), "Acknowledge: keep Yolo", "a base-agent notice offers Review rules");
+  const ack = notice.querySelectorAll("button").pop();
+  ack.onclick();
+  const posted = p.fetches.find((f) => f.url === "/api/acp-permissions/acknowledge");
+  assert(posted, "Acknowledge sent nothing");
+  assertEqual(JSON.stringify(JSON.parse(posted.init.body)), JSON.stringify({ notice: "posture" }),
+    "Acknowledge did not name the notice");
+  await p.settle();
+  assertEqual(notice.hidden, true, "the acknowledged notice stayed up");
+});
+
+check("settings: the one-time upgrade notice names the mode, opens Always blocked and can be acknowledged (final review, M-6)", async () => {
+  const cleared = Object.assign({ ok: true }, permState({ mode: "manual" }));
+  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions/acknowledge" ? { body: cleared } : { body: {} } });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual",
+    upgrade_notice: { mode: "manual", detected_at: "t" } }));
+  const up = $("acpPermUpgrade");
+  assertEqual(up.hidden, false, "the upgrade notice was not shown");
+  assert(/Permissions are now modes: you are on Manual\. The Always blocked list applies in every mode\./.test(up.textContent),
+    `the upgrade notice's words changed: ${up.textContent}`);
+  assertEqual($("topbarPendingDot").hidden, false, "the upgrade notice did not light the gear dot");
+  const buttons = up.querySelectorAll("button");
+  assertEqual(buttons.map((b) => b.textContent).join("|"), "Show the Always blocked list|Acknowledge",
+    "the upgrade notice's buttons changed");
+  buttons[0].onclick();
+  assertEqual($("acpPermFloor").open, true, "the Always blocked list was not opened");
+  buttons[1].onclick();
+  const posted = p.fetches.find((f) => f.url === "/api/acp-permissions/acknowledge");
+  assertEqual(JSON.stringify(JSON.parse(posted.init.body)), JSON.stringify({ notice: "upgrade" }),
+    "Acknowledge did not name the upgrade notice");
+  await p.settle();
+  assertEqual(up.hidden, true, "the acknowledged upgrade notice stayed up");
+});
+
+check("settings: Manual's description comes from the stored rules, never the seed's words (final review, M-5)", () => {
+  const p = loadPanel();
+  const desc = () => p.sandbox.document.getElementById("acpPermDescManual").textContent;
+  const rows = [["fs_read", "Read files"], ["shell", "Run commands"], ["mcp", "MCP tools"], ["power", "Powers"]]
+    .map(([id, label]) => ({ id, label }));
+  const rules = {
+    fs_read: { default: "ask", allow: ["./**"], block: [] },
+    shell: { default: "ask", allow: ["git status", "npm test"], block: [] },
+    mcp: { default: "allow", allow: ["s/t"], block: [] },
+    power: { default: "block", allow: [], block: [] },
+    protected_block: ["agents"],
+  };
+  const prot = [{ id: "agents", label: "Agent definitions", patterns: [], effect: "block" },
+                { id: "steering", label: "Steering files", patterns: [], effect: "ask" }];
+  p.sandbox.renderAcpPermissions(permState({ mode: "yolo", rules, rule_rows: rows, protected: prot }));
+  const text = desc();
+  assert(/Asks first: Read files, Run commands\./.test(text), `the ask rows are not named: ${text}`);
+  assert(/Runs without asking: MCP tools\./.test(text), `the allow rows are not named: ${text}`);
+  assert(/Blocked: Powers\./.test(text), `the block rows are not named: ${text}`);
+  assert(/3 patterns run without asking/.test(text), `the allow patterns are not counted: ${text}`);
+  assert(/blocked outright: Agent definitions/.test(text), `a migrated Protected block is not said: ${text}`);
+  assert(!/git status|whoami|uname/.test(text), `the seed's commands are claimed: ${text}`);
+});
+
+check("settings: a Protected folder that could not be listed says so (final review, RE7)", () => {
+  const p = loadPanel();
+  p.sandbox.renderAcpPermissions(permState({ protected_links: {
+    agents: { count: 0, links: [], error: "PermissionError: Access is denied" },
+    steering: { count: 0, links: [], error: "" } } }));
+  const prot = p.sandbox.document.getElementById("acpPermProtectedList").textContent;
+  assert(prot.includes("Could not be checked for links: PermissionError: Access is denied"),
+    `an unlistable folder read as no links: ${prot}`);
+});
+
+check("rules editor and card: a file pattern over PowerAtlas's settings or ~/.kiro is warned about (final review, SEC5)", async () => {
+  const e = await openRules();
+  e.add("fs_write", "allow", "C:/Users/me/AppData/Local/power-atlas/**");
+  assert(/PowerAtlas's own settings folder/.test(e.warnings("fs_write")),
+    `no warning for the settings folder: ${e.warnings("fs_write")}`);
+  e.add("fs_write", "allow", "C:/Users/me/.kiro/**");
+  assert(/kiro-cli's own folder/.test(e.warnings("fs_write")), `no warning for ~/.kiro: ${e.warnings("fs_write")}`);
+  const d = loadDashCard(() => ({ body: {} }));
+  const warn = d.sandbox.permissionRuleWarnings("fs_write", "C:/Users/me/AppData/Local/**", "");
+  assert(warn.some((w) => /PowerAtlas's own settings folder/.test(w)), `the card does not warn: ${warn}`);
+  assertEqual(d.sandbox.permissionRuleSensitivePlace("C:/work/src/**", "fs_write"), "",
+    "an ordinary folder was warned about");
+});
+
+check("rules editor: its pattern checks agree with the server's over the shared case table (final review, EU13, A4)", async () => {
+  const table = JSON.parse(fs.readFileSync(path.join(HERE, "permission_pattern_cases.json"), "utf8"));
+  const e = await openRules();
+  const problem = e.p.sandbox._acpRulesPatternProblem;
+  for (const c of table.cases) {
+    const list = Array.from({ length: c.list_size || 0 }, (_, i) => "p" + i);
+    // The editor trims what was typed before it checks it (`_acpRulesAddFrom`).
+    const typed = c.pattern.trim();
+    const said = problem(list, typed, c.row, "allow");
+    const got = !said ? "ok"
+      : /matches everything/.test(said) ? "match-all"
+      : /at most \d+ characters/.test(said) ? "long"
+      : /goes up a folder/.test(said) ? "parent"
+      : /at most \d+ patterns/.test(said) ? "full"
+      : /contains (.*), which is not allowed/.test(said) ? "char" : said;
+    // An edge space cannot reach the server from the editor: it is trimmed.
+    const want = c.expect === "edge-space" ? "ok" : c.expect;
+    assertEqual(got, want, `${JSON.stringify(c.pattern)}: ${said}`);
+    if (c.expect === "char") {
+      assertEqual(/contains (.*), which is not allowed/.exec(said)[1], c.words,
+        `${JSON.stringify(c.pattern)} is described differently from the server`);
+    }
+    if (c.expect === "edge-space") {
+      assert(typed !== c.pattern, `${JSON.stringify(c.pattern)} was not trimmed`);
+    }
+  }
+});
+
+check("dashboard: an optimistic change refused by the server reverts and says why (final review, RE9)", async () => {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const pick = (name) => {
+    const at = src.indexOf("function " + name + "(");
+    assert(at >= 0, `index.html no longer defines ${name}`);
+    let depth = 0;
+    for (let i = src.indexOf("{", at); i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}" && --depth === 0) return src.slice(at, i + 1);
+    }
+    throw new Error(`${name} is unterminated`);
+  };
+  const toasts = [];
+  const box = { toasts, showToast: (h) => toasts.push(h),
+    _escHtml: (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
+    Promise, Error, String };
+  vm.createContext(box);
+  vm.runInContext(pick("_okOrRefused") + "\n" + pick("_refusedToast"), box);
+  const refusal = { ok: false, status: 409, json: () => Promise.resolve({ ok: false,
+    error: "PowerAtlas's config.toml could not be read (x), so the change was not saved." }) };
+  let caught = null;
+  await box._okOrRefused(refusal).catch((err) => { caught = err; });
+  assert(caught && caught.refused === true && /could not be read/.test(caught.message),
+    "a 409 was not raised as a refusal naming the fix");
+  caught = null;
+  await box._okOrRefused({ ok: true, status: 200, json: () => Promise.resolve({ ok: false, error: "Profile not found" }) })
+    .catch((err) => { caught = err; });
+  assert(caught && caught.message === "Profile not found", "an ok:false body was taken as success");
+  const fine = await box._okOrRefused({ ok: true, status: 200, json: () => Promise.resolve({ enabled: true }) });
+  assertEqual(fine.enabled, true, "a plain answer was refused");
+  box._refusedToast("Failed to pin", { refused: true, message: "<b>fix config.toml</b>" });
+  assert(toasts[0].includes("Failed to pin: &lt;b&gt;fix config.toml&lt;/b&gt;"), `the refusal was not escaped and shown: ${toasts[0]}`);
+  for (const name of ["pinSession", "pinWorkspace", "toggleNotifications", "activateProfile"]) {
+    assert(/_okOrRefused/.test(pick(name)), `${name} does not read the answer for a refusal`);
+  }
 });
 
 let failed = 0;

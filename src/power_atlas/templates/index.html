@@ -119,23 +119,39 @@
            menu, so the result and any warning stay visible. -->
       <div class="topbar-menu-divider"></div>
       <div class="topbar-menu-section-label">Agent permissions</div>
-      <div id="acpPermModes" class="acp-perm-modes topbar-menu-keep" role="radiogroup" aria-labelledby="acpPermModesLabel" aria-describedby="acpPermDesc">
+      <!-- Final review (M-4): each mode's description sits under its own
+           radio and stays visible, so the two can be compared before one is
+           chosen (a radio saves on change, arrow keys included). The group
+           and each radio point at the per-option text. The Manual text is
+           redrawn from the stored rules (M-5). -->
+      <div id="acpPermModes" class="acp-perm-modes topbar-menu-keep" role="radiogroup" aria-labelledby="acpPermModesLabel" aria-describedby="acpPermDescYolo acpPermDescManual">
         <div class="acp-perm-modes-head">
           <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6Z"/></svg>
           <span id="acpPermModesLabel" class="topbar-menu-label">Permission mode</span>
           <span id="acpPermBadge" class="restart-badge" hidden>not in effect</span>
         </div>
-        <label class="acp-perm-mode" for="acpPermModeYolo"><input type="radio" name="acpPermMode" id="acpPermModeYolo" value="yolo" onchange="setAcpPermissionMode(this)"><span>Yolo</span></label>
+        <label class="acp-perm-mode" for="acpPermModeYolo"><input type="radio" name="acpPermMode" id="acpPermModeYolo" value="yolo" onchange="setAcpPermissionMode(this)" aria-describedby="acpPermDescYolo"><span>Yolo</span></label>
+        <div id="acpPermDescYolo" class="acp-perm-mode-desc">New sessions run every action without asking, except the Always blocked list, which is refused silently. kiro-cli itself still asks before writes to .git, .vscode, *.code-workspace, .kiro/agents and .kiro/hooks, and blocks writes to .kiroignore and .kiro/settings, in every mode.</div>
         <label class="acp-perm-mode acp-perm-mode-disabled" for="acpPermModeAuto"><input type="radio" name="acpPermMode" id="acpPermModeAuto" value="auto" disabled aria-describedby="acpPermAutoHint"><span>Auto</span><span id="acpPermAutoHint" class="acp-perm-mode-hint">coming soon — behaves like Manual</span></label>
-        <label class="acp-perm-mode" for="acpPermModeManual"><input type="radio" name="acpPermMode" id="acpPermModeManual" value="manual" onchange="setAcpPermissionMode(this)"><span>Manual</span></label>
+        <label class="acp-perm-mode" for="acpPermModeManual"><input type="radio" name="acpPermMode" id="acpPermModeManual" value="manual" onchange="setAcpPermissionMode(this)" aria-describedby="acpPermDescManual"><span>Manual</span></label>
+        <div id="acpPermDescManual" class="acp-perm-mode-desc">The Always blocked list, plus your Manual rules (Edit rules… shows them): what a rule does not allow asks first, and file-tool writes to Protected items always ask.</div>
       </div>
-      <!-- What the chosen mode does, visible rather than only in a tooltip.
-           renderAcpPermissions() replaces it with the chosen mode's text. -->
-      <div id="acpPermDesc" class="topbar-menu-note">Yolo: sessions run every action without asking, except the Always blocked list. Manual: common read-only actions run and everything else asks.</div>
-      <div id="acpPermNotice" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
+      <!-- Final review (H-A): re-applies the mode already chosen. A checked
+           radio sends nothing when clicked again, and every "not in effect"
+           fix names this button. Shown only while something is wrong or a
+           notice is pending; hidden while config.toml cannot be read, where
+           the fix is the file. -->
+      <button type="button" id="acpPermApplyAgain" class="topbar-menu-row topbar-menu-keep acp-perm-apply" onclick="applyAcpPermissionModeAgain()" hidden>
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+        <span class="topbar-menu-label">Apply again</span>
+      </button>
+      <!-- D-35 and final review (M-3, M-6): the notices, each with its own
+           buttons, drawn by renderAcpPermissions(). -->
+      <div id="acpPermNotice" class="topbar-menu-note topbar-menu-warn topbar-menu-keep" role="status" hidden></div>
+      <div id="acpPermUpgrade" class="topbar-menu-note topbar-menu-keep" role="status" hidden></div>
       <details id="acpPermFloor" class="acp-perm-details topbar-menu-keep">
         <summary>Always blocked</summary>
-        <div class="topbar-menu-note">Refused silently in every mode, in the ACP sessions PowerAtlas creates with Default.</div>
+        <div class="topbar-menu-note">Refused silently in every mode, in the ACP sessions PowerAtlas creates with Default. A session reopened from before the Always blocked list was in effect keeps the agent it started with, and is not covered.</div>
         <div id="acpPermFloorList" class="acp-perm-list"></div>
       </details>
       <details id="acpPermProtected" class="acp-perm-details topbar-menu-keep">
@@ -169,7 +185,7 @@
            rewrite mid-session (probe P-C), so a change reaches only sessions
            created afterwards. The derived agent is never deleted any more, so
            the old "off also reaches running sessions" direction is gone. -->
-      <div id="acpPermScopeNote" class="topbar-menu-note">Changes apply to sessions created afterwards. Terminal sessions and task modes such as Spec or Plan are not covered.</div>
+      <div id="acpPermScopeNote" class="topbar-menu-note">Changes apply to sessions created afterwards. A reopened session keeps the agent it started with, so it is outside the Always blocked list if PowerAtlas's agent was not in effect when it started. Terminal sessions and task modes such as Spec or Plan are not covered.</div>
       <div id="acpPermWarn" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
 
       <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review
@@ -4446,6 +4462,23 @@ function showToast(html){var c=document.getElementById('toastContainer');if(!c){
 // acp.html's own railRowNode works around), so `closest()` has to find a
 // plain container carrying the same dataset rather than the button itself.
 function resumeSession(btn){var row=btn.closest('[data-sid]');fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:row.dataset.sid,workspace:row.dataset.cwd,provider:row.dataset.provider||''})}).then(function(r){return r.text()}).then(showToast)}
+// 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (RE9): the answer
+// to an optimistic change. A non-2xx status (409 while config.toml cannot be
+// read) or an `ok: false` body is a refusal, raised with the server's own
+// words so the caller can revert and say why.
+function _okOrRefused(r){
+  return Promise.resolve(r.json()).catch(function(){return null}).then(function(d){
+    if(!r.ok||(d&&d.ok===false)){
+      var err=new Error((d&&typeof d.error==='string'&&d.error)||('HTTP '+r.status));
+      err.refused=true;throw err;
+    }
+    return d;
+  });
+}
+function _refusedToast(what,err){
+  showToast('<div class="toast toast-error">'+_escHtml(what+(err&&err.refused?': '+err.message:''))
+    +'<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+}
 function pinSession(btn){
   var row=btn.closest('[data-sid]');
   var pinned=btn.classList.contains('pinned');
@@ -4486,8 +4519,9 @@ function pinSession(btn){
   dashRenderRail();
   showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');
   fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:sid,workspace:row.dataset.cwd})})
+    .then(_okOrRefused)
     .then(function(){ dashRailRefreshSoon(); })
-    .catch(function(){
+    .catch(function(err){
       // Revert
       btn.classList.toggle('pinned');
       btn.setAttribute('aria-label', pinned ? 'Unpin session' : 'Pin session');
@@ -4498,7 +4532,7 @@ function pinSession(btn){
       (function(list){ list.forEach(function(s){ if (s.id === sid) s.pinned = pinned; }); })(dashRailFlat);
       dashRailGroups.forEach(function(g){ g.sessions.forEach(function(s){ if (s.id === sid) s.pinned = pinned; }); });
       dashRenderRail();
-      showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');
+      _refusedToast('Failed to '+(pinned?'unpin':'pin'), err);
     });
 }
 function pinWorkspace(btn){
@@ -4531,13 +4565,14 @@ function pinWorkspace(btn){
   dashRenderRail();
   showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');
   fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:cwd})})
+    .then(_okOrRefused)
     .then(function(){ dashRailRefreshSoon(); })
-    .catch(function(){
+    .catch(function(err){
       // Revert
       btn.classList.toggle('pinned');
       dashRailGroups.forEach(function(g){ if (g.cwd === cwd) g.pinned = pinned; });
       dashRenderRail();
-      showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');
+      _refusedToast('Failed to '+(pinned?'unpin':'pin'), err);
     });
 }
 function openFolder(cwd){fetch('/api/open-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:cwd})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Failed to open folder<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
@@ -4565,9 +4600,12 @@ function toggleNotifications(el){
     try{Notification.requestPermission()}catch(e){}
   }
   fetch('/api/notifications',{method:'POST'})
-    .then(function(r){return r.ok?r.json():null})
+    .then(_okOrRefused)
     .then(function(d){if(d)el.classList.toggle('active',!!d.enabled)})
-    .catch(function(){el.classList.toggle('active',!turningOn)});
+    .catch(function(err){
+      el.classList.toggle('active',!turningOn);
+      if(err&&err.refused)_refusedToast('Notifications were not changed',err);
+    });
 }
 function refreshNotifyToggle(){
   var el=document.getElementById('notifyToggle');
@@ -6927,7 +6965,7 @@ var _launchProfiles={{launch_profiles|tojson}};
 var _activeLaunchProfile={{active_launch_profile.id|tojson}};
 function openProfileModal(){var m=document.getElementById('profileModal');renderProfileList();document.getElementById('profileForm').style.display='none';m.showModal()}
 function renderProfileList(){var list=document.getElementById('profileList');var html='';_launchProfiles.forEach(function(p){var isActive=p.id===_activeLaunchProfile;var cls='profile-item'+(isActive?' active':'');html+='<div class="'+cls+'" data-id="'+p.id+'">';html+='<span class="profile-item-name"></span>';html+='<span class="profile-item-actions">';if(!isActive)html+='<button type="button" class="btn-sm" onclick="activateProfile(\''+p.id+'\')">Activate</button>';html+=' <button type="button" class="btn-sm" onclick="editProfile(\''+p.id+'\')">Edit</button>';html+='</span></div>'});list.innerHTML=html;list.querySelectorAll('.profile-item-name').forEach(function(el,i){el.textContent=_launchProfiles[i].name})}
-function activateProfile(id){fetch('/api/launch-profile/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.json()}).then(function(d){if(d.ok){_activeLaunchProfile=id;renderProfileList();var btn=document.getElementById('profileNameBtn');var p=_launchProfiles.find(function(x){return x.id===id});if(btn&&p){var lbl=btn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=p.name}}}).catch(function(){})}
+function activateProfile(id){fetch('/api/launch-profile/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(_okOrRefused).then(function(d){if(d&&d.ok){_activeLaunchProfile=id;renderProfileList();var btn=document.getElementById('profileNameBtn');var p=_launchProfiles.find(function(x){return x.id===id});if(btn&&p){var lbl=btn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=p.name}}}).catch(function(err){if(err&&err.refused)_refusedToast('The profile was not activated',err)})}
 function editProfile(id){var form=document.getElementById('profileForm');form.style.display='';var isNew=id==='__new__';var p=isNew?{id:'__new__',name:'',terminal_command:'wt new-tab --title {title} -p {wt_profile} -d {cwd} -- pwsh -NoExit -Command {pscmd}',wt_profile:'PowerShell'}:_launchProfiles.find(function(x){return x.id===id});if(!p)return;document.getElementById('profileId').value=p.id;document.getElementById('profileName').value=p.name;document.getElementById('profileTerminal').value=p.terminal_command;document.getElementById('profileWtProfile').value=p.wt_profile||'PowerShell';document.getElementById('profileDefaultDir').value=_globalDefaultDirectory||'';var delBtn=document.getElementById('profileDeleteBtn');delBtn.style.display=isNew||_launchProfiles.length<=1?'none':'';if(_launchProfiles.length<=1)delBtn.title='Cannot delete the last profile';else delBtn.title=''}
 function saveProfile(){var payload={id:document.getElementById('profileId').value,name:document.getElementById('profileName').value,terminal_command:document.getElementById('profileTerminal').value,wt_profile:document.getElementById('profileWtProfile').value};var newDefaultDir=document.getElementById('profileDefaultDir').value;fetch('/api/launch-profile/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);if(newDefaultDir!==_globalDefaultDirectory){return fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'default_directory',value:newDefaultDir})}).then(function(r){return r.json()}).then(function(d){if(d.ok)_globalDefaultDirectory=newDefaultDir;else showToast('<div class="toast toast-error">Failed to save default directory<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')}).catch(function(){showToast('<div class="toast toast-error">Failed to save default directory<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}}).then(function(){return fetch('/api/settings')}).then(function(r){return r.json()}).then(function(d){_launchProfiles=d.launch_profiles;_activeLaunchProfile=d.active_launch_profile;renderProfileList();var btn=document.getElementById('profileNameBtn');var active=_launchProfiles.find(function(p){return p.id===_activeLaunchProfile});if(btn&&active){var lbl=btn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}).catch(function(){showToast('<div class="toast toast-error">Save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 function deleteProfile(){var id=document.getElementById('profileId').value;if(!id||id==='__new__')return;if(_launchProfiles.length<=1){showToast('<div class="toast toast-error">Cannot delete the last profile<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');return}if(id===_activeLaunchProfile&&!confirm('This is the active profile. Delete and switch to another?'))return;fetch('/api/launch-profile/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.text()}).then(function(t){showToast(t);return fetch('/api/settings')}).then(function(r){return r.json()}).then(function(d){_launchProfiles=d.launch_profiles;_activeLaunchProfile=d.active_launch_profile;renderProfileList();document.getElementById('profileForm').style.display='none';var btn=document.getElementById('profileNameBtn');var active=_launchProfiles.find(function(p){return p.id===_activeLaunchProfile});if(btn&&active){var lbl=btn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}).catch(function(){showToast('<div class="toast toast-error">Delete failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
@@ -7483,28 +7521,77 @@ var _acpPermLinks = null;
 
 var _ACP_PERM_MODES = ['yolo', 'auto', 'manual'];
 var _ACP_PERM_MODE_NAMES = {yolo: 'Yolo', manual: 'Manual'};
-// What each mode does, shown under the picker. Yolo names kiro-cli's own
-// built-in rules, which apply in every mode and which no PowerAtlas rule can
-// lift (D-38c, P-0.10).
-var _ACP_PERM_MODE_DESC = {
-  yolo: 'Yolo: new sessions run every action without asking, except the '
-    + 'Always blocked list, which is refused silently. kiro-cli itself still '
-    + 'asks before writes to .git, .vscode, *.code-workspace, .kiro/agents and '
-    + '.kiro/hooks, and blocks writes to .kiroignore and .kiro/settings, in '
-    + 'every mode.',
-  manual: 'Manual: the Always blocked list, plus PowerAtlas\'s default rules. '
-    + 'Reading files in the session folder and the exact commands git status, '
-    + 'git log, git diff, git branch, pwd, whoami and uname run without asking; '
-    + 'everything else asks first, and file-tool writes to Protected items '
-    + 'always ask.'
-};
+// What Yolo does, shown under its radio. It names kiro-cli's own built-in
+// rules, which apply in every mode and which no PowerAtlas rule can lift
+// (D-38c, P-0.10). Manual's text is drawn from the stored rules
+// (`_acpPermManualDesc`, final review M-5).
+var _ACP_PERM_YOLO_DESC = 'New sessions run every action without asking, '
+  + 'except the Always blocked list, which is refused silently. kiro-cli '
+  + 'itself still asks before writes to .git, .vscode, *.code-workspace, '
+  + '.kiro/agents and .kiro/hooks, and blocks writes to .kiroignore and '
+  + '.kiro/settings, in every mode.';
+var _ACP_PERM_DEFAULT_WORDS = [
+  ['ask', 'Asks first'], ['allow', 'Runs without asking'], ['block', 'Blocked'],
+];
+
+/** Manual's description from the stored rules (final review, M-5): which
+ *  rows ask, run or are blocked by default, how many patterns run without
+ *  asking, and which Protected items are blocked outright. Nothing here is
+ *  the seed's: a user who edited the rules, or who was migrated with Agent
+ *  definitions blocked, reads their own. */
+function _acpPermManualDesc(d) {
+  var lead = 'The Always blocked list, plus your Manual rules';
+  var rules = d && d.rules && typeof d.rules === 'object' ? d.rules : null;
+  var rows = d && Array.isArray(d.rule_rows) ? d.rule_rows : [];
+  if (!rules || !rows.length) {
+    return lead + ' (Edit rules… shows them): what a rule does not allow '
+      + 'asks first, and file-tool writes to Protected items always ask.';
+  }
+  var by = {allow: [], ask: [], block: []};
+  var allowed = 0;
+  rows.forEach(function (r) {
+    var spec = r && typeof r === 'object' ? rules[r.id] : null;
+    if (!spec || typeof spec !== 'object' || !by[spec.default]) return;
+    by[spec.default].push(String(r.label || r.id));
+    if (spec.default !== 'allow' && Array.isArray(spec.allow)) allowed += spec.allow.length;
+  });
+  var parts = [];
+  _ACP_PERM_DEFAULT_WORDS.forEach(function (pair) {
+    if (by[pair[0]].length) parts.push(pair[1] + ': ' + by[pair[0]].join(', ') + '.');
+  });
+  var text = lead + '. ' + parts.join(' ');
+  if (allowed) {
+    text += ' Besides, ' + allowed + (allowed === 1 ? ' pattern runs' : ' patterns run')
+      + ' without asking (Edit rules… lists them).';
+  }
+  var blocked = (Array.isArray(d.protected) ? d.protected : []).filter(function (p) {
+    return p && p.effect === 'block';
+  }).map(function (p) { return String(p.label || p.id); });
+  return text + ' File-tool writes to Protected items always ask'
+    + (blocked.length ? '; blocked outright: ' + blocked.join(', ') : '') + '.';
+}
 
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 review
-// (G3, G9): every warning names its cause and a next step.
-var _ACP_PERM_NEXT_BASE = 'Check the Base agent name below, then save the '
-  + 'mode again or restart PowerAtlas.';
-var _ACP_PERM_NEXT_REGEN = 'Save the mode again or restart PowerAtlas to '
-  + 'regenerate it.';
+// (G3, G9): every warning names its cause and a next step. Final review
+// (M-8): the step fits the cause the server names in `error_kind`, and
+// (H-A) re-applying means the Apply again button, since a radio that is
+// already checked sends nothing.
+var _ACP_PERM_NEXT = {
+  foreign: 'Remove or rename that file, then press Apply again.',
+  rules: 'Open Edit rules… to fix the row it names (or fix '
+    + 'acp_permission_rules in config.toml), then press Apply again.',
+  base: 'Check the Base agent name below, then press Apply again.',
+  unreadable: 'Press Apply again in a moment; if it keeps failing, close any '
+    + 'program holding that file (a sync client or a virus scan).',
+  write: 'Press Apply again, or restart PowerAtlas, to write it again.',
+};
+
+/** The next step for the warning `why`, by the server's `error_kind`. None
+ *  when `why` already names its own fix (M-8). */
+function _acpPermNextStep(d, why) {
+  if (why && /Apply again|by hand|remove or rename/i.test(why)) return '';
+  return _ACP_PERM_NEXT[d.error_kind] || _ACP_PERM_NEXT.write;
+}
 
 function _acpPermHasError(d) {
   return typeof d.generation_error === 'string' && d.generation_error !== '';
@@ -7531,38 +7618,44 @@ function _acpPermWarnText(d) {
     return configError + '. New Default sessions are refused until this is '
       + 'fixed; task modes such as Spec or Plan still start.';
   }
-  // D-25: an unreadable stored mode loads as Manual and says so.
+  // D-25: an unreadable stored mode loads as Manual and says so. Apply again
+  // stores the mode shown (final review, A10 keeps it otherwise).
   if (typeof d.mode_warning === 'string' && d.mode_warning) {
-    parts.push(d.mode_warning + '.');
+    parts.push(d.mode_warning + '. Press Apply again to store it.');
   }
-  // Finding 7: what loading had to change in the stored rules.
+  // Finding 7: what loading had to change in the stored rules. Final review
+  // (EU12, A10): the fix, and that other saves leave them as they are.
   if (typeof d.rules_warning === 'string' && d.rules_warning) {
-    parts.push('Some stored rules were not used: ' + d.rules_warning + '.');
+    parts.push('Some stored rules were not used: ' + d.rules_warning + '. Open '
+      + 'Edit rules… and Save to store them as shown; saving other settings '
+      + 'leaves them as they are.');
   }
+  var why, next;
   if (d.in_effect !== true) {
-    var why, next;
     if (_acpPermHasError(d)) {
       why = d.generation_error;
-      next = _ACP_PERM_NEXT_BASE;
     } else if (d.state === 'stale') {
       why = 'the agent file on disk does not match these settings';
-      next = _ACP_PERM_NEXT_REGEN;
     } else if (d.state === 'unknown') {
       why = 'the agent file ' + (d.derived_agent || '') + ' was not written by '
         + 'PowerAtlas';
-      next = 'Remove or rename that file, then save the mode again.';
+    } else if (d.state === 'unreadable') {
+      why = 'the agent file ' + (d.derived_agent || '') + ' could not be read '
+        + 'just now';
     } else {
-      why = 'the agent file could not be written';
-      next = _ACP_PERM_NEXT_REGEN + ' If that fails, check the Base agent name below.';
+      why = 'the agent file has not been written';
     }
+    next = _acpPermNextStep(d, why);
     parts.push('Not in effect: ' + why + '. New Default sessions are refused '
-      + 'until this is fixed; task modes such as Spec or Plan still start. ' + next);
+      + 'until this is fixed; task modes such as Spec or Plan still start.'
+      + (next ? ' ' + next : ''));
   } else if (_acpPermGenerationFailed(d)) {
     // G3: in effect, but the latest generation failed — the file in force was
-    // built before the latest change (for example from the previous base agent).
+    // built before the latest change.
+    why = _acpPermHasError(d) ? d.generation_error : 'unknown error';
+    next = _acpPermNextStep(d, why);
     parts.push('Still using the previous agent file; the latest change could '
-      + 'not be applied: ' + (_acpPermHasError(d) ? d.generation_error : 'unknown error')
-      + '. Check the Base agent name below.');
+      + 'not be applied: ' + why + '.' + (next ? ' ' + next : ''));
   }
   // D-28: generation succeeded from a minimal agent. Not a failure, but the
   // user's own base agent is not the one in use.
@@ -7652,6 +7745,12 @@ function _acpPermRenderProtected(rows, links) {
     }
     var found = links && typeof links === 'object' ? links[row.id] : null;
     var count = found && typeof found.count === 'number' ? found.count : 0;
+    // Final review (RE7): a folder that could not be listed is not a folder
+    // with no links.
+    if (found && typeof found.error === 'string' && found.error) {
+      item.appendChild(_acpPermEl('div', 'acp-perm-links-marker',
+        'Could not be checked for links: ' + found.error));
+    }
     if (count > 0) {
       item.appendChild(_acpPermEl('div', 'acp-perm-links-marker',
         count + (count === 1 ? ' linked item' : ' linked items') + ' not covered'));
@@ -7669,14 +7768,102 @@ function _acpPermRenderProtected(rows, links) {
   });
 }
 
-/** D-35: the mode or rules changed without the dashboard (config.toml or the
- *  settings API). Shown until the next change made here. */
+/** D-35: the mode, the rules or the base agent changed without the dashboard
+ *  (config.toml or the settings API), or the agent file itself was edited.
+ *  Final review (M-3): says which, and never implies that choosing the mode
+ *  again undoes a change to the rules. Shown until the next change made here
+ *  or Acknowledge. */
 function _acpPermNoticeText(notice) {
   if (!notice || typeof notice !== 'object' || typeof notice.mode !== 'string') return '';
-  return 'The permission settings were changed outside the dashboard (in '
-    + 'config.toml or through the settings API) and new sessions now use '
-    + _acpPermModeName(notice.mode) + (notice.detected_at ? ' (noticed ' + notice.detected_at + ')' : '')
-    + '. If you did not make this change, choose the mode again here.';
+  var when = typeof notice.detected_at === 'string' && notice.detected_at
+    ? ' (noticed ' + notice.detected_at + ')' : '';
+  var mode = _acpPermModeName(notice.mode);
+  if (notice.what === 'file') {
+    return 'PowerAtlas\'s agent file (poweratlas-acp.md) was edited outside '
+      + 'PowerAtlas, so PowerAtlas rewrote it from your settings' + when
+      + '. Your mode and rules did not change; if you did not expect this, '
+      + 'check what else writes to ~/.kiro/agents.';
+  }
+  if (notice.what === 'rules') {
+    return 'Manual\'s rules were changed outside the dashboard (in config.toml '
+      + 'or through PowerAtlas\'s settings API), and new sessions now use them'
+      + when + '. Review them in Edit rules…; choosing the mode again does not '
+      + 'undo a change to the rules.';
+  }
+  if (notice.what === 'base') {
+    return 'The Base agent setting was changed outside the dashboard (in '
+      + 'config.toml or through PowerAtlas\'s settings API), and new sessions '
+      + 'now use an agent built from it' + when + '. Check the Base agent name '
+      + 'below.';
+  }
+  var previous = typeof notice.previous === 'string' && notice.previous
+    && notice.previous !== notice.mode
+    ? ' instead of ' + _acpPermModeName(notice.previous) : '';
+  return 'The permission mode was changed outside the dashboard (in '
+    + 'config.toml or through PowerAtlas\'s settings API): new sessions now use '
+    + mode + previous + when + '. If you did not make this change, choose the '
+    + 'mode you want above.';
+}
+
+/** Draw a notice with its buttons into `host`, only when it changed (final
+ *  review, EU14: a live region rewritten on every refresh is re-announced).
+ *  `buttons` is `[[label, onclick], ...]`. */
+function _acpPermDrawNotice(host, text, buttons) {
+  if (!host) return;
+  var key = text + '\u0000' + buttons.map(function (b) { return b[0]; }).join('\u0000');
+  if (host._acpPermKey === key) return;
+  host._acpPermKey = key;
+  host.hidden = !text;
+  host.textContent = '';
+  if (!text) return;
+  host.appendChild(_acpPermEl('span', 'acp-perm-notice-text', text));
+  var row = _acpPermEl('div', 'acp-perm-notice-actions');
+  buttons.forEach(function (b) {
+    var btn = _acpPermEl('button', 'btn-sm acp-perm-notice-btn', b[0]);
+    btn.type = 'button';
+    btn.onclick = b[1];
+    row.appendChild(btn);
+  });
+  host.appendChild(row);
+}
+
+/** Final review (M-3, M-6): the Acknowledge button. Clears the notice, and
+ *  nothing else: the mode and the rules stay as they are. */
+function acknowledgeAcpPermissionNotice(kind) {
+  fetch('/api/acp-permissions/acknowledge', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({notice: kind}),
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d && d.ok) renderAcpPermissions(d);
+      else _acpPermToast((d && d.error) || 'The notice was not cleared.');
+    })
+    .catch(function () { _acpPermToast('The notice was not cleared.'); });
+}
+
+/** Final review (M-6): open the Always blocked list the upgrade notice
+ *  points at. */
+function showAcpPermissionFloor() {
+  var floor = document.getElementById('acpPermFloor');
+  if (floor) floor.open = true;
+}
+
+/** Final review (H-A): re-apply the mode that is checked. `setAcpPermissionMode`
+ *  posts it even when it is unchanged, which regenerates the agent file and
+ *  clears an outside-change notice. */
+function applyAcpPermissionModeAgain() {
+  var checked = null;
+  ['Yolo', 'Manual'].forEach(function (m) {
+    var el = document.getElementById('acpPermMode' + m);
+    if (el && el.checked) checked = el;
+  });
+  if (!checked) {
+    _acpPermToast('Choose a permission mode first.');
+    return;
+  }
+  setAcpPermissionMode(checked);
 }
 
 /** Draw the permission rows from a `GET`/`POST /api/acp-permissions` (or
@@ -7687,12 +7874,19 @@ function renderAcpPermissions(d) {
   var badge = document.getElementById('acpPermBadge');
   var warn = document.getElementById('acpPermWarn');
   var base = document.getElementById('acpPermBaseAgent');
-  var desc = document.getElementById('acpPermDesc');
-  var notice = document.getElementById('acpPermNotice');
+  var descYolo = document.getElementById('acpPermDescYolo');
+  var descManual = document.getElementById('acpPermDescManual');
+  var applyAgain = document.getElementById('acpPermApplyAgain');
+  var configError = _acpPermConfigError(d);
   // No mode is checked while config.toml cannot be read: `d.mode` is then the
   // default, and checking it would claim a posture nobody set (as G10).
-  _acpPermSetMode(_acpPermConfigError(d) ? null : d.mode);
-  if (desc && _ACP_PERM_MODE_DESC[d.mode]) desc.textContent = _ACP_PERM_MODE_DESC[d.mode];
+  _acpPermSetMode(configError ? null : d.mode);
+  // M-4: both descriptions, always; Manual's from the stored rules (M-5).
+  if (descYolo && descYolo.textContent !== _ACP_PERM_YOLO_DESC) {
+    descYolo.textContent = _ACP_PERM_YOLO_DESC;
+  }
+  var manualText = _acpPermManualDesc(configError ? null : d);
+  if (descManual && descManual.textContent !== manualText) descManual.textContent = manualText;
   // Not while the user is typing into it: a background refresh would replace
   // a half-typed name with the saved one.
   if (base && typeof d.base_agent === 'string' && document.activeElement !== base) {
@@ -7704,14 +7898,40 @@ function renderAcpPermissions(d) {
     badge.hidden = !notInEffect;
     badge.title = notInEffect ? text : '';
   }
-  if (warn) {
+  // EU14: a live region, so written only when its text changes.
+  if (warn && (warn.textContent !== text || warn.hidden !== !text)) {
     warn.hidden = !text;
     warn.textContent = text;
   }
-  var noticeText = _acpPermNoticeText(d.posture_notice);
-  if (notice) {
-    notice.hidden = !noticeText;
-    notice.textContent = noticeText;
+  var notice = d.posture_notice;
+  var noticeText = _acpPermNoticeText(notice);
+  var noticeMode = notice && typeof notice === 'object' ? _acpPermModeName(notice.mode) : '';
+  var noticeButtons = [];
+  if (noticeText) {
+    if (notice.what !== 'base') {
+      noticeButtons.push(['Review rules', function () { openAcpRulesEditor(); }]);
+    }
+    noticeButtons.push([
+      'Acknowledge: keep ' + noticeMode
+        + (noticeMode === 'Manual' ? ' with the current rules' : ''),
+      function () { acknowledgeAcpPermissionNotice('posture'); }]);
+  }
+  _acpPermDrawNotice(document.getElementById('acpPermNotice'), noticeText, noticeButtons);
+  var upgrade = d.upgrade_notice;
+  var upgradeText = upgrade && typeof upgrade === 'object' && typeof upgrade.mode === 'string'
+    ? 'Permissions are now modes: you are on ' + _acpPermModeName(upgrade.mode)
+      + '. The Always blocked list applies in every mode.'
+    : '';
+  _acpPermDrawNotice(document.getElementById('acpPermUpgrade'), upgradeText, upgradeText ? [
+    ['Show the Always blocked list', showAcpPermissionFloor],
+    ['Acknowledge', function () { acknowledgeAcpPermissionNotice('upgrade'); }],
+  ] : []);
+  // H-A: offered while the mode is not working as set or an outside change is
+  // pending — never while config.toml cannot be read, where the fix is the
+  // file and the POST would be refused.
+  if (applyAgain) {
+    applyAgain.hidden = !!configError || !(notInEffect || _acpPermGenerationFailed(d)
+      || !!d.mode_warning || !!noticeText);
   }
   if (d.protected_links && typeof d.protected_links === 'object') _acpPermLinks = d.protected_links;
   _acpPermRenderFloor(d.floor);
@@ -7719,8 +7939,8 @@ function renderAcpPermissions(d) {
   // G4: visible without opening the menu, on the same gear dot the
   // restart-drift badge uses.
   var attention = notInEffect || _acpPermGenerationFailed(d)
-    || !!d.mode_warning || !!d.rules_warning || !!_acpPermConfigError(d)
-    || !!noticeText;
+    || !!d.mode_warning || !!d.rules_warning || !!configError
+    || !!noticeText || !!upgradeText;
   _topbarDotPerm = attention
     ? 'The permission mode is not working as set; see Agent permissions' : '';
   _syncTopbarDot();
@@ -7978,6 +8198,9 @@ function _acpRulesWarnings(row, spec) {
           out.push('"' + p + '" covers ' + what + ', so '
             + 'file-tool writes anywhere in it run without asking.');
         }
+        // Final review (SEC5): shared with the prompt card.
+        var own = permissionRuleSensitivePlace(p, 'fs_write');
+        if (own) out.push(own);
       });
     }
   }
@@ -8010,7 +8233,9 @@ function _acpRulesWarnings(row, spec) {
  *  server's `_matches_everything` (D-14, S4). `./**` names the session folder. */
 function _acpRulesMatchesAll(pattern) {
   var s = String(pattern).trim();
-  return /^[*?\/\\.: ]+$/.test(s) && !/^\.{1,2}([\/\\]|$)/.test(s);
+  // Final review (SEC6): glob syntax (braces, brackets, `!`, `,`) is not a
+  // literal either, as on the server.
+  return /^[*?\/\\.: {}\[\]!,]+$/.test(s) && !/^\.{1,2}([\/\\]|$)/.test(s);
 }
 
 /** The first character D-14 refuses, in words, or '' (U7). */
@@ -8037,7 +8262,7 @@ function _acpRulesBadChar(pattern) {
 
 /** A quick check before a pattern joins a list; the server checks again,
  *  fully, on Save. */
-function _acpRulesPatternProblem(list, pattern) {
+function _acpRulesPatternProblem(list, pattern, row, which) {
   if (!pattern) return 'Type a pattern first.';
   if (list.indexOf(pattern) >= 0) return 'Already listed.';
   if (pattern.length > _ACP_RULES_MAX_CHARS) {
@@ -8050,6 +8275,12 @@ function _acpRulesPatternProblem(list, pattern) {
   if (bad) {
     return 'This pattern contains ' + bad + ', which is not allowed. Retype it '
       + 'without that character.';
+  }
+  // Final review (SE6): the server's `fs_allow_error`, before Save.
+  if (which === 'allow' && (row === 'fs_read' || row === 'fs_write')
+      && /(^|[\/\\])\.\.([\/\\]|$)/.test(pattern)) {
+    return 'This pattern goes up a folder with “..”; write the folder\'s '
+      + 'full path instead.';
   }
   if (list.length >= _ACP_RULES_MAX_PATTERNS) {
     return 'A list can hold at most ' + _ACP_RULES_MAX_PATTERNS + ' patterns.';
@@ -8073,7 +8304,7 @@ function _acpRulesEdited(row) {
 function _acpRulesAddFrom(row, which, input, problemEl) {
   var list = _acpRulesDraft[row][which];
   var pattern = String(input.value || '').trim();
-  var problem = _acpRulesPatternProblem(list, pattern);
+  var problem = _acpRulesPatternProblem(list, pattern, row, which);
   if (problem) {
     problemEl.textContent = problem;
     problemEl.hidden = false;

@@ -1,0 +1,163 @@
+{
+ "_comment": "260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (EU13, A4): one table of rule patterns, read by tests/test_web.py (the server's checks) and tests/acp_page.test.mjs (the rule editor's), so the two cannot drift. `expect` is ok, match-all, edge-space, long, parent, full (the list already holds `list_size` patterns) or char (with the `words` both sides use). The patterns are allow-list patterns of `row`.",
+ "cases": [
+  {
+   "pattern": "git status",
+   "row": "shell",
+   "expect": "ok"
+  },
+  {
+   "pattern": "./**",
+   "row": "fs_read",
+   "expect": "ok"
+  },
+  {
+   "pattern": "../shared/**",
+   "row": "shell",
+   "expect": "ok"
+  },
+  {
+   "pattern": "*",
+   "row": "shell",
+   "expect": "match-all"
+  },
+  {
+   "pattern": "?:/**",
+   "row": "fs_write",
+   "expect": "match-all"
+  },
+  {
+   "pattern": " ** ",
+   "row": "fs_write",
+   "expect": "match-all"
+  },
+  {
+   "pattern": "{**}",
+   "row": "mcp",
+   "expect": "match-all"
+  },
+  {
+   "pattern": "*{,}*",
+   "row": "mcp",
+   "expect": "match-all"
+  },
+  {
+   "pattern": "**/{*}",
+   "row": "fs_read",
+   "expect": "match-all"
+  },
+  {
+   "pattern": "[!a]*",
+   "row": "fs_read",
+   "expect": "ok"
+  },
+  {
+   "pattern": "git status ",
+   "row": "shell",
+   "expect": "edge-space"
+  },
+  {
+   "pattern": " git status",
+   "row": "shell",
+   "expect": "edge-space"
+  },
+  {
+   "pattern": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "row": "mcp",
+   "expect": "ok"
+  },
+  {
+   "pattern": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "row": "mcp",
+   "expect": "long"
+  },
+  {
+   "pattern": "../**",
+   "row": "fs_read",
+   "expect": "parent"
+  },
+  {
+   "pattern": "C:/work/../../**",
+   "row": "fs_write",
+   "expect": "parent"
+  },
+  {
+   "pattern": "s/t",
+   "row": "mcp",
+   "list_size": 100,
+   "expect": "full"
+  },
+  {
+   "pattern": "a\tb",
+   "row": "shell",
+   "expect": "char",
+   "words": "an invisible tab character"
+  },
+  {
+   "pattern": "a\nb",
+   "row": "shell",
+   "expect": "char",
+   "words": "a line break"
+  },
+  {
+   "pattern": "a\rb",
+   "row": "shell",
+   "expect": "char",
+   "words": "a line break"
+  },
+  {
+   "pattern": "a\u007fb",
+   "row": "shell",
+   "expect": "char",
+   "words": "an invisible delete character"
+  },
+  {
+   "pattern": "a\u00a0b",
+   "row": "shell",
+   "expect": "char",
+   "words": "a non-breaking space"
+  },
+  {
+   "pattern": "a\u200bb",
+   "row": "shell",
+   "expect": "char",
+   "words": "an invisible zero-width space"
+  },
+  {
+   "pattern": "a\u2028b",
+   "row": "shell",
+   "expect": "char",
+   "words": "a line separator"
+  },
+  {
+   "pattern": "a\u2029b",
+   "row": "shell",
+   "expect": "char",
+   "words": "a paragraph separator"
+  },
+  {
+   "pattern": "a\ufeffb",
+   "row": "shell",
+   "expect": "char",
+   "words": "an invisible byte-order mark"
+  },
+  {
+   "pattern": "a\u0001b",
+   "row": "shell",
+   "expect": "char",
+   "words": "an invisible control character"
+  },
+  {
+   "pattern": "a\u0085b",
+   "row": "shell",
+   "expect": "char",
+   "words": "an invisible control character"
+  },
+  {
+   "pattern": "a\ud83d\ude00b",
+   "row": "shell",
+   "expect": "char",
+   "words": "an emoji or another character PowerAtlas cannot store in a rule"
+  }
+ ]
+}

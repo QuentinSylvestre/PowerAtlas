@@ -4317,6 +4317,22 @@ async def toggle_notifications():
 # the dashboard's rule editor, on the same lock and loopback-only terms.
 
 
+def _permission_error_kind(state: str, compile_error: str, config, last) -> str:
+    """The cause behind the settings panel's warning, so its next step fits
+    it (final review, M-8). Most specific first: an unreadable config.toml,
+    a rule set that does not compile, a file PowerAtlas did not write or
+    could not read, then the last generation's own failure."""
+    if config._load_error:
+        return "config"
+    if compile_error:
+        return "rules"
+    if state in ("unknown", "unreadable"):
+        return "foreign" if state == "unknown" else "unreadable"
+    if last.attempted and not last.ok:
+        return last.error_kind or "write"
+    return ""
+
+
 def _acp_permission_state(config) -> dict:
     """The permission settings as the settings panel has to render them.
 
@@ -4355,6 +4371,9 @@ def _acp_permission_state(config) -> dict:
         "generation_attempted": last.attempted,
         "generation_ok": last.ok and not compile_error,
         "generation_error": compile_error or last.error,
+        # Final review (M-8): which fix the panel names for the error above —
+        # "config", "rules", "foreign", "unreadable", "base", "write" or "".
+        "error_kind": _permission_error_kind(state, compile_error, config, last),
         "generation_note": last.note,
         "floor": agent_profile.floor_display(),
         "protected": agent_profile.protected_display(

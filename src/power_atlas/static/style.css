@@ -162,13 +162,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
    disclosures. Indented to the menu notes' 34px so the section reads as one. */
 .acp-perm-modes { padding: 4px 10px 2px; }
 .acp-perm-modes-head { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 2px 0 4px; }
-.acp-perm-mode { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 24px; font-size: 12.5px; cursor: pointer; }
+/* Final review (EU11): 24px targets, WCAG 2.2 2.5.8. */
+.acp-perm-mode { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 24px; font-size: 12.5px; cursor: pointer; min-height: 24px; box-sizing: border-box; }
 .acp-perm-mode input { margin: 0; accent-color: var(--accent, #60a5fa); cursor: pointer; }
 .acp-perm-mode-disabled { cursor: not-allowed; color: var(--text-muted); }
 .acp-perm-mode-disabled input { cursor: not-allowed; }
 .acp-perm-mode-hint { font-size: 11px; color: var(--text-muted); }
+/* Final review (M-4): each mode's description under its radio, always shown. */
+.acp-perm-mode-desc { padding: 0 10px 4px 46px; font-size: 11px; line-height: 1.4; color: var(--text-muted); }
+/* Final review (M-3, M-6): the notices' buttons. */
+.acp-perm-notice-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.acp-perm-notice-btn { min-height: 24px; }
 .acp-perm-details { padding: 0 10px 4px 34px; font-size: 11.5px; }
-.acp-perm-details > summary { cursor: pointer; color: var(--text); padding: 2px 0; }
+.acp-perm-details > summary { cursor: pointer; color: var(--text); padding: 2px 0; min-height: 24px; line-height: 20px; box-sizing: border-box; }
 .acp-perm-details > .topbar-menu-note { padding-left: 0; }
 .acp-perm-summary-hint { color: var(--text-muted); }
 .acp-perm-summary-hint.acp-perm-summary-warn { color: var(--amber); }  /* U13's linked-item count */

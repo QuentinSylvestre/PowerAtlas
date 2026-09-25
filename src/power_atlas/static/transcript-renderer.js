@@ -1824,19 +1824,23 @@ var PERMISSION_CONSENT_FIELDS = [
 // measured in probe P4. Anything else falls back to the raw value. Looked up
 // with hasOwnProperty, because the value is agent-authored and "constructor"
 // or "__proto__" must not resolve to something on Object.prototype.
+// 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (EU8, A5): the
+// rule editor's row names (`ROW_LABELS`), so the card and the editor call a
+// row by one name. `agent-profile` is the derived agent's own rules, which
+// only ask in Manual.
 var PERMISSION_CAPABILITY_WORDS = {
   fs_read: 'Read files',
-  fs_write: 'Write or delete files',
-  shell: 'Run shell commands',
-  mcp: 'Use an MCP tool',
-  web_fetch: 'Fetch a web page',
-  web_search: 'Search the web',
-  subagent: 'Start a sub-agent',
-  skill: 'Use a skill',
-  power: 'Use a power',
+  fs_write: 'Write files',
+  shell: 'Run commands',
+  mcp: 'MCP tools',
+  web_fetch: 'Web fetch',
+  web_search: 'Web search',
+  subagent: 'Sub-agents',
+  skill: 'Skills',
+  power: 'Powers',
 };
 var PERMISSION_SOURCE_WORDS = {
-  'agent-profile': 'The agent’s own permissions',
+  'agent-profile': 'PowerAtlas permission rules (Manual)',
 };
 
 function permissionWords(table, raw) {
@@ -1972,9 +1976,10 @@ function permissionRuleShellWarnings(pattern) {
       + 'from, and send data to, any site without asking.');
   }
   // D-38e, Phase 3 review (M5): `?` and `[` are wildcards to kiro-cli too
-  // (agent_profile `_MATCH_ALL_CHARS`), so each can stand for the `>`.
-  if (/[*?[]/.test(p)) {
-    out.push('"' + p + '": a wildcard (*, ? or [) also matches an output '
+  // (agent_profile `_MATCH_ALL_CHARS`), so each can stand for the `>`; and
+  // `{` (final review, SEC6), a glob alternation.
+  if (/[*?[{]/.test(p)) {
+    out.push('"' + p + '": a wildcard (*, ?, [ or {) also matches an output '
       + 'redirection such as > file, so this also lets the command write to '
       + 'any file.');
   }
@@ -2013,6 +2018,27 @@ function permissionRuleBroadPlace(pattern, root) {
     if (rootKey.indexOf(low + '/') === 0) return 'a folder that contains the session folder';
   }
   return '';
+}
+
+/** A warning when a file pattern covers PowerAtlas's own settings folder
+ *  (`%LOCALAPPDATA%\power-atlas`: config.toml, which holds these rules, and
+ *  the sign-in secrets) or kiro-cli's `~/.kiro`, or a folder above either;
+ *  '' otherwise (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review,
+ *  SEC5). `row` picks "reads" or "writes". Shared by the prompt card and the
+ *  rule editor. */
+function permissionRuleSensitivePlace(pattern, row) {
+  var p = String(pattern).trim().replace(/\\/g, '/');
+  var low = p.toLowerCase().replace(/(\/\*+)+$/, '').replace(/\/+$/, '');
+  var what = '';
+  if (/(^|\/)power-atlas(\/|$)/.test(low) || /(^|\/)(appdata|appdata\/local)$/.test(low)
+      || /^(%localappdata%|\$localappdata|%appdata%\/\.\.\/local)$/.test(low)) {
+    what = 'PowerAtlas\'s own settings folder, where config.toml holds these rules';
+  } else if (/(^|\/)\.kiro(\/|$)/.test(low) || /(^|\/)kiro~[^/]*(\/|$)/.test(low)) {
+    what = 'kiro-cli\'s own folder (~/.kiro), where its agents and settings live';
+  }
+  if (!what) return '';
+  return '"' + pattern + '" covers ' + what + ', so file-tool '
+    + (row === 'fs_read' ? 'reads' : 'writes') + ' there run without asking.';
 }
 
 /** Whether a file resource cannot be turned into a folder pattern, so the
@@ -2085,6 +2111,9 @@ function permissionRuleWarnings(row, pattern, root) {
         + (row === 'fs_read' ? 'reads' : 'writes')
         + ' anywhere in it run without asking.');
     }
+    // Final review (SEC5).
+    var own = permissionRuleSensitivePlace(p, row);
+    if (own) out.push(own);
     if (/(^|[\\/])\.\.([\\/]|$)/.test(p)) {
       out.push('"' + p + '" goes up a folder with "..", which a rule cannot '
         + 'hold; write the folder\'s full path instead.');
@@ -2215,7 +2244,9 @@ function addPermissionRuleButton(ctx) {
     if (answer.posture_notice && typeof answer.posture_notice === 'object') {
       var notice = document.createElement('div');
       notice.className = 'acp-permission-rule-warning acp-permission-rule-notice';
-      notice.textContent = 'Settings changed outside the dashboard — review them';
+      // Final review (EU9): where to look.
+      notice.textContent = 'Settings changed outside the dashboard — review '
+        + 'them in the dashboard’s Settings > Agent permissions';
       status.appendChild(notice);
     }
     // D-32: stored, but the agent file was not written, so new Default
