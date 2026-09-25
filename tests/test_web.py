@@ -2699,6 +2699,40 @@ class TestAcpUnsubscribe:
         acp_mod._dispatch(conn, {"type": "unsubscribe"})
         assert acp_mod._registry.loading[sid] == []
 
+    def test_unsubscribe_does_not_stop_the_initiator_of_a_load(
+            self, acp_session):
+        """Pins today's behaviour: ``unsubscribe`` drops *waiters* only. The
+        socket that started a ``session/load`` is not in the waiter list, so
+        ``_deliver_load`` still answers and attaches it when the load lands;
+        the page's own backstop is to ``close`` a session frame for its
+        ``_dashLoadingSid`` that arrives after the user moved on.
+        260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D18"""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.loading[sid] = []  # this socket's own load, in flight
+        acp_mod._dispatch(conn, {"type": "unsubscribe"})
+        waiters = acp_mod._registry.loading.pop(sid)
+        attached = []
+        acp_mod._deliver_load(conn, waiters, sid, None,
+                              subscribe_fn=lambda c, s: attached.append((c, s)))
+        assert attached == [(conn, sid)]
+
+    def test_unsubscribe_logs_waiter_removal_and_no_op(self, acp_session,
+                                                       caplog):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.loading[sid] = [conn]
+        with caplog.at_level(logging.DEBUG, logger=acp_mod.log.name):
+            acp_mod._dispatch(conn, {"type": "unsubscribe"})
+        waiter = [r for r in caplog.records
+                  if "no longer waits on the load" in r.getMessage()]
+        assert len(waiter) == 1 and waiter[0].levelno == logging.INFO
+        assert sid in waiter[0].getMessage()
+        noop = [r for r in caplog.records if "not attached" in r.getMessage()]
+        assert len(noop) == 1 and noop[0].levelno == logging.DEBUG
+
     def test_unsubscribe_is_synchronous(self):
         """Frame order on one socket is the order of effect only while this
         handler never awaits: ``subscribe`` then ``unsubscribe`` must end

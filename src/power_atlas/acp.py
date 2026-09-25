@@ -6518,21 +6518,30 @@ def _handle_unsubscribe(conn):
     notifications and the idle sweeper skips it. ``detach`` also stamps the
     idle clock, exactly as a closing tab does.
 
-    The socket is also dropped from any ``session/load`` waiter list, or a
-    subscribe deferred behind a load would attach it when the load lands,
-    after the page has already moved on. Idempotent: a socket watching nothing
-    is left as it is. Sync, like ``_handle_subscribe``, so frame order on one
-    socket is the order of effect: a ``subscribe`` then an ``unsubscribe``
-    always ends detached.
+    The socket is also dropped from any ``session/load`` *waiter* list, so a
+    subscribe or load deferred behind someone else's load does not attach it
+    when that load lands, after the page has already moved on. It does not
+    reach a load this socket started itself: ``_deliver_load`` always answers
+    and subscribes the initiator. The page covers that case: a ``session``
+    frame for its own ``_dashLoadingSid`` arriving after the user moved on is
+    answered with ``close`` (index.html's stale-arrival branch in
+    ``dashHandle``). Idempotent: a socket watching nothing is left as it is.
+    Sync, like ``_handle_subscribe``, so frame order on one socket is the
+    order of effect: a ``subscribe`` then an ``unsubscribe`` always ends
+    detached.
     260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D18
     """
     sid = conn.session_id
-    for waiters in _registry.loading.values():
+    for loading_sid, waiters in _registry.loading.items():
         if conn in waiters:
             waiters.remove(conn)
+            log.info("ACP unsubscribe: socket=%s no longer waits on the load "
+                     "of session=%s", conn.cid, loading_sid)
     _registry.detach(conn)
     if sid is not None:
         log.info("ACP unsubscribe: socket=%s session=%s", conn.cid, sid)
+    else:
+        log.debug("ACP unsubscribe: socket=%s not attached", conn.cid)
 
 
 def _handle_subscribe(conn, session_id):

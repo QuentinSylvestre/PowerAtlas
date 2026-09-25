@@ -13272,6 +13272,17 @@ function loadDashPicker(opts = {}) {
   for (const id of ["dashOverview", "dashOvLive", "dashOvPlans", "dashOvUsage"]) {
     byId.set(id, new El("div"));
   }
+  // The MCP status indicator, wired through composer-chrome.js's
+  // initMcpIndicatorDom() below as index.html does. The Overview resets it
+  // on leaving a session, and the Escape guard reads the toggle's
+  // aria-expanded. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+  byId.set("dashMcpIndicator", new El("div"));
+  byId.get("dashMcpIndicator").hidden = true;
+  byId.set("dashMcpToggle", new El("button"));
+  byId.get("dashMcpToggle").setAttribute("aria-expanded", "false");
+  for (const id of ["dashMcpCompact", "dashMcpPanel", "dashMcpList"]) {
+    byId.set(id, new El(id === "dashMcpList" ? "ul" : "span"));
+  }
 
   const fetches = [];
   const sentFrames = [];
@@ -13833,6 +13844,19 @@ function loadDashPicker(opts = {}) {
   // against the byId entries and document stand-in set above; every other
   // name it reads resolves at call time.
   vm.runInContext(overviewRegion, sandbox, { filename: "index.html#dash-overview" });
+  // index.html calls this before the Overview region; it runs after it here
+  // so the Overview's keydown listener is registered first. fireDoc() calls
+  // listeners in registration order and has no capture phase, and the real
+  // page runs the Overview's capture-phase listener before the MCP panel's
+  // bubble-phase one. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+  sandbox.initMcpIndicatorDom({
+    indicatorEl: byId.get("dashMcpIndicator"),
+    toggleEl: byId.get("dashMcpToggle"),
+    compactEl: byId.get("dashMcpCompact"),
+    panelEl: byId.get("dashMcpPanel"),
+    listEl: byId.get("dashMcpList"),
+    onSignIn: () => {},
+  });
   vm.runInContext(composerControlsRegion, sandbox, { filename: "index.html#dash-composer-controls" });
   // Close-button click wiring (Fix 3, Phase 6 review) -- self-contained
   // (reads send/_dashAttachedSid/showToast/dashCloseBtn as free variables,
@@ -16883,6 +16907,212 @@ check("dashboard overview: clicking the open row again returns to the Overview o
     assertEqual(calls.join(","), loaded ? "overview" : "open",
       loaded ? "a loaded open row toggles back to the Overview" : "a loading or failed row reloads");
   }
+});
+
+// ---- Overview review fixes -------------------------------------------------
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE Phase 1 review fixes: the
+// user-close flag's lifetime, the CONNECTING race, the MCP reset, the MCP
+// Escape guard, the create refusal after Home, the rail highlight and the
+// pending close-then-create.
+
+/** Attached to sess-1 on an open socket, pane showing, Close clicked. */
+function dashUserCloseFixture() {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox._dashOrigin = "joined";
+  p.sandbox._dashWs = { readyState: 1 };
+  p.sandbox.dashShowPane();
+  p.sandbox.dashCloseBtn.dispatch("click");
+  assertEqual(p.sandbox._dashUserClosedSid, "sess-1", "fixture: a sent Close sets the flag");
+  return p;
+}
+
+check("dashboard overview: Close sent, then Home before session_closed, sends no unsubscribe (D18)", () => {
+  const p = dashUserCloseFixture();
+  p.el("dashHome").dispatch("click");
+  assert(dashInOverview(p), "Home still enters the Overview");
+  assertEqual(p.sentOf("unsubscribe").length, 0,
+    "`close` refuses a socket that is no longer attached, so no unsubscribe may overtake it");
+});
+
+check("dashboard overview: a refused Close clears the flag and restores the button, so Home then unsubscribes", () => {
+  const p = dashUserCloseFixture();
+  let restored = 0;
+  p.sandbox.dashUpdateCloseButton = () => { restored++; };
+  p.sandbox.dashHandle({ type: "error", sessionId: "sess-1",
+    payload: { code: "turn_in_progress", message: "This session is still answering." } });
+  assertEqual(p.sandbox._dashUserClosedSid, null, "the refused close is no longer in flight");
+  assert(restored >= 1, "the Close button must come back from 'Closing…'");
+  p.el("dashHome").dispatch("click");
+  assertEqual(p.sentOf("unsubscribe").length, 1, "the session is still watched and must be released");
+});
+
+check("dashboard overview: a close_in_progress refusal keeps the flag: that close's session_closed is still coming", () => {
+  const p = dashUserCloseFixture();
+  p.sandbox.dashHandle({ type: "error", sessionId: "sess-1",
+    payload: { code: "close_in_progress", message: "This session is already being closed." } });
+  assertEqual(p.sandbox._dashUserClosedSid, "sess-1");
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  assert(dashInOverview(p), "the user's close still returns to the Overview");
+});
+
+check("dashboard overview: an error for another sid leaves the user-close flag alone", () => {
+  const p = dashUserCloseFixture();
+  p.sandbox.dashHandle({ type: "error", sessionId: "sess-other",
+    payload: { code: "not_subscribed", message: "Subscribe first." } });
+  assertEqual(p.sandbox._dashUserClosedSid, "sess-1");
+});
+
+check("dashboard overview: after a refused Close, a later sweeper close keeps the closed message (D3)", () => {
+  const p = dashUserCloseFixture();
+  p.sandbox.dashHandle({ type: "error", sessionId: "sess-1",
+    payload: { code: "nothing_to_close", message: "nothing to close" } });
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  assert(!dashInOverview(p), "a close the user's refused Close did not cause must stay on the pane");
+});
+
+check("dashboard overview: a socket drop after Close clears the user-close flag", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.sandbox._dashAttachedSid = "sess-1";
+  p.sandbox._viewingSid = "sess-1";
+  p.sandbox.dashCloseBtn.dispatch("click");
+  assertEqual(p.sandbox._dashUserClosedSid, "sess-1", "fixture: a sent Close sets the flag");
+  p.closeMain({ code: 1006, reason: "" });
+  assertEqual(p.sandbox._dashUserClosedSid, null, "the close cannot complete on a dead socket");
+});
+
+/** dashMaybeAttach for a held kiro-cli-v3 session, with dashConnect's
+ *  onReady captured rather than run: the socket is still CONNECTING. */
+async function dashHeldAttachFixture() {
+  const slice = dashSentinelSlice("function dashMaybeAttach", "// ---- Image paste-to-attach");
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const descFrom = src.indexOf("function dashDesc(");
+  const descTo = src.indexOf("// ---- Phase 3: live-attach wiring", descFrom);
+  if (descFrom < 0 || descTo < 0) throw new Error("index.html no longer defines dashDesc before the live-attach marker");
+  const sent = [];
+  let onReady = null;
+  const { box } = runDashSentinel(slice + "\n" + src.slice(descFrom, descTo), true, {
+    fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({ availability: "held" }) }),
+    dashConnect: (cb) => { onReady = cb; },
+    send: (type, payload, sid) => { sent.push({ type, sid }); return true; },
+    dashComposerEl: new El("div"),
+    dashPromptInput: new El("textarea"),
+    dashSendBtn: new El("button"),
+    dashSetComposerNote: () => {},
+    dashRefreshComposerControls: () => {},
+    _viewingSid: "s1",
+    _dashOrigin: null,
+  });
+  box.dashMaybeAttach({ sid: "s1", provider: "kiro-cli-v3", cwd: "/ws" }, "s1");
+  await settleStaging();
+  assert(typeof onReady === "function", "fixture: a held session must connect with an onReady");
+  return { box, sent, onReady };
+}
+
+check("dashboard overview: Home while the socket is CONNECTING sends no subscribe when it opens (D18)", async () => {
+  const { box, sent, onReady } = await dashHeldAttachFixture();
+  box._viewingSid = null; // the Overview, entered while the socket was CONNECTING
+  onReady();
+  assertEqual(sent.filter((f) => f.type === "subscribe").length, 0,
+    "a subscribe for a session the user left would leave it watched");
+});
+
+check("dashboard overview: a socket that opens with the session still on screen subscribes to it", async () => {
+  const { sent, onReady } = await dashHeldAttachFixture();
+  onReady();
+  assertEqual(sent.filter((f) => f.type === "subscribe" && f.sid === "s1").length, 1);
+});
+
+check("dashboard overview: a session frame landing on the idle Overview is released with unsubscribe (D18)", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashHandle({ type: "session", sessionId: "sess-late", payload: { turnActive: false } });
+  assertEqual(p.sentOf("unsubscribe").length, 1, "nobody is watching it");
+  assertEqual(p.sandbox._dashAttachedSid, null, "the page does not adopt it");
+});
+
+check("dashboard overview: a stale session frame sends no unsubscribe while another attach may be in flight", () => {
+  const cases = {
+    "another session on screen": (p) => { p.sandbox._viewingSid = "sess-B"; },
+    "a create in flight": (p) => { p.sandbox._dashCreateInFlight = true; },
+    "a load in flight": (p) => { p.sandbox._dashLoadingSid = "sess-C"; },
+  };
+  for (const [what, arrange] of Object.entries(cases)) {
+    const p = loadDashPicker();
+    arrange(p);
+    p.sandbox.dashHandle({ type: "session", sessionId: "sess-A", payload: { turnActive: false } });
+    assertEqual(p.sentOf("unsubscribe").length, 0,
+      `${what}: an unsubscribe landing after the next attach would detach that one`);
+  }
+});
+
+check("dashboard overview: Home hides the MCP indicator of the session just left", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.sandbox.dashHandle({ type: "mcp_servers", sessionId: "sess-1",
+    payload: { servers: [{ name: "github", status: "connected", failedAuthorization: false, toolCount: 3 }] } });
+  assertEqual(p.el("dashMcpIndicator").hidden, false, "fixture: the indicator shows for the open session");
+  p.el("dashHome").dispatch("click");
+  assertEqual(p.el("dashMcpIndicator").hidden, true, "the Overview header must not keep the old session's MCP status");
+  assertEqual(p.sandbox.sessionMcpServers, null);
+});
+
+check("dashboard overview: Escape with the MCP panel open closes the panel, not the session (D19)", async () => {
+  const p = loadDashPicker();
+  await dashOpenFixture(p);
+  p.sandbox.dashHandle({ type: "mcp_servers", sessionId: "sess-1",
+    payload: { servers: [{ name: "github", status: "connected", failedAuthorization: false, toolCount: 3 }] } });
+  p.el("dashMcpToggle").setAttribute("aria-expanded", "true");
+  dashEscape(p);
+  assertEqual(p.sandbox._viewingSid, "sess-1", "Escape belongs to the open MCP panel");
+  assertEqual(p.el("dashMcpToggle").getAttribute("aria-expanded"), "false", "the panel's own listener closed it");
+  dashEscape(p);
+  assert(dashInOverview(p), "with the panel closed, the next Escape leaves the session");
+});
+
+check("dashboard overview: a create refusal after Home is shown in the pane, not written behind the Overview", () => {
+  const p = loadDashPicker();
+  p.sandbox._dashPickerCapacity = { held: 0, max: 8 };
+  p.sandbox.dashRailQuickCreate("/proj");
+  assertEqual(p.sandbox._dashCreateInFlight, true, "fixture: the create is in flight");
+  p.sandbox.dashShowOverview();
+  assert(dashInOverview(p), "fixture: the user went back to the Overview");
+  p.sandbox.dashHandle({ type: "error", sessionId: null,
+    payload: { code: "session_limit", message: "Too many sessions are open." } });
+  assert(!dashInOverview(p), "the refusal must be visible");
+  assert(p.addMessageCalls.some((c) => /Too many sessions/.test(c.text)), "the refusal is written into the pane");
+});
+
+check("dashboard overview: opening from a descriptor highlights every rail row for that session (D14)", () => {
+  const p = loadDashPicker();
+  const rows = ["sess-1", "sess-1", "sess-2"].map((sid) => {
+    const r = new El("button");
+    r.className = "acp-rail-row";
+    r.dataset = { sid };
+    return r;
+  });
+  rows[2].classList.add("viewing");
+  p.sandbox.document.querySelectorAll = (sel) => {
+    if (sel === ".acp-rail-row") return rows;
+    if (sel === ".acp-rail-row.viewing") return rows.filter((r) => r.classList.contains("viewing"));
+    return [];
+  };
+  p.sandbox.openSessionTranscript({ sid: "sess-1", provider: "claude-code", cwd: "/ws" });
+  assert(rows[0].classList.contains("viewing") && rows[1].classList.contains("viewing"),
+    "a tile has no clicked row; every row for the session must be highlighted");
+  assert(!rows[2].classList.contains("viewing"), "the previous session's row loses its highlight");
+  p.el("dashHome").dispatch("click");
+  assert(rows.every((r) => !r.classList.contains("viewing")), "the Overview clears every highlight");
+});
+
+check("dashboard overview: a close-then-create pending behind the user's Close still runs after the return", () => {
+  const p = dashUserCloseFixture();
+  p.sandbox._dashPendingCreate = { cwd: "/proj", mode: "kiro_default" };
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  const news = p.sentOf("new");
+  assertEqual(news.length, 1, "the pending create must not be dropped by the Overview's teardown");
+  assertEqual(news[0].payload.cwd, "/proj");
+  assertEqual(p.sandbox._dashPendingCreate, null, "consumed once");
 });
 
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {

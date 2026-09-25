@@ -1087,7 +1087,13 @@ function dashSessionMetaRender(session, workspace){
 // returns to the Overview; any other close (idle sweeper, another tab) keeps
 // "This session was closed." on screen (D3). Set only after the close frame
 // actually left, cleared when consumed, on opening a session and on entering
-// the Overview.
+// the Overview -- and whenever the close cannot complete on this socket: an
+// `error` frame for that sid (the server refused or failed the close) and a
+// socket drop. It stands only for a close genuinely in flight on the current
+// socket; stale, it would skip the Overview's `unsubscribe` and turn a later
+// sweeper or remote close into a return. The one refusal that keeps it is
+// `close_in_progress`: that close is already running and its session_closed
+// is still coming.
 var _dashUserClosedSid = null;
 // Whether the pane holds a transcript, as opposed to "Loading transcript…" or
 // "Could not load this transcript.". Clicking the open row again returns to
@@ -1183,6 +1189,12 @@ function dashShowOverview(){
   _viewingSid = null;
   dashSessionMetaRender(null);
   dashComposerEl.hidden = true;
+  // The MCP indicator, its Connect rows and the slash-command catalogue
+  // belonged to the session just left; resetCommandPalette() is the one
+  // reset that nulls sessionMcpServers and hides #dashMcpIndicator, as the
+  // session_closed and agent_died branches already do.
+  // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+  resetCommandPalette();
   // clearTranscript() resets the renderer's per-conversation state (tool
   // rows, timers, prompt-nav targets); the pane is then emptied and given
   // back its single placeholder.
@@ -1202,8 +1214,11 @@ function dashShowOverview(){
 // Whether Escape may leave the open session (D19). Menus and dialogs close
 // on Escape in their own bubble-phase listeners; this runs in the capture
 // phase, before them, so an open one is still open here and wins. It never
-// consults aria-expanded: expanded rail groups and the log toggle make that
-// true nearly always. The page's modals are divs (#dashPicker, the delete
+// consults aria-expanded generically: expanded rail groups and the log toggle
+// make that true nearly always. The one targeted read is #dashMcpToggle,
+// because the MCP panel has no other open state: its visibility is that
+// toggle's aria-expanded, and its own Escape listener runs in bubble phase,
+// after this one. The page's modals are divs (#dashPicker, the delete
 // modal) and also <dialog>s opened with showModal(), so both are checked.
 function dashEscapeMayLeave(target){
   if (!_viewingSid) return false;
@@ -1216,12 +1231,16 @@ function dashEscapeMayLeave(target){
   if (typeof topbarSettingsMenu !== 'undefined' && open(topbarSettingsMenu)) return false;
   if (typeof wsFilterMenu !== 'undefined' && open(wsFilterMenu)) return false;
   if (open(document.getElementById('dashPicker'))) return false;
+  var mcpToggle = document.getElementById('dashMcpToggle');
+  if (mcpToggle && mcpToggle.getAttribute('aria-expanded') === 'true') return false;
   if (document.querySelectorAll('.acp-ws-delete-modal').length) return false;
   if (document.querySelectorAll('[role="dialog"]:not([hidden]), dialog[open]').length) return false;
   return true;
 }
+// No defaultPrevented check: a capture-phase listener on document runs
+// before every bubble-phase handler that could set it.
 document.addEventListener('keydown', function(e){
-  if (e.key !== 'Escape' || e.defaultPrevented) return;
+  if (e.key !== 'Escape') return;
   if (!dashEscapeMayLeave(e.target)) return;
   dashShowOverview();
 }, true);
@@ -1568,6 +1587,10 @@ function dashConnect(onReady){
     // create's answer cannot arrive on a dead socket; a later sid-less error
     // on the next one must not be read as its refusal.
     _dashCreateInFlight = false;
+    // A user close cannot complete on a dead socket: its session_closed will
+    // not arrive here. The tail's dashUpdateCloseButton() restores the button
+    // from "Closing…". 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D3
+    _dashUserClosedSid = null;
 
     // ---- SC7 (Phase 6): restore or tear down the full Phases 1-5 state ----
     // ---- surface a drop leaves behind -------------------------------------
@@ -2200,7 +2223,11 @@ function dashMaybeAttach(target, sid){
       dashRefreshComposerControls();
       if (state === 'held') {
         _dashOrigin = 'joined';
-        dashConnect(function(){ send('subscribe', {}, sid); });
+        // Re-checked when the socket opens: the user may have gone back to
+        // the Overview (or on to another session) while it was CONNECTING,
+        // and dashShowOverview() could send no unsubscribe then.
+        // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D18
+        dashConnect(function(){ if (_viewingSid !== sid) return; send('subscribe', {}, sid); });
       }
     })
     .catch(function(){}); // no live-attach on a failed peek — static transcript stands as-is
@@ -3459,7 +3486,21 @@ function dashHandle(frame){
       }
       return;
     }
-    if (sid !== _viewingSid) return;
+    if (sid !== _viewingSid) {
+      // A `session` frame is a private reply to this socket's own request,
+      // so the server has just attached this socket to `sid`. If the page is
+      // on the Overview with nothing in flight, nobody is watching it:
+      // release it (D18). Not while another session is on screen, loading or
+      // being created: the page's next subscribe/load/new may already have
+      // been processed, and an unsubscribe landing after it would detach
+      // that one instead. The server's attach() detaches first, so the next
+      // attach ends this watch on its own anyway.
+      // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+      if (sid && _viewingSid === null && !_dashLoadingSid && !_dashCreateInFlight) {
+        send('unsubscribe');
+      }
+      return;
+    }
     // Fix 1 (review, Phase 3 fix cycle): a `session` frame only ever arrives
     // as a private reply to THIS connection's own subscribe/load/new request
     // (acp.py's _handle_subscribe/_handle_load/_handle_new all `conn.send`,
@@ -4015,10 +4056,15 @@ function dashHandle(frame){
     dashUpdateCloseButton();
     // A close the user asked for with the Close button returns to the
     // Overview; any other close keeps the message above (D3). Before
-    // dashPickerRunPending(), so a pending create still shows its session.
-    // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    // dashPickerRunPending(), so the created session's frame lands after the
+    // return and shows it. dashShowOverview() goes through
+    // dashCloseIfAbandoned(), which drops _dashPendingCreate, so a pending
+    // close-then-create is saved across the call and put back for
+    // dashPickerRunPending() below. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
     if (sid && sid === _dashUserClosedSid) {
+      var pendingCreate = _dashPendingCreate;
       dashShowOverview();
+      _dashPendingCreate = pendingCreate;
       _dashUserClosedSid = null;
     }
     dashRailRefreshSoon(); // session just released — update the dot promptly
@@ -4155,6 +4201,16 @@ function dashHandle(frame){
     // flag stuck true forever, since no other frame was coming to clear it
     // and dashStopBtn.disabled stays true while it is set.
     _dashStopInProgress = false;
+    // The user's Close was refused or failed (turn_in_progress,
+    // not_subscribed, nothing_to_close, session_loading, internal_error, ...):
+    // its session_closed is not coming, so the flag must not outlive it, and
+    // the button comes back from "Closing…". close_in_progress keeps both:
+    // that close is already running and its session_closed will follow.
+    // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D3
+    if (sid && sid === _dashUserClosedSid && !(payload && payload.code === 'close_in_progress')) {
+      _dashUserClosedSid = null;
+      dashUpdateCloseButton();
+    }
     // Fix 3 (review, Phase 3 fix cycle): several server-side error_frame()
     // calls omit sessionId entirely (bad_json/bad_envelope/bad_payload for a
     // frame unrelated to this steer -- acp.py's error_frame(code, message)
@@ -4290,6 +4346,10 @@ function dashHandle(frame){
     // no composer to restore, and the rail's create actions are the way on.
     if (_dashCreateInFlight && !sid) {
       _dashCreateInFlight = false;
+      // Shown even if the user went back to the Overview while it was being
+      // created, as the created branch does: the refusal is written into the
+      // pane. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+      dashShowPane();
       var createPane = document.getElementById('dashTranscript');
       if (createPane) createPane.textContent = '';
       addMessage('error', '[' + ((payload && payload.code) || 'error') + '] ' + errText);
