@@ -1,7 +1,7 @@
 # Dashboard Overview: Live Session Tails, Active Plans and Usage Insights
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phase 1 complete, Phases 2-5 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 1-2 complete, Phases 3-5 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the dashboard's empty Transcript panel with an Overview (live session tails, active plans, 14-day usage insights), reachable again after a session is opened
 > **Estimated effort**: 2-4 days
@@ -500,9 +500,21 @@ QA (2026-09-25, live, after a restart the user granted for this plan): PASS, 15/
   - `tests/acp_page.test.mjs`: an adversarial render test feeding `<img src=x onerror=…>` as title, detail and tracker notes, asserting no element or attribute is created from it.
 
 **Exit criteria**:
-- [ ] `pytest tests/test_web.py -k OverviewPlans --timeout=300` and `node tests/acp_page.test.mjs` pass.
-- [ ] After a **user-approved restart**, the live Overview lists exactly the In Progress and Complete non-`done/` plans in rail-visible workspaces, comparing against a script that globs the same folders. It includes agent-playbook's `260924_QDREAM_COST_AND_SIGNAL_REWORK` with a `done/total` taken from its current tracker.
-- [ ] Expanding a row shows its tracker rows. `stale` appears only on In Progress plans unchanged for more than 7 days.
+- [x] `pytest tests/test_web.py -k OverviewPlans --timeout=300` and `node tests/acp_page.test.mjs` pass.
+- [x] After a **user-approved restart**, the live Overview lists exactly the In Progress and Complete non-`done/` plans in rail-visible workspaces, comparing against a script that globs the same folders. It includes agent-playbook's `260924_QDREAM_COST_AND_SIGNAL_REWORK` with a `done/total` taken from its current tracker.
+- [x] Expanding a row shows its tracker rows. `stale` appears only on In Progress plans unchanged for more than 7 days.
+
+**Implementation (2026-09-25, code: d198d70)**
+
+Commit d198d70 fills the Overview's Active plans section. The new `src/power_atlas/overview.py` (no `web` import) provides `scan_plans(workspaces, deadline_s=2.0)`, which reads only the top-level `plans/*.md` files of each `(cwd, name)` workspace (excluding `done/`) and skips `ROADMAP.md` and `CLOSED_INVESTIGATIONS.md`, and `parse_plan`, which reads the first Status line, keeps only `In Progress` and `Complete`, takes the detail after the first ` — ` or ` - `, collects the numbered `## Progress Tracker` rows with status normalised to done, in_progress, pending or other, and otherwise counts the distinct `### Phase N` headings. Plans are sorted In Progress first, newest first. Reads follow D21 (UNC and relative cwds rejected by a string check before any filesystem call, a between-cwd deadline, files over 1 MiB skipped, `errors="replace"`, per-file error isolation), and parsed files are memoised per path on `(mtime_ns, size)` with eviction of paths not seen by a complete scan (D22). In `src/power_atlas/web.py`, `_overview_workspaces()` applies the rail's filters (available and enabled providers, de-duplication by `data._normalize_path`, the hidden tag), `_overview_summary()` reuses the scan for 30 s (D23), and `api_dashboard_overview_summary` serves `GET /api/dashboard/overview/summary` from a thread with `Cache-Control: no-store`, returning `usage: None, usage_state: "cold"`; the route is not in `_REMOTE_ALLOWED_PATHS`. In `index.html`, `dashOverviewStart`/`dashOverviewStop` drive `dashOverviewRefreshSummary` (one request in flight, through `dashOverviewFetch`), `dashOverviewPoll` runs from the rail's existing 60 s poll and visibilitychange handler, and `dashOvRenderPlans`/`dashOvPlanRow` build DOM with `textContent` only, a clamped numeric bar width and tracker classes from a fixed map; rows with tracker rows expand in place, and the empty state reads "No active plans". `style.css` adds the row, badge, bar and tracker styles with the `[hidden]` pair. Tests: `TestOverviewPlans` in `tests/test_web.py`, and seven "dashboard overview plans" checks (including the adversarial `<img onerror>` render test) in `tests/acp_page.test.mjs`.
+
+**Implementation (2026-09-25, code: 0c87284) — review fixes**
+
+The Status parser no longer runs a backtracking regex over unbounded text: the value is cut to 500 characters and a trailing comment is stripped with `rstrip`/`endswith`/`rfind`. The scan checks its deadline before every file, skips a `plans` folder whose `realpath` is a network share (`_resolves_to_unc`, which treats `\\?\C:` as local), uses `lstat` and never follows symlinks, and caps the read in bytes. The tracker vocabulary now covers "not started" (pending) and "implemented…"/"review pending" (in progress), and an en dash is accepted as the Status separator. `_overview_summary` holds `_overview_plans_lock` across check, scan and store, so concurrent cold requests share one scan. `progress.current` gained a `state` field: "in_progress" for a real in-progress row, "next" for the first row not yet done (null when all are done). Its only reader, `dashOvPlanRow`, shows "Phase N in progress" only for "in_progress" and "Next: phase N" otherwise. The workspace chip's `title` holds the full cwd, and `_dashOvPlanOpen` is pruned to the rendered keys. New tests cover each fix; the fixes for the regex, the single-flight, the 30 s expiry, the "next" fallback and the stray-byte read were mutation-verified.
+
+Tests: node 860 passed; pytest 2675 passed, 2 skipped.
+
+QA (2026-09-25, live, after a restart the user granted for this plan): PASS, 9/9 checks. The summary route answers 403 without the cookie and 200 with `Cache-Control: no-store`. The listed plans equal an independent glob of `plans/*.md` Status lines over the rail's de-duplicated, non-hidden workspaces: 7 plans, none missing, none extra. `stale` appears only on the two In Progress meeting_transcriber plans (8 and 9 days old), and "Ready to close" only on the two Complete plans. agent-playbook's `260924_QDREAM_COST_AND_SIGNAL_REWORK` shows 9/13, matching its tracker, with "Next: phase 10". The UI renders one row per plan; expanding the QDREAM row shows its 13 tracker rows and collapsing hides them. No page errors.
 
 ### Phase 3: Live now tiles [QA]
 **Goal**: Up to 8 live-session tiles with the rail's liveness and filters, 2 s tails, the All/PowerAtlas filter, and click-to-open.
@@ -770,7 +782,7 @@ Changes:
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
 | 1 | Overview shell, navigation, detach | Done | code 11f444b, 8b7fe7a, 9c67735 |
-| 2 | Active plans | Pending | restart |
+| 2 | Active plans | Done | code d198d70, 0c87284 |
 | 3 | Live now tiles | Pending | restart |
 | 4 | Usage insights | Pending | restart |
 | 5 | Docs, roadmap and full QA | Pending | |
@@ -790,6 +802,19 @@ Phase 1:
 9. `_dashUserClosedSid` is cleared on a refused or failed close (except `close_in_progress`) and on socket drop. A late `session` frame on the idle Overview gets an `unsubscribe`, and the deferred subscribe re-checks `_viewingSid`. Reason: Phase 1 review findings 1-2; a stale flag or a subscribe landing after Home left the session watched, breaking D18.
 10. Escape with the sub-agent view open closes that view first; a second Escape returns to the Overview. Reason: user decision on 2026-09-25 ("When a sub-agent's transcript is open inside a session, what should Escape do?" answered "Close sub-agent first").
 11. The node harness gains `El.cloneNode(deep)` and wires the real `initMcpIndicatorDom()`, and the `dashMaybeAttach` sentinel appends the real `dashDesc` source. Reason: the placeholder is restored by cloning, and the new checks need the real code rather than stubs.
+
+Phase 2:
+
+1. `scan_plans` takes an optional `now` keyword, used by the stale tests. Reason: a deterministic stale boundary (exactly 7 days is not stale; 7 days + 1 s is).
+2. The 60 s summary refresh reuses the rail's existing `setInterval` and visibilitychange handler through `dashOverviewPoll()`, gated on the Overview being active, instead of a timer owned by `dashOverviewStart`. Reason: SC-5 says Plans and Usage refresh "with the existing 60 s rail poll".
+3. The plans body div has `id="dashOvPlansBody"`. Reason: the node harness's element map is keyed by id.
+4. A failed first load shows "Could not load plans."; a failed later refresh keeps the rows already drawn. A 403 still goes through the signed-out path. Reason: the spec did not cover failure.
+5. A plan with no tracker rows renders its head as a `<div>` without `aria-expanded`. Reason: it has nothing to expand. Expanded rows stay expanded across the 60 s re-render, and the expand-state map is pruned to the rendered plans.
+6. The workspace list also drops providers missing from `data.available_providers()`. Reason: matches the rail route (available ∩ enabled).
+7. `progress.current` carries a `state` ("in_progress" or "next"), falling back to the first row not yet done, and the bar reads "Next: phase N" for the fallback. Reason: real trackers seldom mark a row In Progress, so the SC-6 phase label was empty on most plans (review finding).
+8. Beyond D21: the Status value is capped at 500 characters and its comment stripped without a regex; the deadline is checked per file; a `plans` folder resolving to a UNC path is skipped; symlinks are not followed; the read is capped in bytes. A dead mapped or `subst` drive remains a recorded residual risk. Reason: security review findings (regex hang, dead-share stalls, read TOCTOU).
+9. D23's single-flight is a lock held across check, scan and store. Reason: the simplest correct single-flight; waits are bounded by the 2 s scan deadline and run on worker threads.
+10. The workspace chip's `title` is the full cwd. Reason: two workspaces can share a basename (two "PowerAtlas" folders exist on this machine).
 
 ## Follow-up Work (Deferred)
 
@@ -881,6 +906,32 @@ Implementation health: Green.
 | 11 | Low | Escape with the sub-agent view open left the whole session rather than closing the view. | Fixed -- per the user's decision, Escape closes the sub-agent view first (9c67735). |
 
 Cycle 2 was not run: the user capped review at 1 cycle per phase ("1 qreview cycle per phase", `/qdev` invocation, 2026-09-25). The Step 9 final review covers the fixes. Findings 1, 4, 6 and 7 were raised by both personas; #4 was rated Medium by the Senior engineer and Low by the Reliability engineer, merged at Medium. Finding 7 is Step 7 bookkeeping.
+
+### 2026-09-25 -- Implementation Review (after Phase 2, persona: Security auditor, Senior engineer)
+
+Implementation health: Green.
+16 findings (1 High, 4 Medium, 11 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | The Status-line comment regex ran in quadratic time on long whitespace, so one crafted plan file could hold executor threads for minutes per request. | Fixed -- Status capped at 500 chars, comment stripped without regex, 100k-space time-bound test (0c87284). |
+| 2 | Medium | D23 promised server-side single-flight, but concurrent cold requests each ran a full scan. | Fixed -- lock held across check, scan and store; concurrent test asserts one scan (0c87284). |
+| 3 | Medium | Mapped drives or junctions to dead shares passed the string check, and the deadline was checked only between cwds. | Fixed -- per-file deadline and realpath-UNC skip; dead mapped drives recorded as residual risk (0c87284). |
+| 4 | Medium | The 30 s reuse test never checked expiry, so a never-expiring cache would pass. | Fixed -- test ages the cache 31 s and asserts a second scan (0c87284). |
+| 5 | Medium | On real trackers `current` was usually null, so the bar never named a phase (SC-6). | Fixed -- falls back to the first not-done row, labelled "Next: phase N" (0c87284). |
+| 6 | Low | "Not started" and "implemented / review pending" tracker statuses showed as "Other". | Fixed -- mapped to pending and in progress, with a table test (0c87284). |
+| 7 | Low | `scan_plans(now=…)` had no caller. | Fixed -- used by the stale tests, which now pin the 7-day boundary (0c87284). |
+| 8 | Low | The 60 s poll wiring through the rail's interval had no test. | Fixed -- node check fires the registered interval with the Overview active and inactive (0c87284). |
+| 9 | Low | No test pinned `errors="replace"`; a strict decode would silently drop a plan with one stray byte. | Fixed -- stray-byte plan is listed with U+FFFD, mutation-verified (0c87284). |
+| 10 | Low | The size cap was checked on stat but the read was unbounded (TOCTOU with an appending agent). | Fixed -- binary read capped at the limit plus one byte (0c87284). |
+| 11 | Low | Symlinked plan files were followed, reading targets outside the workspace. | Fixed -- `lstat` and regular-file check, with a test (0c87284). |
+| 12 | Low | Two workspaces with the same basename got identical chips. | Fixed -- chip tooltip holds the full cwd (0c87284). |
+| 13 | Low | Memo eviction on complete scans and the available-provider filter had no test. | Fixed -- one assertion each (0c87284). |
+| 14 | Low | A Status line separated by an en dash was silently excluded. | Fixed -- en dash accepted, with a test (0c87284). |
+| 15 | Low | The client expand-state map was never pruned. | Fixed -- pruned to the rendered plans (0c87284). |
+| 16 | Low | The plan's §9 held no Phase 2 divergences at the reviewed commit. | Fixed -- recorded in §9 by the Step 7 plan update. |
+
+Cycle 2 was not run, per the user's 1-cycle cap. Finding 9 was raised by both personas. The fix sub-agent was interrupted once by an API session limit before editing any file, and was resumed with its context intact. The Senior engineer's read-only parity check over 47 real workspaces found every inclusion, exclusion, count and badge correct.
 
 ## Harness Improvement Opportunities
 
