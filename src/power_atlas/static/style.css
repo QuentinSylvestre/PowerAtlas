@@ -1276,6 +1276,37 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .dash-ov-section { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 10px 14px 12px; }
 .dash-ov-title { margin: 0 0 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
 .dash-ov-loading { font-size: 12px; font-style: italic; color: var(--text-dim); }
+.dash-ov-empty { font-size: 12px; color: var(--text-dim); }
+/* Active plans: one row per plan, its head a button when it has tracker rows
+   to expand. The tracker list is toggled with `hidden`, and its display rule
+   would beat the UA's [hidden], hence the explicit pair.
+   260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE */
+.dash-ov-plans { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dash-ov-plan-head { display: flex; flex-direction: column; gap: 3px; width: 100%; min-width: 0; padding: 6px 8px; border: 0; border-radius: var(--radius-sm); background: none; color: var(--text); font: inherit; text-align: left; }
+button.dash-ov-plan-head { cursor: pointer; }
+button.dash-ov-plan-head:hover { background: var(--surface-hover); }
+.dash-ov-plan-top { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; }
+.dash-ov-ws { flex-shrink: 0; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border-radius: 4px; background: var(--surface); color: var(--text-muted); font-size: 11px; }
+.dash-ov-plan-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.dash-ov-badge { flex-shrink: 0; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+.dash-ov-badge-progress { background: var(--accent-dim); color: var(--accent); }
+.dash-ov-badge-ready { background: rgba(74, 222, 128, 0.14); color: var(--success); }
+.dash-ov-badge-stale { background: rgba(245, 158, 11, 0.14); color: var(--amber); }
+.dash-ov-plan-count, .dash-ov-plan-age { flex-shrink: 0; font-size: 11px; color: var(--text-dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dash-ov-plan-bar { display: block; height: 3px; border-radius: 2px; background: var(--surface); overflow: hidden; }
+.dash-ov-plan-fill { display: block; height: 100%; background: var(--accent); }
+.dash-ov-plan-phase, .dash-ov-plan-detail { font-size: 11.5px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-ov-plan-detail { color: var(--text-dim); }
+.dash-ov-tracker { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 6px; padding: 0 8px 0 16px; list-style: none; }
+.dash-ov-tracker[hidden] { display: none; }
+.dash-ov-tr { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: var(--text-muted); min-width: 0; }
+.dash-ov-tr-id { flex-shrink: 0; width: 1.5em; text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.dash-ov-tr-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-ov-tr-status { flex-shrink: 0; font-size: 10.5px; font-weight: 600; }
+.dash-ov-tr-notes { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.dash-ov-tr.is-done .dash-ov-tr-status { color: var(--success); }
+.dash-ov-tr.is-active .dash-ov-tr-status { color: var(--accent); }
+.dash-ov-tr.is-pending .dash-ov-tr-status, .dash-ov-tr.is-other .dash-ov-tr-status { color: var(--text-dim); }
 /* Home: back to the Overview, shown only while a session is open. Its
    inline-flex would beat the UA's [hidden] rule, hence the explicit pair. */
 .dash-home-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; }

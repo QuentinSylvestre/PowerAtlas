@@ -46,6 +46,7 @@ from .config import (load_config, save_config, ConfigUnreadableError,
                      local_secret_status, rotate_local_secret,
                      ACP_PERMISSION_MODES)
 from . import agent_profile, autostart, data, icons, launcher, notifications, presence
+from . import overview
 from . import permission_rows
 from .status_classifier import get_semantic_status, SemanticStatus
 
@@ -3295,6 +3296,76 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
         held, capacity, providers, True, tag, time_filter, sort, q)
+
+
+# --- The dashboard Overview's summary ------------------------------------
+#
+# 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE. The Overview is what the
+# dashboard's right panel shows while no session is open. This route feeds its
+# Active plans section (SC-6) and, from a later step of the same plan, its
+# Usage section; the page polls it with the rail's 60 s refresh. Loopback-only
+# (SC-10): it is deliberately absent from `_REMOTE_ALLOWED_PATHS`, so the
+# `pa_local` cookie gate covers it and a remote peer is refused.
+
+_DASHBOARD_OVERVIEW_SUMMARY_PATH = "/api/dashboard/overview/summary"
+
+# How long a plan scan is reused (D23). Home/Escape toggles and several open
+# tabs would otherwise rescan every workspace's `plans/` on each entry.
+_OVERVIEW_PLANS_REUSE_SECONDS = 30.0
+# (monotonic time of the scan, its result). Reset by the tests.
+_overview_plans_cache: list = [0.0, None]
+_overview_plans_lock = threading.Lock()
+
+
+def _overview_workspaces() -> list[tuple[str, str]]:
+    """`(cwd, name)` for every workspace the rail can show, once each.
+
+    The rail's own exclusions (D8): providers that are unavailable or disabled
+    in config, and workspaces tagged `hidden`. Rows are filtered by provider
+    **before** de-duplication, so a folder with sessions under both a disabled
+    and an enabled provider is kept. Blocking; runs off the loop.
+    """
+    from .config import get_workspace_settings
+
+    config = load_config()
+    providers = frozenset(p for p in data.available_providers() if _enabled(config, p))
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for cwd, _count, _updated, prov in data.discover_workspaces_with_counts(None):
+        if prov not in providers:
+            continue
+        key = data._normalize_path(cwd)
+        if key in seen:
+            continue
+        seen.add(key)
+        if "hidden" in get_workspace_settings(config, cwd)["tags"]:
+            continue
+        out.append((cwd, Path(cwd).name or cwd))
+    return out
+
+
+def _overview_summary() -> dict:
+    """The summary payload. Blocking; runs off the loop."""
+    now = time.monotonic()
+    with _overview_plans_lock:
+        at, plans = _overview_plans_cache
+        fresh = plans is not None and now - at < _OVERVIEW_PLANS_REUSE_SECONDS
+    if not fresh:
+        plans = overview.scan_plans(_overview_workspaces())
+        with _overview_plans_lock:
+            _overview_plans_cache[:] = [time.monotonic(), plans]
+    return {"plans": plans, "usage": None, "usage_state": "cold"}
+
+
+@app.get(_DASHBOARD_OVERVIEW_SUMMARY_PATH)
+async def api_dashboard_overview_summary(response: Response):
+    """Active plans across the rail-visible workspaces, for the Overview.
+
+    `plans` is `overview.scan_plans`'s list. `usage` and `usage_state` are the
+    Usage section's slot, `None` and `"cold"` until that section is built.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(_overview_summary)
 
 
 # --- The create flow's workspace list ------------------------------------

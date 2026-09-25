@@ -13272,6 +13272,15 @@ function loadDashPicker(opts = {}) {
   for (const id of ["dashOverview", "dashOvLive", "dashOvPlans", "dashOvUsage"]) {
     byId.set(id, new El("div"));
   }
+  // The Active plans body, holding the markup's "Loading…" line until the
+  // first summary lands. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+  byId.set("dashOvPlansBody", new El("div"));
+  {
+    const loading = new El("div");
+    loading.className = "dash-ov-loading";
+    loading.textContent = "Loading…";
+    byId.get("dashOvPlansBody").appendChild(loading);
+  }
   // The MCP status indicator, wired through composer-chrome.js's
   // initMcpIndicatorDom() below as index.html does. The Overview resets it
   // on leaving a session, and the Escape guard reads the toggle's
@@ -17146,6 +17155,165 @@ check("dashboard overview: a close-then-create pending behind the user's Close s
   assertEqual(news.length, 1, "the pending create must not be dropped by the Overview's teardown");
   assertEqual(news[0].payload.cwd, "/proj");
   assertEqual(p.sandbox._dashPendingCreate, null, "consumed once");
+});
+
+// ---- Overview: Active plans ------------------------------------------------
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE (SC-6, D23, D26). The
+// renderers run for real over the harness DOM, whose innerHTML sink throws.
+
+const OV_XSS = '<img src=x onerror="alert(1)">';
+
+/** A summary fetch the check controls: each call is recorded and answered
+ *  with `body`, or left pending when `body` is undefined. */
+function ovSummaryFetch(p, body) {
+  const calls = [];
+  p.sandbox.fetch = (url) => {
+    calls.push(String(url));
+    if (body === undefined) return new Promise(() => {});
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+  };
+  return calls;
+}
+
+function ovPlan(over = {}) {
+  return Object.assign({
+    cwd: "C:\\ws\\proj", workspace: "proj", file: "260920_ALPHA.md", title: "ALPHA",
+    state: "In Progress", detail: "Phase 2 underway", mtime: new Date(Date.now() - 5 * 60000).toISOString(),
+    stale: false, ready_to_close: false,
+    progress: { done: 1, total: 3, current: { id: "2", name: "Second" } },
+    tracker: [
+      { id: "1", name: "First", status: "done", notes: "code abc" },
+      { id: "2", name: "Second", status: "in_progress", notes: "" },
+      { id: "3", name: "Third", status: "pending", notes: "" },
+    ],
+  }, over);
+}
+
+function ovPlanRows(p) {
+  return p.el("dashOvPlansBody").querySelectorAll(".dash-ov-plan");
+}
+
+check("dashboard overview plans: entering the Overview fetches the summary once, one request in flight (D23)", async () => {
+  const p = loadDashPicker();
+  const calls = ovSummaryFetch(p); // never answers
+  await dashOpenFixture(p);
+  const before = calls.filter((u) => u === "/api/dashboard/overview/summary").length;
+  p.sandbox.dashShowOverview();
+  p.sandbox.dashOverviewRefreshSummary();
+  p.sandbox.dashOverviewPoll();
+  const after = calls.filter((u) => u === "/api/dashboard/overview/summary").length;
+  assertEqual(after - before, 1, "a second request must wait for the first");
+});
+
+check("dashboard overview plans: the rail poll refreshes plans only while the Overview is showing", async () => {
+  const p = loadDashPicker();
+  const calls = ovSummaryFetch(p, { plans: [] });
+  p.sandbox.dashOverviewStart();
+  await p.settle(); await p.settle();
+  const n = calls.length;
+  p.sandbox.dashOverviewPoll();
+  await p.settle(); await p.settle();
+  assertEqual(calls.length, n + 1, "the Overview is showing: the poll refreshes");
+  p.sandbox.dashShowPane();
+  p.sandbox.dashOverviewPoll();
+  assertEqual(calls.length, n + 1, "a session is open: the poll must not fetch plans");
+});
+
+check("dashboard overview plans: an empty list reads No active plans", async () => {
+  const p = loadDashPicker();
+  ovSummaryFetch(p, { plans: [], usage: null, usage_state: "cold" });
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  assertEqual(p.el("dashOvPlansBody").textContent, "No active plans");
+});
+
+check("dashboard overview plans: a row shows workspace, title, badges, progress, phase, detail and age", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderPlans([
+    ovPlan({ stale: true }),
+    ovPlan({ file: "B.md", title: "BETA", state: "Complete", ready_to_close: true,
+             progress: { phases: 4 }, tracker: [], detail: "" }),
+  ]);
+  const [a, b] = ovPlanRows(p);
+  assertEqual(a.querySelector(".dash-ov-ws").textContent, "proj");
+  assertEqual(a.querySelector(".dash-ov-plan-title").textContent, "ALPHA");
+  assertEqual(a.querySelector(".dash-ov-badge-progress").textContent, "In progress");
+  assertEqual(a.querySelector(".dash-ov-badge-stale").textContent, "stale");
+  assertEqual(a.querySelector(".dash-ov-plan-count").textContent, "1/3");
+  assertEqual(a.querySelector(".dash-ov-plan-fill").style.width, (1 / 3 * 100) + "%");
+  assertEqual(a.querySelector(".dash-ov-plan-phase").textContent, "Phase 2 in progress: Second");
+  assertEqual(a.querySelector(".dash-ov-plan-detail").textContent, "Phase 2 underway");
+  assertEqual(a.querySelector(".dash-ov-plan-age").textContent, "5 min ago");
+  assertEqual(b.querySelector(".dash-ov-badge-ready").textContent, "Ready to close");
+  assertEqual(b.querySelector(".dash-ov-badge-stale"), null, "stale only when the server says so");
+  assertEqual(b.querySelector(".dash-ov-plan-phase").textContent, "4 phases");
+  assertEqual(b.querySelector(".dash-ov-plan-bar"), null, "no tracker, no bar");
+  assertEqual(b.querySelector(".dash-ov-tracker"), null, "no tracker rows to expand");
+});
+
+check("dashboard overview plans: clicking a row expands its tracker rows, and a refresh keeps it open", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderPlans([ovPlan()]);
+  let [row] = ovPlanRows(p);
+  const head = row.querySelector(".dash-ov-plan-head");
+  assertEqual(row.querySelector(".dash-ov-tracker").hidden, true, "collapsed at first");
+  assertEqual(head.getAttribute("aria-expanded"), "false");
+  head.dispatch("click");
+  assertEqual(row.querySelector(".dash-ov-tracker").hidden, false);
+  assertEqual(head.getAttribute("aria-expanded"), "true");
+  const items = row.querySelectorAll(".dash-ov-tr");
+  assertEqual(items.length, 3);
+  assertEqual(items[0].querySelector(".dash-ov-tr-status").textContent, "Done");
+  assert(items[1].classList.contains("is-active"));
+  p.sandbox.dashOvRenderPlans([ovPlan()]);
+  [row] = ovPlanRows(p);
+  assertEqual(row.querySelector(".dash-ov-tracker").hidden, false, "the refresh must not fold it back");
+  row.querySelector(".dash-ov-plan-head").dispatch("click");
+  assertEqual(row.querySelector(".dash-ov-tracker").hidden, true);
+});
+
+check("dashboard overview plans: markup in a title, detail or tracker note stays text (D26)", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderPlans([ovPlan({
+    workspace: OV_XSS, title: OV_XSS, detail: OV_XSS, mtime: OV_XSS, file: OV_XSS,
+    progress: { done: OV_XSS, total: "3); background:url(x", current: { id: OV_XSS, name: OV_XSS } },
+    tracker: [{ id: OV_XSS, name: OV_XSS, status: OV_XSS, notes: OV_XSS },
+              { id: "2", name: "n", status: "__proto__", notes: "" }],
+  })]);
+  const body = p.el("dashOvPlansBody");
+  const nodes = body.descendants();
+  const allowed = new Set(["UL", "LI", "BUTTON", "SPAN", "OL", "DIV"]);
+  for (const n of nodes) {
+    assert(allowed.has(n.tagName), `no element may come from the data, got <${n.tagName}>`);
+    for (const name of Object.keys(n._attrs)) {
+      assertEqual(name, "aria-expanded", `no attribute may come from the data, got ${name}`);
+    }
+    for (const key of Object.keys(n.style)) {
+      assertEqual(key, "width", `only the bar width is styled, got ${key}`);
+      assert(/^\d+(\.\d+)?%$/.test(n.style.width), `the width must be a clamped number, got ${n.style.width}`);
+    }
+  }
+  const [row] = ovPlanRows(p);
+  assertEqual(row.querySelector(".dash-ov-plan-title").textContent, OV_XSS, "shown as text");
+  assertEqual(row.querySelector(".dash-ov-plan-detail").textContent, OV_XSS, "shown as text");
+  assertEqual(row.querySelector(".dash-ov-plan-fill").style.width, "0%");
+  const items = row.querySelectorAll(".dash-ov-tr");
+  assertEqual(items[0].querySelector(".dash-ov-tr-notes").textContent, OV_XSS);
+  assertEqual(items[0].className, "dash-ov-tr is-other", "an unknown status gets the fixed fallback class");
+  assertEqual(items[1].className, "dash-ov-tr is-other", "a prototype key is not a status");
+  assertEqual(items[0].querySelector(".dash-ov-tr-status").textContent, "Other");
+});
+
+check("dashboard overview plans: a failed first load says so, a failed refresh keeps the rows", async () => {
+  const p = loadDashPicker();
+  p.sandbox.fetch = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  assertEqual(p.el("dashOvPlansBody").textContent, "Could not load plans.");
+  p.sandbox.dashOvRenderPlans([ovPlan()]);
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  assertEqual(ovPlanRows(p).length, 1, "a failed refresh must not wipe the list");
 });
 
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {

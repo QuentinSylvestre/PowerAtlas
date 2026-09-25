@@ -29822,3 +29822,299 @@ class TestAcpMcpStatusNotification:
             assert mcp_frames[0]["payload"]["servers"] == servers
         finally:
             self._cleanup_registry(acp_mod)
+
+
+# ---------------------------------------------------------------------------
+# 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE -- the Overview's Active
+# plans section (SC-6) and its summary route (SC-10). Every workspace here is
+# a `tmp_path` folder; discovery is patched so nothing reads the real stores.
+# ---------------------------------------------------------------------------
+
+_OV_TRACKER_PLAN = """# Alpha
+
+> **Date**: 2026-09-20
+> **Status**: In Progress — Phase 2 of 3 underway  <!-- Status grammar: x -->
+
+### Phase 1: One
+### Phase 2: Two
+### Phase 3: Three
+
+## Progress Tracker
+
+| # | Phase/Task | Status | Notes |
+|---|---|---|---|
+| 1 | First | Done | code abc |
+| 2 | Second | In Progress | half |
+| 3 | Third | Pending | |
+| U | User follow-up | Pending | not a phase |
+
+## Review Log
+
+| 9 | Not tracker | Done | outside the section |
+"""
+
+_OV_PHASES_PLAN = """# Beta
+
+> **Status**: In Progress
+
+### Phase 1: One
+### Phase 2: Two
+### Phase 2: Two again
+"""
+
+_OV_COMPLETE_PLAN = """> **Status**: Complete - all phases done
+"""
+
+
+class TestOverviewPlans:
+    """`overview.scan_plans` and `GET /api/dashboard/overview/summary`."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self):
+        from power_atlas import overview, web as web_mod
+        overview._plan_memo.clear()
+        web_mod._overview_plans_cache[:] = [0.0, None]
+        yield
+        overview._plan_memo.clear()
+        web_mod._overview_plans_cache[:] = [0.0, None]
+
+    @staticmethod
+    def _ws(root, name, files):
+        ws = root / name
+        (ws / "plans").mkdir(parents=True)
+        for fname, body in files.items():
+            p = ws / "plans" / fname
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(body, bytes):
+                p.write_bytes(body)
+            else:
+                p.write_text(body, encoding="utf-8")
+        return ws
+
+    @staticmethod
+    def _scan(*workspaces, **kw):
+        from power_atlas import overview
+        return overview.scan_plans([(str(w), w.name) for w in workspaces], **kw)
+
+    def test_tracker_rows_skip_the_non_numeric_row(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {"260920_ALPHA_PLAN.md": _OV_TRACKER_PLAN})
+        [plan] = self._scan(ws)
+        assert plan["title"] == "ALPHA PLAN"
+        assert plan["workspace"] == "proj"
+        assert plan["cwd"] == str(ws)
+        assert plan["file"] == "260920_ALPHA_PLAN.md"
+        assert plan["state"] == "In Progress"
+        assert plan["detail"] == "Phase 2 of 3 underway"
+        assert [r["id"] for r in plan["tracker"]] == ["1", "2", "3"]
+        assert [r["status"] for r in plan["tracker"]] == ["done", "in_progress", "pending"]
+        assert plan["tracker"][0]["notes"] == "code abc"
+        assert plan["progress"] == {"done": 1, "total": 3,
+                                    "current": {"id": "2", "name": "Second"}}
+        assert plan["ready_to_close"] is False and plan["stale"] is False
+
+    def test_no_tracker_counts_distinct_phase_headings(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {"B.md": _OV_PHASES_PLAN})
+        [plan] = self._scan(ws)
+        assert plan["progress"] == {"phases": 2}
+        assert plan["tracker"] == []
+        assert plan["detail"] == ""
+
+    def test_no_tracker_and_no_phases_gives_state_only(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {"C.md": _OV_COMPLETE_PLAN})
+        [plan] = self._scan(ws)
+        assert plan["progress"] is None
+        assert plan["state"] == "Complete"
+        assert plan["detail"] == "all phases done"
+
+    def test_no_status_line_and_draft_are_skipped(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {
+            "none.md": "# No status\n\n### Phase 1\n",
+            "draft.md": "> **Status**: Draft — not yet\n",
+            "exploring.md": "> **Status**: Exploring\n",
+        })
+        assert self._scan(ws) == []
+
+    def test_complete_is_ready_to_close_and_never_stale(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {"C.md": _OV_COMPLETE_PLAN})
+        old = time.time_ns() - 30 * 24 * 3600 * 10**9
+        os.utime(ws / "plans" / "C.md", ns=(old, old))
+        [plan] = self._scan(ws)
+        assert plan["ready_to_close"] is True
+        assert plan["stale"] is False
+
+    def test_eight_day_old_in_progress_plan_is_stale(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {"old.md": _OV_PHASES_PLAN,
+                                         "new.md": _OV_PHASES_PLAN})
+        old = time.time_ns() - 8 * 24 * 3600 * 10**9
+        os.utime(ws / "plans" / "old.md", ns=(old, old))
+        plans = {p["file"]: p for p in self._scan(ws)}
+        assert plans["old.md"]["stale"] is True
+        assert plans["new.md"]["stale"] is False
+
+    def test_order_is_in_progress_first_then_newest(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {"a.md": _OV_PHASES_PLAN, "b.md": _OV_PHASES_PLAN,
+                                         "c.md": _OV_COMPLETE_PLAN})
+        base = time.time_ns()
+        for name, age in (("a.md", 3), ("b.md", 1), ("c.md", 0)):
+            t = base - age * 10**9
+            os.utime(ws / "plans" / name, ns=(t, t))
+        assert [p["file"] for p in self._scan(ws)] == ["b.md", "a.md", "c.md"]
+
+    def test_done_subfolder_and_non_plan_files_are_ignored(self, tmp_path):
+        ws = self._ws(tmp_path, "proj", {
+            "done/archived.md": _OV_COMPLETE_PLAN,
+            "ROADMAP.md": _OV_PHASES_PLAN,
+            "closed_investigations.md": _OV_PHASES_PLAN,
+            "notes.txt": _OV_PHASES_PLAN,
+        })
+        assert self._scan(ws) == []
+
+    def test_non_utf8_and_oversized_files_are_skipped(self, tmp_path):
+        from power_atlas import overview
+        ws = self._ws(tmp_path, "proj", {
+            # UTF-16: decodes with replacement characters and NULs, so no
+            # Status line matches and the file is skipped rather than raising.
+            "utf16.md": _OV_PHASES_PLAN.encode("utf-16"),
+            "big.md": (_OV_PHASES_PLAN + "x" * overview.PLAN_MAX_BYTES).encode(),
+            "ok.md": _OV_COMPLETE_PLAN,
+        })
+        assert [p["file"] for p in self._scan(ws)] == ["ok.md"]
+
+    def test_an_unreadable_file_skips_only_that_file(self, tmp_path, monkeypatch):
+        from power_atlas import overview
+        ws = self._ws(tmp_path, "proj", {"bad.md": _OV_PHASES_PLAN, "ok.md": _OV_COMPLETE_PLAN})
+        real = overview._read_plan_file
+
+        def flaky(path):
+            if path.name == "bad.md":
+                raise PermissionError("locked")
+            return real(path)
+
+        monkeypatch.setattr(overview, "_read_plan_file", flaky)
+        assert [p["file"] for p in self._scan(ws)] == ["ok.md"]
+
+    def test_unc_and_relative_cwds_are_skipped_without_a_filesystem_call(self, monkeypatch):
+        from power_atlas import overview
+        calls = []
+        monkeypatch.setattr(overview.Path, "is_dir", lambda self: calls.append(self) or False)
+        assert overview.scan_plans([("\\\\server\\share\\proj", "proj"),
+                                    ("//server/share/proj", "proj"),
+                                    ("relative\\proj", "proj")]) == []
+        assert calls == []
+
+    def test_no_further_cwd_is_scanned_after_the_deadline(self, tmp_path):
+        a = self._ws(tmp_path, "a", {"p.md": _OV_PHASES_PLAN})
+        b = self._ws(tmp_path, "b", {"p.md": _OV_PHASES_PLAN})
+        plans = self._scan(a, b, deadline_s=0.0)
+        assert [p["workspace"] for p in plans] == ["a"], "the first cwd is always scanned"
+
+    def test_memo_reads_once_and_rereads_exactly_the_touched_file(self, tmp_path, monkeypatch):
+        from power_atlas import overview
+        ws = self._ws(tmp_path, "proj", {"a.md": _OV_PHASES_PLAN, "b.md": _OV_TRACKER_PLAN})
+        reads = []
+        real = overview._read_plan_file
+        monkeypatch.setattr(overview, "_read_plan_file",
+                            lambda path: reads.append(path.name) or real(path))
+        first = self._scan(ws)
+        assert sorted(reads) == ["a.md", "b.md"]
+        reads.clear()
+        assert self._scan(ws) == first
+        assert reads == [], "an unchanged file must not be read again"
+        st = (ws / "plans" / "a.md").stat()
+        bumped = st.st_mtime_ns + 5 * 10**9
+        os.utime(ws / "plans" / "a.md", ns=(bumped, bumped))
+        self._scan(ws)
+        assert reads == ["a.md"], "only the touched file is read again"
+
+    def test_memo_evicts_files_that_are_gone(self, tmp_path):
+        from power_atlas import overview
+        ws = self._ws(tmp_path, "proj", {"a.md": _OV_PHASES_PLAN, "b.md": _OV_PHASES_PLAN})
+        self._scan(ws)
+        assert len(overview._plan_memo) == 2
+        (ws / "plans" / "b.md").unlink()
+        self._scan(ws)
+        assert list(overview._plan_memo) == [str(ws / "plans" / "a.md")]
+
+    # --- the route ---------------------------------------------------------
+
+    @pytest.fixture
+    def workspaces(self, tmp_path, monkeypatch):
+        """Two workspaces with one plan each, discovered under claude-code."""
+        from power_atlas import data
+        shown = self._ws(tmp_path, "shown", {"s.md": _OV_PHASES_PLAN})
+        hidden = self._ws(tmp_path, "hidden", {"h.md": _OV_PHASES_PLAN})
+        rows = [(str(shown), 1, "", "claude-code"), (str(hidden), 1, "", "claude-code"),
+                # The same folder again under another provider: listed once.
+                (str(shown).upper() if sys.platform == "win32" else str(shown),
+                 1, "", "kiro-cli-v3")]
+        monkeypatch.setattr(data, "discover_workspaces_with_counts", lambda provider=None: rows)
+        monkeypatch.setattr(data, "available_providers", lambda: ["claude-code", "kiro-cli-v3"])
+        return shown, hidden
+
+    @staticmethod
+    def _config(**kw):
+        from power_atlas.config import Config
+        return Config(**kw)
+
+    def test_route_lists_plans_and_excludes_hidden_workspaces(self, client, workspaces):
+        shown, hidden = workspaces
+        with patch("power_atlas.web.load_config", return_value=self._config(
+                workspace_settings={str(hidden): {"tags": ["hidden"], "color": ""}})):
+            resp = client.get("/api/dashboard/overview/summary")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+        body = resp.json()
+        assert body["usage"] is None and body["usage_state"] == "cold"
+        assert [(p["workspace"], p["file"]) for p in body["plans"]] == [("shown", "s.md")]
+
+    def test_route_without_the_hidden_tag_lists_both(self, client, workspaces):
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            body = client.get("/api/dashboard/overview/summary").json()
+        assert sorted(p["workspace"] for p in body["plans"]) == ["hidden", "shown"]
+
+    def test_route_excludes_disabled_providers(self, client, workspaces, monkeypatch):
+        from power_atlas import data
+        shown, _hidden = workspaces
+        monkeypatch.setattr(data, "discover_workspaces_with_counts",
+                            lambda provider=None: [(str(shown), 1, "", "kiro-ide")])
+        monkeypatch.setattr(data, "available_providers", lambda: ["kiro-ide"])
+        with patch("power_atlas.web.load_config", return_value=self._config(
+                provider_settings={"kiro-ide": {"enabled": False}})):
+            body = client.get("/api/dashboard/overview/summary").json()
+        assert body["plans"] == []
+
+    def test_route_survives_bad_files(self, client, workspaces):
+        from power_atlas import overview
+        shown, _hidden = workspaces
+        (shown / "plans" / "bad.md").write_bytes(b"\xff\xfe\x00\x81 not utf-8 \x92")
+        (shown / "plans" / "big.md").write_bytes(b"x" * (overview.PLAN_MAX_BYTES + 1))
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            resp = client.get("/api/dashboard/overview/summary")
+        assert resp.status_code == 200
+        assert "bad.md" not in resp.text and "big.md" not in resp.text
+
+    def test_route_reuses_the_scan_for_30_seconds(self, client, workspaces, monkeypatch):
+        from power_atlas import overview
+        scans = []
+        real = overview.scan_plans
+        monkeypatch.setattr(overview, "scan_plans",
+                            lambda ws, **kw: scans.append(1) or real(ws, **kw))
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            client.get("/api/dashboard/overview/summary")
+            client.get("/api/dashboard/overview/summary")
+        assert len(scans) == 1
+
+    def test_route_refused_without_the_cookie(self, anonymous_client, client, workspaces):
+        assert _is_json_403(anonymous_client.get("/api/dashboard/overview/summary"))
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            assert client.get("/api/dashboard/overview/summary").status_code == 200
+
+    def test_route_refused_to_a_remote_peer(self, remote_enabled, workspaces):
+        status, body, _ = _peer_http("/api/dashboard/overview/summary", [_cookie_header()])
+        assert status == 403
+        assert b"s.md" not in body
+
+    def test_route_is_not_on_the_remote_surface(self):
+        from power_atlas import web as web_mod
+        assert web_mod._DASHBOARD_OVERVIEW_SUMMARY_PATH == "/api/dashboard/overview/summary"
+        assert web_mod._DASHBOARD_OVERVIEW_SUMMARY_PATH not in web_mod._REMOTE_ALLOWED_PATHS

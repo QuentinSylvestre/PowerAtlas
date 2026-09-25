@@ -506,7 +506,7 @@
       </section>
       <section class="dash-ov-section" id="dashOvPlans" aria-labelledby="dashOvPlansTitle">
         <h3 class="dash-ov-title" id="dashOvPlansTitle">Active plans</h3>
-        <div class="dash-ov-body"><div class="dash-ov-loading">Loading…</div></div>
+        <div class="dash-ov-body" id="dashOvPlansBody"><div class="dash-ov-loading">Loading…</div></div>
       </section>
       <section class="dash-ov-section" id="dashOvUsage" aria-labelledby="dashOvUsageTitle">
         <h3 class="dash-ov-title" id="dashOvUsageTitle">Usage</h3>
@@ -1132,10 +1132,21 @@ function dashSetPanelMode(mode){
   var home = document.getElementById('dashHome');
   if (home) home.hidden = overview;
 }
-// Start and stop the Overview's pollers. Nothing polls yet: the sections get
-// their data in the plan's later phases.
-function dashOverviewStart(){}
-function dashOverviewStop(){}
+// Start and stop the Overview's pollers. Starting fetches the summary at once;
+// after that the rail's own 60 s poll refreshes it through dashOverviewPoll(),
+// only while the Overview is showing and the tab is visible (SC-5).
+var _dashOverviewActive = false;
+function dashOverviewStart(){
+  _dashOverviewActive = true;
+  dashOverviewRefreshSummary();
+}
+function dashOverviewStop(){
+  _dashOverviewActive = false;
+}
+function dashOverviewPoll(){
+  if (!_dashOverviewActive || document.visibilityState === 'hidden') return;
+  dashOverviewRefreshSummary();
+}
 // Every Overview request goes through here. A plain fetch 403 never reaches
 // the htmx signed-out handling, so a 403 is reported here, once, and the
 // pollers stop: repeating it on every poll would say nothing new.
@@ -1153,6 +1164,163 @@ function dashOverviewFetch(url){
     if (!r.ok) throw new Error(String(r.status));
     return r.json();
   });
+}
+// ---- Active plans (SC-6) ----------------------------------------------------
+// One summary request in flight at a time (D23); the server reuses its plan
+// scan for 30 s on top of that. Every string from the response is set with
+// textContent, and the only style written is a clamped number (D26): plan
+// titles, details and tracker notes are free text from files on disk.
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+var DASH_OV_SUMMARY_URL = '/api/dashboard/overview/summary';
+var _dashOvSummaryBusy = false;
+// Which plans the user expanded, so a refresh does not fold them back.
+var _dashOvPlanOpen = Object.create(null);
+// Tracker statuses come from a fixed server vocabulary; the class and label
+// are looked up here, never taken from the response.
+var DASH_OV_TRACKER_STATUS = {
+  done: ['is-done', 'Done'],
+  in_progress: ['is-active', 'In progress'],
+  pending: ['is-pending', 'Pending'],
+  other: ['is-other', 'Other']
+};
+function dashOverviewRefreshSummary(){
+  if (_dashOvSummaryBusy || _dashOverviewSignedOut) return;
+  _dashOvSummaryBusy = true;
+  dashOverviewFetch(DASH_OV_SUMMARY_URL).then(function(data){
+    dashOvRenderPlans(data && data.plans);
+  }).catch(function(){
+    dashOvPlansFailed();
+  }).then(function(){ _dashOvSummaryBusy = false; });
+}
+function dashOvText(tag, cls, text){
+  var n = document.createElement(tag);
+  if (cls) n.className = cls;
+  n.textContent = text == null ? '' : String(text);
+  return n;
+}
+// "5 min ago" from an ISO timestamp; '' when it does not parse.
+function dashOvAgo(iso){
+  var t = Date.parse(String(iso));
+  if (!isFinite(t)) return '';
+  var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return 'just now';
+  var m = Math.floor(s / 60);
+  if (m < 60) return m + ' min ago';
+  var h = Math.floor(m / 60);
+  if (h < 48) return h + ' h ago';
+  return Math.floor(h / 24) + ' d ago';
+}
+// A whole number >= 0 from anything, for counts drawn as text.
+function dashOvCount(v){
+  var n = Math.floor(Number(v));
+  return isFinite(n) && n > 0 ? n : 0;
+}
+// A percentage clamped to 0-100, the only value written into a style.
+function dashOvPct(done, total){
+  var d = Number(done), t = Number(total);
+  if (!(t > 0) || !isFinite(d)) return 0;
+  return Math.max(0, Math.min(100, d / t * 100));
+}
+function dashOvPlanRow(plan){
+  var li = document.createElement('li');
+  li.className = 'dash-ov-plan';
+  var rows = Array.isArray(plan.tracker) ? plan.tracker : [];
+  // A row with tracker rows expands in place (a button); one without has
+  // nothing to show, so it is not a control.
+  var head = document.createElement(rows.length ? 'button' : 'div');
+  if (rows.length) head.type = 'button';
+  head.className = 'dash-ov-plan-head';
+  var top = document.createElement('span');
+  top.className = 'dash-ov-plan-top';
+  top.appendChild(dashOvText('span', 'dash-ov-ws', plan.workspace));
+  top.appendChild(dashOvText('span', 'dash-ov-plan-title', plan.title));
+  var ready = plan.ready_to_close === true;
+  top.appendChild(dashOvText('span',
+    'dash-ov-badge ' + (ready ? 'dash-ov-badge-ready' : 'dash-ov-badge-progress'),
+    ready ? 'Ready to close' : 'In progress'));
+  if (plan.stale === true) top.appendChild(dashOvText('span', 'dash-ov-badge dash-ov-badge-stale', 'stale'));
+  var prog = plan.progress && typeof plan.progress === 'object' ? plan.progress : null;
+  var tracked = !!prog && prog.total != null;
+  if (tracked) {
+    top.appendChild(dashOvText('span', 'dash-ov-plan-count',
+      dashOvCount(prog.done) + '/' + dashOvCount(prog.total)));
+  }
+  top.appendChild(dashOvText('span', 'dash-ov-plan-age', dashOvAgo(plan.mtime)));
+  head.appendChild(top);
+  if (tracked) {
+    var bar = document.createElement('span');
+    bar.className = 'dash-ov-plan-bar';
+    var fill = document.createElement('span');
+    fill.className = 'dash-ov-plan-fill';
+    fill.style.width = dashOvPct(prog.done, prog.total) + '%';
+    bar.appendChild(fill);
+    head.appendChild(bar);
+  }
+  var phase = '';
+  if (tracked && prog.current && typeof prog.current === 'object') {
+    phase = 'Phase ' + String(prog.current.id) + ' in progress' +
+      (prog.current.name ? ': ' + String(prog.current.name) : '');
+  } else if (prog && prog.phases != null) {
+    var k = dashOvCount(prog.phases);
+    phase = k + (k === 1 ? ' phase' : ' phases');
+  }
+  if (phase) head.appendChild(dashOvText('span', 'dash-ov-plan-phase', phase));
+  if (plan.detail) head.appendChild(dashOvText('span', 'dash-ov-plan-detail', plan.detail));
+  li.appendChild(head);
+  if (rows.length) {
+    var key = String(plan.cwd) + '\n' + String(plan.file);
+    var list = document.createElement('ol');
+    list.className = 'dash-ov-tracker';
+    rows.forEach(function(r){
+      if (!r || typeof r !== 'object') return;
+      var st = Object.prototype.hasOwnProperty.call(DASH_OV_TRACKER_STATUS, r.status)
+        ? DASH_OV_TRACKER_STATUS[r.status] : DASH_OV_TRACKER_STATUS.other;
+      var item = document.createElement('li');
+      item.className = 'dash-ov-tr ' + st[0];
+      item.appendChild(dashOvText('span', 'dash-ov-tr-id', r.id));
+      item.appendChild(dashOvText('span', 'dash-ov-tr-name', r.name));
+      item.appendChild(dashOvText('span', 'dash-ov-tr-status', st[1]));
+      if (r.notes) item.appendChild(dashOvText('span', 'dash-ov-tr-notes', r.notes));
+      list.appendChild(item);
+    });
+    var open = _dashOvPlanOpen[key] === true;
+    list.hidden = !open;
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    head.addEventListener('click', function(){
+      var expand = list.hidden;
+      list.hidden = !expand;
+      head.setAttribute('aria-expanded', expand ? 'true' : 'false');
+      if (expand) _dashOvPlanOpen[key] = true;
+      else delete _dashOvPlanOpen[key];
+    });
+    li.appendChild(list);
+  }
+  return li;
+}
+function dashOvRenderPlans(plans){
+  var body = document.getElementById('dashOvPlansBody');
+  if (!body) return;
+  body.textContent = '';
+  var shown = Array.isArray(plans) ? plans.filter(function(p){ return p && typeof p === 'object'; }) : [];
+  if (!shown.length) {
+    body.appendChild(dashOvText('div', 'dash-ov-empty', 'No active plans'));
+    return;
+  }
+  var list = document.createElement('ul');
+  list.className = 'dash-ov-plans';
+  shown.forEach(function(p){ list.appendChild(dashOvPlanRow(p)); });
+  body.appendChild(list);
+}
+// A failed refresh keeps the rows already drawn; only a section that never
+// loaded says so.
+function dashOvPlansFailed(){
+  var body = document.getElementById('dashOvPlansBody');
+  if (!body) return;
+  var kids = body.children || body.childNodes || [];
+  if (kids.length === 1 && kids[0].className === 'dash-ov-loading') {
+    body.textContent = '';
+    body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load plans.'));
+  }
 }
 // The transcript pane. Called before anything is drawn into it: opening a
 // session, creating one, and the signed-out note.
@@ -6908,11 +7076,14 @@ function dashRailReload(){ dashRailLoadFirstPage(); }
 function dashRailInit(){
   dashRailLoadFirstPage();
   document.addEventListener('visibilitychange', function(){
-    if (document.visibilityState !== 'hidden') dashRailRefresh();
+    if (document.visibilityState !== 'hidden') { dashRailRefresh(); dashOverviewPoll(); }
   });
+  // The Overview's Active plans ride this poll rather than a timer of their
+  // own (SC-5). 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
   setInterval(function(){
     if (document.visibilityState === 'hidden') return;
     dashRailRefresh();
+    dashOverviewPoll();
   }, DASH_RAIL_REFRESH_MS);
 }
 
