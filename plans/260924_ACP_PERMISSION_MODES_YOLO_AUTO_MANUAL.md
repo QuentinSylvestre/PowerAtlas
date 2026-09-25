@@ -233,7 +233,7 @@ decisions; D-22 onwards were added by the 2026-09-24 plan review.
 | D-31 | Bound mode per session | The session record stores the mode PowerAtlas bound (`session/new`) or sent (`session/load`); the frame gains `ruleEligible` computed server-side: `consent.source == "agent-profile"`, `matchedRule.effect == "ask"`, no `match` on the matched rule, bound mode `poweratlas-acp` | Eligibility by capability | The button must only appear where a row rule can silence the prompt (Protected, built-in and vendor-mode prompts cannot) |
 | D-32 | `apply_settings` result | Returns `{saved, generation_ok, generation_error}`; a save failure → route `ok: false`; a generation failure → `ok: true` plus a warning shown by the panel and the card | Raise | Distinguishes "nothing changed" from "saved, not yet in effect" |
 | D-33 | Base-agent save | `/api/save-setting` routes `acp_permission_base_agent` through `apply_settings` | Save then sync | D-16 covers every permission-relevant writer |
-| D-38 | Phase 0 gate outcomes (2026-09-24, kiro-cli 2.24.0, P-0.x and F-x) | (a) 8.3 short names are not mapped by agent-profile rules for `fs_read` (P-0.11) or `fs_write` (F-5): every floor and Protected path ships short-name glob variants; fs patterns are case-insensitive (measured for `fs_read`); credential-store copy drops guarantee wording. Trailing-dot and trailing-space spellings name a different, missing folder and are not a bypass (F-2, F-5). (b) `\` is literal in shell patterns (P-0.3): shell floor entries with a separator ship both spellings. (c) kiro-cli's built-in `kiro-scope` rules apply in every mode: asks on writes to `.git`, `.vscode`, `*.code-workspace`, `.kiro/agents`, `.kiro/hooks` (workspace and home); denies on writes to `.kiroignore`, `.kiro/settings`, `~/.kiro/workspace-roots`, `~/.kiro/sandbox-state`, `~/.kiro/web-session`, `~/.kiro/powers/installed/*/mcp.json`, `~/.kiro/cloud-cache` (P-0.10, F-5). The Yolo description and the Always blocked view list them. The built-in `.kiro/settings` deny misses `KIRO~1\settings` (F-5); the floor's short-name variant closes it. (d) web-fetch patterns are host names (`example.com`), labelled so in the editor (P-0.5). (e) The editor warns on any shell allow pattern containing `*`: it also allows output redirection to any file (P-0.8). Exact literals match the whole command, so redirection and extra arguments prompt (F-3). (f) Shell patterns are case-sensitive (F-4): the shell floor ships lower- and upper-case spellings; mixed case stays uncovered (best-effort). (g) `fs_write` rules govern the file-writing tools only; a shell redirection writes any path unchecked (P-0.8, F-6). The fs_write floor and Protected are described as file-tool rules; a best-effort shell deny `*poweratlas-acp*` is added. (h) Rules match a symlink's resolved target: a link inside a Protected folder pointing outside escapes the ask (F-1), and a link to a denied folder escapes an `fs_read` deny (F-1b). **Pending the user** (PD-6). Not fired: P-0.1 (search tools filtered by the `fs_read` deny), P-0.2, P-0.6, P-0.7, P-0.9, P-0.12 (a sub-agent runs under the parent's rules); F-7: kiro-cli sends UTF-8 and non-ASCII patterns match | Leave the gaps undisclosed | Plan Phase 0 gate list, applied mechanically; (h) is a trade-off |
+| D-38 | Phase 0 gate outcomes (2026-09-24, kiro-cli 2.24.0, P-0.x and F-x) | (a) 8.3 short names are not mapped by agent-profile rules for `fs_read` (P-0.11) or `fs_write` (F-5): every floor and Protected path ships short-name glob variants; fs patterns are case-insensitive (measured for `fs_read`); credential-store copy drops guarantee wording. Trailing-dot and trailing-space spellings name a different, missing folder and are not a bypass (F-2, F-5). (b) `\` is literal in shell patterns (P-0.3): shell floor entries with a separator ship both spellings. (c) kiro-cli's built-in `kiro-scope` rules apply in every mode: asks on writes to `.git`, `.vscode`, `*.code-workspace`, `.kiro/agents`, `.kiro/hooks` (workspace and home); denies on writes to `.kiroignore`, `.kiro/settings`, `~/.kiro/workspace-roots`, `~/.kiro/sandbox-state`, `~/.kiro/web-session`, `~/.kiro/powers/installed/*/mcp.json`, `~/.kiro/cloud-cache` (P-0.10, F-5). The Yolo description and the Always blocked view list them. The built-in `.kiro/settings` deny misses `KIRO~1\settings` (F-5); the floor's short-name variant closes it. (d) web-fetch patterns are host names (`example.com`), labelled so in the editor (P-0.5). (e) The editor warns on any shell allow pattern containing `*`: it also allows output redirection to any file (P-0.8). Exact literals match the whole command, so redirection and extra arguments prompt (F-3). (f) Shell patterns are case-sensitive (F-4): the shell floor ships lower- and upper-case spellings; mixed case stays uncovered (best-effort). (g) `fs_write` rules govern the file-writing tools only; a shell redirection writes any path unchecked (P-0.8, F-6). The fs_write floor and Protected are described as file-tool rules; a best-effort shell deny `*poweratlas-acp*` is added. (h) Rules match a symlink's resolved target: a link inside a Protected folder pointing outside escapes the ask (F-1), and a link to a denied folder escapes an `fs_read` deny (F-1b). Decided in D-39 (PD-6). Not fired: P-0.1 (search tools filtered by the `fs_read` deny), P-0.2, P-0.6, P-0.7, P-0.9, P-0.12 (a sub-agent runs under the parent's rules); F-7: kiro-cli sends UTF-8 and non-ASCII patterns match | Leave the gaps undisclosed | Plan Phase 0 gate list, applied mechanically; (h) is a trade-off |
 
 ### Decisions from the plan review (user, 2026-09-24)
 
@@ -245,6 +245,7 @@ Escalated by the 2026-09-24 plan review; PD-1 and PD-2 went through a Full counc
 | D-35 | PD-2: same-user self-widening | **Accepted, disclosed** (`User: accepted — 2026-09-24`). R-16 states that allowing an interpreter or a broad shell prefix in Manual equals allow-all, including widening future sessions via the API or `config.toml`. The editor and the prompt-card button show "allowing an interpreter is equivalent to allow-all" when a pattern's first token is an interpreter or shell (D-20 list). A posture change not made from the dashboard (detected when the D-30 self-heal regenerates from a changed mode or rules) raises a visible dashboard notice naming the new mode | Tray-granted elevation for widening changes | User chose A; council 4-0: `config.toml` sits beside the secret, so an HTTP-layer gate would guard one of two equal doors |
 | D-36 | PD-3: floor additions | **None.** The floor stays as agreed in exploration (D-6). Within those items the patterns cover the files they name: `data.sqlite3*` (SQLite sidecars of the kiro token store) and `local-secret*` / `remote-secret*` (the rotation temp file) | Add the power-atlas folder, the base agent, extra shell tripwires | User chose to add nothing. Consequence recorded in R-16 and R-18: `config.toml` and the base agent stay writable by agents |
 | D-37 | PD-4 and PD-5 | Both accepted (`User: accepted — 2026-09-24`): R-4 with its full scope, and R-11 rollback | Legacy key for one release; reopen D-8 | User accepted both |
+| D-39 | PD-6: symlinks escape Protected and the floor (D-38h) | **Detect and name, plus a probe for enforcement** (`User: accepted — 2026-09-24`, the user chose "C + probe B" after a Full council, 3-1 for C). A resolver `find_protected_links()` in `agent_profile.py` lists symlinks and junctions one level deep under `~/.kiro/{agents,steering,skills,hooks}` with their resolved targets (unresolvable entries listed as such). It is called only when the settings state is served (`GET /api/acp-permissions`), never by `compile_block`, `derived_block_state` or the session-creation hook. The Protected section shows a per-row marker ("N linked items not covered") and the list. Workspace links and credential aliases keep a generic disclosure. Phase 1 probes whether an `fs_write` ask on an absolute resolved target (a path with spaces) catches a write through the link; if it does, Follow-up 3 carries option B (emit target rules, shown in the UI, a resolver failure adds no rules and never refuses a session) | A: generic disclosure only; B now: resolve at compile time | Council: B couples the Default-session gate to a filesystem walk over OneDrive and rests on an unmeasured matching premise; C names the real gap without touching the in-effect check |
 
 ## 4) External Dependencies & Costs
 
@@ -421,7 +422,8 @@ Protected: `{"agents": "**/.kiro/agents/**", "steering": "**/.kiro/steering/**",
 "hooks": "**/.kiro/hooks/**"}` → `fs_write` `ask`, or `deny` when in `protected_block` (kiro-cli's built-in
 asks also cover `agents` and `hooks` in every mode, P-0.10; Protected still owns the Block outright switch).
 Each Protected pattern also ships its `**/kiro~*/<folder>/**` short-name variant (F-5). Protected governs the
-file-writing tools only (D-38g) and does not see writes through symlinks that point outside (D-38h, PD-6).
+file-writing tools only (D-38g) and does not see writes through symlinks that point outside (D-38h); the
+resolver and the per-row marker follow D-39.
 Emission per D-14. Move
 the overlay's measured-semantics comments beside the constants. Qualify every prior-plan ID the rewrite keeps
 (`D-18`, `D-19`, `Phase 0`, `plan section 9`, …) with the slug `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`;
@@ -494,6 +496,12 @@ Update the `transcript-renderer.js` capability-words comment that cites `agents/
 - [ ] Live, via a separate probe process bound to `compile_block` output (Yolo) copied into `pa-probe-yolo.md`:
       `echo ok` runs with no prompt; the read-file tool and `Get-Content` on the canary `.ssh/dummy` are refused, and
       so is the read-file tool on its 8.3 short-name path (`SSH~1\dummy`)
+- [ ] `find_protected_links()` tests (temp-directory fixture: file link, directory link, broken link, loop) and a
+      test that `compile_block`, `derived_block_state` and the gate hook never call it (D-39); the settings section
+      shows the per-row "linked items not covered" marker (page test)
+- [ ] Probe (D-39): under a Manual block with an `fs_write` ask on the absolute resolved target of a scratch link
+      whose path contains spaces, a write through the link prompts or not; recorded in the implementation notes and
+      Follow-up 3 updated
 - [ ] Live, same for Manual seed: `git status` silent, `echo x` and `git status > x.txt` prompt, a write under
       `.kiro/agents/` refused, and a write to the derived agent through its `KIRO~1` short-name path refused
 - [ ] Update README.md: config sample (`acp_permission_mode`), the feature bullet (~149, "off by default"), the
@@ -523,7 +531,8 @@ Manual is selected). Rows with plain labels (Read files, Write files, Run comman
 tools, Sub-agents, Skills, Powers), a default `<select>`, chip lists "Allow without asking" (hidden under default
 Allow) and "Always block". `./**` renders as "the session folder". A breadth warning (not a refusal) on patterns whose first token is an interpreter or shell (D-35: "equivalent to allow-all") and on patterns
 covering the session folder, a drive root or the home folder for Write files. Read-only Always blocked and
-Protected sections (per-item "Block outright" toggles). Footer: "Applies to sessions created afterwards." Save
+Protected sections (per-item "Block outright" toggles; the Protected section lists the D-39 linked items and their
+targets). Footer: "Applies to sessions created afterwards." Save
 posts JSON, shows the server error inline, closes on success, shows the D-32 warning when generation failed.
 Web fetch chips are labelled as site host names (`example.com`, D-38d); no chip list is hidden (P-0.9
 passed). A shell pattern containing `*` shows the D-38e redirection warning. The Run commands row notes that
@@ -606,7 +615,7 @@ answered". On error it shows the message and leaves the prompt open.
 | R-4 | Always-present allow-all `poweratlas-acp` in kiro-cli's terminal picker | Widens posture for a default-configuration kiro user who picks it | User: accepted — 2026-09-24 (D-37) |
 | R-5 | A compiled block kiro-cli rejects fails open silently | All protection lost | D-14, D-26, P-0.7, invariants test |
 | R-6 | Missing `exclude` makes an allow rule dead | More prompts than configured | D-13; invariants test with a mutation check |
-| R-7 | Rules match a symlink's resolved target; a link inside a Protected folder pointing outside, or to a denied folder, escapes (F-1, F-1b) | Self-config edit without a prompt (the user's `~/.kiro/steering/*.md` are such links); credential read via an alias | Pending the user (PD-6) |
+| R-7 | Rules match a symlink's resolved target; a link inside a Protected folder pointing outside, or to a denied folder, escapes (F-1, F-1b) | Self-config edit without a prompt (all 9 of the user's `~/.kiro/steering/*.md` and 16 of 27 `~/.kiro/skills` entries are such links); credential read via an alias | User: accepted — 2026-09-24, disclosed per item (D-39); enforcement pending the Phase 1 probe (Follow-up 3) |
 | R-8 | Allowed git commands run repository-controlled code (textconv, `diff.external`) | Code execution from a cloned repo | Accepted in the prior plan; carried forward |
 | R-9 | An unanswered prompt is cancelled after 1800 s | Lost turn when away | Out of scope (Follow-up 6) |
 | R-10 | Generation fails after a save | Default creation refused until fixed | D-32 warning; D-34 refusal names the fix; D-28 removes the commonest cause |
@@ -645,7 +654,7 @@ answered". On error it shows the message and leaves the prompt open.
 
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
-| 0 | Pre-flight probes and gate | Done — PD-6 pending | 4 gates fired, follow-up F-1..F-7, applied as D-38; PD-6 (symlinks) escalated |
+| 0 | Pre-flight probes and gate | Done | 4 gates fired, follow-up F-1..F-7, applied as D-38; PD-6 decided as D-39 |
 | 1 | Modes, compiler and the mode picker | Pending | |
 | 2 | Custom Manual rules and the rule editor | Pending | |
 | 3 | "Allow, and always in new sessions" | Pending | |
@@ -718,7 +727,7 @@ Phase 4 (docs)
 1. **Auto mode decider.** Deny, steer with the reason, escalate on repeat (D-5); needs a probe of when a queued
    steer reaches the agent. Source: D-2, D-5.
 2. **Home/root deletion protection.** Left to Auto (D-6).
-3. **Symlinked self-config.** Reopened 2026-09-24 by F-1: links pointing out of a Protected folder escape it. Pending PD-6. Source: R-7.
+3. **Symlinked self-config enforcement (PD-6 option B).** If the Phase 1 probe shows an absolute resolved-target rule catches writes through a link: emit Protected rules for resolved targets, shown in the UI; a resolver failure adds no rules and never refuses a session. Source: R-7, D-39.
 4. **Shell floor bypass by rephrasing.** Accepted best-effort. Source: R-2, R-12.
 5. **Terminal-picker exposure of the allow-all derived agent.** User-accepted. Source: R-4, D-37.
 6. **Unanswered prompt cancelled at 1800 s.** Source: R-9.
@@ -813,12 +822,12 @@ for PD-3, and accepted PD-4 and PD-5 on 2026-09-24.
 
 ### 2026-09-24 -- Implementation Review (after Phase 0, persona: Security auditor)
 
-Implementation health: Red until PD-6 is decided (one High escalated); every other finding fixed.
+Implementation health: Green (finding 1 decided by the user as D-39 on 2026-09-24; the rest fixed).
 13 findings (3 High, 6 Medium, 4 Low). Standard effort, one cycle (user cap, below).
 
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
-| 1 | High | P-0.4 tested a link into `.kiro/steering`; links pointing out (the user's own steering links) likely escape Protected | Escalated — measured by F-1/F-1b (escape confirmed); remedy is PD-6 |
+| 1 | High | P-0.4 tested a link into `.kiro/steering`; links pointing out (the user's own steering links) likely escape Protected | User: accepted — 2026-09-24, detect and name plus an enforcement probe (D-39, PD-6 after council 3-1) |
 | 2 | High | Short-name globs added to fs_read only, not the fs_write floor or Protected | Fixed — F-5 measured the write bypass; short-name variants added to fs_write floor and Protected |
 | 3 | High | Trailing-dot and trailing-space spellings neither probed nor covered | Fixed — F-2/F-5 measured: they name a different, missing folder, not an alias; recorded in D-38a and R-3 |
 | 4 | Medium | "Exact literals cannot carry a redirection" was never measured | Fixed — F-3 measured redirection and extra arguments prompt; Phase 1 live criterion adds `git status > x.txt` |
@@ -838,6 +847,16 @@ implementation note), not by argument. The reviewer checked P-0.1, P-0.3-P-0.5, 
 frames and found no misclassified row; P-0.2, P-0.6 and S0/S4a/S7 were not opened. Review Log closures audited: none
 reason-less.
 
+### 2026-09-24 -- Council on PD-6 (via /qcouncil, pre-escalation from /qdev Phase 0)
+
+Full tier (blast radius over three or more files). Options: A disclose; B resolve links at compile time; C detect
+and name. The assumption challenger's first run failed on an API session limit (HTTP 429); the user resumed after
+the reset and it was re-run. Challenger: all 9 global steering files and 16 of 27 skills entries are links into
+agent-playbook; a resolve walk over them takes 56 ms; B's premise (an absolute-target rule catches a write through
+a link) is strongly supported but unmeasured. Jurors: Reliability engineer C, End-user advocate C, Senior engineer
+C, Security auditor B (conditional on that premise; falls back to C). **C, 3-1.** The user chose "C + probe B"
+(D-39).
+
 ## Harness Improvement Opportunities
 
 - `/qexplore`'s probe gate says to run side-effecting probes only with consent, while `shared.md` says one
@@ -852,6 +871,8 @@ reason-less.
   more personas — cost: the orchestrator had to choose between the literal rule and a disclosed deviation —
   suggested change: let cross-persona corroboration substitute for a verifier, and dispatch verifiers only for
   single-source findings.
+- An API session limit (HTTP 429) killed a council sub-agent mid-run; the council's partial-failure rule then halts the whole pipeline — cost: about an hour of wall-clock waiting on the reset and one re-dispatch — suggested change: none to the rule; a note in `/qcouncil` that a rate-limit failure is a Retry-after-reset case, with completed advocate briefs saved to scratch so they are reusable.
+- `/qdev` has no shape for a probe-only phase (no code commit): the `feat`/`docs` pairing and "sub-agent commits code" steps did not apply — cost: small; the orchestrator improvised a docs-only commit and confirmed `commit-pairing` passes — suggested change: state in `/qdev` Step 4 that a results-only phase produces one `docs(<slug>): phase N progress (code: none)` commit.
 - The exploration's lower-stakes assumptions were shown at the checkpoint but not written as an
   `Assumptions (unconfirmed)` adjunct, so `/qplan` had no labelled list to route — cost: the planner folded them
   in as its own D-rows without a user confirmation step — suggested change: `/qexplore` Step 3 should always write
