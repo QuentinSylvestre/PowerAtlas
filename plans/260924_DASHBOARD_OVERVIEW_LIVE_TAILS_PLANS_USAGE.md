@@ -1,7 +1,7 @@
 # Dashboard Overview: Live Session Tails, Active Plans and Usage Insights
 
 > **Date**: 2026-09-24
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phase 1 complete, Phases 2-5 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the dashboard's empty Transcript panel with an Overview (live session tails, active plans, 14-day usage insights), reachable again after a session is opened
 > **Estimated effort**: 2-4 days
@@ -402,15 +402,31 @@ Changes:
 > **Rejected:** toggling `#dashTranscriptWrap.hidden` for the mode. `dashCloseSubagentView()` resets it on every socket drop. **Use instead:** `dash-mode-overview` on `#sessions-panel`.
 
 **Exit criteria**:
-- [ ] `node tests/acp_page.test.mjs` passes, including all new cases above. `.venv-PowerAtlas/Scripts/python -m pytest tests/ -q --timeout=300` passes, including the `unsubscribe` test.
-- [ ] After a **user-approved restart**, the live checks pass:
+- [x] `node tests/acp_page.test.mjs` passes, including all new cases above. `.venv-PowerAtlas/Scripts/python -m pytest tests/ -q --timeout=300` passes, including the `unsubscribe` test.
+- [x] After a **user-approved restart**, the live checks pass:
   - On page load, the panel shows "Overview" with three sections.
   - Opening a session shows the transcript and the Home button.
   - Home, Escape (focus on the page body, rail groups expanded) and clicking the loaded open row each return to the Overview, with `_viewingSid === null` and `.viewing` cleared.
-- [ ] Escape in the composer, in the search field, with a rail menu open, or with the picker open does **not** leave the session.
-- [ ] After returning to the Overview from a held session, `orchestrator.log` or a WS debug-log check shows the `unsubscribe`. A turn ending in that session afterwards produces a desktop notification (notifications enabled).
-- [ ] Clicking Close returns to the Overview. A sweeper or remote close keeps "This session was closed." Deleting the open session returns to the Overview.
-- [ ] After returning, the pane holds exactly one `.acp-system-msg[data-empty]` child.
+- [x] Escape in the composer, in the search field, with a rail menu open, or with the picker open does **not** leave the session.
+- [x] After returning to the Overview from a held session, `orchestrator.log` or a WS debug-log check shows the `unsubscribe`. A turn ending in that session afterwards produces a desktop notification (notifications enabled).
+- [x] Clicking Close returns to the Overview. A sweeper or remote close keeps "This session was closed." Deleting the open session returns to the Overview.
+- [x] After returning, the pane holds exactly one `.acp-system-msg[data-empty]` child.
+
+**Implementation (2026-09-25, code: 11f444b)**
+
+The dashboard's right panel now opens on an Overview that is always reachable again, and entering it releases the server-side subscription. Server (`src/power_atlas/acp.py`): a new `unsubscribe` client frame is listed in `CLIENT_TYPES`; `_dispatch` routes it, before `subscribe`, to a synchronous `_handle_unsubscribe(conn)` that drops the socket from any `_registry.loading` waiter list, calls `_registry.detach(conn)` (which also stamps the idle clock), sends nothing back, and logs `ACP unsubscribe: socket=… session=…` so the live-QA check can find it in `orchestrator.log`. Page (`src/power_atlas/templates/index.html`): the markup gains a sibling `#dashOverview` with three placeholder sections (`#dashOvLive`, `#dashOvPlans`, `#dashOvUsage`), a Home button `#dashHome`, and `id="dashPanelTitle"` on the header span. A new slug-marked region just before `openSessionTranscript` holds `dashSetPanelMode` (toggles `dash-mode-overview` on `#sessions-panel`, sets the title, shows Home only in pane mode), `dashShowPane`, `dashShowOverview` (abandon-close, conditional unsubscribe, attach/close-button reset, sub-agent and crew teardown, clears `.viewing`/`_viewingSid`/the metadata strip, then restores exactly one clone of the `[data-empty]` placeholder captured at load), no-op `dashOverviewStart`/`dashOverviewStop` stubs, `dashOverviewFetch` (403 reported as signed out once, pollers stopped), the Home click wiring, and a capture-phase Escape listener behind `dashEscapeMayLeave`, which checks explicit open-state predicates and never reads `aria-expanded`. The rail row click handler toggles back to the Overview when the open row is clicked again and `_dashTranscriptLoaded` is true (set on a successful fetch and on the `session` attach frame). The Close button records `_dashUserClosedSid` only after `send('close')` succeeds, and `dashHandle`'s main `session_closed` branch returns to the Overview only for that sid, so a sweeper or remote close keeps "This session was closed.". `dashRailForgetSession` now calls `dashShowOverview()` in place of the "This session was deleted." branch. `openSessionTranscript` and `dashMaybeAttach` accept a rail row or a `{sid, provider, cwd}` descriptor through `dashDesc` (inside the `openSessionTranscript` region) and apply `.viewing` to every matching rail row. `dashShowPane()` is called from `openSessionTranscript`, `dashPickerCreate`, `dashRailQuickCreate`, `dashReportSignedOut` and the created-session branch. Styles (`style.css`): under the mode class the transcript wrap, metadata strip, composer, prompt nav and sub-agent panel are hidden and the Overview is shown; the Home button has its `[hidden]` pair. Tests: `tests/test_web.py` gains `TestAcpUnsubscribe` (detach and watched=false, idempotent second unsubscribe, other watchers kept, load-waiter removal, synchronous handler); `tests/acp_page.test.mjs` runs the new region for real in `loadDashPicker` and adds checks for every return path, the Escape guard cases, the unsubscribe/close ordering, and the J4 lone-placeholder shape. Edge cases noted, not fixed: Home pressed after Close but before `session_closed` arrives drops that frame via the stale-frame guard, so the rail dot can lag until the next 60 s poll; switching sessions (rather than going to the Overview) still sends no unsubscribe, as before this plan.
+
+**Implementation (2026-09-25, code: 8b7fe7a) — review fixes**
+
+`src/power_atlas/templates/index.html`: the user-close flag is now dropped when the server refuses or fails the close (except `close_in_progress`) and when the socket drops, with the Close button restored at the same time. `dashShowOverview` resets the MCP indicator and the command palette. The Escape guard gains one targeted MCP-panel predicate, and the always-false `defaultPrevented` check is gone. `dashMaybeAttach`'s deferred subscribe re-checks `_viewingSid` when the socket opens. A late `session` frame arriving on the idle Overview gets an `unsubscribe`. A create refusal after Home switches back to the pane. A pending close-then-create survives the user-close return to the Overview. `src/power_atlas/acp.py`: `_handle_unsubscribe`'s docstring is corrected (waiters only; `_deliver_load` still attaches a load's initiator, with the page's stale-arrival `close` as the backstop) and it gains INFO and DEBUG log lines. `tests/acp_page.test.mjs` and `tests/test_web.py` gain the corresponding checks. Consumers of `_dashUserClosedSid`: `dashShowOverview`'s unsubscribe gate now skips only while a close is really in flight; the `session_closed` Overview return fires only for a pending or `close_in_progress` user close; `openSessionTranscript` and the Close click handler are unchanged. Consumers of the new defence-in-depth `unsubscribe`: server-side `_handle_unsubscribe` is idempotent; pending subscribe, load or create on the same socket are protected because the frame is not sent while `_viewingSid`, `_dashLoadingSid` or `_dashCreateInFlight` is set; the stale-load branch that sends `close` runs first and returns; created frames set `_viewingSid` before this point.
+
+**Implementation (2026-09-25, code: 9c67735) — Escape closes the sub-agent view first (user decision)**
+
+The change is in the capture-phase Escape listener in `src/power_atlas/templates/index.html`. When Escape is allowed at all, the listener now checks the sub-agent view first: if it is open, it runs `dashCloseSubagentView()` (the same function as the "‹ Back to main" button) and stops; otherwise it returns to the Overview as before. Because the new step comes after `dashEscapeMayLeave`, the same guards apply to it. Consumers: `dashCloseSubagentView()` is already safe to call at any time; the MCP panel's and menus' own Escape listeners are unaffected; `dashShowOverview()` is reached one Escape later when the view is open.
+
+Tests: node 850 passed; pytest 2637 passed, 2 skipped.
+
+QA (2026-09-25, live, after a restart the user granted for this plan): PASS, 15/15 checks. Load shows "Overview" with Live now, Active plans and Usage, Home hidden. Opening a row shows the transcript and Home. Home, Escape (page body focused, 3 `aria-expanded="true"` elements present) and clicking the loaded open row each return to the Overview with `_viewingSid === null`, no `.viewing` rows and exactly one `.acp-system-msg[data-empty]` child. Escape in the search field, with the rail settings menu open, with the picker open, and in the composer of a held session keeps the session. Home from a held session logged `ACP unsubscribe: socket=s1 session=sess_69d348c8…` at 10:11:58; the running turn then ended at 10:12:01 (`end_turn`) with no subscriber and notifications enabled, which is the `notify_turn_end` path. The desktop toast itself is not logged and was not observed. User Close returned to the Overview; a close sent from `/acp` kept "This session was closed." on the dashboard; deleting the open session returned to the Overview. No page errors. The test sessions were closed and deleted afterwards.
 
 ### Phase 2: Active plans [QA]
 **Goal**: The Active plans section lists In Progress and not-yet-archived Complete plans across the rail-visible workspaces, with progress, `stale` and "Ready to close" badges and expandable rows.
@@ -753,14 +769,27 @@ Changes:
 
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
-| 1 | Overview shell, navigation, detach | Pending | restart (acp.py) |
+| 1 | Overview shell, navigation, detach | Done | code 11f444b, 8b7fe7a, 9c67735 |
 | 2 | Active plans | Pending | restart |
 | 3 | Live now tiles | Pending | restart |
 | 4 | Usage insights | Pending | restart |
 | 5 | Docs, roadmap and full QA | Pending | |
 
 ## 9) Implementation Divergences from Plan
-<Reserved -- filled during implementation>
+
+Phase 1:
+
+1. `unsubscribe` is not gated on `_dashAttachedSid`. It is sent whenever the main socket is open, unless a close was just sent or a user Close is in flight. Reason: step 4.1's `dashCloseIfAbandoned()` clears `_dashAttachedSid` before step 4.2 reads it, so the plan's gate would never send the frame. Sending on an open socket also covers a subscribe still in flight, and the server treats unsubscribe on an unattached socket as a no-op.
+2. `dashCloseIfAbandoned()` returns whether it sent a close, and `dashShowOverview` then skips `unsubscribe`. Reason: `_handle_close` runs as a spawned task and refuses with `not_subscribed` once the socket is detached, so a synchronous unsubscribe right after it would make the abandon-close fail.
+3. `_handle_unsubscribe` also removes the socket from `_registry.loading` waiter lists. Reason: otherwise a subscribe parked behind a `session/load` re-attaches the socket when the load lands. The load's own initiator is still attached by `_deliver_load`; the page's stale-arrival `close` is the backstop.
+4. The Escape guard also checks `dialog[open]`, plus one targeted `#dashMcpToggle[aria-expanded="true"]` predicate. Reason: D19 assumed all dialogs are divs, but the launcher, profile, workspace-settings and remote modals are real `<dialog>`s. The MCP panel has no open state other than that toggle's `aria-expanded`. No generic `aria-expanded` check was added.
+5. Overview-mode CSS also hides `#dashSubPanel`. `dashShowOverview` also hides the composer and calls `clearTranscript()` and `resetCommandPalette()`. Reason: no sub-agent view, composer, MCP indicator or command catalogue from the session just left may show behind the Overview.
+6. The initial Overview state is also in the server markup (class, title, `#dashHome` hidden). Reason: avoids a first-paint flash of the transcript pane.
+7. `dashShowPane()` runs after the early returns in `openSessionTranscript`, `dashPickerCreate` and `dashRailQuickCreate`, and also in `dashHandle`'s created branch and the create-refusal branch. Reason: a refused call must not switch modes, and a session created (or a create refused) after the user went back to the Overview must still be shown.
+8. The `session_closed` return to the Overview runs before `dashRailRefreshSoon()`/`dashPickerRunPending()`, and `_dashPendingCreate` is preserved across it. Reason: a pending close-then-create must still run.
+9. `_dashUserClosedSid` is cleared on a refused or failed close (except `close_in_progress`) and on socket drop. A late `session` frame on the idle Overview gets an `unsubscribe`, and the deferred subscribe re-checks `_viewingSid`. Reason: Phase 1 review findings 1-2; a stale flag or a subscribe landing after Home left the session watched, breaking D18.
+10. Escape with the sub-agent view open closes that view first; a second Escape returns to the Overview. Reason: user decision on 2026-09-25 ("When a sub-agent's transcript is open inside a session, what should Escape do?" answered "Close sub-agent first").
+11. The node harness gains `El.cloneNode(deep)` and wires the real `initMcpIndicatorDom()`, and the `dashMaybeAttach` sentinel appends the real `dashDesc` source. Reason: the placeholder is restored by cloning, and the new checks need the real code rather than stubs.
 
 ## Follow-up Work (Deferred)
 
@@ -832,6 +861,27 @@ Four personas (Architect, Senior engineer, Performance engineer, Security audito
 - **Security auditor**: 12 findings (4 High). 75% confidence. Blocking: hidden-workspace parity, rendering safety, robust plan reads, the UNC stall.
 - **Doc-impact**: 8 documentation gaps. All were added to §8 and Phase 5, or to Phase 4 for KNOWLEDGE.md.
 
+### 2026-09-25 -- Implementation Review (after Phase 1, persona: Senior engineer, Reliability engineer)
+
+Implementation health: Green.
+11 findings (2 High, 5 Medium, 4 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `_dashUserClosedSid` was never cleared when a close was refused, failed or lost to a socket drop, so Home skipped `unsubscribe` and the session stayed watched. | Fixed -- cleared on a matching error (except `close_in_progress`) and on socket close, with the Close button restored (8b7fe7a). |
+| 2 | High | A subscribe chained on a still-connecting socket fired after the user went back to the Overview, leaving the session watched. | Fixed -- the deferred subscribe re-checks `_viewingSid`; a late `session` frame on the idle Overview gets `unsubscribe` (8b7fe7a). |
+| 3 | Medium | `dashShowOverview` did not call `resetCommandPalette()`, so the left session's MCP indicator and catalogue stayed visible. | Fixed -- called in the teardown, with a node check (8b7fe7a). |
+| 4 | Medium | Escape with the MCP panel open left the session, because that panel's only open state is its toggle's `aria-expanded`. | Fixed -- one targeted `#dashMcpToggle` predicate, with a node check (8b7fe7a). |
+| 5 | Medium | A create refusal arriving after Home was written into the hidden pane and removed its placeholder. | Fixed -- `dashShowPane()` in the refusal branch, with a node check (8b7fe7a). |
+| 6 | Medium | The unsubscribe gate, the D14 `.viewing` loop and the `.viewing` clear had no test; mutations passed all 832 checks. | Fixed -- mutation-verified node checks added (8b7fe7a). |
+| 7 | Medium | The declared divergences were not recorded in §9. | Fixed -- recorded in §9 by the Step 7 plan update. |
+| 8 | Low | `_handle_unsubscribe`'s docstring claimed it stops a late attach after a load, but it only drops waiters. | Fixed -- docstring narrowed, initiator behaviour pinned by a pytest (8b7fe7a). |
+| 9 | Low | Unsubscribe logged only for attached sockets, and a `defaultPrevented` check in the capture listener was dead code. | Fixed -- INFO for waiter removal, DEBUG for a no-op; the dead check removed with a comment (8b7fe7a). |
+| 10 | Low | A pending close-then-create was dropped when the user-close returned to the Overview. | Fixed -- `_dashPendingCreate` preserved across that call, with a node check (8b7fe7a). |
+| 11 | Low | Escape with the sub-agent view open left the whole session rather than closing the view. | Fixed -- per the user's decision, Escape closes the sub-agent view first (9c67735). |
+
+Cycle 2 was not run: the user capped review at 1 cycle per phase ("1 qreview cycle per phase", `/qdev` invocation, 2026-09-25). The Step 9 final review covers the fixes. Findings 1, 4, 6 and 7 were raised by both personas; #4 was rated Medium by the Senior engineer and Low by the Reliability engineer, merged at Medium. Finding 7 is Step 7 bookkeeping.
+
 ## Harness Improvement Opportunities
 
 - The governance rule "a sub-agent's deliverable is a file" conflicts with the harness. All three
@@ -841,3 +891,18 @@ Four personas (Architect, Senior engineer, Performance engineer, Security audito
   each agent spent a turn discovering that — suggested change: in `shared/AGENTS.md` §
   Multi-Agent Coordination, note that Claude Code sub-agents return reports as text, and apply
   the file-deliverable rule only where the harness permits sub-agent writes.
+- `/qdev` Step 5b calls `/qqa`, but no `/qqa` skill is installed in this Claude Code setup (only
+  `/qbrowser-test`). Phase 1's QA was hand-written Playwright following AGENTS.md § Verification
+  Setup. — cost: about 25 minutes of script iteration (row selectors, the rule that an unprompted
+  session has no rail row, cleanup) — suggested change: install `/qqa` for Claude Code, or have
+  `/qdev` Step 5b name `/qbrowser-test` as the fallback when `/qqa` is absent.
+- Review sub-agents running with `isolation: "worktree"` test the **main** repo's source, because
+  the venv installs `power_atlas` in editable mode from the main tree. One reviewer noticed only
+  when a mutation went undetected. — cost: two wasted pytest runs, and a real risk of a false "this
+  test pins it" claim — suggested change: add "set `PYTHONPATH=src` when running pytest from a
+  worktree" to this project's AGENTS.md § Doc & Test Guidelines.
+- User override of the per-phase review cycle cap: the default is 2 cycles (`/qdev` Step 6),
+  overridden to 1 ("1 qreview cycle per phase", `/qdev` invocation, 2026-09-25). Recorded per
+  `shared/AGENTS.md § Continuous Improvement`. — cost: none observed yet; a fix regression would
+  surface only at Step 9 — suggested change: none unless Step 9 finds a regression that a cycle 2
+  would have caught.
