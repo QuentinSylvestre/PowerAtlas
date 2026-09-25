@@ -12,10 +12,10 @@
 > off this header. Claims are marked *verified* (observed on this machine, with logs) or *unverified*
 > (inferred from shipped code or docs, not executed).
 >
-> Raw wire logs, captured payloads and benchmark scripts live outside the repo at
-> `Downloads\260724_PowerAtlas-spikes\` (`REPORT.md` for round 1, `REPORT-ROUND2.md` for round 2). That
-> path is machine-local and unversioned, so the load-bearing numbers are reproduced here rather than
-> pointed at.
+> The 2026-07-24 raw wire logs, captured payloads and benchmark scripts were kept outside the repo
+> and deleted on 2026-09-25. The load-bearing numbers were always reproduced here rather than pointed
+> at, so the entries below stand on their own. A *verified* claim from that date has no log behind it
+> any more; re-measure rather than look for one.
 
 ---
 
