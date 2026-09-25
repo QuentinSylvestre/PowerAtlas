@@ -1,7 +1,7 @@
 # ACP Permission Modes: Yolo, Auto and Manual
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phases 0-4 complete, final review pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the on/off ACP permission profile with three permission modes (Yolo, Auto, Manual), an always-on hard-deny floor, and a plain-language Manual-mode rule editor that compiles to the derived agent
 > **Tier**: Major
@@ -216,6 +216,7 @@ decisions; D-22 onwards were added by the 2026-09-24 plan review.
 | D-14 | Pattern validation and emission | 1-200 characters from printable BMP only (reject C0/C1 controls, DEL, surrogates, U+2028/2029, U+FEFF), max 100 per list, not blank, not `*` or `**` alone; emitted with `json.dumps(s, ensure_ascii=False)` | Default `json.dumps` | Surrogate escapes and DEL can make kiro-cli reject the frontmatter, which fails open silently |
 | D-15 | In-effect check | `derived_block_state(config)` compares the on-disk block with `compile_block(config)` and never raises (a compile error → `unknown` with the message in `generation_error`) | Byte-compare to one overlay | SC-9; otherwise every edit reads as stale |
 | D-16 | Locking | `apply_settings(mutate)` holds `_generation_lock` across load, mutate, `save_config`, generate. The **only** other acquirer is `_derived_agent_in_effect`, with `acquire(timeout=2)`; timeout raises. `derived_block_state`, `compile_block`, `_apply_locked` never acquire it; routes compute the returned state after release | Lock-free gate; unbounded acquire | Closes the config-ahead-of-file window without letting a stalled generation hang session creation |
+| D-16a | Locking amendment (2026-09-25, Step 9 cycle 2, C-M3) | `acknowledge_notice` is a **third** acquirer of `_generation_lock` (bounded 5 s wait): it serialises writes of `permission-notice.json` against the gate's heal. The gate may hand its hold to a worker thread that runs the heal and releases it. The lock's declaration comment in `agent_profile.py` lists all three acquirers | Serialise notice writes another way | The notice file and the derived agent must not be written concurrently; a third bounded acquirer keeps D-16's invariant (config never ahead of the file) |
 | D-17 | Overlay package data | Delete `src/power_atlas/agents/permissions.yaml` and the `agents/**` package-data entry; floor, Protected set and seed become constants in `agent_profile.py` carrying the overlay's measured-semantics comments | Template the YAML | The block is computed; one source of truth |
 | D-18 | `_remove` path | Delete `_remove` and the off branch | Keep for rollback | No Off state; unused code is deleted per governance |
 | D-19 | Prompt-card button | "Allow, and always in new sessions…" opens an inline editor; Save adds the rule and answers this prompt with the option whose `kind` is `allow_once`; if the prompt resolved meanwhile, the rule is still saved and the card says so | Save only adds the rule | One click for an action the user evidently approves |
@@ -878,13 +879,25 @@ Phase 4 (docs)
   `agentMode` is `poweratlas-acp`; saving from a card keeps a pending D-35 notice (`keeps_notice`).
 - **Phase 3 — shared helpers:** the rule editor's warning helpers moved into `transcript-renderer.js`;
   `markPermissionResolved` leaves an open rule row usable so a save can finish after the prompt resolved (D-19).
+- **Step 9 — `tests/permission_pattern_cases.json` is a new test data file** (a case table shared by the Python and JS
+  tests for pattern validation parity). AGENTS.md discourages new test files; the orchestrator's fix brief asked for
+  a shared table, which needs a shared file.
+- **Step 9 — behaviour changes from the final review:** the in-effect check compares the whole derived-agent file
+  (base agent name and digest header lines); a base-agent change or edit reads stale until regenerated, and a failed
+  regeneration refuses Default sessions; while the base cannot be read, a self-consistent file stays in effect. The
+  gate also regenerates an absent file. The D-35 notice is persisted in `permission-notice.json` (with the last
+  generated posture), says what changed (mode, rules, base agent, file), and offers Review rules and Acknowledge; a
+  one-time upgrade notice follows migration. The settings panel gains Apply again. Unrelated saves keep the stored
+  mode and rules as written (user decision 2026-09-25).
 - **Phase 1 — scope addition at the user's request:** the six pre-existing dashboard page-test failures (from
   `8d1782d`) were repaired in this plan (967267e).
 
 ## Follow-up Work (Deferred)
 
 1. **Auto mode decider.** Deny, steer with the reason, escalate on repeat (D-5); needs a probe of when a queued
-   steer reaches the agent. Source: D-2, D-5.
+   steer reaches the agent. Seam: the session record keeps `permission_mode` (Step 9 A7); `acp._rule_row` covers only
+   row catch-all asks and must be generalised to classify every Manual ask (row, Protected, built-in, vendor) before
+   Auto can reuse it (Step 9 A8). Source: D-2, D-5.
 2. **Home/root deletion protection.** Left to Auto (D-6).
 3. **Symlinked self-config enforcement (PD-6 option B).** The Phase 1 probe (2026-09-25) showed an `fs_write` ask on the absolute resolved target (a path with a space) prompts for a write through the link, so option B is viable: emit Protected rules for resolved targets, shown in the UI; a resolver failure adds no rules and never refuses a session. It matters only when the session workspace contains the target: kiro-cli's built-in `kiro-scope:workspace-escape` already denies writes through a link whose target lies outside the workspace (measured). Source: R-7, D-39.
 4. **Shell floor bypass by rephrasing.** Accepted best-effort. Source: R-2, R-12.
@@ -893,8 +906,13 @@ Phase 4 (docs)
 7. **git textconv / `diff.external` via allowed git commands.** Source: R-8.
 8. **Unnamed capabilities** (`context`, `diagnostics`, `sandbox_network`) inherit user scope; probe and name them.
    Source: Sec review #20.
-9. **Config lost update between settings routes.** A single config-write primitive would remove it. Source: R-13.
+9. **Config lost update between settings routes.** A single config-write primitive would remove it. `/api/save-setting`
+   still saves non-permission keys outside the generation lock (Step 9 SEC7; user chose follow-up 2026-09-25).
+   Source: R-13.
 10. **Runtime confirmation that kiro-cli bound the compiled block.** Source: R-17.
+12. **Row-label single source.** `acp._RULE_ROWS`, `agent_profile.ROW_LABELS`, the renderer's `PERMISSION_RULE_ROWS` and
+    `PERMISSION_CAPABILITY_WORDS` repeat the row names; pinned by tests. A leaf module would need `acp.py` to widen its
+    import boundary (Step 9 SE7, not fixed). Source: Step 9 review.
 11. **Stale plan paths.** `plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` is still cited at
     `docs/KNOWLEDGE.md` ~273, `acp.py` ~22 and ~896, `plans/ROADMAP.md` ~218 (AGENTS.md's is fixed in Phase 1).
     Pre-existing; reported, not in scope. Source: doc-impact scan.
@@ -1039,7 +1057,7 @@ Implementation health: Green.
 | 12 | Low | D-34 refusal leaked absolute paths to remote clients | Fixed — 682bbc7, 687ee20: redacted at folder boundaries, incl. the config folder |
 | 13 | Low | README said a hand edit is picked up by the next session for every key | Fixed — 682bbc7: wording per key and session kind |
 | 14 | Low | `_gate_verdict` accepted a bare bool only for a test fixture | Fixed — 682bbc7: fixture returns the dict; bool fails closed |
-| 15 | Low | Manual-seed criterion's agents-write clause met only in the migrated run | Fixed — recorded in the Phase 1 note (criterion predates D-23) |
+| 15 | Low | Manual-seed criterion's agents-write clause met only in the migrated run | User: accepted — 2026-09-25, behaviour correct per D-5/D-23; the criterion predates D-23 |
 | 16 | Low | Self-reported divergences not in § 9 | Fixed — recorded in § 9 |
 | 17 | Low | Six dashboard page tests failing (pre-existing, `8d1782d`) | Fixed — 967267e (user chose to fix in this plan, 2026-09-25) |
 | 18 | Low | `web.py` docstring cited `derived_block_state()` without its argument | Fixed — 682bbc7 |
@@ -1125,6 +1143,73 @@ KNOWLEDGE facts against the raw probe files and re-ran the Phase 4 grep (one int
 | 1 | Medium | KNOWLEDGE claimed kiro-cli splits inside `powershell -Command "…"`; raw P-0.8i shows the whole command matched | Fixed — 6abfcbf; plan's Phase 0 note carries a dated correction |
 | 2 | Low | Blanket-ask-needs-exclude cited probes that only showed the working case | Fixed — 6abfcbf: cites the prior plan § 9 Step 4 |
 
+### 2026-09-25 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor, Reliability engineer, End-user advocate, Architect (full effort).
+Cycle 1: 2 High, 10 Medium (1 refuted by a verifier), about 30 Low — all fixed except SE7 (Follow-up 12) and the two
+user decisions below. Cycle 2 (targeted re-review of the cycle-1 fix commits, Security auditor and Reliability
+engineer): 2 High, 3 Medium, 9 Low, all introduced by the cycle-1 fixes and all fixed; no further review cycle at the
+user's direction (2026-09-25: "Fix but no more review cycle"). QA verification: PASS after one fix round (6 surfaces
+verified in real Chrome, 20+ probes executed).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 0: Pre-flight probes and gate | not_run | SKIP | Probe-only phase; 12 probes plus follow-up F-1..F-7 against separate kiro-cli processes |
+| 1: Modes, compiler and the mode picker | pass | PASS | Live Yolo/Manual probes; restart and Playwright + Chrome MCP QA |
+| 2: Custom Manual rules and the rule editor | pass | PASS | Chrome MCP QA after one focus fix |
+| 3: "Allow, and always in new sessions" | pass | PASS | Live button test end to end in Chrome |
+| 4: Documentation and final live check | not_run | SKIP | Docs-only phase; facts spot-checked against raw probe files |
+
+Final state: pytest `tests/test_web.py tests/test_config.py` 2236 passed; `node tests/acp_page.test.mjs` 805/805;
+`_check_test_names.py` clean.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| H-A | High | [End-user, Reliability] "Save the mode again" impossible; an absent derived agent was never regenerated | Fixed — b95026a, 561bdf7: gate regenerates absent files; Apply again control; fix texts name it |
+| H-B | High | [Security] In-effect check compared only the first `permissions:` block; tampering elsewhere read "on" | Fixed — b95026a: whole-file comparison with base name and digest; tamper heals with a "file" notice |
+| M-1 | Medium | [Senior, Reliability] Heal raised a false outside-change notice after the dashboard's own failed save | Fixed — b95026a, 6c0f8b9 |
+| M-2 | Medium | [Reliability, Security] Posture notice lost on restart | Fixed — b95026a: persisted in `permission-notice.json` |
+| M-3 | Medium | [End-user] Notice text implied choosing the mode undoes outside rules changes | Fixed — 561bdf7: says what changed; Review rules and Acknowledge |
+| M-4 | Medium | [End-user] Only the checked mode's description shown | Fixed — 561bdf7: both descriptions always shown |
+| M-5 | Medium | [End-user, Senior] Manual description was fixed seed text | Fixed — 561bdf7: derived from the stored rules |
+| M-6 | Medium | [End-user] No upgrade notice | Fixed — b95026a, 561bdf7: one-time persisted upgrade notice |
+| M-7 | Medium | [End-user, Senior] SC-3's reopened-session disclosure missing | Fixed — 561bdf7: scope note, Always blocked note, README |
+| M-8 | Medium | [End-user, Senior] Next-step advice always blamed the base agent | Fixed — 561bdf7: cause-specific next steps |
+| M-9 | Medium | [Architect] `acp.py` docstring claimed `config` imports nothing from the package | Fixed — 24a5904: docstring corrected; import-isolation guard test |
+| M-10 | Medium | [Architect] Lock protocol split across `web.py` and `agent_profile.py` | Refuted by verifier — the split is D-16's recorded design and documented at the lock |
+| A10 | Low | [Architect] Unrelated saves persisted load-time-normalised rules and mode | Fixed — b95026a: raw stored values written back (user chose Fix, 2026-09-25) |
+| SEC7 | Low | [Security] `/api/save-setting` saves outside the generation lock (pre-existing R-13) | User: accepted — 2026-09-25, left for Follow-up 9 |
+| SE7 | Low | [Senior] Row-label map repeated four times | Orchestrator: proposed-accept — pending user decision; Follow-up 12 |
+| L-* | Low | [all] About 28 further Lows (EU8-14, SE4/6/9, RE4-10, A3/4/5/6/7/9, SEC3/4/5/6/8) | Fixed — b95026a, 561bdf7, 24a5904 |
+| C-H1 | High | [Security, cycle 2] Saved fingerprint never cleared, silencing outside reverts | Fixed — 6c0f8b9; reviewer probe re-run clean |
+| C-H2 | High | [Security, cycle 2] Absent-file heal raised no notice for an outside change | Fixed — 6c0f8b9: last generated posture persisted; probe re-run clean |
+| C-M1 | Medium | [Reliability, cycle 2] Transient base-read failure refused sessions on a correct file | Fixed — 6c0f8b9: self-consistency fallback and one retry |
+| C-M2 | Medium | [Reliability, cycle 2] Base-caused refusal pointed at Apply again | Fixed — 6c0f8b9: names the base agent file |
+| C-M3 | Medium | [Security, cycle 2] Third lock acquirer not in D-16 | Fixed — 6c0f8b9 comment; plan amended as D-16a |
+| C-L* | Low | [cycle 2] Nine Lows (C-L1..C-L9) | Fixed — 6c0f8b9 |
+| Q-1 | Medium | [QA] Apply again always visible: `.topbar-menu-row` `display:flex` overrode `hidden` | Fixed — 936794b; confirmed in Chrome |
+| Q-2 | Medium | [QA] Focus fell to the page body after Apply again or Acknowledge | Fixed — db5b8e1; confirmed in Chrome |
+
+Verification phase (full effort): one verifier per High/Medium, grouped into three verifier sub-agents to stay within the
+API rate limit that had killed the first dispatch (deviation stated); Lows were not separately verified — the fixer was
+told to reject any it could refute (none were). Completeness critic: not dispatched (deviation stated). The first Step 9
+dispatch (five personas) failed on an API session limit (HTTP 429) and was retried at the user's request after the
+reset.
+
+QA (Step 9b, 2026-09-25, real Chrome via Claude-in-Chrome MCP after a restart at 08:12; standalone Playwright for phone
+widths): settings panel (both descriptions, Manual summary, reopened-session scope note, Protected count); outside
+change in `config.toml` → session gate heal → notice "Manual instead of Yolo" with Review rules / Acknowledge →
+Acknowledge cleared it; foreign `poweratlas-acp.md` → Default refused with cause, fix and task-mode alternative, file
+left untouched (D-29) → file removed → NOT IN EFFECT badge and Apply again → regenerated, in effect, focus on the checked
+radio; prompt card in Manual shows row names and the PowerAtlas source label with the always-allow button; 375 px and
+320 px widths without horizontal scroll, editor gutters 16-18 px. Two QA defects found and fixed (Q-1, Q-2). State
+restored: Yolo, seed rules, no pending notice; QA sessions deleted after checking `createdAt`/`agentMode`/
+`workspacePaths`. Backups: `config.toml.pre-permission-modes`, `.pre-phase2-restart`, `.pre-phase3-restart`,
+`.pre-final-qa` in `%LOCALAPPDATA%\power-atlas`.
+
 ## Harness Improvement Opportunities
 
 - `/qexplore`'s probe gate says to run side-effecting probes only with consent, while `shared.md` says one
@@ -1142,6 +1227,8 @@ KNOWLEDGE facts against the raw probe files and re-ran the Phase 4 grep (one int
 - An API session limit (HTTP 429) killed a council sub-agent mid-run; the council's partial-failure rule then halts the whole pipeline — cost: about an hour of wall-clock waiting on the reset and one re-dispatch — suggested change: none to the rule; a note in `/qcouncil` that a rate-limit failure is a Retry-after-reset case, with completed advocate briefs saved to scratch so they are reusable.
 - The Claude-in-Chrome MCP extension was not connected even after starting Chrome, while `/qqa`'s browser gate names Playwright MCP `browser_*` calls and the project has no Playwright MCP — cost: two tool round trips and a gate the evidence cannot literally satisfy — suggested change: let `/qqa`'s browser gate accept a project-documented standalone Playwright recipe (`AGENTS.md § Verification Setup`) as equivalent evidence.
 - Chrome MCP ref-based clicks issued right after a navigation were silently dropped (no pointer events reached the page), which first read as an app bug — cost: about eight tool calls of diagnosis — suggested change: `/qbrowser-test` guidance to wait for page settle, or prefer coordinate clicks after a navigation, and to log capture-phase pointer events before diagnosing "click does nothing".
+- Sub-agents may not write report files ("Subagents should return findings as text"), while `/qdev` and the multi-agent rules say a sub-agent's deliverable is a file — cost: every reviewer spent a turn on a refused write and the orchestrator re-typed findings into scratch files — suggested change: state in `/qreview`'s spawn contract that findings return as text and the orchestrator persists them.
+- Page tests run without a CSS engine, so a `display` rule overriding `hidden` (Q-1) passed 803 checks and was found only in a real browser — cost: one QA round — suggested change: a project convention (or lint) that any class setting `display` on a `hidden`-toggled element also declares `[hidden] { display: none }`.
 - `/qdev` has no shape for a probe-only phase (no code commit): the `feat`/`docs` pairing and "sub-agent commits code" steps did not apply — cost: small; the orchestrator improvised a docs-only commit and confirmed `commit-pairing` passes — suggested change: state in `/qdev` Step 4 that a results-only phase produces one `docs(<slug>): phase N progress (code: none)` commit.
 - The exploration's lower-stakes assumptions were shown at the checkpoint but not written as an
   `Assumptions (unconfirmed)` adjunct, so `/qplan` had no labelled list to route — cost: the planner folded them
