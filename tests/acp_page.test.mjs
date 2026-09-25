@@ -4769,8 +4769,10 @@ const PANEL_NAMES = [
   "renderRemoteAccess", "rotateRemoteSecret",
   "loadRemoteAccess", "_RESTART_KEY_LABELS", "renderRestartKeys",
   "markRestartInputs", "loadRestartKeys", "openRemoteModal",
-  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3.
-  "renderAcpPermissions", "loadAcpPermissions", "toggleAcpPermissions",
+  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3; the mode
+  // picker replaced the toggle in 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL
+  // Phase 1.
+  "renderAcpPermissions", "loadAcpPermissions", "setAcpPermissionMode",
   "saveAcpPermissionBaseAgent",
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review.
   "renderLocalSecret", "rotateLocalSecret",
@@ -4824,19 +4826,35 @@ function loadPanel(opts = {}) {
     ["remoteModal", modal],
   ]);
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the
-  // permission-profile rows in the topbar menu, which live in the same
-  // <script> region as this panel. Initial `hidden` states match the markup.
-  const permToggle = new El("div");
-  permToggle.className = "topbar-menu-row topbar-toggle";
+  // permission rows in the topbar menu, which live in the same <script>
+  // region as this panel. Initial `hidden` states match the markup.
+  // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1: the three mode
+  // radios (Auto disabled, as in the markup), the per-mode description, the
+  // external-change notice and the Always blocked / Protected lists.
   const permBadge = new El("span");
   permBadge.hidden = true;
   const permWarn = new El("div");
   permWarn.hidden = true;
   const permBase = new El("input");
-  byId.set("acpPermToggle", permToggle);
+  for (const [id, value] of [["acpPermModeYolo", "yolo"], ["acpPermModeAuto", "auto"],
+                             ["acpPermModeManual", "manual"]]) {
+    const radio = new El("input");
+    radio.type = "radio";
+    radio.value = value;
+    radio.checked = false;
+    radio.disabled = value === "auto";
+    byId.set(id, radio);
+  }
+  const permDesc = new El("div");
+  const permNotice = new El("div");
+  permNotice.hidden = true;
   byId.set("acpPermBadge", permBadge);
   byId.set("acpPermWarn", permWarn);
   byId.set("acpPermBaseAgent", permBase);
+  byId.set("acpPermDesc", permDesc);
+  byId.set("acpPermNotice", permNotice);
+  byId.set("acpPermFloorList", new El("div"));
+  byId.set("acpPermProtectedList", new El("div"));
   // G4 (Phase 3 review): the settings gear's dot, shared with restart drift.
   const pendingDot = new El("span");
   pendingDot.hidden = true;
@@ -11025,9 +11043,14 @@ check("task-mode picker: Default sends kiro_default, never the derived agent, wi
 check("task-mode picker: a refused derived-agent create is legible in the transcript", async (tpl) => {
   const { page } = connected(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
   await page.settle();
-  const message = "The PowerAtlas permission profile is not in effect, so its agent " +
-    "cannot be selected. Settings shows whether the profile is off or why it is not " +
-    "in effect. Pick Default or another mode to start a session now.";
+  // The D-34 refusal (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL): cause,
+  // fix, the remote note and the task-mode way on.
+  const message = "PowerAtlas did not create this session: its permission rules, " +
+    "including the Always blocked list, are not in effect, because its agent file " +
+    "C:/x/poweratlas-acp.md has not been written. Save the permission mode again in " +
+    "Settings > Agent permissions on the dashboard, or restart PowerAtlas. This has to " +
+    "be done on the computer running PowerAtlas. To start a session now without those " +
+    "rules, pick a task mode such as Spec or Plan instead of Default.";
   page.deliver({ type: "error", payload: { code: "bad_payload", message } });
   assert(page.transcript().includes(message),
     "the server's refusal did not reach the transcript, so the create just silently failed");
@@ -11066,7 +11089,7 @@ check("dashboard: a refused create replaces 'Creating session…' with the serve
   assert(/Creating session/.test(p.el("dashTranscript").textContent),
     "fixture: the placeholder was not drawn");
   assertEqual(p.sandbox.dashComposerEl.hidden, true, "fixture: the composer was not hidden");
-  const message = "PowerAtlas could not check whether its permission profile is in effect, " +
+  const message = "PowerAtlas could not check whether its permission rules are in effect, " +
     "so no session was created.";
   p.sandbox.dashHandle({ type: "error", payload: { code: "bad_payload", message } });
   assert(!/Creating session/.test(p.el("dashTranscript").textContent),
@@ -11105,177 +11128,236 @@ check("dashboard: a permission_request frame passes its consent block to the ren
 
 // The dashboard settings rows. They live in the same <script> region as the
 // remote-access panel, so `loadPanel` runs them from the real source.
+// 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1 replaced the on/off
+// toggle with a three-option mode picker (Yolo, Auto disabled, Manual).
 
-check("settings: the permission rows render the server's state, and warn only when on but not in effect", () => {
+const PERM_FLOOR = [
+  { id: "fs_read", label: "Reading credential stores", detail: "SSH, AWS",
+    patterns: ["**/.ssh/**"], note: "A link to one of these folders is not covered." },
+  { id: "shell", label: "Commands that mention those stores", detail: "",
+    patterns: ["*.ssh*"], note: "Catches common accidents, not a guarantee." },
+];
+const PERM_PROTECTED = [
+  { id: "agents", label: "Agent definitions", patterns: ["**/.kiro/agents/**"], effect: "block" },
+  { id: "steering", label: "Steering files", patterns: ["**/.kiro/steering/**"], effect: "ask" },
+];
+function permState(over) {
+  return Object.assign({ mode: "yolo", mode_warning: "", in_effect: true, state: "on",
+    base_agent: "kiro_default", generation_ok: true, generation_error: "",
+    generation_note: "", floor: PERM_FLOOR, protected: PERM_PROTECTED,
+    posture_notice: null }, over || {});
+}
+function checkedMode(p) {
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  const on = [["yolo", "acpPermModeYolo"], ["auto", "acpPermModeAuto"], ["manual", "acpPermModeManual"]]
+    .filter(([, id]) => $(id).checked === true).map(([m]) => m);
+  return on.length ? on.join(",") : null;
+}
+
+check("settings: the mode picker checks the stored mode, describes it, and warns only when not in effect", () => {
   const p = loadPanel();
   const $ = (id) => p.sandbox.document.getElementById(id);
-  p.sandbox.renderAcpPermissions({ enabled: false, in_effect: false, state: "absent",
-    base_agent: "kiro_default", generation_ok: true, generation_error: null });
-  assertEqual($("acpPermToggle").classList.contains("active"), false, "off rendered as on");
+  p.sandbox.renderAcpPermissions(permState());
+  assertEqual(checkedMode(p), "yolo", "the stored Yolo mode was not the checked radio");
+  assertEqual($("acpPermModeAuto").disabled, true, "Auto became selectable");
   assertEqual($("acpPermBaseAgent").value, "kiro_default", "the base agent was not shown");
-  assertEqual($("acpPermBadge").hidden, true, "the healthy off state shows a warning badge");
-  assertEqual($("acpPermWarn").hidden, true, "the healthy off state shows a warning");
+  assert(/^Yolo:/.test($("acpPermDesc").textContent), `no Yolo description: ${$("acpPermDesc").textContent}`);
+  // D-38c: kiro-cli's own built-in asks and the .kiroignore deny, in every mode.
+  for (const word of [".git", ".vscode", "*.code-workspace", ".kiro/agents", ".kiro/hooks", ".kiroignore"]) {
+    assert($("acpPermDesc").textContent.includes(word), `the Yolo description does not name ${word}`);
+  }
+  assertEqual($("acpPermBadge").hidden, true, "a healthy state shows the badge");
+  assertEqual($("acpPermWarn").hidden, true, "a healthy state shows a warning");
 
-  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: true, state: "on",
-    base_agent: "my_agent", generation_ok: true, generation_error: null });
-  assertEqual($("acpPermToggle").classList.contains("active"), true, "on rendered as off");
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual", base_agent: "my_agent" }));
+  assertEqual(checkedMode(p), "manual", "Manual was not the checked radio");
+  assert(/^Manual:/.test($("acpPermDesc").textContent), "no Manual description");
   assertEqual($("acpPermBaseAgent").value, "my_agent", "the base agent did not update");
-  assertEqual($("acpPermBadge").hidden, true, "the healthy on state shows a warning badge");
-  assertEqual($("acpPermWarn").hidden, true, "the healthy on state shows a warning");
 
-  // SC-8's UI half: generation failed, so the toggle and the posture disagree.
-  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: false, state: "absent",
-    base_agent: "missing_agent", generation_ok: false,
-    generation_error: "base agent 'missing_agent' not found" });
-  assertEqual($("acpPermToggle").classList.contains("active"), true,
-    "the toggle stopped reading on — it is what the user asked for, and stays so");
-  assertEqual($("acpPermBadge").hidden, false,
-    "on-but-not-in-effect shows no badge on the toggle row");
-  assertEqual($("acpPermWarn").hidden, false, "on-but-not-in-effect shows no warning");
-  assert(/not in effect/i.test($("acpPermWarn").textContent),
-    `the warning does not say the profile is not in effect: ${$("acpPermWarn").textContent}`);
-  assert($("acpPermWarn").textContent.includes("base agent 'missing_agent' not found"),
-    "the warning does not carry the generation error");
-  assert($("acpPermBadge").title.includes("missing_agent"), "the badge carries no reason");
+  // SC-9's UI half: the file is not what the settings compile to.
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual", in_effect: false, state: "absent",
+    generation_ok: false, generation_error: "cannot write C:/x/poweratlas-acp.md" }));
+  assertEqual(checkedMode(p), "manual", "the chosen mode stopped reading as chosen");
+  assertEqual($("acpPermBadge").hidden, false, "not in effect shows no badge");
+  assertEqual($("acpPermWarn").hidden, false, "not in effect shows no warning");
+  const warn = $("acpPermWarn").textContent;
+  assert(/Not in effect/.test(warn), `the warning does not say not in effect: ${warn}`);
+  assert(warn.includes("cannot write C:/x/poweratlas-acp.md"), "the warning does not carry the error");
+  assert(/New Default sessions are refused/.test(warn), "the warning does not say what that means (D-34)");
+  assert(/task modes such as Spec or Plan/.test(warn), "the warning does not offer the way on");
+  assert($("acpPermBadge").title.includes("poweratlas-acp.md"), "the badge carries no reason");
 
-  // A bare refusal is not a state and must not repaint the rows as off.
+  // Neither a bare refusal nor an old-shaped `enabled` answer is a state.
   p.sandbox.renderAcpPermissions({ ok: false, error: "nope" });
-  assertEqual($("acpPermToggle").classList.contains("active"), true,
-    "an {ok:false} answer repainted the toggle");
+  p.sandbox.renderAcpPermissions({ enabled: false, in_effect: false, state: "absent" });
+  assertEqual(checkedMode(p), "manual", "a non-state answer repainted the radios");
 });
 
-check("settings: every warning names a next step (G9)", () => {
+check("settings: every permission warning names a next step, and none says to turn anything off and on (G9)", () => {
   const p = loadPanel();
   const warn = () => p.sandbox.document.getElementById("acpPermWarn").textContent;
-  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: false, state: "absent",
-    base_agent: "x", generation_ok: false, generation_error: "base agent 'x' not found" });
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "absent",
+    generation_ok: false, generation_error: "base agent 'x' is invalid" }));
   assert(/Check the Base agent name below/.test(warn()), `no next step for a failed generation: ${warn()}`);
-  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: false, state: "stale",
-    base_agent: "x", generation_ok: true, generation_error: "" });
-  assert(/off and on again to regenerate/.test(warn()), `no next step for a stale profile: ${warn()}`);
-  p.sandbox.renderAcpPermissions({ enabled: false, in_effect: false, state: "on",
-    base_agent: "x", generation_ok: false, generation_error: "access denied" });
-  assert(/on and off again to retry/.test(warn()), `no next step for an undeletable profile: ${warn()}`);
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "stale" }));
+  assert(/save the mode again or restart PowerAtlas/i.test(warn()), `no next step for a stale file: ${warn()}`);
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "unknown",
+    derived_agent: "C:/k/poweratlas-acp.md" }));
+  assert(/Remove or rename that file/.test(warn()), `no next step for a foreign file: ${warn()}`);
+  assert(warn().includes("C:/k/poweratlas-acp.md"), "the foreign file is not named");
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "absent" }));
+  assert(/restart PowerAtlas/.test(warn()), `no next step for a missing file: ${warn()}`);
+  const src = panelSource();
+  assert(!/off and on again|on and off again/.test(src),
+    "the panel still tells the user to turn something off and on; there is no Off state");
 });
 
-check("settings: a failed base-agent change that kept the previous profile is reported (G3)", () => {
-  // D-10 keeps the last-good derived agent, so in_effect stays true; the
-  // first version of the panel showed nothing at all for this.
+check("settings: a failed change that kept the previous file, an unreadable mode and a minimal base agent are reported", () => {
   const p = loadPanel();
   const $ = (id) => p.sandbox.document.getElementById(id);
-  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: true, state: "on",
-    base_agent: "new_agent", generation_ok: false,
-    generation_error: "base agent 'new_agent' not found" });
-  assertEqual($("acpPermWarn").hidden, false, "a kept-previous-profile state shows no warning");
-  assert(/Still using the previous profile/.test($("acpPermWarn").textContent),
-    `the warning does not say the previous profile is still in use: ${$("acpPermWarn").textContent}`);
-  assert($("acpPermWarn").textContent.includes("base agent 'new_agent' not found"),
-    "the warning does not carry the generation error");
-  assertEqual($("acpPermBadge").hidden, true,
-    "the 'not in effect' badge is shown although the (previous) profile is in effect");
+  // No generation has run yet in this process: not a failure.
+  p.sandbox.renderAcpPermissions(permState({ generation_ok: false, generation_attempted: false }));
+  assertEqual($("acpPermWarn").hidden, true, "a generation that has not run yet was reported as failed");
+  // G3: in effect, but the latest generation failed.
+  p.sandbox.renderAcpPermissions(permState({ generation_ok: false,
+    generation_error: "cannot write the file" }));
+  assert(/Still using the previous agent file/.test($("acpPermWarn").textContent),
+    `the warning does not say the previous file is in use: ${$("acpPermWarn").textContent}`);
+  assertEqual($("acpPermBadge").hidden, true, "the badge claims not in effect while it is");
+  // D-25: a junk stored mode loads as Manual and says so.
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual",
+    mode_warning: "acp_permission_mode 'junk' is not a permission mode; running as Manual" }));
+  assertEqual($("acpPermWarn").hidden, false, "the mode warning was not shown");
+  assert($("acpPermWarn").textContent.includes("running as Manual"), "the mode warning text was lost");
+  // D-28: generated from the minimal agent.
+  p.sandbox.renderAcpPermissions(permState({
+    generation_note: "base agent 'kiro_default' not found — using a minimal agent" }));
+  assert($("acpPermWarn").textContent.includes("using a minimal agent"), "the minimal-agent note was not shown");
 });
 
-check("settings: the gear dot lights for a profile not working as set, and restart drift cannot hide it (G4)", () => {
+check("settings: the gear dot lights for a permission mode not working as set, and restart drift cannot hide it (G4)", () => {
   const p = loadPanel();
   const dot = p.sandbox.document.getElementById("topbarPendingDot");
-  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: true, state: "on",
-    base_agent: "kiro_default", generation_ok: true, generation_error: "" });
-  assertEqual(dot.hidden, true, "the healthy on state lit the gear dot");
-  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: false, state: "absent",
-    base_agent: "x", generation_ok: false, generation_error: "nope" });
-  assertEqual(dot.hidden, false, "on-but-not-in-effect did not light the gear dot");
-  assert(/permission profile/i.test(dot.title), `the dot does not say why: ${dot.title}`);
-  // The restart-drift writer runs with nothing pending: it must not hide it.
+  p.sandbox.renderAcpPermissions(permState());
+  assertEqual(dot.hidden, true, "a healthy state lit the gear dot");
+  p.sandbox.renderAcpPermissions(permState({ in_effect: false, state: "absent",
+    generation_ok: false, generation_error: "nope" }));
+  assertEqual(dot.hidden, false, "not in effect did not light the gear dot");
+  assert(/permission mode/i.test(dot.title), `the dot does not say why: ${dot.title}`);
   p.sandbox._topbarDotRestart = false;
   p.sandbox._syncTopbarDot();
   assertEqual(dot.hidden, false, "the restart-drift source hid the permission source's dot");
-  p.sandbox.renderAcpPermissions({ enabled: true, in_effect: true, state: "on",
-    base_agent: "x", generation_ok: false, generation_error: "nope" });
-  assertEqual(dot.hidden, false, "the kept-previous-profile state (G3) did not light the gear dot");
-  p.sandbox.renderAcpPermissions({ enabled: false, in_effect: false, state: "absent",
-    base_agent: "x", generation_ok: true, generation_error: "" });
-  assertEqual(dot.hidden, true, "turning the profile off left the gear dot lit");
+  p.sandbox.renderAcpPermissions(permState({ posture_notice: { mode: "manual", detected_at: "t" } }));
+  assertEqual(dot.hidden, false, "an outside change did not light the gear dot");
+  p.sandbox.renderAcpPermissions(permState());
+  assertEqual(dot.hidden, true, "a healthy state left the gear dot lit");
 });
 
-check("settings: the toggle is a switch whose aria-checked follows it, and Enter/Space operate it (G7)", async () => {
-  let answer = { ok: true, enabled: true, in_effect: true, state: "on", base_agent: "kiro_default" };
+check("settings: a mode changed outside the dashboard is announced, naming the new mode (D-35)", () => {
+  const p = loadPanel();
+  const notice = p.sandbox.document.getElementById("acpPermNotice");
+  p.sandbox.renderAcpPermissions(permState({ mode: "yolo",
+    posture_notice: { mode: "yolo", detected_at: "2026-09-24 10:00:00" } }));
+  assertEqual(notice.hidden, false, "the outside change was not shown");
+  assert(/outside the dashboard/.test(notice.textContent) && /Yolo/.test(notice.textContent),
+    `the notice does not name the new mode: ${notice.textContent}`);
+  p.sandbox.renderAcpPermissions(permState({ posture_notice: null }));
+  assertEqual(notice.hidden, true, "the notice outlived the change that cleared it");
+});
+
+check("settings: the Always blocked and Protected lists render as text, with the linked-items marker (D-39)", () => {
+  const p = loadPanel();
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  const links = {
+    agents: { count: 0, links: [] },
+    steering: { count: 2, links: [
+      { name: "a.md", target: "C:/playbook/a.md", error: "" },
+      { name: "<img src=x>.md", target: "", error: "unresolvable (FileNotFoundError)" }] },
+  };
+  p.sandbox.renderAcpPermissions(permState({ protected_links: links }));
+  const floor = $("acpPermFloorList").textContent;
+  assert(floor.includes("Reading credential stores") && floor.includes("**/.ssh/**"),
+    `the floor was not listed: ${floor}`);
+  assert(floor.includes("not a guarantee"), "the shell tier is not labelled best-effort");
+  const prot = $("acpPermProtectedList").textContent;
+  assert(prot.includes("Agent definitions") && /blocked outright/.test(prot), `Protected block effect missing: ${prot}`);
+  assert(prot.includes("Steering files") && /asks/.test(prot), "Protected ask effect missing");
+  assert(prot.includes("2 linked items not covered"), `no linked-items marker: ${prot}`);
+  assert(prot.includes("a.md → C:/playbook/a.md"), "a link target is not shown");
+  assert(prot.includes("<img src=x>.md (unresolvable"), "an unresolvable link is not shown as text");
+  const markers = $("acpPermProtectedList").querySelectorAll(".acp-perm-links-marker");
+  assertEqual(markers.length, 1, "a folder with no links got a marker");
+  // A POST answer carries no links (the walk runs only on GET): the last
+  // links found are kept rather than the marker vanishing.
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual" }));
+  assert($("acpPermProtectedList").textContent.includes("2 linked items not covered"),
+    "a POST answer without links erased the marker");
+});
+
+check("settings: choosing a radio posts the mode it names, and reconciles from the answer", async () => {
+  let answer = Object.assign({ ok: true }, permState({ mode: "manual" }));
   const p = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: answer } : { body: {} } });
-  const toggle = p.sandbox.document.getElementById("acpPermToggle");
-  p.sandbox.renderAcpPermissions({ enabled: false, in_effect: false, state: "absent", base_agent: "kiro_default" });
-  assertEqual(toggle.getAttribute("aria-checked"), "false", "aria-checked does not read off");
-  let prevented = 0;
-  const key = (k) => p.sandbox.acpPermToggleKey({ key: k, preventDefault() { prevented++; } }, toggle);
-  key("a");
-  assertEqual(p.fetches.length, 0, "an unrelated key operated the switch");
-  key("Enter");
-  assertEqual(p.fetches.length, 1, "Enter did not operate the switch");
-  assertEqual(prevented, 1, "Enter was not consumed");
-  assertEqual(toggle.getAttribute("aria-checked"), "true", "aria-checked did not follow the optimistic change");
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  p.sandbox.setAcpPermissionMode($("acpPermModeManual"));
+  assertEqual(p.fetches.length, 1, "choosing Manual sent no request");
+  assertEqual(p.fetches[0].url, "/api/acp-permissions", "the mode posted to the wrong route");
+  assertEqual(String(p.fetches[0].init.method).toUpperCase(), "POST", "the mode was not POSTed");
+  assertEqual(JSON.stringify(JSON.parse(p.fetches[0].init.body)), JSON.stringify({ mode: "manual" }),
+    "the request did not state the chosen mode");
   await p.settle();
-  answer = { ok: true, enabled: false, in_effect: false, state: "absent", base_agent: "kiro_default" };
-  key(" ");
-  assertEqual(p.fetches.length, 2, "Space did not operate the switch");
+  assertEqual(checkedMode(p), "manual", "the answer was not drawn");
+  // Saved but not in effect (D-32): drawn, and the warning raised.
+  answer = Object.assign({ ok: true, warning: "Saved, but not yet in effect: x." },
+    permState({ mode: "yolo", in_effect: false, state: "unknown" }));
+  p.sandbox.setAcpPermissionMode($("acpPermModeYolo"));
   await p.settle();
-  assertEqual(toggle.getAttribute("aria-checked"), "false", "aria-checked did not follow the answer");
+  assertEqual(checkedMode(p), "yolo", "a saved-but-not-in-effect answer was not drawn");
+  assert(p.toasts.some((t) => t.includes("not yet in effect")), "the D-32 warning was not raised");
+  // A refusal: toast, and the radios are put back from a fresh read.
+  answer = { ok: false, error: "mode must be \"yolo\" or \"manual\"" };
+  const before = p.fetches.length;
+  p.sandbox.setAcpPermissionMode($("acpPermModeManual"));
+  await p.settle();
+  await p.settle();
+  assert(p.toasts.some((t) => t.includes("mode must be")), "a refused change was not reported");
+  assert(p.fetches.slice(before).some((f) => !f.init.method), "the radios were not re-read after a refusal");
+  // Auto is not storable: nothing is sent for it.
+  const sent = p.fetches.length;
+  p.sandbox.setAcpPermissionMode($("acpPermModeAuto"));
+  assertEqual(p.fetches.length, sent, "choosing Auto sent a request");
 });
 
-check("settings: a state read that fails shows 'could not read', not off (G10)", async () => {
+check("settings: a state read that fails checks no mode and says so (G10)", async () => {
   const p = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { reject: "offline" } : null });
   const $ = (id) => p.sandbox.document.getElementById(id);
+  p.sandbox.renderAcpPermissions(permState());
   await p.sandbox.loadAcpPermissions();
-  assertEqual($("acpPermToggle").getAttribute("aria-checked"), "mixed",
-    "a failed read rendered the toggle as a definite state");
-  assertEqual($("acpPermToggle").classList.contains("active"), false, "a failed read rendered on");
+  assertEqual(checkedMode(p), null, "a failed read left a mode checked");
   assertEqual($("acpPermWarn").hidden, false, "a failed read showed no explanation");
-  assert(/Could not read the permission setting/.test($("acpPermWarn").textContent),
+  assert(/Could not read the permission mode/.test($("acpPermWarn").textContent),
     `the explanation does not say the read failed: ${$("acpPermWarn").textContent}`);
   // An answer that is not the state's shape is a failed read too.
-  const q = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: { detail: "Not Found" } } : null });
+  const q = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: { enabled: true } } : null });
   await q.sandbox.loadAcpPermissions();
-  assertEqual(q.sandbox.document.getElementById("acpPermToggle").getAttribute("aria-checked"), "mixed",
-    "a non-state answer rendered the toggle as a definite state");
+  assertEqual(checkedMode(q), null, "an old-shaped answer checked a mode");
 });
 
 check("settings: the permission rows' error toasts can be dismissed (G12)", async () => {
   const p = loadPanel({ answer: (url) => url === "/api/acp-permissions"
     ? { body: { ok: false, error: "nope" } } : { body: {} } });
-  p.sandbox.toggleAcpPermissions(p.sandbox.document.getElementById("acpPermToggle"));
+  p.sandbox.setAcpPermissionMode(p.sandbox.document.getElementById("acpPermModeManual"));
   await p.settle();
   assertEqual(p.toasts.length, 1, "the refusal raised no toast");
   assert(p.toasts[0].includes('class="toast-dismiss"'), "the error toast has no dismiss button");
 });
 
-check("settings: the toggle sets the value it is moving to, and reconciles from the answer", async () => {
-  let answer = { ok: true, enabled: true, in_effect: true, state: "on", base_agent: "kiro_default" };
-  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: answer } : { body: {} } });
-  const toggle = p.sandbox.document.getElementById("acpPermToggle");
-  p.sandbox.toggleAcpPermissions(toggle);
-  assertEqual(p.fetches.length, 1, "pressing the toggle sent no request");
-  assertEqual(p.fetches[0].url, "/api/acp-permissions", "the toggle posted to the wrong route");
-  assertEqual(String(p.fetches[0].init.method).toUpperCase(), "POST", "the toggle did not POST");
-  assertEqual(JSON.stringify(JSON.parse(p.fetches[0].init.body)), JSON.stringify({ enabled: true }),
-    "the toggle did not state the value it is moving to — the route sets, it does not flip");
-  await p.settle();
-  assertEqual(toggle.classList.contains("active"), true, "the toggle did not stay on");
-
-  // A refusal arrives as HTTP 200 with ok:false; the row goes back.
-  answer = { ok: false, error: "enabled must be true or false" };
-  p.sandbox.toggleAcpPermissions(toggle);
-  assertEqual(JSON.parse(p.fetches[1].init.body).enabled, false, "turning off did not send false");
-  await p.settle();
-  assertEqual(toggle.classList.contains("active"), true,
-    "a refused change left the toggle showing a value that was not saved");
-  assert(p.toasts.some((t) => t.includes("enabled must be true or false")),
-    "a refused change was not reported");
-});
-
 check("settings: the base agent saves through /api/save-setting and shows the resulting state", async () => {
-  let answer = { ok: true, restart_required: false, enabled: true, in_effect: false,
-                 state: "absent", base_agent: "other", generation_ok: false,
-                 generation_error: "base agent 'other' not found" };
+  let answer = Object.assign({ ok: true, restart_required: false },
+    permState({ in_effect: false, state: "unknown", base_agent: "other",
+      generation_ok: false, generation_error: "C:/k/poweratlas-acp.md was not written by PowerAtlas" }));
   const p = loadPanel({ answer: (url) =>
     url === "/api/save-setting" ? { body: answer }
-      : url === "/api/acp-permissions" ? { body: { enabled: true, in_effect: true, state: "on", base_agent: "kiro_default" } }
+      : url === "/api/acp-permissions" ? { body: permState() }
       : { body: {} } });
   const input = p.sandbox.document.getElementById("acpPermBaseAgent");
   input.value = "  other  ";
@@ -11462,8 +11544,25 @@ check("settings: clicking into the menu's text fields keeps it open; a toggle or
   const baseBox = fieldInMenu(baseAgent);
   const peek = new El("input");
   const peekBox = fieldInMenu(peek);
-  const toggle = $("acpPermToggle");
+  // A Startup-style toggle row (the permission toggle it used to be was
+  // replaced by the mode picker, 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL).
+  const toggle = new El("div");
+  toggle.className = "topbar-menu-row topbar-toggle";
   p.topbarMenu.appendChild(toggle);
+  // The mode picker's label text and the Always blocked disclosure's
+  // summary are not inputs; `.topbar-menu-keep` keeps the menu open on them.
+  const modes = new El("div");
+  modes.className = "acp-perm-modes topbar-menu-keep";
+  const modeLabel = new El("label");
+  const modeText = new El("span");
+  modeLabel.appendChild(modeText);
+  modes.appendChild(modeLabel);
+  p.topbarMenu.appendChild(modes);
+  const floor = new El("details");
+  floor.className = "acp-perm-details topbar-menu-keep";
+  const summary = new El("summary");
+  floor.appendChild(summary);
+  p.topbarMenu.appendChild(floor);
   const outside = new El("div");
   const menuOpen = () => !p.topbarMenu.hidden
     && p.topbarBtn.getAttribute("aria-expanded") === "true";
@@ -11485,6 +11584,10 @@ check("settings: clicking into the menu's text fields keeps it open; a toggle or
   assert(menuOpen(), "clicking into the Peek hotkey field closed the settings menu");
   clickOn(peekBox);
   assert(menuOpen(), "clicking the Peek hotkey field's box closed the settings menu");
+  clickOn(modeText);
+  assert(menuOpen(), "clicking a permission mode's label closed the settings menu");
+  clickOn(summary);
+  assert(menuOpen(), "opening the Always blocked list closed the settings menu");
 
   clickOn(outside);
   assert(!menuOpen(), "an outside click no longer closes the settings menu");
@@ -11510,35 +11613,44 @@ check("settings: a refused rotation says so and does not claim success (F3)", as
   assert(!/signed out/i.test(note.textContent), "a refused rotation claimed browsers were signed out");
 });
 
-check("settings: the permission rows say which sessions they apply to, what on and off mean, and are a keyboard switch", () => {
+check("settings: the permission rows are a radio group with Auto disabled, and say which sessions they apply to", () => {
   // Static markup, which the panel harness does not render; asserted on the
   // template source, anchored on the rows' own ids.
+  // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1 (SC-1, SC-10, D-2).
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
-  const from = src.indexOf('id="acpPermToggle"');
+  const from = src.indexOf('id="acpPermModes"');
   const to = src.indexOf('id="topbarRestartDivider"', from);
   assert(from >= 0 && to > from, "the permission rows are not in the settings menu");
   const rows = src.slice(from, to);
+  const group = /<div id="acpPermModes"[^>]*>/.exec(src)[0];
+  assert(group.includes('role="radiogroup"'), "the mode picker is not a radiogroup");
+  assert(/aria-labelledby="acpPermModesLabel"/.test(group), "the radiogroup has no accessible name");
+  const radios = [...rows.matchAll(/<input type="radio" name="acpPermMode" id="(acpPermMode\w+)" value="(\w+)"([^>]*)>/g)];
+  assertEqual(radios.map((m) => m[2]).join(","), "yolo,auto,manual", "the three modes are not offered in order");
+  const auto = radios.find((m) => m[2] === "auto");
+  assert(/\bdisabled\b/.test(auto[3]), "Auto is selectable; it has no decider yet (D-2)");
+  assert(!/onchange=/.test(auto[3]), "Auto has a change handler");
+  assert(/coming soon — behaves like Manual/.test(rows), "Auto does not say it is coming and behaves like Manual");
+  for (const m of radios.filter((r) => r[2] !== "auto")) {
+    assert(/onchange="setAcpPermissionMode\(this\)"/.test(m[3]), `${m[1]} does not save the mode`);
+  }
   const note = /id="acpPermScopeNote"[^>]*>([^<]*)</.exec(rows);
   assert(note, "the permission rows carry no scope note");
-  // G5 (Phase 3 review), reworded by
-  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (user
-  // decision (3)): on reaches new sessions only, off reaches running ones too.
-  assert(/turning it on applies to sessions created afterwards/i.test(note[1]),
-    `the scope note does not say turning it on applies to new sessions only: ${note[1]}`);
-  assert(/turning it off also stops sessions that were using it from asking/i.test(note[1]),
-    `the scope note does not say turning it off reaches running sessions too: ${note[1]}`);
-  // G6: the meaning of on and off is visible, not only a tooltip.
-  const desc = /id="acpPermDesc"[^>]*>([^<]*)</.exec(rows);
-  assert(desc && /On:.*ask/.test(desc[1]) && /Off:.*never ask/.test(desc[1]),
-    `the rows do not say what on and off mean: ${desc && desc[1]}`);
-  // G7: operable from the keyboard.
-  const toggleTag = /<div id="acpPermToggle"[^>]*>/.exec(src)[0];
-  for (const attr of ['role="switch"', 'tabindex="0"', "aria-checked=", "onkeydown="]) {
-    assert(toggleTag.includes(attr), `the permission toggle lacks ${attr}`);
-  }
+  assertEqual(note[1], "Changes apply to sessions created afterwards. Terminal sessions and task " +
+    "modes such as Spec or Plan are not covered.", "the scope note (SC-10, D-3) changed");
+  assert(/<details id="acpPermFloor"[^>]*>\s*<summary>Always blocked<\/summary>/.test(rows),
+    "there is no Always blocked disclosure");
+  assert(/<details id="acpPermProtected"/.test(rows), "there is no Protected disclosure");
+  assert(/id="acpPermNotice"/.test(rows), "there is no outside-change notice (D-35)");
   assert(/id="acpPermBaseAgent"/.test(rows), "there is no base-agent input");
+  assert(!/acpPermToggle|role="switch"/.test(rows), "the old on/off switch is still in the rows");
   assert(!/querySelector\(['"]\.topbar-toggle/.test(src),
     "a `.topbar-toggle` class query is back — it matches the Startup toggles first");
+});
+
+check("dashboard: ACP_LOCAL is a literal true, because / is loopback-only by construction (D-21)", () => {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  assert(/^var ACP_LOCAL = true;$/m.test(src), "index.html does not declare ACP_LOCAL = true");
 });
 
 // ---- dashboard new-session picker (plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md) ---

@@ -106,30 +106,44 @@
         </div>
       </div>
 
-      <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the ACP
-           permission profile. Off = today's allow-all; on = ACP sessions run
-           as the derived agent and ask before acting. No Jinja initial state
-           (that would need a render-context key in web.py): the row starts off
-           and renderAcpPermissions() fills it from GET /api/acp-permissions on
-           load. Addressed by id only — `.topbar-toggle` is shared with the two
-           Startup toggles above. The badge follows markRestartInputs()' drift
-           pattern: shown only while what was asked for is not what a new
-           session would get. -->
+      <!-- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1: the permission
+           mode picker, replacing the on/off switch of
+           260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3. Native
+           radios in a radiogroup, so the arrow keys and a screen reader get
+           radio semantics without script. No Jinja initial state:
+           renderAcpPermissions() checks the stored mode from GET
+           /api/acp-permissions on load, and nothing is checked until then.
+           Auto is shown but disabled until its decider exists (D-2). The badge
+           is shown only while the chosen mode is not what a new session would
+           get. `topbar-menu-keep` stops a click in these rows from closing the
+           menu, so the result and any warning stay visible. -->
       <div class="topbar-menu-divider"></div>
       <div class="topbar-menu-section-label">Agent permissions</div>
-      <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G7):
-           a keyboard-operable switch. aria-checked is kept in sync by
-           _acpPermSetToggle(); "mixed" while the state could not be read
-           (G10). The Startup toggles above share the gap and are out of scope. -->
-      <div id="acpPermToggle" class="topbar-menu-row topbar-toggle" role="switch" tabindex="0" aria-checked="false" aria-describedby="acpPermDesc" onclick="toggleAcpPermissions(this)" onkeydown="acpPermToggleKey(event, this)" title="Permission profile: ACP sessions PowerAtlas creates ask before running shell commands, writing files and similar. Off keeps today's behaviour, where they never ask.">
-        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6Z"/></svg>
-        <span class="topbar-menu-label">Permission profile</span>
-        <span id="acpPermBadge" class="restart-badge" hidden>not in effect</span>
-        <span class="topbar-switch"><span class="topbar-switch-knob"></span></span>
+      <div id="acpPermModes" class="acp-perm-modes topbar-menu-keep" role="radiogroup" aria-labelledby="acpPermModesLabel" aria-describedby="acpPermDesc">
+        <div class="acp-perm-modes-head">
+          <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6Z"/></svg>
+          <span id="acpPermModesLabel" class="topbar-menu-label">Permission mode</span>
+          <span id="acpPermBadge" class="restart-badge" hidden>not in effect</span>
+        </div>
+        <label class="acp-perm-mode" for="acpPermModeYolo"><input type="radio" name="acpPermMode" id="acpPermModeYolo" value="yolo" onchange="setAcpPermissionMode(this)"><span>Yolo</span></label>
+        <label class="acp-perm-mode acp-perm-mode-disabled" for="acpPermModeAuto"><input type="radio" name="acpPermMode" id="acpPermModeAuto" value="auto" disabled aria-describedby="acpPermAutoHint"><span>Auto</span><span id="acpPermAutoHint" class="acp-perm-mode-hint">coming soon — behaves like Manual</span></label>
+        <label class="acp-perm-mode" for="acpPermModeManual"><input type="radio" name="acpPermMode" id="acpPermModeManual" value="manual" onchange="setAcpPermissionMode(this)"><span>Manual</span></label>
       </div>
-      <!-- G6: what on and off mean, visible rather than only in the tooltip. -->
-      <div id="acpPermDesc" class="topbar-menu-note">On: new ACP sessions ask before running commands or writing files. Off: they never ask.</div>
-      <div class="topbar-menu-row acp-perm-base-group" title="The kiro-cli agent the permission profile is built from. It is read, never modified.">
+      <!-- What the chosen mode does, visible rather than only in a tooltip.
+           renderAcpPermissions() replaces it with the chosen mode's text. -->
+      <div id="acpPermDesc" class="topbar-menu-note">Yolo: sessions run every action without asking, except the Always blocked list. Manual: common read-only actions run and everything else asks.</div>
+      <div id="acpPermNotice" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
+      <details id="acpPermFloor" class="acp-perm-details topbar-menu-keep">
+        <summary>Always blocked</summary>
+        <div class="topbar-menu-note">Refused silently in every mode, in the ACP sessions PowerAtlas creates with Default.</div>
+        <div id="acpPermFloorList" class="acp-perm-list"></div>
+      </details>
+      <details id="acpPermProtected" class="acp-perm-details topbar-menu-keep">
+        <summary>Protected <span class="acp-perm-summary-hint">(Manual)</span></summary>
+        <div class="topbar-menu-note">In Manual, file-tool writes to these always ask, even when writing files is allowed. A link inside one of these folders that points elsewhere is not covered, in a project's own .kiro folder too.</div>
+        <div id="acpPermProtectedList" class="acp-perm-list"></div>
+      </details>
+      <div class="topbar-menu-row acp-perm-base-group" title="The kiro-cli agent PowerAtlas builds its own agent from. It is read, never modified; if it is missing, a minimal agent is used instead.">
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
         <label class="topbar-menu-label peek-label" for="acpPermBaseAgent">Base agent</label>
         <div class="hotkey-field" onclick="document.getElementById('acpPermBaseAgent').focus()">
@@ -140,17 +154,12 @@
                  onchange="saveAcpPermissionBaseAgent(this)">
         </div>
       </div>
-      <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (user
-           decision (3), 2026-09-23): the two directions differ. On reaches only
-           sessions created afterwards, since kiro-cli binds a session's agent at
-           session/new (probe P2, D-12). Off deletes the derived agent file, and
-           kiro-cli then falls back to `vibe`, which runs under the user-scope
-           permissions, for sessions bound to it, so they stop asking. Measured
-           live 2026-09-23 on a running session: with the setting on it asked
-           before one command, and after the setting was turned off the same
-           session ran the next with no permission request.
-           260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7. -->
-      <div id="acpPermScopeNote" class="topbar-menu-note">Turning it on applies to sessions created afterwards. Turning it off also stops sessions that were using it from asking.</div>
+      <!-- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL SC-10, D-3: kiro-cli
+           binds a session's agent at session/new and does not pick up a
+           rewrite mid-session (probe P-C), so a change reaches only sessions
+           created afterwards. The derived agent is never deleted any more, so
+           the old "off also reaches running sessions" direction is gone. -->
+      <div id="acpPermScopeNote" class="topbar-menu-note">Changes apply to sessions created afterwards. Terminal sessions and task modes such as Spec or Plan are not covered.</div>
       <div id="acpPermWarn" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
 
       <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review
@@ -1078,6 +1087,13 @@ function openSessionTranscript(row, session, workspace){
 // A boolean, never a credential: the loopback cookie authenticates /ws/acp.
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 6 (D-15)
 var ACP_AVAILABLE = {{ acp_available | tojson }};
+// Whether this page is served to the computer running PowerAtlas. Always true
+// here: `/` is loopback-only by construction (it is not in web.py's
+// `_REMOTE_ALLOWED_PATHS`, so a remote peer gets a 403 and never this page).
+// /acp computes the same flag per request. The shared transcript renderer reads
+// this one global to decide whether loopback-only affordances appear.
+// 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-21
+var ACP_LOCAL = true;
 var WS_PATH = '/ws/acp';
 function dashWsUrl(){
   // No query string: the pa_local cookie the browser sends with the upgrade
@@ -4296,7 +4312,8 @@ function dashPickerCreate(cwd) {
   );
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (SC-3):
   // Default is sent as its own value, `kiro_default`; the server decides what
-  // it binds (the derived agent while the permission profile is in effect).
+  // it binds (the derived agent, or a refusal while that is not in effect,
+  // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34).
   var mode = _dashPickedTaskMode;
   // Clear the transcript pane now so the user doesn't see a stale previous
   // session's content during the creation round-trip.
@@ -4349,9 +4366,10 @@ function dashRailQuickCreate(cwd){
   }
   dashComposerEl.hidden = true;
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (SC-3): the
-  // Default value, which the server binds to the derived agent while the
-  // permission profile is in effect — so this path, which bypasses the picker,
-  // does not bypass the profile.
+  // Default value, which the server binds to the derived agent (or refuses
+  // while that is not in effect, 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL
+  // D-34) — so this path, which bypasses the picker, does not bypass the
+  // permission mode.
   dashConnect(function() { dashSendNew(cwd, 'kiro_default'); });
 }
 
@@ -6572,13 +6590,18 @@ topbarSettingsBtn.addEventListener('click', function(){
 // typed into with a mouse. Toggles and buttons still close the menu.
 // Walks parentNode by hand rather than closest() with a selector list.
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+// Also anything inside a `.topbar-menu-keep` region: the permission mode
+// picker (whose label text is not an input) and the Always blocked and
+// Protected disclosures, which could not be opened while a click on their
+// summary closed the menu. 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1
 function topbarMenuTextEntryClick(target){
   var entry = false;
   for (var n = target; n; n = n.parentNode) {
     if (n === topbarSettingsMenu) return entry;
     var tag = n.tagName;
     if (n.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
-        || (n.classList && n.classList.contains('hotkey-field'))) entry = true;
+        || (n.classList && (n.classList.contains('hotkey-field')
+                            || n.classList.contains('topbar-menu-keep')))) entry = true;
   }
   return false;
 }
@@ -7331,10 +7354,12 @@ function renderRestartKeys(settings) {
 // item's guard against the exact same accidental-click concern.
 //
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G4): the dot
-// has two sources now — a restart-pending setting, and a permission profile
-// that is on but not doing what the user set (not in effect, or kept on a
-// previous base agent). Each source records its own flag and the dot is their
-// OR, so neither writer can hide the other's reason. The title says which.
+// has two sources now — a restart-pending setting, and a permission mode that
+// is not doing what the user set (not in effect, kept on a previous base agent,
+// an unreadable stored mode, or changed outside the dashboard;
+// 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1). Each source records
+// its own flag and the dot is their OR, so neither writer can hide the other's
+// reason. The title says which.
 var _topbarDotRestart = false;
 var _topbarDotPerm = '';
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F2): a
@@ -7416,79 +7441,111 @@ function openRemoteModal() {
   document.getElementById('remoteModal').showModal();
 }
 
-// ---- ACP permission profile ------------------------------------------------
+// ---- ACP permission mode ---------------------------------------------------
 //
-// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the settings
-// rows for the permission profile (SC-1's UI half) and its on-but-not-in-effect
-// report (SC-8's UI half). Every element is looked up by id: `.topbar-toggle`
-// also matches the Startup toggles, and a class query here would pick one of
-// those instead.
+// 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1: the permission mode
+// picker (SC-1), its Always blocked and Protected lists (SC-3, D-39), and the
+// not-in-effect report (SC-9), replacing the on/off switch of
+// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3. Every element
+// is looked up by id: `.topbar-toggle` also matches the Startup toggles.
 //
-// The panel renders `in_effect`, never the toggle alone. The two disagree
-// exactly when generation failed, and the server then keeps new sessions on
-// the base agent (D-10) — reporting only the toggle would claim a posture that
-// is not there.
+// The panel renders `in_effect`, never the chosen mode alone. The two disagree
+// exactly when the agent file is missing, stale or foreign, and the server then
+// refuses new Default sessions (D-34) — reporting only the mode would claim a
+// posture that is not there. Everything is drawn with createElement and
+// textContent: the floor, the Protected list and the link targets are data.
 
 var _acpPermSaving = false;
+// The last `protected_links` the GET route sent (D-39). POST answers leave it
+// out on purpose (the walk runs only when the state is read), so a mode change
+// keeps showing the links the last read found.
+var _acpPermLinks = null;
+
+var _ACP_PERM_MODES = ['yolo', 'auto', 'manual'];
+var _ACP_PERM_MODE_NAMES = {yolo: 'Yolo', manual: 'Manual'};
+// What each mode does, shown under the picker. Yolo names kiro-cli's own
+// built-in rules, which apply in every mode and which no PowerAtlas rule can
+// lift (D-38c, P-0.10).
+var _ACP_PERM_MODE_DESC = {
+  yolo: 'Yolo: new sessions run every action without asking, except the '
+    + 'Always blocked list, which is refused silently. kiro-cli itself still '
+    + 'asks before writes to .git, .vscode, *.code-workspace, .kiro/agents and '
+    + '.kiro/hooks, and blocks writes to .kiroignore and .kiro/settings, in '
+    + 'every mode.',
+  manual: 'Manual: the Always blocked list, plus PowerAtlas\'s default rules. '
+    + 'Reading files in the session folder and the exact commands git status, '
+    + 'git log, git diff, git branch, pwd, whoami and uname run without asking; '
+    + 'everything else asks first, and file-tool writes to Protected items '
+    + 'always ask.'
+};
 
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 review
-// (G3, G9): every warning names its cause and a next step. G3 is the case the
-// first version missed: a base-agent change whose regeneration failed keeps
-// the last-good derived agent (D-10), so `in_effect` stays true and nothing
-// said the new base agent was not being used.
-var _ACP_PERM_NEXT_BASE = 'Check the Base agent name below, then turn the '
-  + 'profile off and on again to regenerate it.';
-var _ACP_PERM_NEXT_REGEN = 'Turn it off and on again to regenerate it.';
+// (G3, G9): every warning names its cause and a next step.
+var _ACP_PERM_NEXT_BASE = 'Check the Base agent name below, then save the '
+  + 'mode again or restart PowerAtlas.';
+var _ACP_PERM_NEXT_REGEN = 'Save the mode again or restart PowerAtlas to '
+  + 'regenerate it.';
 
 function _acpPermHasError(d) {
   return typeof d.generation_error === 'string' && d.generation_error !== '';
 }
 
+/** The latest generation ran and failed. A generation that has not run yet in
+ *  this process (the first seconds after startup) is not a failure. */
+function _acpPermGenerationFailed(d) {
+  return d.generation_ok === false && d.generation_attempted !== false;
+}
+
 function _acpPermWarnText(d) {
-  if (d.enabled === true && d.in_effect !== true) {
+  var parts = [];
+  // D-25: an unreadable stored mode loads as Manual and says so.
+  if (typeof d.mode_warning === 'string' && d.mode_warning) {
+    parts.push(d.mode_warning + '.');
+  }
+  if (d.in_effect !== true) {
     var why, next;
     if (_acpPermHasError(d)) {
       why = d.generation_error;
       next = _ACP_PERM_NEXT_BASE;
     } else if (d.state === 'stale') {
-      why = 'the permission profile on disk is out of date';
+      why = 'the agent file on disk does not match these settings';
       next = _ACP_PERM_NEXT_REGEN;
+    } else if (d.state === 'unknown') {
+      why = 'the agent file ' + (d.derived_agent || '') + ' was not written by '
+        + 'PowerAtlas';
+      next = 'Remove or rename that file, then save the mode again.';
     } else {
-      why = 'the permission profile could not be generated';
+      why = 'the agent file could not be written';
       next = _ACP_PERM_NEXT_REGEN + ' If that fails, check the Base agent name below.';
     }
-    return 'On, but not in effect: ' + why + '. New sessions start without the '
-      + 'permission profile and will not ask before acting. ' + next;
+    parts.push('Not in effect: ' + why + '. New Default sessions are refused '
+      + 'until this is fixed; task modes such as Spec or Plan still start. ' + next);
+  } else if (_acpPermGenerationFailed(d)) {
+    // G3: in effect, but the latest generation failed — the file in force was
+    // built before the latest change (for example from the previous base agent).
+    parts.push('Still using the previous agent file; the latest change could '
+      + 'not be applied: ' + (_acpPermHasError(d) ? d.generation_error : 'unknown error')
+      + '. Check the Base agent name below.');
   }
-  // G3: on and in effect, but the latest generation failed — the profile in
-  // force is the previous one, built from the previous base agent.
-  if (d.enabled === true && d.generation_ok === false) {
-    return 'Still using the previous profile; the new base agent could not be '
-      + 'used: ' + (_acpPermHasError(d) ? d.generation_error : 'unknown error')
-      + '. Check the Base agent name below.';
+  // D-28: generation succeeded from a minimal agent. Not a failure, but the
+  // user's own base agent is not the one in use.
+  if (typeof d.generation_note === 'string' && d.generation_note) {
+    parts.push('Note: ' + d.generation_note + '.');
   }
-  // Off, but PowerAtlas could not remove its derived agent: it is still on
-  // disk and still selectable from kiro-cli's own agent picker.
-  if (d.enabled === false && d.generation_ok === false && _acpPermHasError(d)) {
-    return 'Off, but the old permission profile could not be removed: '
-      + d.generation_error + '. Turn it on and off again to retry.';
-  }
-  return '';
+  return parts.join(' ');
 }
 
-/** G7: the toggle's visual and ARIA state, together. `on` is true, false, or
- *  null for "could not read" (G10), which reads as mixed rather than off. */
-function _acpPermSetToggle(el, on) {
-  if (!el) return;
-  el.classList.toggle('active', on === true);
-  el.setAttribute('aria-checked', on === null ? 'mixed' : (on ? 'true' : 'false'));
+/** Check the radio for `mode`; `null` checks none, for "could not read"
+ *  (G10) — checking Yolo would claim a posture nobody read. */
+function _acpPermSetMode(mode) {
+  _ACP_PERM_MODES.forEach(function (m) {
+    var el = document.getElementById('acpPermMode' + m.charAt(0).toUpperCase() + m.slice(1));
+    if (el) el.checked = (m === mode);
+  });
 }
 
-/** G7: Enter and Space operate the switch, as they would a native control. */
-function acpPermToggleKey(ev, el) {
-  if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
-  ev.preventDefault();
-  toggleAcpPermissions(el);
+function _acpPermModeName(mode) {
+  return _ACP_PERM_MODE_NAMES[mode] || String(mode || '');
 }
 
 /** G12: the permission rows' error toasts carry the same dismiss button the
@@ -7498,23 +7555,96 @@ function _acpPermToast(msg) {
     + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
 }
 
+function _acpPermEl(tag, cls, text) {
+  var el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text) el.textContent = text;
+  return el;
+}
+
+/** The Always blocked list (SC-3), from the server's `floor` rows. */
+function _acpPermRenderFloor(rows) {
+  var host = document.getElementById('acpPermFloorList');
+  if (!host || !Array.isArray(rows)) return;
+  host.textContent = '';
+  rows.forEach(function (row) {
+    if (!row || typeof row !== 'object') return;
+    var item = _acpPermEl('div', 'acp-perm-item');
+    item.appendChild(_acpPermEl('div', 'acp-perm-item-label', String(row.label || '')));
+    if (row.detail) item.appendChild(_acpPermEl('div', 'acp-perm-item-detail', String(row.detail)));
+    if (Array.isArray(row.patterns) && row.patterns.length) {
+      item.appendChild(_acpPermEl('div', 'acp-perm-patterns', row.patterns.join('   ')));
+    }
+    if (row.note) item.appendChild(_acpPermEl('div', 'acp-perm-item-note', String(row.note)));
+    host.appendChild(item);
+  });
+}
+
+/** The Protected items (D-5), each with D-39's marker: the links in that
+ *  folder whose targets the ask does not cover, and where they point. */
+function _acpPermRenderProtected(rows, links) {
+  var host = document.getElementById('acpPermProtectedList');
+  if (!host || !Array.isArray(rows)) return;
+  host.textContent = '';
+  rows.forEach(function (row) {
+    if (!row || typeof row !== 'object') return;
+    var item = _acpPermEl('div', 'acp-perm-item');
+    // The label as a child of its own rather than the row's text, so the
+    // effect appended beside it cannot replace it.
+    var head = _acpPermEl('div', 'acp-perm-item-label');
+    head.appendChild(_acpPermEl('span', '', String(row.label || '')));
+    head.appendChild(_acpPermEl('span', 'acp-perm-effect',
+      row.effect === 'block' ? ' — blocked outright' : ' — asks'));
+    item.appendChild(head);
+    if (Array.isArray(row.patterns) && row.patterns.length) {
+      item.appendChild(_acpPermEl('div', 'acp-perm-patterns', row.patterns.join('   ')));
+    }
+    var found = links && typeof links === 'object' ? links[row.id] : null;
+    var count = found && typeof found.count === 'number' ? found.count : 0;
+    if (count > 0) {
+      item.appendChild(_acpPermEl('div', 'acp-perm-links-marker',
+        count + (count === 1 ? ' linked item' : ' linked items') + ' not covered'));
+      var list = _acpPermEl('ul', 'acp-perm-links');
+      (Array.isArray(found.links) ? found.links : []).forEach(function (link) {
+        if (!link || typeof link !== 'object') return;
+        var where = link.target ? ' → ' + link.target : ' (' + (link.error || 'unresolvable') + ')';
+        list.appendChild(_acpPermEl('li', '', String(link.name || '') + where));
+      });
+      item.appendChild(list);
+    }
+    host.appendChild(item);
+  });
+}
+
+/** D-35: the mode or rules changed without the dashboard (config.toml or the
+ *  settings API). Shown until the next change made here. */
+function _acpPermNoticeText(notice) {
+  if (!notice || typeof notice !== 'object' || typeof notice.mode !== 'string') return '';
+  return 'The permission settings were changed outside the dashboard (in '
+    + 'config.toml or through the settings API) and new sessions now use '
+    + _acpPermModeName(notice.mode) + (notice.detected_at ? ' (noticed ' + notice.detected_at + ')' : '')
+    + '. If you did not make this change, choose the mode again here.';
+}
+
 /** Draw the permission rows from a `GET`/`POST /api/acp-permissions` (or
  *  `/api/save-setting`) answer. Ignores anything that is not that shape, so a
- *  bare `{ok: false}` never repaints the rows as off. */
+ *  bare `{ok: false}` never repaints the rows. */
 function renderAcpPermissions(d) {
-  if (!d || typeof d !== 'object' || typeof d.enabled !== 'boolean') return;
-  var toggle = document.getElementById('acpPermToggle');
+  if (!d || typeof d !== 'object' || typeof d.mode !== 'string') return;
   var badge = document.getElementById('acpPermBadge');
   var warn = document.getElementById('acpPermWarn');
   var base = document.getElementById('acpPermBaseAgent');
-  _acpPermSetToggle(toggle, d.enabled);
+  var desc = document.getElementById('acpPermDesc');
+  var notice = document.getElementById('acpPermNotice');
+  _acpPermSetMode(d.mode);
+  if (desc && _ACP_PERM_MODE_DESC[d.mode]) desc.textContent = _ACP_PERM_MODE_DESC[d.mode];
   // Not while the user is typing into it: a background refresh would replace
   // a half-typed name with the saved one.
   if (base && typeof d.base_agent === 'string' && document.activeElement !== base) {
     base.value = d.base_agent;
   }
   var text = _acpPermWarnText(d);
-  var notInEffect = d.enabled === true && d.in_effect !== true;
+  var notInEffect = d.in_effect !== true;
   if (badge) {
     badge.hidden = !notInEffect;
     badge.title = notInEffect ? text : '';
@@ -7523,25 +7653,34 @@ function renderAcpPermissions(d) {
     warn.hidden = !text;
     warn.textContent = text;
   }
+  var noticeText = _acpPermNoticeText(d.posture_notice);
+  if (notice) {
+    notice.hidden = !noticeText;
+    notice.textContent = noticeText;
+  }
+  if (d.protected_links && typeof d.protected_links === 'object') _acpPermLinks = d.protected_links;
+  _acpPermRenderFloor(d.floor);
+  _acpPermRenderProtected(d.protected, _acpPermLinks);
   // G4: visible without opening the menu, on the same gear dot the
-  // restart-drift badge uses. Only for the two "on, but not as set" cases.
-  var attention = notInEffect || (d.enabled === true && d.generation_ok === false);
+  // restart-drift badge uses.
+  var attention = notInEffect || _acpPermGenerationFailed(d)
+    || !!d.mode_warning || !!noticeText;
   _topbarDotPerm = attention
-    ? 'The permission profile is not working as set; see Agent permissions' : '';
+    ? 'The permission mode is not working as set; see Agent permissions' : '';
   _syncTopbarDot();
 }
 
-/** G10: the state could not be read. The toggle shows neither on nor off —
- *  "off" would claim a posture nobody checked. */
+/** G10: the state could not be read. No mode is checked — Yolo would claim a
+ *  posture nobody checked. */
 function _acpPermRenderUnread() {
-  _acpPermSetToggle(document.getElementById('acpPermToggle'), null);
+  _acpPermSetMode(null);
   var badge = document.getElementById('acpPermBadge');
   if (badge) badge.hidden = true;
   var warn = document.getElementById('acpPermWarn');
   if (warn) {
     warn.hidden = false;
-    warn.textContent = 'Could not read the permission setting, so whether it is '
-      + 'on is unknown. Reload the page to try again.';
+    warn.textContent = 'Could not read the permission mode, so which one is '
+      + 'in use is unknown. Reload the page to try again.';
   }
 }
 
@@ -7552,7 +7691,7 @@ function loadAcpPermissions() {
       return r.json();
     })
     .then(function (d) {
-      if (!d || typeof d !== 'object' || typeof d.enabled !== 'boolean') {
+      if (!d || typeof d !== 'object' || typeof d.mode !== 'string') {
         _acpPermRenderUnread();
         return;
       }
@@ -7561,45 +7700,46 @@ function loadAcpPermissions() {
     .catch(_acpPermRenderUnread);
 }
 
-/** The toggle. `POST /api/acp-permissions` **sets** the value rather than
- *  flipping it, so the request states the value the row is moving to. A
- *  refusal is `{ok: false, error}` with HTTP 200, so success is read from the
- *  body, not the status. */
-function toggleAcpPermissions(el) {
-  if (_acpPermSaving) return;
-  var was = el.getAttribute('aria-checked');
-  var want = !el.classList.contains('active');
-  _acpPermSetToggle(el, want);  // optimistic; reconciled from the answer
-  function revert() {
-    _acpPermSetToggle(el, was === 'mixed' ? null : !want);
+/** A radio's `change`. `POST /api/acp-permissions` **sets** the mode, so the
+ *  request states the one chosen. A refusal is `{ok: false, error}` with HTTP
+ *  200, so success is read from the body, not the status. `ok: true` with a
+ *  `warning` means saved but not yet in effect (D-32). */
+function setAcpPermissionMode(el) {
+  var want = el && el.value;
+  if (want !== 'yolo' && want !== 'manual') return;
+  if (_acpPermSaving) {
+    loadAcpPermissions();  // put the radios back to what is stored
+    return;
   }
   _acpPermSaving = true;
   fetch('/api/acp-permissions', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({enabled: want}),
+    body: JSON.stringify({mode: want}),
   })
     .then(function (r) { return r.json(); })
     .then(function (d) {
       _acpPermSaving = false;
       if (d && d.ok) {
         renderAcpPermissions(d);
+        if (typeof d.warning === 'string' && d.warning) _acpPermToast(d.warning);
       } else {
-        revert();
-        _acpPermToast((d && d.error) || 'The permission setting was not saved.');
+        _acpPermToast((d && d.error) || 'The permission mode was not saved.');
+        loadAcpPermissions();
       }
     })
     .catch(function () {
       _acpPermSaving = false;
-      revert();
-      _acpPermToast('The permission setting was not saved.');
+      _acpPermToast('The permission mode was not saved.');
+      loadAcpPermissions();
     });
 }
 
 /** The base-agent field. Saved through `/api/save-setting`, which validates
- *  the name and regenerates the derived agent, and answers with the same
- *  state fields as `/api/acp-permissions`. Trimmed here as well as there, so
- *  the field never shows whitespace the server dropped. */
+ *  the name and regenerates the derived agent under the same lock as a mode
+ *  change (D-33), and answers with the same state fields as
+ *  `/api/acp-permissions`. Trimmed here as well as there, so the field never
+ *  shows whitespace the server dropped. */
 function saveAcpPermissionBaseAgent(input) {
   var v = String(input.value || '').trim();
   input.value = v;

@@ -4491,9 +4491,11 @@
     //
     // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (SC-3):
     // Default is sent as its own value, `kiro_default`. The server decides
-    // what that binds — the derived agent while the permission profile is in
-    // effect, `kiro_default` otherwise — so this page never needs to read the
-    // setting to create a session, and a stale tab cannot bind the wrong one.
+    // what that binds — the derived agent, which carries the permission mode,
+    // or a refusal naming the cause while it is not in effect
+    // (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34) — so this page never
+    // needs to read the setting to create a session, and a stale tab cannot
+    // bind the wrong one.
     var taskMode = pickedTaskMode;
     pickerClose();
     if (!wantsClose) {

@@ -1784,8 +1784,9 @@ var PERMISSION_CONSENT_FIELDS = [
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 review (G11):
 // plain words for the identifiers a prompt most often carries, so a prompt
 // reads "Write or delete files (fs_write)" rather than a bare `fs_write`. The
-// capability names are the ones the shipped rule set uses
-// (src/power_atlas/agents/permissions.yaml); `agent-profile` is the source
+// capability names are the rows the permission compiler names
+// (`PERMISSION_ROWS` in src/power_atlas/agent_profile.py,
+// 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-11); `agent-profile` is the source
 // measured in probe P4. Anything else falls back to the raw value. Looked up
 // with hasOwnProperty, because the value is agent-authored and "constructor"
 // or "__proto__" must not resolve to something on Object.prototype.

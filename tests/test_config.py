@@ -762,3 +762,171 @@ def test_get_workspace_settings_lazy_builds_norm_map():
     result = get_workspace_settings(cfg, "/proj")
     assert result["tags"] == ["x"]
     assert hasattr(cfg, "_ws_norm_map")
+
+
+# --- ACP permission mode and rules --------------------------------------------
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1: the on/off switch is
+# migrated into `acp_permission_mode` (D-8, D-27), an unreadable mode loads as
+# Manual (D-25), and a malformed rule table never raises and never narrows
+# protection silently (D-26).
+
+
+@pytest.fixture
+def mode_warnings_reset(monkeypatch):
+    """The once-per-value warning set is process-global."""
+    monkeypatch.setattr("power_atlas.config._mode_values_warned", set())
+
+
+def _seed():
+    from power_atlas.agent_profile import normalise_rules
+    return normalise_rules({})
+
+
+@pytest.mark.parametrize("data,mode,agents_blocked", [
+    ({"acp_permissions_enabled": True}, "manual", True),
+    ({"acp_permissions_enabled": False}, "yolo", False),
+    ({}, "yolo", False),
+    # D-27: the newest schema wins after a rollback and roll-forward.
+    ({"acp_permissions_enabled": True, "acp_permission_mode": "yolo"}, "yolo", False),
+    ({"acp_permissions_enabled": False, "acp_permission_mode": "manual"}, "manual", False),
+])
+def test_the_permission_switch_migrates_to_a_mode(tmp_path, data, mode, agents_blocked):
+    _write_toml(tmp_path, data)
+    cfg = load_config()
+    assert cfg.acp_permission_mode == mode
+    assert cfg._mode_warning == ""
+    expected = _seed()
+    if agents_blocked:
+        # D-23: the old overlay's write deny on `**/.kiro/agents/**`.
+        expected["protected_block"] = ["agents"]
+    assert cfg.acp_permission_rules == expected
+    assert not hasattr(cfg, "acp_permissions_enabled")
+
+
+def test_migrated_rules_are_seeded_only_when_the_table_is_absent_or_empty(tmp_path):
+    """D-27: rules already present win over the `true` seed."""
+    rules = {"shell": {"default": "block", "allow": ["ls"], "block": []}}
+    _write_toml(tmp_path, {"acp_permissions_enabled": True,
+                           "acp_permission_rules": rules})
+    cfg = load_config()
+    assert cfg.acp_permission_mode == "manual"
+    assert cfg.acp_permission_rules["shell"] == {
+        "default": "block", "allow": ["ls"], "block": []}
+    assert cfg.acp_permission_rules["protected_block"] == []
+    _write_toml(tmp_path, {"acp_permissions_enabled": True,
+                           "acp_permission_rules": {}})
+    assert load_config().acp_permission_rules["protected_block"] == ["agents"]
+
+
+def test_the_legacy_key_is_dropped_on_the_next_save(tmp_path):
+    _write_toml(tmp_path, {"acp_permissions_enabled": True, "port": 4915})
+    cfg = load_config()
+    save_config(cfg)
+    with open(tmp_path / "config.toml", "rb") as f:
+        data = tomllib.load(f)
+    assert "acp_permissions_enabled" not in data
+    assert data["acp_permission_mode"] == "manual"
+    assert data["acp_permission_rules"]["protected_block"] == ["agents"]
+    assert data["port"] == 4915
+    # And the saved file reads back the same way, with no legacy key to win.
+    assert load_config().acp_permission_mode == "manual"
+
+
+@pytest.mark.parametrize("raw,mode,warns", [
+    ("Manual", "manual", False),
+    ("YOLO", "yolo", False),
+    (" manual ", "manual", False),
+    ("AUTO", "manual", True),
+    ("auto", "manual", True),
+    ("junk", "manual", True),
+    ("", "manual", True),
+    (1, "manual", True),
+    (True, "manual", True),
+    (["yolo"], "manual", True),
+])
+def test_the_mode_loads_case_insensitively_and_fails_toward_manual(
+        tmp_path, caplog, mode_warnings_reset, raw, mode, warns):
+    """D-25: `auto` and anything unreadable load as Manual, never Yolo, with a
+    `mode_warning` for the panel and one WARNING per distinct value per
+    process, however many times the config is loaded."""
+    import logging
+    _write_toml(tmp_path, {"acp_permission_mode": raw})
+    with caplog.at_level(logging.WARNING, logger="power_atlas.config"):
+        for _ in range(3):
+            cfg = load_config()
+    assert cfg.acp_permission_mode == mode
+    warnings = [r for r in caplog.records if "acp_permission_mode" in r.getMessage()]
+    if warns:
+        assert cfg._mode_warning
+        assert "Manual" in cfg._mode_warning
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    else:
+        assert cfg._mode_warning == ""
+        assert warnings == []
+
+
+@pytest.mark.parametrize("rules", [
+    {"shell": {"default": "ask", "allow": "git status"}},          # string allow
+    {"shell": "ask"},                                               # non-table row
+    {"fs_read": ["./**"]},                                          # list row
+    {"not_a_row": {"default": "allow"}},                            # unknown row
+    {"protected_block": "agents"},                                  # non-list
+    {"protected_block": 7},
+    {"protected_block": ["agents", "nope", {"x": 1}]},
+    {"mcp": {"default": 7, "allow": ["paecho/pa_echo"]}},          # bad default
+    {"fs_write": {"default": "ask",
+                  "allow": [f"**/a{i}/**" for i in range(10000)]}},  # 10 000 entries
+    {"shell": {"default": "ask", "block": ["rm\u007f"]}},            # invalid block
+    {"shell": {"default": "ask", "block": "rm *"}},                 # non-list block
+    {"web_fetch": {"default": "allow", "allow": [1, "", "*", "example.com"]}},
+])
+def test_a_malformed_rule_table_never_raises_and_normalises(tmp_path, rules):
+    """D-26: every row is present and well-typed after load; an invalid allow
+    pattern is dropped and the list capped at 100; a block list is kept as
+    stored so generation refuses it by name rather than dropping a
+    protection; unknown rows and Protected names are dropped."""
+    from power_atlas.agent_profile import PERMISSION_ROWS, pattern_error
+    _write_toml(tmp_path, {"acp_permission_mode": "manual",
+                           "acp_permission_rules": rules})
+    cfg = load_config()
+    loaded = cfg.acp_permission_rules
+    assert set(loaded) == set(PERMISSION_ROWS) | {"protected_block"}
+    for row in PERMISSION_ROWS:
+        assert loaded[row]["default"] in ("allow", "ask", "block")
+        assert isinstance(loaded[row]["allow"], list)
+        assert len(loaded[row]["allow"]) <= 100
+        assert all(pattern_error(p) == "" for p in loaded[row]["allow"])
+    assert set(loaded["protected_block"]) <= {"agents", "steering", "skills", "hooks"}
+    shell = rules.get("shell")
+    if isinstance(shell, dict) and "block" in shell:
+        assert loaded["shell"]["block"] == shell["block"], (
+            "a block pattern was dropped rather than refused")
+
+
+def test_an_invalid_block_pattern_refuses_generation_by_name(tmp_path):
+    """D-26, D-14: kept on load, refused by the compiler with the row named."""
+    from power_atlas.agent_profile import AgentProfileError, compile_block
+    _write_toml(tmp_path, {"acp_permission_mode": "manual",
+                           "acp_permission_rules": {
+                               "shell": {"default": "ask", "block": ["rm\u007f"]}}})
+    cfg = load_config()
+    with pytest.raises(AgentProfileError, match=r"Run commands \(shell\)"):
+        compile_block(cfg)
+
+
+def test_a_bad_default_keeps_the_row_lists(tmp_path):
+    _write_toml(tmp_path, {"acp_permission_rules": {
+        "mcp": {"default": "sometimes", "allow": ["paecho/pa_echo"],
+                "block": ["evil/tool"]}}})
+    row = load_config().acp_permission_rules["mcp"]
+    assert row == {"default": "ask", "allow": ["paecho/pa_echo"],
+                   "block": ["evil/tool"]}
+
+
+def test_a_corrupt_file_marks_the_load_error(tmp_path):
+    """The session gate's self-heal must not regenerate from defaults
+    (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-30)."""
+    (tmp_path / "config.toml").write_text("not = [ toml", encoding="utf-8")
+    cfg = load_config()
+    assert getattr(cfg, "_load_error", "")
+    assert cfg.acp_permission_mode == "yolo"

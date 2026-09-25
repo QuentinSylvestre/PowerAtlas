@@ -35,8 +35,4 @@ power-atlas = "power_atlas.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# `agents/**` carries the ACP permission overlay that `agent_profile.py` splices
-# into the derived kiro-cli agent. It is read through `importlib.resources`, so
-# it has to survive a wheel build — present in the source tree is not enough.
-# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
-power_atlas = ["static/**", "templates/**", "agents/**"]
+power_atlas = ["static/**", "templates/**"]

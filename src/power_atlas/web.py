@@ -41,7 +41,8 @@ from .config import (load_config, save_config, get_active_launch_profile,
                      rotate_remote_secret, validate_remote_bind_address,
                      REMOTE_SECRET_MIN_LEN, REMOTE_SECRET_PATH,
                      ensure_local_secret, hold_local_secret_in_memory,
-                     local_secret_status, rotate_local_secret)
+                     local_secret_status, rotate_local_secret,
+                     ACP_PERMISSION_MODES)
 from . import agent_profile, autostart, data, icons, launcher, notifications, presence
 from .status_classifier import get_semantic_status, SemanticStatus
 
@@ -460,40 +461,27 @@ def _notify_from_acp(event: str, session_id: str, cwd: str, detail: str,
 
 
 async def _sync_derived_agent() -> None:
-    """Bring `~/.kiro/agents/poweratlas-acp.md` in line with the settings.
+    """Regenerate `~/.kiro/agents/poweratlas-acp.md` from the current settings.
 
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1.
-
-    Writes the file when the posture setting is on and **deletes** it when the
-    setting is off — `off` is a filesystem no-op only if nothing is left behind,
-    since any file under `~/.kiro/agents/` is selectable from kiro-cli's own
-    agent picker (P1). See `agent_profile`'s module docstring.
-
-    Called from exactly two places (D-9): startup, and every settings write that
-    changes what the derived agent should contain. Not per session creation —
-    two defined trigger points, and no filesystem I/O on the session-open path.
+    The startup pass. 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1: the
+    derived agent is always written, in every permission mode (D-8), so this
+    never deletes anything. Settings writes do not come through here; they call
+    `agent_profile.apply_settings` with their change, which saves and
+    regenerates under one lock (D-16).
 
     `asyncio.to_thread` because the work is a few synchronous file operations and
-    this runs on the event loop, which is the same reason `_background_refresh`
-    threads out `data.refresh_stale_entries`. `load_config()` is *not* called
-    here: `agent_profile.sync_from_config` reads it inside its own lock, so two
-    rapid settings writes cannot each capture a snapshot out here and then
-    publish in scheduling order rather than in the order they were saved.
+    this runs on the event loop. `load_config()` is *not* called here:
+    `agent_profile.sync_from_config` reads it inside the generation lock.
 
-    It swallows everything. `agent_profile` promises a typed `AgentProfileError`
-    for the failures it predicted, but an unexpected bug in it must not abort
-    startup or turn a settings write into a 500 (D-10/SC-8) — the posture simply
-    stays whatever is already on disk, and
-    `agent_profile.last_generation()` carries the reason to the settings panel.
+    It swallows everything. `agent_profile` reports a failed generation through
+    `last_generation()` rather than raising, and an unexpected bug must not abort
+    startup (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL D-10/SC-8) —
+    the posture stays whatever is already on disk, and the session gate refuses
+    Default while it is not in effect (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL
+    D-34).
     """
     try:
         await asyncio.to_thread(agent_profile.sync_from_config)
-    except agent_profile.AgentProfileError:
-        # Already logged, once, by `agent_profile._apply_locked`, which also
-        # recorded it for the settings panel. A second traceback here added
-        # nothing but noise.
-        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F10)
-        pass
     except Exception:
         log.exception("derived agent sync failed; "
                       "the permission posture is unchanged")
@@ -516,7 +504,9 @@ async def _startup_sync_derived_agent() -> None:
     touch the file, and `derived_block_state()` keeps reading whatever is there,
     so the settings panel stays truthful. A sync still running in its thread
     may yet complete; it holds `agent_profile`'s lock, so a settings write
-    queues behind it rather than racing it.
+    queues behind it rather than racing it, and the session gate's bounded
+    acquire refuses Default until it finishes
+    (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-16).
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F5)
     """
     try:
@@ -569,25 +559,94 @@ async def _startup_load_local_secret() -> None:
             f"Local secret setup failed: {type(exc).__name__}: {exc}"))
 
 
-def _derived_agent_in_effect() -> bool:
-    """`acp.mode_gate_hook`: whether the permission profile is in effect.
+# How long the session gate waits for `agent_profile`'s generation lock before
+# it gives up and raises, which `acp._handle_new` turns into a refusal. Long
+# enough for an ordinary regeneration, short enough that a stalled one (a hung
+# disk, an antivirus scan) never hangs session creation.
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-16
+_GATE_LOCK_TIMEOUT_SECONDS = 2.0
 
-    Decides both what Default binds (the derived agent when True,
-    `kiro_default` when False) and whether an explicit request for the derived
-    agent is allowed. Exactly `_acp_permission_state`'s `in_effect` — the
-    setting is on **and** the file is `"on"` — so the settings panel and the
-    session gate can never disagree. `"absent"`, `"stale"` and `"unknown"` all
-    read False, so a hand-authored file of the same name is never handed out.
-    The setting half is what keeps a leftover `"on"` file that could not be
-    deleted while the setting is off from being used.
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1).
 
-    `acp`'s `load_session` consults it too, for the `modeId` a reload sends,
-    through the same Default mapping. There a raising call falls back to
-    `kiro_default` instead of refusing the load.
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K5).
+def _not_in_effect_reason(state: str, compile_error: str, config,
+                          healed: bool | None) -> tuple[str, str]:
+    """`(cause, fix)` for a derived agent that is not in effect (D-34).
+
+    Plain words for the session refusal and the log: what is wrong, and the
+    concrete step that fixes it. `healed` is the D-30 self-heal's outcome, or
+    None when it did not run.
     """
-    return _acp_permission_state(load_config())["in_effect"]
+    path = str(agent_profile.derived_agent_path())
+    last = agent_profile.last_generation()
+    settings_step = ("save the permission mode again in Settings > Agent "
+                     "permissions on the dashboard, or restart PowerAtlas")
+    if compile_error:
+        return (f"the permission rules in config.toml cannot be applied "
+                f"({compile_error})",
+                "Fix or remove acp_permission_rules in PowerAtlas's "
+                f"config.toml, then {settings_step}.")
+    if state == "absent":
+        why = f": {last.error}" if last.attempted and last.error else ""
+        return (f"its agent file {path} has not been written{why}",
+                settings_step[0].upper() + settings_step[1:]
+                + "; if it keeps failing, the warning there names the error.")
+    if state == "stale":
+        if getattr(config, "_load_error", ""):
+            why = ("; config.toml could not be read, so it was not "
+                   "regenerated")
+        elif healed is False and last.error:
+            why = f", and regenerating it failed ({last.error})"
+        else:
+            why = ""
+        return (f"its agent file {path} does not match the current permission "
+                f"settings{why}",
+                settings_step[0].upper() + settings_step[1:] + ".")
+    return (f"{path} was not written by PowerAtlas, or cannot be read, so "
+            "PowerAtlas will not use or replace it",
+            "Remove or rename that file, then " + settings_step + ".")
+
+
+def _derived_agent_in_effect() -> dict:
+    """`acp.mode_gate_hook`: whether the derived agent is in effect, and why not.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1. Returns
+    `{in_effect, state, mode, cause, fix}`; `acp` reads `in_effect` and, when it
+    is False, refuses a Default create naming `cause` and `fix` (D-34).
+    In effect means the file on disk is exactly what the current settings
+    compile to (`derived_block_state(config) == "on"`, D-15) — the same
+    predicate the settings panel shows, so the two cannot disagree.
+
+    Takes `agent_profile._generation_lock` with a bounded wait (D-16): it is
+    the only acquirer besides `agent_profile.apply_settings`, so it never reads
+    a config.toml that is ahead of the file. A timeout raises, and `acp`
+    refuses on a raise. While holding the lock, a `"stale"` file whose config
+    loaded cleanly is regenerated once and re-checked (D-30); a regeneration
+    that compiled a different mode or rule set raises D-35's dashboard notice.
+    Never calls `find_protected_links` (D-39).
+
+    `acp`'s `load_session` consults it too, for the `modeId` a reload sends.
+    There a raising call falls back to `kiro_default` instead of refusing the
+    load. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K5).
+    """
+    lock = agent_profile._generation_lock
+    if not lock.acquire(timeout=_GATE_LOCK_TIMEOUT_SECONDS):
+        raise TimeoutError(
+            "the permission settings are being applied and did not finish "
+            f"within {_GATE_LOCK_TIMEOUT_SECONDS:.0f} s")
+    try:
+        config = load_config()
+        state, compile_error = agent_profile.block_state_detail(config)
+        healed = None
+        if state == "stale" and not getattr(config, "_load_error", ""):
+            healed = agent_profile.heal_stale_locked(config)
+            state, compile_error = agent_profile.block_state_detail(config)
+    finally:
+        lock.release()
+    verdict = {"in_effect": state == "on", "state": state,
+               "mode": config.acp_permission_mode, "cause": "", "fix": ""}
+    if not verdict["in_effect"]:
+        verdict["cause"], verdict["fix"] = _not_in_effect_reason(
+            state, compile_error, config, healed)
+    return verdict
 
 
 @asynccontextmanager
@@ -643,7 +702,9 @@ async def lifespan(app_instance):
         # it must bind Default to the derived agent while it is.
         # `acp` calls this off the loop and refuses the create if it raises.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 2 review,
-        # Phase 3 (G1).
+        # Phase 3 (G1). While it is not in effect a Default create is refused
+        # too, never bound to `kiro_default` without the floor
+        # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34).
         # `acp`'s `load_session` calls it as well, for the `modeId` a reload
         # sends; there a raise falls back to `kiro_default` rather than
         # refusing the load.
@@ -4059,65 +4120,94 @@ async def toggle_notifications():
     return {"enabled": enabled}
 
 
-# --- ACP permission posture ----------------------------------------------
-# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
+# --- ACP permission mode ---------------------------------------------------
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1, replacing the on/off
+# route pair of 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1.
 #
-# Its own pair of routes rather than a `_SETTING_TYPES` entry (D-11):
-# `/api/save-setting` rejects booleans before its type check, by design. The
-# base-agent *name* is a string and does go through that route.
+# Its own pair of routes rather than a `_SETTING_TYPES` entry: a mode change
+# must save and regenerate under one lock (`agent_profile.apply_settings`,
+# D-16). Neither route is in `_REMOTE_ALLOWED_PATHS`, so a remote peer gets a
+# 403 (D-9, SC-7); a POST also needs a same-origin Origin or Referer and the
+# `pa_local` cookie, like every loopback write.
 #
-# Shaped on `/api/notifications` but **set**, not toggled: the caller states the
-# value it wants. A toggle route cannot express "make sure this is off" and, for
-# a control whose two states are allow-all and ask, a lost response turning into
-# a second click is the wrong kind of ambiguity.
+# **Set**, not toggled: the caller states the mode it wants, so a lost response
+# turning into a second click cannot land on the wrong mode.
 
 
 def _acp_permission_state(config) -> dict:
-    """The posture as the settings panel has to render it (SC-8).
+    """The permission settings as the settings panel has to render them.
 
-    `enabled` is what the user asked for; `state` is what a session created
-    right now would actually get, read back off the derived agent on disk. They
-    disagree exactly when generation failed, which is the on-but-not-in-effect
-    case D-10 requires the panel to report — and the case where reporting only
-    the toggle would claim a posture that is not there.
-
-    The healthy `off` pairing is `enabled=False`, `state="absent"`,
-    `generation_ok=True`: `off` deletes the derived agent, so absence is the
-    expected reading rather than a failure. `enabled=False` with any other state
-    means a file PowerAtlas could not remove is still selectable, and
+    `mode` is what the user chose; `state` is what a session created right now
+    would actually get, read back off the derived agent on disk and compared
+    with what `mode` and the rules compile to (D-15). `in_effect` is exactly
+    the session gate's predicate, so the panel and the gate cannot disagree
+    (SC-9). They part exactly when generation failed or the file changed, and
     `generation_error` says which.
+
+    Pure reads, no lock: the routes call this after `apply_settings` has
+    released it (D-16). Never calls `find_protected_links` (D-39); the GET
+    route adds that.
     """
-    enabled = bool(config.acp_permissions_enabled)
-    state = agent_profile.derived_block_state()
+    state, compile_error = agent_profile.block_state_detail(config)
     last = agent_profile.last_generation()
     return {
-        "enabled": enabled,
+        "mode": config.acp_permission_mode,
+        "mode_warning": getattr(config, "_mode_warning", ""),
         "base_agent": config.acp_permission_base_agent,
         "derived_agent": str(agent_profile.derived_agent_path()),
         "state": state,
-        "in_effect": enabled and state == "on",
+        "in_effect": state == "on",
         "generation_attempted": last.attempted,
-        "generation_ok": last.ok,
-        "generation_error": last.error,
+        "generation_ok": last.ok and not compile_error,
+        "generation_error": compile_error or last.error,
+        "generation_note": last.note,
+        "floor": agent_profile.floor_display(),
+        "protected": agent_profile.protected_display(
+            config.acp_permission_rules),
+        "posture_notice": agent_profile.posture_notice(),
     }
 
 
-async def _current_acp_permission_state() -> dict:
+async def _current_acp_permission_state(*, links: bool = False) -> dict:
     """`_acp_permission_state(load_config())`, off the event loop.
 
     Both halves touch the filesystem — the config parse and the derived agent's
-    read-back — so the settings routes run them through `asyncio.to_thread`,
-    per D-9. `_derived_agent_in_effect` keeps its synchronous body: `acp`
-    already threads its call out (`_derived_mode_in_effect`).
+    read-back — so the settings routes run them through `asyncio.to_thread`.
+    `links=True` adds `protected_links` (D-39), for the GET route only: a walk
+    of `~/.kiro/{agents,steering,skills,hooks}` that must never sit on the
+    session-creation path.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F9)
     """
-    return await asyncio.to_thread(
-        lambda: _acp_permission_state(load_config()))
+    def read() -> dict:
+        state = _acp_permission_state(load_config())
+        if links:
+            state["protected_links"] = agent_profile.find_protected_links()
+        return state
+
+    return await asyncio.to_thread(read)
 
 
 @app.get("/api/acp-permissions")
 async def get_acp_permissions():
-    return await _current_acp_permission_state()
+    return await _current_acp_permission_state(links=True)
+
+
+def _apply_result(result: dict) -> dict:
+    """The fields D-32 adds to a permission write's answer.
+
+    Saved but not generated is `ok: true` plus a `warning`: the setting is
+    stored, and new Default sessions are refused until it is in effect (D-34).
+    """
+    if not result["saved"]:
+        return {"ok": False,
+                "error": result.get("error") or "The setting was not saved."}
+    answer = {"ok": True}
+    if not result["generation_ok"]:
+        answer["warning"] = (
+            "Saved, but not yet in effect: "
+            + (result["generation_error"] or "the agent file was not written")
+            + ". New Default sessions are refused until this is fixed.")
+    return answer
 
 
 @app.post("/api/acp-permissions")
@@ -4126,20 +4216,25 @@ async def set_acp_permissions(request: Request):
         body = await request.json()
     except (ValueError, UnicodeDecodeError):
         return {"ok": False, "error": "Invalid JSON body"}
-    enabled = body.get("enabled") if isinstance(body, dict) else None
-    # `isinstance(1, int)` is not the hazard here — `isinstance(1, bool)` is
-    # False — but `"true"`, `1` and `None` all read as "the caller meant on" to
-    # a `bool()` cast, and this is the control that decides whether a shell
-    # command asks. It has to be the literal boolean.
-    if not isinstance(enabled, bool):
-        return {"ok": False, "error": "enabled must be true or false"}
-    config = load_config()
-    # Mutate and save the same instance `load_config` returned, for the reason
-    # `/api/notifications` states: unknown top-level keys ride on `_extra`.
-    config.acp_permissions_enabled = enabled
-    save_config(config)
-    await _sync_derived_agent()
-    return {"ok": True, **(await _current_acp_permission_state())}
+    mode = body.get("mode") if isinstance(body, dict) else None
+    # Exactly the storable modes (D-2): Auto is shown but not selectable until
+    # its decider exists, and a case variant or anything else is refused
+    # rather than guessed at — this is the control that decides whether a
+    # shell command asks.
+    if mode not in ACP_PERMISSION_MODES:
+        return {"ok": False,
+                "error": "mode must be \"yolo\" or \"manual\""}
+
+    def mutate(config) -> None:
+        # The instance `load_config` returned inside the lock, so unknown
+        # top-level keys riding on `_extra` survive the save.
+        config.acp_permission_mode = mode
+
+    result = await asyncio.to_thread(agent_profile.apply_settings, mutate)
+    answer = _apply_result(result)
+    if not answer["ok"]:
+        return answer
+    return {**answer, **(await _current_acp_permission_state())}
 
 
 @app.post("/api/open-folder", response_class=HTMLResponse)
@@ -4718,20 +4813,25 @@ async def save_setting(request: Request):
                     "error": "Base agent must be 1-64 characters of "
                              "letters, digits, '_' or '-', and not a Windows "
                              "reserved device name"}
+    if key == "acp_permission_base_agent":
+        # Saved and regenerated under the generation lock, like a mode change
+        # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-33, D-16): the
+        # derived agent is built from this file, and a save outside the lock
+        # would let a session check see the new name before the file.
+        def mutate(locked_config) -> None:
+            locked_config.acp_permission_base_agent = value
+
+        result = await asyncio.to_thread(agent_profile.apply_settings, mutate)
+        answer = _apply_result(result)
+        if not answer["ok"]:
+            return answer
+        # The same generation-outcome fields `POST /api/acp-permissions`
+        # returns, for the same reason: a bare `{"ok": True}` reported
+        # unqualified success for a rename whose regeneration had failed.
+        return {**answer, "restart_required": key in _RESTART_TO_APPLY,
+                **(await _current_acp_permission_state())}
     setattr(config, key, value)
     save_config(config)
-    if key == "acp_permission_base_agent":
-        # The second of D-9's two trigger points. The derived agent is built
-        # from this file, so a new name that never regenerates leaves the
-        # posture reading as the old base agent's.
-        await _sync_derived_agent()
-        # The same generation-outcome fields `POST /api/acp-permissions`
-        # returns, for the same reason (SC-8). A bare `{"ok": True}` here
-        # reported unqualified success for a rename whose regeneration had
-        # failed — the setting was saved, which is all `ok` ever meant, but the
-        # caller had no way to see that the posture had not moved with it.
-        return {"ok": True, "restart_required": key in _RESTART_TO_APPLY,
-                **(await _current_acp_permission_state())}
     return {"ok": True, "restart_required": key in _RESTART_TO_APPLY}
 
 

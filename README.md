@@ -146,8 +146,10 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   with no restart. Notifications reach the machine running PowerAtlas, **not** a remote browser: the
   remote bind serves plain HTTP, and browsers refuse the notification API outside a secure context,
   so a phone on the NetBird address is hard-denied by the browser and cannot be prompted
-- **Agent permissions** (gear icon in topbar, off by default) decides whether ACP sessions PowerAtlas
-  creates ask before acting. See *Tool permissions* under *Agent sessions* below
+- **Agent permissions** (gear icon in topbar) sets the permission mode for ACP sessions PowerAtlas
+  creates: **Yolo** (the default; nothing asks, except a short Always blocked list that is refused in
+  every mode) or **Manual** (common read-only actions run, everything else asks). **Auto** is shown but
+  not yet selectable. See *Tool permissions* under *Agent sessions* below
 - Platform-aware terminal detection:
   - Windows: Windows Terminal › PowerShell › cmd
   - Linux: kitty › Alacritty › GNOME Terminal › Konsole › xterm
@@ -187,11 +189,13 @@ acp_prompt_silence_seconds = 1800  # 60-86400. A turn is cancelled after this mu
                                   # streaming is never cut off. A 24-hour absolute ceiling still
                                   # applies, so one chunk per window cannot run forever.
 
-# ACP permission profile. Both are set from the settings menu's "Agent permissions" section and take
-# effect without a restart; a hand edit here is applied at the next start. See "Tool permissions"
-# under "Agent sessions".
-acp_permissions_enabled = false          # true = new ACP sessions ask before acting
-acp_permission_base_agent = "kiro_default"  # the kiro-cli agent the permission profile is built from
+# ACP permission mode. Set from the settings menu's "Agent permissions" section, without a restart.
+# A hand edit here is picked up by the next new session (and the dashboard then says the mode changed
+# outside it). See "Tool permissions" under "Agent sessions".
+acp_permission_mode = "yolo"                # "yolo" or "manual". Anything else loads as "manual".
+acp_permission_base_agent = "kiro_default"  # the kiro-cli agent PowerAtlas's own agent is built from
+# acp_permission_rules is written by PowerAtlas with Manual's rules; editing them comes in a later
+# release. An older config's `acp_permissions_enabled = true` becomes "manual", `false` becomes "yolo".
 
 [provider_settings.claude-code]
 default_args = ""
@@ -377,43 +381,67 @@ prompting leaves the transcript byte-identical.
 carries a task-mode control offering Default, Spec, Quick spec, Bug fix, Plan and Semantic reviewer,
 which map to kiro-cli's own `kiro_default`, `spec`, `quick-spec`, `bug-fix`, `plan` and
 `semantic_reviewer` agent modes. Default is resolved by the server when the session is created: it
-binds the derived agent `poweratlas-acp` while the permission setting below is on and in effect, and
-`kiro_default` otherwise. The control resets to Default each time the picker opens. The mode
+binds the derived agent `poweratlas-acp`, which carries the permission mode below. While that agent
+is not in effect, a Default session is refused with the reason and the fix; the other task modes still
+start, without PowerAtlas's rules. The control resets to Default each time the picker opens. The mode
 is fixed for the life of the session: kiro-cli ignores a different mode on resume, so a session created
 in Spec mode stays in Spec mode however it is reopened. The same control is offered when a session is
 created from the dashboard's workspace sparkle menu.
 
-**Tool permissions depend on a setting.** The agent runs kiro-cli's v3 engine without
-`--trust-all-tools`; the two are incompatible, and the flag is never passed. Whether a session asks
-before acting is decided by the **Agent permissions** section of the settings menu (gear icon in the
-topbar). It is off by default.
+**Tool permissions follow the permission mode.** The agent runs kiro-cli's v3 engine without
+`--trust-all-tools`; the two are incompatible, and the flag is never passed. What a session may do
+without asking is set by the **Agent permissions** section of the settings menu (gear icon in the
+topbar). PowerAtlas writes a derived agent, `~/.kiro/agents/poweratlas-acp.md`, in every mode. It is a
+copy of the **base agent** (the field below the modes, `kiro_default` unless you change it; a minimal
+agent is used if that file does not exist) with one `permissions:` block that PowerAtlas compiles from
+the mode. Default sessions bind that agent. The base agent file is never modified, so terminal kiro-cli
+sessions keep their own posture.
 
-- **Off.** PowerAtlas changes nothing. Default sessions run as `kiro_default`, with whatever
-  permissions that agent and your own kiro-cli settings give it. If your `~/.kiro/settings/permissions.yaml` allows everything, nothing asks.
-- **On.** PowerAtlas writes a derived agent, `~/.kiro/agents/poweratlas-acp.md`. It is a copy of the
-  **base agent** (the field below the toggle, `kiro_default` unless you change it) with one
-  `permissions:` block added, which reproduces kiro-cli's own default posture. Default sessions then
-  bind that agent. Shell commands, file writes, web fetches and searches, MCP tools, subagents, skills
-  and powers ask first. Reading files under the session's folder runs without asking, and so do
-  `git status`, `git log`, `git diff`, `git branch`, `pwd`, `whoami` and `uname`. Those commands are
-  matched as exact strings, so `git log --oneline` asks. Reading a file outside the session's folder
-  asks, and writes to `**/.kiro/agents/**` and `**/.kiro/settings/**` are denied outright rather than
-  asked, so a session cannot rewrite the profile that constrains it. Sub-agents are gated too:
-  measured live 2026-09-23, spawning one asks, a shell command the sub-agent runs asks in the parent
-  session's page, and Allow runs it. Nothing asks when a session starts. The base agent file is never modified, so terminal
-  kiro-cli sessions keep their own posture. The other task modes (Spec, Plan and so on) are not
-  affected.
+- **Yolo** (the default). Every action runs without asking, except the Always blocked list below.
+  kiro-cli's own built-in rules still apply in every mode and no agent can lift them: it asks before
+  writes to `.git`, `.vscode`, `*.code-workspace`, `.kiro/agents` and `.kiro/hooks` (in the workspace
+  and in your home folder), and it blocks writes to `.kiroignore`, `.kiro/settings`,
+  `~/.kiro/workspace-roots`, `~/.kiro/sandbox-state`, `~/.kiro/web-session`,
+  `~/.kiro/powers/installed/*/mcp.json` and `~/.kiro/cloud-cache`.
+- **Manual.** The Always blocked list, plus PowerAtlas's default rules. Reading files under the
+  session's folder runs without asking, and so do the exact commands `git status`, `git log`,
+  `git diff`, `git branch`, `pwd`, `whoami` and `uname`. Everything else asks: other shell commands,
+  file writes, reads outside the session's folder, web fetches and searches, MCP tools, sub-agents,
+  skills and powers. `git` commands carrying `--output`, `--no-index` or `--ext-diff` are refused.
+  Writes to **Protected** items — agent definitions, steering files, skills and hooks under `.kiro`
+  — always ask. A configuration migrated from the old on setting also keeps its old rule that
+  refuses writes to `**/.kiro/agents/**` outright. Sub-agents run under the parent session's rules
+  (measured 2026-09-24). Nothing asks when a session starts.
+- **Auto** is shown but not selectable yet; when it arrives it will decide Manual's prompts itself.
 
-Turning the setting on applies to sessions created afterwards. Turning it off deletes the derived
-agent, and kiro-cli then moves any session that was using it to its `vibe` agent, which runs under your
-own permission settings. So turning it off also stops sessions that were already running from asking.
-Measured 2026-09-23: a session that had just asked before a shell command ran the next one with no
-prompt once the setting was turned off, without being reopened.
+**Always blocked**, in every mode, is refused silently with kiro-cli's own denial text: reading SSH,
+AWS, Azure and gcloud credential folders, kiro-cli's token files and PowerAtlas's own sign-in
+secrets; shell commands that mention those names; and file-tool writes to PowerAtlas's derived agent
+and to kiro-cli's settings and workspace-roots folders. The settings menu lists every pattern. The
+lists include the common Windows 8.3 short spellings (`SSH~1`), but not every alias: a link to one of
+those folders, or an unusual short name, is not covered. The shell part catches common accidents, not
+a determined command: it also blocks harmless commands such as `ssh -i ~/.ssh/key`.
 
-If the derived agent cannot be written, for example because the base agent is missing or cannot be
-read, PowerAtlas keeps a derived agent it wrote earlier, if one is still valid, and the settings menu
-warns that the change did not apply. With no valid earlier one, the menu shows a "not in effect" badge
-with the reason, and Default sessions bind `kiro_default`.
+Four limits of how kiro-cli matches rules, measured 2026-09-24 on kiro-cli 2.24.0, shape all of this.
+Command patterns are matched literally and case-sensitively against the whole command, which is why
+the default commands are exact: `git log --oneline` asks. A `*` in a command pattern would also allow
+an output redirection such as `git status > notes.txt`, which writes that file with no write check.
+Write rules cover kiro-cli's file-writing tools only; a shell redirection writes any path unchecked. And
+a rule matches a symlink's target, so a link inside a Protected folder that points elsewhere is not
+protected: the settings menu counts such links under each Protected item.
+
+A mode change applies to sessions created afterwards; kiro-cli keeps a running session on the rules it
+started with. Terminal sessions and the other task modes (Spec, Plan and so on) are not covered.
+
+If the derived agent cannot be written, or the file on disk is not what the current settings compile
+to — for example because a file of that name that PowerAtlas did not write is in the way — the menu
+shows a "not in effect" badge with the reason, and **new Default sessions are refused** with the cause
+and the fix until it is resolved. PowerAtlas never starts a Default session without the Always blocked
+list. A file edited by hand is regenerated automatically the next time a session is created. If
+`config.toml` is changed while PowerAtlas runs, the next new session picks the change up and the
+settings menu says the mode was changed outside the dashboard. Anything that can edit files on this
+machine as you can change the mode, including an agent you let run a shell or an interpreter such as
+Python; in Manual, allowing an interpreter is equivalent to allowing everything.
 
 When a session does ask, the request renders inline in the transcript and the turn pauses until you
 answer, from any tab or after a reload, the same way a clarifying question does. The prompt shows the

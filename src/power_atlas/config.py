@@ -40,7 +40,42 @@ _DEFAULT_TERMINAL_COMMAND = "wt new-tab --title {title} -p {wt_profile} -d {cwd}
 # Legacy top-level keys migrated into structured fields on load. They must be
 # excluded from unknown-key preservation (else they'd defeat the save-time drop
 # below and linger in config.toml forever) and always dropped on save.
-_LEGACY_KEYS = frozenset({"trust_all_tools", "terminal_command"})
+# `acp_permissions_enabled` is the on/off switch the permission modes replaced;
+# `load_config` migrates it into `acp_permission_mode`
+# (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-8, D-27).
+_LEGACY_KEYS = frozenset({"trust_all_tools", "terminal_command",
+                          "acp_permissions_enabled"})
+
+# The permission modes that can be stored (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL
+# D-2). Auto is shown in the settings menu but is not storable until its decider
+# exists.
+ACP_PERMISSION_MODES = ("yolo", "manual")
+
+# Mode values already warned about in this process, so a hand-edited junk value
+# logs one WARNING rather than one per `load_config` call (~16 routes call it).
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-25
+_mode_values_warned: set[str] = set()
+
+
+def parse_permission_mode(raw: object) -> tuple[str, str]:
+    """Return `(mode, warning)` for a stored `acp_permission_mode` value.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-25. Case-insensitive. `auto`
+    and every unreadable value load as `manual`: the fallback fails toward
+    prompting, never toward the least restrictive mode, and matches Auto's
+    "behaves like Manual". `warning` is empty for a readable value and is shown
+    in the settings panel otherwise. Never raises.
+    """
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in ACP_PERMISSION_MODES:
+            return value, ""
+        if value == "auto":
+            return "manual", ("acp_permission_mode is 'auto', which is not "
+                              "available yet; running as Manual")
+    shown = repr(raw)[:80]
+    return "manual", (f"acp_permission_mode {shown} is not a permission mode; "
+                      "running as Manual")
 
 
 @dataclass
@@ -86,27 +121,26 @@ class Config:
     # on the write path and sanitised to "" here on load — `load_config` is
     # documented as never raising and ~16 routes call it on the event loop.
     remote_bind_address: str = ""
-    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1.
+    # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1 (replaces the
+    # on/off switch of 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+    # Phase 1; `_migrate_permission_settings` migrates it).
     #
-    # The ACP permission posture, and the kiro-cli agent it is derived from.
-    # `False` is allow-all, which is exactly the behaviour PowerAtlas shipped
-    # before this feature existed, so the default is a genuine no-op and
-    # installing a release changes no permission behaviour until the user opts
-    # in. `True` writes an explicit rule set into the derived agent.
+    # The ACP permission mode: "yolo" (every action runs, except the Always
+    # blocked floor) or "manual" (the floor, Protected asks and the rules
+    # below). `agent_profile.compile_block` turns the pair into the derived
+    # agent's `permissions:` block, which is always written — there is no Off
+    # state (D-8). Loaded by `parse_permission_mode` (D-25) and
+    # `agent_profile.normalise_rules` (D-26), both of which never raise.
     #
-    # `False` is a no-op on the **filesystem** too: it deletes the derived agent
-    # rather than writing an allow-all one. Any file under `~/.kiro/agents/`
-    # registers in kiro-cli's own mode catalogue (P1), so an allow-all
-    # `poweratlas-acp` left on disk is selectable from a terminal session's
-    # agent picker and would widen the posture of a user whose machine baseline
-    # is narrower than allow-all. See `agent_profile`'s module docstring.
-    #
-    # The boolean has no `web._SETTING_TYPES` entry on purpose:
-    # `/api/save-setting` rejects booleans before its type check (a Python
-    # `isinstance(True, int)` guard), so it gets its own route. The base-agent
-    # **name** is a string and does go through that route, validated on the
-    # write path by `agent_profile.validate_base_agent_name`.
-    acp_permissions_enabled: bool = False
+    # Neither has a `web._SETTING_TYPES` entry: they change through
+    # `POST /api/acp-permissions`, which runs `agent_profile.apply_settings`
+    # (D-16). The base-agent **name** is a string that goes through
+    # `/api/save-setting`, validated there by
+    # `agent_profile.validate_base_agent_name`, and applied through the same
+    # `apply_settings` (D-33).
+    acp_permission_mode: str = "yolo"
+    acp_permission_rules: dict = field(
+        default_factory=lambda: _default_permission_rules())
     acp_permission_base_agent: str = "kiro_default"
 
 
@@ -586,21 +620,88 @@ def _normalize_launch_profile(raw: dict, index: int, seen_ids: dict[str, str], i
     )
 
 
+def _default_permission_rules() -> dict:
+    """The seed rules, as `Config`'s default for `acp_permission_rules`.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-26: `{}` is never the
+    in-memory reading of "no rules"; the rows are always complete. Imported at
+    call time: `agent_profile` imports this module, and the rule constants live
+    beside the compiler (D-17).
+    """
+    from .agent_profile import normalise_rules
+    return normalise_rules({})
+
+
+def _with_permission_defaults(config: Config) -> Config:
+    """A config with no stored permission settings: Yolo and the seed rules."""
+    config._mode_warning = ""
+    return config
+
+
+def _migrate_permission_settings(config: Config, data: dict) -> None:
+    """Set `acp_permission_mode` and `acp_permission_rules` from the raw TOML.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1. Read from `data`
+    rather than from the type-checked kwargs, because a wrong-typed mode must
+    load as Manual (D-25), not fall back to the dataclass default, Yolo.
+
+    * D-27 precedence: a stored `acp_permission_mode` wins over the legacy
+      `acp_permissions_enabled`. Otherwise the legacy `true` becomes Manual and
+      `false` or absent becomes Yolo (D-8). The legacy key is in `_LEGACY_KEYS`,
+      so it is dropped on the next save.
+    * Rules are seeded only when the table is absent or empty (D-27). A
+      migrated `true` also seeds `protected_block = ["agents"]`, keeping the
+      old overlay's write deny on `**/.kiro/agents/**` (D-23).
+    * Normalised per D-26 by `agent_profile.normalise_rules`, which never
+      raises. Imported here, not at module level: `agent_profile` imports this
+      module, and the rule constants live beside the compiler (D-17).
+    """
+    from .agent_profile import normalise_rules
+    migrated_manual = False
+    if "acp_permission_mode" in data:
+        raw_mode = data["acp_permission_mode"]
+        mode, warning = parse_permission_mode(raw_mode)
+        if warning:
+            key = repr(raw_mode)
+            if key not in _mode_values_warned:
+                _mode_values_warned.add(key)
+                log.warning("%s", warning)
+    else:
+        warning = ""
+        migrated_manual = data.get("acp_permissions_enabled") is True
+        mode = "manual" if migrated_manual else "yolo"
+    config.acp_permission_mode = mode
+    config._mode_warning = warning
+
+    raw_rules = data.get("acp_permission_rules")
+    if isinstance(raw_rules, dict) and raw_rules:
+        config.acp_permission_rules = normalise_rules(raw_rules)
+    else:
+        seeded = {"protected_block": ["agents"]} if migrated_manual else {}
+        config.acp_permission_rules = normalise_rules(seeded)
+
+
 def load_config() -> Config:
     """Load config from TOML. Missing keys get defaults, unknown keys ignored, wrong types get defaults."""
     with _lock:
         if not CONFIG_PATH.exists():
-            return Config()
+            return _with_permission_defaults(Config())
         try:
             with open(CONFIG_PATH, "rb") as f:
                 data = tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
             try:
                 shutil.copy2(CONFIG_PATH, CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak"))
                 log.warning("Corrupt config backed up to %s; using defaults", CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak"))
             except Exception:
                 log.warning("Corrupt config; using defaults (backup failed)")
-            return Config()
+            config = _with_permission_defaults(Config())
+            # The permission gate's self-heal must not regenerate the derived
+            # agent from these defaults: they are not what the user set, and
+            # the default mode is the least restrictive one.
+            # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-30
+            config._load_error = f"{type(exc).__name__}: {exc}"
+            return config
         defaults = Config()
         fields = {f.name for f in Config.__dataclass_fields__.values()}
         kwargs = {}
@@ -620,6 +721,8 @@ def load_config() -> Config:
         # Store as instance attr (not a dataclass field) — object identity constraint:
         # the same Config instance returned by load must be passed to save for extras to persist.
         config._extra = extra
+
+        _migrate_permission_settings(config, data)
 
         # --- Launch profile normalization ---
         has_launch_profiles_in_toml = "launch_profiles" in data and isinstance(data.get("launch_profiles"), list)

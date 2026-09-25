@@ -1,6 +1,7 @@
-"""Generate the derived kiro-cli agent that carries PowerAtlas's ACP posture.
+"""Generate the derived kiro-cli agent that carries PowerAtlas's ACP permission mode.
 
-260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1.
+260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1, on the generator first
+written by 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1.
 
 PowerAtlas never modifies the user's own kiro-cli agent. It reads a **base
 agent** (`~/.kiro/agents/<name>.md`, configurable, default `kiro_default`) and
@@ -10,72 +11,84 @@ inside, its YAML frontmatter. Interactive terminal kiro-cli sessions keep using
 the base agent untouched, which is what keeps their permission posture
 independent of anything PowerAtlas does.
 
-**The derived agent exists only while the setting is on.** Turning the setting
-off *deletes* the file rather than writing an allow-all one (Step 5 review,
-2026-09-22; the earlier behaviour is described in plan section 9 Phase 1). The
-reason is P1: any file under `~/.kiro/agents/` registers in kiro-cli's own mode
-catalogue, so an allow-all `poweratlas-acp` is selectable from a terminal
-session's agent picker. For a user whose machine baseline is narrower than
-allow-all, that widens their posture — in the one state where PowerAtlas is
-supposed to be doing nothing at all. Absence is the only representation of
-`off` that cannot widen anything.
+**The block is compiled, and the derived agent is always written.** The
+permission mode (`acp_permission_mode`: `yolo` or `manual`) and, in Manual, the
+rules (`acp_permission_rules`) live in `config.toml`; `compile_block` turns them
+into kiro-cli rules (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-1, D-13). Every
+mode starts with the Always blocked floor (`FLOOR_RULES`), so there is no Off
+state and no delete path (D-8, D-18): a missing file is a failure the settings
+panel reports and the session gate refuses on (D-34), never a posture. The
+cost, accepted by the user (D-37, R-4): `poweratlas-acp` is always selectable
+from kiro-cli's own terminal agent picker.
 
-Four properties this module is built around, each measured rather than assumed
-(plan section 9):
+Five properties this module is built around:
 
-* **Injection is textual, never parsed** (D-18). No YAML library is declared or
-  installed in this project, and byte-identity outside the injected block is an
-  exit criterion — only *not* parsing achieves that by construction, since a
-  parse/re-emit round trip normalises quoting, key order and flow style.
+* **Injection is textual, never parsed**
+  (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL D-18). No YAML library
+  is declared or installed in this project, and byte-identity outside the
+  injected block is an exit criterion — only *not* parsing achieves that by
+  construction, since a parse/re-emit round trip normalises quoting, key order
+  and flow style.
 
 * **A base agent this module cannot splice safely is refused, not guessed at.**
   The splice assumes a frontmatter whose root mapping sits at column 0, which is
   the shape the shipped `kiro_default.md` has. An indented root mapping, or a
   frontmatter region that turns out to hold document body, raises rather than
   producing a file with two `permissions:` keys or a block spliced into the
-  prose — both of which are the silent fail-open below.
+  prose — both of which are the silent fail-open below. A base agent that does
+  not exist at all is different: generation uses `MINIMAL_BASE` and reports it
+  (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-28), so a clean kiro-cli
+  install still gets the floor.
 
-* **The write is verified before it is published** (D-19): tmp -> `fsync` ->
-  read the **tmp** back and re-excise it -> only then `os.replace`. The ordering
-  is the point, not the check. Verifying after `os.replace` detects a bad splice
-  with the last-good file already destroyed, which is the opposite of what
-  D-10/SC-8 promises. Staging outside the agents directory and publishing only a
-  file that has already been read back means a failure leaves the previous file
-  untouched because `os.replace` never ran.
+* **The write is verified before it is published**
+  (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL D-19): tmp -> `fsync`
+  -> read the **tmp** back and re-excise it -> only then `os.replace`. The
+  ordering is the point, not the check. Verifying after `os.replace` detects a
+  bad splice with the last-good file already destroyed. Staging outside the
+  agents directory and publishing only a file that has already been read back
+  means a failure leaves the previous file untouched because `os.replace`
+  never ran.
 
-  The pattern is `config.save_config`'s, which the secret files now share too
-  (`config._write_secret_file`: tmp, `fsync`, `os.replace`; the earlier
-  in-place `O_CREAT|O_TRUNC` secret write was reversed in
-  260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review). It
-  matters more here than there. A torn `permissions:` block fails **open**:
-  kiro-cli loads an agent whose frontmatter does not parse without an error or
-  a warning, and silently falls back to the wider scopes. That was reproduced
-  live, by accident, across seven consecutive probe runs in Phase 0. This file
-  adds one step the secrets do not need: the tmp is read back and re-excised
-  before `os.replace`.
+  The pattern is `config.save_config`'s, which the secret files share too
+  (`config._write_secret_file`). It matters more here than there. A torn
+  `permissions:` block fails **open**: kiro-cli loads an agent whose
+  frontmatter does not parse without an error or a warning, and silently falls
+  back to the wider scopes. That was reproduced live, by accident, across seven
+  consecutive probe runs in 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+  Phase 0.
 
-* **Generation failure never widens the posture** (D-10/SC-8). A failed
+* **Generation failure never widens the posture**
+  (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL D-10/SC-8). A failed
   regeneration leaves whatever is already on disk exactly where it is. It never
-  writes a base-agent copy over a previously generated derived agent, because an
-  unconditional fallback like that turns a transient write error into a silently
-  ungated session. A failed *delete* fails the same way round: the file stays,
-  and the failure is reported, rather than the module pretending it is gone.
+  writes a base-agent copy over a previously generated derived agent.
+
+* **A file PowerAtlas did not write is never overwritten**
+  (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-29). The name is not
+  reserved; a file at the target whose block lacks `_PROVENANCE_MARKER` is the
+  user's, and generation refuses and reports it.
 
 `acp.py` must not import this module: it states a narrow isolation boundary in
 its own header and imports three names from two intra-package modules. The name it needs,
-`DERIVED_AGENT_NAME`, lives in `config.py` for that reason (D-20).
+`DERIVED_AGENT_NAME`, lives in `config.py` for that reason
+(260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL D-20). What it needs from
+here — whether the derived agent is in effect — reaches it through
+`web._derived_agent_in_effect`, installed as `acp.mode_gate_hook`.
 """
 
+import copy
+import hashlib
+import json
 import logging
 import os
 import re
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from importlib import resources
 from pathlib import Path
 
-from .config import DERIVED_AGENT_NAME, load_config
+from .config import (DERIVED_AGENT_NAME, load_config, parse_permission_mode,
+                     save_config)
 
 log = logging.getLogger(__name__)
 
@@ -134,34 +147,36 @@ _PERMISSIONS_KEY_RE = re.compile(
 # and its indented value often enough to matter.
 _BLOCK_CONTINUATION_CHARS = " \t-#"
 
-# The overlay is package data, read through `importlib.resources` so it survives
-# a wheel build. Read once and cached: it is a committed constant, and a
-# per-generation read would put a package-data lookup on the settings write path
-# for no benefit.
-_OVERLAY_PACKAGE = "power_atlas"
-_OVERLAY_RESOURCE = "agents/permissions.yaml"
-_overlay_cache: str | None = None
-
-# The provenance stamp every block this module writes carries, and the whole
-# basis on which the `off` transition is allowed to delete a file. The derived
-# agent is documented as a build product that is never hand-edited, but the
-# *name* is not reserved: if a block at that path does not say PowerAtlas wrote
-# it, it is left alone and reported rather than removed.
+# The provenance stamp every block this module writes carries. Its purpose is
+# recognising PowerAtlas's own file (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL
+# D-29): generation overwrites only an absent file or one whose block carries
+# it, and `derived_block_state` reads a marked block that does not match the
+# current settings as `"stale"` (safe to regenerate, D-30) rather than
+# `"unknown"` (someone else's file). The name `poweratlas-acp` is not reserved,
+# so a block without the marker is left alone and reported.
 #
-# A marker rather than byte-equality against a table of every block this module
-# has ever written: byte-equality would fail to recognise its own output from
-# one overlay revision ago, which is exactly the file an upgrade needs to clean
-# up. `TestOverlayIsReachableAtRuntime` asserts the shipped overlay carries the
-# marker, so a rewrite that drops the line fails loudly in the suite instead of
-# quietly making every derived agent undeletable.
+# A marker rather than byte-equality against every block this module has ever
+# written: byte-equality would fail to recognise its own output from one
+# release ago, which is exactly the file an upgrade needs to regenerate.
 _PROVENANCE_MARKER = "Written by PowerAtlas"
 
-# Serialises generation. Two settings writes dispatched through
-# `asyncio.to_thread` would otherwise race on the same staging path, and the
-# loser could `os.replace` a half-written file into place. It also covers the
-# `load_config()` read in `sync_from_config`, so two rapid writes cannot each
-# capture a snapshot and then publish in scheduling order rather than in the
-# order the settings were saved.
+# The header line that records which settings a block was compiled from
+# (`settings_fingerprint`). Read back by the D-30 self-heal to tell a posture
+# change made outside the dashboard (the fingerprint moved) from a hand edit of
+# the file itself (it did not), which is what D-35's notice needs.
+_FINGERPRINT_LABEL = "Settings fingerprint: "
+_FINGERPRINT_RE = re.compile(r"#\s*Settings fingerprint: ([0-9a-f]{16})\b")
+
+# Serialises generation and the settings write in front of it.
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-16: `apply_settings` holds it
+# across `load_config`, the mutation, `save_config` and generation, so
+# config.toml is never ahead of the derived agent for a session-creation check
+# to see. The **only** other acquirer is `web._derived_agent_in_effect`, with a
+# bounded `acquire(timeout=...)`, so a stalled generation refuses a session
+# rather than hanging it. `compile_block`, `derived_block_state`,
+# `_apply_locked` and `heal_stale_locked` never acquire it: a plain
+# `threading.Lock` is not reentrant, and the two acquirers call them while
+# holding it.
 _generation_lock = threading.Lock()
 
 
@@ -173,24 +188,446 @@ class GenerationStatus:
     "generation ran and succeeded", which the panel must not conflate: the first
     happens for a few milliseconds at startup, the second is the steady state.
 
-    A successful `off` pass — the derived agent deleted, or already absent — is
-    also `ok=True`. The healthy off state is therefore `enabled=False`,
-    `ok=True`, block state `"absent"`.
+    `mode` is the permission mode the attempt compiled. `note` is a success the
+    panel still reports: generation from `MINIMAL_BASE` because the base agent
+    was not found (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-28).
     """
 
     attempted: bool = False
     ok: bool = False
     error: str = ""
-    enabled: bool = False
+    mode: str = ""
     base_agent: str = ""
+    note: str = ""
 
 
 _status = GenerationStatus()
+
+# A posture change the dashboard did not make: set by the D-30 self-heal when
+# the regeneration it ran compiled a different mode or rule set from the block
+# it replaced, cleared by the next change made through `apply_settings` with a
+# mutation. `None` when there is nothing to report.
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-35
+_posture_notice: dict | None = None
 
 
 def last_generation() -> GenerationStatus:
     """The outcome of the most recent generation attempt in this process."""
     return _status
+
+
+def posture_notice() -> dict | None:
+    """D-35's external posture-change notice, or `None`."""
+    return dict(_posture_notice) if _posture_notice else None
+
+
+# ---- The rule model -----------------------------------------------------------
+#
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-11. One row per kind of action.
+# The measured kiro-cli semantics the compiler is built on, carried over from
+# the shipped overlay this replaced (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+# plan section 9) and from this plan's Phase 0:
+#
+#   * A capability no rule names does NOT fall back to ask. It inherits the
+#     wider scopes, which on a machine whose `~/.kiro/settings/permissions.yaml`
+#     is `all: allow` means it runs silently. Manual therefore names every row,
+#     and `normalise_rules` fills a missing row from the seed rather than
+#     omitting it (D-26).
+#
+#   * Within one capability, a blanket `ask` rule silently defeats a narrower
+#     `allow` rule for the same resource — most-restrictive-wins, regardless of
+#     rule order, with no error and no warning. `exclude` is the only mechanism
+#     that expresses "allow X, ask about everything else", so every blanket
+#     `ask` or `deny` the compiler emits beside an allow list carries an
+#     `exclude` equal to that list (D-13; `deny` + `exclude` measured in P-0.7).
+#
+#   * Deny beats ask and allow, across rules and across rule sources (P-0.7
+#     items 5, 9 and 10; F-5), so the floor needs no `exclude` anywhere.
+#
+#   * `exclude` is a resource glob, not a capability filter: `all: ask` with an
+#     `exclude` would drop the excluded resource out of the ask for every
+#     capability at once. Manual never names a meta-capability (`all`,
+#     `builtin`, `filesystem`). Yolo's single `all: allow` carries no `exclude`
+#     and the floor's denies beat it (P-A1).
+#
+#   * Not named: `context`, `diagnostics` and `sandbox_network`. The kiro-cli
+#     documentation lists them in the rule schema, but none was ever observed
+#     on the ACP surface, and an unrecognised capability name risks rejecting
+#     the whole block, which fails open (Follow-up 8).
+#
+#   * Shell patterns match the whole command literally and case-sensitively,
+#     and `\` is a literal character (P-0.3, F-3, F-4). A `*` also matches an
+#     output redirection (`git status > x.txt` ran silently under
+#     `git status*`, P-0.8), while `&&`, `;`, `|`, `||`, `&`, a newline and
+#     `$(...)` are split and checked per sub-command. File patterns are
+#     case-insensitive and match a symlink's resolved target (P-0.11, F-1).
+#
+#   * `fs_write` rules govern the file-writing tools only: a shell redirection
+#     writes any path unchecked (P-0.8, F-6).
+
+PERMISSION_ROWS = ("fs_read", "fs_write", "shell", "web_fetch", "web_search",
+                   "mcp", "subagent", "skill", "power")
+
+ROW_LABELS = {
+    "fs_read": "Read files",
+    "fs_write": "Write files",
+    "shell": "Run commands",
+    "web_fetch": "Web fetch",
+    "web_search": "Web search",
+    "mcp": "MCP tools",
+    "subagent": "Sub-agents",
+    "skill": "Skills",
+    "power": "Powers",
+}
+
+ROW_DEFAULTS = ("allow", "ask", "block")
+
+# D-14. Past these the rule set is not something a person edits, and a huge
+# block is one more thing kiro-cli could reject — which fails open.
+MAX_PATTERN_CHARS = 200
+MAX_PATTERNS_PER_LIST = 100
+
+# ---- The Always blocked floor ------------------------------------------------
+#
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-6, D-36, D-38. Emitted first in
+# every mode as kiro `deny` rules, which refuse silently with kiro-cli's own
+# denial text. Paths use the `**/` form (a `~/` prefix also works, P-0.2).
+#
+# Each 8.3 short-name variant replaces one long segment with its prefix glob
+# (`.ssh` -> `ssh~*`), because agent-profile rules do not map short names to
+# long ones for `fs_read` (P-0.11) or `fs_write` (F-5). NTFS hashed short names,
+# used after four prefix collisions, are not covered (R-3). Trailing-dot and
+# trailing-space spellings name a different, missing folder, not an alias
+# (F-2, F-5), so they need no variant.
+_FLOOR_FS_READ = (
+    "**/.ssh/**", "**/.aws/**", "**/.azure/**", "**/.config/gcloud/**",
+    "**/.kiro/secrets.json", "**/Kiro-Cli/data.sqlite3*",
+    "**/power-atlas/local-secret*", "**/power-atlas/remote-secret*",
+    # 8.3 short-name variants (D-38a).
+    "**/ssh~*/**", "**/aws~*/**", "**/azure~*/**", "**/config~*/gcloud/**",
+    "**/kiro~*/secrets.json", "**/.kiro/secret~*", "**/kiro~*/secret~*",
+    "**/Kiro-Cli/data~*", "**/power-~*/local-*", "**/power-~*/remote*",
+    "**/power-atlas/local-~*", "**/power-atlas/remote~*",
+)
+
+# Best-effort: a command can be spelled many ways (D-4, R-2). Shell patterns are
+# literal (so `/` and `\` spellings are both listed, D-38b) and case-sensitive
+# (so every entry also ships upper-case, D-38f; mixed case stays uncovered,
+# R-19). `*poweratlas-acp*` stands in for the fs_write floor on shell
+# redirections, which no fs_write rule sees (D-38g). Over-matches harmless
+# commands such as `echo notes.sshx` (P-0.3) and `ssh -i ~/.ssh/key` (R-12).
+_FLOOR_SHELL_LOWER = (
+    "*.ssh*", "*.aws*", "*.azure*", "*.config/gcloud*", "*.config\\gcloud*",
+    "*secrets.json*", "*data.sqlite3*", "*local-secret*", "*remote-secret*",
+    "*poweratlas-acp*",
+    # Short-name stems (D-38a).
+    "*ssh~*", "*aws~*", "*azure~*", "*config~*gcloud*", "*secret~*",
+    "*local-~*", "*remote~*", "*data~*", "*powera~*",
+)
+_FLOOR_SHELL = _FLOOR_SHELL_LOWER + tuple(p.upper() for p in _FLOOR_SHELL_LOWER)
+
+# File-writing tools only (D-38g). `.kiro/settings` and `.kiro/workspace-roots`
+# repeat kiro-cli's own built-in denies so the floor lists them in full, and
+# the short-name variant closes the `KIRO~1\settings` spelling the built-in
+# misses (F-5).
+_FLOOR_FS_WRITE = (
+    "**/.kiro/agents/poweratlas-acp.md", "**/.kiro/settings/**",
+    "**/.kiro/workspace-roots/**",
+    # 8.3 short-name variants (F-5).
+    "**/kiro~*/agents/poweratlas-acp.md", "**/.kiro/agents/powera~*",
+    "**/kiro~*/agents/powera~*", "**/kiro~*/settings/**",
+    "**/.kiro/worksp~*/**", "**/kiro~*/workspace-roots/**",
+    "**/kiro~*/worksp~*/**",
+)
+
+FLOOR_RULES = (
+    {"capability": "fs_read", "match": _FLOOR_FS_READ, "effect": "deny"},
+    {"capability": "shell", "match": _FLOOR_SHELL, "effect": "deny"},
+    {"capability": "fs_write", "match": _FLOOR_FS_WRITE, "effect": "deny"},
+)
+
+# kiro-cli's own `kiro-scope` rules, which apply in every mode and which no
+# agent rule can lift (P-0.10, F-5, D-38c). Listed so the settings panel and
+# the Yolo description can say so.
+KIRO_BUILTIN_ASKS = (
+    ".git", ".vscode", "*.code-workspace", ".kiro/agents", ".kiro/hooks",
+)
+KIRO_BUILTIN_DENIES = (
+    ".kiroignore", ".kiro/settings", "~/.kiro/workspace-roots",
+    "~/.kiro/sandbox-state", "~/.kiro/web-session",
+    "~/.kiro/powers/installed/*/mcp.json", "~/.kiro/cloud-cache",
+)
+
+# ---- Protected ---------------------------------------------------------------
+#
+# Manual only (D-5): writes to agent, steering, skill and hook configuration
+# always prompt, even under a Write files row whose default is Allow, and each
+# can be switched to Block outright (`protected_block`). kiro-cli's built-in
+# asks already cover `agents` and `hooks` in every mode (P-0.10); Protected
+# still owns the Block outright switch. Each item ships its `kiro~*` short-name
+# variant (F-5). Governs the file-writing tools only (D-38g) and does not see a
+# write through a symlink whose target lies outside (D-38h, F-1);
+# `find_protected_links` names those links for the settings panel (D-39).
+PROTECTED = {
+    "agents": ("Agent definitions", ("**/.kiro/agents/**", "**/kiro~*/agents/**")),
+    "steering": ("Steering files", ("**/.kiro/steering/**", "**/kiro~*/steering/**")),
+    "skills": ("Skills", ("**/.kiro/skills/**", "**/kiro~*/skills/**")),
+    "hooks": ("Hooks", ("**/.kiro/hooks/**", "**/kiro~*/hooks/**")),
+}
+
+# ---- The Manual seed ------------------------------------------------------------
+#
+# The shipped overlay this plan replaced, as rows (D-22, D-24). The shell allow
+# patterns are exact literals: a `*` suffix also allows an output redirection
+# (P-0.8), and an exact pattern matches the whole command, so a redirection or
+# an extra argument falls to the ask (F-3). The shell block patterns guard the
+# git prefixes a user may add later: `--output`, `--no-index` and `--ext-diff`
+# turn a read-only git command into a write, a read outside the repository or
+# a program run.
+#
+# Flagged rather than changed (R-8, carried forward): `git status`, `git log`,
+# `git diff` and `git branch` can each execute repository-controlled code,
+# because git honours `.gitattributes` `textconv` filters and repo-local
+# `diff.external` from the checkout it runs in.
+SEED_RULES = {
+    "fs_read": {"default": "ask", "allow": ["./**"], "block": []},
+    "fs_write": {"default": "ask", "allow": [], "block": []},
+    "shell": {
+        "default": "ask",
+        "allow": ["git status", "git log", "git diff", "git branch",
+                  "pwd", "whoami", "uname"],
+        "block": ["git *--output*", "git *--no-index*", "git *--ext-diff*"],
+    },
+    "web_fetch": {"default": "ask", "allow": [], "block": []},
+    "web_search": {"default": "ask", "allow": [], "block": []},
+    "mcp": {"default": "ask", "allow": [], "block": []},
+    "subagent": {"default": "ask", "allow": [], "block": []},
+    "skill": {"default": "ask", "allow": [], "block": []},
+    "power": {"default": "ask", "allow": [], "block": []},
+    "protected_block": [],
+}
+
+# The base agent used when the configured one does not exist (D-28). It must
+# pass `_check_frontmatter_shape` and carry no bare `: ` in a plain scalar,
+# which is the malformation that made kiro-cli fall open in the prior plan's
+# Phase 0.
+MINIMAL_BASE = (
+    "---\n"
+    "description: PowerAtlas ACP sessions on a minimal base agent\n"
+    "tools:\n"
+    '  - "*"\n'
+    "---\n"
+    "\n"
+    "PowerAtlas wrote this agent from a built-in minimal base because the\n"
+    "configured base agent was not found.\n"
+)
+
+
+def pattern_error(pattern: object) -> str:
+    """Why `pattern` cannot be used, or `""` when it can (D-14).
+
+    1-200 characters, not blank, not `*` or `**` alone, and printable BMP
+    characters only: no C0 or C1 controls, DEL, surrogates, U+2028/U+2029 or
+    U+FEFF. Emission uses `json.dumps(s, ensure_ascii=False)`, and a surrogate
+    escape or a raw control character can make kiro-cli reject the frontmatter,
+    which fails open silently.
+    """
+    if not isinstance(pattern, str):
+        return "is not text"
+    if not pattern.strip():
+        return "is blank"
+    if len(pattern) > MAX_PATTERN_CHARS:
+        return f"is longer than {MAX_PATTERN_CHARS} characters"
+    if pattern.strip() in ("*", "**"):
+        return "matches everything; set the row's default instead"
+    for ch in pattern:
+        # `isprintable` is False for Cc (C0, DEL, C1), Cs (surrogates), Zl/Zp
+        # (U+2028/U+2029), Cf (U+FEFF) and every separator but the ASCII space.
+        if ord(ch) > 0xFFFF or not (ch == " " or ch.isprintable()):
+            return f"contains the character U+{ord(ch):04X}, which is not allowed"
+    return ""
+
+
+def _seed_row(row: str) -> dict:
+    return copy.deepcopy(SEED_RULES[row])
+
+
+def normalise_rules(raw: object) -> dict:
+    """`acp_permission_rules` as the complete, well-typed rule set. Never raises.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-26, applied by `load_config`
+    and again by `compile_block`:
+
+    * a missing or non-table row is the seed row, so every capability is always
+      named (an unnamed one inherits the wider scopes);
+    * an unreadable default becomes `ask`, keeping the row's lists;
+    * an invalid **allow** pattern is dropped, and the list is capped at
+      `MAX_PATTERNS_PER_LIST` — both narrow what runs silently;
+    * the **block** list is kept exactly as stored, invalid entries and length
+      included, so `compile_block` refuses it by name rather than dropping a
+      protection silently;
+    * unknown rows and unknown Protected names are dropped.
+    """
+    src = raw if isinstance(raw, dict) else {}
+    out: dict = {}
+    for row in PERMISSION_ROWS:
+        raw_row = src.get(row)
+        if not isinstance(raw_row, dict):
+            out[row] = _seed_row(row)
+            continue
+        default = raw_row.get("default")
+        default = default.strip().lower() if isinstance(default, str) else ""
+        if default not in ROW_DEFAULTS:
+            default = "ask"
+        allow: list = []
+        raw_allow = raw_row.get("allow")
+        if isinstance(raw_allow, list):
+            for pattern in raw_allow:
+                if len(allow) >= MAX_PATTERNS_PER_LIST:
+                    break
+                if not pattern_error(pattern) and pattern not in allow:
+                    allow.append(pattern)
+        raw_block = raw_row.get("block")
+        if raw_block is None:
+            block = []
+        elif isinstance(raw_block, list):
+            block = list(raw_block)
+        else:
+            block = raw_block
+        out[row] = {"default": default, "allow": allow, "block": block}
+    raw_protected = src.get("protected_block")
+    if isinstance(raw_protected, str):
+        raw_protected = [raw_protected]
+    if not isinstance(raw_protected, list):
+        raw_protected = []
+    out["protected_block"] = [key for key in PROTECTED if key in raw_protected]
+    return out
+
+
+def _check_block_lists(rules: dict) -> None:
+    """Refuse a block list that cannot be compiled as stored (D-26, D-14)."""
+    for row in PERMISSION_ROWS:
+        block = rules[row]["block"]
+        name = f"{ROW_LABELS[row]} ({row})"
+        if not isinstance(block, list):
+            raise AgentProfileError(
+                f"{name}: the block list is not a list, so the rules were not "
+                "applied; fix acp_permission_rules in config.toml")
+        if len(block) > MAX_PATTERNS_PER_LIST:
+            raise AgentProfileError(
+                f"{name}: the block list has {len(block)} patterns; at most "
+                f"{MAX_PATTERNS_PER_LIST} are allowed")
+        for pattern in block:
+            reason = pattern_error(pattern)
+            if reason:
+                raise AgentProfileError(
+                    f"{name}: block pattern {str(pattern)[:60]!r} {reason}, so "
+                    "the rules were not applied")
+
+
+def settings_fingerprint(mode: str, rules: dict) -> str:
+    """A short digest of what a block is compiled from (D-35).
+
+    Yolo compiles no rules, so its fingerprint is the mode alone: editing
+    Manual's rows while in Yolo is not a posture change.
+    """
+    payload: dict = {"mode": mode}
+    if mode != "yolo":
+        payload["rules"] = rules
+    text = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=repr)
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _compiled_settings(config) -> tuple[str, dict]:
+    """The mode and normalised rules `config` compiles to."""
+    mode, _warning = parse_permission_mode(
+        getattr(config, "acp_permission_mode", None))
+    rules = normalise_rules(getattr(config, "acp_permission_rules", None))
+    return mode, rules
+
+
+def compile_rules(mode: str, rules: dict) -> list[dict]:
+    """The kiro-cli rule list for a mode and a normalised rule set.
+
+    The floor first in both modes. Yolo adds one `all: allow`. Manual adds the
+    Protected items, then one group per row (D-13):
+
+    * a block list -> `deny` with `match`, first, so it beats everything below;
+    * default Allow -> `allow` (the allow list is ignored);
+    * default Ask -> `allow match <allow>` + `ask exclude <allow>`;
+    * default Block -> `allow match <allow>` + `deny exclude <allow>`;
+    * an empty allow list -> the bare effect.
+    """
+    out = [dict(rule) for rule in FLOOR_RULES]
+    if mode == "yolo":
+        out.append({"capability": "all", "effect": "allow"})
+        return out
+    blocked = set(rules["protected_block"])
+    for key, (_label, patterns) in PROTECTED.items():
+        out.append({"capability": "fs_write", "match": patterns,
+                    "effect": "deny" if key in blocked else "ask"})
+    for row in PERMISSION_ROWS:
+        spec = rules[row]
+        allow, block, default = spec["allow"], spec["block"], spec["default"]
+        if block:
+            out.append({"capability": row, "match": block, "effect": "deny"})
+        if default == "allow":
+            out.append({"capability": row, "effect": "allow"})
+            continue
+        effect = "ask" if default == "ask" else "deny"
+        if allow:
+            out.append({"capability": row, "match": allow, "effect": "allow"})
+            out.append({"capability": row, "exclude": allow, "effect": effect})
+        else:
+            out.append({"capability": row, "effect": effect})
+    return out
+
+
+def _flow(patterns) -> str:
+    """A single-line YAML flow sequence of JSON-quoted strings (D-14).
+
+    A JSON string is a valid YAML double-quoted scalar. `ensure_ascii=False`
+    keeps non-ASCII as UTF-8 rather than `\\u` escapes (F-7 measured that
+    kiro-cli sends and matches plain UTF-8); `pattern_error` has already kept
+    out every character whose escape could trip kiro-cli's parser.
+    """
+    return "[" + ", ".join(json.dumps(p, ensure_ascii=False) for p in patterns) + "]"
+
+
+def compile_block(config) -> str:
+    """The derived agent's `permissions:` block for `config`. Pure.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1. Reads
+    `acp_permission_mode` and `acp_permission_rules` (normalised again here,
+    D-26) and nothing on disk. Raises `AgentProfileError` naming the row and
+    pattern when a Manual block list cannot be compiled.
+
+    Deterministic, byte for byte: no timestamp or per-run text, because
+    `derived_block_state` compares the file against this output to decide
+    whether the settings are in effect (D-15). LF line endings and exactly one
+    trailing newline, because the splice re-derives both from the base agent.
+    """
+    mode, rules = _compiled_settings(config)
+    if mode != "yolo":
+        _check_block_lists(rules)
+    lines = [
+        "permissions:",
+        f"  # {_PROVENANCE_MARKER} from its ACP permission mode and rules.",
+        "  # The whole file is rewritten at startup and on every settings change,",
+        "  # so an edit here is lost. Change the mode or the rules in PowerAtlas's",
+        "  # settings; compile_block in src/power_atlas/agent_profile.py writes it.",
+        f"  # Permission mode: {mode}",
+        f"  # {_FINGERPRINT_LABEL}{settings_fingerprint(mode, rules)}",
+        "  rules:",
+    ]
+    for rule in compile_rules(mode, rules):
+        lines.append(f"    - capability: {rule['capability']}")
+        if "match" in rule:
+            lines.append(f"      match: {_flow(rule['match'])}")
+        if "exclude" in rule:
+            lines.append(f"      exclude: {_flow(rule['exclude'])}")
+        lines.append(f"      effect: {rule['effect']}")
+    return "\n".join(lines) + "\n"
 
 
 def validate_base_agent_name(name: object) -> str:
@@ -230,39 +667,6 @@ def _stage_path() -> Path:
     not outlive the next thing PowerAtlas does.
     """
     return KIRO_AGENTS_DIR.parent / f"{DERIVED_AGENT_NAME}.md.tmp"
-
-
-def overlay_text() -> str:
-    """The `on` state's `permissions:` block, from package data.
-
-    Normalised in two ways, both because the block is spliced into a file whose
-    every other byte is copied through unchanged:
-
-    * Line endings become `\\n`. The splice re-applies the *base's* dominant
-      ending (`_dominant_line_ending`), so a `\\r\\n` overlay checked out on
-      Windows would otherwise reach an LF base as `\\r\\n` and make the derived
-      agent mixed-ending, and a CRLF base would end up with `\\r\\r\\n`.
-
-    * Exactly one trailing newline. `inject_permissions` drops trailing blank
-      lines from the block and `excise_permissions` hands them back to the
-      surrounding text, so an incidental blank line at the end of the
-      package-data file would make the written block and the assembled block
-      compare unequal — and the verification would then fail every time,
-      permanently disabling the feature over a whitespace edit.
-    """
-    global _overlay_cache
-    if _overlay_cache is None:
-        try:
-            raw = (resources.files(_OVERLAY_PACKAGE)
-                   .joinpath(_OVERLAY_RESOURCE)
-                   .read_text(encoding="utf-8"))
-        except (OSError, ValueError, ModuleNotFoundError) as exc:
-            raise AgentProfileError(
-                f"permission overlay unreadable: {type(exc).__name__}: {exc}"
-            ) from exc
-        lf = raw.replace("\r\n", "\n").replace("\r", "\n")
-        _overlay_cache = lf.rstrip("\n") + "\n"
-    return _overlay_cache
 
 
 def _norm_block(block: str) -> str:
@@ -484,16 +888,6 @@ def inject_permissions(base_text: str, block: str) -> str:
     return "\n".join(out)
 
 
-def build_derived_agent(base_text: str) -> str:
-    """The derived agent's full text for a base agent.
-
-    One argument, not two: there is no `off` variant to build. `off` deletes the
-    file (see the module docstring), so the only block this module ever splices
-    is the overlay.
-    """
-    return inject_permissions(base_text, overlay_text())
-
-
 def _read_text(path: Path) -> str:
     """Read `path` as UTF-8 with `\\n` preserved exactly as stored.
 
@@ -554,53 +948,79 @@ def _publish(path: Path, text: str, verify: Callable[[str], None]) -> None:
         raise
 
 
-def derived_block_state() -> str:
-    """Classify the derived agent currently on disk.
+def _block_on_disk() -> str | None:
+    """The derived agent's first `permissions:` block; `""` when it has none.
 
-    The settings panel needs this rather than the bare toggle: the toggle
-    records what the user asked for, and this records what a session started
-    right now would actually get. One of:
-
-    * `"absent"` — no derived agent at all. This is the **expected, healthy**
-      state while the setting is off, not an error, because `off` deletes the
-      file. It is also the state after a failed first generation.
-    * `"on"` — the current overlay, byte-for-byte modulo the line endings and
-      trailing blank lines the splice re-derives from the base. The only state
-      `in_effect` accepts.
-    * `"stale"` — a block carrying PowerAtlas's provenance marker that is not
-      the current overlay: this module's own output from a different overlay
-      revision, or from the version that wrote an allow-all block in the `off`
-      state. Never `in_effect`, and safe to delete, which is the only reason it
-      is a state of its own rather than folded into `"unknown"`.
-    * `"unknown"` — anything else: a file whose `permissions:` block PowerAtlas
-      did not write, a file with no `permissions:` key, a file that cannot be
-      read, or one whose frontmatter `_check_frontmatter_shape` refuses. Never
-      deleted — the name is not reserved, and a hand-authored agent that took it
-      is the user's file, not a build product.
+    `None` when there is no file, or it cannot be read or split — the cases
+    `derived_block_state` reads as `"absent"` or `"unknown"`.
     """
     path = derived_agent_path()
     if not path.exists():
-        return "absent"
+        return None
     try:
-        _, block = excise_permissions(_read_text(path))
+        return excise_permissions(_read_text(path))[1]
     except AgentProfileError:
-        return "unknown"
+        return None
+
+
+def block_state_detail(config) -> tuple[str, str]:
+    """`(state, compile_error)` for the derived agent against `config`.
+
+    Never raises (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-15). States:
+
+    * `"absent"` — no derived agent. Since the file is always written, this is
+      a failure: the first generation has not run or did not succeed.
+    * `"on"` — the block on disk is exactly what `compile_block(config)`
+      produces, modulo the line endings and trailing blank lines the splice
+      re-derives from the base. The only state `in_effect` accepts.
+    * `"stale"` — a block carrying PowerAtlas's marker that is not the current
+      compilation: settings changed outside `apply_settings`, a hand edit of
+      the file, or an older release's output. Safe to regenerate (D-30).
+    * `"unknown"` — anything else: a file PowerAtlas did not write, a file with
+      no `permissions:` key, one that cannot be read or split, or a rule set
+      that does not compile, in which case `compile_error` says why.
+    """
+    path = derived_agent_path()
+    if not path.exists():
+        return "absent", ""
+    block = _block_on_disk()
     if not block:
-        return "unknown"
+        return "unknown", ""
     try:
-        on_block = overlay_text()
-    except AgentProfileError:
-        return "unknown"
-    if _norm_block(block) == _norm_block(on_block):
-        return "on"
+        expected = compile_block(config)
+    except AgentProfileError as exc:
+        return "unknown", str(exc)
+    except Exception as exc:  # noqa: BLE001 - never raises, by contract
+        return "unknown", f"{type(exc).__name__}: {exc}"
+    if _norm_block(block) == _norm_block(expected):
+        return "on", ""
     if _PROVENANCE_MARKER in block:
-        return "stale"
-    return "unknown"
+        return "stale", ""
+    return "unknown", ""
 
 
-def _generate(status: GenerationStatus, base_agent: str) -> GenerationStatus:
-    """Write the derived agent, or raise leaving the previous file alone."""
-    name = validate_base_agent_name(base_agent)
+def derived_block_state(config) -> str:
+    """Classify the derived agent on disk against `config`; see
+    `block_state_detail`. Never raises, never takes `_generation_lock`."""
+    return block_state_detail(config)[0]
+
+
+def _target_is_ours() -> bool:
+    """Whether generation may write the derived agent's path (D-29).
+
+    True for an absent file and for one whose block carries the provenance
+    marker. Anything else — no block, a block without the marker, a file that
+    cannot be read or split — is someone else's, and is never overwritten.
+    """
+    if not derived_agent_path().exists():
+        return True
+    block = _block_on_disk()
+    return bool(block) and _PROVENANCE_MARKER in block
+
+
+def _generate(status: GenerationStatus, config) -> GenerationStatus:
+    """Write the derived agent for `config`, or raise leaving the previous file alone."""
+    name = validate_base_agent_name(getattr(config, "acp_permission_base_agent", None))
     status = replace(status, base_agent=name)
     source = base_agent_path(name)
     target = derived_agent_path()
@@ -610,20 +1030,33 @@ def _generate(status: GenerationStatus, base_agent: str) -> GenerationStatus:
         # the block on every restart.
         raise AgentProfileError(
             f"base agent {name!r} is the derived agent; pick a different base")
-    block = overlay_text()
-    base_text = _read_text(source)
+    if not _target_is_ours():
+        raise AgentProfileError(
+            f"{target} was not written by PowerAtlas, so it was left in place; "
+            "remove or rename it, then save the permission mode again")
+    block = compile_block(config)
+    note = ""
+    if source.exists():
+        base_text = _read_text(source)
+    else:
+        # D-28: a clean kiro-cli install has no `kiro_default.md` unless
+        # agent-playbook deployed it. Generating from a minimal agent keeps the
+        # floor there; refusing would leave Default sessions refused (D-34).
+        base_text = MINIMAL_BASE
+        note = f"base agent {name!r} not found — using a minimal agent"
     derived_text = inject_permissions(base_text, block)
     base_kept = excise_permissions(base_text)[0]
 
     def verify(written: str) -> None:
         """A structural confirmation of this module's own splice.
 
-        The frontmatter still has its fences, the block is the overlay, and
-        every other byte still matches the base. It is deliberately **not** a
-        claim that kiro-cli bound the rules: only a live session can show that,
-        and `kiro-cli agent validate --path` was measured in Phase 0 to report
-        every `.md`-format agent as invalid, including the machine's own working
-        one. Live bind confirmation is Phase 7's.
+        The frontmatter still has its fences, the block is the compiled one,
+        and every other byte still matches the base. It is deliberately **not**
+        a claim that kiro-cli bound the rules: only a live session can show
+        that, and `kiro-cli agent validate --path` was measured in
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 0 to report
+        every `.md`-format agent as invalid, including the machine's own
+        working one (R-17).
         """
         kept, block_back = excise_permissions(written)
         if _norm_block(block_back) != _norm_block(block) or kept != base_kept:
@@ -635,44 +1068,22 @@ def _generate(status: GenerationStatus, base_agent: str) -> GenerationStatus:
         _publish(target, derived_text, verify)
     except OSError as exc:
         raise AgentProfileError(f"cannot write {target}: {exc}") from exc
-    return replace(status, ok=True, error="")
+    if note:
+        log.warning("derived agent: %s", note)
+    return replace(status, ok=True, error="", note=note)
 
 
-def _remove(status: GenerationStatus) -> GenerationStatus:
-    """Delete the derived agent, or refuse to touch a file this module did not write."""
-    target = derived_agent_path()
-    state = derived_block_state()
-    if state == "absent":
-        return replace(status, ok=True, error="")
-    if state not in ("on", "stale"):
-        raise AgentProfileError(
-            f"{target} does not carry PowerAtlas's marker, so it was left in "
-            "place; remove it by hand if it should not be selectable")
-    try:
-        target.unlink()
-    except OSError as exc:
-        # The fail-safe direction is a surviving file that is reported, not a
-        # module that claims the posture is gone when it is still selectable.
-        raise AgentProfileError(f"cannot remove {target}: {exc}") from exc
-    return replace(status, ok=True, error="")
-
-
-def _apply_locked(*, enabled: bool, base_agent: object) -> GenerationStatus:
-    """Bring the derived agent in line with `enabled`. The lock must be held."""
+def _apply_locked(config) -> GenerationStatus:
+    """Write the derived agent for `config`. The lock must be held; this never
+    takes it (D-16). Records the outcome for the panel, and re-raises."""
     global _status
-    status = GenerationStatus(attempted=True, ok=False,
-                              enabled=bool(enabled), base_agent="")
+    mode, _rules = _compiled_settings(config)
+    base = getattr(config, "acp_permission_base_agent", "")
+    status = GenerationStatus(attempted=True, ok=False, mode=mode,
+                              base_agent=base if isinstance(base, str) else "")
     try:
         _clear_stage()
-        if enabled:
-            status = _generate(status, base_agent)
-        else:
-            # The name plays no part in a delete, so an invalid one left in
-            # `config.toml` by a hand edit must not stop the file coming off
-            # disk. It is still recorded, because the panel shows it.
-            if isinstance(base_agent, str):
-                status = replace(status, base_agent=base_agent)
-            status = _remove(status)
+        status = _generate(status, config)
     except AgentProfileError as exc:
         _status = replace(status, ok=False, error=str(exc))
         log.error("derived agent update failed: %s", exc)
@@ -690,17 +1101,197 @@ def _apply_locked(*, enabled: bool, base_agent: object) -> GenerationStatus:
     return _status
 
 
-def sync_from_config() -> GenerationStatus:
-    """Bring the derived agent in line with the **current** settings.
+def apply_settings(mutate: Callable[[object], None] | None = None) -> dict:
+    """Save a permission-settings change and regenerate, as one locked step.
 
-    The entry point `web.py` uses. `load_config()` runs *inside* the lock, which
-    is the difference that matters: read outside it, two settings writes
-    dispatched through `asyncio.to_thread` can each capture a snapshot and then
-    publish in scheduling order rather than in the order they were saved, so the
-    file can end up disagreeing with `config.toml`.
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-16, D-32. Holds
+    `_generation_lock` across `load_config`, `mutate(config)`, `save_config` and
+    generation, so the session gate — the only other acquirer — can never see
+    a config.toml that is ahead of the derived agent. `mutate=None` saves
+    nothing and only regenerates from the current settings (startup).
+
+    Returns `{saved, generation_ok, generation_error}` and never raises:
+    `saved` False means nothing changed (the route answers `ok: false`);
+    `saved` True with `generation_ok` False means the setting is stored but not
+    yet in effect (the route answers `ok: true` and a warning). The settings
+    state the route returns is computed after this releases the lock.
     """
+    global _posture_notice
     with _generation_lock:
         config = load_config()
-        return _apply_locked(
-            enabled=bool(config.acp_permissions_enabled),
-            base_agent=config.acp_permission_base_agent)
+        saved = False
+        if mutate is not None:
+            try:
+                mutate(config)
+                save_config(config)
+            except Exception as exc:  # noqa: BLE001 - reported, never raised
+                log.exception("permission settings were not saved")
+                return {"saved": False, "generation_ok": False,
+                        "generation_error": "",
+                        "error": f"The setting was not saved: {exc}"}
+            saved = True
+            # A change made here is the dashboard's own; the notice was about
+            # one that was not.
+            _posture_notice = None
+        try:
+            _apply_locked(config)
+        except Exception:  # noqa: BLE001 - logged and recorded by _apply_locked
+            return {"saved": saved, "generation_ok": False,
+                    "generation_error": _status.error}
+        return {"saved": saved, "generation_ok": True, "generation_error": ""}
+
+
+def sync_from_config() -> dict:
+    """Regenerate from the current settings; the startup entry point.
+
+    `apply_settings` with no mutation, so the settings are read inside the
+    lock and it stays one of D-16's two acquirers.
+    """
+    return apply_settings(None)
+
+
+def _fingerprint_on_disk() -> str:
+    block = _block_on_disk()
+    found = _FINGERPRINT_RE.search(block or "")
+    return found.group(1) if found else ""
+
+
+def heal_stale_locked(config) -> bool:
+    """Regenerate a `"stale"` derived agent once (D-30). The lock must be held.
+
+    Called by the session gate, which holds `_generation_lock` and has already
+    checked that `config` loaded cleanly. Heals a hand edit of the file, a
+    config.toml edited while PowerAtlas runs, and a settings route that saved
+    over a just-applied change (R-13), without a restart.
+
+    When the block it replaced was compiled from a different mode or rule set
+    (the fingerprint moved), the posture changed without the dashboard, and
+    D-35's notice is raised naming the new mode. A hand edit of the file itself
+    leaves the fingerprint alone and raises nothing. Returns whether the
+    regeneration succeeded.
+    """
+    global _posture_notice
+    before = _fingerprint_on_disk()
+    try:
+        _apply_locked(config)
+    except Exception:  # noqa: BLE001 - recorded by _apply_locked
+        return False
+    mode, rules = _compiled_settings(config)
+    if before and before != settings_fingerprint(mode, rules):
+        _posture_notice = {
+            "mode": mode,
+            "detected_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        log.warning("ACP permission settings changed outside the dashboard; "
+                    "the derived agent was regenerated for mode %s", mode)
+    return True
+
+
+# ---- What the settings panel shows ---------------------------------------------
+
+
+def floor_display() -> list[dict]:
+    """The Always blocked floor as the settings panel lists it (SC-3).
+
+    Credential-store wording carries no guarantee (D-38a), the shell tier is
+    labelled best-effort (D-4), and kiro-cli's own built-ins are listed so the
+    view is complete (D-38c).
+    """
+    return [
+        {"id": "fs_read",
+         "label": "Reading credential stores",
+         "detail": ("SSH, AWS, Azure and gcloud folders, kiro-cli's token files, "
+                    "and PowerAtlas's sign-in secrets"),
+         "patterns": list(_FLOOR_FS_READ),
+         "note": ("Covers the file-reading and search tools, including common 8.3 "
+                  "short-name spellings. A link to one of these folders, or an "
+                  "NTFS hashed short name, is not covered.")},
+        {"id": "shell",
+         "label": "Commands that mention those stores",
+         "detail": "",
+         "patterns": list(_FLOOR_SHELL_LOWER),
+         "note": ("Catches common accidents, not a guarantee: a command can be "
+                  "spelled many ways. Matching is case-sensitive; lower- and "
+                  "upper-case spellings are both blocked. Also blocks harmless "
+                  "commands that mention these names, such as "
+                  "`echo notes.sshx` or `ssh -i ~/.ssh/key`.")},
+        {"id": "fs_write",
+         "label": "Writing PowerAtlas's own agent and kiro-cli's settings",
+         "detail": "",
+         "patterns": list(_FLOOR_FS_WRITE),
+         "note": ("File-writing tools only; a shell redirection such as "
+                  "`> file` is not checked.")},
+        {"id": "kiro",
+         "label": "kiro-cli's own rules, in every mode",
+         "detail": "",
+         "patterns": [],
+         "note": ("kiro-cli always asks before writes to "
+                  + ", ".join(KIRO_BUILTIN_ASKS)
+                  + ", and always blocks writes to "
+                  + ", ".join(KIRO_BUILTIN_DENIES) + ".")},
+    ]
+
+
+def protected_display(rules: object) -> list[dict]:
+    """The Protected items with their current effect (Manual only)."""
+    blocked = set(normalise_rules(rules)["protected_block"])
+    return [{"id": key, "label": label, "patterns": list(patterns),
+             "effect": "block" if key in blocked else "ask"}
+            for key, (label, patterns) in PROTECTED.items()]
+
+
+# How many links per folder the panel lists by name; the count is always exact.
+_LINKS_LISTED_PER_FOLDER = 50
+
+
+def _describe_link(entry: Path) -> dict:
+    """One link's name and resolved target, or why it has none."""
+    try:
+        target = str(entry.resolve(strict=True))
+        error = ""
+    except (OSError, RuntimeError) as exc:
+        target = ""
+        try:
+            pointed = os.readlink(entry)
+        except OSError:
+            pointed = ""
+        error = ("unresolvable (" + type(exc).__name__
+                 + (f"; points at {pointed}" if pointed else "") + ")")
+    return {"name": entry.name, "path": str(entry), "target": target,
+            "error": error}
+
+
+def find_protected_links(root: Path | None = None) -> dict:
+    """Symlinks and junctions one level deep under `~/.kiro/{agents,steering,skills,hooks}`.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-39. kiro-cli matches a file
+    rule against a link's resolved target (F-1), so a write through a link
+    whose target lies outside a Protected folder escapes the ask. This names
+    those links for the settings panel; it does not enforce anything.
+
+    Called **only** when the settings state is served (`GET
+    /api/acp-permissions`) — never by `compile_block`, `derived_block_state` or
+    the session gate, so a slow filesystem walk (these folders are often links
+    into a synced folder) can never delay or refuse a session.
+
+    Returns `{folder: {"count": n, "links": [{name, path, target, error}]}}`.
+    Never raises: an unreadable folder reads as no links.
+    """
+    base = root if root is not None else KIRO_AGENTS_DIR.parent
+    found: dict = {}
+    for key in PROTECTED:
+        links: list[dict] = []
+        try:
+            entries = sorted((base / key).iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            entries = []
+        for entry in entries:
+            try:
+                linked = entry.is_symlink() or os.path.isjunction(entry)
+            except OSError:
+                continue
+            if linked:
+                links.append(_describe_link(entry))
+        found[key] = {"count": len(links),
+                      "links": links[:_LINKS_LISTED_PER_FOLDER]}
+    return found

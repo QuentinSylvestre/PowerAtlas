@@ -67,10 +67,19 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", tmp_path / "remote-secret")
     monkeypatch.setattr(agent_profile_mod, "KIRO_AGENTS_DIR", tmp_path / "kiro-agents")
+    # A base agent in the redirected folder, as a developer machine has one:
+    # the derived agent is generated in every permission mode now
+    # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-8), so every `lifespan`
+    # test generates. The missing-base path (D-28) has its own test, which
+    # deletes this file.
+    (tmp_path / "kiro-agents").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "kiro-agents" / "kiro_default.md").write_bytes(
+        b"---\ndescription: A test base agent\ntools:\n  - \"*\"\n---\n\nBody.\n")
     # Process-global, so it would otherwise carry one test's generation outcome
     # into the next one's assertions about the settings panel.
     monkeypatch.setattr(agent_profile_mod, "_status",
                         agent_profile_mod.GenerationStatus())
+    monkeypatch.setattr(agent_profile_mod, "_posture_notice", None)
     # `lifespan` now creates the local secret at startup, so the path is
     # redirected with the same unconditional reach, and the D-22 fallback
     # state and the loaded key are reset because both are process-global.
@@ -81,6 +90,22 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "_local_secret_persist_error", "")
     monkeypatch.setattr(web_mod, "_LOCAL_SECRET", "")
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def derived_agent_in_effect_by_default(monkeypatch):
+    """Install an "in effect" permission gate for every test in this file.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34: with no gate, or a gate
+    that says the derived agent is not in effect, `_handle_new` refuses a
+    Default create. Production always wires the gate (`web.lifespan`), so the
+    many tests that create a Default session to exercise something else — the
+    cap message, buffered history, the resolve thread — get one that answers
+    True. A test about the gate itself installs its own, and the None case is
+    set explicitly where it is under test.
+    """
+    from power_atlas import acp as acp_mod
+    monkeypatch.setattr(acp_mod, "mode_gate_hook", lambda: True)
 
 
 # The loopback key every test runs under. `local_enabled` (Phase 4) loads the
@@ -4788,10 +4813,13 @@ class TestAcpSessionLoad:
                 patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
             asyncio.run(acp_mod._handle_load(conn, sid))
 
+        # The module-wide gate answers "in effect", so the reload sends the
+        # derived agent (the `modeId` has its own tests below).
         assert calls == [(
             "session/load",
             {"sessionId": sid, "cwd": resolved_cwd,
-             "mcpServers": [], **acp_mod._build_kas_session_params()},
+             "mcpServers": [], **acp_mod._build_kas_session_params(
+                 mode_id=acp_mod.DERIVED_AGENT_NAME)},
         )]
         frames = _queued(conn)
         assert [f["type"] for f in frames] == ["meta", "session", "history"]
@@ -4875,8 +4903,29 @@ class TestAcpSessionLoad:
         assert mode == "kiro_default"
         assert "error" not in [f["type"] for f in frames], frames
         assert "session" in [f["type"] for f in frames]
-        assert any("session/load: the permission-profile check failed"
+        assert any("session/load: the permission-mode check failed"
                    in r.getMessage() for r in caplog.records)
+
+    def test_load_reads_a_gate_verdict_dict(
+            self, acp_store, acp_store_dir_v3, monkeypatch):
+        """`web._derived_agent_in_effect` answers with a dict
+        (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34); a reload reads its
+        `in_effect` and records the modeId it sent (D-31), never refusing."""
+        from power_atlas.config import DERIVED_AGENT_NAME
+        acp_mod, store = acp_store
+        mode, _frames = self._load_mode_sent(
+            acp_mod, store, acp_store_dir_v3, monkeypatch,
+            lambda: {"in_effect": True, "cause": "", "fix": ""},
+            "load-mode-dict-01")
+        assert mode == DERIVED_AGENT_NAME
+        assert acp_mod._supervisor.sessions["load-mode-dict-01"]["mode"] == \
+            DERIVED_AGENT_NAME
+        mode, frames = self._load_mode_sent(
+            acp_mod, store, acp_store_dir_v3, monkeypatch,
+            lambda: {"in_effect": False, "cause": "x", "fix": "y"},
+            "load-mode-dict-02")
+        assert mode == "kiro_default"
+        assert "error" not in [f["type"] for f in frames], frames
 
     def test_a_replayed_tool_call_survives_the_load(self, acp_store):
         """Tool calls already forward and render; a loaded history full of them
@@ -6904,8 +6953,12 @@ class TestAcpSessionRecordHoldsNoDeadState:
         with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
                 patch.object(acp_mod._Supervisor, "_request", verbose):
             asyncio.run(acp_mod._supervisor.new_session(str(store)))
+        # `mode` is the modeId PowerAtlas bound, which the prompt card's
+        # "always allow" eligibility reads
+        # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-31).
         assert set(acp_mod._supervisor.sessions["records-0001"]) == {
-            "cwd", "created", "last_used", "last_activity"}
+            "cwd", "created", "last_used", "last_activity", "mode"}
+        assert acp_mod._supervisor.sessions["records-0001"]["mode"] == "kiro_default"
 
     def test_a_loaded_session_records_only_what_is_read(self, acp_store):
         acp_mod, store = acp_store
@@ -6916,8 +6969,12 @@ class TestAcpSessionRecordHoldsNoDeadState:
         with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
                 patch.object(acp_mod._Supervisor, "_request", answers):
             asyncio.run(acp_mod._supervisor.load_session("records-0002", str(store)))
+        # D-31: the modeId the reload sent (the module-wide gate answers "in
+        # effect", so the derived agent).
         assert set(acp_mod._supervisor.sessions["records-0002"]) == {
-            "cwd", "created", "last_used", "last_activity"}
+            "cwd", "created", "last_used", "last_activity", "mode"}
+        assert acp_mod._supervisor.sessions["records-0002"]["mode"] == \
+            acp_mod.DERIVED_AGENT_NAME
 
     def test_the_supervisor_keeps_no_agent_info(self):
         from power_atlas import acp as acp_mod
@@ -7035,18 +7092,18 @@ class TestAcpTaskModeSelection:
 
     @pytest.mark.parametrize("mode", [
         "vibe", "spec", "quick-spec", "bug-fix", "plan",
-        "autonomous", "semantic_reviewer", "kiro_default",
+        "autonomous", "semantic_reviewer",
     ])
     def test_handle_new_accepts_every_valid_task_mode(
             self, acp_store, tmp_path, mode, monkeypatch):
-        """All 8 modes kiro-cli's own session/new response enumerates
+        """All the vendor modes kiro-cli's own session/new response enumerates
         (plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md Phase 2 divergence 1) are
         accepted by the backend -- not just the 5 the UI picker itself offers
         (vibe/autonomous/semantic_reviewer are backend robustness only, per
-        that plan's Phase 3 design). The derived agent, the 9th value, has its
-        own test below. No gate hook, so Default (`kiro_default`) binds
-        itself (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3,
-        G1)."""
+        that plan's Phase 3 design) -- and pass through untouched even with no
+        gate hook. `kiro_default`, the 8th, is Default and has its own tests
+        below, as does the derived agent
+        (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34)."""
         acp_mod, _store = acp_store
         monkeypatch.setattr(acp_mod, "mode_gate_hook", None)
         conn = _acp_conn(acp_mod)
@@ -7138,10 +7195,11 @@ class TestAcpTaskModeSelection:
 
     def test_no_gate_hook_reads_as_not_in_effect(
             self, acp_store, tmp_path, monkeypatch):
-        """`None` (acp.py on its own) is "not in effect" on both paths: Default
-        still creates a session, as `kiro_default`, and the derived agent is
-        refused, since nothing vouches that its file exists.
-        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1)."""
+        """`None` (acp.py on its own) is "not in effect" on both paths: nothing
+        vouches that the derived agent's file exists, so Default and the
+        derived agent are both refused, and a vendor task mode still works.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1);
+        Default refused since 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34."""
         acp_mod, _store = acp_store
         monkeypatch.setattr(acp_mod, "mode_gate_hook", None)
         seen = {}
@@ -7151,24 +7209,25 @@ class TestAcpTaskModeSelection:
             return {"sessionId": "taskmode-000h", "cwd": cwd}
 
         with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+            for refused in ("kiro_default", acp_mod.DERIVED_AGENT_NAME):
+                conn = _acp_conn(acp_mod)
+                asyncio.run(acp_mod._handle_new(
+                    conn, {"cwd": str(tmp_path), "mode": refused}))
+                assert "mode" not in seen, f"{refused} reached new_session()"
+                assert [f["payload"]["code"] for f in _queued(conn)
+                        if f.get("type") == "error"] == ["bad_payload"]
             conn = _acp_conn(acp_mod)
             asyncio.run(acp_mod._handle_new(
-                conn, {"cwd": str(tmp_path), "mode": "kiro_default"}))
-            assert seen.pop("mode") == "kiro_default"
-            assert not [f for f in _queued(conn) if f.get("type") == "error"]
-            conn = _acp_conn(acp_mod)
-            asyncio.run(acp_mod._handle_new(
-                conn, {"cwd": str(tmp_path), "mode": acp_mod.DERIVED_AGENT_NAME}))
-        assert "mode" not in seen, "the derived agent reached new_session()"
-        assert [f["payload"]["code"] for f in _queued(conn)
-                if f.get("type") == "error"] == ["bad_payload"]
+                conn, {"cwd": str(tmp_path), "mode": "spec"}))
+        assert seen["mode"] == "spec"
 
     # ---- Default is resolved by the server --------------------------------
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1, user
     # decision 2026-09-23). The page sends Default as `kiro_default` (or, from
     # an older client, no mode at all); `_handle_new` binds the derived agent
-    # while the permission profile is in effect and `kiro_default` otherwise,
-    # and tells the page which through the `session` frame's `mode`.
+    # while it is in effect and refuses otherwise
+    # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34), and tells the page
+    # which mode it bound through the `session` frame's `mode`.
 
     @pytest.mark.parametrize("mode", ["kiro_default", _OMITTED])
     def test_default_binds_the_derived_agent_while_in_effect(
@@ -7182,18 +7241,76 @@ class TestAcpTaskModeSelection:
         assert [f["mode"] for f in self.session_frames] == [
             acp_mod.DERIVED_AGENT_NAME]
 
+    _NOT_IN_EFFECT = {
+        "in_effect": False, "state": "unknown", "mode": "manual",
+        "cause": "C:/x/poweratlas-acp.md was not written by PowerAtlas",
+        "fix": "Remove or rename that file, then save the permission mode again.",
+    }
+
     @pytest.mark.parametrize("mode", ["kiro_default", _OMITTED])
-    def test_default_binds_kiro_default_while_not_in_effect(
-            self, acp_store, tmp_path, monkeypatch, mode):
-        """Off, or on but not in effect: the hook answers False either way,
-        and Default falls back to `kiro_default` (D-10)."""
+    def test_default_is_refused_while_not_in_effect(
+            self, acp_store, tmp_path, monkeypatch, caplog, mode):
+        """D-34 (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL, council 4-0):
+        PowerAtlas never creates a Default session without the Always blocked
+        floor. The refusal names the cause and the fix from the gate, says the
+        fix needs this computer when the client is remote, offers task modes
+        as the way on, and is logged at WARNING."""
+        acp_mod, _store = acp_store
+        with caplog.at_level(logging.WARNING, logger=acp_mod.log.name):
+            bound, errors, runs = self._new_with_gate(
+                acp_mod, tmp_path, monkeypatch,
+                lambda: dict(self._NOT_IN_EFFECT), mode)
+        assert bound == "not called", "a Default session was created without the floor"
+        assert runs == 1
+        assert [e["code"] for e in errors] == ["bad_payload"], errors
+        message = errors[0]["message"]
+        assert self._NOT_IN_EFFECT["cause"] in message
+        assert self._NOT_IN_EFFECT["fix"] in message
+        # `_SinkWs` carries no transport address, which reads as remote.
+        assert "computer running PowerAtlas" in message
+        assert "task mode such as Spec or Plan" in message
+        assert self.session_frames == []
+        warned = [r for r in caplog.records if r.levelno == logging.WARNING
+                  and "not in effect" in r.getMessage()]
+        assert len(warned) == 1, [r.getMessage() for r in caplog.records]
+        assert self._NOT_IN_EFFECT["cause"] in warned[0].getMessage()
+
+    def test_the_refusal_leaves_out_the_remote_note_on_loopback(
+            self, acp_store, tmp_path, monkeypatch):
+        """The "this computer" note is for a client that is not on it."""
+        import types
+        acp_mod, _store = acp_store
+        monkeypatch.setattr(acp_mod, "mode_gate_hook",
+                            lambda: dict(self._NOT_IN_EFFECT))
+        conn = _acp_conn(acp_mod)
+        conn.ws.client = types.SimpleNamespace(host="127.0.0.1", port=1)
+        asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
+        errors = [f["payload"] for f in _queued(conn) if f.get("type") == "error"]
+        assert [e["code"] for e in errors] == ["bad_payload"]
+        assert "computer running PowerAtlas" not in errors[0]["message"]
+        assert self._NOT_IN_EFFECT["fix"] in errors[0]["message"]
+
+    def test_a_bare_false_gate_still_refuses_with_generic_words(
+            self, acp_store, tmp_path, monkeypatch):
+        """A bool answer carries no cause; the refusal still says what to do."""
+        acp_mod, _store = acp_store
+        bound, errors, _runs = self._new_with_gate(
+            acp_mod, tmp_path, monkeypatch, lambda: False, "kiro_default")
+        assert bound == "not called"
+        assert "not in effect" in errors[0]["message"]
+        assert "Settings > Agent permissions" in errors[0]["message"]
+
+    def test_a_task_mode_create_succeeds_while_not_in_effect(
+            self, acp_store, tmp_path, monkeypatch):
+        """The refusal's offered way on works: a vendor task mode is not
+        gated (D-3), so it starts while Default is refused."""
         acp_mod, _store = acp_store
         bound, errors, runs = self._new_with_gate(
-            acp_mod, tmp_path, monkeypatch, lambda: False, mode)
-        assert bound == "kiro_default"
+            acp_mod, tmp_path, monkeypatch,
+            lambda: dict(self._NOT_IN_EFFECT), "plan")
+        assert bound == "plan"
         assert not errors, errors
-        assert runs == 1
-        assert [f["mode"] for f in self.session_frames] == ["kiro_default"]
+        assert runs == 0
 
     @pytest.mark.parametrize("mode", ["kiro_default", _OMITTED])
     def test_default_is_refused_when_the_gate_raises(
@@ -7224,10 +7341,10 @@ class TestAcpTaskModeSelection:
 
     def test_derived_mode_is_refused_while_the_gate_says_off(
             self, acp_store, tmp_path, monkeypatch):
-        """The derived agent file is deleted while the setting is off, and
-        kiro-cli silently coerces an unknown modeId to "vibe". Refused up front
-        with the same `bad_payload` shape an unrecognised mode gets, and no
-        session is created."""
+        """A derived agent that is not in effect may be missing, and kiro-cli
+        silently coerces an unknown modeId to "vibe". Refused up front with the
+        same `bad_payload` shape an unrecognised mode gets, and no session is
+        created."""
         acp_mod, _store = acp_store
         mode, errors, runs = self._new_with_gate(
             acp_mod, tmp_path, monkeypatch, lambda: False,
@@ -7285,8 +7402,10 @@ class TestAcpTaskModeSelection:
             self, acp_store, tmp_path, monkeypatch):
         """No mode at all is Default: `new_session` would send it as
         `kiro_default`, so it is resolved the same way rather than passed
-        through as None, which would skip the permission profile.
-        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1)."""
+        through as None, which would skip the permission mode — refused with
+        no gate, the derived agent with one in effect.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1);
+        260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34."""
         acp_mod, _store = acp_store
         monkeypatch.setattr(acp_mod, "mode_gate_hook", None)
         conn = _acp_conn(acp_mod)
@@ -7298,7 +7417,11 @@ class TestAcpTaskModeSelection:
 
         with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
             asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
-        assert seen["mode"] == "kiro_default"
+            assert "mode" not in seen, "an omitted mode skipped the gate"
+            monkeypatch.setattr(acp_mod, "mode_gate_hook", lambda: True)
+            asyncio.run(acp_mod._handle_new(_acp_conn(acp_mod),
+                                            {"cwd": str(tmp_path)}))
+        assert seen["mode"] == acp_mod.DERIVED_AGENT_NAME
 
     @pytest.mark.parametrize("bad_mode", [
         "", "KIRO_DEFAULT", "spec ", "Spec", "not-a-mode",
@@ -12786,18 +12909,23 @@ class TestSettingsSurface:
         assert b"Forbidden" in body
 
     def test_the_acp_permissions_write_is_loopback_only(self, remote_enabled):
+        """SC-7, D-9: posture changes only from this computer.
+        260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1 moved the body
+        from `{"enabled": ...}` to `{"mode": ...}`."""
         from power_atlas import config as config_mod
-        assert config_mod.load_config().acp_permissions_enabled is False
-        status, body, _ = _peer_http(
-            "/api/acp-permissions",
-            [self._both_cookies(),
-             (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode()),
-             (b"content-type", b"application/json")],
-            method="POST", body=b'{"enabled": true}')
-        assert status == 403
-        assert b"Forbidden" in body
-        assert config_mod.load_config().acp_permissions_enabled is False, (
-            "a remote peer changed the permission posture")
+        assert config_mod.load_config().acp_permission_mode == "yolo"
+        for mode in (b"manual", b"yolo"):
+            status, body, _ = _peer_http(
+                "/api/acp-permissions",
+                [self._both_cookies(),
+                 (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode()),
+                 (b"content-type", b"application/json")],
+                method="POST", body=b'{"mode": "' + mode + b'"}')
+            assert status == 403
+            assert b"Forbidden" in body
+        assert config_mod.load_config().acp_permission_mode == "yolo", (
+            "a remote peer changed the permission mode")
+        assert not (config_mod.CONFIG_PATH).exists()
 
     def test_rotating_replaces_the_stored_secret(self, client, tmp_path):
         from power_atlas import config as config_mod
@@ -23083,15 +23211,17 @@ class TestSupervisor:
             self._cleanup_registry(acp_mod)
 
 
-# --- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1 ---------
+# --- ACP permission modes: the derived agent ----------------------------------
 #
-# Derived-agent generation. The properties below are the ones a UI test cannot
-# reach and the ones a silent failure here would cost: byte-identity outside the
-# injected block, replace-rather-than-duplicate, a base agent whose shape the
-# splice cannot handle refused rather than guessed at, name validation before any
-# path is built, verify-before-publish, delete-on-off, and the two rule-assembly
-# invariants Phase 0 measured live (every gated capability named explicitly, and
-# no blanket `ask` beside a narrower `allow` without an `exclude`).
+# 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1, on the generator tests of
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1. The properties
+# below are the ones a UI test cannot reach and the ones a silent failure here
+# would cost: byte-identity outside the injected block, replace-rather-than-
+# duplicate, a base agent whose shape the splice cannot handle refused rather
+# than guessed at, name validation before any path is built, verify-before-
+# publish, a foreign file never overwritten, and the compiled rule invariants
+# Phase 0 measured live (every capability named, the floor first, no blanket
+# `ask` beside a narrower `allow` without an `exclude`).
 
 _BASE_NO_PERMISSIONS = """\
 ---
@@ -23128,17 +23258,42 @@ def _agent_profile():
     return agent_profile_mod
 
 
-def _regenerate(ap, *, enabled, base_agent):
-    """Generate (``enabled``) or remove the derived agent from explicit values.
+def _cfg(mode="yolo", rules=None, base_agent="kiro_default"):
+    """A `Config` carrying explicit permission settings, never read from disk."""
+    from power_atlas.config import Config
+    config = Config()
+    config.acp_permission_mode = mode
+    if rules is not None:
+        config.acp_permission_rules = rules
+    config.acp_permission_base_agent = base_agent
+    return config
 
-    `agent_profile.regenerate` was a production function with only test
-    callers, so it was removed; this drives the same locked core
-    `sync_from_config` uses, with values that need not be in `config.toml` --
+
+def _block(config=None):
+    """The compiled `permissions:` block for `config`.
+
+    Default: Manual with the seed rules, the longer block, and the one that
+    names no `all` capability -- so a splice test can see a base agent's own
+    `- capability: all` rule disappear.
+    """
+    return _agent_profile().compile_block(
+        config if config is not None else _cfg("manual"))
+
+
+def _derive(base_text, config=None):
+    """The derived agent's text for a base agent: the base plus the block."""
+    return _agent_profile().inject_permissions(base_text, _block(config))
+
+
+def _regenerate(ap, config):
+    """Generate from explicit settings, through the locked core.
+
+    Drives `_apply_locked` with values that need not be in `config.toml` --
     which is what the invalid-name and self-reference cases below require.
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11)
+    Raises on failure, as `_apply_locked` does.
     """
     with ap._generation_lock:
-        return ap._apply_locked(enabled=enabled, base_agent=base_agent)
+        return ap._apply_locked(config)
 
 
 def _write_base(isolated_config, text=_BASE_NO_PERMISSIONS, name="kiro_default"):
@@ -23150,16 +23305,9 @@ def _write_base(isolated_config, text=_BASE_NO_PERMISSIONS, name="kiro_default")
     return path
 
 
-def _enable_in_config(isolated_config):
-    """Turn the posture setting on in the redirected config.toml.
-
-    Needed by every `lifespan` test that expects a *generation*: the default is
-    off, and off now deletes the derived agent rather than writing an allow-all
-    one, so a test that forgets this asserts against a file the startup pass has
-    just correctly removed.
-    """
-    (isolated_config / "config.toml").write_text(
-        "acp_permissions_enabled = true\n")
+def _write_config(isolated_config, text):
+    """Replace the redirected config.toml."""
+    (isolated_config / "config.toml").write_text(text, encoding="utf-8")
 
 
 class TestDerivedAgentInjectionIsTextual:
@@ -23173,30 +23321,34 @@ class TestDerivedAgentInjectionIsTextual:
 
     def test_every_byte_outside_the_block_survives(self):
         ap = _agent_profile()
-        derived = ap.build_derived_agent(_BASE_NO_PERMISSIONS)
+        derived = _derive(_BASE_NO_PERMISSIONS)
         kept_derived, block = ap.excise_permissions(derived)
         kept_base, base_block = ap.excise_permissions(_BASE_NO_PERMISSIONS)
         assert base_block == ""
         assert kept_derived == kept_base
         assert kept_derived == _BASE_NO_PERMISSIONS
-        assert block == ap.overlay_text()
+        assert block == _block()
 
     def test_an_existing_block_is_replaced_not_duplicated_or_merged(self):
         ap = _agent_profile()
-        derived = ap.build_derived_agent(_BASE_WITH_PERMISSIONS)
+        # Manual: its block names no `all` capability, which is what lets the
+        # assertion below see the base's own rule go. (Yolo's block carries an
+        # `all: allow` of its own.)
+        manual = _cfg("manual")
+        derived = _derive(_BASE_WITH_PERMISSIONS, manual)
         lines = derived.split("\n")
         close = ap._frontmatter_bounds(lines)
         assert len(ap._permissions_regions(lines, close)) == 1, (
             "two top-level `permissions:` keys -- kiro-cli loads the file "
             "anyway and which one wins is undefined")
         # The base's own rule, gone. Named by its capability rather than by its
-        # effect: the shipped overlay carries an `effect: deny` of its own for
-        # `~/.kiro/agents/**`, so `"effect: deny" not in derived` would be
-        # testing the overlay rather than the replacement.
+        # effect: the compiled block carries `effect: deny` rules of its own
+        # (the floor), so `"effect: deny" not in derived` would be testing the
+        # block rather than the replacement.
         assert "capability: all" not in derived
         kept, block = ap.excise_permissions(derived)
         assert kept == ap.excise_permissions(_BASE_WITH_PERMISSIONS)[0]
-        assert block == ap.overlay_text()
+        assert block == _block(manual)
         # The blank line that separated the old block from `model:` is part of
         # the surrounding text, not of the block, so it is still there.
         assert "\n\nmodel: claude-sonnet-4.6\n" in derived
@@ -23206,7 +23358,7 @@ class TestDerivedAgentInjectionIsTextual:
         ap = _agent_profile()
         base = ("---\ndescription: d\npermissions:\n  rules: []\n"
                 "model: m\npermissions:\n  rules: []\n---\nbody\n")
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         lines = derived.split("\n")
         assert len(ap._permissions_regions(
             lines, ap._frontmatter_bounds(lines))) == 1
@@ -23215,7 +23367,7 @@ class TestDerivedAgentInjectionIsTextual:
     def test_an_inline_permissions_key_is_replaced(self):
         ap = _agent_profile()
         base = "---\ndescription: d\npermissions: {}\nmodel: m\n---\nbody\n"
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         assert "permissions: {}" not in derived
         assert ap.excise_permissions(derived)[0] == (
             "---\ndescription: d\nmodel: m\n---\nbody\n")
@@ -23224,7 +23376,7 @@ class TestDerivedAgentInjectionIsTextual:
         """`permissions :` is legal YAML; missing it would leave two keys."""
         ap = _agent_profile()
         base = "---\ndescription: d\npermissions :\n  rules: []\n---\nbody\n"
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         lines = derived.split("\n")
         assert len(ap._permissions_regions(
             lines, ap._frontmatter_bounds(lines))) == 1
@@ -23234,7 +23386,7 @@ class TestDerivedAgentInjectionIsTextual:
         """`"permissions":` is the same YAML key, so it must be replaced."""
         ap = _agent_profile()
         base = f"---\ndescription: d\n{key}\n  rules: []\nmodel: m\n---\nbody\n"
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         assert key not in derived
         assert ap.excise_permissions(derived)[0] == (
             "---\ndescription: d\nmodel: m\n---\nbody\n")
@@ -23252,7 +23404,7 @@ class TestDerivedAgentInjectionIsTextual:
         ap = _agent_profile()
         base = ("---\ndescription: d\npermissions:\n- capability: all\n"
                 "  effect: deny\nmodel: x\n---\nbody\n")
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         assert "- capability: all" not in derived
         assert ap.excise_permissions(derived)[0] == (
             "---\ndescription: d\nmodel: x\n---\nbody\n")
@@ -23261,7 +23413,7 @@ class TestDerivedAgentInjectionIsTextual:
         ap = _agent_profile()
         base = ("---\ndescription: d\npermissions:\n# note\n  rules: []\n"
                 "model: m\n---\nbody\n")
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         assert "rules: []" not in derived
         assert "# note" not in derived
         assert ap.excise_permissions(derived)[0] == (
@@ -23272,7 +23424,7 @@ class TestDerivedAgentInjectionIsTextual:
         ap = _agent_profile()
         base = ("---\ndescription: d\npermissions:\n  rules: []\n# next\n"
                 "model: m\n---\nbody\n")
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         assert ap.excise_permissions(derived)[0] == (
             "---\ndescription: d\n# next\nmodel: m\n---\nbody\n")
 
@@ -23281,7 +23433,7 @@ class TestDerivedAgentInjectionIsTextual:
         ap = _agent_profile()
         base = ('---\ntools:\n- "*"\npermissions:\n  rules: []\nmodel: m\n'
                 "---\nbody\n")
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         assert '- "*"' in derived
         assert ap.excise_permissions(derived)[0] == (
             '---\ntools:\n- "*"\nmodel: m\n---\nbody\n')
@@ -23290,18 +23442,18 @@ class TestDerivedAgentInjectionIsTextual:
         ap = _agent_profile()
         base = ("---\ndescription: d\nmcpServers:\n  x:\n    permissions: y\n"
                 "---\nbody\n")
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         assert "    permissions: y" in derived
 
     def test_crlf_and_trailing_content_are_preserved(self):
         """Byte-identity means CRLF too: text-mode I/O would rewrite it."""
         ap = _agent_profile()
         base = "---\r\ndescription: d\r\n---\r\nbody\r\n"
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         assert ap.excise_permissions(derived)[0] == base
 
     def test_the_injected_block_adopts_a_crlf_base_line_endings(self):
-        """An LF overlay spliced into a CRLF base made a mixed-ending file.
+        """An LF block spliced into a CRLF base made a mixed-ending file.
 
         YAML accepts either break, so this is byte-hygiene rather than a
         fail-open -- but the derived agent is supposed to be the base plus one
@@ -23312,21 +23464,21 @@ class TestDerivedAgentInjectionIsTextual:
         ap = _agent_profile()
         base = ("---\r\ndescription: d\r\npermissions:\r\n  rules: []\r\n"
                 "model: m\r\n---\r\nbody\r\n")
-        derived = ap.build_derived_agent(base).encode("utf-8")
+        derived = _derive(base).encode("utf-8")
         assert derived.count(b"\r\n") > 20, "the block should have been spliced"
         assert len(re.findall(rb"(?<!\r)\n", derived)) == 0, "mixed endings"
 
     def test_regeneration_is_idempotent(self):
         ap = _agent_profile()
-        once = ap.build_derived_agent(_BASE_NO_PERMISSIONS)
-        twice = ap.build_derived_agent(once)
+        once = _derive(_BASE_NO_PERMISSIONS)
+        twice = _derive(once)
         assert once == twice
 
     def test_a_file_without_frontmatter_raises(self):
         ap = _agent_profile()
         for bad in ("", "no fence here\n", "---\nunterminated\n"):
             with pytest.raises(ap.AgentProfileError):
-                ap.build_derived_agent(bad)
+                _derive(bad)
 
     def test_a_closing_fence_with_trailing_whitespace_is_still_the_fence(self):
         """`'--- '` ended the frontmatter; the scan used to run past it.
@@ -23340,7 +23492,7 @@ class TestDerivedAgentInjectionIsTextual:
         ap = _agent_profile()
         base = ("---\ndescription: d\n--- \n\n# Body\n\nprose line\n"
                 "\n---\n\ntail\n")
-        derived = ap.build_derived_agent(base)
+        derived = _derive(base)
         lines = derived.split("\n")
         # Independent of the function under test: the fence index is computed
         # here by a plain scan, and the injected key must land before it. A
@@ -23369,7 +23521,7 @@ class TestDerivedAgentInjectionIsTextual:
         base = ("---\ndescription: d\n-----\n\n# Body\n\nProse with no "
                 "colon.\n\n---\n\nmore\n")
         with pytest.raises(ap.AgentProfileError):
-            ap.build_derived_agent(base)
+            _derive(base)
 
     @pytest.mark.parametrize("base", [
         # An indented root mapping: valid YAML, invisible to a column-0 key
@@ -23393,7 +23545,7 @@ class TestDerivedAgentInjectionIsTextual:
         """
         ap = _agent_profile()
         with pytest.raises(ap.AgentProfileError):
-            ap.build_derived_agent(base)
+            _derive(base)
 
     def test_the_shape_guard_accepts_every_shape_the_suite_relies_on(self):
         """A guard that rejected a legal base would disable the feature.
@@ -23410,7 +23562,7 @@ class TestDerivedAgentInjectionIsTextual:
                      "---\nwelcome: |\n  prose with no colon\n---\nb\n",
                      "\ufeff---\ndescription: d\n---\nb\n",
                      "---\r\ndescription: d\r\n---\r\nb\r\n"):
-            ap.build_derived_agent(base)
+            _derive(base)
 
     def test_the_real_base_agent_on_this_machine_is_accepted(self):
         """The one base agent that actually matters, if it is there.
@@ -23425,9 +23577,9 @@ class TestDerivedAgentInjectionIsTextual:
         if not real.exists():
             pytest.skip("no kiro_default.md on this machine")
         text = real.read_bytes().decode("utf-8")
-        derived = ap.build_derived_agent(text)
+        derived = _derive(text)
         assert ap.excise_permissions(derived)[0] == text
-        assert ap.excise_permissions(derived)[1] == ap.overlay_text()
+        assert ap.excise_permissions(derived)[1] == _block()
 
 
 class TestBaseAgentNameValidation:
@@ -23476,7 +23628,7 @@ class TestBaseAgentNameValidation:
 class TestDerivedAgentWrite:
     """The write is verified before publication, and the base is never touched.
 
-    D-19, SC-2.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL D-19, SC-2.
     """
 
     def test_the_base_agent_is_never_modified(self, isolated_config):
@@ -23484,28 +23636,31 @@ class TestDerivedAgentWrite:
         ap = _agent_profile()
         base = _write_base(isolated_config)
         before = hashlib.sha256(base.read_bytes()).hexdigest()
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
+        _regenerate(ap, _cfg())
         after = hashlib.sha256(base.read_bytes()).hexdigest()
         assert before == after
         assert ap.derived_agent_path().exists()
 
-    def test_the_written_file_is_the_injected_base(self, isolated_config):
+    @pytest.mark.parametrize("mode", ["yolo", "manual"])
+    def test_the_written_file_is_the_injected_base(self, isolated_config, mode):
         ap = _agent_profile()
         _write_base(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
+        config = _cfg(mode)
+        _regenerate(ap, config)
         written = ap.derived_agent_path().read_bytes().decode("utf-8")
-        assert written == ap.build_derived_agent(_BASE_NO_PERMISSIONS)
+        assert written == _derive(_BASE_NO_PERMISSIONS, config)
         assert ap.last_generation().ok is True
-        assert ap.derived_block_state() == "on"
+        assert ap.last_generation().mode == mode
+        assert ap.derived_block_state(config) == "on"
 
     def test_a_failed_publish_keeps_the_previous_file_and_leaves_no_stage(
             self, isolated_config):
         """D-10/SC-8: a regen failure must not widen or destroy the posture."""
         ap = _agent_profile()
         _write_base(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
+        _regenerate(ap, _cfg())
         good = ap.derived_agent_path().read_bytes()
-        assert ap.derived_block_state() == "on"
+        assert ap.derived_block_state(_cfg()) == "on"
         # A *different* base, so the failed regeneration would genuinely have
         # produced different bytes -- otherwise "the previous file survived" is
         # true for the wrong reason.
@@ -23519,10 +23674,10 @@ class TestDerivedAgentWrite:
         # the context manager, and nothing else in this test runs concurrently.
         with patch.object(ap.os, "replace", boom):
             with pytest.raises(ap.AgentProfileError):
-                _regenerate(ap, enabled=True, base_agent="kiro_default")
+                _regenerate(ap, _cfg())
         assert ap.derived_agent_path().read_bytes() == good, (
             "the last good derived agent was replaced by a failed regen")
-        assert ap.derived_block_state() == "on"
+        assert ap.derived_block_state(_cfg()) == "on"
         assert not ap._stage_path().exists(), "staging residue"
         assert not list(ap.KIRO_AGENTS_DIR.glob("*.tmp")), "tmp residue"
         assert ap.last_generation().ok is False
@@ -23533,15 +23688,14 @@ class TestDerivedAgentWrite:
         """Step 5 review, High: the check has to run *before* publication.
 
         Verifying after `os.replace` detects a bad splice with the last-good
-        file already destroyed, which is the opposite of what the module
-        docstring, `_generate`'s docstring and D-10/SC-8 all promise. The
-        ordering is asserted directly -- `os.replace` must never be called --
-        rather than only through its outcome, because a module that published
-        and then rolled back would pass an outcome-only assertion.
+        file already destroyed. The ordering is asserted directly --
+        `os.replace` must never be called -- rather than only through its
+        outcome, because a module that published and then rolled back would
+        pass an outcome-only assertion.
         """
         ap = _agent_profile()
         _write_base(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
+        _regenerate(ap, _cfg())
         good = ap.derived_agent_path().read_bytes()
         _write_base(isolated_config, text=_BASE_WITH_PERMISSIONS)
 
@@ -23563,12 +23717,12 @@ class TestDerivedAgentWrite:
         with patch.object(ap.os, "fsync", torn_fsync), \
                 patch.object(ap.os, "replace", spy_replace):
             with pytest.raises(ap.AgentProfileError):
-                _regenerate(ap, enabled=True, base_agent="kiro_default")
+                _regenerate(ap, _cfg())
         assert replaced == [], (
             "the staged file was published before it was verified, so the "
             "last-good derived agent is gone")
         assert ap.derived_agent_path().read_bytes() == good
-        assert ap.derived_block_state() == "on"
+        assert ap.derived_block_state(_cfg()) == "on"
         assert not ap._stage_path().exists(), "staging residue"
         assert ap.last_generation().ok is False
         assert "may not be in effect" in ap.last_generation().error
@@ -23586,10 +23740,10 @@ class TestDerivedAgentWrite:
 
         with patch.object(ap.os, "fsync", torn_fsync):
             with pytest.raises(ap.AgentProfileError):
-                _regenerate(ap, enabled=True, base_agent="kiro_default")
+                _regenerate(ap, _cfg())
         assert not ap.derived_agent_path().exists()
         assert not ap._stage_path().exists()
-        assert ap.derived_block_state() == "absent"
+        assert ap.derived_block_state(_cfg()) == "absent"
 
     def test_a_stray_staging_file_is_cleared_by_the_next_pass(
             self, isolated_config):
@@ -23599,19 +23753,13 @@ class TestDerivedAgentWrite:
         stray = ap._stage_path()
         stray.parent.mkdir(parents=True, exist_ok=True)
         stray.write_bytes(b"left over by a crash\n")
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
+        _regenerate(ap, _cfg())
         assert not stray.exists()
-        # Including on the `off` pass, which writes nothing at all.
+        # Including on a pass that fails before it writes anything.
         stray.write_bytes(b"left over by a crash\n")
-        _regenerate(ap, enabled=False, base_agent="kiro_default")
-        assert not stray.exists()
-
-    def test_a_missing_base_agent_is_a_typed_error(self, isolated_config):
-        ap = _agent_profile()
         with pytest.raises(ap.AgentProfileError):
-            _regenerate(ap, enabled=True, base_agent="does_not_exist")
-        assert not ap.derived_agent_path().exists()
-        assert ap.derived_block_state() == "absent"
+            _regenerate(ap, _cfg(base_agent="../nonsense"))
+        assert not stray.exists()
 
     def test_naming_the_derived_agent_as_the_base_is_refused(
             self, isolated_config):
@@ -23620,34 +23768,64 @@ class TestDerivedAgentWrite:
         ap = _agent_profile()
         _write_base(isolated_config, name=DERIVED_AGENT_NAME)
         with pytest.raises(ap.AgentProfileError):
-            _regenerate(ap, enabled=True, base_agent=DERIVED_AGENT_NAME)
+            _regenerate(ap, _cfg(base_agent=DERIVED_AGENT_NAME))
 
     def test_the_block_state_distinguishes_on_stale_absent_and_foreign(
             self, isolated_config):
-        """SC-8's on-but-not-in-effect rests on this, not on the toggle."""
+        """SC-9: "on" means the file matches what the settings compile to."""
         ap = _agent_profile()
         _write_base(isolated_config)
-        assert ap.derived_block_state() == "absent"
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
-        assert ap.derived_block_state() == "on"
-        # This module's own output from a different overlay revision, or from
-        # the version that wrote an allow-all block in the `off` state.
+        assert ap.derived_block_state(_cfg()) == "absent"
+        _regenerate(ap, _cfg())
+        assert ap.derived_block_state(_cfg()) == "on"
+        # The same file against settings that compile differently is ours,
+        # but not what those settings ask for.
+        assert ap.derived_block_state(_cfg("manual")) == "stale"
+        # This module's own output from a different release.
         ap.derived_agent_path().write_bytes(
             b"---\ndescription: d\npermissions:\n"
             b"  # Written by PowerAtlas. An older revision.\n"
             b"  rules:\n    - capability: all\n      effect: allow\n"
             b"---\nbody\n")
-        assert ap.derived_block_state() == "stale"
+        assert ap.derived_block_state(_cfg()) == "stale"
         # A block without the provenance marker: someone else's file.
         ap.derived_agent_path().write_bytes(
             b"---\ndescription: d\npermissions:\n  rules: []\n---\nbody\n")
-        assert ap.derived_block_state() == "unknown"
+        assert ap.derived_block_state(_cfg()) == "unknown"
         # A file with no `permissions:` key at all is still not ours.
         ap.derived_agent_path().write_bytes(
             b"---\ndescription: mine\n---\nbody\n")
-        assert ap.derived_block_state() == "unknown"
+        assert ap.derived_block_state(_cfg()) == "unknown"
         ap.derived_agent_path().write_bytes(b"not an agent file\n")
-        assert ap.derived_block_state() == "unknown"
+        assert ap.derived_block_state(_cfg()) == "unknown"
+
+    def test_an_edited_rule_set_is_never_stale_once_applied(self, isolated_config):
+        """SC-9: every rule edit compiles to a new block, and `apply_settings`
+        writes it, so the in-effect check follows the settings rather than
+        reading every edit as out of date."""
+        ap = _agent_profile()
+        from power_atlas import config as config_mod
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+
+        def edit(config):
+            config.acp_permission_rules["shell"]["allow"].append("git remote -v")
+
+        result = ap.apply_settings(edit)
+        assert result == {"saved": True, "generation_ok": True, "generation_error": ""}
+        assert ap.derived_block_state(config_mod.load_config()) == "on"
+        assert '"git remote -v"' in ap.derived_agent_path().read_text(encoding="utf-8")
+
+    def test_a_block_state_read_never_raises_on_a_rule_set_that_does_not_compile(
+            self, isolated_config):
+        """D-15: a compile error is `unknown` with the message, not a raise."""
+        ap = _agent_profile()
+        _regenerate(ap, _cfg("manual"))
+        rules = ap.normalise_rules({})
+        rules["shell"]["block"] = ["rm\x7f"]
+        state, error = ap.block_state_detail(_cfg("manual", rules))
+        assert state == "unknown"
+        assert "Run commands (shell)" in error and "U+007F" in error
+        assert ap.derived_block_state(_cfg("manual", rules)) == "unknown"
 
     def test_a_crlf_base_agent_generates_and_verifies_end_to_end(
             self, isolated_config):
@@ -23655,157 +23833,147 @@ class TestDerivedAgentWrite:
 
         The injected block adopts the base's `\\r\\n`, so the pre-publish
         verification and `derived_block_state` both compare a block that
-        carries `\\r` against an overlay that does not -- which only works
-        because `_norm_block` normalises line endings on both sides. If it ever
-        stops doing that, generation fails on every CRLF base and the feature is
-        permanently disabled for those users, which is the failure mode the
-        trailing-blank-line test below guards from the other direction.
+        carries `\\r` against a compiled block that does not -- which only
+        works because `_norm_block` normalises line endings on both sides.
         """
         ap = _agent_profile()
         _write_base(isolated_config,
                     text="---\r\ndescription: d\r\nmodel: m\r\n---\r\nbody\r\n")
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
+        _regenerate(ap, _cfg("manual"))
         assert ap.last_generation().ok is True
         assert ap.last_generation().error == ""
-        assert ap.derived_block_state() == "on"
+        assert ap.derived_block_state(_cfg("manual")) == "on"
         written = ap.derived_agent_path().read_bytes()
         assert len(re.findall(rb"(?<!\r)\n", written)) == 0, "mixed endings"
-        # And the off transition still recognises it as PowerAtlas's own.
-        _regenerate(ap, enabled=False, base_agent="kiro_default")
-        assert not ap.derived_agent_path().exists()
+        # And the next pass still recognises it as PowerAtlas's own.
+        _regenerate(ap, _cfg())
+        assert ap.derived_block_state(_cfg()) == "on"
 
-    def test_a_trailing_blank_line_in_the_overlay_does_not_break_generation(
+    def test_a_trailing_blank_line_in_the_block_does_not_break_generation(
             self, isolated_config):
-        """An incidental newline in the package-data file must be harmless.
+        """An incidental trailing newline must be harmless.
 
         `inject_permissions` drops trailing blank lines from the block and
         `excise_permissions` hands them back to the surrounding text, so a
         block compared raw would never match what was written -- and the
-        verification would then fail on every generation, permanently disabling
-        the feature over a whitespace edit to a YAML file.
+        verification would then fail on every generation.
         """
         ap = _agent_profile()
         _write_base(isolated_config)
-        raw = ap.overlay_text()
-        with patch.object(ap, "_overlay_cache", raw.rstrip("\n") + "\n\n\n"):
-            assert ap.overlay_text().endswith("\n\n\n")
-            _regenerate(ap, enabled=True, base_agent="kiro_default")
+        real = ap.compile_block
+        with patch.object(ap, "compile_block",
+                          lambda config: real(config).rstrip("\n") + "\n\n\n"):
+            _regenerate(ap, _cfg())
             assert ap.last_generation().ok is True
-            assert ap.derived_block_state() == "on"
+            assert ap.derived_block_state(_cfg()) == "on"
 
 
-class TestDerivedAgentRemovalOnOff:
-    """The `off` state deletes the derived agent (Step 5 review, 2026-09-22).
+class TestDerivedAgentAlwaysWritten:
+    """260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-8, D-18, D-28, D-29.
 
-    Generating an allow-all file in the `off` state put a selectable
-    `poweratlas-acp` into kiro-cli's own mode catalogue (P1), which widens the
-    posture of a user whose machine baseline is narrower than allow-all -- in
-    the one state PowerAtlas is supposed to be doing nothing. Absence is the
-    only `off` representation that cannot widen anything.
+    Replaces the old on/off removal tests: there is no Off state, so the file
+    is written in every mode, a foreign file at the path is refused rather than
+    overwritten (or, as before, deleted), and a missing base agent falls back
+    to a built-in minimal one.
     """
 
-    def test_off_removes_a_file_this_module_wrote(self, isolated_config):
+    @pytest.mark.parametrize("mode", ["yolo", "manual"])
+    def test_generation_writes_in_every_mode(self, isolated_config, mode):
         ap = _agent_profile()
-        _write_base(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
-        assert ap.derived_agent_path().exists()
-        status = _regenerate(ap, enabled=False, base_agent="kiro_default")
-        assert not ap.derived_agent_path().exists()
-        assert ap.derived_block_state() == "absent"
-        assert status.ok is True
-        assert status.error == ""
+        status = _regenerate(ap, _cfg(mode))
+        assert status.ok is True and status.mode == mode
+        text = ap.derived_agent_path().read_text(encoding="utf-8")
+        assert f"# Permission mode: {mode}" in text
+        assert ap._PROVENANCE_MARKER in text
 
-    def test_off_with_nothing_on_disk_is_a_success_not_an_error(
-            self, isolated_config):
-        """The default state on a fresh install: nothing to do, and no failure.
-
-        Phase 3 renders `enabled=False`, `state="absent"`, `ok=True` as the
-        healthy off state, so this pairing has to be the successful one.
-        """
+    def test_changing_the_mode_rewrites_the_file(self, isolated_config):
         ap = _agent_profile()
-        _write_base(isolated_config)
-        status = _regenerate(ap, enabled=False, base_agent="kiro_default")
-        assert status.ok is True
-        assert status.error == ""
-        assert ap.derived_block_state() == "absent"
+        _regenerate(ap, _cfg())
+        _regenerate(ap, _cfg("manual"))
+        assert ap.derived_block_state(_cfg("manual")) == "on"
+        assert ap.derived_block_state(_cfg()) == "stale"
 
-    def test_off_removes_a_stale_block_from_an_older_revision(
-            self, isolated_config):
-        """The upgrade path: the allow-all `off` file the old code wrote.
-
-        Recognised by the provenance marker rather than by byte-equality
-        against a table of every block ever shipped, so this module cleans up
-        its own output across overlay revisions.
-        """
+    @pytest.mark.parametrize("foreign", [
+        b"---\ndescription: my own agent\npermissions:\n"
+        b"  rules:\n    - capability: all\n      effect: deny\n---\nmine\n",
+        b"---\ndescription: mine, no permissions key\n---\nx\n",
+        b"not an agent file at all\n",
+    ])
+    def test_a_foreign_file_is_refused_and_left_alone(self, isolated_config, foreign):
+        """D-29: the name is not reserved; a file whose block does not carry
+        PowerAtlas's marker is the user's, and is never overwritten."""
         ap = _agent_profile()
-        _write_base(isolated_config)
+        ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
+        ap.derived_agent_path().write_bytes(foreign)
+        with pytest.raises(ap.AgentProfileError):
+            _regenerate(ap, _cfg())
+        assert ap.derived_agent_path().read_bytes() == foreign
+        assert ap.last_generation().ok is False
+        assert "not written by PowerAtlas" in ap.last_generation().error
+        assert ap.derived_block_state(_cfg()) == "unknown"
+
+    def test_a_stale_block_of_ours_is_regenerated(self, isolated_config):
+        """The upgrade path: an older release's file carries the marker."""
+        ap = _agent_profile()
         ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
         ap.derived_agent_path().write_bytes(
             b"---\ndescription: d\npermissions:\n"
             b"  # Written by PowerAtlas. The ACP permission posture is OFF.\n"
             b"  rules:\n    - capability: all\n      effect: allow\n"
             b"---\nbody\n")
-        assert ap.derived_block_state() == "stale"
-        _regenerate(ap, enabled=False, base_agent="kiro_default")
-        assert not ap.derived_agent_path().exists()
+        _regenerate(ap, _cfg())
+        assert ap.derived_block_state(_cfg()) == "on"
 
-    def test_off_leaves_a_file_this_module_did_not_write(self, isolated_config):
-        """The name is not reserved; a hand-authored agent is the user's file."""
+    def test_a_missing_base_agent_uses_the_minimal_base(self, isolated_config):
+        """D-28: a clean kiro-cli install has no `kiro_default.md`. Generation
+        still writes the floor, from `MINIMAL_BASE`, and says so."""
         ap = _agent_profile()
-        _write_base(isolated_config)
-        foreign = ("---\ndescription: my own agent\npermissions:\n"
-                   "  rules:\n    - capability: all\n      effect: deny\n"
-                   "---\nmine\n").encode("utf-8")
-        ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
-        ap.derived_agent_path().write_bytes(foreign)
-        with pytest.raises(ap.AgentProfileError):
-            _regenerate(ap, enabled=False, base_agent="kiro_default")
-        assert ap.derived_agent_path().read_bytes() == foreign
-        assert ap.last_generation().ok is False
-        assert "PowerAtlas" in ap.last_generation().error
-
-    def test_a_failed_delete_reports_rather_than_pretending(
-            self, isolated_config):
-        """The fail-safe direction is a surviving file that is reported."""
-        ap = _agent_profile()
-        _write_base(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
-        good = ap.derived_agent_path().read_bytes()
-
-        def boom(self, missing_ok=False):
-            raise OSError(errno.EACCES, "denied")
-
-        with patch.object(Path, "unlink", boom):
-            with pytest.raises(ap.AgentProfileError):
-                _regenerate(ap, enabled=False, base_agent="kiro_default")
-        assert ap.derived_agent_path().read_bytes() == good
-        assert ap.last_generation().ok is False
-        assert ap.last_generation().error
-
-    def test_off_does_not_need_a_valid_base_agent_name(self, isolated_config):
-        """A bad name hand-edited into config.toml must not block the delete.
-
-        The name plays no part in a delete, and a file left selectable because
-        an unrelated setting was mistyped is the fail-open this whole policy
-        change exists to remove.
-        """
-        ap = _agent_profile()
-        _write_base(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
-        status = _regenerate(ap, enabled=False, base_agent="../nonsense")
+        (isolated_config / "kiro-agents" / "kiro_default.md").unlink()
+        status = _regenerate(ap, _cfg())
         assert status.ok is True
-        assert not ap.derived_agent_path().exists()
+        assert "not found" in status.note and "minimal agent" in status.note
+        written = ap.derived_agent_path().read_text(encoding="utf-8")
+        kept, block = ap.excise_permissions(written)
+        assert kept == ap.MINIMAL_BASE
+        assert ap._norm_block(block) == ap._norm_block(_block(_cfg()))
+        assert ap.derived_block_state(_cfg()) == "on"
+
+    def test_the_minimal_base_is_a_shape_the_splice_accepts(self):
+        """No bare `: ` in a plain scalar -- the malformation that made
+        kiro-cli fall open in the prior plan's Phase 0 -- and the column-0
+        root mapping `_check_frontmatter_shape` requires."""
+        ap = _agent_profile()
+        ap.excise_permissions(ap.MINIMAL_BASE)
+        lines = ap.MINIMAL_BASE.split("\n")
+        close = ap._frontmatter_bounds(lines)
+        for line in lines[1:close]:
+            _, _, value = line.strip().partition(":")
+            value = value.strip()
+            if value.startswith(("[", "{", '"')) or not value:
+                continue
+            assert ": " not in value, line
+
+    def test_the_overlay_is_no_longer_package_data(self):
+        """D-17: the block is computed; the overlay file under
+        `src/power_atlas/agents/` is gone and so is its package-data entry."""
+        import tomllib
+        root = Path(__file__).resolve().parent.parent
+        assert not (root / "src" / "power_atlas" / "agents" / "permissions.yaml").exists()
+        with open(root / "pyproject.toml", "rb") as fh:
+            data = tomllib.load(fh)
+        patterns = data["tool"]["setuptools"]["package-data"]["power_atlas"]
+        assert not any(p.startswith("agents") for p in patterns), patterns
 
 
 def _parse_rules(block):
     """Line-scan `block` into a list of rule dicts. Tests only.
 
     A short splitter rather than a YAML dependency: the product deliberately
-    never parses this text (D-18), and the invariants below need the rules as
-    data. It understands exactly the grammar the shipped overlay uses -- one
-    `- capability:` item per rule, single-line flow sequences for `match` and
-    `exclude` -- and raises on anything else, so an overlay rewritten into a
-    shape this cannot read fails loudly instead of silently passing.
+    never parses this text, and the invariants below need the rules as data. It
+    understands exactly the grammar `compile_block` emits -- one
+    `- capability:` item per rule, single-line JSON flow sequences for `match`
+    and `exclude` -- and raises on anything else, so a compiler rewritten into
+    a shape this cannot read fails loudly instead of silently passing.
     """
     rules = []
     for raw in block.split("\n"):
@@ -23823,8 +23991,7 @@ def _parse_rules(block):
         if key in ("match", "exclude"):
             assert value.startswith("[") and value.endswith("]"), (
                 f"{key} must be a single-line flow sequence: {raw!r}")
-            rules[-1][key] = [p.strip().strip('"')
-                              for p in value[1:-1].split(",") if p.strip()]
+            rules[-1][key] = json.loads(value)
         elif key == "effect":
             rules[-1][key] = value
         else:
@@ -23832,25 +23999,15 @@ def _parse_rules(block):
     return rules
 
 
-# Phase 0 measured that kiro-cli's ACP surface exposes these capabilities, and
-# that a capability no rule names inherits the wider scopes rather than
-# defaulting to `ask`. With the deny floor dropped (D-13 superseded), correct
-# assembly here is the only backstop the feature ships.
-_GATED_CAPABILITIES = frozenset({
-    "fs_read", "fs_write", "shell", "web_fetch", "web_search",
-    "mcp", "subagent", "skill", "power",
-})
-
-
 def _blanket_ask_without_exclude(rules):
     """Capabilities whose `ask` rule is silently defeated by a narrower allow.
 
-    Phase 0 measured this live: within one capability, a blanket `ask` beats a
-    narrower `allow` for the same resource regardless of rule order, with no
-    error and no warning, so the allow rule is dead code. `exclude` on the
-    blanket rule is the only mechanism that expresses "allow X, ask about
-    everything else". A meta-capability rule (`all`, `builtin`, `filesystem`)
-    does the same thing across every capability at once.
+    Phase 0 of the prior plan measured this live: within one capability, a
+    blanket `ask` beats a narrower `allow` for the same resource regardless of
+    rule order, with no error and no warning, so the allow rule is dead code.
+    `exclude` on the blanket rule is the only mechanism that expresses "allow
+    X, ask about everything else". A meta-capability rule (`all`, `builtin`,
+    `filesystem`) does the same thing across every capability at once.
     """
     allowed_patterns = {}
     for rule in rules:
@@ -23859,7 +24016,7 @@ def _blanket_ask_without_exclude(rules):
                 rule["match"])
     offenders = set()
     for rule in rules:
-        if rule.get("effect") != "ask":
+        if rule.get("effect") != "ask" or rule.get("match"):
             continue
         scope = rule["capability"]
         targets = (set(allowed_patterns)
@@ -23871,19 +24028,47 @@ def _blanket_ask_without_exclude(rules):
     return offenders
 
 
-class TestRuleAssemblyInvariants:
-    """The two properties Phase 0 measured, asserted against what ships.
+def _rule_set_table():
+    """Every row default x empty/non-empty allow and block lists, plus `{}`
+    and partial dicts (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1
+    Tests). Each entry is `(id, raw rules)` as `config.toml` could hold it."""
+    ap = _agent_profile()
+    table = [
+        ("empty", {}),
+        ("partial-one-row", {"shell": {"default": "allow"}}),
+        ("partial-no-lists", {"fs_read": {"default": "block"}}),
+        ("partial-protected", {"protected_block": ["agents", "hooks"]}),
+        ("partial-bad-default", {"mcp": {"default": "sometimes",
+                                         "allow": ["paecho/pa_echo"]}}),
+    ]
+    for default in ap.ROW_DEFAULTS:
+        for allow in ([], ["./**", "git status", "echo café"]):
+            for block in ([], ["**/blocked/**", "rm *"]):
+                table.append((
+                    f"{default}-allow{len(allow)}-block{len(block)}",
+                    {row: {"default": default, "allow": list(allow),
+                           "block": list(block)}
+                     for row in ap.PERMISSION_ROWS}))
+    return table
 
-    Both failure modes are silent at runtime -- kiro-cli reports nothing and the
-    session simply runs ungated -- so they can only be caught here.
+
+class TestCompiledRuleInvariants:
+    """The compiled `permissions:` block, over a table of rule sets.
+
+    Replaces `TestRuleAssemblyInvariants`, which asserted the same properties
+    against one shipped overlay. Every failure mode here is silent at runtime
+    -- kiro-cli reports nothing and the session simply runs ungated -- so it
+    can only be caught here. Retired from the old class, one line each: "the
+    agents folder is write-denied" (replaced by Protected's ask, and by
+    D-23's `protected_block = ["agents"]` for migrated users, pinned below);
+    "no meta-capability" (now scoped to Manual; Yolo is the floor plus one
+    `all: allow`, pinned below).
     """
 
     def test_the_checker_flags_the_measured_defeat(self):
-        """Negative fixture: the exact pair Phase 0 measured must be flagged.
-
-        Without this, a checker that never flags anything would pass the real
-        assertion below for the wrong reason.
-        """
+        """Negative fixture: the exact pair the prior Phase 0 measured must be
+        flagged. Without this, a checker that never flags anything would pass
+        the real assertions below for the wrong reason."""
         defeated = ("permissions:\n  rules:\n"
                     '    - capability: shell\n      match: ["echo *"]\n'
                     "      effect: allow\n"
@@ -23902,76 +24087,144 @@ class TestRuleAssemblyInvariants:
                  "      effect: ask\n")
         assert _blanket_ask_without_exclude(_parse_rules(fixed)) == set()
 
-    def test_no_blanket_ask_sits_beside_an_unexcluded_allow(self):
+    @pytest.mark.parametrize("name,raw", _rule_set_table(),
+                             ids=[n for n, _ in _rule_set_table()])
+    def test_every_blanket_ask_or_deny_excludes_exactly_the_row_allow_list(
+            self, name, raw):
+        """D-13 / SC-5: wherever an `ask` or `deny` rule carries no `match`,
+        its `exclude` equals the row's allow list, so no allow rule is
+        silently defeated. A compiler that drops an `exclude` fails here."""
         ap = _agent_profile()
-        rules = _parse_rules(ap.overlay_text())
-        assert _blanket_ask_without_exclude(rules) == set(), (
-            "a blanket `ask` rule silently defeats the narrower `allow` rule "
-            "beside it; populate the blanket rule's `exclude`")
-
-    def test_every_gated_capability_is_named_explicitly(self):
-        ap = _agent_profile()
-        rules = _parse_rules(ap.overlay_text())
-        named = {r["capability"] for r in rules}
-        missing = _GATED_CAPABILITIES - named
-        assert not missing, (
-            f"unnamed capabilities inherit the wider scopes, not `ask`: "
-            f"{sorted(missing)}")
-        assert not named & {"all", "builtin", "filesystem"}, (
-            "a meta-capability rule applies its effect across every "
-            "capability at once; `exclude` is a resource glob, not a "
-            "capability filter")
-
-    def test_every_rule_has_a_recognised_capability_and_effect(self):
-        ap = _agent_profile()
-        for rule in _parse_rules(ap.overlay_text()):
-            assert rule["capability"] in _GATED_CAPABILITIES
-            assert rule["effect"] in ("allow", "ask", "deny")
-
-    def test_the_agents_and_settings_directories_are_write_denied(self):
-        """Step 5 review, Medium: the block must not be self-editable.
-
-        kiro-cli's own non-overridable Kiro-scope rules cover
-        `~/.kiro/settings/` at always-deny, but `.kiro/agents/**` is
-        workspace-relative and always-**ask** -- so one `fs_write` approval let
-        a session rewrite the very `permissions:` block constraining it, and the
-        rewrite stayed in effect until the next restart or settings write.
-        Unlike the rejected deny floor (D-13), a path is not rephrasable the way
-        a shell command is.
-        """
-        ap = _agent_profile()
-        denied = set()
-        for rule in _parse_rules(ap.overlay_text()):
-            if rule["capability"] == "fs_write" and rule["effect"] == "deny":
-                denied.update(rule.get("match", []))
-        assert "**/.kiro/agents/**" in denied
-        assert "**/.kiro/settings/**" in denied
-
-    def test_the_shell_allow_patterns_carry_no_trailing_wildcard(self):
-        """A `*` suffix would also match `git status && <anything>`.
-
-        kiro-cli matches a shell rule as a literal glob over the whole command
-        string with no canonicalisation (Phase 0 step 6), and whether `*` stops
-        at a chaining operator was never established. Too narrow costs a
-        prompt; too wide costs the guarantee this state exists to provide.
-        """
-        ap = _agent_profile()
-        for rule in _parse_rules(ap.overlay_text()):
-            if rule["capability"] != "shell" or rule["effect"] != "allow":
+        normal = ap.normalise_rules(raw)
+        rules = _parse_rules(ap.compile_block(_cfg("manual", raw)))
+        checked = 0
+        for rule in rules[len(ap.FLOOR_RULES):]:
+            if "match" in rule or rule["effect"] not in ("ask", "deny"):
                 continue
-            for pattern in rule["match"]:
-                assert not pattern.endswith("*"), pattern
+            row = rule["capability"]
+            expected = normal[row]["allow"] if normal[row]["default"] != "allow" else []
+            assert rule.get("exclude", []) == expected, (name, rule)
+            checked += 1
+        assert checked >= len(ap.PERMISSION_ROWS) - sum(
+            1 for row in ap.PERMISSION_ROWS if normal[row]["default"] == "allow")
+        assert _blanket_ask_without_exclude(rules) == set(), name
 
-    def test_the_overlay_has_no_unquoted_colon_space_in_a_scalar(self):
-        """The exact malformation that fell open across 7 Phase 0 probe runs.
-
-        A bare `: ` inside a plain YAML scalar breaks the whole frontmatter, and
-        kiro-cli loads the file anyway with no error and no warning, falling
-        back to the wider scopes. Comments are exempt because a YAML lexer
-        discards them.
-        """
+    @pytest.mark.parametrize("name,raw", _rule_set_table(),
+                             ids=[n for n, _ in _rule_set_table()])
+    def test_manual_names_every_capability_and_no_meta_capability(self, name, raw):
+        """A capability no rule names inherits the wider scopes, not `ask`
+        (D-12, D-26), and a meta-capability rule applies across every
+        capability at once."""
         ap = _agent_profile()
-        for line in ap.overlay_text().split("\n"):
+        rules = _parse_rules(ap.compile_block(_cfg("manual", raw)))
+        named = {r["capability"] for r in rules}
+        missing = set(ap.PERMISSION_ROWS) - named
+        assert not missing, f"unnamed capabilities inherit the wider scopes: {sorted(missing)}"
+        assert not named & {"all", "builtin", "filesystem"}, name
+        for rule in rules:
+            assert rule["capability"] in ap.PERMISSION_ROWS, rule
+            assert rule["effect"] in ("allow", "ask", "deny"), rule
+
+    @pytest.mark.parametrize("mode", ["yolo", "manual"])
+    def test_the_floor_comes_first_in_both_modes(self, mode):
+        ap = _agent_profile()
+        rules = _parse_rules(ap.compile_block(_cfg(mode)))
+        expected = [{"capability": r["capability"], "match": list(r["match"]),
+                     "effect": r["effect"]} for r in ap.FLOOR_RULES]
+        assert rules[:len(expected)] == expected
+        assert all(r["effect"] == "deny" for r in expected)
+
+    def test_yolo_is_the_floor_plus_one_allow_all(self):
+        """Yolo adds no PowerAtlas asks (D-5): nothing after the floor but
+        `all: allow`, which the floor's denies beat (P-A1)."""
+        ap = _agent_profile()
+        rules = _parse_rules(ap.compile_block(_cfg("yolo")))
+        assert rules[len(ap.FLOOR_RULES):] == [{"capability": "all", "effect": "allow"}]
+
+    def test_protected_items_ask_or_deny_and_ship_short_name_variants(self):
+        """D-5, D-23, F-5: each Protected folder asks in Manual, or is denied
+        when in `protected_block`, with its `kiro~*` short-name spelling."""
+        ap = _agent_profile()
+        rules = _parse_rules(ap.compile_block(
+            _cfg("manual", {"protected_block": ["agents"]})))
+        protected = {tuple(r["match"]): r["effect"] for r in rules
+                     if r["capability"] == "fs_write" and r.get("match")
+                     and r["effect"] in ("ask", "deny")
+                     and r["match"] != list(ap._FLOOR_FS_WRITE)}
+        assert protected == {
+            ("**/.kiro/agents/**", "**/kiro~*/agents/**"): "deny",
+            ("**/.kiro/steering/**", "**/kiro~*/steering/**"): "ask",
+            ("**/.kiro/skills/**", "**/kiro~*/skills/**"): "ask",
+            ("**/.kiro/hooks/**", "**/kiro~*/hooks/**"): "ask",
+        }
+
+    def test_patterns_are_json_quoted_with_ensure_ascii_false(self):
+        """D-14: a JSON string is a valid YAML double-quoted scalar; non-ASCII
+        stays UTF-8 (F-7 measured that kiro-cli matches it), and a backslash
+        or quote is escaped rather than breaking the flow sequence."""
+        ap = _agent_profile()
+        allow = ["echo café", "type notes\\a.txt", 'echo "quoted"']
+        block = ap.compile_block(_cfg("manual", {"shell": {
+            "default": "ask", "allow": allow, "block": []}}))
+        assert '"echo café"' in block
+        assert "\\u00e9" not in block
+        assert '"type notes\\\\a.txt"' in block
+        assert '"echo \\"quoted\\""' in block
+        shell_allow = [r for r in _parse_rules(block)
+                       if r["capability"] == "shell" and r["effect"] == "allow"]
+        assert shell_allow == [{"capability": "shell", "match": allow,
+                                "effect": "allow"}]
+
+    @pytest.mark.parametrize("pattern", [
+        "rm\x7f", "echo \ud800", "a\u2028b", "a\u2029b", "\ufeffx", "a\x85b",
+        "a\x00b", "a\tb", "a\nb", "*", "**", " * ", "", "   ", "x" * 201, 7, None,
+    ])
+    def test_d14_rejects_the_characters_that_can_fail_kiro_open(self, pattern):
+        """DEL, surrogates, U+2028/U+2029, U+FEFF, C0/C1 controls, blank,
+        match-everything and over-long patterns are refused. In a block list
+        that refuses generation by name (D-26); in an allow list the pattern is
+        dropped, which narrows what runs silently."""
+        ap = _agent_profile()
+        assert ap.pattern_error(pattern)
+        with pytest.raises(ap.AgentProfileError, match=r"Run commands \(shell\)"):
+            ap.compile_block(_cfg("manual", {"shell": {
+                "default": "ask", "allow": [], "block": [pattern]}}))
+        normal = ap.normalise_rules({"shell": {"default": "ask",
+                                               "allow": [pattern, "pwd"]}})
+        assert normal["shell"]["allow"] == ["pwd"]
+
+    @pytest.mark.parametrize("pattern", ["x" * 200, "echo café", "a b", "~/x",
+                                         "C:/Users/me/**", "type a\\b"])
+    def test_d14_accepts_ordinary_patterns(self, pattern):
+        assert _agent_profile().pattern_error(pattern) == ""
+
+    def test_more_than_100_block_patterns_refuse_generation(self):
+        ap = _agent_profile()
+        raw = {"fs_write": {"default": "ask",
+                            "block": [f"**/b{i}/**" for i in range(101)]}}
+        with pytest.raises(ap.AgentProfileError, match="101 patterns"):
+            ap.compile_block(_cfg("manual", raw))
+
+    @pytest.mark.parametrize("name,raw", _rule_set_table(),
+                             ids=[n for n, _ in _rule_set_table()])
+    def test_the_output_round_trips_through_excise_permissions(self, name, raw):
+        ap = _agent_profile()
+        for mode in ("yolo", "manual"):
+            block = ap.compile_block(_cfg(mode, raw))
+            assert block.endswith("\n") and not block.endswith("\n\n")
+            assert "\r" not in block
+            derived = ap.inject_permissions(_BASE_NO_PERMISSIONS, block)
+            kept, back = ap.excise_permissions(derived)
+            assert kept == _BASE_NO_PERMISSIONS
+            assert ap._norm_block(back) == ap._norm_block(block), (name, mode)
+
+    @pytest.mark.parametrize("mode", ["yolo", "manual"])
+    def test_the_block_has_no_unquoted_colon_space_in_a_scalar(self, mode):
+        """The exact malformation that fell open across 7 probe runs in the
+        prior plan's Phase 0. Comments are exempt: a YAML lexer discards
+        them."""
+        ap = _agent_profile()
+        for line in ap.compile_block(_cfg(mode)).split("\n"):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
@@ -23980,160 +24233,467 @@ class TestRuleAssemblyInvariants:
             value = value.strip()
             if value.startswith(("[", "{", '"')) or not value:
                 continue
-            assert ": " not in value, (
-                f"unquoted ': ' in a plain scalar: {line!r}")
+            assert ": " not in value, f"unquoted ': ' in a plain scalar: {line!r}"
 
-
-class TestOverlayIsReachableAtRuntime:
-    """`pyproject.toml` ships the overlay, and the runtime read finds it."""
-
-    def test_importlib_resources_can_read_the_overlay(self):
+    def test_the_compiled_block_is_deterministic(self):
+        """No timestamp or per-run text, or `derived_block_state` would never
+        read "on" (D-15)."""
         ap = _agent_profile()
-        text = ap.overlay_text()
-        assert text.startswith("permissions:")
-        assert "capability: fs_read" in text
-        assert "\r" not in text, "CRLF would leak into a byte-identical splice"
-        assert text.endswith("\n") and not text.endswith("\n\n"), (
-            "exactly one trailing newline, so the written block and the "
-            "assembled block compare equal")
+        for mode in ("yolo", "manual"):
+            assert ap.compile_block(_cfg(mode)) == ap.compile_block(_cfg(mode))
 
-    def test_the_overlay_carries_the_provenance_marker(self):
-        """The whole basis on which the `off` transition may delete a file.
-
-        A block without the marker is left in place, so an overlay rewrite that
-        dropped the line would make every derived agent undeletable -- silently,
-        and only visible the first time a user turned the setting off.
-        """
+    def test_the_seed_shell_allow_patterns_carry_no_wildcard(self):
+        """D-24 after P-0.8: `git status*` also allowed `git status > x.txt`
+        to write a file silently. Exact literals only."""
         ap = _agent_profile()
-        assert ap._PROVENANCE_MARKER in ap.overlay_text()
+        for pattern in ap.SEED_RULES["shell"]["allow"]:
+            assert "*" not in pattern, pattern
+        assert ap.SEED_RULES["shell"]["block"] == [
+            "git *--output*", "git *--no-index*", "git *--ext-diff*"]
 
-    def test_pyproject_declares_the_overlay_as_package_data(self):
-        """The runtime read passes under an editable install regardless.
+    def test_the_floor_lists_are_pinned(self):
+        """D-6, D-36, D-38 (a, b, f, g): the lists as the plan fixed them.
+        Changing the floor is a decision, not a refactor."""
+        ap = _agent_profile()
+        assert list(ap._FLOOR_FS_READ) == [
+            "**/.ssh/**", "**/.aws/**", "**/.azure/**", "**/.config/gcloud/**",
+            "**/.kiro/secrets.json", "**/Kiro-Cli/data.sqlite3*",
+            "**/power-atlas/local-secret*", "**/power-atlas/remote-secret*",
+            "**/ssh~*/**", "**/aws~*/**", "**/azure~*/**", "**/config~*/gcloud/**",
+            "**/kiro~*/secrets.json", "**/.kiro/secret~*", "**/kiro~*/secret~*",
+            "**/Kiro-Cli/data~*", "**/power-~*/local-*", "**/power-~*/remote*",
+            "**/power-atlas/local-~*", "**/power-atlas/remote~*",
+        ]
+        lower = [
+            "*.ssh*", "*.aws*", "*.azure*", "*.config/gcloud*", "*.config\\gcloud*",
+            "*secrets.json*", "*data.sqlite3*", "*local-secret*", "*remote-secret*",
+            "*poweratlas-acp*",
+            "*ssh~*", "*aws~*", "*azure~*", "*config~*gcloud*", "*secret~*",
+            "*local-~*", "*remote~*", "*data~*", "*powera~*",
+        ]
+        assert list(ap._FLOOR_SHELL) == lower + [p.upper() for p in lower]
+        assert "*.SSH*" in ap._FLOOR_SHELL and "*SSH~*" in ap._FLOOR_SHELL
+        assert "*.CONFIG\\GCLOUD*" in ap._FLOOR_SHELL
+        assert list(ap._FLOOR_FS_WRITE) == [
+            "**/.kiro/agents/poweratlas-acp.md", "**/.kiro/settings/**",
+            "**/.kiro/workspace-roots/**",
+            "**/kiro~*/agents/poweratlas-acp.md", "**/.kiro/agents/powera~*",
+            "**/kiro~*/agents/powera~*", "**/kiro~*/settings/**",
+            "**/.kiro/worksp~*/**", "**/kiro~*/workspace-roots/**",
+            "**/kiro~*/worksp~*/**",
+        ]
 
-        `importlib.resources` resolves to the source tree, so that half of the
-        criterion cannot see a missing `package-data` entry -- which is what
-        would make the wheel ship without the file.
-        """
-        import tomllib
-        root = Path(__file__).resolve().parent.parent
-        with open(root / "pyproject.toml", "rb") as fh:
-            data = tomllib.load(fh)
-        patterns = data["tool"]["setuptools"]["package-data"]["power_atlas"]
-        assert any(p.startswith("agents") for p in patterns), patterns
+    def test_every_short_name_variant_shadows_a_long_form(self):
+        """Each `~*` variant is a long form in the list with one or more of
+        its segments replaced by an 8.3 prefix glob (D-38a; `kiro~*/secret~*`
+        replaces both), so no variant protects a path the long forms do not
+        name."""
+        ap = _agent_profile()
+        for patterns in (ap._FLOOR_FS_READ, ap._FLOOR_FS_WRITE):
+            long_forms = [p for p in patterns if "~" not in p]
+            for variant in (p for p in patterns if "~" in p):
+                segments = variant.split("/")
+
+                def shadows(long):
+                    parts = long.split("/")
+                    if len(parts) != len(segments):
+                        return False
+                    changed = [(a, b) for a, b in zip(parts, segments) if a != b]
+                    # A changed segment is the long one's 8.3 prefix glob
+                    # (`.ssh` -> `ssh~*`), or a wider `*` glob of it
+                    # (`local-secret*` -> `local-*`, which the short
+                    # `power-~*` folder needs because its file names are
+                    # short too).
+                    return bool(changed) and all(
+                        a.lower().lstrip(".").startswith(
+                            b.lower().split("~")[0].rstrip("*").lstrip("."))
+                        and ("~" in b or b.endswith("*"))
+                        for a, b in changed) and any("~" in b for _, b in changed)
+
+                assert any(shadows(long) for long in long_forms), variant
+
+    def test_the_fingerprint_moves_with_mode_and_rules_only(self):
+        ap = _agent_profile()
+        manual = ap.normalise_rules({})
+        edited = ap.normalise_rules({"shell": {"default": "ask", "allow": ["ls"]}})
+        assert ap.settings_fingerprint("yolo", manual) == \
+            ap.settings_fingerprint("yolo", edited), "rules do not apply in Yolo"
+        assert ap.settings_fingerprint("manual", manual) != \
+            ap.settings_fingerprint("manual", edited)
+        assert ap.settings_fingerprint("manual", manual) != \
+            ap.settings_fingerprint("yolo", manual)
+
+
+class TestFindProtectedLinks:
+    """D-39: links one level deep under `~/.kiro/{agents,steering,skills,hooks}`
+    are named, with their resolved targets, for the settings panel -- and the
+    walk is never on the compile, state or session-gate path."""
+
+    @staticmethod
+    def _tree(tmp_path):
+        root = tmp_path / "kiro-home"
+        for folder in ("agents", "steering", "skills", "hooks"):
+            (root / folder).mkdir(parents=True)
+        outside = tmp_path / "outside dir"
+        (outside / "dir").mkdir(parents=True)
+        (outside / "file.md").write_text("x", encoding="utf-8")
+        (root / "steering" / "plain.md").write_text("not a link", encoding="utf-8")
+        try:
+            os.symlink(outside / "file.md", root / "steering" / "linked.md")
+            os.symlink(outside / "dir", root / "skills" / "linkdir",
+                       target_is_directory=True)
+            os.symlink(outside / "missing.md", root / "hooks" / "broken.md")
+            os.symlink(root / "agents" / "loopB", root / "agents" / "loopA")
+            os.symlink(root / "agents" / "loopA", root / "agents" / "loopB")
+        except OSError as exc:
+            pytest.skip(f"cannot create symlinks here: {exc}")
+        return root, outside
+
+    def test_file_dir_broken_and_looping_links_are_named(self, tmp_path):
+        ap = _agent_profile()
+        root, outside = self._tree(tmp_path)
+        found = ap.find_protected_links(root)
+        assert set(found) == {"agents", "steering", "skills", "hooks"}
+        steering = found["steering"]
+        assert steering["count"] == 1, "a plain file was listed as a link"
+        assert steering["links"][0]["name"] == "linked.md"
+        assert Path(steering["links"][0]["target"]) == (outside / "file.md").resolve()
+        assert steering["links"][0]["error"] == ""
+        skills = found["skills"]["links"]
+        assert [l["name"] for l in skills] == ["linkdir"]
+        assert Path(skills[0]["target"]) == (outside / "dir").resolve()
+        broken = found["hooks"]["links"]
+        assert [l["name"] for l in broken] == ["broken.md"]
+        assert broken[0]["target"] == "" and "unresolvable" in broken[0]["error"]
+        loop = found["agents"]
+        assert loop["count"] == 2
+        assert all(l["target"] == "" and "unresolvable" in l["error"]
+                   for l in loop["links"])
+
+    def test_a_missing_folder_reads_as_no_links(self, tmp_path):
+        ap = _agent_profile()
+        found = ap.find_protected_links(tmp_path / "nowhere")
+        assert all(v == {"count": 0, "links": []} for v in found.values())
+
+    def test_the_default_root_is_the_redirected_kiro_folder(self, isolated_config):
+        """Never the developer's real `~/.kiro` in this suite."""
+        ap = _agent_profile()
+        assert ap.KIRO_AGENTS_DIR.parent == isolated_config
+        assert all(v["count"] == 0 for v in ap.find_protected_links().values())
+
+    def test_compile_state_and_the_gate_never_call_it(self, isolated_config, monkeypatch):
+        ap = _agent_profile()
+        from power_atlas import web as web_mod
+
+        def forbidden(*_a, **_k):
+            raise AssertionError("find_protected_links ran off the settings read")
+
+        monkeypatch.setattr(ap, "find_protected_links", forbidden)
+        ap.compile_block(_cfg("manual"))
+        ap.derived_block_state(_cfg("manual"))
+        ap.apply_settings(None)
+        assert web_mod._derived_agent_in_effect()["in_effect"] is True
+        web_mod._acp_permission_state(web_mod.load_config())
+
+    def test_only_the_get_route_reports_links(self, client, isolated_config, monkeypatch):
+        ap = _agent_profile()
+        calls = []
+
+        def spy(root=None):
+            calls.append(root)
+            return {"steering": {"count": 3, "links": []}}
+
+        monkeypatch.setattr(ap, "find_protected_links", spy)
+        body = client.get("/api/acp-permissions").json()
+        assert body["protected_links"] == {"steering": {"count": 3, "links": []}}
+        assert len(calls) == 1
+        posted = client.post("/api/acp-permissions", json={"mode": "manual"}).json()
+        assert "protected_links" not in posted
+        assert len(calls) == 1
+
+
+class TestPermissionGate:
+    """`web._derived_agent_in_effect`, the session gate (D-15, D-16, D-30,
+    D-34, D-35)."""
+
+    def test_in_effect_follows_the_file_against_the_settings(self, isolated_config):
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is False and verdict["state"] == "absent"
+        assert verdict["cause"] and verdict["fix"]
+        ap.apply_settings(None)
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict == {"in_effect": True, "state": "on", "mode": "yolo",
+                           "cause": "", "fix": ""}
+
+    def test_a_stalled_generation_times_the_gate_out_and_new_is_refused(
+            self, isolated_config, acp_store, monkeypatch, tmp_path):
+        """D-16, deterministic: `_generate` blocks on an Event inside
+        `apply_settings`, which holds the lock across the save. The gate's
+        bounded acquire raises within its timeout, `_handle_new` refuses, and
+        `apply_settings` finishes once released -- no deadlock, and never a
+        read of the saved config ahead of the file."""
+        import threading
+        import time as _time
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        acp_mod, _store = acp_store
+        monkeypatch.setattr(web_mod, "_GATE_LOCK_TIMEOUT_SECONDS", 0.2)
+        entered, release = threading.Event(), threading.Event()
+        real_generate = ap._generate
+
+        def stalled(status, config):
+            entered.set()
+            assert release.wait(10), "the test never released the generation"
+            return real_generate(status, config)
+
+        monkeypatch.setattr(ap, "_generate", stalled)
+        results = []
+        worker = threading.Thread(target=lambda: results.append(ap.apply_settings(
+            lambda c: setattr(c, "acp_permission_mode", "manual"))))
+        worker.start()
+        late = []
+        try:
+            assert entered.wait(5), "apply_settings never reached generation"
+            started = _time.monotonic()
+            with pytest.raises(TimeoutError):
+                web_mod._derived_agent_in_effect()
+            elapsed = _time.monotonic() - started
+            assert 0.15 <= elapsed < 2.0, elapsed
+
+            monkeypatch.setattr(acp_mod, "mode_gate_hook",
+                                web_mod._derived_agent_in_effect)
+            conn = _acp_conn(acp_mod)
+            seen = {}
+
+            async def fake_new_session(self, cwd, mode=None):
+                seen["mode"] = mode
+                return {"sessionId": "gate-lock-0001", "cwd": cwd}
+
+            with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+                asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
+            assert "mode" not in seen, "a session was created during generation"
+            errors = [f["payload"] for f in _queued(conn) if f.get("type") == "error"]
+            assert [e["code"] for e in errors] == ["bad_payload"]
+            assert "could not check" in errors[0]["message"]
+
+            # A gate call that waits long enough is served once the lock frees.
+            monkeypatch.setattr(web_mod, "_GATE_LOCK_TIMEOUT_SECONDS", 10.0)
+            waiter = threading.Thread(
+                target=lambda: late.append(web_mod._derived_agent_in_effect()))
+            waiter.start()
+            _time.sleep(0.05)
+            assert waiter.is_alive(), "the gate did not wait for the lock"
+        finally:
+            release.set()
+            worker.join(10)
+        waiter.join(10)
+        assert not worker.is_alive(), "apply_settings deadlocked"
+        assert results == [{"saved": True, "generation_ok": True,
+                            "generation_error": ""}]
+        assert late and late[0]["in_effect"] is True and late[0]["mode"] == "manual"
+
+    def test_a_hand_edited_file_is_healed_without_a_notice(self, isolated_config):
+        """D-30: a stale file whose config loads cleanly is regenerated once;
+        a hand edit of the file itself is not a settings change (D-35)."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        assert ap.apply_settings(None)["generation_ok"] is True
+        path = ap.derived_agent_path()
+        good = path.read_bytes()
+        path.write_bytes(good.replace(b"effect: ask", b"effect: allow", 1))
+        assert ap.derived_block_state(web_mod.load_config()) == "stale"
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is True
+        assert path.read_bytes() == good
+        assert ap.posture_notice() is None
+
+    def test_a_mode_changed_outside_the_dashboard_is_healed_and_noticed(
+            self, isolated_config, client):
+        """D-35: config.toml edited while PowerAtlas runs. The gate heals it,
+        and because the heal compiled a different mode, the dashboard is told;
+        the next change made through the dashboard clears the notice."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        assert ap.apply_settings(None)["generation_ok"] is True
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is True and verdict["mode"] == "manual"
+        assert ap.posture_notice()["mode"] == "manual"
+        body = client.get("/api/acp-permissions").json()
+        assert body["posture_notice"]["mode"] == "manual"
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        assert ap.posture_notice() is None
+
+    def test_a_corrupt_config_is_not_healed_from_defaults(self, isolated_config):
+        """D-30 heals only when the config loaded cleanly: a corrupt file
+        loads as defaults, and the default mode is the least restrictive."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        ap.apply_settings(None)
+        manual = ap.derived_agent_path().read_bytes()
+        _write_config(isolated_config, "this is = not [ toml\n")
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is False
+        assert "could not be read" in verdict["cause"]
+        assert ap.derived_agent_path().read_bytes() == manual
+
+    def test_the_verdict_names_a_foreign_file_and_its_fix(self, isolated_config):
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
+        ap.derived_agent_path().write_bytes(b"---\ndescription: mine\n---\nx\n")
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is False and verdict["state"] == "unknown"
+        assert "was not written by PowerAtlas" in verdict["cause"]
+        assert verdict["fix"].startswith("Remove or rename that file")
+
+    def test_the_verdict_names_a_rule_set_that_does_not_compile(self, isolated_config):
+        from power_atlas import config as config_mod
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        ap.apply_settings(None)
+        config = config_mod.load_config()
+        config.acp_permission_rules["shell"]["block"] = ["rm\x7f"]
+        config_mod.save_config(config)
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is False
+        assert "cannot be applied" in verdict["cause"]
+        assert "acp_permission_rules" in verdict["fix"]
 
 
 class TestAcpPermissionRoutes:
-    """D-11: a dedicated boolean route, and the name via `/api/save-setting`."""
+    """`GET`/`POST /api/acp-permissions` and the base agent via
+    `/api/save-setting` (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-2,
+    D-32, D-33)."""
 
-    def test_get_and_post_round_trip_the_boolean(self, client, isolated_config):
+    def test_get_and_post_round_trip_the_mode(self, client, isolated_config):
         ap = _agent_profile()
-        _write_base(isolated_config)
-        assert client.get("/api/acp-permissions").json()["enabled"] is False
-        resp = client.post("/api/acp-permissions", json={"enabled": True})
-        assert resp.json()["ok"] is True
-        assert resp.json()["enabled"] is True
-        assert client.get("/api/acp-permissions").json()["enabled"] is True
-        assert ap.derived_agent_path().exists()
-        resp = client.post("/api/acp-permissions", json={"enabled": False})
-        assert resp.json()["enabled"] is False
-        assert resp.json()["state"] == "absent"
-        assert client.get("/api/acp-permissions").json()["enabled"] is False
-        assert not ap.derived_agent_path().exists()
+        from power_atlas import config as config_mod
+        body = client.get("/api/acp-permissions").json()
+        assert body["mode"] == "yolo" and body["mode_warning"] == ""
+        assert [row["id"] for row in body["floor"]] == ["fs_read", "shell", "fs_write", "kiro"]
+        assert [row["id"] for row in body["protected"]] == ["agents", "steering", "skills", "hooks"]
+        resp = client.post("/api/acp-permissions", json={"mode": "manual"}).json()
+        assert resp["ok"] is True and "warning" not in resp
+        assert resp["mode"] == "manual"
+        assert resp["state"] == "on" and resp["in_effect"] is True
+        assert resp["generation_ok"] is True
+        assert config_mod.load_config().acp_permission_mode == "manual"
+        assert "# Permission mode: manual" in ap.derived_agent_path().read_text(encoding="utf-8")
+        assert client.get("/api/acp-permissions").json()["mode"] == "manual"
+        resp = client.post("/api/acp-permissions", json={"mode": "yolo"}).json()
+        assert resp["mode"] == "yolo" and resp["in_effect"] is True
 
     @pytest.mark.parametrize("body", [
-        {"enabled": "true"}, {"enabled": 1}, {"enabled": 0}, {"enabled": None},
-        {}, {"enabled": []}, {"other": True}, [],
+        {"mode": "auto"}, {"mode": "Manual"}, {"mode": "junk"}, {"mode": 1},
+        {"mode": None}, {}, {"enabled": True}, [], {"mode": ["manual"]},
     ])
-    def test_a_non_boolean_body_is_refused(self, client, isolated_config, body):
-        _write_base(isolated_config)
-        resp = client.post("/api/acp-permissions", json=body)
-        assert resp.json()["ok"] is False
-        assert client.get("/api/acp-permissions").json()["enabled"] is False
+    def test_an_unstorable_mode_is_refused(self, client, isolated_config, body):
+        """D-2: only `yolo` and `manual` can be stored; Auto is shown but not
+        selectable, and a case variant is refused rather than guessed at."""
+        from power_atlas import config as config_mod
+        resp = client.post("/api/acp-permissions", json=body).json()
+        assert resp["ok"] is False and resp["error"]
+        assert config_mod.load_config().acp_permission_mode == "yolo"
+        assert not (isolated_config / "config.toml").exists()
 
-    def test_the_post_regenerates_and_reports_what_is_in_effect(
-            self, client, isolated_config):
+    def test_a_save_failure_answers_ok_false_and_changes_nothing(
+            self, client, isolated_config, monkeypatch):
+        """D-32: nothing saved is `ok: false`, and the file is not touched."""
+        from power_atlas import config as config_mod
         ap = _agent_profile()
-        _write_base(isolated_config)
-        body = client.post("/api/acp-permissions", json={"enabled": True}).json()
-        assert body["state"] == "on"
-        assert body["in_effect"] is True
-        assert body["generation_ok"] is True
-        assert ap.derived_agent_path().exists()
 
-    def test_turning_the_posture_off_deletes_the_derived_agent(
-            self, client, isolated_config):
-        """Step 5 review: `off` must leave nothing selectable behind (P1)."""
-        ap = _agent_profile()
-        _write_base(isolated_config)
-        client.post("/api/acp-permissions", json={"enabled": True})
-        assert ap.derived_agent_path().exists()
-        body = client.post("/api/acp-permissions", json={"enabled": False}).json()
+        def boom(_config):
+            raise OSError(errno.EACCES, "denied")
+
+        monkeypatch.setattr(ap, "save_config", boom)
+        resp = client.post("/api/acp-permissions", json={"mode": "manual"}).json()
+        assert resp["ok"] is False and "not saved" in resp["error"]
+        assert config_mod.load_config().acp_permission_mode == "yolo"
         assert not ap.derived_agent_path().exists()
-        assert body["enabled"] is False
-        assert body["state"] == "absent"
-        assert body["in_effect"] is False
-        assert body["generation_ok"] is True, (
-            "absence is the healthy off state, not a failure")
-        assert body["generation_error"] == ""
 
-    def test_a_generation_failure_reports_on_but_not_in_effect(
+    def test_a_generation_failure_answers_ok_true_with_a_warning(
             self, client, isolated_config):
-        """SC-8: the panel is the whole failure surface -- no toast, no badge."""
-        # No base agent on disk, so generation cannot succeed.
-        resp = client.post("/api/acp-permissions", json={"enabled": True})
-        body = resp.json()
-        assert body["ok"] is True, "the setting is still recorded"
-        assert body["enabled"] is True
-        assert body["in_effect"] is False
-        assert body["generation_ok"] is False
-        assert body["generation_error"]
+        """D-32: saved but not in effect is `ok: true` plus a warning."""
+        from power_atlas import config as config_mod
+        ap = _agent_profile()
+        ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
+        ap.derived_agent_path().write_bytes(b"---\ndescription: mine\n---\nx\n")
+        resp = client.post("/api/acp-permissions", json={"mode": "manual"}).json()
+        assert resp["ok"] is True, "the setting is still recorded"
+        assert "not yet in effect" in resp["warning"]
+        assert "not written by PowerAtlas" in resp["warning"]
+        assert resp["generation_ok"] is False and resp["in_effect"] is False
+        assert config_mod.load_config().acp_permission_mode == "manual"
 
-    def test_the_base_agent_name_goes_through_save_setting(
-            self, client, isolated_config):
+    def test_the_base_agent_name_goes_through_apply_settings(
+            self, client, isolated_config, monkeypatch):
+        """D-33: saved and regenerated under the generation lock."""
         from power_atlas import config as config_mod
         ap = _agent_profile()
         _write_base(isolated_config, name="other_agent")
-        client.post("/api/acp-permissions", json={"enabled": True})
-        resp = client.post("/api/save-setting",
+        seen = []
+        real = ap.apply_settings
+
+        def spy(mutate=None):
+            seen.append(mutate)
+            return real(mutate)
+
+        monkeypatch.setattr(ap, "apply_settings", spy)
+        body = client.post("/api/save-setting",
                            json={"key": "acp_permission_base_agent",
-                                 "value": "other_agent"})
-        body = resp.json()
-        assert body["ok"] is True
-        assert body["restart_required"] is False
+                                 "value": "other_agent"}).json()
+        assert body["ok"] is True and body["restart_required"] is False
+        assert len(seen) == 1 and seen[0] is not None
         assert config_mod.load_config().acp_permission_base_agent == "other_agent"
-        assert ap.derived_agent_path().exists()
+        assert body["base_agent"] == "other_agent" and body["in_effect"] is True
 
-    def test_the_base_agent_name_write_reports_the_generation_outcome(
+    def test_a_missing_base_agent_is_generated_from_the_minimal_base(
             self, client, isolated_config):
-        """Step 5 review, Medium: a bare `{"ok": True}` hid a failed regen.
-
-        `POST /api/acp-permissions` already returned the full generation state;
-        this branch returned unqualified success for a rename whose
-        regeneration had failed, so the caller could not tell that the posture
-        had not moved with the setting.
-        """
-        from power_atlas import config as config_mod
-        _write_base(isolated_config)
-        client.post("/api/acp-permissions", json={"enabled": True})
-        # The new name has no file on disk, so regeneration cannot succeed.
+        """D-28 through the route: a name with no file still gets the floor,
+        and the panel is told which agent is in use."""
         body = client.post("/api/save-setting",
                            json={"key": "acp_permission_base_agent",
                                  "value": "no_such_agent"}).json()
+        assert body["ok"] is True and body["in_effect"] is True
+        assert "minimal agent" in body["generation_note"]
+
+    def test_the_base_agent_name_write_reports_a_generation_failure(
+            self, client, isolated_config):
+        """A bare `{"ok": True}` once hid a failed regeneration."""
+        from power_atlas import config as config_mod
+        ap = _agent_profile()
+        client.post("/api/acp-permissions", json={"mode": "manual"})
+        good = ap.derived_agent_path().read_bytes()
+        _write_base(isolated_config, name="other_agent")
+
+        def refused(path, text, verify):
+            # `_publish` only: `os.replace` is shared with `save_config`, and
+            # the setting itself must still save.
+            raise OSError(errno.EACCES, "denied")
+
+        with patch.object(ap, "_publish", refused):
+            body = client.post("/api/save-setting",
+                               json={"key": "acp_permission_base_agent",
+                                     "value": "other_agent"}).json()
         assert body["ok"] is True, "the setting is still recorded"
-        assert config_mod.load_config().acp_permission_base_agent == "no_such_agent"
-        assert body["base_agent"] == "no_such_agent"
-        assert body["generation_ok"] is False
-        assert body["generation_error"]
-        # D-10 kept the previously generated file, so the block on disk is
-        # still `on` -- built from the *old* base agent. That pairing
-        # (`state: on`, `generation_ok: false`) is exactly what the caller
-        # could not see before, and what tells the user the rename did not take
-        # effect.
+        assert config_mod.load_config().acp_permission_base_agent == "other_agent"
+        assert body["generation_ok"] is False and body["generation_error"]
+        assert "warning" in body
+        # The previous file is kept (D-10), and it still matches the mode and
+        # rules -- the block does not depend on the base agent -- so it is in
+        # effect, built from the previous base agent.
+        assert ap.derived_agent_path().read_bytes() == good
         assert body["state"] == "on"
 
     def test_an_unrelated_save_setting_key_keeps_its_narrow_response(
             self, client, isolated_config):
-        """Only the base-agent branch gained the generation fields."""
+        """Only the base-agent branch carries the generation fields."""
         resp = client.post("/api/save-setting",
                            json={"key": "remote_bind_address", "value": ""})
         assert set(resp.json()) == {"ok", "restart_required"}
@@ -24151,19 +24711,19 @@ class TestAcpPermissionRoutes:
         assert resp.json()["ok"] is False
         assert config_mod.load_config().acp_permission_base_agent == "kiro_default"
 
-    def test_a_base_agent_name_change_does_not_touch_the_boolean(
+    def test_a_base_agent_name_change_does_not_touch_the_mode(
             self, client, isolated_config):
         from power_atlas import config as config_mod
         _write_base(isolated_config, name="other_agent")
-        client.post("/api/acp-permissions", json={"enabled": True})
+        client.post("/api/acp-permissions", json={"mode": "manual"})
         client.post("/api/save-setting",
                     json={"key": "acp_permission_base_agent",
                           "value": "other_agent"})
-        assert config_mod.load_config().acp_permissions_enabled is True
+        assert config_mod.load_config().acp_permission_mode == "manual"
 
 
 class TestGenerationRunsAtStartup:
-    """D-9's first trigger point, through the existing `lifespan` seam."""
+    """The startup pass, through the existing `lifespan` seam."""
 
     @staticmethod
     def _fake_acp():
@@ -24204,39 +24764,20 @@ class TestGenerationRunsAtStartup:
 
     def test_lifespan_wires_the_mode_gate_to_the_derived_agent_state(
             self, isolated_config):
-        """`acp` refuses the derived agent as a modeId unless it is in effect,
+        """`acp` refuses Default and the derived agent unless it is in effect,
         and it learns that only through the hook `web.py` installs here --
-        `acp.py` may not import `agent_profile` (D-20). Asserted through the
-        real lifespan: the hook is registered once, answers True after an on
-        startup has generated the file, and False after an off startup has
-        deleted it.
-        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 2 review.
-        """
-        from power_atlas import config as config_mod
+        `acp.py` may not import `agent_profile`. The hook is registered once
+        and answers in effect after startup has generated the file.
+        260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 2 review."""
         from power_atlas import web as web_mod
-        ap = _agent_profile()
-        _write_base(isolated_config)
-        _enable_in_config(isolated_config)
         gates = self._run_lifespan_capturing_gate(web_mod)
         assert len(gates) == 1, f"expected one registration, got {gates!r}"
-        assert ap.derived_block_state() == "on"
-        assert gates[0]() is True
-
-        cfg = config_mod.load_config()
-        cfg.acp_permissions_enabled = False
-        config_mod.save_config(cfg)
-        gates = self._run_lifespan_capturing_gate(web_mod)
-        assert ap.derived_block_state() == "absent"
-        assert gates[0]() is False
+        assert gates[0]()["in_effect"] is True
 
     # ---- Default through the real gate ------------------------------------
-    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1): what
-    # the picker's Default binds, decided by `web._derived_agent_in_effect`
-    # (the same predicate as the settings panel's `in_effect`) over the real,
-    # redirected config and agents dir.
 
     @staticmethod
-    def _default_binds(acp_store, monkeypatch, tmp_path):
+    def _default_create(acp_store, monkeypatch, tmp_path):
         from power_atlas import web as web_mod
         acp_mod, _store = acp_store
         monkeypatch.setattr(acp_mod, "mode_gate_hook",
@@ -24251,99 +24792,70 @@ class TestGenerationRunsAtStartup:
         with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
             asyncio.run(acp_mod._handle_new(
                 conn, {"cwd": str(tmp_path), "mode": "kiro_default"}))
-        return seen["mode"]
+        errors = [f["payload"] for f in _queued(conn) if f.get("type") == "error"]
+        return seen["mode"], errors
 
+    @pytest.mark.parametrize("mode", ["yolo", "manual"])
     def test_default_binds_the_derived_agent_when_in_effect(
-            self, isolated_config, acp_store, monkeypatch, tmp_path):
+            self, isolated_config, acp_store, monkeypatch, tmp_path, mode):
         from power_atlas.config import DERIVED_AGENT_NAME
         ap = _agent_profile()
-        _write_base(isolated_config)
-        _enable_in_config(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
-        assert ap.derived_block_state() == "on"
-        assert self._default_binds(
-            acp_store, monkeypatch, tmp_path) == DERIVED_AGENT_NAME
+        _write_config(isolated_config, f'acp_permission_mode = "{mode}"\n')
+        ap.apply_settings(None)
+        bound, errors = self._default_create(acp_store, monkeypatch, tmp_path)
+        assert bound == DERIVED_AGENT_NAME and not errors
 
-    def test_default_binds_kiro_default_when_off(
+    def test_default_is_refused_before_the_first_generation(
             self, isolated_config, acp_store, monkeypatch, tmp_path):
-        _write_base(isolated_config)
-        assert self._default_binds(
-            acp_store, monkeypatch, tmp_path) == "kiro_default"
+        """No derived agent yet: D-34, not a floorless `kiro_default`."""
+        bound, errors = self._default_create(acp_store, monkeypatch, tmp_path)
+        assert bound == "not called"
+        assert "has not been written" in errors[0]["message"]
 
-    def test_default_binds_kiro_default_when_on_but_not_in_effect(
+    def test_default_is_refused_over_a_foreign_file(
             self, isolated_config, acp_store, monkeypatch, tmp_path):
-        """On, but no base agent on disk, so no derived agent was ever
-        generated: D-10's fallback, not a refusal."""
+        ap = _agent_profile()
+        ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
+        ap.derived_agent_path().write_bytes(b"---\ndescription: mine\n---\nx\n")
+        ap.apply_settings(None)
+        bound, errors = self._default_create(acp_store, monkeypatch, tmp_path)
+        assert bound == "not called"
+        assert "was not written by PowerAtlas" in errors[0]["message"]
+        assert "Remove or rename that file" in errors[0]["message"]
+
+    def test_lifespan_generates_the_derived_agent_in_the_default_mode(
+            self, isolated_config):
+        """A default configuration is Yolo, and Yolo still writes the floor
+        (D-8): there is no Off state that writes nothing."""
         from power_atlas import web as web_mod
         ap = _agent_profile()
-        _enable_in_config(isolated_config)
-        asyncio.run(web_mod._sync_derived_agent())  # guarded; it logs, not raises
-        assert ap.last_generation().ok is False
-        assert ap.derived_block_state() != "on"
-        assert web_mod._acp_permission_state(
-            web_mod.load_config())["in_effect"] is False
-        assert self._default_binds(
-            acp_store, monkeypatch, tmp_path) == "kiro_default"
-
-    def test_a_leftover_on_file_is_not_used_while_the_setting_is_off(
-            self, isolated_config, acp_store, monkeypatch, tmp_path):
-        """A derived agent that could not be deleted when the setting went off
-        still classifies as `"on"`. The gate is the full `in_effect`
-        predicate, so the setting being off wins."""
-        from power_atlas import web as web_mod
-        ap = _agent_profile()
-        _write_base(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
-        assert ap.derived_block_state() == "on"
-        from power_atlas import config as config_mod
-        assert config_mod.load_config().acp_permissions_enabled is False
-        assert web_mod._derived_agent_in_effect() is False
-        assert self._default_binds(
-            acp_store, monkeypatch, tmp_path) == "kiro_default"
-
-    def test_lifespan_generates_the_derived_agent(self, isolated_config):
-        from power_atlas import web as web_mod
-        ap = _agent_profile()
-        _write_base(isolated_config)
-        _enable_in_config(isolated_config)
         assert self._run_lifespan(
             web_mod, lambda: ap.derived_agent_path().exists()) is True
-        assert ap.derived_block_state() == "on"
-
-    def test_a_default_off_startup_writes_no_derived_agent(self, isolated_config):
-        """Step 5 review: a default configuration must touch `~/.kiro/` not at all.
-
-        The previous behaviour wrote an allow-all `poweratlas-acp.md` on every
-        startup regardless of the toggle, which put a selectable allow-all agent
-        into kiro-cli's mode catalogue (P1) for a user who had never opted in.
-        """
-        from power_atlas import web as web_mod
-        ap = _agent_profile()
-        _write_base(isolated_config)
-        self._run_lifespan(web_mod)
-        assert not ap.derived_agent_path().exists()
+        assert ap.derived_block_state(web_mod.load_config()) == "on"
         assert not ap._stage_path().exists()
-        assert ap.derived_block_state() == "absent"
         assert ap.last_generation().attempted is True
         assert ap.last_generation().ok is True
-        assert ap.last_generation().enabled is False
+        assert ap.last_generation().mode == "yolo"
 
-    def test_an_off_startup_removes_a_file_left_by_an_on_session(
+    def test_a_migrated_true_config_starts_in_manual_with_the_agents_block(
             self, isolated_config):
-        """The off transition is applied at startup too, not only on the write."""
+        """D-8, D-23: the old `true` becomes Manual seeded from the old overlay,
+        keeping its write deny on `**/.kiro/agents/**`."""
         from power_atlas import web as web_mod
         ap = _agent_profile()
-        _write_base(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
-        assert ap.derived_agent_path().exists()
+        _write_config(isolated_config, "acp_permissions_enabled = true\n")
         self._run_lifespan(web_mod)
-        assert not ap.derived_agent_path().exists()
+        rules = _parse_rules(ap.excise_permissions(
+            ap.derived_agent_path().read_text(encoding="utf-8"))[1])
+        assert {"capability": "fs_write",
+                "match": ["**/.kiro/agents/**", "**/kiro~*/agents/**"],
+                "effect": "deny"} in rules
+        assert "# Permission mode: manual" in ap.derived_agent_path().read_text(encoding="utf-8")
 
-    def test_an_off_startup_leaves_a_foreign_file_alone(self, isolated_config):
+    def test_startup_leaves_a_foreign_file_alone(self, isolated_config):
         """A hand-authored agent that took the name is the user's file."""
         from power_atlas import web as web_mod
         ap = _agent_profile()
-        _write_base(isolated_config)
         foreign = b"---\ndescription: mine\npermissions:\n  rules: []\n---\nx\n"
         ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
         ap.derived_agent_path().write_bytes(foreign)
@@ -24352,14 +24864,9 @@ class TestGenerationRunsAtStartup:
         assert ap.last_generation().ok is False
 
     def test_a_generation_failure_does_not_prevent_startup(self, isolated_config):
-        """A non-`AgentProfileError` is still not allowed to abort startup.
-
-        The typed error is what the module promises; the broad `except` is for
-        the bug it did not predict, and this asserts the broad half.
-        """
+        """A non-`AgentProfileError` is still not allowed to abort startup."""
         from power_atlas import web as web_mod
         ap = _agent_profile()
-        _write_base(isolated_config)
 
         def boom():
             raise RuntimeError("unexpected bug")
@@ -24367,16 +24874,15 @@ class TestGenerationRunsAtStartup:
         with patch.object(ap, "sync_from_config", boom):
             assert self._run_lifespan(web_mod, lambda: "started") == "started"
 
-    # -- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review --
-
     def test_a_predicted_generation_failure_is_logged_once(
             self, isolated_config, caplog):
-        """F10. `agent_profile` logs its own `AgentProfileError` and records
-        it for the panel; `_sync_derived_agent` used to log it a second time
-        with a traceback."""
+        """F10 of the prior plan's final review: `agent_profile` logs its own
+        failure and records it for the panel; the startup wrapper adds
+        nothing."""
         from power_atlas import web as web_mod
         ap = _agent_profile()
-        _enable_in_config(isolated_config)  # on, and no base agent on disk
+        ap.derived_agent_path().parent.mkdir(parents=True, exist_ok=True)
+        ap.derived_agent_path().write_bytes(b"---\ndescription: mine\n---\nx\n")
         with caplog.at_level(logging.INFO):
             asyncio.run(web_mod._sync_derived_agent())
         assert ap.last_generation().ok is False
@@ -24426,32 +24932,25 @@ class TestGenerationRunsAtStartup:
 
     def test_startup_keeps_a_valid_derived_agent_when_regen_fails(
             self, isolated_config):
-        """D-10: no base-agent fallback over a previously generated file."""
+        """D-10: a failed regeneration keeps the last good file."""
         from power_atlas import web as web_mod
         ap = _agent_profile()
-        base = _write_base(isolated_config)
-        _enable_in_config(isolated_config)
-        _regenerate(ap, enabled=True, base_agent="kiro_default")
+        _regenerate(ap, _cfg())
         good = ap.derived_agent_path().read_bytes()
-        # The base agent disappears, so the next regeneration cannot succeed.
-        base.unlink()
+        # A name that fails validation, so the next regeneration cannot succeed.
+        _write_config(isolated_config, 'acp_permission_base_agent = "../x"\n')
         assert self._run_lifespan(web_mod, lambda: "started") == "started"
+        assert ap.last_generation().ok is False
         assert ap.derived_agent_path().read_bytes() == good
-        assert ap.derived_block_state() == "on"
+        assert ap.derived_block_state(web_mod.load_config()) == "on"
 
     def test_the_settings_are_read_inside_the_generation_lock(
             self, isolated_config):
-        """Step 5 review, Low: a snapshot taken outside the lock can be stale.
-
-        `web.py` used to `load_config()` on the event loop and pass the values
-        into the threaded, locked work, so two rapid settings writes could each
-        capture a snapshot and then publish in scheduling order rather than in
-        the order they were saved. Asserted structurally: the read happens while
-        the lock is held.
-        """
+        """A snapshot taken outside the lock can be stale: two rapid settings
+        writes could each capture one and publish in scheduling order rather
+        than in the order they were saved. Asserted structurally."""
         from power_atlas import config as config_mod
         ap = _agent_profile()
-        _write_base(isolated_config)
         held = []
         real_load = config_mod.load_config
 
@@ -26964,8 +27463,10 @@ class TestAcpMcpStatusNotification:
         _queued(conn)  # drain
 
         async def run_handle_new():
+            # In effect: a Default create is refused otherwise
+            # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34).
             with patch.object(acp_mod, "_derived_mode_in_effect",
-                              AsyncMock(return_value=False)), \
+                              AsyncMock(return_value=True)), \
                  patch.object(acp_mod, "_resolve_session_cwd",
                               return_value="C:\\scratch"), \
                  patch.object(sv3, "new_session",
