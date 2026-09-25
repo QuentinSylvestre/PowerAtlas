@@ -1,7 +1,7 @@
 # Dashboard Overview: Live Session Tails, Active Plans and Usage Insights
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phases 1-2 complete, Phases 3-5 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 1-3 complete, Phases 4-5 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the dashboard's empty Transcript panel with an Overview (live session tails, active plans, 14-day usage insights), reachable again after a session is opened
 > **Estimated effort**: 2-4 days
@@ -606,11 +606,23 @@ QA (2026-09-25, live, after a restart the user granted for this plan): PASS, 9/9
 > **Rejected:** `presence.get_snapshot()` as a `to_thread` argument. It runs a 42–75 ms rescan on the loop. **Use instead:** call it inside the worker (D24).
 
 **Exit criteria**:
-- [ ] `pytest tests/test_web.py -k OverviewLive --timeout=300` and `node tests/acp_page.test.mjs` pass.
-- [ ] After a **user-approved restart**, the set of tile sids equals the rail rows with a status dot (all workspaces expanded, or compared by script against `/api/dashboard/sessions` rows with `availability=='held' or live`) plus held sessions without a rail row. Any difference is explained by D8.
-- [ ] A live Claude Code terminal session in a collapsed, unloaded workspace appears as a tile, and its `name` keeps its original case.
-- [ ] While a live session works, its tile shows ≥ 1 event and updates within about 3 s. Clicking the tile opens its transcript and marks its rail row `.viewing` immediately. Home returns.
-- [ ] With the Overview or the tab hidden, the Network log shows no `/overview/live` requests. Tiles never send `subscribe` (WS debug log).
+- [x] `pytest tests/test_web.py -k OverviewLive --timeout=300` and `node tests/acp_page.test.mjs` pass.
+- [x] After a **user-approved restart**, the set of tile sids equals the rail rows with a status dot (all workspaces expanded, or compared by script against `/api/dashboard/sessions` rows with `availability=='held' or live`) plus held sessions without a rail row. Any difference is explained by D8.
+- [x] A live Claude Code terminal session in a collapsed, unloaded workspace appears as a tile, and its `name` keeps its original case.
+- [x] While a live session works, its tile shows ≥ 1 event and updates within about 3 s. Clicking the tile opens its transcript and marks its rail row `.viewing` immediately. Home returns.
+- [x] With the Overview or the tab hidden, the Network log shows no `/overview/live` requests. Tiles never send `subscribe` (WS debug log).
+
+**Implementation (2026-09-25, code: 8952918)**
+
+Commit 8952918 fills the dashboard Overview's Live now section. In `src/power_atlas/presence.py`, `Snapshot` gains two accessors, `live_sids()` (provider, sid, normalized cwd) and `live_cwd_pairs()`, with no constructor change. In `src/power_atlas/overview.py`, which still never imports `web`, a `LiveDeps` NamedTuple carries the rail helpers that web.py passes in. `live_sessions(held, snapshot, filter_, deps, originals)` builds its candidates from three sources: held sessions; cmdline or sidecar ids, checked against `SESSION_ID_RE` (the same `(?:sess_)?UUID` pattern `/api/session-transcript` uses) before any lookup; and sessions in live cwds that pass the rail's `_session_is_live`. It drops hidden workspaces and providers the rail does not show. Every snapshot cwd goes through the discovered original spelling before `data.get_sessions`, and undiscovered cwds are never loaded. A held session with no store record becomes "New session". Tiles are sorted by transcript mtime, falling back to `updated_at`, and capped at 8. Availability (with v3 workspace hashes) and held status are computed only for the shown tiles. `tail_events(path, provider, n=5)` has its own widening loop, 64 KiB ×8 up to 2 MiB. It drops a leading partial line, skips lines over 256 KiB, turns v3 and Claude records into text, tool (≤80 chars) and result events (text ≤240 chars), logs only the path on failure, and is memoised per path on (mtime_ns, size). In `src/power_atlas/web.py`, `GET /api/dashboard/overview/live` (`Query(alias="filter")`, unknown values fall back to `all`, no-store, not in `_REMOTE_ALLOWED_PATHS`) captures `held` on the loop with the `acp is None` guard. `_overview_live` takes the presence snapshot inside the worker thread and builds `originals` and `LiveDeps` there. The rail filters were factored into `_overview_rail_filters()`, shared with Phase 2's `_overview_workspaces()`. In `src/power_atlas/templates/index.html`, inside the Overview region, `dashOverviewStart/Stop` now drive a 2 s poller with these rules: one request in flight, a generation counter that drops late responses, a 10 s backoff after errors, and a fetch only when the panel is in overview mode and the tab is visible. The same region adds the All/PowerAtlas filter, stored in `localStorage` under `pa_dash_ov_filter` inside try/catch. Tiles are built from DOM nodes only and reused per sid. Each shows a `dashRailDotClass` dot, a provider icon for a fixed set of providers only, the title, workspace and age, `idle Nm` dimming after 2 min, and the events (`›` for tools, ✓/✗ for results). Clicking a tile calls `openSessionTranscript({sid, provider, cwd}, tile, {cwd, name})`. Locked tiles are disabled and inert. With no live sessions the section reads "No live sessions". Styles are in `src/power_atlas/static/style.css`; none of the new elements is toggled with `hidden`. Tests are `TestOverviewLive` in `tests/test_web.py` and nine "dashboard overview live" checks in `tests/acp_page.test.mjs`.
+
+**Implementation (2026-09-25, code: 9bbf18b) — review fixes**
+
+Commit 9bbf18b applies all 13 review fixes to the Phase 3 live tiles. **Server side.** One bad transcript line now costs only that line, and the result is still memoised. The tail memo is a path-keyed LRU of 32 entries (`4 * LIVE_MAX_TILES`), so tabs with different filters no longer evict each other. Each widening step parses only the newly read bytes, and a line cut at the window edge is parsed whole on the next step. `tail_events` reuses the stat that `live_sessions` already took. Held sessions get no workspace-hash lookup; a v3 hash comes from the transcript path, otherwise there is one lookup per cwd per poll. The live route reuses the rail filters for 5 s. web.py validates session ids with `overview.SESSION_ID_RE` instead of its own copies. A held session with no transcript sorts first. **Client side.** One persistent tile grid, reordered without moving the focused tile; a tile is rebuilt only when its data changed. Each poll has its own `AbortController`, aborted on halt and after a 15 s timeout. **Tests.** New tests pin D8's hidden-workspace rule on the held path and the cmdline path, and the CRLF-fragile node slice is fixed. Consumers checked: `_tail_memo` (only `tail_events` and tests); `workspace_hashes` (read only by `_acp_availability`/`_lock_holder_v3`, which validate the name and fall back to a full scan, so the answer cannot change); `dashOverviewFetch` (the summary refresh still passes one argument); `tail_events` (only caller `live_sessions`); tile ordering (the body still holds a single child); `_overview_rail_filters` (the summary route still calls it uncached).
+
+Tests: node 871 passed; pytest 2706 passed, 2 skipped.
+
+QA (2026-09-25, live, after a restart the user granted for this plan): PASS, 20/20 checks (one measurement corrected below). The live route answers 403 without the cookie. **Parity:** the tile set equals the set of rail rows with a dot, collected by script from `/api/dashboard/sessions` across every group page and session page, including collapsed groups: 6 tiles, 6 rail rows, no difference either way. It includes a kiro-cli terminal session in the collapsed "Aruba" workspace (a locked tile), and a live Claude Code terminal session in the collapsed, unloaded `meeting_transcriber` workspace whose `name` keeps its original case. Every tile showed 5 events. The UI rendered 6 tiles and polled 2 times in 4.2 s; keyboard focus on a tile survived re-renders. Clicking a tile opened its transcript; clicking this session's tile marked both of its rendered rail rows `.viewing` immediately; Home returned. No `/overview/live` requests were made in 4.5 s with the transcript open, nor in 4.5 s with the tab hidden. No `subscribe` frame was sent by the tiles. **Held session:** a session created and prompted from `/acp` appeared as a "New session" tile in PowerAtlas; the PowerAtlas filter showed exactly that session. The tile showed a new prompt about 0.4 s after kiro-cli wrote its `user` record (13:13:33.98 written, tile updated about 13:13:34.4). The QA script's own "within 3 s of turn end" check reported 10.4 s because it matched the prompt text, not the reply, against the previous turn's end; the file timestamps above are the corrected measurement. The test session was closed and its directory deleted. No page errors.
 
 ### Phase 4: Usage insights [QA]
 **Goal**: The 14-day Usage section per D5.
@@ -783,7 +795,7 @@ Changes:
 |---|---|---|---|
 | 1 | Overview shell, navigation, detach | Done | code 11f444b, 8b7fe7a, 9c67735 |
 | 2 | Active plans | Done | code d198d70, 0c87284 |
-| 3 | Live now tiles | Pending | restart |
+| 3 | Live now tiles | Done | code 8952918, 9bbf18b |
 | 4 | Usage insights | Pending | restart |
 | 5 | Docs, roadmap and full QA | Pending | |
 
@@ -815,6 +827,23 @@ Phase 2:
 8. Beyond D21: the Status value is capped at 500 characters and its comment stripped without a regex; the deadline is checked per file; a `plans` folder resolving to a UNC path is skipped; symlinks are not followed; the read is capped in bytes. A dead mapped or `subst` drive remains a recorded residual risk. Reason: security review findings (regex hang, dead-share stalls, read TOCTOU).
 9. D23's single-flight is a lock held across check, scan and store. Reason: the simplest correct single-flight; waits are bounded by the 2 s scan deadline and run on worker threads.
 10. The workspace chip's `title` is the full cwd. Reason: two workspaces can share a basename (two "PowerAtlas" folders exist on this machine).
+
+Phase 3:
+
+1. A held session is dropped when its provider (kiro-cli-v3) is disabled or unavailable. Reason: D8's prose ("minus disabled providers") and the rail hide that provider's rows. This is stricter than D8's parity formula "∪ held sessions without a row", which the parity criterion is judged against with this reading.
+2. The per-case equality tests are one set-equality test covering every inclusion and exclusion together, plus separate tests for provider, filter, cap/order, original case and deleted transcript. Reason: one fixture makes an over-inclusive change fail; every case was mutation-verified.
+3. While the tab is hidden or the panel is not in overview mode, the 2 s timer keeps ticking without fetching; it is not stopped on visibilitychange. Reason: simplest correct loop; a tab shown again fetches within 2 s.
+4. The rail filters are factored into `_overview_rail_filters()` in web.py, shared with Phase 2's `_overview_workspaces()`; the live route reuses the result for 5 s. Reason: `_tag_keep` is an unimportable closure, and the per-poll `load_config()` cost 2.6–3.8 ms.
+5. New ids `dashOvLiveBody`, `dashOvLiveAll`, `dashOvLivePa` (`aria-pressed`). Reason: the node harness's element map is keyed by id.
+6. A failed first live load shows "Could not load live sessions."; later failures keep the tiles and back off to 10 s. Each request has an `AbortController`, aborted on halt and after 15 s (not 10 s, which the harness uses to recognise the backoff timer).
+7. Response shape `{filter, tiles}`; a tile's `live` is `session_is_live` for held sessions and true otherwise (the dot reads `availability == 'held'` first).
+8. The tail memo is a path-keyed LRU of `4 * LIVE_MAX_TILES` entries rather than a window-evicted map. Reason: pruning to each poll's paths made tabs with different filters evict each other (review finding).
+9. v3 workspace hashes come from the transcript path, held sessions get none, and at most one `hash_dir_for_cwd` lookup runs per cwd per poll. Reason: that lookup walks every v3 session dir (16–30 ms each); measured 52–90 ms per poll for 3 v3 tiles before the fix.
+10. The tile grid is persistent and patched in place; a tile is rebuilt only when its data changed. Reason: rebuilding every 2 s dropped keyboard focus (review finding).
+11. One bad transcript line (e.g. a Claude `user` record with `message: null`, or deeply nested JSON) is skipped silently and the rest of the tail is memoised. Reason: it previously emptied the tile and logged a traceback every 2 s; per-line logging would flood the log.
+12. A held session with no transcript and no `updated_at` sorts first, using the current time as its ordering key, while its displayed `last_activity` stays empty. Reason: otherwise a new held session could be cut by the 8-tile cap.
+13. Known gap (not fixed): a live session id whose process cwd could not be read (psutil access denied, no sidecar cwd) gets a rail dot but no tile, because `live_sids()` needs a cwd. None existed on 2026-09-25.
+14. Measured costs differ from §4 (2026-09-25, warm, 5 live sids, 8 candidate tiles): a presence rescan took 86–182 ms (§4: 42–75 ms; still in the worker per D24); a `discover_workspaces_with_counts` miss (130–211 ms) is paid by one poll every 30 s; a warm live poll took about 100–140 ms before the hash fix, most of it the v3 hash walk (divergence 9).
 
 ## Follow-up Work (Deferred)
 
@@ -933,6 +962,33 @@ Implementation health: Green.
 
 Cycle 2 was not run, per the user's 1-cycle cap. Finding 9 was raised by both personas. The fix sub-agent was interrupted once by an API session limit before editing any file, and was resumed with its context intact. The Senior engineer's read-only parity check over 47 real workspaces found every inclusion, exclusion, count and badge correct.
 
+### 2026-09-25 -- Implementation Review (after Phase 3, persona: Security auditor, Performance engineer, Senior engineer)
+
+Implementation health: Green.
+17 findings (0 High, 5 Medium, 12 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | A non-`ValueError` per-line error (null Claude `message`, deep nesting) emptied the tile, skipped the memo and logged a traceback every poll. | Fixed -- per-line `except Exception`, result memoised, poison-line tests (9bbf18b). |
+| 2 | Medium | D8's hidden-workspace rule was untested on the held path and the cmdline path; removing either check passed all tests. | Fixed -- both cases added to the set-equality test, mutation-verified (9bbf18b). |
+| 3 | Medium | Every 2 s poll rebuilt the tile grid, so a keyboard-focused tile lost focus. | Fixed -- persistent grid patched in place, node focus checks (9bbf18b). |
+| 4 | Medium | The v3 workspace-hash lookup walked every v3 session dir per tile per poll (52–90 ms for 3 tiles). | Fixed -- hash from the transcript path, none for held sids, one lookup per cwd (9bbf18b). |
+| 5 | Medium | Pruning the tail memo to each poll's paths made tabs with different filters evict each other. | Fixed -- LRU of `4 * LIVE_MAX_TILES`, with a filter-toggle test (9bbf18b). |
+| 6 | Low | The memo bound had no test. | Fixed -- bound and LRU-order tests, mutation-verified (9bbf18b). |
+| 7 | Low | Each poll ran `load_config()` and rebuilt the filter map. | Fixed -- rail filters reused for 5 s on the live route (9bbf18b). |
+| 8 | Low | A restart could overlap an in-flight request, and a hung request froze the tiles with no timeout. | Fixed -- per-generation `AbortController`, 15 s timeout (9bbf18b). |
+| 9 | Low | Each transcript was resolved and stat'd 3–4 times per poll. | Fixed -- `tail_events` reuses the activity-pass stat (9bbf18b). |
+| 10 | Low | The widening loop re-parsed the inner window at each step. | Fixed -- each step parses only the new bytes, boundary line carried (9bbf18b). |
+| 11 | Low | The session-id regex existed in three copies. | Fixed -- web.py uses `overview.SESSION_ID_RE` (9bbf18b). |
+| 12 | Low | A held "New session" with no transcript sorted last and could be cut by the cap. | Fixed -- sorts first, display unchanged (9bbf18b). |
+| 13 | Low | A Phase 2 node check sliced source with `"\n}\n"`, failing on CRLF checkouts. | Fixed -- normalised before slicing (9bbf18b). |
+| 14 | Low | A live sid with an unreadable cwd gets a rail dot but no tile; D8 does not name this. | Fixed -- recorded as a known gap in §9 (Phase 3 item 13). |
+| 15 | Low | Dropping held sessions of a disabled provider departs from D8's literal parity formula. | Fixed -- reading recorded in §9 (Phase 3 item 1). |
+| 16 | Low | Plan §4 cost figures no longer match measurement. | Fixed -- measured figures recorded in §9 (Phase 3 item 14). |
+| 17 | Low | §9 held no Phase 3 divergences at the reviewed commit. | Fixed -- recorded in §9 by the Step 7 plan update. |
+
+Cycle 2 was not run, per the user's 1-cycle cap. Findings 1, 2 and 3 were raised by two or three personas; 5 was rated Medium by the Security auditor and Low by the Performance engineer, merged at Medium. Two reviewers ran in CRLF worktrees, where one pre-existing Phase 2 node check failed (finding 13). The Senior engineer's read-only parity check found tiles and rail equal (8 = 8) on 2026-09-25, and `tail_events` returned 5 mixed events on the 12 largest and most recent real transcripts in 0.3–8.8 ms each.
+
 ## Harness Improvement Opportunities
 
 - The governance rule "a sub-agent's deliverable is a file" conflicts with the harness. All three
@@ -952,6 +1008,12 @@ Cycle 2 was not run, per the user's 1-cycle cap. Finding 9 was raised by both pe
   when a mutation went undetected. — cost: two wasted pytest runs, and a real risk of a false "this
   test pins it" claim — suggested change: add "set `PYTHONPATH=src` when running pytest from a
   worktree" to this project's AGENTS.md § Doc & Test Guidelines.
+- Harness worktrees for review sub-agents check out with `core.autocrlf=true`, while the main
+  tree stores LF, so a node test that slices template source on `"\n}\n"` fails only in the
+  reviewer's worktree. Two Phase 3 reviewers each spent turns proving the failure was
+  environmental. — cost: roughly 10 reviewer turns and one pre-existing defect discovered by
+  accident — suggested change: in this project's AGENTS.md § Doc & Test Guidelines, say that
+  source-slicing tests must normalise `\r\n` first.
 - User override of the per-phase review cycle cap: the default is 2 cycles (`/qdev` Step 6),
   overridden to 1 ("1 qreview cycle per phase", `/qdev` invocation, 2026-09-25). Recorded per
   `shared/AGENTS.md § Continuous Improvement`. — cost: none observed yet; a fix regression would
