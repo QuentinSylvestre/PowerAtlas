@@ -203,6 +203,10 @@ class GenerationStatus:
     mode: str = ""
     base_agent: str = ""
     note: str = ""
+    # The attempt was refused because config.toml did not parse, so `error` is
+    # only that; `clear_unreadable_status` drops it once the file reads cleanly
+    # and the agent file matches (Phase 1 re-review, finding 4).
+    unreadable_config: bool = False
 
 
 _status = GenerationStatus()
@@ -1181,12 +1185,32 @@ def config_load_error_message(config) -> str:
         return ""
     from . import config as config_mod
     path = config_mod.CONFIG_PATH
-    backup = path.with_name(path.name + ".bak")
+    # Names the `.bak` copy only when `load_config` wrote one (Phase 1
+    # re-review, finding 2).
     return (f"PowerAtlas's config.toml could not be read ({error}), so no "
             "setting was changed and the permission settings were not applied. "
             "Fix the file "
-            f"{path} by hand (a copy of the unreadable file was saved as "
-            f"{backup}), then save the mode again or restart PowerAtlas")
+            f"{path} by hand ({config_mod.unreadable_backup_note(config)}), "
+            "then save the mode again or restart PowerAtlas")
+
+
+def clear_unreadable_status(config) -> None:
+    """Drop a status that only says config.toml could not be read.
+
+    Phase 1 re-review, finding 4. Called with the lock held, by the gate, once
+    config.toml has loaded cleanly and the file on disk is exactly what it
+    compiles to: the user fixed the file by hand, and no regeneration was
+    needed to record that. The status then reports the settings in effect.
+    A D-28 note is not known here; the next regeneration restores it.
+    """
+    global _status
+    if not _status.unreadable_config or getattr(config, "_load_error", ""):
+        return
+    base = getattr(config, "acp_permission_base_agent", "")
+    _status = GenerationStatus(
+        attempted=True, ok=True, error="",
+        mode=str(getattr(config, "acp_permission_mode", "")),
+        base_agent=base if isinstance(base, str) else "")
 
 
 def _record_notice(mode: str, why: str) -> None:
@@ -1256,7 +1280,8 @@ def apply_settings(mutate: Callable[[object], None] | None = None, *,
             base = getattr(config, "acp_permission_base_agent", "")
             _status = GenerationStatus(
                 attempted=True, ok=False, error=load_error, mode="",
-                base_agent=base if isinstance(base, str) else "")
+                base_agent=base if isinstance(base, str) else "",
+                unreadable_config=True)
             log.error("derived agent not updated: %s", load_error)
             return {"saved": False, "generation_ok": False,
                     "generation_error": load_error, "error": load_error + "."}
@@ -1318,7 +1343,15 @@ def heal_stale_locked(config) -> bool:
     D-35's notice is raised naming the new mode. A hand edit of the file itself
     leaves the fingerprint alone and raises nothing. Returns whether the
     regeneration succeeded.
+
+    Refuses a config whose config.toml did not parse (Phase 1 re-review,
+    finding 5): it is the defaults, and healing from them would write the
+    least restrictive mode. The gate already checks; this is so a future
+    caller cannot skip that check.
     """
+    if getattr(config, "_load_error", ""):
+        log.warning("derived agent not healed: config.toml could not be read")
+        return False
     before = _fingerprint_on_disk()
     try:
         _apply_locked(config)

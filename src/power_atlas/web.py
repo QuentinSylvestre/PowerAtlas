@@ -36,7 +36,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .config import (load_config, save_config, get_active_launch_profile,
+from .config import (load_config, save_config, ConfigUnreadableError,
+                     unreadable_config_message, get_active_launch_profile,
                      LaunchProfile, ensure_remote_secret, load_remote_secret,
                      rotate_remote_secret, validate_remote_bind_address,
                      REMOTE_SECRET_MIN_LEN, REMOTE_SECRET_PATH,
@@ -604,8 +605,9 @@ def _not_in_effect_reason(state: str, compile_error: str, config,
         return (f"PowerAtlas's config.toml could not be read"
                 f"{said(load_error, ' ({})')}, so which permission mode is set "
                 "is unknown",
-                f"Fix {cfg} by hand (a copy of the unreadable file was saved as "
-                f"{cfg.name}.bak beside it), then start the session again.")
+                f"Fix {cfg} by hand "
+                f"({config_mod.unreadable_backup_note(config)}), then start "
+                "the session again.")
     if compile_error:
         return (f"the permission rules in config.toml cannot be applied"
                 f"{said(compile_error, ' ({})')}",
@@ -635,14 +637,47 @@ def _for_remote(text: str) -> str:
 
     Both separator spellings, case-insensitively on Windows, because the
     paths in a refusal come from `Path` objects and from kiro-cli's error text.
+
+    A folder is matched only as a whole path component: followed by a
+    separator or the end of the text, so `C:\\Users\\me2` is not shortened to
+    `~2`. PowerAtlas's config folder is replaced too when it is not under the
+    home folder (Linux `XDG_CONFIG_HOME`), before the home folder, so neither
+    reaches a remote client (Phase 1 re-review, finding 3).
     """
-    home = os.path.expanduser("~")
-    if not home or home == "~":
-        return text
-    for spelling in {home, home.replace("\\", "/"), home.replace("/", "\\")}:
-        flags = re.IGNORECASE if sys.platform == "win32" else 0
-        text = re.sub(re.escape(spelling), "~", text, flags=flags)
+    from . import config as config_mod
+    home = os.path.expanduser("~").rstrip("\\/")
+    if home == "~":
+        home = ""
+    folders: list[tuple[str, str]] = []
+    config_dir = str(config_mod.CONFIG_DIR).rstrip("\\/")
+    if config_dir and not (home and _path_within(config_dir, home)):
+        folders.append((config_dir, "<PowerAtlas config folder>"))
+    if home:
+        folders.append((home, "~"))
+    flags = re.IGNORECASE if sys.platform == "win32" else 0
+    # The deeper folder first, so a home folder inside the config folder (or
+    # the reverse) is shortened by its own name.
+    for folder, shown in sorted(folders, key=lambda f: len(f[0]), reverse=True):
+        for spelling in {folder, folder.replace("\\", "/"),
+                         folder.replace("/", "\\")}:
+            text = re.sub(re.escape(spelling) + r"(?=[\\/]|$)",
+                          lambda _m, s=shown: s, text, flags=flags)
     return text
+
+
+def _path_within(path: str, folder: str) -> bool:
+    """Whether `path` is `folder` or lies under it, compared as `_for_remote` does."""
+    norm = lambda p: p.replace("\\", "/").rstrip("/")  # noqa: E731
+    p, f = norm(path), norm(folder)
+    if sys.platform == "win32":
+        p, f = p.lower(), f.lower()
+    return p == f or p.startswith(f + "/")
+
+
+class _GateBudgetTimeout(TimeoutError):
+    """The gate's own wait ran out. Still a `TimeoutError`, which is what `acp`
+    reads as "being applied"; every other `TimeoutError` the gate meets is
+    re-raised as a failure (Phase 1 re-review, finding 6)."""
 
 
 def _derived_agent_in_effect() -> dict:
@@ -682,7 +717,7 @@ def _derived_agent_in_effect() -> dict:
     deadline = time.monotonic() + _GATE_LOCK_TIMEOUT_SECONDS
 
     def timed_out(what: str) -> TimeoutError:
-        return TimeoutError(
+        return _GateBudgetTimeout(
             f"the permission settings are being applied ({what}) and did not "
             f"finish within {_GATE_LOCK_TIMEOUT_SECONDS:.0f} s")
 
@@ -715,9 +750,25 @@ def _derived_agent_in_effect() -> dict:
             if not done.wait(max(0.0, deadline - time.monotonic())):
                 raise timed_out("regenerating the agent file")
             if "error" in box:
-                raise box["error"]
+                # Wrapped, so only this call's own budget reads as "being
+                # applied": a `TimeoutError` raised inside the regeneration is
+                # a failure, and `acp` must report it as one (Phase 1
+                # re-review, finding 6).
+                raise RuntimeError("regenerating the ACP agent file failed: "
+                                   f"{box['error']!r}") from box["error"]
             healed = box["healed"]
             state, compile_error = box["state"]
+        elif _permission_in_effect(state, config):
+            # config.toml reads cleanly again and the file already matches it:
+            # a "could not be read" status from earlier no longer holds
+            # (finding 4). The lock is still this call's here.
+            agent_profile.clear_unreadable_status(config)
+    except TimeoutError as exc:
+        if exc.__class__ is _GateBudgetTimeout:
+            raise
+        # Any other `TimeoutError` (from reading config.toml or the agent
+        # file) is a failure, not "being applied" (finding 6).
+        raise RuntimeError(f"the ACP permission check failed: {exc!r}") from exc
     finally:
         if not handed_off:
             lock.release()
@@ -881,6 +932,30 @@ templates = Jinja2Templates(
 # PowerAtlas, so a value fixed for the process lifetime is exactly as fresh
 # as the file it points at.
 templates.env.globals["static_version"] = str(int((_STATIC_DIR / "style.css").stat().st_mtime))
+
+
+@app.exception_handler(ConfigUnreadableError)
+async def _config_unreadable_refusal(request: Request, exc: ConfigUnreadableError):
+    """A route tried to save over a config.toml that did not parse.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL, Phase 1 re-review finding 1.
+    `save_config` refuses such a write, so every route that loads, changes and
+    saves the config answers here rather than with a bare 500 and none needs
+    its own check. `save_config` has already logged the refusal.
+
+    A JSON route gets `{"ok": false, "error": ...}` with 409. A route that
+    answers with a toast partial gets the same toast its own validation
+    refusals use, level `error`, with status 200: its callers show the body of
+    a 2xx response as a toast, and some of them drop a non-2xx body in favour
+    of a generic "failed" line, which would hide the fix.
+    """
+    message = str(exc)
+    route = request.scope.get("route")
+    response_class = getattr(route, "response_class", None)
+    if isinstance(response_class, type) and issubclass(response_class, HTMLResponse):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": message, "level": "error"})
+    return JSONResponse({"ok": False, "error": message}, status_code=409)
 
 
 # Loopback host names the server is legitimately reached by. Validating the Host
@@ -3529,6 +3604,12 @@ def _acp_delete_workspace_folder(cwd: str) -> tuple[bool, str]:
         return False, "Refusing to delete home directory or its parent."
     # --- Load, mutate, save config (all in this worker thread) ---
     config = load_config()
+    refusal = unreadable_config_message(config)
+    if refusal:
+        # Before anything is deleted: the final `save_config` would refuse this
+        # config (Phase 1 re-review, finding 1), leaving the folder gone and
+        # its workspace entries still in config.toml.
+        return False, refusal + "."
     _remove_workspace_from_config(cwd, config)
     if not p.exists():
         save_config(config)  # still clean config even if folder is gone

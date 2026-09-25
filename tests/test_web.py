@@ -24785,6 +24785,96 @@ class TestPermissionGate:
         assert "U+007F" not in verdict["remote_cause"]
         assert "cannot be applied" in verdict["remote_cause"]
 
+    def test_remote_wording_matches_whole_folders_and_the_config_folder(
+            self, isolated_config, monkeypatch):
+        """Phase 1 re-review, finding 3: a folder is shortened only as a whole
+        path component, and PowerAtlas's config folder is hidden too when it
+        is not under the home folder."""
+        from power_atlas import config as config_mod
+        from power_atlas import web as web_mod
+        # A sibling of the config folder, so the config folder is not under it.
+        home = str(isolated_config.parent / (isolated_config.name + "-home"))
+        real_expanduser = os.path.expanduser
+        monkeypatch.setattr(os.path, "expanduser",
+                            lambda p: home if p == "~" else real_expanduser(p))
+        sep = os.sep
+        text = f"{home}2{sep}x | {home}{sep}y | {home}"
+        assert web_mod._for_remote(text) == f"{home}2{sep}x | ~{sep}y | ~"
+        cfg_dir = str(config_mod.CONFIG_DIR)
+        shown = web_mod._for_remote(f"{cfg_dir}{sep}config.toml")
+        assert cfg_dir not in shown
+        assert shown == f"<PowerAtlas config folder>{sep}config.toml"
+        assert web_mod._for_remote(f"{cfg_dir}9{sep}x") == f"{cfg_dir}9{sep}x"
+        _write_config(isolated_config, "this is = not [ toml\n")
+        verdict = web_mod._derived_agent_in_effect()
+        assert cfg_dir in verdict["fix"]
+        assert cfg_dir not in verdict["remote_fix"]
+        assert "<PowerAtlas config folder>" in verdict["remote_fix"]
+
+    def test_a_fixed_config_clears_the_could_not_be_read_status(
+            self, isolated_config, client):
+        """Phase 1 re-review, finding 4: once config.toml reads cleanly again
+        and the file already matches it, the gate drops the old status."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        manual = 'acp_permission_mode = "manual"\n'
+        _write_config(isolated_config, manual)
+        assert ap.apply_settings(None)["generation_ok"] is True
+        agent = ap.derived_agent_path().read_bytes()
+        _write_config(isolated_config, "this is = not [ toml\n")
+        ap.sync_from_config()
+        assert ap.last_generation().unreadable_config is True
+        assert "could not be read" in client.get(
+            "/api/acp-permissions").json()["generation_error"]
+        _write_config(isolated_config, manual)
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is True and verdict["state"] == "on"
+        assert ap.derived_agent_path().read_bytes() == agent
+        last = ap.last_generation()
+        assert last.ok is True and last.error == "" and last.mode == "manual"
+        assert last.unreadable_config is False
+        state = client.get("/api/acp-permissions").json()
+        assert state["in_effect"] is True
+        assert state["generation_error"] == ""
+
+    def test_heal_refuses_a_config_that_did_not_load(self, isolated_config):
+        """Phase 1 re-review, finding 5: `heal_stale_locked` itself refuses the
+        defaults stand-in, whoever calls it."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        assert ap.apply_settings(None)["generation_ok"] is True
+        manual = ap.derived_agent_path().read_bytes()
+        _write_config(isolated_config, "this is = not [ toml\n")
+        config = web_mod.load_config()
+        assert config._load_error
+        assert ap.heal_stale_locked(config) is False
+        assert ap.derived_agent_path().read_bytes() == manual
+
+    def test_a_timeout_inside_the_heal_is_a_failure_not_being_applied(
+            self, isolated_config, monkeypatch):
+        """Phase 1 re-review, finding 6: only the gate's own budget reads as
+        "being applied"; a `TimeoutError` from inside the regeneration is
+        re-raised as a failure, so `acp` reports it as one."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_config(isolated_config, 'acp_permission_mode = "manual"\n')
+        assert ap.apply_settings(None)["generation_ok"] is True
+        path = ap.derived_agent_path()
+        path.write_bytes(path.read_bytes().replace(b"effect: ask",
+                                                   b"effect: allow", 1))
+
+        def broken_heal(_config):
+            raise TimeoutError("the disk did not answer")
+
+        monkeypatch.setattr(ap, "heal_stale_locked", broken_heal)
+        with pytest.raises(Exception) as caught:
+            web_mod._derived_agent_in_effect()
+        assert not isinstance(caught.value, TimeoutError)
+        assert isinstance(caught.value.__cause__, TimeoutError)
+        assert ap._generation_lock.acquire(timeout=5), "the lock was not released"
+        ap._generation_lock.release()
+
 
 class TestPostureNotice:
     """D-35's notice, on the paths Phase 1 review finding 3 named."""
@@ -25010,6 +25100,56 @@ class TestAcpPermissionRoutes:
         state = client.get("/api/acp-permissions").json()
         assert state["in_effect"] is False
         assert "could not be read" in state["config_error"]
+
+    def test_a_direct_writer_on_a_corrupt_config_is_refused(
+            self, client, isolated_config):
+        """Phase 1 re-review, finding 1: routes that load, change and save the
+        config themselves (pins, notifications, tags, launchers, ...) reach
+        `save_config`, which refuses the defaults stand-in. A JSON route
+        answers 409 `ok: false`, a toast route an error toast; the file keeps
+        its bytes and Manual is never converted to Yolo."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_config(isolated_config,
+                      'acp_permission_mode = "manual"\npinned_sessions = ["keep"]\n')
+        assert ap.apply_settings(None)["generation_ok"] is True
+        manual = ap.derived_agent_path().read_bytes()
+        corrupt = (b'acp_permission_mode = "manual"\npinned_sessions = ["keep"]\n'
+                   b'broken = [\n')
+        (isolated_config / "config.toml").write_bytes(corrupt)
+        for resp in (client.post("/api/pin-session", json={"session_id": "x"}),
+                     client.post("/api/notifications")):
+            assert resp.status_code == 409, resp.text
+            body = resp.json()
+            assert body["ok"] is False
+            assert "config.toml could not be read" in body["error"]
+            assert "by hand" in body["error"]
+            assert (isolated_config / "config.toml").read_bytes() == corrupt
+        toast = client.post("/api/tag/save", json={"tag": "t", "color": ""})
+        assert toast.status_code == 200
+        assert "config.toml could not be read" in toast.text
+        assert "error" in toast.text
+        assert (isolated_config / "config.toml").read_bytes() == corrupt
+        verdict = web_mod._derived_agent_in_effect()
+        assert verdict["in_effect"] is False
+        assert ap.derived_agent_path().read_bytes() == manual
+        assert client.get("/api/acp-permissions").json()["in_effect"] is False
+
+    def test_a_folder_delete_on_a_corrupt_config_deletes_nothing(
+            self, isolated_config, tmp_path):
+        """Phase 1 re-review, finding 1: the folder delete checks before it
+        removes anything, so a refused config save cannot leave the folder
+        gone and its workspace entries behind."""
+        from power_atlas import web as web_mod
+        folder = tmp_path / "work" / "area" / "project"
+        folder.mkdir(parents=True)
+        corrupt = b'pinned_sessions = ["keep"]\nbroken = [\n'
+        (isolated_config / "config.toml").write_bytes(corrupt)
+        deleted, error = web_mod._acp_delete_workspace_folder(str(folder))
+        assert deleted is False
+        assert "config.toml could not be read" in error
+        assert folder.is_dir()
+        assert (isolated_config / "config.toml").read_bytes() == corrupt
 
     def test_a_route_waits_a_bounded_time_for_the_lock(
             self, client, isolated_config, monkeypatch):

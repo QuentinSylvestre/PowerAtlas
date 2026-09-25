@@ -930,3 +930,47 @@ def test_a_corrupt_file_marks_the_load_error(tmp_path):
     cfg = load_config()
     assert getattr(cfg, "_load_error", "")
     assert cfg.acp_permission_mode == "yolo"
+
+
+def test_save_config_refuses_a_config_from_an_unreadable_file(tmp_path):
+    """Phase 1 re-review, finding 1: `save_config` is the choke point every
+    writer passes through, so the defaults that stand in for an unreadable
+    config.toml are never written over it -- not by any route."""
+    from power_atlas.config import ConfigUnreadableError
+    corrupt = b'acp_permission_mode = "manual"\npinned_sessions = ["keep"]\nbroken = [\n'
+    (tmp_path / "config.toml").write_bytes(corrupt)
+    cfg = load_config()
+    cfg.notifications = {"enabled": True}
+    with pytest.raises(ConfigUnreadableError) as caught:
+        save_config(cfg)
+    assert "config.toml" in str(caught.value)
+    assert "by hand" in str(caught.value)
+    assert (tmp_path / "config.toml").read_bytes() == corrupt
+    assert not (tmp_path / "config.tmp").exists()
+    # A clean load still saves.
+    (tmp_path / "config.toml").write_bytes(b'acp_permission_mode = "manual"\n')
+    fresh = load_config()
+    fresh.notifications = {"enabled": True}
+    save_config(fresh)
+    assert load_config().notifications == {"enabled": True}
+
+
+def test_the_backup_note_names_a_bak_only_when_one_was_written(
+        tmp_path, monkeypatch):
+    """Phase 1 re-review, finding 2: no message claims a `.bak` copy that
+    `load_config` failed to write."""
+    import power_atlas.config as config_mod
+    (tmp_path / "config.toml").write_text("not = [ toml", encoding="utf-8")
+    saved = load_config()
+    assert "config.toml.bak" in config_mod.unreadable_backup_note(saved)
+    assert "config.toml.bak" in config_mod.unreadable_config_message(saved)
+
+    def no_copy(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config_mod.shutil, "copy2", no_copy)
+    unsaved = load_config()
+    assert unsaved._load_error
+    note = config_mod.unreadable_backup_note(unsaved)
+    assert ".bak" not in note and "could not save a backup" in note
+    assert ".bak" not in config_mod.unreadable_config_message(unsaved)

@@ -704,9 +704,14 @@ def load_config() -> Config:
             try:
                 shutil.copy2(CONFIG_PATH, CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak"))
                 log.warning("Corrupt config backed up to %s; using defaults", CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak"))
+                backed_up = True
             except Exception:
                 log.warning("Corrupt config; using defaults (backup failed)")
+                backed_up = False
             config = _with_permission_defaults(Config())
+            # Whether the `.bak` copy exists, so no message claims one that
+            # was never written (Phase 1 re-review, finding 2).
+            config._load_error_backed_up = backed_up
             # The permission gate's self-heal must not regenerate the derived
             # agent from these defaults: they are not what the user set, and
             # the default mode is the least restrictive one.
@@ -845,8 +850,52 @@ def load_config() -> Config:
         return config
 
 
+class ConfigUnreadableError(RuntimeError):
+    """`save_config` was handed the stand-in for a config.toml that did not parse.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL, Phase 1 re-review finding 1.
+    The message is plain words for the user: it names config.toml and says to
+    fix it by hand.
+    """
+
+
+def unreadable_backup_note(config) -> str:
+    """What happened to the unreadable file's `.bak` copy, as one clause.
+
+    Read from what `load_config` recorded (finding 2): the copy is only named
+    when it was written. Paths are read at call time, because tests and
+    probes redirect `CONFIG_PATH`.
+    """
+    backup = CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak")
+    if getattr(config, "_load_error_backed_up", False):
+        return f"a copy of the unreadable file was saved as {backup}"
+    return "PowerAtlas could not save a backup copy of it, so keep one before editing"
+
+
+def unreadable_config_message(config) -> str:
+    """The refusal for a write over a config.toml that did not parse, or `""`."""
+    error = getattr(config, "_load_error", "")
+    if not error:
+        return ""
+    return (f"PowerAtlas's config.toml could not be read ({error}), so the "
+            f"change was not saved. Fix the file {CONFIG_PATH} by hand "
+            f"({unreadable_backup_note(config)}), then try again")
+
+
 def save_config(config: Config) -> None:
-    """Atomic write: .tmp → fsync → os.replace. Lock-protected."""
+    """Atomic write: .tmp → fsync → os.replace. Lock-protected.
+
+    Refuses, with `ConfigUnreadableError`, a `config` that `load_config`
+    produced from a file it could not read: that config is the defaults, and
+    writing it would replace the user's settings (the permission mode among
+    them, whose default is the least restrictive) with them. This is the one
+    choke point every writer passes through, so no route needs its own check.
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL, Phase 1 re-review finding 1.
+    """
+    refusal = unreadable_config_message(config)
+    if refusal:
+        log.warning("config.toml not saved: %s", refusal)
+        raise ConfigUnreadableError(refusal + ".")
     with _lock:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         tmp = CONFIG_PATH.with_suffix(".tmp")
