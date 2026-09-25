@@ -296,7 +296,7 @@ So the earlier finding that `modeId` is ignored on load holds only for a session
 
 **Shell patterns**
 - Literal and case-sensitive (F-4): `*.ssh*` does not match `.SSH`. `\` is a literal character, so `*.config\gcloud*` does not match `.config/gcloud` (P-0.3). `*.ssh*` also matches `notes.sshx` (P-0.3).
-- A command is split at `&&`, `;`, `|`, `&`, `||`, a newline, `$(…)` and inside `powershell -Command "…"`; each part is matched on its own (P-A2, P-0.8). The prompt's `consent.triggeringResource` names the part that hit the ask: the second part when the first was allowed (P-B), the first part under a bare ask row (Phase 3).
+- A command is split at `&&`, `;`, `|`, `&`, `||`, a newline and `$(…)`; each part is matched on its own (P-A2, P-0.8). A command wrapped in `powershell -Command "…"` is not split: it is matched as one string, so a block pattern such as `Remove-Item *` does not catch `powershell -Command "Remove-Item …"` (P-0.8i). The prompt's `consent.triggeringResource` names the part that hit the ask: the second part when the first was allowed (P-B), the first part under a bare ask row (Phase 3).
 - Output redirection is not a separator: `git status > x.txt` runs silently under `git status*` and writes the file with no `fs_write` check (P-0.8). A pattern without `*` matches the whole command exactly, so redirection and extra arguments fall to the ask (F-3).
 - Shell writes bypass every `fs_write` rule: `echo pwned > .kiro/agents/target.md` ran under an `fs_write` deny on that file (F-6).
 
@@ -307,7 +307,7 @@ So the earlier finding that `modeId` is ignored on load holds only for a session
 - An `fs_read` deny also filters the search tools: `grep_search` and `file_search` run but silently leave denied paths out of their results (P-0.1).
 
 **Rule composition**
-- An agent block with `all: allow` plus narrower `deny` rules refuses what the denies name and runs the rest with no prompt (P-A1). `deny` with `exclude` works, and a full Manual-shaped block loads without failing open (P-0.7). A blanket `ask` must carry `exclude` for any narrower `allow` to take effect (P-B, P-0.7).
+- An agent block with `all: allow` plus narrower `deny` rules refuses what the denies name and runs the rest with no prompt (P-A1). `deny` with `exclude` works, and a full Manual-shaped block loads without failing open (P-0.7). A blanket `ask` must carry `exclude` for any narrower `allow` to take effect: without it the ask still fires on what the `allow` names (`plans/done/260924-0525_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` § 9, Phase 0 Step 4); with it the `allow` runs silently (P-B, P-0.7).
 - `web_fetch`'s `consent.resource` is the host (`example.com`), not the URL, so only host patterns match (P-0.5). For `mcp`, `subagent` and `skill`, an allow pattern equal to `consent.resource` (`paecho/pa_echo`, `kiro_default`, `pa-probe-skill`) suppresses the prompt (P-0.9).
 - A sub-agent runs under the parent session's agent rules: `kiro_default` spawned from a probe agent was refused on the canary (P-0.12).
 - Non-ASCII patterns match: kiro-cli sends and reads plain UTF-8 (F-7).
