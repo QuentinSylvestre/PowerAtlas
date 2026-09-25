@@ -1338,6 +1338,45 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .dash-ov-ev-arg { margin-left: 6px; color: var(--text-dim); }
 .dash-ov-ev-result.is-ok { color: var(--success); }
 .dash-ov-ev-result.is-err { color: var(--amber); }
+/* Overview: Usage (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE). Provider
+   colours come from these fixed classes only, never from fetched data (D26).
+   None of these elements is toggled with `hidden`. */
+.dash-ov-title-note { margin-left: 6px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.dash-ov-usage-block + .dash-ov-usage-block, .dash-ov-legend + .dash-ov-usage-block { margin-top: 12px; }
+.dash-ov-usage-label { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; font-size: 11.5px; font-weight: 600; color: var(--text-muted); }
+.dash-ov-usage-scope { padding: 0 6px; border-radius: 4px; background: var(--surface); color: var(--text-dim); font-size: 10.5px; font-weight: 500; }
+.dash-ov-usage-ws { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dash-ov-usage-ws-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 12px; }
+.dash-ov-usage-ws-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-ov-usage-ws-time { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.dash-ov-usage-delta { flex-shrink: 0; min-width: 5.5em; text-align: right; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.dash-ov-usage-delta.is-up { color: var(--success); }
+.dash-ov-usage-delta.is-down { color: var(--amber); }
+.dash-ov-bars { display: flex; align-items: flex-end; gap: 3px; height: 56px; }
+.dash-ov-bar { display: flex; align-items: flex-end; flex: 1 1 0; min-width: 0; height: 100%; }
+.dash-ov-bar-stack { display: flex; flex-direction: column-reverse; width: 100%; min-height: 1px; border-radius: 2px 2px 0 0; overflow: hidden; background: var(--surface); }
+.dash-ov-bar-seg { flex-shrink: 0; width: 100%; }
+.dash-ov-bars-axis { display: flex; justify-content: space-between; margin-top: 2px; font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.dash-ov-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--text-muted); }
+.dash-ov-legend-item::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 2px; }
+.dash-ov-bar-seg.is-claude, .dash-ov-legend-item.is-claude::before { background: #d97757; }
+.dash-ov-bar-seg.is-kiro-cli, .dash-ov-legend-item.is-kiro-cli::before { background: var(--accent); }
+.dash-ov-bar-seg.is-kiro-ide, .dash-ov-legend-item.is-kiro-ide::before { background: #a78bfa; }
+.dash-ov-usage-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.dash-ov-tool-head { margin-bottom: 2px; font-size: 11px; color: var(--text-dim); }
+.dash-ov-tool-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.dash-ov-tool-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 11.5px; }
+.dash-ov-tool-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 10.5px; }
+.dash-ov-tool-cell { flex-shrink: 0; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.dash-ov-usage-line { font-size: 12px; color: var(--text-muted); }
+.dash-ov-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.dash-ov-chip { display: inline-flex; align-items: baseline; gap: 6px; padding: 1px 8px; border-radius: 10px; background: var(--surface); font-size: 11px; }
+.dash-ov-chip-n { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.dash-ov-usage-note { margin-top: 12px; font-size: 11px; font-style: italic; color: var(--text-dim); }
+.dash-ov-skel { display: flex; flex-direction: column; gap: 6px; }
+.dash-ov-skel-line { display: block; height: 10px; border-radius: 4px; background: var(--surface); }
+.dash-ov-skel-line:nth-of-type(2) { width: 80%; }
+.dash-ov-skel-line:nth-of-type(3) { width: 60%; }
 /* Home: back to the Overview, shown only while a session is open. Its
    inline-flex would beat the UA's [hidden] rule, hence the explicit pair. */
 .dash-home-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; }

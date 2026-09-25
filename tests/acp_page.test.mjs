@@ -12937,6 +12937,7 @@ const DASH_OVERVIEW_NAMES = [
   "function dashEscapeMayLeave", "_dashUserClosedSid", "_dashTranscriptLoaded",
   "_dashEmptyPlaceholder", "send('unsubscribe')",
   "function dashOvLiveTick", "function dashOvRenderLive", "function dashOvOpenTile",
+  "function dashOvRenderUsage",
 ];
 
 function dashPickerSource() {
@@ -13294,6 +13295,15 @@ function loadDashPicker(opts = {}) {
     loading.className = "dash-ov-loading";
     loading.textContent = "Loading…";
     byId.get("dashOvLiveBody").appendChild(loading);
+  }
+  // The Usage body, holding the markup's "Loading…" line until the first
+  // summary lands. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+  byId.set("dashOvUsageBody", new El("div"));
+  {
+    const loading = new El("div");
+    loading.className = "dash-ov-loading";
+    loading.textContent = "Loading…";
+    byId.get("dashOvUsageBody").appendChild(loading);
   }
   byId.set("dashOvLiveAll", new El("button"));
   byId.set("dashOvLivePa", new El("button"));
@@ -17722,6 +17732,185 @@ check("dashboard overview live: halting aborts the request in flight, and a requ
   await p.settle(); await p.settle();
   assert(p.timers.some((t) => t.ms === 10000), "a timed-out poll backs off to 10 s");
   assertEqual(p.el("dashOvLiveBody").textContent, "Could not load live sessions.");
+});
+
+// ---- Overview: Usage (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE) ------
+// SC-7, SC-8, D26. The renderer runs for real over the harness DOM, whose
+// innerHTML sink throws.
+
+function ovUsageDays(fill) {
+  const out = [];
+  for (let i = 0; i < 14; i += 1) {
+    out.push(Object.assign({ date: `2026-09-${String(12 + i).padStart(2, "0")}`,
+                             sessions: {}, agent_s: {} }, fill ? fill(i) : {}));
+  }
+  return out;
+}
+
+function ovUsage(over = {}) {
+  return Object.assign({
+    window_days: 14,
+    by_workspace: [
+      { cwd: "C:\\ws\\alpha", name: "alpha", this_week_s: 5400, last_week_s: 3600 },
+      { cwd: "C:\\ws\\beta", name: "beta", this_week_s: 600, last_week_s: 1800 },
+      { cwd: "C:\\ws\\gamma", name: "gamma", this_week_s: 120, last_week_s: 0 },
+    ],
+    daily: ovUsageDays((i) => (i === 13
+      ? { sessions: { "claude-code": 2, "kiro-cli-v3": 1, "kiro-ide": 1 },
+          agent_s: { "claude-code": 300, "kiro-cli-v3": 100 } }
+      : i === 12 ? { sessions: { "kiro-cli-v3": 1 }, agent_s: { "kiro-cli-v3": 800 } } : {})),
+    tools: { top: [{ name: "Bash", calls: 1200, fail_rate: 0.0333 }],
+             failing: [{ name: "shell", failed: 4, calls: 10 }] },
+    context_pressure: { sessions_over_80: 1, sessions_total: 5,
+                        top: [{ session_id: "sess_a", cwd: "C:\\ws\\alpha", name: "alpha", peak: 82.5 }] },
+    models: [{ model: "claude-opus-5-5", sessions: 3 }],
+    claude_tokens: { input: 1500, output: 2000000, cache_read: 9000000, cache_creation: 500000,
+                     cache_hit_ratio: 0.8547 },
+    reparsed: 0, aggregate_age_s: 0,
+  }, over);
+}
+
+function ovUsageBody(p) { return p.el("dashOvUsageBody"); }
+
+check("dashboard overview usage: while the server is warming, a skeleton, and the summary is fetched again 3 s later", async () => {
+  const p = loadDashPicker();
+  let body = { plans: [], usage: null, usage_state: "warming" };
+  const calls = [];
+  p.sandbox.fetch = (url) => {
+    calls.push(String(url));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+  };
+  p.sandbox._dashOverviewActive = true;
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  assert(ovUsageBody(p).querySelector(".dash-ov-skel"), "a skeleton while usage is null");
+  assertEqual(calls.length, 1);
+  const retry = p.timers.filter((t) => t.ms === 3000);
+  assertEqual(retry.length, 1, "one short re-fetch is scheduled");
+  body = { plans: [], usage: ovUsage(), usage_state: "ready" };
+  retry[0].fn();
+  await p.settle(); await p.settle();
+  assertEqual(calls.length, 2, "the re-fetch asks again");
+  assertEqual(ovUsageBody(p).querySelector(".dash-ov-skel"), null, "real data replaces the skeleton");
+  assertEqual(p.timers.filter((t) => t.ms === 3000).length, 1, "no further re-fetch once ready");
+});
+
+check("dashboard overview usage: the short re-fetch does nothing once the Overview is left", async () => {
+  const p = loadDashPicker();
+  const calls = ovSummaryFetch(p, { plans: [], usage: null, usage_state: "warming" });
+  p.sandbox._dashOverviewActive = true;
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  p.sandbox._dashOverviewActive = false;
+  p.timers.filter((t) => t.ms === 3000)[0].fn();
+  await p.settle();
+  assertEqual(calls.length, 1, "no fetch while a session is open");
+});
+
+check("dashboard overview usage: week, daily bars, tools, context, models and tokens, with their scope labels", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovUsage(), "ready");
+  const b = ovUsageBody(p);
+  const rows = b.querySelectorAll(".dash-ov-usage-ws-row");
+  assertEqual(rows.map((r) => r.querySelector(".dash-ov-usage-ws-name").textContent).join(","), "alpha,beta,gamma");
+  assertEqual(rows[0].querySelector(".dash-ov-usage-ws-time").textContent, "1h 30m");
+  assertEqual(rows[0].querySelector(".dash-ov-usage-delta").textContent, "▲ 30m");
+  assert(rows[0].querySelector(".dash-ov-usage-delta").classList.contains("is-up"));
+  assertEqual(rows[1].querySelector(".dash-ov-usage-delta").textContent, "▼ 20m");
+  assert(rows[1].querySelector(".dash-ov-usage-delta").classList.contains("is-down"));
+  assertEqual(rows[2].querySelector(".dash-ov-usage-delta").textContent, "new");
+  assertEqual(rows[0].querySelector(".dash-ov-usage-ws-name").title, "C:\\ws\\alpha");
+  const charts = b.querySelectorAll(".dash-ov-bars");
+  assertEqual(charts.length, 2, "agent time and sessions");
+  const [time, sessions] = charts.map((c) => c.querySelectorAll(".dash-ov-bar"));
+  assertEqual(time.length, 14);
+  assertEqual(sessions.length, 14);
+  // Agent time: day 12 (800 s) is the tallest; day 13 (400 s) half of it.
+  assertEqual(time[12].querySelector(".dash-ov-bar-stack").style.height, "100%");
+  assertEqual(time[13].querySelector(".dash-ov-bar-stack").style.height, "50%");
+  assertEqual(time[0].querySelector(".dash-ov-bar-stack").style.height, "0%");
+  const segs = time[13].querySelectorAll(".dash-ov-bar-seg");
+  assertEqual(segs.map((s) => s.className).join("|"),
+    "dash-ov-bar-seg is-claude|dash-ov-bar-seg is-kiro-cli");
+  assertEqual(segs.map((s) => s.style.height).join("|"), "75%|25%");
+  assertEqual(sessions[13].querySelectorAll(".dash-ov-bar-seg").length, 3, "Kiro IDE counts as sessions");
+  assertEqual(time[13].title, "2026-09-25: 7m");
+  assertEqual(b.querySelector(".dash-ov-legend").textContent, "Claude Codekiro-cliKiro IDE");
+  const tools = b.querySelectorAll(".dash-ov-tool-row");
+  assertEqual(tools[0].textContent, "Bash1.2k calls3% failed");
+  assertEqual(tools[1].textContent, "shell4 of 1040%");
+  const labels = b.querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent);
+  assert(labels.includes("Context pressurekiro-cli only"), `context is labelled kiro-cli only: ${labels}`);
+  assert(labels.includes("TokensClaude Code only"), `tokens are labelled Claude Code only: ${labels}`);
+  const lines = b.querySelectorAll(".dash-ov-usage-line").map((l) => l.textContent);
+  assertEqual(lines[0], "1 of 5 sessions reached 80% of the context window · highest 83% (alpha)");
+  assertEqual(lines[1], "Input 1.5k · Output 2.0M · Cache read 9.0M · Cache write 500.0k · Cache hit 85%");
+  assertEqual(b.querySelector(".dash-ov-chip").textContent, "claude-opus-5-53");
+  assertEqual(b.querySelector(".dash-ov-usage-note").textContent,
+    "Claude agent time is estimated from message timestamps.");
+});
+
+check("dashboard overview usage: markup in a workspace, tool or model name stays text, and bar heights are numbers only (D26)", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovUsage({
+    by_workspace: [{ cwd: OV_XSS, name: OV_XSS, this_week_s: OV_XSS, last_week_s: "1); x:y" }],
+    daily: ovUsageDays((i) => ({
+      date: OV_XSS,
+      sessions: { "kiro-cli-v3": "2; background:url(x)", evil: 5, __proto__: 9 },
+      agent_s: i === 3 ? { "claude-code": "50%; color:red", "kiro-cli-v3": 1e308 * 10 }
+                       : { "claude-code": -40, constructor: 7 },
+    })),
+    tools: { top: [{ name: OV_XSS, calls: OV_XSS, fail_rate: OV_XSS }],
+             failing: [{ name: OV_XSS, failed: OV_XSS, calls: OV_XSS }] },
+    context_pressure: { sessions_over_80: OV_XSS, sessions_total: 3,
+                        top: [{ session_id: OV_XSS, cwd: OV_XSS, name: OV_XSS, peak: "900" }] },
+    models: [{ model: OV_XSS, sessions: OV_XSS }, "not an object"],
+    claude_tokens: { input: OV_XSS, output: null, cache_read: -1, cache_creation: "x",
+                     cache_hit_ratio: OV_XSS },
+  }), "ready");
+  const b = ovUsageBody(p);
+  const allowed = new Set(["DIV", "SPAN", "UL", "LI"]);
+  for (const n of b.descendants()) {
+    assert(allowed.has(n.tagName), `no element may come from the data, got <${n.tagName}>`);
+    assertEqual(Object.keys(n._attrs).length, 0, `no attribute may come from the data, got ${Object.keys(n._attrs)}`);
+    assert(/^(dash-ov-[a-z0-9-]+)?( (is-[a-z-]+|dash-ov-[a-z0-9-]+))*$/.test(n.className),
+      `every class is a fixed one, got "${n.className}"`);
+    for (const key of Object.keys(n.style)) {
+      assertEqual(key, "height", `only bar heights are styled, got ${key}`);
+      assert(/^\d+(\.\d+)?%$/.test(n.style.height), `a height must be a clamped number, got ${n.style.height}`);
+      assert(parseFloat(n.style.height) <= 100, `clamped to 100%, got ${n.style.height}`);
+    }
+  }
+  assertEqual(b.querySelector(".dash-ov-usage-ws-name").textContent, OV_XSS, "shown as text");
+  assertEqual(b.querySelector(".dash-ov-usage-ws-name").title, OV_XSS, "the tooltip is text too");
+  assertEqual(b.querySelector(".dash-ov-tool-name").textContent, OV_XSS);
+  assertEqual(b.querySelector(".dash-ov-chip-name").textContent, OV_XSS);
+  assertEqual(b.querySelectorAll(".dash-ov-chip").length, 1, "a non-object model entry is skipped");
+  const segClasses = new Set(b.querySelectorAll(".dash-ov-bar-seg").map((s) => s.className));
+  for (const c of segClasses) {
+    assert(["dash-ov-bar-seg is-claude", "dash-ov-bar-seg is-kiro-cli", "dash-ov-bar-seg is-kiro-ide"].includes(c),
+      `a segment class comes from the fixed map, got ${c}`);
+  }
+});
+
+check("dashboard overview usage: a failed first load says so; a later failure or null keeps the data drawn", async () => {
+  const p = loadDashPicker();
+  p.sandbox.fetch = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  assertEqual(ovUsageBody(p).textContent, "Could not load usage.");
+  p.sandbox.dashOvRenderUsage(ovUsage(), "ready");
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  assert(ovUsageBody(p).querySelector(".dash-ov-usage-ws"), "a failed refresh keeps the rows");
+  p.sandbox.dashOvRenderUsage(null, "warming");
+  assert(ovUsageBody(p).querySelector(".dash-ov-usage-ws"), "and so does a null usage");
+});
+
+check("dashboard overview usage: an error state with nothing drawn says so", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(null, "error");
+  assertEqual(ovUsageBody(p).textContent, "Could not load usage.");
 });
 
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {

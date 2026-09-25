@@ -496,8 +496,8 @@
     <div class="dash-session-meta" id="dashSessionMeta" hidden></div>
     <!-- The Overview: what shows while no session is open. A sibling of the
          transcript pane, never inside it: #dashTranscript is wiped on every
-         load, and the signed-out check counts its children. Its sections are
-         placeholders until their own phases fill them.
+         load, and the signed-out check counts its children. Each section's
+         body holds "Loading…" until the Overview script's renderer fills it.
          260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D15 -->
     <div class="dash-overview" id="dashOverview">
       <section class="dash-ov-section" id="dashOvLive" aria-labelledby="dashOvLiveTitle">
@@ -517,8 +517,8 @@
         <div class="dash-ov-body" id="dashOvPlansBody"><div class="dash-ov-loading">Loading…</div></div>
       </section>
       <section class="dash-ov-section" id="dashOvUsage" aria-labelledby="dashOvUsageTitle">
-        <h3 class="dash-ov-title" id="dashOvUsageTitle">Usage</h3>
-        <div class="dash-ov-body"><div class="dash-ov-loading">Loading…</div></div>
+        <h3 class="dash-ov-title" id="dashOvUsageTitle">Usage <span class="dash-ov-title-note">last 14 days</span></h3>
+        <div class="dash-ov-body" id="dashOvUsageBody"><div class="dash-ov-loading">Loading…</div></div>
       </section>
     </div>
     <div class="acp-transcript-wrap" id="dashTranscriptWrap">
@@ -1204,8 +1204,11 @@ function dashOverviewRefreshSummary(){
   _dashOvSummaryBusy = true;
   dashOverviewFetch(DASH_OV_SUMMARY_URL).then(function(data){
     dashOvRenderPlans(data && data.plans);
+    dashOvRenderUsage(data && data.usage, data && data.usage_state);
+    if (data && data.usage == null && data.usage_state === 'warming') dashOvUsageRetrySoon();
   }).catch(function(){
     dashOvPlansFailed();
+    dashOvUsageFailed();
   }).then(function(){ _dashOvSummaryBusy = false; });
 }
 function dashOvText(tag, cls, text){
@@ -1623,6 +1626,281 @@ function dashOvLiveFailed(){
   if (kids.length === 1 && kids[0].className === 'dash-ov-loading') {
     body.textContent = '';
     body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load live sessions.'));
+  }
+}
+// ---- Usage (SC-7, SC-8) -----------------------------------------------------
+// 14 days of usage, from the summary route. `usage` is null while the
+// server's startup pass is still reading transcripts (usage_state
+// "warming"): the section shows a skeleton and the summary is fetched again
+// DASH_OV_USAGE_RETRY_MS later rather than at the next 60 s poll, so real data
+// replaces the skeleton within seconds. Built from DOM nodes only (D26):
+// workspace, tool and model names are free text from transcripts; the only
+// styles written are clamped numbers, and provider colours come from the
+// fixed class map below, never from the response.
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+var DASH_OV_USAGE_RETRY_MS = 3000;
+var _dashOvUsageRetry = null;
+// Whether real data was drawn: later nulls and failures keep it on screen.
+var _dashOvUsageDrawn = false;
+// [provider key, class, label], in drawing order.
+var DASH_OV_USAGE_PROVIDERS = [
+  ['claude-code', 'is-claude', 'Claude Code'],
+  ['kiro-cli-v3', 'is-kiro-cli', 'kiro-cli'],
+  ['kiro-ide', 'is-kiro-ide', 'Kiro IDE']
+];
+function dashOvUsageRetrySoon(){
+  if (_dashOvUsageRetry !== null) return;
+  _dashOvUsageRetry = setTimeout(function(){
+    _dashOvUsageRetry = null;
+    if (_dashOverviewActive && document.visibilityState !== 'hidden') dashOverviewRefreshSummary();
+  }, DASH_OV_USAGE_RETRY_MS);
+}
+// A number >= 0 from anything.
+function dashOvNum(v){
+  var n = Number(v);
+  return isFinite(n) && n > 0 ? n : 0;
+}
+function dashOvObj(v){ return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; }
+function dashOvArr(v){
+  return Array.isArray(v) ? v.filter(function(x){ return x && typeof x === 'object'; }) : [];
+}
+// A provider's value from a {provider: n} map: own keys only, so a
+// `__proto__` or `constructor` key in the response is never read.
+function dashOvOwn(map, key){
+  return Object.prototype.hasOwnProperty.call(map, key) ? dashOvNum(map[key]) : 0;
+}
+// "3h 20m" from seconds.
+function dashOvDuration(s){
+  var sec = dashOvNum(s);
+  if (sec < 60) return sec > 0 ? '<1m' : '0m';
+  var m = Math.round(sec / 60);
+  if (m < 60) return m + 'm';
+  var h = Math.floor(m / 60), r = m % 60;
+  return r ? h + 'h ' + r + 'm' : h + 'h';
+}
+// "1.2M" from a count.
+function dashOvCompact(v){
+  var n = dashOvNum(v);
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(Math.round(n));
+}
+// "12%" from a ratio in 0-1, clamped.
+function dashOvRatio(r){
+  var n = Number(r);
+  if (!isFinite(n)) n = 0;
+  return Math.round(Math.max(0, Math.min(1, n)) * 100) + '%';
+}
+function dashOvBlock(label, scope){
+  var block = document.createElement('div');
+  block.className = 'dash-ov-usage-block';
+  var head = document.createElement('div');
+  head.className = 'dash-ov-usage-label';
+  head.appendChild(dashOvText('span', 'dash-ov-usage-label-text', label));
+  if (scope) head.appendChild(dashOvText('span', 'dash-ov-usage-scope', scope));
+  block.appendChild(head);
+  return block;
+}
+function dashOvUsageWeek(rows){
+  var block = dashOvBlock('This week', '');
+  rows = dashOvArr(rows);
+  if (!rows.length) {
+    block.appendChild(dashOvText('div', 'dash-ov-empty', 'No agent time in the last 14 days'));
+    return block;
+  }
+  var list = document.createElement('ul');
+  list.className = 'dash-ov-usage-ws';
+  rows.forEach(function(r){
+    var li = document.createElement('li');
+    li.className = 'dash-ov-usage-ws-row';
+    var name = dashOvText('span', 'dash-ov-usage-ws-name', r.name);
+    name.title = r.cwd == null ? '' : String(r.cwd);
+    li.appendChild(name);
+    var now = dashOvNum(r.this_week_s), before = dashOvNum(r.last_week_s);
+    li.appendChild(dashOvText('span', 'dash-ov-usage-ws-time', dashOvDuration(now)));
+    var delta;
+    if (!before) {
+      delta = dashOvText('span', 'dash-ov-usage-delta is-new', 'new');
+    } else {
+      var up = now >= before;
+      delta = dashOvText('span', 'dash-ov-usage-delta ' + (up ? 'is-up' : 'is-down'),
+        (up ? '▲ ' : '▼ ') + dashOvDuration(Math.abs(now - before)));
+    }
+    delta.title = 'Last week: ' + dashOvDuration(before);
+    li.appendChild(delta);
+    list.appendChild(li);
+  });
+  block.appendChild(list);
+  return block;
+}
+// 14 stacked bars of `key` ("agent_s" or "sessions"), one segment per
+// provider. Heights are percentages of the tallest day, clamped by dashOvPct.
+function dashOvUsageBars(days, key, label, fmt){
+  var block = dashOvBlock(label, '');
+  var totals = days.map(function(d){
+    var m = dashOvObj(d[key]);
+    return DASH_OV_USAGE_PROVIDERS.reduce(function(sum, p){ return sum + dashOvOwn(m, p[0]); }, 0);
+  });
+  var max = totals.reduce(function(a, b){ return Math.max(a, b); }, 0);
+  var chart = document.createElement('div');
+  chart.className = 'dash-ov-bars';
+  days.forEach(function(d, i){
+    var m = dashOvObj(d[key]);
+    var col = document.createElement('div');
+    col.className = 'dash-ov-bar';
+    col.title = (d.date == null ? '' : String(d.date)) + ': ' + fmt(totals[i]);
+    var stack = document.createElement('div');
+    stack.className = 'dash-ov-bar-stack';
+    stack.style.height = dashOvPct(totals[i], max) + '%';
+    DASH_OV_USAGE_PROVIDERS.forEach(function(p){
+      var v = dashOvOwn(m, p[0]);
+      if (!v) return;
+      var seg = document.createElement('div');
+      seg.className = 'dash-ov-bar-seg ' + p[1];
+      seg.style.height = dashOvPct(v, totals[i]) + '%';
+      stack.appendChild(seg);
+    });
+    col.appendChild(stack);
+    chart.appendChild(col);
+  });
+  block.appendChild(chart);
+  if (days.length) {
+    var axis = document.createElement('div');
+    axis.className = 'dash-ov-bars-axis';
+    axis.appendChild(dashOvText('span', '', days[0].date));
+    axis.appendChild(dashOvText('span', '', 'today'));
+    block.appendChild(axis);
+  }
+  return block;
+}
+function dashOvUsageLegend(){
+  var legend = document.createElement('div');
+  legend.className = 'dash-ov-legend';
+  DASH_OV_USAGE_PROVIDERS.forEach(function(p){
+    legend.appendChild(dashOvText('span', 'dash-ov-legend-item ' + p[1], p[2]));
+  });
+  return legend;
+}
+function dashOvToolList(title, rows, cells, empty){
+  var wrap = document.createElement('div');
+  wrap.className = 'dash-ov-tool-table';
+  wrap.appendChild(dashOvText('div', 'dash-ov-tool-head', title));
+  if (!rows.length) {
+    wrap.appendChild(dashOvText('div', 'dash-ov-empty', empty));
+    return wrap;
+  }
+  var list = document.createElement('ul');
+  list.className = 'dash-ov-tool-list';
+  rows.forEach(function(t){
+    var li = document.createElement('li');
+    li.className = 'dash-ov-tool-row';
+    li.appendChild(dashOvText('span', 'dash-ov-tool-name', t.name));
+    cells(t).forEach(function(c){ li.appendChild(dashOvText('span', 'dash-ov-tool-cell', c)); });
+    list.appendChild(li);
+  });
+  wrap.appendChild(list);
+  return wrap;
+}
+function dashOvUsageTools(tools){
+  tools = dashOvObj(tools);
+  var block = dashOvBlock('Tool reliability', '');
+  var grid = document.createElement('div');
+  grid.className = 'dash-ov-usage-tools';
+  grid.appendChild(dashOvToolList('Most used', dashOvArr(tools.top), function(t){
+    return [dashOvCompact(t.calls) + ' calls', dashOvRatio(t.fail_rate) + ' failed'];
+  }, 'No tool calls'));
+  grid.appendChild(dashOvToolList('Most failing this week', dashOvArr(tools.failing), function(t){
+    var calls = dashOvNum(t.calls), failed = dashOvNum(t.failed);
+    return [dashOvCount(failed) + ' of ' + dashOvCount(calls), dashOvRatio(calls ? failed / calls : 0)];
+  }, 'No failing tools'));
+  block.appendChild(grid);
+  return block;
+}
+function dashOvUsageContext(cp){
+  cp = dashOvObj(cp);
+  var block = dashOvBlock('Context pressure', 'kiro-cli only');
+  var total = dashOvCount(cp.sessions_total), over = dashOvCount(cp.sessions_over_80);
+  var text = total
+    ? over + ' of ' + total + ' sessions reached 80% of the context window'
+    : 'No kiro-cli sessions in the last 14 days';
+  var top = dashOvArr(cp.top)[0];
+  if (top) {
+    text += ' · highest ' + Math.round(Math.max(0, Math.min(100, dashOvNum(top.peak)))) + '%';
+    if (top.name) text += ' (' + String(top.name) + ')';
+  }
+  block.appendChild(dashOvText('div', 'dash-ov-usage-line', text));
+  return block;
+}
+function dashOvUsageModels(models){
+  var block = dashOvBlock('Models', '');
+  models = dashOvArr(models);
+  if (!models.length) {
+    block.appendChild(dashOvText('div', 'dash-ov-empty', 'No model recorded'));
+    return block;
+  }
+  var chips = document.createElement('div');
+  chips.className = 'dash-ov-chips';
+  models.forEach(function(m){
+    var chip = document.createElement('span');
+    chip.className = 'dash-ov-chip';
+    chip.appendChild(dashOvText('span', 'dash-ov-chip-name', m.model));
+    chip.appendChild(dashOvText('span', 'dash-ov-chip-n', dashOvCount(m.sessions)));
+    chips.appendChild(chip);
+  });
+  block.appendChild(chips);
+  return block;
+}
+function dashOvUsageTokens(t){
+  t = dashOvObj(t);
+  var block = dashOvBlock('Tokens', 'Claude Code only');
+  block.appendChild(dashOvText('div', 'dash-ov-usage-line',
+    'Input ' + dashOvCompact(t.input) + ' · Output ' + dashOvCompact(t.output) +
+    ' · Cache read ' + dashOvCompact(t.cache_read) + ' · Cache write ' + dashOvCompact(t.cache_creation) +
+    ' · Cache hit ' + dashOvRatio(t.cache_hit_ratio)));
+  return block;
+}
+function dashOvUsageSkeleton(){
+  var wrap = document.createElement('div');
+  wrap.className = 'dash-ov-skel';
+  wrap.appendChild(dashOvText('div', 'dash-ov-loading', 'Reading the last 14 days of transcripts…'));
+  for (var i = 0; i < 3; i++) wrap.appendChild(dashOvText('span', 'dash-ov-skel-line', ''));
+  return wrap;
+}
+function dashOvRenderUsage(usage, state){
+  var body = document.getElementById('dashOvUsageBody');
+  if (!body) return;
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
+    if (_dashOvUsageDrawn) return;
+    body.textContent = '';
+    if (state === 'error') body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load usage.'));
+    else body.appendChild(dashOvUsageSkeleton());
+    return;
+  }
+  _dashOvUsageDrawn = true;
+  body.textContent = '';
+  var days = dashOvArr(usage.daily).slice(-14);
+  body.appendChild(dashOvUsageWeek(usage.by_workspace));
+  body.appendChild(dashOvUsageBars(days, 'agent_s', 'Agent time per day', dashOvDuration));
+  body.appendChild(dashOvUsageBars(days, 'sessions', 'Sessions per day',
+    function(n){ return dashOvCount(n) + ' sessions'; }));
+  body.appendChild(dashOvUsageLegend());
+  body.appendChild(dashOvUsageTools(usage.tools));
+  body.appendChild(dashOvUsageContext(usage.context_pressure));
+  body.appendChild(dashOvUsageModels(usage.models));
+  body.appendChild(dashOvUsageTokens(usage.claude_tokens));
+  body.appendChild(dashOvText('div', 'dash-ov-usage-note',
+    'Claude agent time is estimated from message timestamps.'));
+}
+// A failed summary keeps usage already drawn; only a section still showing
+// its first "Loading…" says so.
+function dashOvUsageFailed(){
+  var body = document.getElementById('dashOvUsageBody');
+  if (!body || _dashOvUsageDrawn) return;
+  var kids = body.children || body.childNodes || [];
+  if (kids.length === 1 && kids[0].className === 'dash-ov-loading') {
+    body.textContent = '';
+    body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load usage.'));
   }
 }
 // The transcript pane. Called before anything is drawn into it: opening a

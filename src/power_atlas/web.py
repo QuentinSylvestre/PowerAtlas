@@ -762,6 +762,14 @@ async def lifespan(app_instance):
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F5)
     await _startup_load_local_secret()
     task =asyncio.create_task(_background_refresh())
+    # The Overview's Usage warm pass (D12): parses the in-window transcripts
+    # into `overview`'s memo once after startup, in its own thread, so the
+    # first Usage request finds it filled. A task of its own, so the 30 s
+    # refresh above is unchanged; `usage_stop` is checked between files, so a
+    # shutdown mid-pass waits for one file at most.
+    # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    usage_stop = threading.Event()
+    usage_task = asyncio.create_task(asyncio.to_thread(overview.warm_usage, usage_stop))
     # Guarded exactly as the teardown below is. An `acp` import failure is
     # designed to degrade to "/acp disabled" (see the import at the top of this
     # module); an unguarded start here would promote it to "the application
@@ -805,6 +813,8 @@ async def lifespan(app_instance):
         yield
     finally:
         task.cancel()
+        usage_stop.set()
+        usage_task.cancel()
         if sweeper is not None:
             sweeper.cancel()
         if watchdog is not None:
@@ -816,7 +826,7 @@ async def lifespan(app_instance):
             # propagate whatever any task raised on its way out, so there is no
             # exception here that could skip `acp.shutdown()`.
             await asyncio.gather(
-                *(t for t in (task, sweeper, watchdog) if t is not None),
+                *(t for t in (task, usage_task, sweeper, watchdog) if t is not None),
                 return_exceptions=True)
         finally:
             # Nested, so that the ACP teardown is not conditional on how the
@@ -3302,8 +3312,8 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
 #
 # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE. The Overview is what the
 # dashboard's right panel shows while no session is open. This route feeds its
-# Active plans section (SC-6) and, from a later step of the same plan, its
-# Usage section; the page polls it with the rail's 60 s refresh. Loopback-only
+# Active plans section (SC-6) and its Usage section (SC-7, SC-8); the page
+# polls it with the rail's 60 s refresh. Loopback-only
 # (SC-10): it is deliberately absent from `_REMOTE_ALLOWED_PATHS`, so the
 # `pa_local` cookie gate covers it and a remote peer is refused.
 
@@ -3367,21 +3377,27 @@ def _overview_summary() -> dict:
     others wait for it and then find it fresh. The wait is bounded by the
     scan's own deadline (`overview.scan_plans`, D21), and every caller is
     already on a worker thread. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+
+    Usage comes from `overview.usage_payload`, which owns its own 30 s reuse
+    and single-flight, and applies the rail's filters (`_overview_rail_filters`)
+    only when it computes.
     """
     with _overview_plans_lock:
         at, plans = _overview_plans_cache
         if plans is None or time.monotonic() - at >= _OVERVIEW_PLANS_REUSE_SECONDS:
             plans = overview.scan_plans(_overview_workspaces())
             _overview_plans_cache[:] = [time.monotonic(), plans]
-    return {"plans": plans, "usage": None, "usage_state": "cold"}
+    usage, usage_state = overview.usage_payload(_overview_rail_filters)
+    return {"plans": plans, "usage": usage, "usage_state": usage_state}
 
 
 @app.get(_DASHBOARD_OVERVIEW_SUMMARY_PATH)
 async def api_dashboard_overview_summary(response: Response):
-    """Active plans across the rail-visible workspaces, for the Overview.
+    """Active plans and 14-day usage, for the Overview.
 
-    `plans` is `overview.scan_plans`'s list. `usage` and `usage_state` are the
-    Usage section's slot, `None` and `"cold"` until that section is built.
+    `plans` is `overview.scan_plans`'s list. `usage` is
+    `overview.usage_summary`'s aggregate, or `None` while `usage_state` is
+    `"warming"` (the startup pass is still running) or `"error"`.
     """
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(_overview_summary)

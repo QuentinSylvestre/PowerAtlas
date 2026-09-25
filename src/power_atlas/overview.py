@@ -776,3 +776,594 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
             "events": events,
         })
     return tiles
+
+
+# --- Usage -------------------------------------------------------------------
+#
+# SC-7/SC-8: 14 days of usage, computed in memory from the transcript stores.
+# A per-file summary is memoised on `(mtime_ns, size)` (D22), a warm pass fills
+# the memo after startup (D12), and a request re-parses only files that changed
+# since. Nothing is written to disk. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+#
+# Definitions the section is built on:
+#
+# - Days are local calendar days. The window is today and the 13 days before.
+# - "This week" is the last 7 days of the window, today included; "last week"
+#   is the 7 before. A 14-day window cannot hold two calendar weeks.
+# - Agent time, kiro-cli v3: the sum of `usage_summary.payload.elapsedTime`,
+#   which is **milliseconds** (verified 2026-09-25 against 399 turns: it equals
+#   the `turn_start` -> `usage_summary` timestamp span to within 0.3 %; see
+#   docs/KNOWLEDGE.md), on the local day of that record.
+# - Agent time, Claude Code (an estimate): each turn runs from a prompt record
+#   to the last assistant record before the next prompt, capped at
+#   `CLAUDE_TURN_CAP_SECONDS`, on the prompt's local day. A prompt is a `user`
+#   record that is not `isMeta` and whose content is a non-empty string, or a
+#   list with no `tool_result` block.
+# - Tool calls, failures and Claude tokens are counted on the local day of
+#   their own record, so a long session modified inside the window contributes
+#   only its in-window days.
+# - Claude tokens are counted once per `message.id`: Claude Code writes one
+#   record per content block and repeats the message's `usage` on each
+#   (measured 2026-09-25: 975 of 1,848 assistant records in one file were such
+#   repeats, none with a different `usage`).
+# - Kiro IDE contributes sessions per day only, from `dateCreated` in its
+#   `sessions.json` files (D25); it records no durations and no tools.
+
+USAGE_WINDOW_DAYS = 14
+USAGE_MAX_LINE_BYTES = 8 * 1024 * 1024
+CLAUDE_TURN_CAP_SECONDS = 30 * 60
+USAGE_REUSE_SECONDS = 30.0
+CONTEXT_PRESSURE_PERCENT = 80.0
+_USAGE_TOP_WORKSPACES = 8
+_USAGE_TOP_TOOLS = 8
+_USAGE_TOP_FAILING = 5
+_USAGE_FAILING_MIN_CALLS = 3
+_USAGE_TOP_CONTEXT = 5
+_USAGE_TOP_MODELS = 8
+# A kiro-cli `session.json` or a Kiro IDE `sessions.json` larger than this is
+# not read; real ones are a few KiB.
+_USAGE_SIDE_FILE_MAX = 8 * 1024 * 1024
+_V3 = "kiro-cli-v3"
+_CLAUDE = "claude-code"
+_IDE = "kiro-ide"
+# Record types that mark a kiro-cli v3 session as active on their day.
+_V3_ACTIVE_TYPES = frozenset({"user", "assistant", "tool_call", "tool_result",
+                              "turn_start", "usage_summary"})
+_TOKEN_KEYS = (("input", "input_tokens"), ("output", "output_tokens"),
+               ("cache_read", "cache_read_input_tokens"),
+               ("cache_creation", "cache_creation_input_tokens"))
+
+# Path-keyed memo of file summaries (D22): path -> (mtime_ns, size, summary).
+# Each complete pass evicts the paths that left the window.
+_usage_memo: dict[str, tuple[int, int, dict]] = {}
+_usage_memo_lock = threading.Lock()
+
+# `cold` until the warm pass starts, `warming` while it runs, then `ready`, or
+# `error` when it failed as a whole. A one-element list so tests can reset it.
+_usage_state: list[str] = ["cold"]
+# The last aggregate: (monotonic time it was computed, payload). Reused for
+# `USAGE_REUSE_SECONDS` (D23); the lock makes the computation single-flight.
+_usage_cache: list = [0.0, None]
+_usage_compute_lock = threading.Lock()
+
+
+def _usage_roots() -> tuple[Path, Path, Path]:
+    """The three stores' roots: kiro-cli v3 sessions, Claude Code projects and
+    the Kiro IDE workspace sessions. Read from their modules at call time, so a
+    test that points a constant at a fixture is honoured; one seam, so the test
+    suite can point every usage read at an empty folder without touching the
+    constants other readers use."""
+    from . import data_claude, data_kiro_ide, status_classifier
+    return (Path(status_classifier._V3_SESSIONS_ROOT), Path(data_claude.CLAUDE_PROJECTS_DIR),
+            Path(data_kiro_ide.SESSIONS_DIR))
+
+
+def usage_state() -> str:
+    return _usage_state[0]
+
+
+def _set_usage_state(state: str) -> None:
+    _usage_state[0] = state
+
+
+def _iter_lines(fh, limit: int):
+    """The file's lines, skipping any longer than `limit` bytes without holding
+    more than `limit + 1` bytes of one in memory."""
+    while True:
+        line = fh.readline(limit + 1)
+        if not line:
+            return
+        if len(line) > limit:
+            while line and not line.endswith(b"\n"):
+                line = fh.readline(1024 * 1024)
+            continue
+        yield line
+
+
+def _epoch(ts) -> float | None:
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _local_day(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).date().isoformat()
+
+
+def _new_day() -> dict:
+    return {"active": False, "agent_seconds": 0.0, "tools": {},
+            "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}}
+
+
+def _tool_slot(day: dict, name: str) -> dict:
+    return day["tools"].setdefault(name, {"calls": 0, "failed": 0})
+
+
+def _read_small_json(path: Path):
+    """A small JSON side file (`session.json`, `sessions.json`), or None. A
+    byte-order mark is accepted: one real Kiro IDE `sessions.json` has one."""
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(_USAGE_SIDE_FILE_MAX + 1)
+        if len(raw) > _USAGE_SIDE_FILE_MAX:
+            return None
+        return json.loads(raw.decode("utf-8-sig"))
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
+def _parse_v3_usage(path: Path) -> dict:
+    days: dict[str, dict] = {}
+    calls: dict[str, tuple[str, str]] = {}   # toolCallId -> (tool name, day)
+    peak: float | None = None
+    with path.open("rb") as fh:
+        for line in _iter_lines(fh, USAGE_MAX_LINE_BYTES):
+            try:
+                obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    continue
+                payload = obj.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                ptype = payload.get("type")
+                if ptype == "session_metadata":
+                    value = payload.get("value")
+                    if payload.get("key") == "contextUsage" and isinstance(value, dict):
+                        pct = value.get("usagePercentage")
+                        if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+                            peak = pct if peak is None else max(peak, pct)
+                    continue
+                if ptype not in _V3_ACTIVE_TYPES:
+                    continue
+                epoch = _epoch(obj.get("timestamp"))
+                if epoch is None:
+                    continue
+                day_key = _local_day(epoch)
+                day = days.setdefault(day_key, _new_day())
+                day["active"] = True
+                if ptype == "usage_summary":
+                    ms = payload.get("elapsedTime")
+                    if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms > 0:
+                        day["agent_seconds"] += ms / 1000.0
+                elif ptype == "tool_call":
+                    name = payload.get("toolName")
+                    if isinstance(name, str) and name:
+                        _tool_slot(day, name)["calls"] += 1
+                        tcid = payload.get("toolCallId")
+                        if isinstance(tcid, str) and tcid:
+                            calls[tcid] = (name, day_key)
+                elif ptype == "tool_result":
+                    tcid = payload.get("toolCallId")
+                    hit = calls.pop(tcid, None) if isinstance(tcid, str) else None
+                    if hit is not None and payload.get("success") is False:
+                        _tool_slot(days[hit[1]], hit[0])["failed"] += 1
+            except Exception:
+                # One odd line costs that line only (the tail reader's rule).
+                continue
+    meta = _read_small_json(path.parent / "session.json")
+    cwd = ""
+    model = None
+    if isinstance(meta, dict):
+        paths = meta.get("workspacePaths")
+        if isinstance(paths, list) and paths and isinstance(paths[0], str):
+            cwd = paths[0]
+        if isinstance(meta.get("modelId"), str) and meta["modelId"]:
+            model = meta["modelId"]
+    return {"provider": _V3, "session_id": path.parent.name, "cwd": cwd, "model": model,
+            "context_peak": peak, "days": days}
+
+
+def _claude_is_prompt(content) -> bool:
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        blocks = [b for b in content if isinstance(b, dict)]
+        return bool(blocks) and not any(b.get("type") == "tool_result" for b in blocks)
+    return False
+
+
+def _parse_claude_usage(path: Path) -> dict:
+    days: dict[str, dict] = {}
+    calls: dict[str, tuple[str, str]] = {}   # tool_use id -> (tool name, day)
+    models: dict[str, int] = {}
+    seen_messages: set[str] = set()
+    cwd = ""
+    turn: list = [None, None, None]          # prompt epoch, prompt day, last assistant epoch
+
+    def close_turn():
+        start, day_key, end = turn
+        if start is not None and end is not None and end > start:
+            days[day_key]["agent_seconds"] += min(end - start, CLAUDE_TURN_CAP_SECONDS)
+
+    with path.open("rb") as fh:
+        for line in _iter_lines(fh, USAGE_MAX_LINE_BYTES):
+            try:
+                obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    continue
+                if not cwd and isinstance(obj.get("cwd"), str):
+                    cwd = obj["cwd"]
+                otype = obj.get("type")
+                if otype not in ("user", "assistant"):
+                    continue
+                msg = obj.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                epoch = _epoch(obj.get("timestamp"))
+                if epoch is None:
+                    continue
+                day_key = _local_day(epoch)
+                content = msg.get("content")
+                if otype == "user":
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "tool_result":
+                                tid = block.get("tool_use_id")
+                                hit = calls.pop(tid, None) if isinstance(tid, str) else None
+                                if hit is not None and block.get("is_error") is True:
+                                    _tool_slot(days[hit[1]], hit[0])["failed"] += 1
+                    if obj.get("isMeta") or not _claude_is_prompt(content):
+                        continue
+                    close_turn()
+                    days.setdefault(day_key, _new_day())["active"] = True
+                    turn[:] = [epoch, day_key, None]
+                    continue
+                day = days.setdefault(day_key, _new_day())
+                day["active"] = True
+                if turn[0] is not None:
+                    turn[2] = epoch
+                model = msg.get("model")
+                if isinstance(model, str) and model and not model.startswith("<"):
+                    models[model] = models.get(model, 0) + 1
+                mid = msg.get("id")
+                usage = msg.get("usage")
+                if isinstance(usage, dict) and not (isinstance(mid, str) and mid in seen_messages):
+                    if isinstance(mid, str):
+                        seen_messages.add(mid)
+                    for key, src in _TOKEN_KEYS:
+                        n = usage.get(src)
+                        if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                            day["tokens"][key] += n
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            name = block.get("name")
+                            if isinstance(name, str) and name:
+                                _tool_slot(day, name)["calls"] += 1
+                                if isinstance(block.get("id"), str):
+                                    calls[block["id"]] = (name, day_key)
+            except Exception:
+                continue
+    close_turn()
+    model = max(sorted(models), key=lambda m: models[m]) if models else None
+    return {"provider": _CLAUDE, "session_id": path.stem, "cwd": cwd, "model": model,
+            "context_peak": None, "days": days}
+
+
+def _parse_usage_file(path: Path, provider: str) -> dict:
+    """Parse one transcript into its summary. Module-level and called by name
+    so a test can count the parses."""
+    if provider == _V3:
+        return _parse_v3_usage(path)
+    return _parse_claude_usage(path)
+
+
+def _summarize(path: Path, provider: str, st) -> tuple[dict, bool]:
+    """The file's summary and whether it was parsed now (False: a memo hit)."""
+    key = str(path)
+    with _usage_memo_lock:
+        hit = _usage_memo.get(key)
+    if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2], False
+    summary = _parse_usage_file(path, provider)
+    with _usage_memo_lock:
+        _usage_memo[key] = (st.st_mtime_ns, st.st_size, summary)
+    return summary, True
+
+
+def summarize_file(path, provider: str) -> dict:
+    """One transcript's usage summary, memoised per path on `(mtime_ns, size)`.
+
+    `{"provider", "session_id", "cwd", "model", "context_peak", "days"}`, where
+    `days` maps a local `YYYY-MM-DD` to `{"active", "agent_seconds", "tools":
+    {name: {"calls", "failed"}}, "tokens": {"input", "output", "cache_read",
+    "cache_creation"}}`. `model` is the v3 `modelId` or the most frequent
+    Claude `message.model`; `context_peak` the v3 maximum `usagePercentage`
+    (0-100), else None. Lines over `USAGE_MAX_LINE_BYTES` are skipped, and one
+    unreadable line skips that line only. The v3 `session.json` fields (cwd,
+    model) are memoised under `messages.jsonl`'s key; they do not change during
+    a session.
+    """
+    path = Path(path)
+    return _summarize(path, provider, path.stat())[0]
+
+
+def _window(now: float) -> tuple[list[str], float]:
+    """The window's local days, oldest first, and the epoch of its first
+    midnight."""
+    today = datetime.fromtimestamp(now).date()
+    first = today.fromordinal(today.toordinal() - (USAGE_WINDOW_DAYS - 1))
+    days = [first.fromordinal(first.toordinal() + i).isoformat()
+            for i in range(USAGE_WINDOW_DAYS)]
+    start = datetime(first.year, first.month, first.day).timestamp()
+    return days, start
+
+
+def _usage_files(since: float) -> list[tuple[Path, str, object]]:
+    """`(path, provider, stat)` for each transcript modified at or after
+    `since`: kiro-cli v3 `<root>/<hash>/sess_*/messages.jsonl` and Claude Code
+    `<root>/<project>/<uuid>.jsonl`."""
+    from . import data_claude
+
+    v3_root, claude_root, _ide_root = _usage_roots()
+    found: list[tuple[Path, str, object]] = []
+    for provider, paths in ((_V3, v3_root.glob("*/sess_*/messages.jsonl")),
+                            (_CLAUDE, claude_root.glob("*/*.jsonl"))):
+        for path in paths:
+            if provider == _CLAUDE and not data_claude._is_session_file(path.name):
+                continue
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if st.st_mtime >= since:
+                found.append((path, provider, st))
+    return found
+
+
+def _refresh(now: float, stop_event=None) -> tuple[list[dict], int, bool]:
+    """Summaries of every in-window transcript, how many were parsed now, and
+    whether the pass ran to the end. One file that raises is logged (path
+    only) and skipped. A complete pass evicts memo paths no longer in the
+    window."""
+    _days, since = _window(now)
+    summaries: list[dict] = []
+    reparsed = 0
+    keep: set[str] = set()
+    complete = True
+    for path, provider, st in _usage_files(since):
+        if stop_event is not None and stop_event.is_set():
+            complete = False
+            break
+        keep.add(str(path))
+        try:
+            summary, parsed = _summarize(path, provider, st)
+        except Exception:
+            log.warning("Overview: could not summarise transcript %s", path)
+            continue
+        reparsed += parsed
+        summaries.append(summary)
+    if complete:
+        with _usage_memo_lock:
+            for key in [k for k in _usage_memo if k not in keep]:
+                del _usage_memo[key]
+    return summaries, reparsed, complete
+
+
+def _ide_daily(days: set[str], since: float, shown: Callable, hidden: Callable) -> dict[str, int]:
+    """Kiro IDE sessions created on each window day (D25): read from its
+    `sessions.json` files directly, never through `data.get_sessions`."""
+    counts: dict[str, int] = {}
+    if not shown(_IDE):
+        return counts
+    ide_root = _usage_roots()[2]
+    for sf in ide_root.glob("*/sessions.json"):
+        try:
+            if sf.stat().st_mtime < since:
+                continue
+        except OSError:
+            continue
+        entries = _read_small_json(sf)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                day = _local_day(int(entry.get("dateCreated")) / 1000.0)
+            except (TypeError, ValueError, OverflowError, OSError):
+                continue
+            ws = entry.get("workspaceDirectory")
+            if day in days and not (isinstance(ws, str) and ws and hidden(ws)):
+                counts[day] = counts.get(day, 0) + 1
+    return counts
+
+
+def usage_summary(now: float | None = None, provider_shown: Callable | None = None,
+                  hidden: Callable | None = None) -> dict:
+    """The Usage section's aggregate over the last `USAGE_WINDOW_DAYS` days.
+
+    Blocking; runs in a worker thread. `provider_shown(provider)` and
+    `hidden(cwd)` are the rail's filters, passed in by `web.py` (D10): a
+    provider the rail does not show and a workspace tagged hidden are left out
+    of every row and total. They are applied here, not in the memo, so a tag
+    change shows at the next aggregate. A filter that raises excludes.
+
+    Keys: `by_workspace` (top 8 by this week's agent seconds), `daily` (14
+    days, oldest first, sessions and agent seconds per provider), `tools`
+    (`top` by calls over the window with `fail_rate`, `failing` this week with
+    at least 3 calls), `context_pressure` (kiro-cli v3 only: sessions whose
+    peak `usagePercentage` reached 80), `models` (sessions per model),
+    `claude_tokens` (with `cache_hit_ratio` = cache reads / (input + cache
+    reads + cache writes), 0 when that is 0), `reparsed` (files parsed for this
+    call rather than taken from the memo) and `aggregate_age_s`.
+    """
+    from . import data
+
+    now = time.time() if now is None else now
+
+    def shown(provider: str) -> bool:
+        try:
+            return provider_shown is None or bool(provider_shown(provider))
+        except Exception:
+            return False
+
+    def is_hidden(cwd: str) -> bool:
+        try:
+            return hidden is not None and bool(hidden(cwd))
+        except Exception:
+            return True
+
+    day_list, since = _window(now)
+    day_set = set(day_list)
+    this_week = set(day_list[USAGE_WINDOW_DAYS - 7:])
+    summaries, reparsed, _complete = _refresh(now)
+
+    daily = {d: {"sessions": {}, "agent_s": {}} for d in day_list}
+    workspaces: dict[str, dict] = {}
+    tools: dict[str, list[int]] = {}
+    tools_week: dict[str, list[int]] = {}
+    models: dict[str, int] = {}
+    tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
+    pressure: list[dict] = []
+    for s in summaries:
+        provider, cwd = s["provider"], s["cwd"]
+        if not shown(provider) or (cwd and is_hidden(cwd)):
+            continue
+        in_window = False
+        for day_key, day in s["days"].items():
+            if day_key not in day_set:
+                continue
+            if day["active"]:
+                in_window = True
+                sessions = daily[day_key]["sessions"]
+                sessions[provider] = sessions.get(provider, 0) + 1
+            secs = day["agent_seconds"]
+            if secs:
+                agent = daily[day_key]["agent_s"]
+                agent[provider] = agent.get(provider, 0.0) + secs
+                if cwd:
+                    row = workspaces.setdefault(data._normalize_path(cwd), {
+                        "cwd": cwd, "name": Path(cwd).name or cwd,
+                        "this_week_s": 0.0, "last_week_s": 0.0})
+                    row["this_week_s" if day_key in this_week else "last_week_s"] += secs
+            for name, t in day["tools"].items():
+                for bucket in ((tools, tools_week) if day_key in this_week else (tools,)):
+                    slot = bucket.setdefault(name, [0, 0])
+                    slot[0] += t["calls"]
+                    slot[1] += t["failed"]
+            if provider == _CLAUDE:
+                for key in tokens:
+                    tokens[key] += day["tokens"][key]
+        if not in_window:
+            continue
+        if s["model"]:
+            models[s["model"]] = models.get(s["model"], 0) + 1
+        if provider == _V3 and s["context_peak"] is not None:
+            pressure.append({"session_id": s["session_id"], "cwd": cwd,
+                             "name": (Path(cwd).name or cwd) if cwd else "",
+                             "peak": round(float(s["context_peak"]), 1)})
+    for day_key, count in _ide_daily(day_set, since, shown, is_hidden).items():
+        daily[day_key]["sessions"][_IDE] = count
+
+    ws_rows = [r for r in workspaces.values() if r["this_week_s"] or r["last_week_s"]]
+    ws_rows.sort(key=lambda r: (-r["this_week_s"], -r["last_week_s"], r["name"].lower()))
+    for r in ws_rows:
+        r["this_week_s"] = round(r["this_week_s"], 1)
+        r["last_week_s"] = round(r["last_week_s"], 1)
+    top_tools = sorted(tools.items(), key=lambda kv: (-kv[1][0], kv[0]))[:_USAGE_TOP_TOOLS]
+    failing = [(n, c, f) for n, (c, f) in tools_week.items()
+               if c >= _USAGE_FAILING_MIN_CALLS and f > 0]
+    failing.sort(key=lambda t: (-t[2], -t[2] / t[1], t[0]))
+    pressure.sort(key=lambda p: (-p["peak"], p["session_id"]))
+    denom = tokens["input"] + tokens["cache_read"] + tokens["cache_creation"]
+    return {
+        "window_days": USAGE_WINDOW_DAYS,
+        "by_workspace": ws_rows[:_USAGE_TOP_WORKSPACES],
+        "daily": [{"date": d,
+                   "sessions": daily[d]["sessions"],
+                   "agent_s": {p: round(v, 1) for p, v in daily[d]["agent_s"].items()}}
+                  for d in day_list],
+        "tools": {
+            "top": [{"name": n, "calls": c, "fail_rate": round(f / c, 4) if c else 0.0}
+                    for n, (c, f) in top_tools],
+            "failing": [{"name": n, "failed": f, "calls": c}
+                        for n, c, f in failing[:_USAGE_TOP_FAILING]],
+        },
+        "context_pressure": {
+            "sessions_over_80": sum(1 for p in pressure if p["peak"] >= CONTEXT_PRESSURE_PERCENT),
+            "sessions_total": len(pressure),
+            "top": pressure[:_USAGE_TOP_CONTEXT],
+        },
+        "models": [{"model": m, "sessions": n} for m, n in
+                   sorted(models.items(), key=lambda kv: (-kv[1], kv[0]))[:_USAGE_TOP_MODELS]],
+        "claude_tokens": dict(tokens, cache_hit_ratio=(round(tokens["cache_read"] / denom, 4)
+                                                       if denom else 0.0)),
+        "reparsed": reparsed,
+        "aggregate_age_s": 0.0,
+    }
+
+
+def warm_usage(stop_event) -> None:
+    """The warm pass after startup (D12): parse every in-window transcript
+    into the memo, so the first Overview request finds it filled.
+
+    Runs in its own worker thread, started by `web.lifespan`. `stop_event`, a
+    `threading.Event`, is checked between files; once set the pass returns
+    after the file in hand, leaves the state `cold` and evicts nothing. One
+    file that fails is skipped (`_refresh`); a failure of the pass as a whole
+    sets `error`, and the summary route then computes on demand.
+    """
+    _set_usage_state("warming")
+    state = "error"
+    try:
+        _summaries, _reparsed, complete = _refresh(time.time(), stop_event)
+        state = "ready" if complete else "cold"
+    except Exception:
+        log.exception("Overview: the usage warm pass failed")
+    finally:
+        _set_usage_state(state)
+
+
+def usage_payload(filters: Callable) -> tuple[dict | None, str]:
+    """`(usage, usage_state)` for the summary route. Blocking; runs off the loop.
+
+    While the warm pass runs, `(None, "warming")`. Otherwise the aggregate:
+    reused for `USAGE_REUSE_SECONDS` (D23), with `reparsed` 0 and its age in
+    `aggregate_age_s` on a reuse; when it is older, or the state is `cold` or
+    `error`, computed now. The lock makes that single-flight: concurrent
+    requests share one computation. `filters()` returns the rail's
+    `(providers, hidden)` and is called only when computing. A computation
+    that fails gives `(None, "error")`.
+    """
+    if usage_state() == "warming":
+        return None, "warming"
+    with _usage_compute_lock:
+        at, cached = _usage_cache
+        age = time.monotonic() - at
+        if cached is not None and age < USAGE_REUSE_SECONDS:
+            return dict(cached, reparsed=0, aggregate_age_s=round(age, 1)), "ready"
+        try:
+            providers, hidden = filters()
+            usage = usage_summary(provider_shown=lambda p: p in providers, hidden=hidden)
+        except Exception:
+            log.exception("Overview: could not compute usage")
+            return None, "error"
+        _usage_cache[:] = [time.monotonic(), usage]
+    return usage, "ready"
