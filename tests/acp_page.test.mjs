@@ -12432,6 +12432,15 @@ function loadDashPicker(opts = {}) {
       if (typeof sandbox.removeAllCrewPanels === "function") sandbox.removeAllCrewPanels();
       if (typeof sandbox.closeSubagentView === "function") sandbox.closeSubagentView();
     },
+    // dashHandle's session_closed branch calls this bare global directly
+    // (commit 8d1782d) -- on the real page it is transcript-renderer.js's
+    // top-level function, loaded by <script src> before index.html's inline
+    // script. A no-op stand-in that deliberately does NOT reproduce the
+    // real body's removeAllCrewPanels/closeSubagentView guard calls (unlike
+    // renderTranscriptHistory above): session_closed tears crew/sub-agent
+    // state down with its own explicit dash* calls, and the crew/sub-agent
+    // session_closed checks must keep testing those calls, not this stub.
+    clearTranscript: () => {},
     // dashHandle's agent_died/session_closed/agent_error branches call this
     // (transcript-renderer.js, not part of either extracted region). Records
     // every call (SC5, Phase 3 needs to assert on queue/steer notes and
