@@ -2,10 +2,37 @@
 
 > **Date**: 2026-09-24
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-09-25 09:00
 > **Scope**: Replace the on/off ACP permission profile with three permission modes (Yolo, Auto, Manual), an always-on hard-deny floor, and a plain-language Manual-mode rule editor that compiles to the derived agent
 > **Tier**: Major
 > **Estimated effort**: 6-8 days
+
+---
+
+## Completion Summary
+
+Delivered: Yolo / Auto (disabled) / Manual permission modes with an always-on Always blocked floor compiled into the
+derived agent, a plain-language Manual rule editor, the prompt-card "Allow, and always in new sessions…" button, a
+fail-closed Default-session gate with self-heal, persisted outside-change notices, and the migration from the on/off
+setting. All SCs met; see the Post-Implementation Review. Final state: pytest 2239 passed, page tests 805/805.
+
+### Acknowledged at archival
+
+- Accepted — Implementation Divergences, Phases 0-1 (15 entries in § 9, reviewed in the phase and final reviews).
+- Accepted — Implementation Divergences, Phases 2-3 (7 entries in § 9).
+- Accepted — Implementation Divergences, Step 9 (SE7 leaf module and allow-rule route change; the new
+  `tests/permission_pattern_cases.json` test data file; final-review behaviour changes).
+- Promoted: qexplore/shared.md — a Probe-gate consent request may ride with the first question (agent-playbook ae7e76e).
+- Accepted (harness opportunity): research report flagged as instruction-shaped for quoting vendor docs; no change unless it recurs.
+- Promoted: qreview Verification phase — corroborated findings need no verifier; single-source findings may share one (ae7e76e).
+- Promoted: shared/AGENTS.md — rate-limit sub-agent failures retry once after the reset, beyond /qcouncil (ae7e76e).
+- Follow-up plan intended (harness opportunity): find a working fix for the Claude-in-Chrome MCP extension being disconnected, so Claude keeps using native browser tools rather than standalone Playwright (user, 2026-09-25).
+- Promoted: qbrowser-test — Chrome MCP ref clicks right after navigation can be dropped (ae7e76e).
+- Promoted: qreview spawn contract and shared/AGENTS.md — sub-agent findings return as text where report files are refused (ae7e76e).
+- Promoted: PowerAtlas AGENTS.md — `[hidden] { display: none }` convention for classes that set `display` (archive commit).
+- Promoted: qdev Step 4 — shape of a results-only phase (ae7e76e).
+- Promoted: qexplore — write the Assumptions (unconfirmed) adjunct at any depth when defaults went unconfirmed (ae7e76e).
+- Pass 4 documentation-ripple sweep: no stale references (remaining hits are intentional history or the migration comment).
 
 ---
 
@@ -217,6 +244,7 @@ decisions; D-22 onwards were added by the 2026-09-24 plan review.
 | D-15 | In-effect check | `derived_block_state(config)` compares the on-disk block with `compile_block(config)` and never raises (a compile error → `unknown` with the message in `generation_error`) | Byte-compare to one overlay | SC-9; otherwise every edit reads as stale |
 | D-16 | Locking | `apply_settings(mutate)` holds `_generation_lock` across load, mutate, `save_config`, generate. The **only** other acquirer is `_derived_agent_in_effect`, with `acquire(timeout=2)`; timeout raises. `derived_block_state`, `compile_block`, `_apply_locked` never acquire it; routes compute the returned state after release | Lock-free gate; unbounded acquire | Closes the config-ahead-of-file window without letting a stalled generation hang session creation |
 | D-16a | Locking amendment (2026-09-25, Step 9 cycle 2, C-M3) | `acknowledge_notice` is a **third** acquirer of `_generation_lock` (bounded 5 s wait): it serialises writes of `permission-notice.json` against the gate's heal. The gate may hand its hold to a worker thread that runs the heal and releases it. The lock's declaration comment in `agent_profile.py` lists all three acquirers | Serialise notice writes another way | The notice file and the derived agent must not be written concurrently; a third bounded acquirer keeps D-16's invariant (config never ahead of the file) |
+| D-16b | Locking amendment (2026-09-25, /qclose, M-10) | Every acquirer of `_generation_lock` now lives in `agent_profile`: `apply_settings` (and `sync_from_config`), `gate_check` (bounded acquire, worker hand-off, heal policy) and `acknowledge_notice`. `web._derived_agent_in_effect` calls `gate_check` and only formats the cause and fix; a test forbids `web.py` from touching private `agent_profile` names | Leave the gate's locked section in `web.py` | One module owns the whole lock protocol |
 | D-17 | Overlay package data | Delete `src/power_atlas/agents/permissions.yaml` and the `agents/**` package-data entry; floor, Protected set and seed become constants in `agent_profile.py` carrying the overlay's measured-semantics comments | Template the YAML | The block is computed; one source of truth |
 | D-18 | `_remove` path | Delete `_remove` and the off branch | Keep for rollback | No Off state; unused code is deleted per governance |
 | D-19 | Prompt-card button | "Allow, and always in new sessions…" opens an inline editor; Save adds the rule and answers this prompt with the option whose `kind` is `allow_once`; if the prompt resolved meanwhile, the rule is still saved and the card says so | Save only adds the rule | One click for an action the user evidently approves |
@@ -1180,7 +1208,7 @@ Final state: pytest `tests/test_web.py tests/test_config.py` 2236 passed; `node 
 | M-7 | Medium | [End-user, Senior] SC-3's reopened-session disclosure missing | Fixed — 561bdf7: scope note, Always blocked note, README |
 | M-8 | Medium | [End-user, Senior] Next-step advice always blamed the base agent | Fixed — 561bdf7: cause-specific next steps |
 | M-9 | Medium | [Architect] `acp.py` docstring claimed `config` imports nothing from the package | Fixed — 24a5904: docstring corrected; import-isolation guard test |
-| M-10 | Medium | [Architect] Lock protocol split across `web.py` and `agent_profile.py` | Refuted by verifier — the split is D-16's recorded design and documented at the lock |
+| M-10 | Medium | [Architect] Lock protocol split across `web.py` and `agent_profile.py` | Fixed — 3ea9262 (user chose Fix now at /qclose, 2026-09-25): `agent_profile.gate_check`; `web.py` touches no private names |
 | A10 | Low | [Architect] Unrelated saves persisted load-time-normalised rules and mode | Fixed — b95026a: raw stored values written back (user chose Fix, 2026-09-25) |
 | SEC7 | Low | [Security] `/api/save-setting` saves outside the generation lock (pre-existing R-13) | User: accepted — 2026-09-25, left for Follow-up 9 |
 | SE7 | Low | [Senior] Row-label map repeated four times | Fixed — 2c0025d (user chose Fix, 2026-09-25): leaf module `permission_rows.py`; card labels from the frame |
