@@ -75,13 +75,6 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Source**: Live observation 2026-08-12, confirmed from tui.js `getCommandOptions` call sites (always pass `e.name`, never `""`); fixed in commit `a245bce` | **Verified**: 2026-08-12
 
 
-### Playwright MCP server drops connections under sustained use - retry without re-diagnosis
-
-**Why**: In session 945f4664, the user had to say 'try again' 4 times and report 'Transport to MCP server playwright is closed' twice. The agent kept retrying the same approach instead of diagnosing the root cause (MCP server instability).
-**How to apply**: When Playwright MCP connection drops during /qqa or /qbrowser-test, report the infrastructure issue immediately rather than retrying silently. If 2 connection attempts fail consecutively, state the MCP server is unstable and offer to verify via code inspection instead.
-**Source**: Session 945f4664 (2026-07-01) - Provider-Launcher Unification /qqa phase | **Verified**: 2026-07-05
-
-
 ### Windows .cmd/.bat wrappers fail with subprocess.Popen without shell=True
 
 **Why**: `kiro` on Windows resolves to `kiro.cmd` (a batch wrapper around `Kiro.exe`). `subprocess.Popen(["kiro", "path"])` with `DETACHED_PROCESS` silently fails because `.cmd` files need `cmd.exe` to execute. This caused the "1 failed" launch error for the Kiro IDE provider.
@@ -131,11 +124,11 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Source**: `plans/done/260725-1542_PARSE_AND_POLL_PERFORMANCE.md` — `/qclose` Pass 4 doc-ripple sweep | **Verified**: 2026-07-25
 
 
-### `(mtime, size)`-keyed caches make a family of `test_data.py` tests timing-flaky
+### `(mtime, size)`-keyed caches cannot see a same-tick rewrite — tests must bump mtime explicitly
 
-**Why**: Eight tests fail intermittently under full-suite timing and pass when run standalone, because the cache keys are finer-grained than the filesystem's timestamp resolution — a test writes, reads back, and the cache cannot tell the file changed. `test_kiro_index_picks_up_a_newly_created_session` fails roughly 3 of 5 runs *even standalone*. This is the blast radius of the parse-and-poll cache optimisation (see [[session-file-parsing-must-be-skipped]]), and at this density a genuine `test_data.py` regression can hide in the noise — during one session the same suite reported 2, 3 and 4 failures on consecutive identical runs.
-**How to apply**: Before attributing a `test_data.py` failure to your change, re-run that test standalone; if it passes, it is this family, not a regression. Known members: `TestKiroPromptsCache::test_changed_jsonl_is_reparsed`, `test_kiro_load_sessions_sees_rewritten_metadata`, `test_cache_miss_triggers_load`, `test_kiro_index_picks_up_a_newly_created_session`, `test_missing_jsonl_still_returns_session`, `TestKiroPromptsCache::test_missing_jsonl_bypasses_cache`, plus `test_web.py::TestWarmupPinned::test_populates_cache_for_existing_folders` and `test_web.py::TestGetAllSessionsPaginated::test_sort_order_by_updated_at`. A durable fix means giving the cache an explicit invalidation hook the tests can call, not sleeping.
-**Source**: `plans/260725_KIRO_CLI_ACP_CLIENT_PROTOTYPE.md` — observed across ~15 full-suite runs during Phase 2 | **Verified**: 2026-07-25
+**Why**: The parse caches key on `(mtime, size)` (`data_claude.py` `_parse_cache` and `_head_cache`; `data.py`), which is coarser than a test's write-then-read cycle: a rewrite inside the filesystem's timestamp resolution that keeps the same size is a cache hit, so the test reads stale data. This once produced an eight-test flaky family in `test_data.py` and `test_web.py` (one test failed about 3 of 5 runs even standalone). That family was deleted with the kiro-cli v2 removal, and the surviving tests set mtime explicitly with `os.utime`. The cache keying, and so the trap, remain (see [[session-file-parsing-must-be-skipped]]).
+**How to apply**: In any new test that rewrites a file one of these caches has already read, move its mtime explicitly (`os.utime(p, (t + 5, t + 5))`, as `tests/test_data.py` does) rather than sleeping. When a cache-backed test fails intermittently and passes standalone, suspect a missing mtime bump before suspecting your change.
+**Source**: `plans/260725_KIRO_CLI_ACP_CLIENT_PROTOTYPE.md` — observed across ~15 full-suite runs during Phase 2 + salvage-rewrite by the 2026-09-24 sweep (test family removed per `plans/done/260917-2249_REMOVE_KIRO_CLI_V2.md`; cache keying re-grepped in `src/power_atlas/data_claude.py:247-259`) | **Verified**: 2026-09-24 (sweep, cross-validated)
 
 ### Real-config exposure in tests is closed by two module-level autouse fixtures — do not narrow them
 
@@ -149,13 +142,6 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: Treat the tab title as owned by whatever the terminal launches, not by the launch command. PowerAtlas's `--title` only controls the window between `wt` spawn and agent startup; anything the agent sets afterwards wins. If a title must persist, fix it in the agent's own steering (kiro-cli `tab-title.md`), not in `launcher.py`. Do not re-attempt title injection into `{pscmd}` — that path broke launching once already.
 **Source**: session 8cf565d0-a987-4616-a782-cb00af9ff6d7 (2026-07-24), user turn at line 65; work reverted the same day | **Verified**: 2026-07-28
 **Evidence-quote**: "the tab name change works well, but kiro-cli sets the title to \"Windows Powershell\" when I open it, so I'll have to handle it from kiro-cli directly"
-
-### Workspace dots must aggregate resolved session statuses, not raw signals
-
-**Why**: A session row showed green (working) while its workspace card showed orange (waiting) for the same single live session at the same tick. `_session_status` let a non-empty provider report win outright, while `_workspace_status` folded the raw report and the raw classifier verdict into a max over `errored > waiting > working` — so a lagging transcript tail could only ever *raise* the card and silently outranked the provider's first-hand "busy".
-**How to apply**: Aggregate `_resolved_session_status(...)` outputs, never the raw `(reported_status, semantic)` pair, so precedence is decided once per session. A card may still outrank a row, but only on the strength of a *different* session or of the errored verdict the row honours too. When touching either function, re-check that both surfaces read the same settled value — the pair has diverged twice.
-**Source**: claude-code session 6ab328ed-b9e7-41e2-8e66-2efe2a1a3afa (2026-07-28), line 87; fixed in commit 09cbbe1 | **Verified**: 2026-07-28
-**Evidence-quote**: "The real design smell is that `_workspace_status` aggregates *raw signals* rather than *resolved session statuses*. If it aggregated `_session_status` outputs, precedence would be decided once, per session"
 
 ### A new context variable added to a shared Jinja partial must be added at EVERY route that renders it
 
@@ -206,13 +192,6 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: When a plan phase's own text defers cleanup work "to Phase N," verify Phase N's stated **File scope** line actually covers the deferred item's file before trusting the reference — a deferral naming a phase is not itself evidence that phase can act on it.
 **Source**: `260911_ACP_V2_TO_V3_ENGINE_CUTOVER`, code: `817ebf2` | **Verified**: 2026-09-12 (session, empirical)
 
-### [improvement_signal] A rate-limit-killed sub-agent's partial edits deserve the same scrutiny as a self-directed "done" return
-
-**Target**: `shared/skills/qdev/SKILL.md`
-**Why**: A rate-limit-killed sub-agent's partial/uncommitted edits were not given the same scrutiny as a self-reported "done" return, even though one of two rate-limited agents left a genuine structural bug (duplicate route registrations) in its working tree. The orchestrator had to independently diagnose and discard a bad partial diff; the parallel companion agent's partial diff turned out fine on inspection, so the risk is asymmetric and easy to under-scrutinize.
-**Frequency**: 1 (below threshold) | **Sessions**: (sourced from plan archive) | **Last observed**: 2026-09-12
-**Evidence-quote**: "a rate-limit-killed sub-agent's partial edits deserve the SAME scrutiny as a self-directed \"done\" return, not less — a near-finished-looking diff can still be silently wrong in a way that only a careful read (not just \"it looks mostly done\") catches."
-
 ### [improvement_signal] qdev's docs-commit-message convention assumes every phase produces a code commit
 
 **Target**: `shared/skills/qdev/SKILL.md`
@@ -244,8 +223,14 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 ### `/acp` 403s during automated QA: check the cookie gate first, then the navigation guard
 
 **Why**: Since `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL` Phase 5, every loopback route refuses a caller without the `pa_local` cookie — pages get the "open PowerAtlas from its tray icon" HTML with 403, APIs get `{"error":"Forbidden"}`. That is now the usual cause of a QA 403. The older reading here ("direct navigation always 403s by design") was wrong: `_acp_navigation_ok` passes `Sec-Fetch-Site: none` — its docstring: "`none` is a user-initiated load (bookmark, address bar), while a cross-site navigation says `cross-site`" — so a typed URL or a Playwright `goto` reaches `/acp` once signed in (measured 2026-09-23); only a genuinely cross-site navigation trips that guard.
-**How to apply**: On a 403, read the body first. Tray page or `{"error":"Forbidden"}` → sign in per `AGENTS.md`'s QA sign-in bullet. A 403 on `/acp` alone while signed in → suspect the `Sec-Fetch-Site` guard (a cross-site navigation).
+**How to apply**: On a 403, read the body first. Tray page or `{"error":"Forbidden"}` → sign in per `AGENTS.md`'s QA sign-in bullet. A 403 on `/acp` alone while signed in → suspect the `Sec-Fetch-Site` guard (a cross-site navigation). A Claude-in-Chrome MCP `navigate` to `/acp` counts as a cross-site navigation and gets `{"error":"Forbidden"}` even when signed in (measured 2026-09-25); load `/` first, then `location.assign('/acp')` from the page.
 **Source**: `plans/done/260924-0525_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` § 9 Phase 5-6 QA; `web.py` `_acp_navigation_ok`; supersedes `plans/done/260922-0859_DASHBOARD_ACP_FEATURE_PARITY.md` Step 9b | **Verified**: 2026-09-24 (session, code re-read + live GET /acp 200 on 2026-09-23)
+
+### `style.css` is linked with a startup version stamp — a browser keeps the old copy after a CSS edit until that exact URL is refetched
+
+**Why**: `base.html` links `/static/style.css?v={{ static_version }}`, and the stamp changes only on restart. After a CSS-only fix on 2026-09-25, Chrome kept serving the cached copy under the same `?v=` URL through normal reloads, so an element that should have been hidden still computed `display: flex` until the exact versioned URL was refetched.
+**How to apply**: After editing `style.css` without a restart, in an agent-driven browser run `await fetch(document.querySelector('link[rel=stylesheet]').href, {cache:'reload'}); location.reload()`. Fetching the unversioned `/static/style.css` does not refresh it. People use Ctrl+Shift+R, per AGENTS.md.
+**Source**: `plans/done/260925-0900_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL.md` Step 9b QA (fix `936794b`) | **Verified**: 2026-09-25 (human: user approved this proposal)
 
 ### WinRT toast template `ToastImageAndText01` silently drops the body — use `ToastText02` for two-slot toasts
 
@@ -286,11 +271,26 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: After adding a new dependency to pyproject.toml, verify it's actually installed in the active venv with `pip show <pkg>`. When live-testing features dependent on optional packages, check installation status FIRST before debugging behavior.
 **Source**: Session 4f376bb5 (2026-07-12) — silent fallback masked root cause | **Verified**: 2026-07-16
 
-### User expects agent to restart PowerAtlas itself during development iterations
+### kiro-cli persists an MCP sign-in only when the ACP client declares secret storage
 
-**Why**: After 5 iteration attempts on the peek window fix, user said 'restart it yourself from now on' — indicating frustration with manual restart cycles.
-**How to apply**: During PowerAtlas development iterations requiring runtime verification, kill the existing PowerAtlas process and restart it using the venv's Python before asking the user to test. Don't ask the user to restart manually.
-**Source**: Session 2ec9143d (2026-07-15) — user correction | **Verified**: 2026-07-16
+**Why**: The Atlassian MCP sign-in loop had one cause: kiro-cli saves and reuses an MCP OAuth token only when its client offers a place to store it. The terminal UI does; PowerAtlas's ACP client did not, so every session re-prompted. The fix was the encrypted secret store ("implement option 1", 856b779b L1157).
+**How to apply**: When MCP auth does not persist across PowerAtlas ACP sessions, first check that the client advertises secret storage, before debugging the MCP provider.
+**Source**: claude-code session 856b779b-90da-4e82-9c34-a3b85e237e8c L1499 | **Verified**: 2026-09-24 (sweep, cross-validated; saved on the user's Save at the 2026-09-24 decision gate)
+**Evidence-quote**: "kiro-cli only saves and reuses an MCP sign-in when its client offers somewhere to store it. The terminal UI offers that; PowerAtlas didn't."
+
+### ACP capability flags are empty objects — test presence with `is not None`, never truthiness
+
+**Why**: ACP advertises a capability as an empty object `{}`. Python treats `{}` as falsy while JavaScript treats it as truthy, so a Python truthiness check reads a present capability as absent, silently. This masked the SC-1 `session/delete` defect during the session-delete/watchdog/MCP plan's QA.
+**How to apply**: In `acp.py` and any other Python that reads an ACP `*Capabilities` field, test presence with `x is not None` (or `'key' in caps`), and add a test that feeds the empty-object value.
+**Source**: claude-code session 856b779b-90da-4e82-9c34-a3b85e237e8c L499 (same turn duplicated in fork 47de9653 L741) | **Verified**: 2026-09-24 (sweep, cross-validated)
+**Evidence-quote**: "Empty objects are falsy in Python but truthy in JavaScript. ACP signals a capability with an empty object `{}`, so presence checks in Python must use `is not None`, not truthiness."
+
+### kiro-cli permission rules are bypassed by symlinked targets
+
+**Why**: Live probes during the permission-modes plan showed that a symlinked target skips both the Protected set and the deny floor. The user's `~/.kiro/steering/*.md` are symlinks into agent-playbook, so "Protected steering" never prompts for them. The same probe run found a second bypass: an allowed prefix rule such as `git status*` also admitted `git status > x.txt`, which wrote a file with no write check (feaef376 L1396: "`git status > x.txt` ran with no prompt under an allowed `git status*` and wrote the file, with no write check.").
+**How to apply**: When designing or reviewing PowerAtlas permission rules, do not rely on path rules to protect symlinked files, and seed command rules as exact commands rather than prefixes. Re-probe both bypasses after any kiro-cli upgrade.
+**Source**: claude-code session feaef376-fe83-4cb4-8efc-7249be12042a L1456 + L1396 | **Verified**: 2026-09-24 (sweep, cross-validated)
+**Evidence-quote**: "Symlinks get around both Protected and the floor (F-1 and F-1b). Your `~/.kiro/steering/*.md` files are symlinks into agent-playbook, so Protected steering never prompts for them."
 
 ## Decision
 
@@ -429,6 +429,20 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Why**: "Watched" was re-litigated during notifications exploration — "focused", "active" and "foreground" were all considered and rejected. The three-way split (server fires when unwatched, client fires when watched-but-hidden, visible tab fires nothing) is the only partition that works given what each surface can structurally observe: the server cannot see tab visibility (nothing carries it over the wire), and the client cannot see absence of socket (it is running in the attached tab). Permission requests deviate: they fire from both surfaces regardless of watched state, because they block the turn either way.
 **How to apply**: "Watched" = a session with at least one attached `_Connection` in `_registry.subscribers`. Distinct from "visible" (client-side `document.visibilityState`) and "unread" (the rail's localStorage marker). Server toasts when `not _registry.subscribers.get(sid)`. Client (`acp.html`) notifies when subscribed and `document.visibilityState === 'hidden'`, gated by `!replaying`. Visible tab fires nothing. `session/request_permission` fires always (both surfaces). Do not unify the two surfaces — they partition by design and the partition is exhaustive.
 **Source**: `plans/done/260922-1140_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS.md` — Resolved decisions Q2, Exploration Discovery item 6 | **Verified**: 2026-09-19 (runtime, watched gate proven in both directions on one session: unwatched `display_error` fired OS toast; same session's turn end with socket attached fired browser Notification only)
+
+### Every MCP feature must ship on both `/acp` and the main dashboard
+
+**Why**: After a /qdev run wired the MCP status panel into /acp only, the user set this rule. The dashboard's session panel is a separately implemented copy of /acp's, so a feature built on one side is silently missing on the other; the dashboard's "More workspaces" click handler was likewise absent while /acp's worked (sess_abd0178e L109).
+**How to apply**: When a plan adds or changes an MCP feature on /acp, put the matching dashboard (`index.html`) surface in the same plan's scope and exit criteria, and verify both at runtime. A one-sided MCP implementation is incomplete.
+**Source**: kiro-cli session sess_49a64c48-1647-4244-8d39-f8f84ace2ebd L1779 (user turn) | **Verified**: 2026-09-24 (sweep, cross-validated)
+**Evidence-quote**: "Note: all mcp features should be mirrored between /acp and the main dashboard!!"
+
+### PowerAtlas owns and installs its derived kiro agent file — never depend on the agent-playbook deploy pipeline
+
+**Why**: Decision D-6 of the permission-profile plan: agent-playbook is a personal config repo, and a product feature must not depend on a personal deploy pipeline.
+**How to apply**: The derived kiro agent file is generated, written and installed by PowerAtlas itself. Do not add an agent-playbook inventory row for it.
+**Source**: `plans/done/260924-0525_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` § Design Decisions (D-6) | **Verified**: 2026-09-24 (sweep, cross-validated)
+**Evidence-quote**: "| D-6 Agent-file ownership | **PowerAtlas repo owns it**; PowerAtlas installs it | agent-playbook inventory row | agent-playbook is a personal config repo; a product feature must not depend on a personal deploy pipeline |"
 
 ## Declined
 
