@@ -1,7 +1,7 @@
 # ACP Permission Modes: Yolo, Auto and Manual
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phases 0-1 complete, Phases 2-4 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-2 complete, Phases 3-4 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the on/off ACP permission profile with three permission modes (Yolo, Auto, Manual), an always-on hard-deny floor, and a plain-language Manual-mode rule editor that compiles to the derived agent
 > **Tier**: Major
@@ -554,7 +554,11 @@ agent (Yolo, fingerprint header, floor first). Driven with standalone Playwright
   (log and `session.json` `agentMode`). The QA session was closed and its folder deleted after checking
   `createdAt`/`agentMode`/`workspacePaths`. Final mode left as Yolo.
 - Observation (advisory): the "N linked items not covered" marker is visible only after expanding the Protected
-  disclosure; the collapsed summary does not show the count.
+  disclosure; the collapsed summary does not show the count. (Fixed in Phase 2, c7111fc: the summary shows the count.)
+- Chrome MCP re-run (2026-09-25, after the user connected the Claude-in-Chrome extension and signed that Chrome in
+  from the tray): the radio group, Auto hint, Protected list with "9 linked items not covered", Manual click (API
+  `manual`, in effect) and ArrowUp from Manual skipping the disabled Auto to Yolo (API `yolo`, in effect) all
+  confirmed; no console errors. Final mode Yolo.
 
 ### Phase 2: Custom Manual rules and the rule editor [QA]
 
@@ -586,13 +590,47 @@ patterns are not mirrored automatically.
 > **Rejected:** a remote read-only editor — `/` is loopback-only by construction, so the branch is unreachable.
 
 **Exit criteria**:
-- [ ] Route tests: valid rules round-trip; each invalid shape (unknown row, bad default, control character, DEL,
+- [x] Route tests: valid rules round-trip; each invalid shape (unknown row, bad default, control character, DEL,
       surrogate, 201-char pattern, 101 patterns, bare `*`) refused with a row-named error; remote POST refused
-- [ ] Page tests: editor renders normalised rows, hides the allow list under default Allow, shows the breadth
+- [x] Page tests: editor renders normalised rows, hides the allow list under default Allow, shows the breadth
       warning and the D-38e redirection warning, posts the edited JSON, shows a generation warning
-- [ ] Live, via a probe agent from `compile_block` with a user-edited rule set (one custom allow, one custom
+- [x] Live, via a probe agent from `compile_block` with a user-edited rule set (one custom allow, one custom
       block, one `Block outright` Protected item): each behaves as configured
-- [ ] Update README.md permission section: Manual rows, Protected items, the editor
+- [x] Update README.md permission section: Manual rows, Protected items, the editor
+
+Implementation (2026-09-25, code: 97c58c2)
+Phase 2 lets you edit Manual's rules from the dashboard. It is committed as `97c58c2` plus the fix `192ba9f`. Neither commit carries attribution and nothing is pushed. **Route.** `POST /api/acp-permissions` now also accepts `{"rules": {...}}`, a full replacement of the rule set. It is checked by the new strict `agent_profile.validate_rules` before the lock is taken. The first fault refuses the whole save, and the error names the row by its label and key plus the pattern: an unknown or missing row, or an unknown key inside a row; a default other than allow, ask or block; a pattern with a control character, DEL, a surrogate or U+2028, a pattern over 200 characters, or a blank one; a pattern that matches everything (a bare `*` or `**`); a list of more than 100 patterns; an unknown Protected name. Valid rules are saved and the agent regenerated through `apply_settings`, so the lock, the D-32 result and the unreadable-config refusal all apply. The GET and the POST answers now carry the normalised `rules` and the row labels, and a GET never writes anything. The route is still loopback-only. **Editor.** An "Edit rules…" control under Agent permissions opens `partials/acp_permission_rules_modal.html`, a native modal dialog, included in `index.html` only. One row per kind of action, each with an Allow / Ask / Block default and two chip lists, "Allow without asking" (hidden under Allow) and "Always block"; `./**` shows as "the session folder". Run commands says patterns match literally and case-sensitively and that `/` and `\` differ; Web fetch says its patterns are host names. Warnings (advice only): an interpreter or shell as the first word of a command pattern, any `*` in a command pattern (it also allows redirection), and a Write files pattern that covers the session folder, a drive root or the home folder. Each Protected item has a Block outright switch and lists its linked items; the Always blocked list is read-only. The footer reads "Applies to sessions created afterwards." Save posts the rules as JSON, shows a refusal inside the dialog, closes on success, and shows the D-32 warning as a toast. Esc closes the dialog, focus stays inside it, every control has a label, and chip remove buttons work from the keyboard. README covers Manual's rows, the Protected items and the editor.
+
+| Probe step (kiro-cli 2.24.0, separate `kiro-cli acp --agent-engine v3`, 2026-09-25) | Configured as | Result |
+|---|---|---|
+| `echo pa-custom` | custom shell allow | ran, no prompt |
+| `echo pa-blocked` | custom shell block | denied by rule (agent profile), no prompt |
+| write `.kiro/steering/probe.md` | Protected steering set to Block outright | denied by rule (agent profile); file not created |
+| `echo x` (control) | Ask row | prompted; the ask rule's `exclude` includes `echo pa-custom` |
+| write `.kiro/skills/probe.md` (control) | Protected skills left on ask | prompted, rejected; file not created |
+| `git status` (control) | seed allow | ran with no prompt |
+
+Implementation (2026-09-25, code: c7111fc, 1f824f1, 1a45415 — review and QA fixes)
+c7111fc applied all 19 merged review findings (S1-S5, U1-U14): a save that does not choose the mode (rules-only, base-agent rename) raises the D-35 notice when the settings it starts from were changed outside the dashboard; the editor refuses to open on a stored Always block list that is not a list (the GET reports per-row load problems, `rule_problems`); `validate_rules` requires every key; patterns with no literal character besides `* ? / \ . :` and spaces are refused as match-everything (`./` and `../` patterns stay valid); the interpreter warning checks every word; Write files set to Allow gets an allow-all note; unsaved edits ask Discard / Keep editing inside the dialog; a refused save returns `{row, list, pattern, message}` and marks the chip in plain words; URL-style web-fetch patterns are flagged with the host to use; duplicates say "Already listed"; bad characters are refused on Add; Save stays focusable while busy; every `.profile-modal` is centred; chip remove buttons are 24×24 px; clearer session-folder and Protected wording; the Protected item "Skills" is renamed "Skill files"; one persistent status region per row; the settings-menu Protected summary shows the linked-item count; the intro explains that Always block wins and a pattern in both lists is flagged. 1f824f1 moved two imports (no behaviour change). 1a45415 (QA fix) returns focus to the settings gear after a successful save, makes only the rules body scroll (the dialog had two scrollbars because hidden `.sr-only` status lines were positioned against the dialog), and shows "Loading rules…" with `aria-busy` on the Edit rules row while the rules load (the menu now stays open until the dialog opens). Tests after 1a45415: pytest 2092 passed; `node tests/acp_page.test.mjs` 774/774; `_check_test_names.py` clean.
+
+QA (Step 5b, 2026-09-25): **PASS** after one fix round. PowerAtlas was restarted through `/api/restart` at 23:56 (user
+authorisation from Phase 1; `config.toml` copied to `config.toml.pre-phase2-restart` first); startup clean, derived
+agent Yolo. Driven in real Chrome through the Claude-in-Chrome MCP (tab signed in by the user from the tray):
+- Settings menu: Protected summary reads "Protected (Manual) (25 linked items not covered)"; "Edit rules…" opens the
+  editor with the note that the rules are not used while the mode is Yolo; the row shows "Loading rules…" and
+  `aria-busy="true"` while the rules load (after 1a45415).
+- Editor: adding `npm test` and `python *` to Run commands keeps focus in the input; a duplicate shows "Already
+  listed." and keeps the text; `python *` shows the allow-all and redirection warnings; `https://evil.example/x` in Web
+  fetch's Always block shows "…blocks nothing as typed. Use evil.example instead."; Esc with unsaved edits shows
+  Discard / Keep editing with focus on Keep editing; only the rules body scrolls (after 1a45415).
+- Save: `npm test` stored (`shell.allow`), dialog closed, mode Yolo and in effect, no notice; switching to Manual
+  compiled `npm test` into both the allow `match` and the ask `exclude`; a POST with a tab character in a pattern was
+  refused with `detail {row: shell, list: allow, message: "…contains an invisible tab character…"}`. After a
+  successful save focus returned to the settings gear (after 1a45415; before it, focus fell to `<body>` — the QA
+  FAIL that 1a45415 fixed).
+- State restored exactly (rules byte-equal to the pre-test copy), mode Yolo, in effect, no notice.
+- Withdrawn observation: an apparent "first click after load does nothing" was the Chrome MCP dropping ref-based
+  clicks right after a navigation (no pointer events reached the page); coordinate clicks worked.
 
 ### Phase 3: "Allow, and always in new sessions" on the prompt card [QA]
 
@@ -699,7 +737,7 @@ answered". On error it shows the message and leaves the prompt open.
 |---|---|---|---|
 | 0 | Pre-flight probes and gate | Done | 4 gates fired, follow-up F-1..F-7, applied as D-38; PD-6 decided as D-39 |
 | 1 | Modes, compiler and the mode picker | Done | b4f579d, 682bbc7, 967267e, 687ee20; Terminology 5e719a5 |
-| 2 | Custom Manual rules and the rule editor | Pending | |
+| 2 | Custom Manual rules and the rule editor | Done | 97c58c2, 192ba9f, c7111fc, 1f824f1, 1a45415 |
 | 3 | "Allow, and always in new sessions" | Pending | |
 | 4 | Documentation and final live check | Pending | |
 
@@ -783,6 +821,17 @@ Phase 4 (docs)
   summary does not close the settings menu.
 - **Phase 1 — toast routes refuse a corrupt-config write with a 200 error toast,** JSON routes with 409; the
   htmx shim swaps nothing on non-2xx.
+- **Phase 2 — `validate_rules` refuses a missing row, key or list on the save path** instead of seeding it (D-26's
+  seeding is a load-time repair; a full-replacement save must not store rules the user never saw).
+- **Phase 2 — delete and download verbs get their own warning wording** (`rm`/`del`/`Remove-Item`/`rmdir`/`rd`:
+  delete without asking; `curl`/`iwr`/`Invoke-WebRequest`: download from and send data to any site); D-35's
+  "equivalent to allow-all" is kept for interpreters and shells.
+- **Phase 2 — match-everything widened** to any pattern with no literal character besides `* ? / \ . :` and spaces
+  (`./` and `../` exempt). A stored block pattern of that kind now stops generation (fail-closed) and a stored allow
+  pattern of that kind is dropped with a warning.
+- **Phase 2 — additions beyond the plan text:** `rule_rows` and `rule_problems` in the state payload; an allow-all
+  note for Run commands and Write files set to Allow; the Protected item "Skills" renamed "Skill files"; the
+  Edit rules row keeps the settings menu open while the rules load; every `.profile-modal` now centred.
 - **Phase 1 — scope addition at the user's request:** the six pre-existing dashboard page-test failures (from
   `8d1782d`) were repaired in this plan (967267e).
 
@@ -961,6 +1010,38 @@ re-review returned "HIGH FIX: CLOSED" for #1 and raised R1-R6. No cycle-2 re-rev
 orchestrator re-ran the re-review's repro against it (Manual config preserved, gate not in effect). Step 5b QA: PASS
 (see the Phase 1 QA note).
 
+### 2026-09-25 -- Implementation Review (after Phase 2, persona: Security auditor, End-user advocate)
+
+Implementation health: Green.
+19 findings (1 High, 4 Medium, 14 Low), all fixed in c7111fc; one QA finding fixed in 1a45415. Standard effort, one
+cycle per the user's cap.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| S1 | High | A rules-only save adopted an unhealed external config change and suppressed the D-35 notice | Fixed — c7111fc: mutation path compares the on-disk fingerprint; notice raised; probe A/B re-run |
+| S2 | Medium | Editor turned a stored non-list block into `[]`, and Save deleted that protection | Fixed — c7111fc: `rule_problems` in the GET; editor refuses to open with a named toast |
+| U1 | Medium | Esc, × and Cancel silently discarded unsaved edits | Fixed — c7111fc: in-dialog Discard / Keep editing |
+| U2 | Medium | A refused save showed its error only in the footer, in internal terms | Fixed — c7111fc: structured detail; chip marked, plain-words message on the row |
+| U3 | Medium | URL-style web-fetch patterns accepted without warning but never match | Fixed — c7111fc: warning names the host to use |
+| S3 | Low | `validate_rules` filled missing `protected_block`/`allow`/`block` with `[]` | Fixed — c7111fc: every key required |
+| S4 | Low | Effective match-alls (`?*`, `*.*`, `?:/**`) accepted | Fixed — c7111fc: widened match-everything check and breadth warning |
+| S5 | Low | Interpreter warning missed `*python*`/`& python`; no allow-all note for Write files | Fixed — c7111fc |
+| U4 | Low | Save disabled the focused button, dropping focus | Fixed — c7111fc: stays focusable while busy |
+| U5 | Low | Focus return after close fell to body | Fixed — c7111fc (close paths) and 1a45415 (after a successful save) |
+| U6 | Low | Duplicate pattern cleared the input silently | Fixed — c7111fc: "Already listed" |
+| U7 | Low | Client accepted control characters the server refuses | Fixed — c7111fc |
+| U8 | Low | Dialog pinned top-left, no gutter on phones (pre-existing `.profile-modal`) | Fixed — c7111fc: `margin: auto` |
+| U9 | Low | Chip remove targets below 24×24 px | Fixed — c7111fc |
+| U10 | Low | Redundant session-folder warning text | Fixed — c7111fc |
+| U11 | Low | Protected toggle wording unclear; "Skills" clashed with the Skills row | Fixed — c7111fc: "Block outright: …"; "Skill files" |
+| U12 | Low | Live regions recreated on redraw | Fixed — c7111fc: one persistent region per row |
+| U13 | Low | Settings-menu Protected summary showed no linked-item count | Fixed — c7111fc |
+| U14 | Low | Precedence between the lists unexplained | Fixed — c7111fc: intro sentence; both-lists warning |
+| Q1 | Medium | QA: focus fell to `<body>` after a successful save (QA FAIL floor Medium) | Fixed — 1a45415; re-checked in Chrome |
+
+No cycle-2 review of c7111fc/1a45415 (user cap); the orchestrator re-ran the security probe outcome (reported by the
+fixer) and re-drove every changed surface in real Chrome (Phase 2 QA note).
+
 ## Harness Improvement Opportunities
 
 - `/qexplore`'s probe gate says to run side-effecting probes only with consent, while `shared.md` says one
@@ -977,6 +1058,7 @@ orchestrator re-ran the re-review's repro against it (Manual config preserved, g
   single-source findings.
 - An API session limit (HTTP 429) killed a council sub-agent mid-run; the council's partial-failure rule then halts the whole pipeline — cost: about an hour of wall-clock waiting on the reset and one re-dispatch — suggested change: none to the rule; a note in `/qcouncil` that a rate-limit failure is a Retry-after-reset case, with completed advocate briefs saved to scratch so they are reusable.
 - The Claude-in-Chrome MCP extension was not connected even after starting Chrome, while `/qqa`'s browser gate names Playwright MCP `browser_*` calls and the project has no Playwright MCP — cost: two tool round trips and a gate the evidence cannot literally satisfy — suggested change: let `/qqa`'s browser gate accept a project-documented standalone Playwright recipe (`AGENTS.md § Verification Setup`) as equivalent evidence.
+- Chrome MCP ref-based clicks issued right after a navigation were silently dropped (no pointer events reached the page), which first read as an app bug — cost: about eight tool calls of diagnosis — suggested change: `/qbrowser-test` guidance to wait for page settle, or prefer coordinate clicks after a navigation, and to log capture-phase pointer events before diagnosing "click does nothing".
 - `/qdev` has no shape for a probe-only phase (no code commit): the `feat`/`docs` pairing and "sub-agent commits code" steps did not apply — cost: small; the orchestrator improvised a docs-only commit and confirmed `commit-pairing` passes — suggested change: state in `/qdev` Step 4 that a results-only phase produces one `docs(<slug>): phase N progress (code: none)` commit.
 - The exploration's lower-stakes assumptions were shown at the checkpoint but not written as an
   `Assumptions (unconfirmed)` adjunct, so `/qplan` had no labelled list to route — cost: the planner folded them
