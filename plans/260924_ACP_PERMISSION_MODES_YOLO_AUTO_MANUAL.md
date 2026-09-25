@@ -1,7 +1,7 @@
 # ACP Permission Modes: Yolo, Auto and Manual
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phase 0 complete, Phases 1-4 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-1 complete (Phase 1 QA pending a restart), Phases 2-4 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the on/off ACP permission profile with three permission modes (Yolo, Auto, Manual), an always-on hard-deny floor, and a plain-language Manual-mode rule editor that compiles to the derived agent
 > **Tier**: Major
@@ -489,29 +489,52 @@ Update the `transcript-renderer.js` capability-words comment that cites `agents/
   ~4773-4839, ~10989-11288, ~11513-11541).
 
 **Exit criteria**:
-- [ ] `pytest tests/test_web.py tests/test_config.py --timeout=300` and `node tests/acp_page.test.mjs` pass;
+- [x] `pytest tests/test_web.py tests/test_config.py --timeout=300` and `node tests/acp_page.test.mjs` pass;
       `_check_test_names.py` clean
-- [ ] `git grep -n "acp_permissions_enabled" -- src/` returns only the migration code and its comment
-- [ ] `git grep -n -e overlay_text -e _overlay_cache -e build_derived_agent -e "agents/permissions.yaml" -e "_remove(" -- src/ tests/ pyproject.toml` returns no hits
-- [ ] Live, via a separate probe process bound to `compile_block` output (Yolo) copied into `pa-probe-yolo.md`:
+- [x] `git grep -n "acp_permissions_enabled" -- src/` returns only the migration code and its comment
+- [x] `git grep -n -e overlay_text -e _overlay_cache -e build_derived_agent -e "agents/permissions.yaml" -e "_remove(" -- src/ tests/ pyproject.toml` returns no hits
+- [x] Live, via a separate probe process bound to `compile_block` output (Yolo) copied into `pa-probe-yolo.md`:
       `echo ok` runs with no prompt; the read-file tool and `Get-Content` on the canary `.ssh/dummy` are refused, and
       so is the read-file tool on its 8.3 short-name path (`SSH~1\dummy`)
-- [ ] `find_protected_links()` tests (temp-directory fixture: file link, directory link, broken link, loop) and a
+- [x] `find_protected_links()` tests (temp-directory fixture: file link, directory link, broken link, loop) and a
       test that `compile_block`, `derived_block_state` and the gate hook never call it (D-39); the settings section
       shows the per-row "linked items not covered" marker (page test)
-- [ ] Probe (D-39): under a Manual block with an `fs_write` ask on the absolute resolved target of a scratch link
+- [x] Probe (D-39): under a Manual block with an `fs_write` ask on the absolute resolved target of a scratch link
       whose path contains spaces, a write through the link prompts or not; recorded in the implementation notes and
       Follow-up 3 updated
-- [ ] Live, same for Manual seed: `git status` silent, `echo x` and `git status > x.txt` prompt, a write under
+- [x] Live, same for Manual seed: `git status` silent, `echo x` and `git status > x.txt` prompt, a write under
       `.kiro/agents/` refused, and a write to the derived agent through its `KIRO~1` short-name path refused
-- [ ] Update README.md: config sample (`acp_permission_mode`), the feature bullet (~149, "off by default"), the
+- [x] Update README.md: config sample (`acp_permission_mode`), the feature bullet (~149, "off by default"), the
       task-mode paragraph (~380, "while the permission setting below is on"), and the permission section's modes,
       Always blocked, scope and built-in-ask disclosure (~385-416), including: seed commands are exact; a `*`
       in a command pattern also allows output redirection; command patterns are case-sensitive; write rules
       cover the file-writing tools, not shell redirection (D-38e-g)
-- [ ] AGENTS.md Terminology: rewrite **derived agent** (always written; "the overlay" becomes "the permission mode
+- [x] AGENTS.md Terminology: rewrite **derived agent** (always written; "the overlay" becomes "the permission mode
       and rules"; fix its stale `plans/260921_…` path) and add **permission mode**, **Always blocked**,
       **Protected** — applied only after the user approves the shown diff
+
+Implementation (2026-09-25, code: b4f579d)
+Phase 1 replaces the on/off ACP permission switch with a stored permission mode, `acp_permission_mode` (`yolo` or `manual`), plus `acp_permission_rules`. `agent_profile.compile_block` compiles them into the derived agent, and the derived agent is now written in every mode: the Always blocked floor comes first, then either `all: allow` (Yolo) or the Protected items and the seed rows (Manual). The package-data overlay, `_remove`, the off branch and `build_derived_agent` are deleted. Old configs migrate on load: `true` becomes Manual with the agents write deny kept, and `false` or no key becomes Yolo. The session gate now takes the generation lock with a 2 s bounded wait. It regenerates a stale file once and raises a dashboard notice when that regeneration changed the mode or rules. While the derived agent is not in effect, a Default session is refused, naming the cause, the fix, a note for remote clients, and task modes as the alternative. The settings menu has a three-option radio group (Auto disabled), a description per mode that names kiro-cli's built-in rules, the Always blocked and Protected lists with a "N linked items not covered" marker, the mode warning and the outside-change notice. README is updated. The work is committed as `b4f579d` (no attribution trailers, not pushed).
+
+| Probe (separate `kiro-cli acp --agent-engine v3`, kiro-cli 2.24.0, 2026-09-24/25) | Step | Result |
+|---|---|---|
+| Yolo | `echo ok` | ran, no prompt |
+| Yolo | read_file `.ssh/dummy` / `Get-Content .ssh/dummy` / read_file `SSH~1\dummy` | denied-by-rule (floor), all three |
+| Manual seed | `git status` | ran silently |
+| Manual seed | `echo x`; `git status > x.txt` | both prompted (agent-profile ask); x.txt not created |
+| Manual seed | write `.kiro/agents/probe.md` | prompted (kiro-scope ask), rejected |
+| Manual seed / migrated | write `KIRO~1\agents\poweratlas-acp.md` | denied-by-rule (floor short-name variant) |
+| Manual migrated | write `.kiro/agents/probe.md` | denied-by-rule (Protected block) |
+| D-39 (target inside the workspace, path with a space) | write through a link to a target with an absolute-path ask rule | prompted |
+| D-39 (same) | write through a link to a target with no rule | ran |
+| D-39 (target outside the workspace) | writes through links | denied by kiro-cli's built-in `kiro-scope:workspace-escape` |
+
+Orchestrator note on the Manual-seed criterion: its "a write under `.kiro/agents/` refused" clause predates D-23. In the plain seed the write is prompted by kiro-cli's own ask (not refused); it is refused as a rule only with `protected_block = ["agents"]`, the migrated case. Both match D-5/D-23; the box stands on the migrated run.
+
+Implementation (2026-09-25, code: 682bbc7, 967267e, 687ee20 — review fixes and the user-requested test repair)
+682bbc7 applied all 13 merged review findings: an unreadable `config.toml` no longer fails open to Yolo (`apply_settings` and the startup sync refuse to generate or save; gate and panel treat it as not in effect; `config_error` in the state payload); the D-30 heal runs in a worker inside the gate's 2 s budget; the permission routes use a 5 s bounded lock; a lock-timeout refusal names its cause; the D-35 notice is raised at startup too and cleared only by a mode/rules change or an explicit mode choice; `find_protected_links` works on Python 3.11 and reports a Protected folder that is itself a link; dropped or rewritten rules are logged once and shown (`rules_warning`); the D-28 note logs once; patterns made only of `*`, `/`, `\` are rejected; remote refusals redact paths; README wording on hand edits corrected; `_gate_verdict` fails closed on anything but the in-effect dict. 967267e repaired the six pre-existing dashboard `session_closed` page tests (from `8d1782d`): the test sandbox lacked a `clearTranscript` stand-in; the production page was correct. 687ee20 closed the targeted re-review's findings: `save_config` refuses to write a config produced by a failed load (`ConfigUnreadableError`, one handler: 409 for JSON routes, an error toast for toast routes; the folder-delete path checks before `rmtree`), the `.bak` wording matches whether a backup was written, remote redaction matches whole folders and the config folder, a fixed config clears the stale "could not be read" status, `heal_stale_locked` refuses a failed load, and only the gate's own budget reports "being applied". The 687ee20 commit body says "25 route call sites"; the correct count is 20 `save_config` calls in `web.py` plus one in `apply_settings` (not amended; amend is banned). Tests after 687ee20: pytest 2042 passed; `node tests/acp_page.test.mjs` 754/754; `_check_test_names.py` clean. The orchestrator re-ran the re-review's repro: a direct writer on a corrupt Manual config is refused, the file keeps its bytes, the gate reports not in effect and the derived agent stays Manual.
+
+AGENTS.md Terminology applied after the user chose Save (2026-09-25): commit 5e719a5.
 
 ### Phase 2: Custom Manual rules and the rule editor [QA]
 
@@ -615,7 +638,7 @@ answered". On error it shows the message and leaves the prompt open.
 | R-4 | Always-present allow-all `poweratlas-acp` in kiro-cli's terminal picker | Widens posture for a default-configuration kiro user who picks it | User: accepted — 2026-09-24 (D-37) |
 | R-5 | A compiled block kiro-cli rejects fails open silently | All protection lost | D-14, D-26, P-0.7, invariants test |
 | R-6 | Missing `exclude` makes an allow rule dead | More prompts than configured | D-13; invariants test with a mutation check |
-| R-7 | Rules match a symlink's resolved target; a link inside a Protected folder pointing outside, or to a denied folder, escapes (F-1, F-1b) | Self-config edit without a prompt (all 9 of the user's `~/.kiro/steering/*.md` and 16 of 27 `~/.kiro/skills` entries are such links); credential read via an alias | User: accepted — 2026-09-24, disclosed per item (D-39); enforcement pending the Phase 1 probe (Follow-up 3) |
+| R-7 | Rules match a symlink's resolved target; a link inside a Protected folder pointing outside, or to a denied folder, escapes (F-1, F-1b) | Self-config edit without a prompt (all 9 of the user's `~/.kiro/steering/*.md` and 16 of 27 `~/.kiro/skills` entries are such links); credential read via an alias | User: accepted — 2026-09-24, disclosed per item (D-39); kiro-cli's built-in `workspace-escape` denies writes through links whose target is outside the session workspace (Phase 1 probe), so the gap is limited to sessions whose workspace contains the target (e.g. agent-playbook itself); enforcement option in Follow-up 3 |
 | R-8 | Allowed git commands run repository-controlled code (textconv, `diff.external`) | Code execution from a cloned repo | Accepted in the prior plan; carried forward |
 | R-9 | An unanswered prompt is cancelled after 1800 s | Lost turn when away | Out of scope (Follow-up 6) |
 | R-10 | Generation fails after a save | Default creation refused until fixed | D-32 warning; D-34 refusal names the fix; D-28 removes the commonest cause |
@@ -655,7 +678,7 @@ answered". On error it shows the message and leaves the prompt open.
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
 | 0 | Pre-flight probes and gate | Done | 4 gates fired, follow-up F-1..F-7, applied as D-38; PD-6 decided as D-39 |
-| 1 | Modes, compiler and the mode picker | Pending | |
+| 1 | Modes, compiler and the mode picker | Done — QA pending restart | b4f579d, 682bbc7, 967267e, 687ee20; Terminology 5e719a5 |
 | 2 | Custom Manual rules and the rule editor | Pending | |
 | 3 | "Allow, and always in new sessions" | Pending | |
 | 4 | Documentation and final live check | Pending | |
@@ -721,13 +744,34 @@ Phase 4 (docs)
 - **Phase 0 — follow-up probes F-1 to F-7.** Added after the Security-auditor review to measure its open questions
   (symlinks, trailing dots, exact literals, shell case, write short names, shell redirection, non-ASCII). Results
   in Phase 0's second implementation note; applied in D-38.
+- **Phase 1 — gate hook returns a dict** `{in_effect, state, mode, cause, fix}` (plus `remote_cause`/`remote_fix`)
+  so the D-34 refusal can name cause and fix without `acp.py` importing `agent_profile`; `_gate_verdict` fails closed
+  on anything else.
+- **Phase 1 — D-35 detection by a `# Settings fingerprint:` header line** in the compiled block, so a settings change
+  is told apart from a hand edit of the file and the check survives a restart.
+- **Phase 1 — corrupt config is a first-class state.** `Config._load_error` stops generation, saving (`save_config`
+  raises `ConfigUnreadableError`) and the heal; the gate reports not in effect. Not in the plan; added after review
+  because a corrupt file loads as defaults, and the default mode is Yolo.
+- **Phase 1 — rules constants live in `agent_profile.py`;** `config.py` imports them at call time, and the
+  `acp_permission_rules` default factory returns the seed rows (D-26 "never `{}`").
+- **Phase 1 — block lists over 100 are kept and refused by name at generation;** only allow lists are capped
+  (D-26 said lists are capped on load, but capping a block list would drop protection silently).
+- **Phase 1 — no gate hook installed (`mode_gate_hook is None`) refuses Default** (SC-3, D-34).
+- **Phase 1 — `find_protected_links(root=None)`** returns `{folder: {count, links[:50]}}` and also reports a
+  Protected folder that is itself a link.
+- **Phase 1 — `.topbar-menu-keep` added to `topbarMenuTextEntryClick`** so clicking a radio label or a `<details>`
+  summary does not close the settings menu.
+- **Phase 1 — toast routes refuse a corrupt-config write with a 200 error toast,** JSON routes with 409; the
+  htmx shim swaps nothing on non-2xx.
+- **Phase 1 — scope addition at the user's request:** the six pre-existing dashboard page-test failures (from
+  `8d1782d`) were repaired in this plan (967267e).
 
 ## Follow-up Work (Deferred)
 
 1. **Auto mode decider.** Deny, steer with the reason, escalate on repeat (D-5); needs a probe of when a queued
    steer reaches the agent. Source: D-2, D-5.
 2. **Home/root deletion protection.** Left to Auto (D-6).
-3. **Symlinked self-config enforcement (PD-6 option B).** If the Phase 1 probe shows an absolute resolved-target rule catches writes through a link: emit Protected rules for resolved targets, shown in the UI; a resolver failure adds no rules and never refuses a session. Source: R-7, D-39.
+3. **Symlinked self-config enforcement (PD-6 option B).** The Phase 1 probe (2026-09-25) showed an `fs_write` ask on the absolute resolved target (a path with a space) prompts for a write through the link, so option B is viable: emit Protected rules for resolved targets, shown in the UI; a resolver failure adds no rules and never refuses a session. It matters only when the session workspace contains the target: kiro-cli's built-in `kiro-scope:workspace-escape` already denies writes through a link whose target lies outside the workspace (measured). Source: R-7, D-39.
 4. **Shell floor bypass by rephrasing.** Accepted best-effort. Source: R-2, R-12.
 5. **Terminal-picker exposure of the allow-all derived agent.** User-accepted. Source: R-4, D-37.
 6. **Unanswered prompt cancelled at 1800 s.** Source: R-9.
@@ -856,6 +900,46 @@ agent-playbook; a resolve walk over them takes 56 ms; B's premise (an absolute-t
 a link) is strongly supported but unmeasured. Jurors: Reliability engineer C, End-user advocate C, Senior engineer
 C, Security auditor B (conditional on that premise; falls back to C). **C, 3-1.** The user chose "C + probe B"
 (D-39).
+
+### 2026-09-25 -- Implementation Review (after Phase 1, persona: Security auditor, Reliability engineer, Senior engineer)
+
+Implementation health: Green.
+18 findings after merge (1 High, 4 Medium, 13 Low), plus a targeted Full-effort Security re-review of the High fix
+(1 High, 5 Low). Standard effort, one cycle per the user's cap; the targeted re-review was the user's choice
+(2026-09-25) because the High fix touches a security gate.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | An unreadable `config.toml` regenerated a Manual user's agent as Yolo at startup and saves wrote defaults over it | Fixed — 682bbc7: no generation or save on `_load_error`; gate not in effect; `config_error` shown |
+| 2 | Medium | D-30 heal ran unbounded under the lock, outside the gate's 2 s budget | Fixed — 682bbc7: heal in a worker inside the remaining budget; deterministic test |
+| 3 | Medium | D-35 notice missed startup and was cleared by unrelated saves | Fixed — 682bbc7: startup compares fingerprints; cleared only by mode/rules changes |
+| 4 | Medium | `os.path.isjunction` needs Python 3.12; `pyproject` allows 3.11 | Fixed — 682bbc7: reparse-tag fallback; never raises per entry |
+| 5 | Medium | D-39 probe box ticked but Follow-up 3 not updated | Fixed — Follow-up 3 and R-7 carry the probe result (this update) |
+| 6 | Low | Permission routes took the lock unbounded | Fixed — 682bbc7: 5 s bounded acquire, "try again" answer |
+| 7 | Low | Lock-timeout refusal was generic with a traceback | Fixed — 682bbc7: names the cause, WARNING without traceback |
+| 8 | Low | Invalid rules, `protected_block` junk and bad defaults dropped silently | Fixed — 682bbc7: logged once, `rules_warning` shown |
+| 9 | Low | D-28 note logged on every regeneration | Fixed — 682bbc7: once per process |
+| 10 | Low | `***`, `**/*`, `*/**` passed D-14 | Fixed — 682bbc7: patterns of only `*`, `/`, `\` rejected |
+| 11 | Low | A Protected folder that is itself a link went unreported | Fixed — 682bbc7: reported as a folder-level link |
+| 12 | Low | D-34 refusal leaked absolute paths to remote clients | Fixed — 682bbc7, 687ee20: redacted at folder boundaries, incl. the config folder |
+| 13 | Low | README said a hand edit is picked up by the next session for every key | Fixed — 682bbc7: wording per key and session kind |
+| 14 | Low | `_gate_verdict` accepted a bare bool only for a test fixture | Fixed — 682bbc7: fixture returns the dict; bool fails closed |
+| 15 | Low | Manual-seed criterion's agents-write clause met only in the migrated run | Fixed — recorded in the Phase 1 note (criterion predates D-23) |
+| 16 | Low | Self-reported divergences not in § 9 | Fixed — recorded in § 9 |
+| 17 | Low | Six dashboard page tests failing (pre-existing, `8d1782d`) | Fixed — 967267e (user chose to fix in this plan, 2026-09-25) |
+| 18 | Low | `web.py` docstring cited `derived_block_state()` without its argument | Fixed — 682bbc7 |
+| R1 | High | Direct `save_config` writers still wrote defaults over a corrupt config, yielding Yolo | Fixed — 687ee20: `save_config` refuses a failed-load config; one handler; repro re-run |
+| R2 | Low | `.bak` named even when the backup failed | Fixed — 687ee20 |
+| R3 | Low | Remote redaction matched bare prefixes and missed the config folder | Fixed — 687ee20 |
+| R4 | Low | Stale "could not be read" status lingered after a hand fix | Fixed — 687ee20 |
+| R5 | Low | `heal_stale_locked` relied on callers to check `_load_error` | Fixed — 687ee20 |
+| R6 | Low | Any `TimeoutError` in the heal read as "being applied" | Fixed — 687ee20 |
+
+Contributing personas: #1 raised by all three; #2 Reliability and Senior engineer; #3 Reliability and Security; #4
+Security and Senior engineer; #10-12 Security; #6-9 Reliability; #13-16, #18 Senior engineer. The Security
+re-review returned "HIGH FIX: CLOSED" for #1 and raised R1-R6. No cycle-2 re-review of 687ee20 (user cap); the
+orchestrator re-ran the re-review's repro against it (Manual config preserved, gate not in effect). Step 5b QA is
+pending: Phase 1 changed Python, so `/qqa` needs the user to restart PowerAtlas.
 
 ## Harness Improvement Opportunities
 
