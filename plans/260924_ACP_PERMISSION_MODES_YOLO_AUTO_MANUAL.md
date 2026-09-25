@@ -1,7 +1,7 @@
 # ACP Permission Modes: Yolo, Auto and Manual
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phases 0-3 complete, Phase 4 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-4 complete, final review pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the on/off ACP permission profile with three permission modes (Yolo, Auto, Manual), an always-on hard-deny floor, and a plain-language Manual-mode rule editor that compiles to the derived agent
 > **Tier**: Major
@@ -344,6 +344,8 @@ All twelve probes were measured on 2026-09-24 with kiro-cli 2.24.0 against separ
 | P-0.10 | Built-in asks under `all: allow` only | git-initialised cwd with `.kiro/agents/` and `.kiro/hooks/` | `.git/x`, `.kiro/agents/x`, `.kiro/hooks/x`: **prompted**, `source: kiro-scope`, `scope: kiro`, `askType: explicit`; `matchedRule` fs_write ask with a 38-entry `match` covering `.git`, `.vscode`, `.kiro/agents/`, `.kiro/hooks/`, `~/.kiro/agents/`, `~/.kiro/hooks/`, `**/*.code-workspace`, plus trailing-dot, trailing-space and 8.3 variants (`**/git~*/**`, `kiro~1/agents/`). `.kiroignore`: **denied-by-rule** — a built-in **deny**, not an ask (`Rule: deny fs_write matching '.kiroignore, .kiroignore., .kiroignore , kiroig~*' Source: kiro-scope:kiroignore`). `.kiro/steering/x.md`: **ran** (no built-in) | **Fired**: list the built-in asks (.git, .vscode, *.code-workspace, .kiro/agents, .kiro/hooks) and the `.kiroignore` built-in deny |
 | P-0.11 | Windows alias forms against the Floor | `dir /x` shows `SSH~1`, `AWS~1`, `CONFIG~1`; `read_file` on each form | Fully short path `C:\Users\QSYLVE~1.POL\…\SSH~1\dummy`: **ran**, content returned. Long path with only `SSH~1`: **ran**, content returned — the 8.3 name bypasses the deny. `\\?\C:\…\.ssh\dummy`: denied. `\\localhost\C$\…\.ssh\dummy`: denied. Closing test (S1b): fs_read deny `**/ssh~*/**` (lowercase) **denied** `SSH~1\dummy` (patterns are case-insensitive); `**/AWS~*/**` **denied** `AWS~1\dummy`. The shell tier against `SSH~1` was not measured (that session had no shell rule); by construction `*.ssh*` cannot match `SSH~1` [inferred] | **Fired**: add short-name globs (`**/ssh~*/**` etc. close the read_file path); drop guarantee wording |
 | P-0.12 | Sub-agent posture | Agent `all: allow` + Floor; the sub-agent `kiro_default` (no permissions block of its own) reads the canary `.ssh/dummy` via `invoke_sub_agent name=kiro_default` and via `subagent_kiro_default` | First attempt (S7): the model refused to delegate (tool-not-invoked). Retry (S7b): both tools fired (`Sub-agent: kiro_default`); the nested `Read File` came back **denied-by-rule** with `deny fs_read matching "**/.ssh/**" Source: agent-profile` — the sub-agent runs under the parent's agent-profile rules. No sub-agent session folder was created | Not fired (no bypass) |
+
+Correction (orchestrator, 2026-09-25, Phase 4 review): in the P-0.8 row, the `powershell -Command "git status; echo x"` step was **not** split — its `resource` and `triggeringResource` were the whole command (raw `res_S3_separators.json` step `P-0.8i`); it prompted because the whole string did not match `git status*`. A command wrapped in `powershell -Command "…"` is matched as one string.
 
 Cleanup verified: no `pa-probe-*` agent remains in `~/.kiro/agents`; no session.json under `~/.kiro/sessions` names a `phase0` workspace; all 11 deleted session folders passed both checks (`agentMode` = `pa-probe-*`, `workspacePaths` = a scratch `phase0` folder). The 9 hash folders listed under divergences remain. One `kiro-cli` process is still running and was not touched; it is probably the live PowerAtlas instance [inferred]. In the project file I ticked exit criteria 1 and 3; criterion 2 is left to you. The project file is not staged.
 
@@ -714,9 +716,12 @@ refused by the `Sec-Fetch-Site` guard, as designed):
 - `plans/tests/260701_POWERATLAS.md`: "with the setting off, the default" (~154) → Yolo with the floor.
 
 **Exit criteria**:
-- [ ] Every row of § 8 done or marked with its reason
-- [ ] `git grep -n -e "Permission profile" -e "acp_permissions_enabled" -e "turn it off and on" -- README.md docs/ AGENTS.md src/power_atlas/templates src/power_atlas/acp.py`
+- [x] Every row of § 8 done or marked with its reason
+- [x] `git grep -n -e "Permission profile" -e "acp_permissions_enabled" -e "turn it off and on" -- README.md docs/ AGENTS.md src/power_atlas/templates src/power_atlas/acp.py`
       returns only intentional historical mentions
+
+Implementation (2026-09-25, code: 9254b1f)
+Phase 4 is committed as 9254b1f, on top of 9b2137b. `docs/KNOWLEDGE.md` gains a new section, "ACP permission rules — measured 2026-09-24 and 2026-09-25, kiro-cli 2.24.0", recording the probe results in grouped bullets and citing the plan by slug for the full tables: P-A1..P-C, P-0.1..P-0.12, F-1..F-7 and the Phase 1-3 probes (separator splitting and redirection, exact literals, `triggeringResource` naming the part that hit the ask, case and slash behaviour of shell and file patterns, 8.3 names past both deny kinds, symlink resolution and kiro-cli's `workspace-escape`, search-tool filtering, sub-agents under the parent's rules, web_fetch host matching, resource matching for MCP/sub-agent/skill, kiro-cli's built-in `kiro-scope` asks and denies). Dated, italic supersession notes mark the four named entries (the opt-in/off-default entry, the "settings copy says so" `vibe` consequence, the "shipped overlay" line, and "Not settled: whether `*` stops at `&&`"); nothing was deleted. `plans/ROADMAP.md` keeps the item name "Decide permission requests by rule for unattended sessions" and gains a sub-bullet pointing to Auto mode with D-5's design, the unmeasured steer-timing probe and R-9; the "as an opt-in setting" sentence now describes the shipped Yolo and Manual modes. `plans/tests/260701_POWERATLAS.md`'s default posture now reads Yolo with the Always blocked list. The Phase 4 grep's only hit is `README.md:204`, the intentional migration comment. Review fixes in 6abfcbf: the powershell-wrapper note (not split) and the citation for the blanket-ask-without-exclude failure (prior plan § 9 Step 4).
 
 ## 6) Risk Assessment
 
@@ -771,7 +776,7 @@ refused by the `Sec-Fetch-Site` guard, as designed):
 | 1 | Modes, compiler and the mode picker | Done | b4f579d, 682bbc7, 967267e, 687ee20; Terminology 5e719a5 |
 | 2 | Custom Manual rules and the rule editor | Done | 97c58c2, 192ba9f, c7111fc, 1f824f1, 1a45415 |
 | 3 | "Allow, and always in new sessions" | Done | fc336a1, 25bb9f5, 9bca1ae |
-| 4 | Documentation and final live check | Pending | |
+| 4 | Documentation and final live check | Done | 9254b1f, 6abfcbf |
 
 ## Dependency Graph
 
@@ -1108,6 +1113,17 @@ Implementation health: Green.
 
 No cycle-2 review of 9bca1ae (user cap); the orchestrator re-drove the button live in Chrome (Phase 3 QA note) and the
 fixer re-ran the reviewer's prefill probe.
+
+### 2026-09-25 -- Implementation Review (after Phase 4, persona: Senior engineer)
+
+Implementation health: Green.
+2 findings (0 High, 1 Medium, 1 Low), both fixed in 6abfcbf. Standard effort, one cycle. The reviewer checked ten
+KNOWLEDGE facts against the raw probe files and re-ran the Phase 4 grep (one intentional hit).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | KNOWLEDGE claimed kiro-cli splits inside `powershell -Command "…"`; raw P-0.8i shows the whole command matched | Fixed — 6abfcbf; plan's Phase 0 note carries a dated correction |
+| 2 | Low | Blanket-ask-needs-exclude cited probes that only showed the working case | Fixed — 6abfcbf: cites the prior plan § 9 Step 4 |
 
 ## Harness Improvement Opportunities
 
