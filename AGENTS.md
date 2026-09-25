@@ -68,17 +68,30 @@ re-litigate a settled word. General programming vocabulary does not belong here.
   **Not "nonce"**: `_acp_csp` in `web.py` already uses that word for the per-response CSP nonce, and
   the two appear within a few lines of each other. **Not "token"**: `_ACP_TOKEN` meant a different,
   per-launch mechanism that the login code replaces. Settled 2026-09-21,
-  `plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md`.
+  `plans/done/260924-0525_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md`.
 - **base agent** — the kiro-cli agent definition PowerAtlas *reads* in order to build the derived
   agent. User-configurable by name, defaults to `kiro_default`. It is never modified; interactive
   terminal kiro-cli sessions keep using it untouched, which is what keeps their permission posture
   independent of anything PowerAtlas does.
 - **derived agent** — `~/.kiro/agents/poweratlas-acp.md`, which PowerAtlas *generates* from the base
-  agent plus a permissions overlay. Never hand-edited and never committed: it is a build product,
-  regenerated at startup and on settings change while the ACP permission setting is on, and **deleted**
-  (not written as an allow-all file) while it is off — writing an allow-all file even when off would
-  have made it selectable from kiro-cli's own terminal agent picker, widening posture for a user whose
-  own baseline is narrower than allow-all. Deleting it also moves sessions still using it to
-  kiro-cli's `vibe` fallback (measured live 2026-09-23), so turning the setting off affects running
-  sessions, not only new ones. Editing it directly is always the wrong move — change
-  the base agent or the overlay instead.
+  agent plus a `permissions:` block compiled from the permission mode and rules (`compile_block` in
+  `agent_profile.py`). Never hand-edited and never committed: it is a build product, written in every
+  permission mode at startup and on every permission-settings change; a hand edit is regenerated the
+  next time a Default session is created. A file of that name that PowerAtlas did not write is left
+  alone and reported, and Default sessions are refused until it is removed. Editing it directly is
+  always the wrong move — change the base agent, the mode or the rules instead. Settled 2026-09-24,
+  `plans/260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL.md` (the deletion-while-off behaviour of
+  `plans/done/260924-0525_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` is gone with the Off state).
+- **permission mode** — the setting that decides what Default ACP sessions may do without asking:
+  **Yolo**, **Manual**, or **Auto** (shown, not yet selectable; behaves like Manual). Stored as
+  `acp_permission_mode`. **Not "permission profile"**: that named the on/off switch this replaced.
+  **Not "posture"** in UI text: code comments use "posture" for the effective result, the UI and docs
+  use "permission mode".
+- **Always blocked** — the rules refused silently in every permission mode (credential-store reads,
+  commands mentioning those stores, file-tool writes to the derived agent and kiro-cli's settings),
+  compiled first as `FLOOR_RULES`. **Not "deny floor"** in UI or docs: "floor" is the code name only,
+  and the 2026-09-22 "deny floor" of shell patterns was a different, rejected design.
+- **Protected** — in Manual, the agent, steering, skill and hook folders under `.kiro`, whose
+  file-tool writes always ask even when writing files is allowed, and each of which can be switched
+  to block outright (`protected_block`). **Not "guarded" or "sensitive paths"**; and not the same as
+  Always blocked, which applies in every mode and never asks.
