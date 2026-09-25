@@ -11543,6 +11543,13 @@ check("rules editor: in Manual, no mode note; a failed read does not open an emp
   await q.sandbox.openAcpRulesEditor();
   assertEqual(q.sandbox.document.getElementById("acpRulesModal").open, false,
     "a state without rules opened the editor");
+  // An unreadable config.toml: the rules in the answer are the defaults.
+  const r = loadPanel({ answer: () => ({ body: rulesState({
+    config_error: "PowerAtlas's config.toml could not be read (x)" }) }) });
+  await r.sandbox.openAcpRulesEditor();
+  assertEqual(r.sandbox.document.getElementById("acpRulesModal").open, false,
+    "the editor opened on the defaults of an unreadable config.toml");
+  assert(r.toasts.some((t) => t.includes("could not be read")), "the unreadable config was not reported");
 });
 
 check("rules editor: default Allow hides the allow list and the patterns come back with Ask", async () => {

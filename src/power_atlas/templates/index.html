@@ -8216,6 +8216,13 @@ function openAcpRulesEditor() {
           || !Array.isArray(d.rule_rows)) {
         throw new Error('not a rules answer');
       }
+      // An unreadable config.toml answers with the defaults' rules, and a
+      // save would be refused anyway (Phase 1 review, finding 1): say why
+      // rather than open an editor on rules nobody set.
+      if (_acpPermConfigError(d)) {
+        _acpPermToast(_acpPermConfigError(d) + '.');
+        return;
+      }
       _acpRulesState = d;
       _acpRulesDraft = _acpRulesCopy(d.rules);
       _acpRulesShowError('');

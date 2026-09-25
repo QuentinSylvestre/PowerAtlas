@@ -181,7 +181,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 /* The Manual rule editor (partials/acp_permission_rules_modal.html),
    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2. Scrolls inside the
    dialog so the footer's Save stays in view. */
-.acp-rules-modal { max-width: 640px; }
+.profile-modal.acp-rules-modal { max-width: 640px; }  /* beats .profile-modal's 480px below */
 .acp-rules-intro { font-size: 12px; color: var(--text-muted); margin: 0 0 8px; line-height: 1.45; }
 .acp-rules-note { font-size: 12px; margin: 0 0 8px; }
 .acp-rules-body { max-height: 62vh; overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 10px; }
