@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import html as html_mod
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -32,7 +33,7 @@ import jinja2 as _jinja2
 
 from fastapi import (BackgroundTasks, FastAPI, HTTPException, Request,
                      Response, WebSocket)
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -4441,9 +4442,7 @@ async def set_acp_permissions(request: Request):
                 # a lone surrogate in it (refused for exactly that) cannot be
                 # encoded as UTF-8. As a `\ud800` escape it reaches the
                 # editor as the same string, so the chip still matches.
-                import json as json_mod
-                from fastapi.responses import Response
-                return Response(json_mod.dumps(answer, ensure_ascii=True),
+                return Response(json.dumps(answer, ensure_ascii=True),
                                 media_type="application/json")
             return answer
 
