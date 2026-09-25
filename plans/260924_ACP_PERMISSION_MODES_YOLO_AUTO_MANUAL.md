@@ -1,7 +1,7 @@
 # ACP Permission Modes: Yolo, Auto and Manual
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phases 0-2 complete, Phases 3-4 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0-3 complete, Phase 4 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the on/off ACP permission profile with three permission modes (Yolo, Auto, Manual), an always-on hard-deny floor, and a plain-language Manual-mode rule editor that compiles to the derived agent
 > **Tier**: Major
@@ -656,16 +656,48 @@ label, an editable field prefilled per D-20, the D-35 interpreter warning when i
 answered". On error it shows the message and leaves the prompt open.
 
 **Exit criteria**:
-- [ ] Route tests: append, dedupe, invalid pattern refused, remote refused, default-Allow row refused
-- [ ] `_project_consent` and `ruleEligible` tests: `triggeringResource` forwarded; a non-string dropped;
+- [x] Route tests: append, dedupe, invalid pattern refused, remote refused, default-Allow row refused
+- [x] `_project_consent` and `ruleEligible` tests: `triggeringResource` forwarded; a non-string dropped;
       ineligible for a Protected rule (`match` present), a non-`agent-profile` source, a non-derived bound mode
-- [ ] Page tests on both pages: button present only with `ACP_LOCAL === true`, `ruleEligible` and an
+- [x] Page tests on both pages: button present only with `ACP_LOCAL === true`, `ruleEligible` and an
       `allow_once` option; prefill per D-20 (`git status --short` → `git status --short`, `python -m pytest` → the
       exact command with the D-35 warning, a bare filename → the exact resource, an MCP tool → its resource, no button on a web-fetch prompt); Save posts then answers by
       `kind`; an error leaves the prompt open; a resolved-meanwhile prompt is not answered
-- [ ] Live on the running instance after the user restarts it (AGENTS.md § Verification Setup): in Manual, a
+- [x] Live on the running instance after the user restarts it (AGENTS.md § Verification Setup): in Manual, a
       prompted `echo pa-button` shows the button prefilled `echo pa-button`; save; the prompt is answered; a new session runs `echo pa-button` without a prompt
-- [ ] Update README.md: the button (new sessions only; when it does not appear) and the "Triggered by" field
+- [x] Update README.md: the button (new sessions only; when it does not appear) and the "Triggered by" field
+
+Implementation (2026-09-25, code: fc336a1)
+Phase 3 adds "Allow, and always in new sessions…" to permission prompt cards. It is committed as fc336a1, plus fc336a1's README wording fix 25bb9f5. Neither commit carries an attribution trailer, and nothing is pushed. In `acp.py`, the `permission_request` frame now forwards `consent.triggeringResource`. It also carries `ruleEligible`, `ruleRow` and `ruleRowLabel`, computed by `_rule_row` from the raw consent before projection: the source is `agent-profile`; the matched rule is an ask with no `match` list, so not Protected; the capability names the row whose rule matched; and the session record's mode is `poweratlas-acp`. In `web.py`, the new route is `POST /api/acp-permissions/allow-rule`. It validates the pattern with `pattern_error`, refuses `web_fetch`, rows outside D-11, a row set to Allow and a full list, checks again inside the lock, and appends without duplicates through `apply_settings(lock_timeout=5, sets_posture=False)`, returning the D-32 result. It is not in `_REMOTE_ALLOWED_PATHS`; tests confirm a 403 for a remote peer, a request without Origin and one without the `pa_local` cookie. In the shared renderer, the card offers the button only when `window.ACP_LOCAL === true` (`acp.html` now sets that global). The field is labelled and prefilled per revised D-20 and shows the D-35 and D-38e warnings. Save posts first and answers with the `allow_once` option by kind only after the server stored the rule; a prompt answered meanwhile is not answered again; an error leaves the prompt open with the reason. "Triggered by" shows only when it differs from the resource. README documents the button and the "Triggered by" field.
+
+| Probe step (kiro-cli 2.24.0; fs_write Ask row with allow list + ask exclude) | Result |
+|---|---|
+| write `sub/a.txt` under allow `sub/**` (relative pattern, relative path) | ran, no prompt |
+| write `<cwd>\sub\d.txt` (absolute backslash path) under relative `sub/**` | ran, no prompt: matched relative to the workspace |
+| write `abs/e.txt` (relative path) under absolute `C:/…/sP3/abs/**` | ran, no prompt |
+| write `C:/…/sP3b/abs/b.txt` and `C:\…\sP3b\abs\c.txt` under absolute forward-slash `C:/…/sP3b/abs/**` | both ran, no prompt |
+| control: write outside the allowed folder | prompted; an absolute path inside the workspace arrives relativised (`resource` was `other.txt`) |
+| shell bare ask, `echo pa-one && echo pa-two` | prompted; `triggeringResource` was the first sub-command, `echo pa-one` |
+| frame shape of a bare row ask | `matchedRule` = `{capability, effect: ask}`, no `match`, no `exclude`: eligible |
+
+Implementation (2026-09-25, code: 9bca1ae — review fixes)
+9bca1ae applied all 15 merged review findings. A file prompt now fills in an absolute path under the session's folder (new frame key `ruleRoot`: the consent's `workspaceRoot`, else the session cwd), and never proposes a broad place: a drive root, the home folder or any ancestor of it, or the session folder or any ancestor of it give the exact file instead; a resource holding a wildcard, a `.`/`..` segment or a device/UNC prefix uses the exact resource. Broad folders warn for reads as well as writes, and a relative pattern warns that it applies in every session. Saving from a card no longer clears the D-35 notice (`apply_settings(keeps_notice=True)`); the route returns the notice and the card points at it after saving. `..` path segments are refused in Read/Write files allow patterns (route and `validate_rules`; loading drops a stored one with the rules warning). The route refuses any row outside `acp._RULE_ROWS` and accepts a pattern already in a full list as a no-op. A reloaded session's eligibility comes from the `agentMode` kiro-cli persisted in `session.json`; unreadable metadata makes it ineligible. Split commands get honest hint and outcome text, warnings run on the whole command, `?` and `[` trigger the redirection warning, focus falls back to the card when the trigger is disabled, a test pins the renderer's row set, a Save test puts `reject_once` first, dashboard-page tests were added, and README was corrected. Tests after 9bca1ae: pytest 2186 passed; `node tests/acp_page.test.mjs` 795/795; `_check_test_names.py` clean. The reviewer's prefill probe re-run shows no broad prefill for any adversarial case (`...\scratchpad\phase3\fix\probe2_out.txt`).
+
+QA (Step 5b and the live exit criterion, 2026-09-25): **PASS**. PowerAtlas restarted through `/api/restart` at 01:04
+(`config.toml` copied to `config.toml.pre-phase3-restart`); startup clean. Driven in real Chrome through the
+Claude-in-Chrome MCP on /acp (reached with a same-origin `location.assign('/acp')`; a direct MCP navigation to /acp is
+refused by the `Sec-Fetch-Site` guard, as designed):
+- Mode set to Manual. A Default session in "The agent's own folder" was asked to run `echo pa-button`; the card showed
+  Capability "Run shell commands", Source "The agent's own permissions (agent-profile)", Matched rule "Run shell
+  commands → ask", and the button "Allow, and always in new sessions…".
+- The button opened a labelled field ("Run commands — allow without asking in new sessions:") prefilled with the exact
+  command `echo pa-button`, focus in the field, and the scope hint. Save stored the rule (`shell.allow` gained
+  `echo pa-button`), answered the prompt with Allow, the command ran (agent replied `pa-button`), and the card read
+  "Rule added — new sessions will not ask". No posture notice.
+- A **new** session ran `echo pa-button` with no permission card (tool call completed).
+- Cleanup: the session was closed, the rule removed through the rules route, the mode set back to Yolo (in effect, no
+  notice, rules equal to the seed set), and both test session folders deleted after checking `createdAt`,
+  `agentMode` (`poweratlas-acp`) and `workspacePaths`.
 
 ### Phase 4: Documentation and final live check
 
@@ -738,7 +770,7 @@ answered". On error it shows the message and leaves the prompt open.
 | 0 | Pre-flight probes and gate | Done | 4 gates fired, follow-up F-1..F-7, applied as D-38; PD-6 decided as D-39 |
 | 1 | Modes, compiler and the mode picker | Done | b4f579d, 682bbc7, 967267e, 687ee20; Terminology 5e719a5 |
 | 2 | Custom Manual rules and the rule editor | Done | 97c58c2, 192ba9f, c7111fc, 1f824f1, 1a45415 |
-| 3 | "Allow, and always in new sessions" | Pending | |
+| 3 | "Allow, and always in new sessions" | Done | fc336a1, 25bb9f5, 9bca1ae |
 | 4 | Documentation and final live check | Pending | |
 
 ## Dependency Graph
@@ -832,6 +864,15 @@ Phase 4 (docs)
 - **Phase 2 — additions beyond the plan text:** `rule_rows` and `rule_problems` in the state payload; an allow-all
   note for Run commands and Write files set to Allow; the Protected item "Skills" renamed "Skill files"; the
   Edit rules row keeps the settings menu open while the rules load; every `.profile-modal` now centred.
+- **Phase 3 — the card is offered for Read files, Write files, Run commands, MCP tools, Sub-agents and Skills only**
+  (not Web search or Powers, whose matching was never measured); the route refuses the same rows.
+- **Phase 3 — file prefills are absolute** (forward slashes, under the session's workspace root from the consent's
+  `workspaceRoot`, carried as frame key `ruleRoot`) rather than D-20's relative parent folder: a relative pattern
+  is global across sessions and so broader than the prompt.
+- **Phase 3 — `..` segments refused in file allow patterns;** loaded sessions eligible only when the persisted
+  `agentMode` is `poweratlas-acp`; saving from a card keeps a pending D-35 notice (`keeps_notice`).
+- **Phase 3 — shared helpers:** the rule editor's warning helpers moved into `transcript-renderer.js`;
+  `markPermissionResolved` leaves an open rule row usable so a save can finish after the prompt resolved (D-19).
 - **Phase 1 — scope addition at the user's request:** the six pre-existing dashboard page-test failures (from
   `8d1782d`) were repaired in this plan (967267e).
 
@@ -1041,6 +1082,32 @@ cycle per the user's cap.
 
 No cycle-2 review of c7111fc/1a45415 (user cap); the orchestrator re-ran the security probe outcome (reported by the
 fixer) and re-drove every changed surface in real Chrome (Phase 2 QA note).
+
+### 2026-09-25 -- Implementation Review (after Phase 3, persona: Security auditor, Senior engineer)
+
+Implementation health: Green.
+15 findings after merge (1 High, 5 Medium, 9 Low), all fixed in 9bca1ae. Standard effort, one cycle per the user's cap.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | File prefill escaped the home/drive fallback (`C:\Users\desktop.ini` → `C:/Users/**`), no warning | Fixed — 9bca1ae: ancestor-of-home and workspace tests; exact resource for wildcards, `.`/`..`, device paths |
+| 2 | Medium | `..` resources prefilled `../**`; the server accepted them | Fixed — 9bca1ae: prefill uses the exact path; `..` refused in file allow patterns |
+| 3 | Medium | Relative file prefill became a global rule across sessions | Fixed — 9bca1ae: absolute prefill under `ruleRoot`; relative patterns warn |
+| 4 | Medium | Saving from a card cleared the D-35 notice, which /acp never shows | Fixed — 9bca1ae: allow-rule keeps the notice; card points at it |
+| 5 | Medium | Chained commands: the card promised "will not ask" for a rule covering one part | Fixed — 9bca1ae: split-command hint and outcome text; README corrected |
+| 6 | Medium | Redirection warning only on `*`, not `?` or `[` | Fixed — 9bca1ae |
+| 7 | Low | Loaded sessions' eligibility used the unconfirmed modeId sent | Fixed — 9bca1ae: persisted `agentMode`; unreadable → ineligible |
+| 8 | Low | Warnings ignored the rest of a compound command | Fixed — 9bca1ae: warnings on the whole command |
+| 9 | Low | Route accepted `web_search` and `power`, never offered by the card | Fixed — 9bca1ae: rows outside `_RULE_ROWS` refused |
+| 10 | Low | Focus fell to body when a resolved card's row was cancelled | Fixed — 9bca1ae |
+| 11 | Low | A duplicate on a full list was refused as "full" | Fixed — 9bca1ae: membership checked first |
+| 12 | Low | Renderer row set not pinned to `_RULE_ROWS` | Fixed — 9bca1ae: pin test |
+| 13 | Low | Answer-by-kind mutation survived the tests | Fixed — 9bca1ae: `reject_once`-first Save test |
+| 14 | Low | Dashboard page coverage thinner than "on both pages" | Fixed — 9bca1ae: dashboard error, resolved-meanwhile and web-fetch tests |
+| 15 | Low | README claimed task modes never show the button, untrue for reloaded sessions | Fixed — 9bca1ae with #7 |
+
+No cycle-2 review of 9bca1ae (user cap); the orchestrator re-drove the button live in Chrome (Phase 3 QA note) and the
+fixer re-ran the reviewer's prefill probe.
 
 ## Harness Improvement Opportunities
 
