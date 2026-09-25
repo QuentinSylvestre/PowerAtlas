@@ -72,7 +72,8 @@ its own header and imports three names from two intra-package modules. The name 
 `DERIVED_AGENT_NAME`, lives in `config.py` for that reason
 (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL D-20). What it needs from
 here — whether the derived agent is in effect — reaches it through
-`web._derived_agent_in_effect`, installed as `acp.mode_gate_hook`.
+`web._derived_agent_in_effect`, installed as `acp.mode_gate_hook`, which
+calls `gate_check` here and only words the answer.
 """
 
 import copy
@@ -202,13 +203,16 @@ _BASE_DIGEST_RE = re.compile(r"#\s*Base agent digest: ([0-9a-f]{16})\b")
 # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-16: `apply_settings` holds it
 # across `load_config`, the mutation, `save_config` and generation, so
 # config.toml is never ahead of the derived agent for a session-creation check
-# to see. There are exactly three acquirers (final review, cycle 2, C-M3):
+# to see. There are exactly three acquirers, all in this module (final
+# review, cycle 2, C-M3; M-10 moved the gate's here, so nothing outside this
+# module touches the lock):
 #
 # * `apply_settings` (and `sync_from_config`, which is `apply_settings(None)`),
 #   for the save and the generation.
-# * `web._derived_agent_in_effect`, the session gate, with a bounded
-#   `acquire(timeout=...)`, so a stalled generation refuses a session rather
-#   than hanging it; it heals a stale or absent file while holding it.
+# * `gate_check`, the session gate's locked section (`web._derived_agent_in_effect`
+#   calls it), with a bounded `acquire(timeout=...)`, so a stalled generation
+#   refuses a session rather than hanging it; it heals a stale or absent file
+#   while holding it.
 # * `acknowledge_notice`, bounded, and only to serialise its write of the
 #   notices against the heal and the startup pass, which set the same notices
 #   and the same notice file while holding it. It never generates.
@@ -217,9 +221,9 @@ _BASE_DIGEST_RE = re.compile(r"#\s*Base agent digest: ([0-9a-f]{16})\b")
 # the startup pass waits unbounded. `compile_block`,
 # `derived_block_state`, `_apply_locked` and `heal_stale_locked` never acquire
 # it: a plain `threading.Lock` is not reentrant, and the first two acquirers
-# call them while holding it. The gate may hand its hold to a worker thread that
-# runs the heal and releases it (a plain `Lock` may be released by any thread),
-# so the gate's own wait stays inside its budget (D-30).
+# call them while holding it. `gate_check` may hand its hold to a worker thread
+# that runs the heal and releases it (a plain `Lock` may be released by any
+# thread), so the gate's own wait stays inside its budget (D-30).
 _generation_lock = threading.Lock()
 
 
@@ -1842,8 +1846,8 @@ def clear_unreadable_status(config) -> None:
     """Drop a status that only says config.toml could not be read.
 
     Phase 1 re-review, finding 4. Called once config.toml has loaded cleanly
-    and the file on disk is exactly what it compiles to: by the gate with the
-    lock held, and by the settings panel's read (final review, RE10), which
+    and the file on disk is exactly what it compiles to: by `gate_check` with
+    the lock held, and by the settings panel's read (final review, RE10), which
     does not take it — the swap below is one assignment, and the worst a race
     with a generation can do is let this status replace a newer one that says
     the same thing. The status then reports the settings in effect. A D-28
@@ -2156,8 +2160,8 @@ def heal_stale_locked(config) -> bool:
     """Regenerate a `"stale"` or `"absent"` derived agent once (D-30, H-A).
     The lock must be held.
 
-    Called by the session gate, which holds `_generation_lock` and has already
-    checked that `config` loaded cleanly. Heals a hand edit of the file, a
+    Called by `gate_check`'s worker thread, which holds `_generation_lock`
+    and has already checked that `config` loaded cleanly. Heals a hand edit of the file, a
     config.toml edited while PowerAtlas runs, a settings route that saved
     over a just-applied change (R-13), and a file that was never written or
     was deleted (final review, H-A), without a restart.
@@ -2188,6 +2192,136 @@ def heal_stale_locked(config) -> bool:
                                info["tampered"], info["base_changed"])
     _generation_succeeded()
     return True
+
+
+def permission_in_effect(state: str, config) -> bool:
+    """The one in-effect predicate the gate and the settings panel share (SC-9).
+
+    The file must be exactly what the settings compile to (D-15), and the
+    settings must have been read: a config.toml that did not parse loads as the
+    defaults, so a file that happens to match them proves nothing about what
+    the user set (Phase 1 review, finding 1).
+    """
+    return state == "on" and not config._load_error
+
+
+class GateBudgetTimeout(TimeoutError):
+    """The gate's own wait ran out. Still a `TimeoutError`, which is what `acp`
+    reads as "being applied"; every other `TimeoutError` the gate meets is
+    re-raised as a failure (Phase 1 re-review, finding 6)."""
+
+
+@dataclass(frozen=True)
+class GateCheck:
+    """What `gate_check` found, read after the lock is released.
+
+    `config` is the settings the check read inside the lock; `state` and
+    `compile_error` are `block_state_detail`'s answer for it, after the heal
+    when one ran; `healed` is the heal's outcome, or None when it did not run.
+    """
+    config: object
+    state: str
+    compile_error: str
+    healed: bool | None
+
+    @property
+    def in_effect(self) -> bool:
+        return permission_in_effect(self.state, self.config)
+
+
+def gate_check(budget_seconds: float) -> GateCheck:
+    """The session gate's locked section (D-16, D-30); see `GateCheck`.
+
+    260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1, moved here from
+    `web._derived_agent_in_effect` so that the lock protocol has one owner
+    (final review, M-10). The web layer turns the result into the refusal's
+    words; everything under the lock happens here.
+
+    Takes `_generation_lock` with a bounded wait, so it never reads a
+    config.toml that is ahead of the file. A wait that runs out raises
+    `GateBudgetTimeout`, and `acp` refuses on a raise. While holding the lock,
+    a `"stale"` or `"absent"` file (final review, H-A) whose config loaded
+    cleanly is regenerated once and re-checked (D-30); a regeneration that
+    compiled a different mode or rule set raises D-35's dashboard notice
+    (`heal_stale_locked`). A config.toml that did not parse is never healed
+    (finding 1). A file already in effect clears an earlier "could not be
+    read" status (finding 4). Never calls `find_protected_links` (D-39).
+
+    The whole call, heal included, waits at most `budget_seconds` (D-30;
+    Phase 1 review, finding 2). The heal runs in a worker thread that takes
+    over this call's hold on the lock and releases it when the regeneration
+    and its re-check finish; this call waits for it with what is left of the
+    budget and raises `GateBudgetTimeout` when that runs out. The
+    regeneration then completes in the background, and a later gate call sees
+    its result. Any other `TimeoutError` met here, from reading config.toml or
+    the agent file or from inside the regeneration, is re-raised as a
+    `RuntimeError`, so only the gate's own budget reads as "being applied"
+    (Phase 1 re-review, finding 6).
+    """
+    lock = _generation_lock
+    deadline = time.monotonic() + budget_seconds
+
+    def timed_out(what: str) -> TimeoutError:
+        return GateBudgetTimeout(
+            f"the permission settings are being applied ({what}) and did not "
+            f"finish within {budget_seconds:.0f} s")
+
+    if not lock.acquire(timeout=budget_seconds):
+        raise timed_out("waiting for a settings change")
+    handed_off = False
+    try:
+        config = load_config()
+        state, compile_error = block_state_detail(config)
+        healed = None
+        # Final review, H-A: a file that was never written, or was deleted,
+        # is regenerated the same way as a stale one; `_target_is_ours` is
+        # True for an absent file.
+        if state in ("stale", "absent") and not config._load_error:
+            done = threading.Event()
+            box: dict = {}
+
+            def heal() -> None:
+                # Owns the lock from here on, and always releases it.
+                try:
+                    box["healed"] = heal_stale_locked(config)
+                    box["state"] = block_state_detail(config)
+                except BaseException as exc:  # noqa: BLE001 - re-raised below
+                    box["error"] = exc
+                finally:
+                    lock.release()
+                    done.set()
+
+            worker = threading.Thread(target=heal, daemon=True,
+                                      name="acp-permission-heal")
+            worker.start()
+            handed_off = True
+            if not done.wait(max(0.0, deadline - time.monotonic())):
+                raise timed_out("regenerating the agent file")
+            if "error" in box:
+                # Wrapped, so only this call's own budget reads as "being
+                # applied": a `TimeoutError` raised inside the regeneration is
+                # a failure, and `acp` must report it as one (Phase 1
+                # re-review, finding 6).
+                raise RuntimeError("regenerating the ACP agent file failed: "
+                                   f"{box['error']!r}") from box["error"]
+            healed = box["healed"]
+            state, compile_error = box["state"]
+        elif permission_in_effect(state, config):
+            # config.toml reads cleanly again and the file already matches it:
+            # a "could not be read" status from earlier no longer holds
+            # (finding 4). The lock is still this call's here.
+            clear_unreadable_status(config)
+    except TimeoutError as exc:
+        if exc.__class__ is GateBudgetTimeout:
+            raise
+        # Any other `TimeoutError` (from reading config.toml or the agent
+        # file) is a failure, not "being applied" (finding 6).
+        raise RuntimeError(f"the ACP permission check failed: {exc!r}") from exc
+    finally:
+        if not handed_off:
+            lock.release()
+    return GateCheck(config=config, state=state, compile_error=compile_error,
+                     healed=healed)
 
 
 # ---- What the settings panel shows ---------------------------------------------

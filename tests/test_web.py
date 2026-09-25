@@ -24955,6 +24955,23 @@ class TestPermissionGate:
     """`web._derived_agent_in_effect`, the session gate (D-15, D-16, D-30,
     D-34, D-35)."""
 
+    def test_web_never_touches_agent_profiles_private_names(self):
+        """Final review, M-10: the lock protocol has one owner. `web.py`
+        calls `agent_profile.gate_check` and reads no private
+        `agent_profile` attribute, `_generation_lock` above all."""
+        import ast
+        from power_atlas import web as web_mod
+        source = Path(web_mod.__file__).read_text(encoding="utf-8")
+        private = sorted({
+            f"{node.attr} (line {node.lineno})"
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "agent_profile"
+            and node.attr.startswith("_")})
+        assert private == [], private
+        assert "_generation_lock" not in source
+
     def test_in_effect_follows_the_file_against_the_settings(self, isolated_config):
         from power_atlas import web as web_mod
         ap = _agent_profile()

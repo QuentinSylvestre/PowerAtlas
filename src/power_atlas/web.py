@@ -570,17 +570,6 @@ async def _startup_load_local_secret() -> None:
 _GATE_LOCK_TIMEOUT_SECONDS = 2.0
 
 
-def _permission_in_effect(state: str, config) -> bool:
-    """The one in-effect predicate the gate and the settings panel share (SC-9).
-
-    The file must be exactly what the settings compile to (D-15), and the
-    settings must have been read: a config.toml that did not parse loads as the
-    defaults, so a file that happens to match them proves nothing about what
-    the user set (Phase 1 review, finding 1).
-    """
-    return state == "on" and not config._load_error
-
-
 def _not_in_effect_reason(state: str, compile_error: str, config,
                           healed: bool | None, *,
                           detail: bool = True) -> tuple[str, str]:
@@ -705,12 +694,6 @@ def _path_within(path: str, folder: str) -> bool:
     return p == f or p.startswith(f + "/")
 
 
-class _GateBudgetTimeout(TimeoutError):
-    """The gate's own wait ran out. Still a `TimeoutError`, which is what `acp`
-    reads as "being applied"; every other `TimeoutError` the gate meets is
-    re-raised as a failure (Phase 1 re-review, finding 6)."""
-
-
 def _derived_agent_in_effect() -> dict:
     """`acp.mode_gate_hook`: whether the derived agent is in effect, and why not.
 
@@ -721,93 +704,27 @@ def _derived_agent_in_effect() -> dict:
     compile to (`derived_block_state(config) == "on"`, D-15) — the same
     predicate the settings panel shows, so the two cannot disagree.
 
-    Takes `agent_profile._generation_lock` with a bounded wait (D-16): it and
-    `agent_profile.apply_settings` are the acquirers that generate (the third,
-    `acknowledge_notice`, only writes the notices), so it never reads a
-    config.toml that is ahead of the file. A timeout raises, and `acp`
-    refuses on a raise. While holding the lock, a `"stale"` file whose config
-    loaded cleanly is regenerated once and re-checked (D-30); a regeneration
-    that compiled a different mode or rule set raises D-35's dashboard notice.
-    Never calls `find_protected_links` (D-39).
+    The locked part — the bounded wait on the generation lock (D-16), the
+    D-30 self-heal of a stale or absent file and D-35's notice — is
+    `agent_profile.gate_check`, which owns the lock protocol (final review,
+    M-10); this function only words its answer. The whole call waits at most
+    `_GATE_LOCK_TIMEOUT_SECONDS`; a wait that runs out raises a
+    `TimeoutError`, and `acp` refuses on a raise. A config.toml that did not
+    parse is never in effect and never healed (finding 1). Never calls
+    `find_protected_links` (D-39).
 
     `acp`'s `load_session` consults it too, for the `modeId` a reload sends.
     There a raising call falls back to `kiro_default` instead of refusing the
     load. 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K5).
 
-    The whole call, heal included, waits at most `_GATE_LOCK_TIMEOUT_SECONDS`
-    (D-30; Phase 1 review, finding 2). The heal runs in a worker thread that
-    takes over this call's hold on the lock and releases it when the
-    regeneration and its re-check finish; this call waits for it with what is
-    left of the budget and raises `TimeoutError` when that runs out. The
-    regeneration then completes in the background, and a later gate call sees
-    its result. A config.toml that did not parse is never in effect and never
-    healed (finding 1). When not in effect, `remote_cause`/`remote_fix` carry
-    the same words without raw error text and with `~` for the home folder,
-    for a remote client (finding 11).
+    When not in effect, `remote_cause`/`remote_fix` carry the same words
+    without raw error text and with `~` for the home folder, for a remote
+    client (finding 11).
     """
-    lock = agent_profile._generation_lock
-    deadline = time.monotonic() + _GATE_LOCK_TIMEOUT_SECONDS
-
-    def timed_out(what: str) -> TimeoutError:
-        return _GateBudgetTimeout(
-            f"the permission settings are being applied ({what}) and did not "
-            f"finish within {_GATE_LOCK_TIMEOUT_SECONDS:.0f} s")
-
-    if not lock.acquire(timeout=_GATE_LOCK_TIMEOUT_SECONDS):
-        raise timed_out("waiting for a settings change")
-    handed_off = False
-    try:
-        config = load_config()
-        state, compile_error = agent_profile.block_state_detail(config)
-        healed = None
-        # Final review, H-A: a file that was never written, or was deleted,
-        # is regenerated the same way as a stale one; `_target_is_ours` is
-        # True for an absent file.
-        if state in ("stale", "absent") and not config._load_error:
-            done = threading.Event()
-            box: dict = {}
-
-            def heal() -> None:
-                # Owns the lock from here on, and always releases it.
-                try:
-                    box["healed"] = agent_profile.heal_stale_locked(config)
-                    box["state"] = agent_profile.block_state_detail(config)
-                except BaseException as exc:  # noqa: BLE001 - re-raised below
-                    box["error"] = exc
-                finally:
-                    lock.release()
-                    done.set()
-
-            worker = threading.Thread(target=heal, daemon=True,
-                                      name="acp-permission-heal")
-            worker.start()
-            handed_off = True
-            if not done.wait(max(0.0, deadline - time.monotonic())):
-                raise timed_out("regenerating the agent file")
-            if "error" in box:
-                # Wrapped, so only this call's own budget reads as "being
-                # applied": a `TimeoutError` raised inside the regeneration is
-                # a failure, and `acp` must report it as one (Phase 1
-                # re-review, finding 6).
-                raise RuntimeError("regenerating the ACP agent file failed: "
-                                   f"{box['error']!r}") from box["error"]
-            healed = box["healed"]
-            state, compile_error = box["state"]
-        elif _permission_in_effect(state, config):
-            # config.toml reads cleanly again and the file already matches it:
-            # a "could not be read" status from earlier no longer holds
-            # (finding 4). The lock is still this call's here.
-            agent_profile.clear_unreadable_status(config)
-    except TimeoutError as exc:
-        if exc.__class__ is _GateBudgetTimeout:
-            raise
-        # Any other `TimeoutError` (from reading config.toml or the agent
-        # file) is a failure, not "being applied" (finding 6).
-        raise RuntimeError(f"the ACP permission check failed: {exc!r}") from exc
-    finally:
-        if not handed_off:
-            lock.release()
-    in_effect = _permission_in_effect(state, config)
+    check = agent_profile.gate_check(_GATE_LOCK_TIMEOUT_SECONDS)
+    config, state, compile_error, healed = (
+        check.config, check.state, check.compile_error, check.healed)
+    in_effect = check.in_effect
     verdict = {"in_effect": in_effect, "state": state,
                "mode": config.acp_permission_mode, "cause": "", "fix": ""}
     if not in_effect:
@@ -4368,7 +4285,7 @@ def _acp_permission_state(config) -> dict:
     route adds that.
     """
     state, compile_error = agent_profile.block_state_detail(config)
-    if _permission_in_effect(state, config):
+    if agent_profile.permission_in_effect(state, config):
         # Final review, RE10: config.toml reads cleanly again and the file
         # already matches it, so a "could not be read" status from earlier no
         # longer holds; the gate does the same with the lock held.
@@ -4387,7 +4304,7 @@ def _acp_permission_state(config) -> dict:
         "base_agent": config.acp_permission_base_agent,
         "derived_agent": str(agent_profile.derived_agent_path()),
         "state": state,
-        "in_effect": _permission_in_effect(state, config),
+        "in_effect": agent_profile.permission_in_effect(state, config),
         "generation_attempted": last.attempted,
         "generation_ok": last.ok and not compile_error,
         "generation_error": compile_error or last.error,
