@@ -17668,30 +17668,34 @@ check("dashboard overview live: a focused tile keeps the focus through a refresh
   const p = loadDashPicker();
   ovLoadRailHelpers(p);
   const b = { id: "sess_22222222-2222-2222-2222-222222222222", title: "Second" };
-  p.sandbox.dashOvRenderLive([ovTile(), ovTile(b)]);
+  // ovTile() stamps Date.now(), so each render gets deep copies of tiles
+  // built once; otherwise "unchanged" data can differ by a millisecond.
+  const tileA = ovTile(), tileB = ovTile(b);
+  const copy = (t) => JSON.parse(JSON.stringify(t));
+  p.sandbox.dashOvRenderLive([copy(tileA), copy(tileB)]);
   const [first, second] = ovTiles(p);
   const grid = p.el("dashOvLiveBody").querySelector(".dash-ov-tiles");
   second.focus();
   assert(p.sandbox.document.activeElement === second);
-  p.sandbox.dashOvRenderLive([ovTile(), ovTile(b)]);
+  p.sandbox.dashOvRenderLive([copy(tileA), copy(tileB)]);
   assert(p.sandbox.document.activeElement === second, "unchanged data: the focus stays");
   assert(p.el("dashOvLiveBody").querySelector(".dash-ov-tiles") === grid, "the grid is kept");
   const events = second.querySelector(".dash-ov-tile-events");
-  p.sandbox.dashOvRenderLive([ovTile(), ovTile(b)]);
+  p.sandbox.dashOvRenderLive([copy(tileA), copy(tileB)]);
   assert(second.querySelector(".dash-ov-tile-events") === events, "unchanged data is not rebuilt");
-  p.sandbox.dashOvRenderLive([ovTile(), ovTile(Object.assign({}, b, {
-    events: [{ kind: "text", role: "assistant", text: "new event" }] }))]);
+  p.sandbox.dashOvRenderLive([copy(tileA), Object.assign(copy(tileB), {
+    events: [{ kind: "text", role: "assistant", text: "new event" }] })]);
   assert(p.sandbox.document.activeElement === second, "changed data: the focus stays");
   assertEqual(second.querySelector(".dash-ov-ev").textContent, "new event", "changed data is redrawn");
   // The focused tile moves first: the other tile moves around it instead.
-  p.sandbox.dashOvRenderLive([ovTile(Object.assign({}, b, { title: "Moved up" })), ovTile()]);
+  p.sandbox.dashOvRenderLive([Object.assign(copy(tileB), { title: "Moved up" }), copy(tileA)]);
   assert(p.sandbox.document.activeElement === second, "reordered: the focus stays");
   assertEqual(ovTiles(p).map((t) => t.querySelector(".dash-ov-tile-title").textContent).join("|"),
     "Moved up|Fix the rail");
   assert(ovTiles(p)[1] === first, "the other tile element is reused");
   // A tile that is no longer live goes, and the rest keep their order.
   const c = { id: "sess_33333333-3333-3333-3333-333333333333", title: "Third" };
-  p.sandbox.dashOvRenderLive([ovTile(c), ovTile(Object.assign({}, b, { title: "Moved up" }))]);
+  p.sandbox.dashOvRenderLive([ovTile(c), Object.assign(copy(tileB), { title: "Moved up" })]);
   assertEqual(ovTiles(p).map((t) => t.querySelector(".dash-ov-tile-title").textContent).join("|"),
     "Third|Moved up");
   assertEqual(grid.childNodes.length, 2, "the gone tile is removed");
@@ -17840,7 +17844,11 @@ check("dashboard overview usage: week, daily bars, tools, context, models and to
   assertEqual(time[13].title, "2026-09-25: 7m · 4 sessions (Claude Code 2, kiro-cli 1, Kiro IDE 1)");
   assertEqual(time[12].title, "2026-09-24: 13m · 1 session (kiro-cli 1)");
   assertEqual(time[0].title, "2026-09-12: 0m · 0 sessions");
-  assertEqual(b.querySelector(".dash-ov-legend").textContent, "Claude Codekiro-cliKiro IDE");
+  // The same text is the accessible name, for touch and screen-reader users.
+  assertEqual(time[13].getAttribute("aria-label"), time[13].title);
+  assertEqual(time[13].getAttribute("role"), "img");
+  // Kiro IDE has no agent time, so no segment; its legend item says so.
+  assertEqual(b.querySelector(".dash-ov-legend").textContent, "Claude Codekiro-cliKiro IDE (sessions only)");
   const tools = b.querySelectorAll(".dash-ov-tool-row");
   assertEqual(tools[0].textContent, "Bash1.2k calls3% failed");
   assertEqual(tools[1].textContent, "shell4 of 1040%");
@@ -17861,7 +17869,11 @@ check("dashboard overview usage: markup in a workspace, tool or model name stays
     by_workspace: [{ cwd: OV_XSS, name: OV_XSS, this_week_s: OV_XSS, last_week_s: "1); x:y" }],
     daily: ovUsageDays((i) => ({
       date: OV_XSS,
-      sessions: { "kiro-cli-v3": "2; background:url(x)", evil: 5, __proto__: 9 },
+      // JSON.parse makes "__proto__" a real own key, as a fetched payload
+      // would; an object literal would set the prototype instead.
+      sessions: Object.assign(JSON.parse('{"__proto__":9}'),
+                              { "claude-code": 3, "kiro-cli-v3": "2; background:url(x)", evil: 5,
+                                "kiro-ide": OV_XSS }),
       agent_s: i === 3 ? { "claude-code": "50%; color:red", "kiro-cli-v3": 1e308 * 10 }
                        : { "claude-code": -40, constructor: 7 },
     })),
@@ -17877,7 +17889,12 @@ check("dashboard overview usage: markup in a workspace, tool or model name stays
   const allowed = new Set(["DIV", "SPAN", "UL", "LI"]);
   for (const n of b.descendants()) {
     assert(allowed.has(n.tagName), `no element may come from the data, got <${n.tagName}>`);
-    assertEqual(Object.keys(n._attrs).length, 0, `no attribute may come from the data, got ${Object.keys(n._attrs)}`);
+    // Only a bar carries attributes: a fixed role and the aria-label that
+    // repeats its tooltip text (checked as text below).
+    const attrs = Object.keys(n._attrs).sort().join(",");
+    assertEqual(attrs, n.className === "dash-ov-bar" ? "aria-label,role" : "",
+      `no attribute may come from the data, got ${attrs}`);
+    if (attrs) assertEqual(n.getAttribute("role"), "img");
     assert(/^(dash-ov-[a-z0-9-]+)?( (is-[a-z-]+|dash-ov-[a-z0-9-]+))*$/.test(n.className),
       `every class is a fixed one, got "${n.className}"`);
     for (const key of Object.keys(n.style)) {
@@ -17896,6 +17913,12 @@ check("dashboard overview usage: markup in a workspace, tool or model name stays
     assert(["dash-ov-bar-seg is-claude", "dash-ov-bar-seg is-kiro-cli", "dash-ov-bar-seg is-kiro-ide"].includes(c),
       `a segment class comes from the fixed map, got ${c}`);
   }
+  // A hostile date lands in the bar tooltip and accessible name as text;
+  // only the fixed providers' numeric counts reach the session text.
+  const bar = b.querySelector(".dash-ov-bar");
+  assertEqual(bar.title, `${OV_XSS}: 0m · 3 sessions (Claude Code 3)`);
+  assertEqual(bar.getAttribute("aria-label"), bar.title);
+  assertEqual(bar.childNodes.length, 1, "the date adds no element");
 });
 
 check("dashboard overview usage: a failed first load says so; a later failure or null keeps the data drawn", async () => {
@@ -18133,14 +18156,20 @@ check("dashboard overview usage: a failed recompute keeps the numbers and says t
 
 check("dashboard overview plans: a focused plan row keeps its element and the focus across an unchanged refresh (F17)", () => {
   const p = loadDashPicker();
-  p.sandbox.dashOvRenderPlans([ovPlan(), ovPlan({ file: "B.md" })]);
+  // ovPlan() stamps Date.now(), so each render gets a deep copy of plans
+  // built once; otherwise "unchanged" data can differ by a millisecond.
+  const plans = [ovPlan(), ovPlan({ file: "B.md" })];
+  const copy = () => JSON.parse(JSON.stringify(plans));
+  p.sandbox.dashOvRenderPlans(copy());
   const head = ovPlanRows(p)[1].querySelector(".dash-ov-plan-head");
   head.focus();
-  p.sandbox.dashOvRenderPlans([ovPlan(), ovPlan({ file: "B.md" })]);
+  p.sandbox.dashOvRenderPlans(copy());
   assert(ovPlanRows(p)[1].querySelector(".dash-ov-plan-head") === head,
     "unchanged data: the row is not rebuilt, so the focused element is still on the page");
   assert(p.sandbox.document.activeElement === head);
-  p.sandbox.dashOvRenderPlans([ovPlan(), ovPlan({ file: "B.md", detail: "moved on" })]);
+  const changed = copy();
+  changed[1].detail = "moved on";
+  p.sandbox.dashOvRenderPlans(changed);
   assertEqual(ovPlanRows(p)[1].querySelector(".dash-ov-plan-detail").textContent, "moved on",
     "changed data is redrawn");
 });

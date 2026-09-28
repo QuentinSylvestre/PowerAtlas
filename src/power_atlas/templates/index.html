@@ -1725,7 +1725,9 @@ var _dashOvUsageDrawn = false;
 var DASH_OV_USAGE_PROVIDERS = [
   ['claude-code', 'is-claude', 'Claude Code'],
   ['kiro-cli-v3', 'is-kiro-cli', 'kiro-cli'],
-  ['kiro-ide', 'is-kiro-ide', 'Kiro IDE']
+  // Kiro IDE records no agent time, so it never has a bar segment; its
+  // legend label says so. The fourth entry is the legend text when it differs.
+  ['kiro-ide', 'is-kiro-ide', 'Kiro IDE', 'Kiro IDE (sessions only)']
 ];
 function dashOvUsageRetrySoon(){
   if (_dashOvUsageRetry !== null) return;
@@ -1841,8 +1843,14 @@ function dashOvUsageChart(days){
     var m = dashOvObj(d.agent_s);
     var col = document.createElement('div');
     col.className = 'dash-ov-bar';
-    col.title = (d.date == null ? '' : String(d.date)) + ': ' + dashOvDuration(totals[i]) +
+    // The same text as the accessible name (role img: aria-label is not
+    // allowed on a plain div), so screen-reader and touch users get the
+    // session counts the hover tooltip shows.
+    var tip = (d.date == null ? '' : String(d.date)) + ': ' + dashOvDuration(totals[i]) +
       ' · ' + dashOvUsageSessionText(d.sessions);
+    col.title = tip;
+    col.setAttribute('role', 'img');
+    col.setAttribute('aria-label', tip);
     var stack = document.createElement('div');
     stack.className = 'dash-ov-bar-stack';
     stack.style.height = dashOvPct(totals[i], max) + '%';
@@ -1871,7 +1879,7 @@ function dashOvUsageLegend(){
   var legend = document.createElement('div');
   legend.className = 'dash-ov-legend';
   DASH_OV_USAGE_PROVIDERS.forEach(function(p){
-    legend.appendChild(dashOvText('span', 'dash-ov-legend-item ' + p[1], p[2]));
+    legend.appendChild(dashOvText('span', 'dash-ov-legend-item ' + p[1], p[3] || p[2]));
   });
   return legend;
 }
