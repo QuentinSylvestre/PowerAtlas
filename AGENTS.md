@@ -12,6 +12,7 @@
 - Update existing tests when implementation changes. Do not introduce new test files unless the user requests them or a regression bug fix requires one.
 - Page behaviour in `src/power_atlas/templates/` is covered by `tests/acp_page.test.mjs`, run with `node tests/acp_page.test.mjs`. It renders the Jinja template and drives the rendered script over a DOM stand-in; it is **not** part of the pytest suite and is not run by CI. Run it when changing a template's inline script — the Python suite cannot see those defects.
 - `tests/acp_page.test.mjs` has no CSS engine, so it cannot see a `display` rule overriding the `hidden` attribute. Any class that sets `display` on an element toggled with `hidden` also declares `<selector>[hidden] { display: none; }` (as `.topbar-menu-row[hidden]` in `style.css` does). Check hide/show in a real browser.
+- **Tests from a git worktree** (review sub-agents run in one). The venv installs `power_atlas` in editable mode from this repo's root, so pytest in a worktree imports the main tree's `src`, not the worktree's. Set `PYTHONPATH=src` there, or a mutation check tests the wrong code and a test appears to pin behaviour it does not. Worktrees also check out with CRLF while the committed files are LF, so a node test that slices template source normalises `\r\n` to `\n` before searching it (`"\n}\n"` never matches CRLF).
 - A duplicate module-level or class-level definition in a test module is caught by `_check_test_names.py`, run as a **pre-commit hook** against the staged content. Python rebinds a repeated `def` silently, so a second fixture of the same name is not an error — it is simply the only one that exists, and every test written against the first now receives the second's value. The one time this happened it cost a full-suite run: **79 failures and 35 errors**, all of them in unrelated tests hundreds of lines from the duplicate, with nothing in the output naming it. A `conftest.py` would not help and the repo has none — the same rebinding rules apply there.
   - `.git/hooks/` is not version controlled, so **a fresh clone has no hook.** Reinstall with `cp _pre_commit_hook.sh .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
   - Run it by hand any time with `.venv-PowerAtlas/Scripts/python _check_test_names.py` (~270 ms over the whole tree).
@@ -61,6 +62,10 @@ Recipe for live QA of /acp and the dashboard against the running instance. It wo
   `~/.kiro/sessions/<hash>/sess_<id>/` after it is closed. kiro-cli keeps it loaded until the
   sweeper stops the idle agent or PowerAtlas restarts. Close the session with `#acpClose`.
   Check `createdAt` in its `session.json`, then delete only the directories you created.
+- **One script per call.** Run each live-QA script in its own foreground call. A long background
+  run that chains several Playwright scripts can be stopped by Claude Code's memory-pressure
+  reaper, leaving headless browsers and a held test session behind. A script that creates a
+  session closes it in a `try/finally`.
 - **Evidence.** `orchestrator.log` records the handshake (`ACP agent ready`), watchdog lines
   (`ACP watchdog:`), and every `_kiro/*` notification without a dedicated handler in full at
   INFO. Grep it before

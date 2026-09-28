@@ -1,10 +1,24 @@
 # Dashboard Overview: Live Session Tails, Active Plans and Usage Insights
 
 > **Date**: 2026-09-24
-> **Status**: Complete — all phases done, final review and live QA passed; ready for /qclose  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-09-28 12:49
 > **Scope**: Replace the dashboard's empty Transcript panel with an Overview (live session tails, active plans, 14-day usage insights), reachable again after a session is opened
 > **Estimated effort**: 2-4 days
+
+## Completion Summary
+
+All five phases shipped, each reviewed and verified live; the Step 9 final review (four personas) and the exhaustive live QA passed on 2026-09-28. At archival the user chose "Fix now" for two divergences (the Kiro IDE BOM skip and the Usage chart layout); both were fixed, reviewed and checked live before the archive (7e8eafb, eb8693f, 7b0089b). The Follow-up Work (Deferred) list below holds eight items, surfaced to the user at archival.
+
+### Acknowledged at archival
+
+- Skipped (harness opportunity): "Claude Code sub-agents return reports as text" — already in `shared/AGENTS.md § Multi-Agent Coordination`.
+- Skipped (harness opportunity): "/qdev Step 5b names /qqa, which was not installed" — obsolete; `/qqa` is now installed.
+- Promoted: "Run pytest from a worktree with `PYTHONPATH=src`" — PowerAtlas `AGENTS.md § Doc & Test Guidelines`, new "Tests from a git worktree" bullet (this archive commit).
+- Promoted: "Source-slicing node tests normalise `\r\n` first" — same bullet (this archive commit).
+- Accepted (harness opportunity): user override of the per-phase review cycle cap (default 2, override 1), recorded for `/qdream`'s harvest.
+- Promoted: "Run live-QA scripts one per foreground call; close test sessions in try/finally" — PowerAtlas `AGENTS.md § Verification Setup`, new "One script per call" bullet (this archive commit).
+- Promoted: "Review code a phase gains after its review, even under a cycle cap" — agent-playbook `shared/skills/qdev/SKILL.md` Step 6 item 4a (agent-playbook commit a70eb3c).
 
 ---
 
