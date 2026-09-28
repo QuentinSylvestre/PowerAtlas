@@ -890,8 +890,8 @@ Phase 4:
 9. Two-stage warm pass with a partial state and a "Still counting sub-agent transcripts…" note. Reason: user decision on 2026-09-28 ("Usage speed": "Two-stage pass").
 10. The warm pass parses in one child process (`_UsageWorker`) rather than a server thread, with an in-thread fallback. Reason: user decision on 2026-09-28 ("Usage timing": "Fix it now") after the two-stage pass still rendered 19 s / 26 s after a restart. Attribution (reproduction of the real app with two headless dashboard clients; the hidden peek webview is a second client): the CPU-bound parse shared the GIL with request threads; lock serialisation was ruled out. The remaining live-only gap before the fix was not isolated.
 11. Measured costs (2026-09-28): cold parse single-threaded out of process 6.8 s over 682 files (kiro-cli v3 0.8 s, Claude main 2.2 s, Claude sub-agents 3.8 s over 526 MB); live after the child-process fix, partial Usage 5.9 s and complete 9.0 s after "Server ready". §4's "about 2.2 s over 148 files" predates the sub-agent files.
-12. Kiro IDE `sessions.json` is read with `utf-8-sig`. One real file starts with a BOM; `data_kiro_ide.discover_workspaces` and `load_sessions` silently skip that workspace (pre-existing, not fixed; recorded in `docs/KNOWLEDGE.md`).
-13. Frontend: `id="dashOvUsageBody"`, a "last 14 days" note, two daily charts (agent time, sessions) plus a provider legend instead of one combined bar, and "Could not load usage." on a failed first load or `error`.
+12. Kiro IDE `sessions.json` is read with `utf-8-sig`. One real file starts with a BOM. The pre-existing `data_kiro_ide` loader used to skip that workspace silently; at archival the user chose to fix it (2026-09-28, `/qclose`: "Fix now"), and every reader in `data_kiro_ide.py` now decodes with `utf-8-sig` (7e8eafb). Discovered Kiro IDE workspaces went from 25 to 26.
+13. Frontend: `id="dashOvUsageBody"`, a "last 14 days" note, and "Could not load usage." on a failed first load or `error`. The daily view was built as two charts (agent time, sessions); at archival the user chose to match the plan (2026-09-28, `/qclose`: "One combined chart"), so it is now one 14-day stacked agent-time chart by provider with each day's session counts per provider in the bar's tooltip and accessible label (eb8693f and the follow-up commit). The legend's Kiro IDE entry reads "sessions only", because Kiro IDE has no agent time.
 14. The autouse `isolated_config` test fixture points `overview._usage_roots` at empty folders, disables the child-process worker, and resets usage state, cache, stop event and filter cache for every test. Reason: lifespan and summary-route tests would otherwise parse the developer's real stores.
 
 Phase 5:
@@ -1149,6 +1149,25 @@ QA verification (Step 9b, 2026-09-28, live after a restart the user granted for 
 - Live now: 16/16 plus 3/4 on the held-session script. Tiles equal rail rows with a dot (6 = 6), a Claude terminal session in a collapsed workspace keeps its original-case name, no `/overview/live` requests while the transcript is open or the tab is hidden, no `subscribe` from tiles, focus survives re-renders, and a tile click marks both rendered rail rows `.viewing`. The held-session script's "within 3 s" check reported 6.8 s because it matched its own prompt text; the file timestamps show the tile updated about 1.1 s after kiro-cli wrote the prompt.
 - Peek webview: with only the hidden peek window, the server held no connections to port 4915 and used 0.2–0.3 s CPU per 30 s; one visible Overview client raised it to 1.2–1.5 s. The peek does not poll.
 - The first attempt at this QA run was stopped by Claude Code for low system memory after the Usage script; its leftover test session was closed and deleted, and the run was repeated one script at a time at the user's request. All test sessions were closed and deleted.
+
+### 2026-09-28 -- Implementation Review (archival-time fixes, persona: Senior engineer)
+
+Implementation health: Green.
+7 findings (0 High, 1 Medium, 6 Low).
+
+At `/qclose` the user chose "Fix now" for §9 Phase 4 items 12 (the Kiro IDE BOM skip) and 13 (the Usage chart layout, "One combined chart"). The fixes are 7e8eafb and eb8693f; this review covers both.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | §9 Phase 4 items 12 and 13 still described the unfixed BOM skip and the two-chart layout. | Fixed -- §9 items rewritten with the user's archival decisions. |
+| 2 | Low | The legend showed a Kiro IDE swatch although Kiro IDE never has agent time. | Fixed -- legend reads "Kiro IDE (sessions only)" (7b0089b). |
+| 3 | Low | Per-day session counts were only in the bar tooltip, invisible to screen readers and touch. | Fixed -- same text as `aria-label` with `role="img"` (7b0089b). |
+| 4 | Low | Only `sessions.json` had a BOM test, not the per-session readers. | Fixed -- per-session BOM fixture asserted through three readers (7b0089b). |
+| 5 | Low | The D26 adversarial usage test no longer reached where hostile values land, and its `__proto__` key was not an own key. | Fixed -- asserts the bar title and uses `JSON.parse` for the key (7b0089b). |
+| 6 | Low | A node test failed about 1 run in 5: `ovPlan()` stamps `Date.now()` per call, so "unchanged" data differed. | Fixed -- fixtures built once and deep-copied; 15/15 clean runs (7b0089b). |
+| 7 | Low | The live-tile identity test had the same latent fixture race. | Fixed -- same change (7b0089b). |
+
+Cycle 2 was not run, per the user's 1-cycle cap. Live check after a restart: the Usage section shows one stacked 14-day agent-time chart with the provider legend, a bar's tooltip reads e.g. "2026-09-28: 6h 2m · 7 sessions (Claude Code 7)", and there are no page errors. Tests: node 889 (15 consecutive clean runs), pytest 2750 passed, 3 skipped.
 
 ## Harness Improvement Opportunities
 
