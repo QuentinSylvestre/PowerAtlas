@@ -1,7 +1,7 @@
 # Dashboard Overview: Live Session Tails, Active Plans and Usage Insights
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phases 1-3 complete, Phases 4-5 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 1-4 complete, Phase 5 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the dashboard's empty Transcript panel with an Overview (live session tails, active plans, 14-day usage insights), reachable again after a session is opened
 > **Estimated effort**: 2-4 days
@@ -209,7 +209,7 @@ The user can return to the Overview at any time.
 **v3 `messages.jsonl`**
 
 - Each record is `{id, timestamp, payload{type, …}}`.
-- `usage_summary.payload.elapsedTime` is an int. Its unit is **unverified**.
+- `usage_summary.payload.elapsedTime` is an int, in **milliseconds** (verified in Phase 4, 2026-09-25; see §9).
 - `tool_call.payload.{toolCallId, toolName, kind, status, title}`.
 - `tool_result.payload.{toolCallId, success}`.
 - `session_metadata.payload.value.usagePercentage` is a float.
@@ -696,14 +696,34 @@ QA (2026-09-25, live, after a restart the user granted for this plan): PASS, 20/
 - `tests/acp_page.test.mjs`: an adversarial model name and workspace name render as text, and bar heights are numeric only.
 
 **Exit criteria**:
-- [ ] `pytest tests/test_web.py -k OverviewUsage --timeout=300` and `node tests/acp_page.test.mjs` pass.
-- [ ] The `elapsedTime` unit is verified against real turn timestamps and recorded in `docs/KNOWLEDGE.md` (kiro-cli v3 store section) and §9.
-- [ ] After a **user-approved restart**:
+- [x] `pytest tests/test_web.py -k OverviewUsage --timeout=300` and `node tests/acp_page.test.mjs` pass.
+- [x] The `elapsedTime` unit is verified against real turn timestamps and recorded in `docs/KNOWLEDGE.md` (kiro-cli v3 store section) and §9.
+- [x] After a **user-approved restart**:
   - the section shows loading, then real data within about 10 s;
   - this-week totals for PowerAtlas and agent-playbook are non-zero;
   - the daily bars cover 14 days.
-- [ ] Two consecutive summary requests with no transcript changes report `reparsed == 0` on the second (via the test-visible counter, not wall time).
-- [ ] Context pressure and tokens carry their "kiro-cli only" / "Claude Code only" labels.
+- [x] Two consecutive summary requests with no transcript changes report `reparsed == 0` on the second (via the test-visible counter, not wall time).
+- [x] Context pressure and tokens carry their "kiro-cli only" / "Claude Code only" labels.
+
+**Implementation (2026-09-25, code: 0eec979)**
+
+Commit 0eec979 (on 1032dea, 7 files, no attribution) fills the dashboard Overview's Usage section. **Backend, `src/power_atlas/overview.py`.** `summarize_file` / `_parse_usage_file` parse one kiro-cli v3 `messages.jsonl` (plus the `session.json` beside it) or one Claude Code transcript into per-local-day buckets: activity, agent seconds, tool calls and failures, and Claude tokens. The results are memoised per path on `(mtime_ns, size)` in `_usage_memo`. Lines over 8 MiB are skipped, and one bad line or file costs only itself. `usage_summary` builds the 14-day aggregate (`by_workspace`, `daily`, `tools`, `context_pressure`, `models`, `claude_tokens`, `reparsed`, `aggregate_age_s`), applies the rail's hidden-tag and provider filters, re-parses only changed files and evicts paths that left the window. Kiro IDE daily counts come from its `sessions.json` files read directly (D25). `warm_usage(stop_event)` is the startup pass. `usage_payload(filters)` gives the summary route `(usage, usage_state)`: `None` while warming, otherwise a 30 s-reused, single-flight aggregate. **`src/power_atlas/web.py`.** `lifespan` starts the warm pass as its own `asyncio.to_thread` task, and on shutdown sets its `threading.Event` before cancelling and gathering it. `_overview_summary` returns real `usage` and `usage_state`. **Frontend.** `dashOvRenderUsage` draws the "This week" list with ▲/▼ against last week, stacked daily bars for agent time and for sessions (heights from `dashOvPct`, provider colours from the fixed `DASH_OV_USAGE_PROVIDERS` class map), two tool tables, a context line labelled "kiro-cli only", model chips, a tokens line labelled "Claude Code only", the estimate note, and a skeleton while warming with a 3 s re-fetch, using DOM nodes and `textContent` only. **Tests and docs.** `tests/test_web.py` gains `TestOverviewUsage` and a usage seam in the autouse fixture; `tests/acp_page.test.mjs` gains 6 checks; `docs/KNOWLEDGE.md` gains "Transcript usage records — kiro-cli v3 and Claude Code" with the verified unit and the record shapes.
+
+**Implementation (2026-09-28, code: 28f5fdc) — review fixes**
+
+Commit 28f5fdc applies the 14 Phase 4 review fixes. The kiro-cli context peak is kept per day, so only in-window records count; it is compared against 80% unrounded and rounded for display only. `isCompactSummary` records no longer start a Claude turn. Claude Code sub-agent transcripts under `<project>/<uuid>/subagents/` now add to Claude tokens and tool reliability, and to nothing else. `sessions_total` counts every in-window kiro-cli session. `usage_payload` never parses the whole window on the request thread: from `cold` it starts one stoppable background pass and returns `warming`; from `error` it starts one and returns `error`; from `ready` it reuses the aggregate for 30 s, keyed on the rail's filters. One module-level stop event covers every pass, and `lifespan` sets `warming` before it creates the warm task. Consumers checked: `usage_state` (read only by `dashOverviewRefreshSummary` and `dashOvRenderUsage`), `sessions_total` (only `dashOvUsageContext`), the reuse key and `_usage_cache` (internal), `hidden.key` (an added attribute the other unpackers ignore); the route payload's keys are unchanged.
+
+**Implementation (2026-09-28, code: c700d20, 6c19d02) — two-stage pass (user decision)**
+
+The warm pass runs in two stages. Stage 1 refreshes without Claude sub-agent transcripts and evicts nothing, then sets `_usage_stage1`; stage 2 is the full refresh. While the state is "warming" and the flag is set, `usage_payload` computes `usage_summary(partial=True)` from the memo under the single-flight lock, never caches it, and returns it with "warming"; a partial aggregate carries `partial: true`, a complete one `partial: false`. The client re-fetches every 3 s whenever `usage_state === 'warming'`, under the same Overview-active and visible-tab gates, and shows "Still counting sub-agent transcripts…" under Tool reliability and Tokens while partial ("Sub-agent transcripts are not counted yet." if the pass fails or a re-fetch fails). 6c19d02 corrects a cost sum in `docs/KNOWLEDGE.md`.
+
+**Implementation (2026-09-28, code: 9f2deb6, 56713da) — usage parse in a child process**
+
+The Usage warm pass parses its memo misses in one child process, `overview._UsageWorker`, started with the venv's base interpreter and `-c` (`CREATE_NO_WINDOW`), so the child never imports `power_atlas.__main__` or `web` and the parse no longer competes for the GIL with request threads. The child receives main transcripts as stage 0 and sub-agent transcripts as stage 1 and streams summaries back into `_usage_memo`; after each stage `warm_usage` runs its unchanged `_refresh` over memo hits, so stage-1 publishing, the partial aggregate, reuse, filters, eviction and the payload are unchanged. A stop is checked every 0.1 s and kills and reaps the child, leaving the state `cold` without evicting; the child exits when its stdin reaches end of file, which also covers the parent dying; a child that fails to start or dies falls back to the in-thread parse. The Claude reader also skips, once `cwd` is known, lines holding neither `"user"` nor `"assistant"`. 56713da publishes the final state before reaping the child and closes stdout from the reader thread.
+
+Tests: node 880 passed; pytest 2741 passed, 3 skipped.
+
+QA (2026-09-28, live, after restarts the user granted for this plan): PASS, 9/9 checks on the final run. The first run (single-stage pass, 28f5fdc) rendered Usage about 15 s after "Server ready"; the retry (two-stage pass, c700d20) rendered partial data at 19.0 s and complete data at 25.9 s, which the user chose to fix now. After 56713da, partial Usage rendered 5.9 s and complete Usage 9.0 s after "Server ready", with no usage-worker warning in `orchestrator.log` and no worker process left running. This-week agent time: PowerAtlas 26.4 h, agent-playbook 13.3 h. The daily bars cover 2026-09-15 to 2026-09-28 (14 days). A second summary request reparsed 0 files. The "kiro-cli only" and "Claude Code only" labels and the estimate note are shown. No page errors.
 
 ### Phase 5: Docs, roadmap and full QA
 **Goal**: The documentation reflects the Overview, the roadmap is updated, and full-suite and live verification are done.
@@ -796,7 +816,7 @@ Changes:
 | 1 | Overview shell, navigation, detach | Done | code 11f444b, 8b7fe7a, 9c67735 |
 | 2 | Active plans | Done | code d198d70, 0c87284 |
 | 3 | Live now tiles | Done | code 8952918, 9bbf18b |
-| 4 | Usage insights | Pending | restart |
+| 4 | Usage insights | Done | code 0eec979, 28f5fdc, c700d20, 9f2deb6, 56713da |
 | 5 | Docs, roadmap and full QA | Pending | |
 
 ## 9) Implementation Divergences from Plan
@@ -844,6 +864,23 @@ Phase 3:
 12. A held session with no transcript and no `updated_at` sorts first, using the current time as its ordering key, while its displayed `last_activity` stays empty. Reason: otherwise a new held session could be cut by the 8-tile cap.
 13. Known gap (not fixed): a live session id whose process cwd could not be read (psutil access denied, no sidecar cwd) gets a rail dot but no tile, because `live_sids()` needs a cwd. None existed on 2026-09-25.
 14. Measured costs differ from §4 (2026-09-25, warm, 5 live sids, 8 candidate tiles): a presence rescan took 86–182 ms (§4: 42–75 ms; still in the worker per D24); a `discover_workspaces_with_counts` miss (130–211 ms) is paid by one poll every 30 s; a warm live poll took about 100–140 ms before the hash fix, most of it the v3 hash walk (divergence 9).
+
+Phase 4:
+
+1. **`elapsedTime` unit: milliseconds.** 399 turns over the 60 most recent v3 `messages.jsonl` files, joined by `executionId`: `elapsedTime / (usage_summary ts − turn_start ts in s)` had median, p10 and p90 of 1000.0 (range 999.8–1000.3) over spans of 0.9–1467 s. It is wall time and includes permission waits. Recorded in `docs/KNOWLEDGE.md`.
+2. Per-file summaries are bucketed per local day (activity, agent seconds, tools, Claude tokens, context peak) rather than per-file totals. Reason: a file modified inside the window can hold older records; day buckets make the 14-day filter and the week split exact.
+3. "This week" is the last 7 days of the window including today; "last week" is the 7 days before. Reason: a 14-day window cannot hold two calendar weeks.
+4. Claude tokens are counted once per `message.id`. Reason: Claude Code repeats `message.usage` on every record of a split message (44–53 % of assistant records), so summing per record roughly doubles the totals.
+5. A Claude prompt is a `user` record that is not `isMeta` or `isCompactSummary` and has non-empty string content or list content with no `tool_result` block; slash-command messages count as prompts. Reason: slash-command-driven turns would otherwise get no agent time; compaction summaries would split long turns.
+6. Claude Code sub-agent transcripts (`<project>/<uuid>/subagents/*.jsonl`, 548 in-window files on 2026-09-28) count toward Claude tokens and tool reliability only, never sessions, agent time, models or per-workspace time. Reason: review finding; they held about 3.1 B cache-read tokens and 22k tool calls the plan's search rule missed. Known gap: 7 `message.id`s appear in both a sub-agent file and its parent, so those few are counted twice.
+7. `usage_state` semantics: `warming` while a pass runs (with a non-null partial `usage` once stage 1 is done); `ready` with a complete aggregate; `error` when a compute fails (a background pass is restarted, and the page shows "Could not load usage."); `cold` only at shutdown. The route never parses on the request thread. `reparsed` means files parsed for this response.
+8. The 30 s usage reuse is keyed on the rail's filters (providers and the hidden set), so a newly hidden workspace disappears at once without re-parsing. Filters are read through the live route's 5 s cache.
+9. Two-stage warm pass with a partial state and a "Still counting sub-agent transcripts…" note. Reason: user decision on 2026-09-28 ("Usage speed": "Two-stage pass").
+10. The warm pass parses in one child process (`_UsageWorker`) rather than a server thread, with an in-thread fallback. Reason: user decision on 2026-09-28 ("Usage timing": "Fix it now") after the two-stage pass still rendered 19 s / 26 s after a restart. Attribution (reproduction of the real app with two headless dashboard clients; the hidden peek webview is a second client): the CPU-bound parse shared the GIL with request threads; lock serialisation was ruled out. The remaining live-only gap before the fix was not isolated.
+11. Measured costs (2026-09-28): cold parse single-threaded out of process 6.8 s over 682 files (kiro-cli v3 0.8 s, Claude main 2.2 s, Claude sub-agents 3.8 s over 526 MB); live after the child-process fix, partial Usage 5.9 s and complete 9.0 s after "Server ready". §4's "about 2.2 s over 148 files" predates the sub-agent files.
+12. Kiro IDE `sessions.json` is read with `utf-8-sig`. One real file starts with a BOM; `data_kiro_ide.discover_workspaces` and `load_sessions` silently skip that workspace (pre-existing, not fixed; recorded in `docs/KNOWLEDGE.md`).
+13. Frontend: `id="dashOvUsageBody"`, a "last 14 days" note, two daily charts (agent time, sessions) plus a provider legend instead of one combined bar, and "Could not load usage." on a failed first load or `error`.
+14. The autouse `isolated_config` test fixture points `overview._usage_roots` at empty folders, disables the child-process worker, and resets usage state, cache, stop event and filter cache for every test. Reason: lifespan and summary-route tests would otherwise parse the developer's real stores.
 
 ## Follow-up Work (Deferred)
 
@@ -988,6 +1025,34 @@ Implementation health: Green.
 | 17 | Low | §9 held no Phase 3 divergences at the reviewed commit. | Fixed -- recorded in §9 by the Step 7 plan update. |
 
 Cycle 2 was not run, per the user's 1-cycle cap. Findings 1, 2 and 3 were raised by two or three personas; 5 was rated Medium by the Security auditor and Low by the Performance engineer, merged at Medium. Two reviewers ran in CRLF worktrees, where one pre-existing Phase 2 node check failed (finding 13). The Senior engineer's read-only parity check found tiles and rail equal (8 = 8) on 2026-09-25, and `tail_events` returned 5 mixed events on the 12 largest and most recent real transcripts in 0.3–8.8 ms each.
+
+### 2026-09-28 -- Implementation Review (after Phase 4, persona: Performance engineer, Senior engineer)
+
+Implementation health: Green.
+18 findings (0 High, 6 Medium, 12 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | D23's usage single-flight was untested; removing the lock passed every test. | Fixed -- concurrent test, lock-removal mutant killed (28f5fdc). |
+| 2 | Medium | The 8 MiB per-line cap was not pinned; the test's oversized line was invalid JSON anyway. | Fixed -- valid oversized record test, mutant killed (28f5fdc). |
+| 3 | Medium | Claude Code sub-agent transcripts were outside the file search, missing about 3.1 B cache-read tokens and 22k tool calls. | Fixed -- counted for tokens and tools only (28f5fdc). |
+| 4 | Medium | The Kiro IDE path of the hidden-workspace and provider rule was untested. | Fixed -- IDE cases added, both mutants killed (28f5fdc). |
+| 5 | Medium | The this-week / last-week boundary was untested; an 8-day week passed. | Fixed -- records at now−6 d and now−7 d, mutant killed (28f5fdc). |
+| 6 | Medium | Live QA: Usage rendered about 15 s, then 19 s / 26 s, after a restart (target about 10 s). | Fixed -- two-stage pass and child-process parse, 5.9 s / 9.0 s live (c700d20, 9f2deb6, 56713da). |
+| 7 | Low | Plan §4 and D6 cost figures were stale. | Fixed -- measured figures recorded in §9 (Phase 4 item 11). |
+| 8 | Low | Criterion 2 was ticked without the §9 half, and §1 still called the unit unverified. | Fixed -- §9 item 1 and §1 updated by the Step 7 plan update. |
+| 9 | Low | `warming` was set inside the worker, so an early request could trigger a full on-demand pass. | Fixed -- lifespan sets `warming` before creating the task (28f5fdc). |
+| 10 | Low | On-demand computes took no stop event. | Fixed -- one module-level stop event covers every pass (28f5fdc). |
+| 11 | Low | `sessions_total` counted only sessions with context data. | Fixed -- counts every in-window kiro-cli session (28f5fdc). |
+| 12 | Low | A metadata-only in-window v3 file counted in models and context pressure. | Fixed -- peak kept per day, in-window only, mutant killed (28f5fdc). |
+| 13 | Low | Compaction-summary records counted as Claude prompts. | Fixed -- excluded like `isMeta` (28f5fdc). |
+| 14 | Low | A failed warming re-fetch left a stale skeleton with no retry. | Fixed -- shows "Could not load usage." (28f5fdc). |
+| 15 | Low | The 30 s usage reuse ignored filter changes. | Fixed -- reuse keyed on the filters (28f5fdc). |
+| 16 | Low | The context peak was rounded before the 80 % comparison. | Fixed -- raw comparison, rounded for display (28f5fdc). |
+| 17 | Low | A cold or error state made the summary route (and plans) wait for a full parse. | Fixed -- background pass, immediate return (28f5fdc). |
+| 18 | Low | §9 held no Phase 4 divergences at the reviewed commit. | Fixed -- recorded in §9 by the Step 7 plan update. |
+
+Cycle 2 was not run, per the user's 1-cycle cap; the two later timing fixes (two-stage pass, child process) were verified by live QA rather than re-review, and the Step 9 final review covers them. Finding 8 was raised by both personas. The Senior engineer's read-only cross-check reproduced every v3 day's agent seconds, every daily session count and the Claude token totals exactly. The fix sub-agent was interrupted once by the end of a Claude Code session and resumed with its uncommitted work intact.
 
 ## Harness Improvement Opportunities
 
