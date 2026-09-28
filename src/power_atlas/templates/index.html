@@ -1893,12 +1893,16 @@ function dashOvRenderUsage(usage, state){
     'Claude agent time is estimated from message timestamps.'));
 }
 // A failed summary keeps usage already drawn; only a section still showing
-// its first "Loading…" says so.
+// its first "Loading…", or the warming skeleton, says so. The skeleton's own
+// 3 s re-fetch is what failed, so without this it would stay up with no
+// message until the next 60 s poll.
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 function dashOvUsageFailed(){
   var body = document.getElementById('dashOvUsageBody');
   if (!body || _dashOvUsageDrawn) return;
   var kids = body.children || body.childNodes || [];
-  if (kids.length === 1 && kids[0].className === 'dash-ov-loading') {
+  if (kids.length === 1 &&
+      (kids[0].className === 'dash-ov-loading' || kids[0].className === 'dash-ov-skel')) {
     body.textContent = '';
     body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load usage.'));
   }

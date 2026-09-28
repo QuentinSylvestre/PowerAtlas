@@ -765,10 +765,15 @@ async def lifespan(app_instance):
     # The Overview's Usage warm pass (D12): parses the in-window transcripts
     # into `overview`'s memo once after startup, in its own thread, so the
     # first Usage request finds it filled. A task of its own, so the 30 s
-    # refresh above is unchanged; `usage_stop` is checked between files, so a
-    # shutdown mid-pass waits for one file at most.
-    # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
-    usage_stop = threading.Event()
+    # refresh above is unchanged. `usage_stop` is overview's module-level
+    # shutdown event, checked between files by this pass and by any pass a
+    # request starts, so a shutdown mid-pass waits for one file at most. The
+    # state is `warming` before the task is created: a request that arrived
+    # before the thread's first statement would otherwise see `cold` and start
+    # a second pass. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    usage_stop = overview.usage_stop_event()
+    usage_stop.clear()
+    overview._set_usage_state("warming")
     usage_task = asyncio.create_task(asyncio.to_thread(overview.warm_usage, usage_stop))
     # Guarded exactly as the teardown below is. An `acp` import failure is
     # designed to degrade to "/acp disabled" (see the import at the top of this
@@ -3343,6 +3348,12 @@ def _overview_rail_filters():
     def hidden(cwd: str) -> bool:
         return "hidden" in get_workspace_settings(config, cwd)["tags"]
 
+    # A hashable form of the hidden set: `overview.usage_payload` keys its
+    # aggregate reuse on it, so a newly hidden workspace is not shown for the
+    # rest of the reuse window. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    hidden.key = frozenset(data._normalize_path(cwd)
+                           for cwd, settings in config.workspace_settings.items()
+                           if "hidden" in (settings.get("tags") or []))
     return providers, hidden
 
 
@@ -3379,15 +3390,18 @@ def _overview_summary() -> dict:
     already on a worker thread. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 
     Usage comes from `overview.usage_payload`, which owns its own 30 s reuse
-    and single-flight, and applies the rail's filters (`_overview_rail_filters`)
-    only when it computes.
+    and single-flight and never parses the whole window on this thread (from
+    `cold` or `error` it starts a background pass and returns at once). It
+    reads the rail's filters through `_overview_live_filters`, the 5 s cached
+    copy, because it compares them on every request: a filter change
+    recomputes the aggregate from the memo instead of waiting out the reuse.
     """
     with _overview_plans_lock:
         at, plans = _overview_plans_cache
         if plans is None or time.monotonic() - at >= _OVERVIEW_PLANS_REUSE_SECONDS:
             plans = overview.scan_plans(_overview_workspaces())
             _overview_plans_cache[:] = [time.monotonic(), plans]
-    usage, usage_state = overview.usage_payload(_overview_rail_filters)
+    usage, usage_state = overview.usage_payload(_overview_live_filters)
     return {"plans": plans, "usage": usage, "usage_state": usage_state}
 
 
@@ -3397,7 +3411,8 @@ async def api_dashboard_overview_summary(response: Response):
 
     `plans` is `overview.scan_plans`'s list. `usage` is
     `overview.usage_summary`'s aggregate, or `None` while `usage_state` is
-    `"warming"` (the startup pass is still running) or `"error"`.
+    `"warming"` (a warm pass is running), `"error"` (the last pass failed; a
+    new one has been started) or `"cold"` (shutting down).
     """
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(_overview_summary)
@@ -3413,9 +3428,10 @@ async def api_dashboard_overview_summary(response: Response):
 
 _DASHBOARD_OVERVIEW_LIVE_PATH = "/api/dashboard/overview/live"
 
-# How long the live route reuses `_overview_rail_filters()`. Each 2 s poll
-# would otherwise re-read config.toml; a hidden tag or a provider toggle shows
-# on the tiles within this many seconds.
+# How long the live route and the summary route's usage half reuse
+# `_overview_rail_filters()`. Each 2 s poll would otherwise re-read
+# config.toml; a hidden tag or a provider toggle shows on the tiles, and in
+# Usage, within this many seconds.
 # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 _OVERVIEW_LIVE_FILTERS_REUSE_SECONDS = 5.0
 # (monotonic time of the read, (providers, hidden)). Reset by the tests.

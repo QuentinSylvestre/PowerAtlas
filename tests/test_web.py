@@ -113,9 +113,21 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(overview_mod, "_usage_roots",
                         lambda: (empty / "v3", empty / "claude", empty / "kiro-ide"))
     monkeypatch.setattr(overview_mod, "_usage_state", ["cold"])
-    monkeypatch.setattr(overview_mod, "_usage_cache", [0.0, None])
+    monkeypatch.setattr(overview_mod, "_usage_cache", [0.0, None, None])
     monkeypatch.setattr(overview_mod, "_usage_memo", {})
-    return tmp_path
+    # The shutdown event is set by every `lifespan` a test runs, and the
+    # summary route starts a background pass from `cold`: each test gets its
+    # own event, and a pass it started is joined before the patches above
+    # unwind, so it can never outlive the test and read the real stores. The
+    # route reads the rail's filters through the live route's 5 s cache, so
+    # that is reset too. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    monkeypatch.setattr(overview_mod, "_usage_stop", threading.Event())
+    monkeypatch.setattr(overview_mod, "_usage_bg", [None])
+    monkeypatch.setattr(web_mod, "_overview_live_filters_cache", [0.0, None])
+    yield tmp_path
+    thread = overview_mod._usage_bg[0]
+    if thread is not None:
+        thread.join(timeout=30)
 
 
 @pytest.fixture(autouse=True)
@@ -30081,9 +30093,10 @@ class TestOverviewPlans:
         assert resp.status_code == 200
         assert resp.headers["cache-control"] == "no-store"
         body = resp.json()
-        # No warm pass ran, so usage is computed on demand (here over the
-        # empty stores the autouse fixture points it at).
-        assert body["usage_state"] == "ready" and body["usage"]["by_workspace"] == []
+        # No warm pass ran, so the route starts one in the background (over
+        # the empty stores the autouse fixture points it at) and returns the
+        # plans without waiting for it.
+        assert body["usage_state"] == "warming" and body["usage"] is None
         assert [(p["workspace"], p["file"]) for p in body["plans"]] == [("shown", "s.md")]
 
     def test_route_without_the_hidden_tag_lists_both(self, client, workspaces):
@@ -31110,9 +31123,12 @@ class TestOverviewUsage:
                            (now, {"type": "session_metadata", "key": "displayError"}),
                            (now, {"type": "user", "content": "hi"})])
         self.v3("sess_b", [(now, meta(30.0)), (now, {"type": "user", "content": "hi"})])
+        # Active in the window but never reported its context: still one of
+        # the "N of M sessions" the line counts, with no peak of its own.
+        self.v3("sess_c", [(now, {"type": "user", "content": "hi"})])
         self.claude("33333333-3333-3333-3333-333333333333", [self.c_user(now, "hi")])
         cp = self.summary()["context_pressure"]
-        assert (cp["sessions_over_80"], cp["sessions_total"]) == (1, 2)
+        assert (cp["sessions_over_80"], cp["sessions_total"]) == (1, 3)
         assert [(p["session_id"], p["peak"]) for p in cp["top"]] == [("sess_a", 85.2), ("sess_b", 30.0)]
 
     def test_claude_tokens_once_per_message_and_the_cache_hit_ratio(self):
@@ -31175,13 +31191,22 @@ class TestOverviewUsage:
                 cwd="C:\\ws\\open", model="m-open")
         self.claude("55555555-5555-5555-5555-555555555555", [
             self.c_user(now, "x"), self.c_asst(now + 5, [{"type": "text", "text": "y"}])])
+        # Kiro IDE sessions go through the same two filters.
+        ide = self.roots.ide / "w1"
+        ide.mkdir()
+        (ide / "sessions.json").write_text(json.dumps([
+            {"sessionId": f"i{n}", "workspaceDirectory": ws, "dateCreated": str(int(now * 1000))}
+            for n, ws in enumerate(["C:\\ws\\secret", "C:\\ws\\open"])]), encoding="utf-8")
         usage = self.summary(hidden=lambda cwd: cwd == "C:\\ws\\secret",
                              provider_shown=lambda p: p != "claude-code")
         assert [r["name"] for r in usage["by_workspace"]] == ["open"]
         assert self.daily(usage, _ov_day(now)) == {
-            "date": _ov_day(now), "sessions": {"kiro-cli-v3": 1}, "agent_s": {"kiro-cli-v3": 2.0}}
+            "date": _ov_day(now), "sessions": {"kiro-cli-v3": 1, "kiro-ide": 1},
+            "agent_s": {"kiro-cli-v3": 2.0}}
         assert usage["models"] == [{"model": "m-open", "sessions": 1}]
         assert usage["claude_tokens"]["cache_hit_ratio"] == 0.0
+        no_ide = self.summary(provider_shown=lambda p: p != "kiro-ide")
+        assert "kiro-ide" not in self.daily(no_ide, _ov_day(now))["sessions"]
 
     def test_odd_lines_cost_only_themselves(self, monkeypatch):
         from power_atlas import overview
@@ -31191,7 +31216,7 @@ class TestOverviewUsage:
             self.c_user(now, "go"),
             {"type": "user", "timestamp": _ov_iso(now), "message": None},
             {"type": "user", "timestamp": _ov_iso(now), "message": "a string"},
-            "[" * 5000,                                   # over the line cap
+            "[" * 5000,                                   # over the cap, and not JSON anyway
             "[" * 3000,                                   # nested past the recursion limit
             '{"a":' * 500,                                # not JSON
             json.dumps({"type": "assistant", "timestamp": _ov_iso(now),
@@ -31255,7 +31280,7 @@ class TestOverviewUsage:
         assert overview.usage_state() == "ready"
         assert set(overview._usage_memo) == {str(good)}
 
-    def test_a_warm_pass_that_fails_as_a_whole_is_error_and_the_route_computes_on_demand(
+    def test_a_warm_pass_that_fails_as_a_whole_is_error_and_the_route_starts_another(
             self, client, monkeypatch):
         from power_atlas import overview
         self.v3("sess_a", [(time.time(), {"type": "usage_summary", "elapsedTime": 4000})])
@@ -31267,9 +31292,16 @@ class TestOverviewUsage:
         overview.warm_usage(threading.Event())
         assert overview.usage_state() == "error"
         monkeypatch.setattr(overview, "_usage_files", real)
+        # The error is reported, not hidden behind "warming" (which the page
+        # would re-fetch every 3 s), and one background pass is started.
+        body = client.get("/api/dashboard/overview/summary").json()
+        assert body["usage"] is None and body["usage_state"] == "error"
+        overview._usage_bg[0].join(timeout=30)
+        assert overview.usage_state() == "ready"
         body = client.get("/api/dashboard/overview/summary").json()
         assert body["usage_state"] == "ready"
         assert [r["name"] for r in body["usage"]["by_workspace"]] == ["alpha"]
+        assert body["usage"]["reparsed"] == 0, "the background pass filled the memo"
 
     def test_setting_the_stop_event_mid_pass_returns_promptly(self, monkeypatch):
         from power_atlas import overview
@@ -31293,16 +31325,25 @@ class TestOverviewUsage:
     def test_lifespan_runs_the_warm_pass_and_stops_it_on_shutdown(self, monkeypatch):
         from power_atlas import overview, web as web_mod
         events = []
-        monkeypatch.setattr(overview, "warm_usage", lambda stop: events.append(stop))
+        states = []
+        # The state the pass starts under: `lifespan` sets `warming` before it
+        # creates the task, so a request that lands before the thread's first
+        # statement does not see `cold` and start a second pass.
+        monkeypatch.setattr(overview, "warm_usage",
+                            lambda stop: states.append(overview.usage_state()) or events.append(stop))
+        overview._usage_stop.set()      # left over from an earlier shutdown
 
         async def run():
             async with web_mod.lifespan(None):
                 await asyncio.sleep(0.05)
-                assert events and not events[0].is_set()
+                assert events and not events[0].is_set(), "cleared at startup"
 
         with patch.object(web_mod, "acp", TestGenerationRunsAtStartup._fake_acp()):
             asyncio.run(run())
+        assert states == ["warming"]
         assert len(events) == 1 and events[0].is_set()
+        assert events[0] is overview._usage_stop, \
+            "the same event stops a request's own pass at shutdown"
 
     # -- route --
 
@@ -31314,6 +31355,7 @@ class TestOverviewUsage:
 
     def test_the_route_reuses_the_aggregate_for_30_seconds(self, client, parses):
         from power_atlas import overview
+        overview._set_usage_state("ready")
         self.v3("sess_a", [(time.time(), {"type": "usage_summary", "elapsedTime": 1000})])
         first = client.get("/api/dashboard/overview/summary").json()["usage"]
         assert first["reparsed"] == 1 and len(parses) == 1
@@ -31327,8 +31369,9 @@ class TestOverviewUsage:
         assert third["reparsed"] == 1 and len(parses) == 2
 
     def test_the_route_applies_the_rail_filters(self, client):
-        from power_atlas import data
+        from power_atlas import data, overview
         from power_atlas.config import Config
+        overview._set_usage_state("ready")
         self.v3("sess_a", [(time.time(), {"type": "usage_summary", "elapsedTime": 1000})],
                 cwd="C:\\ws\\secret")
         self.v3("sess_b", [(time.time(), {"type": "usage_summary", "elapsedTime": 1000})],
@@ -31338,3 +31381,226 @@ class TestOverviewUsage:
                     workspace_settings={"C:\\ws\\secret": {"tags": ["hidden"], "color": ""}})):
             usage = client.get("/api/dashboard/overview/summary").json()["usage"]
         assert [r["name"] for r in usage["by_workspace"]] == ["open"]
+
+    # -- review fixes (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE) --
+
+    @staticmethod
+    def ctx(pct):
+        return {"type": "session_metadata", "key": "contextUsage",
+                "value": {"usagePercentage": pct}}
+
+    def test_a_valid_record_over_the_line_cap_is_skipped(self, monkeypatch):
+        from power_atlas import overview
+        now = self.now
+        monkeypatch.setattr(overview, "USAGE_MAX_LINE_BYTES", 4096)
+        self.v3("sess_a", [
+            (now, {"type": "usage_summary", "elapsedTime": 1000}),
+            # Valid JSON and a real record type: only the cap keeps it out.
+            (now, {"type": "usage_summary", "elapsedTime": 999_000, "pad": "x" * 5000}),
+            (now, {"type": "usage_summary", "elapsedTime": 2000}),
+        ])
+        assert self.daily(self.summary(), _ov_day(now))["agent_s"] == {"kiro-cli-v3": 3.0}
+
+    def test_the_week_boundary_is_six_days_ago_against_seven(self):
+        this_, last = self.now - 6 * self.DAY, self.now - 7 * self.DAY
+        records = [(this_, {"type": "usage_summary", "elapsedTime": 60_000}),
+                   (last, {"type": "usage_summary", "elapsedTime": 240_000})]
+        for at, tag in ((this_, "t"), (last, "l")):
+            for i in range(3):
+                records.append((at, {"type": "tool_call", "toolCallId": f"{tag}{i}",
+                                     "toolName": f"tool_{tag}"}))
+                records.append((at, {"type": "tool_result", "toolCallId": f"{tag}{i}",
+                                     "success": False}))
+        self.v3("sess_a", records)
+        usage = self.summary()
+        [row] = usage["by_workspace"]
+        assert (row["this_week_s"], row["last_week_s"]) == (60.0, 240.0)
+        assert usage["tools"]["failing"] == [{"name": "tool_t", "failed": 3, "calls": 3}]
+
+    def test_the_context_peak_counts_in_window_records_only(self):
+        now, old = self.now, self.now - 20 * self.DAY
+        # Active today; its 95 % was 20 days ago, and today's peak is 40 %.
+        self.v3("sess_a", [(old, self.ctx(95.0)), (now, self.ctx(40.0)),
+                           (now, {"type": "user", "content": "hi"})])
+        # Only a context record in the window: not a session of the window.
+        self.v3("sess_b", [(old, {"type": "user", "content": "hi"}), (now, self.ctx(90.0))],
+                model="m-b", hash_="h2")
+        usage = self.summary()
+        cp = usage["context_pressure"]
+        assert (cp["sessions_over_80"], cp["sessions_total"]) == (0, 1)
+        assert [(p["session_id"], p["peak"]) for p in cp["top"]] == [("sess_a", 40.0)]
+        assert usage["models"] == [{"model": "claude-sonnet-4.6", "sessions": 1}]
+
+    def test_the_80_percent_line_compares_the_unrounded_peak(self):
+        now = self.now
+        self.v3("sess_a", [(now, self.ctx(79.95)), (now, {"type": "user", "content": "hi"})])
+        self.v3("sess_b", [(now, self.ctx(80.0)), (now, {"type": "user", "content": "hi"})],
+                hash_="h2")
+        cp = self.summary()["context_pressure"]
+        assert (cp["sessions_over_80"], cp["sessions_total"]) == (1, 2)
+        assert [(p["session_id"], p["peak"]) for p in cp["top"]] == [
+            ("sess_b", 80.0), ("sess_a", round(79.95, 1))]
+
+    def test_a_compact_summary_does_not_start_a_turn(self):
+        t = self.now - 3600
+        self.claude("99999999-9999-9999-9999-999999999999", [
+            self.c_user(t, "prompt"),
+            self.c_asst(t + 10, [{"type": "text", "text": "working"}]),
+            self.c_user(t + 20, "This session is being continued from a previous conversation.",
+                        isCompactSummary=True),
+            self.c_asst(t + 100, [{"type": "text", "text": "done"}]),
+        ])
+        assert self.daily(self.summary(), _ov_day(t))["agent_s"] == {"claude-code": 100.0}
+
+    def test_sub_agent_transcripts_add_tokens_and_tools_only(self, parses):
+        now = self.now
+        sid = "88888888-8888-8888-8888-888888888888"
+        u = {"input_tokens": 5, "output_tokens": 1, "cache_read_input_tokens": 100,
+             "cache_creation_input_tokens": 0}
+        self.claude(sid, [self.c_user(now, "go"),
+                          self.c_asst(now + 60, [{"type": "text", "text": "ok"}], mid="p1", usage=u)])
+        base = self.summary()
+        subs = self.roots.claude / "C--ws-beta" / sid / "subagents"
+        _ov_jsonl(subs / "agent-a1.jsonl", [
+            self.c_user(now + 5, "the brief"),
+            self.c_asst(now + 30, [{"type": "tool_use", "id": "s1", "name": "Grep", "input": {}}],
+                        mid="s-m1", usage=u, model="claude-haiku"),
+            self.c_user(now + 31, [{"type": "tool_result", "tool_use_id": "s1", "is_error": True}]),
+            self.c_asst(now + 50, [{"type": "text", "text": "done"}], mid="s-m2", usage=u,
+                        model="claude-haiku"),
+        ])
+        # No `cwd` on its records: it takes the parent session's.
+        _ov_jsonl(subs / "agent-a2.jsonl", [
+            self.c_asst(now + 40, [{"type": "tool_use", "id": "s2", "name": "Read", "input": {}}],
+                        mid="s-m3", usage=u, cwd=None)])
+        # Out of the window by mtime, and a folder that is not a session: ignored.
+        stale = _ov_jsonl(subs / "agent-old.jsonl", [self.c_asst(now, [], mid="o", usage=u)])
+        os.utime(stale, (now - 15 * self.DAY, now - 15 * self.DAY))
+        _ov_jsonl(self.roots.claude / "C--ws-beta" / "not-a-session" / "subagents" / "agent-x.jsonl",
+                  [self.c_asst(now, [], mid="x", usage=u)])
+        del parses[:]
+        usage = self.summary()
+        assert sorted(parses) == sorted([str(subs / "agent-a1.jsonl"), str(subs / "agent-a2.jsonl")])
+        assert usage["claude_tokens"]["input"] == 5 * 4
+        assert usage["claude_tokens"]["cache_read"] == 100 * 4
+        assert {t["name"]: (t["calls"], t["fail_rate"]) for t in usage["tools"]["top"]} == {
+            "Grep": (1, 1.0), "Read": (1, 0.0)}
+        # Not sessions of their own: no session, agent time, model or row.
+        for key in ("daily", "by_workspace", "models", "context_pressure"):
+            assert usage[key] == base[key], key
+        # The parent's workspace and provider filters apply to them too.
+        for kw in ({"hidden": lambda cwd: cwd == "C:\\ws\\beta"},
+                   {"provider_shown": lambda p: p != "claude-code"}):
+            filtered = self.summary(**kw)
+            assert filtered["claude_tokens"]["input"] == 0, kw
+            assert filtered["tools"]["top"] == [], kw
+
+    def test_concurrent_requests_share_one_computation(self, monkeypatch):
+        from power_atlas import overview
+        overview._set_usage_state("ready")
+        a = self.v3("sess_a", [(time.time(), {"type": "usage_summary", "elapsedTime": 1000})])
+        b = self.claude("12121212-1212-1212-1212-121212121212", [self.c_user(time.time(), "x")])
+        entered, release = threading.Event(), threading.Event()
+        seen = []
+        real = overview._parse_usage_file
+
+        def parse(path, provider):
+            seen.append(str(path))
+            entered.set()
+            release.wait(timeout=5)
+            return real(path, provider)
+        monkeypatch.setattr(overview, "_parse_usage_file", parse)
+
+        def hidden(cwd):
+            return False
+        results = [None, None]
+
+        def call(i):
+            results[i] = overview.usage_payload(lambda: (frozenset({"kiro-cli-v3", "claude-code"}),
+                                                         hidden))
+        first = threading.Thread(target=call, args=(0,))
+        first.start()
+        assert entered.wait(timeout=5)
+        second = threading.Thread(target=call, args=(1,))
+        second.start()
+        time.sleep(0.2)                  # the second caller is now waiting
+        release.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        assert sorted(seen) == sorted([str(a), str(b)]), "one parse per file"
+        (u1, s1), (u2, s2) = results
+        assert s1 == s2 == "ready"
+
+        def strip(u):
+            return {k: v for k, v in u.items() if k not in ("reparsed", "aggregate_age_s")}
+        assert strip(u1) == strip(u2)
+        assert u2["reparsed"] == 0, "the second request reused the first's aggregate"
+
+    def test_a_filter_change_recomputes_within_the_reuse_window(self, client, parses):
+        from power_atlas import data, overview, web as web_mod
+        from power_atlas.config import Config
+        overview._set_usage_state("ready")
+        self.v3("sess_a", [(time.time(), {"type": "usage_summary", "elapsedTime": 1000})],
+                cwd="C:\\ws\\secret")
+        self.v3("sess_b", [(time.time(), {"type": "usage_summary", "elapsedTime": 1000})],
+                cwd="C:\\ws\\open", hash_="h2")
+
+        def get(settings):
+            web_mod._overview_live_filters_cache[:] = [0.0, None]   # its 5 s have passed
+            with patch.object(data, "available_providers", lambda: ["kiro-cli-v3"]), \
+                    patch("power_atlas.web.load_config",
+                          return_value=Config(workspace_settings=settings)):
+                return client.get("/api/dashboard/overview/summary").json()["usage"]
+        first = get({})
+        assert sorted(r["name"] for r in first["by_workspace"]) == ["open", "secret"]
+        assert len(parses) == 2
+        second = get({"C:\\ws\\secret": {"tags": ["hidden"], "color": ""}})
+        assert [r["name"] for r in second["by_workspace"]] == ["open"], \
+            "a newly hidden workspace goes at once, not after the reuse window"
+        assert second["reparsed"] == 0 and len(parses) == 2, "recomputed from the memo"
+        third = get({"C:\\ws\\secret": {"tags": ["hidden"], "color": ""}})
+        assert third["aggregate_age_s"] >= 0 and third["reparsed"] == 0
+        assert [r["name"] for r in third["by_workspace"]] == ["open"]
+
+    def test_the_route_does_not_wait_for_a_cold_pass(self, client, monkeypatch):
+        from power_atlas import overview
+        self.v3("sess_a", [(time.time(), {"type": "usage_summary", "elapsedTime": 4000})])
+        release = threading.Event()
+        real = overview._parse_usage_file
+
+        def parse(path, provider):
+            release.wait(timeout=10)
+            return real(path, provider)
+        monkeypatch.setattr(overview, "_parse_usage_file", parse)
+        try:
+            body = client.get("/api/dashboard/overview/summary").json()
+            # Returned while the background pass is still blocked in its parse.
+            assert body["usage"] is None and body["usage_state"] == "warming"
+            thread = overview._usage_bg[0]
+            assert thread is not None and thread.is_alive()
+            again = client.get("/api/dashboard/overview/summary").json()
+            assert again["usage_state"] == "warming"
+            assert overview._usage_bg[0] is thread, "one background pass at a time"
+        finally:
+            release.set()
+        thread.join(timeout=10)
+        assert overview.usage_state() == "ready"
+        body = client.get("/api/dashboard/overview/summary").json()
+        assert body["usage_state"] == "ready"
+        assert [r["name"] for r in body["usage"]["by_workspace"]] == ["alpha"]
+
+    def test_a_request_pass_stops_at_shutdown_and_caches_nothing(self):
+        from power_atlas import overview
+        self.v3("sess_a", [(time.time(), {"type": "usage_summary", "elapsedTime": 1000})])
+        overview._usage_memo["C:\\gone\\messages.jsonl"] = (0, 0, {})
+        overview._usage_stop.set()
+
+        def filters():
+            return frozenset({"kiro-cli-v3"}), (lambda cwd: False)
+        overview._set_usage_state("ready")
+        assert overview.usage_payload(filters) == (None, "cold")
+        assert overview._usage_cache[1] is None, "no partial aggregate is cached"
+        assert "C:\\gone\\messages.jsonl" in overview._usage_memo, "and nothing is evicted"
+        overview._set_usage_state("cold")
+        assert overview.usage_payload(filters) == (None, "cold")
+        assert overview._usage_bg[0] is None, "no background pass starts during shutdown"

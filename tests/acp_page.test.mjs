@@ -17913,6 +17913,25 @@ check("dashboard overview usage: an error state with nothing drawn says so", () 
   assertEqual(ovUsageBody(p).textContent, "Could not load usage.");
 });
 
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE review fix: the skeleton's
+// own 3 s re-fetch failing must not leave the skeleton up with no message.
+check("dashboard overview usage: a failed re-fetch while the skeleton shows says so", async () => {
+  const p = loadDashPicker();
+  let fail = false;
+  p.sandbox.fetch = () => Promise.resolve(fail
+    ? { ok: false, status: 500, json: () => Promise.resolve({}) }
+    : { ok: true, status: 200, json: () => Promise.resolve({ plans: [], usage: null, usage_state: "warming" }) });
+  p.sandbox._dashOverviewActive = true;
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  assert(ovUsageBody(p).querySelector(".dash-ov-skel"), "the skeleton while warming");
+  fail = true;
+  p.timers.filter((t) => t.ms === 3000)[0].fn();
+  await p.settle(); await p.settle();
+  assertEqual(ovUsageBody(p).querySelector(".dash-ov-skel"), null, "the skeleton is gone");
+  assertEqual(ovUsageBody(p).textContent, "Could not load usage.");
+});
+
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
   assertEqual(typeof p.sandbox.dashHandleSub, "function");

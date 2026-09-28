@@ -797,15 +797,24 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
 # - Agent time, Claude Code (an estimate): each turn runs from a prompt record
 #   to the last assistant record before the next prompt, capped at
 #   `CLAUDE_TURN_CAP_SECONDS`, on the prompt's local day. A prompt is a `user`
-#   record that is not `isMeta` and whose content is a non-empty string, or a
-#   list with no `tool_result` block.
-# - Tool calls, failures and Claude tokens are counted on the local day of
-#   their own record, so a long session modified inside the window contributes
-#   only its in-window days.
+#   record that is neither `isMeta` nor `isCompactSummary` (the recap Claude
+#   Code writes after compacting, which continues a turn rather than starting
+#   one) and whose content is a non-empty string, or a list with no
+#   `tool_result` block.
+# - Tool calls, failures, Claude tokens and the kiro-cli context peak are
+#   counted on the local day of their own record, so a long session modified
+#   inside the window contributes only its in-window days.
 # - Claude tokens are counted once per `message.id`: Claude Code writes one
 #   record per content block and repeats the message's `usage` on each
 #   (measured 2026-09-25: 975 of 1,848 assistant records in one file were such
 #   repeats, none with a different `usage`).
+# - Claude Code sub-agent transcripts,
+#   `<project>/<session-uuid>/subagents/agent-<hex>.jsonl`, add their tokens
+#   and tool calls to the totals; they are not sessions of their own and add
+#   no agent time, model or workspace row (their time is inside the parent
+#   turn that waited for them). Measured 2026-09-25: 574 in-window files,
+#   holding about 3.09 B cache-read tokens and 22,345 tool calls that the
+#   session files alone missed (see docs/KNOWLEDGE.md).
 # - Kiro IDE contributes sessions per day only, from `dateCreated` in its
 #   `sessions.json` files (D25); it records no durations and no tools.
 
@@ -825,6 +834,9 @@ _USAGE_TOP_MODELS = 8
 _USAGE_SIDE_FILE_MAX = 8 * 1024 * 1024
 _V3 = "kiro-cli-v3"
 _CLAUDE = "claude-code"
+# The file-discovery tag of a Claude Code sub-agent transcript. Internal only:
+# its summary carries `provider == _CLAUDE` and `subagent: True`.
+_CLAUDE_SUB = "claude-code-subagent"
 _IDE = "kiro-ide"
 # Record types that mark a kiro-cli v3 session as active on their day.
 _V3_ACTIVE_TYPES = frozenset({"user", "assistant", "tool_call", "tool_result",
@@ -841,10 +853,23 @@ _usage_memo_lock = threading.Lock()
 # `cold` until the warm pass starts, `warming` while it runs, then `ready`, or
 # `error` when it failed as a whole. A one-element list so tests can reset it.
 _usage_state: list[str] = ["cold"]
-# The last aggregate: (monotonic time it was computed, payload). Reused for
-# `USAGE_REUSE_SECONDS` (D23); the lock makes the computation single-flight.
-_usage_cache: list = [0.0, None]
+# The last aggregate: (monotonic time it was computed, payload, filter key).
+# Reused for `USAGE_REUSE_SECONDS` while the rail's filters are unchanged
+# (D23); the lock makes the computation single-flight.
+_usage_cache: list = [0.0, None, None]
 _usage_compute_lock = threading.Lock()
+# Set by `web.lifespan` on shutdown. Every pass checks it between files: the
+# startup warm pass, the background pass `usage_payload` starts from `cold` or
+# `error`, and a request's own refresh. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+_usage_stop = threading.Event()
+# The background pass `usage_payload` started, if any (tests join it), and the
+# lock that makes starting one single-flight.
+_usage_bg: list = [None]
+_usage_bg_lock = threading.Lock()
+
+
+class _UsageStopped(Exception):
+    """A request's refresh stopped at shutdown; nothing is cached."""
 
 
 def _usage_roots() -> tuple[Path, Path, Path]:
@@ -897,7 +922,7 @@ def _local_day(epoch: float) -> str:
 
 
 def _new_day() -> dict:
-    return {"active": False, "agent_seconds": 0.0, "tools": {},
+    return {"active": False, "agent_seconds": 0.0, "tools": {}, "context_peak": None,
             "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}}
 
 
@@ -921,7 +946,6 @@ def _read_small_json(path: Path):
 def _parse_v3_usage(path: Path) -> dict:
     days: dict[str, dict] = {}
     calls: dict[str, tuple[str, str]] = {}   # toolCallId -> (tool name, day)
-    peak: float | None = None
     with path.open("rb") as fh:
         for line in _iter_lines(fh, USAGE_MAX_LINE_BYTES):
             try:
@@ -933,11 +957,17 @@ def _parse_v3_usage(path: Path) -> dict:
                     continue
                 ptype = payload.get("type")
                 if ptype == "session_metadata":
+                    # The peak is kept per day, so only in-window records
+                    # count; a metadata record does not make its day active.
                     value = payload.get("value")
                     if payload.get("key") == "contextUsage" and isinstance(value, dict):
                         pct = value.get("usagePercentage")
-                        if isinstance(pct, (int, float)) and not isinstance(pct, bool):
-                            peak = pct if peak is None else max(peak, pct)
+                        epoch = _epoch(obj.get("timestamp"))
+                        if (isinstance(pct, (int, float)) and not isinstance(pct, bool)
+                                and epoch is not None):
+                            day = days.setdefault(_local_day(epoch), _new_day())
+                            peak = day["context_peak"]
+                            day["context_peak"] = pct if peak is None else max(peak, pct)
                     continue
                 if ptype not in _V3_ACTIVE_TYPES:
                     continue
@@ -976,7 +1006,7 @@ def _parse_v3_usage(path: Path) -> dict:
         if isinstance(meta.get("modelId"), str) and meta["modelId"]:
             model = meta["modelId"]
     return {"provider": _V3, "session_id": path.parent.name, "cwd": cwd, "model": model,
-            "context_peak": peak, "days": days}
+            "subagent": False, "days": days}
 
 
 def _claude_is_prompt(content) -> bool:
@@ -988,7 +1018,7 @@ def _claude_is_prompt(content) -> bool:
     return False
 
 
-def _parse_claude_usage(path: Path) -> dict:
+def _parse_claude_usage(path: Path, subagent: bool = False) -> dict:
     days: dict[str, dict] = {}
     calls: dict[str, tuple[str, str]] = {}   # tool_use id -> (tool name, day)
     models: dict[str, int] = {}
@@ -1028,7 +1058,8 @@ def _parse_claude_usage(path: Path) -> dict:
                                 hit = calls.pop(tid, None) if isinstance(tid, str) else None
                                 if hit is not None and block.get("is_error") is True:
                                     _tool_slot(days[hit[1]], hit[0])["failed"] += 1
-                    if obj.get("isMeta") or not _claude_is_prompt(content):
+                    if (obj.get("isMeta") or obj.get("isCompactSummary")
+                            or not _claude_is_prompt(content)):
                         continue
                     close_turn()
                     days.setdefault(day_key, _new_day())["active"] = True
@@ -1062,8 +1093,10 @@ def _parse_claude_usage(path: Path) -> dict:
                 continue
     close_turn()
     model = max(sorted(models), key=lambda m: models[m]) if models else None
-    return {"provider": _CLAUDE, "session_id": path.stem, "cwd": cwd, "model": model,
-            "context_peak": None, "days": days}
+    # A sub-agent transcript is filed under its parent session's folder.
+    session_id = path.parent.parent.name if subagent else path.stem
+    return {"provider": _CLAUDE, "session_id": session_id, "cwd": cwd, "model": model,
+            "subagent": subagent, "days": days}
 
 
 def _parse_usage_file(path: Path, provider: str) -> dict:
@@ -1071,7 +1104,7 @@ def _parse_usage_file(path: Path, provider: str) -> dict:
     so a test can count the parses."""
     if provider == _V3:
         return _parse_v3_usage(path)
-    return _parse_claude_usage(path)
+    return _parse_claude_usage(path, subagent=provider == _CLAUDE_SUB)
 
 
 def _summarize(path: Path, provider: str, st) -> tuple[dict, bool]:
@@ -1090,12 +1123,14 @@ def _summarize(path: Path, provider: str, st) -> tuple[dict, bool]:
 def summarize_file(path, provider: str) -> dict:
     """One transcript's usage summary, memoised per path on `(mtime_ns, size)`.
 
-    `{"provider", "session_id", "cwd", "model", "context_peak", "days"}`, where
+    `{"provider", "session_id", "cwd", "model", "subagent", "days"}`, where
     `days` maps a local `YYYY-MM-DD` to `{"active", "agent_seconds", "tools":
     {name: {"calls", "failed"}}, "tokens": {"input", "output", "cache_read",
-    "cache_creation"}}`. `model` is the v3 `modelId` or the most frequent
-    Claude `message.model`; `context_peak` the v3 maximum `usagePercentage`
-    (0-100), else None. Lines over `USAGE_MAX_LINE_BYTES` are skipped, and one
+    "cache_creation"}, "context_peak"}`. `model` is the v3 `modelId` or the
+    most frequent Claude `message.model`; `context_peak` the v3 maximum
+    `usagePercentage` (0-100) recorded that day, else None. `subagent` is True
+    for a Claude Code sub-agent transcript (`provider` `_CLAUDE_SUB`), whose
+    `session_id` is its parent session's. Lines over `USAGE_MAX_LINE_BYTES` are skipped, and one
     unreadable line skips that line only. The v3 `session.json` fields (cwd,
     model) are memoised under `messages.jsonl`'s key; they do not change during
     a session.
@@ -1117,16 +1152,21 @@ def _window(now: float) -> tuple[list[str], float]:
 
 def _usage_files(since: float) -> list[tuple[Path, str, object]]:
     """`(path, provider, stat)` for each transcript modified at or after
-    `since`: kiro-cli v3 `<root>/<hash>/sess_*/messages.jsonl` and Claude Code
-    `<root>/<project>/<uuid>.jsonl`."""
+    `since`: kiro-cli v3 `<root>/<hash>/sess_*/messages.jsonl`, Claude Code
+    `<root>/<project>/<uuid>.jsonl`, and Claude Code sub-agent transcripts
+    `<root>/<project>/<uuid>/subagents/*.jsonl` (tagged `_CLAUDE_SUB`)."""
     from . import data_claude
 
     v3_root, claude_root, _ide_root = _usage_roots()
     found: list[tuple[Path, str, object]] = []
     for provider, paths in ((_V3, v3_root.glob("*/sess_*/messages.jsonl")),
-                            (_CLAUDE, claude_root.glob("*/*.jsonl"))):
+                            (_CLAUDE, claude_root.glob("*/*.jsonl")),
+                            (_CLAUDE_SUB, claude_root.glob("*/*/subagents/*.jsonl"))):
         for path in paths:
             if provider == _CLAUDE and not data_claude._is_session_file(path.name):
+                continue
+            if provider == _CLAUDE_SUB and not data_claude._is_session_file(
+                    path.parent.parent.name + ".jsonl"):
                 continue
             try:
                 st = path.stat()
@@ -1196,7 +1236,7 @@ def _ide_daily(days: set[str], since: float, shown: Callable, hidden: Callable) 
 
 
 def usage_summary(now: float | None = None, provider_shown: Callable | None = None,
-                  hidden: Callable | None = None) -> dict:
+                  hidden: Callable | None = None, stop_event=None) -> dict:
     """The Usage section's aggregate over the last `USAGE_WINDOW_DAYS` days.
 
     Blocking; runs in a worker thread. `provider_shown(provider)` and
@@ -1204,15 +1244,20 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     provider the rail does not show and a workspace tagged hidden are left out
     of every row and total. They are applied here, not in the memo, so a tag
     change shows at the next aggregate. A filter that raises excludes.
+    `stop_event`, optional, is checked between files; a refresh it stops
+    raises `_UsageStopped` and evicts nothing.
 
     Keys: `by_workspace` (top 8 by this week's agent seconds), `daily` (14
     days, oldest first, sessions and agent seconds per provider), `tools`
     (`top` by calls over the window with `fail_rate`, `failing` this week with
-    at least 3 calls), `context_pressure` (kiro-cli v3 only: sessions whose
-    peak `usagePercentage` reached 80), `models` (sessions per model),
-    `claude_tokens` (with `cache_hit_ratio` = cache reads / (input + cache
-    reads + cache writes), 0 when that is 0), `reparsed` (files parsed for this
-    call rather than taken from the memo) and `aggregate_age_s`.
+    at least 3 calls), `context_pressure` (kiro-cli v3 only: `sessions_total`
+    is every in-window kiro-cli session, `sessions_over_80` those whose
+    in-window peak `usagePercentage` reached 80), `models` (sessions per
+    model), `claude_tokens` (with `cache_hit_ratio` = cache reads / (input +
+    cache reads + cache writes), 0 when that is 0), `reparsed` (files parsed
+    for this call rather than taken from the memo) and `aggregate_age_s`.
+    Claude Code sub-agent transcripts count in `tools` and `claude_tokens`
+    only.
     """
     from . import data
 
@@ -1233,8 +1278,14 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     day_list, since = _window(now)
     day_set = set(day_list)
     this_week = set(day_list[USAGE_WINDOW_DAYS - 7:])
-    summaries, reparsed, _complete = _refresh(now)
+    summaries, reparsed, complete = _refresh(now, stop_event)
+    if not complete:
+        raise _UsageStopped()
 
+    # A sub-agent record with no `cwd` takes its parent session's, so the
+    # hidden-workspace filter still applies to it.
+    parent_cwd = {s["session_id"]: s["cwd"] for s in summaries
+                  if s["provider"] == _CLAUDE and not s["subagent"] and s["cwd"]}
     daily = {d: {"sessions": {}, "agent_s": {}} for d in day_list}
     workspaces: dict[str, dict] = {}
     tools: dict[str, list[int]] = {}
@@ -1242,18 +1293,37 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     models: dict[str, int] = {}
     tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
     pressure: list[dict] = []
+    v3_sessions = 0
     for s in summaries:
-        provider, cwd = s["provider"], s["cwd"]
+        provider, cwd, sub = s["provider"], s["cwd"], s["subagent"]
+        if sub and not cwd:
+            cwd = parent_cwd.get(s["session_id"], "")
         if not shown(provider) or (cwd and is_hidden(cwd)):
             continue
         in_window = False
+        peak = None
         for day_key, day in s["days"].items():
             if day_key not in day_set:
+                continue
+            for name, t in day["tools"].items():
+                for bucket in ((tools, tools_week) if day_key in this_week else (tools,)):
+                    slot = bucket.setdefault(name, [0, 0])
+                    slot[0] += t["calls"]
+                    slot[1] += t["failed"]
+            if provider == _CLAUDE:
+                for key in tokens:
+                    tokens[key] += day["tokens"][key]
+            if sub:
+                # Not a session of its own: its time is inside the parent's
+                # turn, and its model and workspace are the parent's.
                 continue
             if day["active"]:
                 in_window = True
                 sessions = daily[day_key]["sessions"]
                 sessions[provider] = sessions.get(provider, 0) + 1
+            day_peak = day["context_peak"]
+            if day_peak is not None:
+                peak = day_peak if peak is None else max(peak, day_peak)
             secs = day["agent_seconds"]
             if secs:
                 agent = daily[day_key]["agent_s"]
@@ -1263,22 +1333,16 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
                         "cwd": cwd, "name": Path(cwd).name or cwd,
                         "this_week_s": 0.0, "last_week_s": 0.0})
                     row["this_week_s" if day_key in this_week else "last_week_s"] += secs
-            for name, t in day["tools"].items():
-                for bucket in ((tools, tools_week) if day_key in this_week else (tools,)):
-                    slot = bucket.setdefault(name, [0, 0])
-                    slot[0] += t["calls"]
-                    slot[1] += t["failed"]
-            if provider == _CLAUDE:
-                for key in tokens:
-                    tokens[key] += day["tokens"][key]
-        if not in_window:
+        if sub or not in_window:
             continue
         if s["model"]:
             models[s["model"]] = models.get(s["model"], 0) + 1
-        if provider == _V3 and s["context_peak"] is not None:
-            pressure.append({"session_id": s["session_id"], "cwd": cwd,
-                             "name": (Path(cwd).name or cwd) if cwd else "",
-                             "peak": round(float(s["context_peak"]), 1)})
+        if provider == _V3:
+            v3_sessions += 1
+            if peak is not None:
+                pressure.append({"session_id": s["session_id"], "cwd": cwd,
+                                 "name": (Path(cwd).name or cwd) if cwd else "",
+                                 "peak": float(peak)})
     for day_key, count in _ide_daily(day_set, since, shown, is_hidden).items():
         daily[day_key]["sessions"][_IDE] = count
 
@@ -1291,7 +1355,10 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     failing = [(n, c, f) for n, (c, f) in tools_week.items()
                if c >= _USAGE_FAILING_MIN_CALLS and f > 0]
     failing.sort(key=lambda t: (-t[2], -t[2] / t[1], t[0]))
+    # Compared and sorted on the raw peak; rounded for display only.
+    over_80 = sum(1 for p in pressure if p["peak"] >= CONTEXT_PRESSURE_PERCENT)
     pressure.sort(key=lambda p: (-p["peak"], p["session_id"]))
+    top_pressure = [dict(p, peak=round(p["peak"], 1)) for p in pressure[:_USAGE_TOP_CONTEXT]]
     denom = tokens["input"] + tokens["cache_read"] + tokens["cache_creation"]
     return {
         "window_days": USAGE_WINDOW_DAYS,
@@ -1307,9 +1374,9 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
                         for n, c, f in failing[:_USAGE_TOP_FAILING]],
         },
         "context_pressure": {
-            "sessions_over_80": sum(1 for p in pressure if p["peak"] >= CONTEXT_PRESSURE_PERCENT),
-            "sessions_total": len(pressure),
-            "top": pressure[:_USAGE_TOP_CONTEXT],
+            "sessions_over_80": over_80,
+            "sessions_total": v3_sessions,
+            "top": top_pressure,
         },
         "models": [{"model": m, "sessions": n} for m, n in
                    sorted(models.items(), key=lambda kv: (-kv[1], kv[0]))[:_USAGE_TOP_MODELS]],
@@ -1320,15 +1387,22 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     }
 
 
-def warm_usage(stop_event) -> None:
-    """The warm pass after startup (D12): parse every in-window transcript
-    into the memo, so the first Overview request finds it filled.
+def usage_stop_event() -> threading.Event:
+    """The shutdown event every usage pass checks (`_usage_stop`). `web.lifespan`
+    clears it at startup and sets it on shutdown."""
+    return _usage_stop
 
-    Runs in its own worker thread, started by `web.lifespan`. `stop_event`, a
+
+def warm_usage(stop_event) -> None:
+    """A warm pass: parse every in-window transcript into the memo, so the
+    next Overview request finds it filled (D12).
+
+    Runs in its own worker thread: after startup, started by `web.lifespan`,
+    and from `cold` or `error`, started by `usage_payload`. `stop_event`, a
     `threading.Event`, is checked between files; once set the pass returns
     after the file in hand, leaves the state `cold` and evicts nothing. One
     file that fails is skipped (`_refresh`); a failure of the pass as a whole
-    sets `error`, and the summary route then computes on demand.
+    sets `error`.
     """
     _set_usage_state("warming")
     state = "error"
@@ -1341,29 +1415,73 @@ def warm_usage(stop_event) -> None:
         _set_usage_state(state)
 
 
+def _start_background_pass() -> bool:
+    """Start one warm pass in a daemon thread, unless one is already running
+    or shutdown has begun. True when a pass is running. The state turns
+    `warming` here, before the thread starts, so a request in between cannot
+    start a second one. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE"""
+    with _usage_bg_lock:
+        if _usage_stop.is_set():
+            return False
+        if usage_state() == "warming":
+            return True
+        _set_usage_state("warming")
+        thread = threading.Thread(target=warm_usage, args=(_usage_stop,), daemon=True,
+                                  name="overview-usage-pass")
+        _usage_bg[0] = thread
+        thread.start()
+        return True
+
+
 def usage_payload(filters: Callable) -> tuple[dict | None, str]:
     """`(usage, usage_state)` for the summary route. Blocking; runs off the loop.
 
-    While the warm pass runs, `(None, "warming")`. Otherwise the aggregate:
-    reused for `USAGE_REUSE_SECONDS` (D23), with `reparsed` 0 and its age in
-    `aggregate_age_s` on a reuse; when it is older, or the state is `cold` or
-    `error`, computed now. The lock makes that single-flight: concurrent
-    requests share one computation. `filters()` returns the rail's
-    `(providers, hidden)` and is called only when computing. A computation
-    that fails gives `(None, "error")`.
+    - `warming` (a warm pass is running): `(None, "warming")`.
+    - `cold` or `error` (no pass finished, or the last one failed as a whole):
+      one warm pass is started in the background and the call returns at once,
+      so the route never makes plans wait for a full parse. `cold` gives
+      `(None, "warming")`, and the page re-fetches within seconds; `error`
+      gives `(None, "error")`, so a pass that keeps failing is reported, and
+      is retried at the page's next 60 s poll rather than every few seconds.
+    - `ready`: the aggregate, reused for `USAGE_REUSE_SECONDS` (D23) with
+      `reparsed` 0 and its age in `aggregate_age_s`, as long as the rail's
+      filters are unchanged; otherwise computed now from the memo, parsing
+      only files that changed since. The lock makes that single-flight:
+      concurrent requests share one computation.
+
+    `filters()` returns the rail's `(providers, hidden)` and is called on
+    every `ready` request, so it should be cheap (the route passes a cached
+    one). The reuse key is `(providers, hidden.key)`, `hidden.key` being a
+    hashable form of the hidden set (the object itself when it has none). A
+    computation that fails gives `(None, "error")`; one stopped by shutdown
+    caches nothing and gives `(None, "cold")`.
     """
-    if usage_state() == "warming":
+    state = usage_state()
+    if state == "warming":
         return None, "warming"
+    if state in ("cold", "error"):
+        started = _start_background_pass()
+        if state == "error":
+            return None, "error"
+        return None, "warming" if started else "cold"
+    try:
+        providers, hidden = filters()
+        key = (frozenset(providers), getattr(hidden, "key", hidden))
+    except Exception:
+        log.exception("Overview: could not read the rail's filters for usage")
+        return None, "error"
     with _usage_compute_lock:
-        at, cached = _usage_cache
+        at, cached, cached_key = _usage_cache
         age = time.monotonic() - at
-        if cached is not None and age < USAGE_REUSE_SECONDS:
+        if cached is not None and cached_key == key and age < USAGE_REUSE_SECONDS:
             return dict(cached, reparsed=0, aggregate_age_s=round(age, 1)), "ready"
         try:
-            providers, hidden = filters()
-            usage = usage_summary(provider_shown=lambda p: p in providers, hidden=hidden)
+            usage = usage_summary(provider_shown=lambda p: p in providers, hidden=hidden,
+                                  stop_event=_usage_stop)
+        except _UsageStopped:
+            return None, "cold"
         except Exception:
             log.exception("Overview: could not compute usage")
             return None, "error"
-        _usage_cache[:] = [time.monotonic(), usage]
+        _usage_cache[:] = [time.monotonic(), usage, key]
     return usage, "ready"
