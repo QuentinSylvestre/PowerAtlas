@@ -245,6 +245,13 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: Never index into a config sub-dict with `["key"]`. Always use `.get("key", <default>)`. Applies to `config.notifications`, `config.provider_settings`, `config.workspace_settings`, and any other dict-typed field that could arrive empty from a bare TOML section.
 **Source**: `plans/done/260922-1140_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS.md` — Exploration Discovery risk R5 | **Verified**: 2026-09-19 (code review, load_config path traced)
 
+### PowerAtlas source files use CRLF line endings — edit them with the Edit tool, not shell edit scripts
+
+**Why**: `web.py`, `acp.html`, `index.html` and `style.css` are CRLF on every line (measured 2026-09-28); in two sessions shell/heredoc edit scripts failed to match text or tripped on quoting, and one wrote a stray NUL byte into `style.css`. Each time the agent spent several turns diagnosing before switching to the Edit tool, which worked.
+**How to apply**: Edit `src/power_atlas/templates/*.html`, `static/*.css` and `web.py` with the Edit tool. If a scripted edit is unavoidable, check the file's line endings first and grep the result for NUL/control bytes afterwards.
+**Source**: claude-code sessions 47de9653-a4aa-4b70-96fa-f791927ffe5c L905-L983 and e3292686-7c13-4ec6-973e-356f71d24205 L475, L585 | **Verified**: 2026-09-28 (human:quentin, saved at the run-1 salvage gate; sweep cross-validated 2026-09-24)
+**Evidence-quote**: "`web.py` uses Windows line endings, so my script's text didn't match. Switching to the Edit tool."
+
 ## Feedback
 
 ### Provider context must be identified from visual cues in screenshots, not assumed
@@ -292,6 +299,20 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Source**: claude-code session feaef376-fe83-4cb4-8efc-7249be12042a L1456 + L1396 | **Verified**: 2026-09-24 (sweep, cross-validated)
 **Evidence-quote**: "Symlinks get around both Protected and the floor (F-1 and F-1b). Your `~/.kiro/steering/*.md` files are symlinks into agent-playbook, so Protected steering never prompts for them."
 
+### Every ACP session UI feature ships on both /acp and the dashboard conversation panel, with session indicators inline with the Debug log button
+
+**Why**: The MCP-status feature was planned, reviewed and declared complete for `/acp` only; the dashboard (`index.html`) had no `mcp_servers` frame handler and no indicator, and the user caught it at manual test time. The context and MCP indicators had also been placed in the `/acp` page topbar rather than the session toolbar.
+**How to apply**: When a plan adds an ACP frame type or a session-scoped UI element, add an exit criterion for `index.html` parity — the frame handler, the indicator element, and an `initXxxDom({refs})` wiring in `composer-chrome.js` rather than hard-coded `acp*` IDs. Place session-scoped indicators (context bar, MCP) in the session toolbar row next to the Debug log toggle on both pages, never in the page topbar.
+**Source**: kiro-cli session sess_49a64c48-1647-4244-8d39-f8f84ace2ebd L1779 (fix L1820-L1926); `260924-1030_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS` | **Verified**: 2026-09-28 (human:quentin, saved at the run-1 salvage gate; sweep cross-validated 2026-09-24)
+**Evidence-quote**: "Note: all mcp features should be mirrored between /acp and the main dashboard!!"
+
+### When a PowerAtlas UI request admits two readings, restate the interpretation and ask before editing
+
+**Why**: "buttons should be on top but not transparent" was implemented as always-visible buttons — 45 CSS lines replaced and a test rewritten — when the user wanted the hover behaviour kept and only the title-text bleed fixed. The user rejected it and asked the agent to check first; two more correction rounds followed.
+**How to apply**: For a visual or UI change request whose wording admits two layouts or behaviours, restate your reading in one line and wait for confirmation before any edit; once the user has picked, implement without re-asking.
+**Source**: kiro-cli session sess_b951edd5-f421-433a-ac94-06f45f135eed L83-L172 | **Verified**: 2026-09-28 (human:quentin, saved at the run-1 salvage gate; sweep cross-validated 2026-09-24)
+**Evidence-quote**: "that's not what i wanted. I want to keep the on-hover behavior, I just want the session title text to not bleed inside the on-hover button when they are shown"
+
 ## Decision
 
 ### v3 session liveness uses session.json status field — lock-file approach does not apply
@@ -305,10 +326,11 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 
 ### v3 ACP close has no JSON-RPC method — `_Supervisor.close_session` does per-session local cleanup only
 
-**Why**: All close-related JSON-RPC calls return `-32603` on v3 (`_kiro.dev/session/terminate`, `session/close`, `_kiro.dev/session/close`, `session/cancel` tested as a request — all fail). No wire call works. The production close path must remove the session from all local state and broadcast a `session_closed` frame — it must NOT call `_discard()`, which kills the entire KAS subprocess and all sessions it holds.
-**How to apply**: When implementing v3-style close for any consumer: set `CLOSE_METHOD = None`, override `close_session` to do per-session local cleanup (remove from `sessions`, `history`, `inflight`, `_diff_backfill`, `subagent_sessions`, `subagent_history`, `crews`, `_bubbles`; broadcast `session_closed` to subscribers). Never call `_discard()` from `close_session` on v3.
-**Source**: `260908-1636_ACP_V3_SPIKE § Phase 0 Results (AS-5)` — wire log showing -32603 on all four candidates | **Verified**: 2026-08-19 (session, empirical — all candidates probed via wire log)
+**Why**: No v3 method unloads a session. The four close candidates (`_kiro.dev/session/terminate`, `session/close`, `_kiro.dev/session/close`, `session/cancel` as a request) all return `-32603`. `session/delete` does exist — kiro-cli 2.24.0 advertises it as `sessionCapabilities.delete: {}` — but it permanently deletes `~/.kiro/sessions/<hash>/sess_<id>` from disk, so wiring it into close would make the Close button and the idle sweeper destroy session history; the wire path was removed and a regression test pins close as local-only. ACP signals a capability with an empty object, which is falsy in Python — check presence with `is not None`. Measurements: `docs/KNOWLEDGE.md` § "Session close — no v3 method unloads a session; `session/delete` deletes it". The production close path must remove the session from all local state and broadcast `session_closed` — it must NOT call `_discard()`, which kills the entire KAS subprocess and all sessions it holds.
+**How to apply**: Keep `close_session` local-only: remove the session from `sessions`, `history`, `inflight`, `_diff_backfill`, `subagent_sessions`, `subagent_history`, `crews`, `_bubbles`, and broadcast `session_closed` to subscribers. Never call `_discard()` from `close_session` on v3, and never use `session/delete` for close or the idle sweeper. Do not reintroduce a `CLOSE_METHOD`.
+**Source**: `260908-1636_ACP_V3_SPIKE § Phase 0 Results (AS-5)` — wire log showing -32603 on all four candidates + `260924-1030_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS § Completion Summary › Post-archival QA (2026-09-24, /qqa)` | **Verified**: 2026-09-28 (human:quentin, saved at the run-1 salvage gate; sweep cross-validated 2026-09-24)
 **Stale-when**: kiro-cli v3 protocol changes
+**Evidence-quote**: "Measured with the check bypassed: `session/delete` deletes `~/.kiro/sessions/<hash>/sess_<id>` from disk, so enabling it would have made the Close button and the idle sweeper destroy session history."
 
 ### v3 session ID returned at `result._meta.id`, not `result.sessionId`
 
