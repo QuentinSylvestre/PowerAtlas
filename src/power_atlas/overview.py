@@ -66,16 +66,26 @@ _plan_memo: dict[str, tuple[int, int, dict | None]] = {}
 _plan_memo_lock = threading.Lock()
 
 
-def _read_plan_file(path: Path) -> str | None:
-    """The file's text, or None when it is larger than `PLAN_MAX_BYTES`.
+def _read_plan_file(path: Path, st=None) -> str | None:
+    """The file's text, or None when it is larger than `PLAN_MAX_BYTES`, or
+    when it is no longer the file `st` describes.
 
     Invalid UTF-8 is replaced rather than raised (D21). The read itself is
     bounded, not only the `stat` before it: an agent appending to the file
-    between the two cannot make this read more than the cap.
+    between the two cannot make this read more than the cap. `st`, the
+    caller's `lstat`, is compared with an `fstat` of the open handle: a file
+    swapped for another (a symlink or a junction included) between the two
+    calls, or one that changed size, is not read; the next scan reads it.
 
     Module-level and called by name so a test can count the reads.
     """
     with path.open("rb") as fh:
+        if st is not None:
+            fst = os.fstat(fh.fileno())
+            if (not stat_mod.S_ISREG(fst.st_mode) or fst.st_size != st.st_size
+                    or (fst.st_ino and st.st_ino and fst.st_ino != st.st_ino)
+                    or (fst.st_dev and st.st_dev and fst.st_dev != st.st_dev)):
+                return None
         raw = fh.read(PLAN_MAX_BYTES + 1)
     if len(raw) > PLAN_MAX_BYTES:
         return None
@@ -199,7 +209,8 @@ def _plan_title(file_name: str) -> str:
 def _skip_cwd(cwd: str) -> bool:
     """A string check, before any filesystem call (D21): a UNC path can stall a
     `stat` for tens of seconds on a dead host, and a relative one would resolve
-    against the server's own working directory."""
+    against the server's own working directory. It runs first: `realpath`
+    opens the path on Windows, so a UNC cwd must never reach it."""
     return (not cwd or cwd.startswith("\\\\") or cwd.startswith("//")
             or not os.path.isabs(cwd))
 
@@ -227,13 +238,16 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
     target. Nothing more is read once `deadline_s` has passed; the deadline is
     checked before each cwd and before each file, and the first file of the
     first cwd is always read, as in `web._acp_exists_flags`. A single stalled
-    call cannot be interrupted, so the bound is one stalled call, not zero. A
-    mapped or `subst` drive letter that points at a dead share passes every
-    check here; no network workspace exists today, so that residual risk is
-    recorded rather than handled. Only top-level `plans/*.md` is read, which
+    call cannot be interrupted, so the bound is one stalled call, not zero.
+    The `realpath` check itself is such a call: it opens the path, so a
+    mapped or `subst` drive letter that points at a dead share passes the
+    string check and stalls there, once per scan, for the OS timeout. No
+    network workspace exists today; that residual risk was accepted by the
+    user on 2026-09-28 rather than handled. Only top-level `plans/*.md` is read, which
     leaves `plans/done/` out; anything that is not a regular file (a symlink
-    included) is skipped; files over `PLAN_MAX_BYTES` are skipped, and the
-    read itself is capped too; one unreadable file skips that file only.
+    included) is skipped, and so is a file swapped between the `lstat` and
+    the open (`_read_plan_file`); files over `PLAN_MAX_BYTES` are skipped, and
+    the read itself is capped too; one unreadable file skips that file only.
 
     Parsed files are memoised per path on `(mtime_ns, size)` (D22), so a
     repeat scan of unchanged files costs one `stat` each. Paths not seen by a
@@ -283,7 +297,7 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
                 if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
                     parsed = hit[2]
                 else:
-                    text = _read_plan_file(path)
+                    text = _read_plan_file(path, st)
                     if text is None:
                         continue
                     parsed = parse_plan(text)
@@ -328,12 +342,6 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
 # filters (D8), and the last few events of its transcript (D13). The route in
 # `web.py` polls this every ~2 s while the Overview is showing, from a worker
 # thread. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
-
-# Session ids taken from process command lines are checked against this before
-# any path is built from them (D21). The same pattern `/api/session-transcript`
-# validates with: kiro-cli-v3 ids carry a `sess_` prefix, Claude ids are bare.
-SESSION_ID_RE = re.compile(
-    r"(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 LIVE_MAX_TILES = 8
 LIVE_FILTERS = ("all", "poweratlas")
@@ -587,16 +595,96 @@ def _transcript_path(sid: str, provider: str, cwd: str) -> Path | None:
     return _resolve_jsonl_path(sid, provider, cwd)
 
 
-def _epoch_of(iso) -> float:
-    if not iso:
-        return 0.0
+# A live session id whose process cwd could not be read (access denied, a
+# process that exited mid-scan) has no workspace in the snapshot. Its
+# transcript is found without one and its workspace read from it; the lookup is
+# memoised per (provider, sid): (monotonic time, path or None, cwd). A complete
+# answer (path and cwd) is kept, least recently used first out; an incomplete
+# one is retried after `_CWDLESS_RETRY_SECONDS`, so a poll every 2 s costs no
+# directory walk. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+_CWDLESS_TITLE = "Live session"
+_CWDLESS_MEMO_MAX = 4 * LIVE_MAX_TILES
+_CWDLESS_RETRY_SECONDS = 30.0
+_CWDLESS_HEAD_BYTES = 64 * 1024
+_cwdless_memo: OrderedDict[tuple[str, str], tuple[float, Path | None, str]] = OrderedDict()
+_cwdless_lock = threading.Lock()
+
+
+def _transcript_cwd(path: Path, provider: str) -> str:
+    """The workspace a transcript records: kiro-cli v3's `session.json`
+    `workspacePaths[0]`, or the first `cwd` in a Claude Code transcript's
+    first `_CWDLESS_HEAD_BYTES`. "" when it names none."""
+    if provider == _V3:
+        meta = _read_small_json(path.parent / "session.json")
+        paths = meta.get("workspacePaths") if isinstance(meta, dict) else None
+        return paths[0] if isinstance(paths, list) and paths and isinstance(paths[0], str) else ""
+    with path.open("rb") as fh:
+        head = fh.read(_CWDLESS_HEAD_BYTES)
+    for line in head.split(b"\n"):
+        try:
+            obj = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("cwd"), str) and obj["cwd"]:
+            return obj["cwd"]
+    return ""
+
+
+def _find_cwdless(provider: str, sid: str) -> tuple[Path | None, str]:
+    """The transcript path and recorded workspace of a live session whose
+    process cwd is unknown; `(None, "")` when it cannot be found. `sid` has
+    passed `data.SESSION_ID_RE`, so it holds no glob character."""
+    key = (provider, sid)
+    with _cwdless_lock:
+        hit = _cwdless_memo.get(key)
+        if hit is not None:
+            _cwdless_memo.move_to_end(key)
+    if hit is not None and ((hit[1] is not None and hit[2])
+                            or time.monotonic() - hit[0] < _CWDLESS_RETRY_SECONDS):
+        return hit[1], hit[2]
+    path: Path | None = None
+    cwd = ""
     try:
-        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    except (ValueError, OverflowError, OSError):
-        return 0.0
+        # kiro-cli v3 is found by id alone; a Claude Code transcript lives in
+        # a folder named after the cwd, so every project folder is tried.
+        path = _transcript_path(sid, provider, "")
+        if path is None and provider == _CLAUDE:
+            from . import data_claude
+            path = next(iter(Path(data_claude.CLAUDE_PROJECTS_DIR).glob(f"*/{sid}.jsonl")), None)
+        if path is not None:
+            cwd = _transcript_cwd(path, provider)
+    except (OSError, ValueError):
+        log.warning("Overview: could not locate the transcript of live session %s", sid)
+    with _cwdless_lock:
+        _cwdless_memo[key] = (time.monotonic(), path, cwd)
+        _cwdless_memo.move_to_end(key)
+        while len(_cwdless_memo) > _CWDLESS_MEMO_MAX:
+            _cwdless_memo.popitem(last=False)
+    return path, cwd
+
+
+def _cwdless_candidate(provider: str, sid: str, originals: dict[str, str],
+                       shown: Callable, sessions_in: Callable, is_live: Callable):
+    """A `live_sessions` candidate for a live session id with no process cwd,
+    or None when the rail's filters leave it out.
+
+    The workspace is the one its transcript records. A known workspace goes
+    through the same filters as any other tile, and its store record is used
+    when the rail has discovered that workspace; otherwise the tile is a
+    minimal one titled "Live session", with no workspace when none is
+    recorded (only the provider filter then applies)."""
+    from . import data
+
+    path, cwd = _find_cwdless(provider, sid)
+    original = originals.get(data._normalize_path(cwd)) if cwd else None
+    if not shown(provider, original or cwd):
+        return None
+    if original:
+        session = next((s for s in sessions_in(provider, original) if s.session_id == sid), None)
+        if session is not None:
+            return (session, original, False, True, path) if is_live(session, provider) else None
+    cwd = original or cwd
+    return (data.Session(sid, _CWDLESS_TITLE, cwd, "", "", "", "", ""), cwd, False, True, path)
 
 
 def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
@@ -606,7 +694,10 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
     Live is the rail's rule (D8): a session this PowerAtlas holds, or one the
     rail's `_session_is_live` marks live, less hidden workspaces and providers
     the rail does not show. Held sessions with no store record (a new session,
-    or one in the agent's own folder) are included, titled "New session".
+    or one in the agent's own folder) are included, titled "New session". A
+    live session id whose process cwd could not be read is included too, with
+    the workspace its transcript records (`_cwdless_candidate`), titled "Live
+    session" when it has no store record.
 
     `held` maps each held sid to its cwd, captured on the loop by the route.
     `snapshot` is a `presence.Snapshot` taken in this thread. `originals` maps
@@ -642,13 +733,21 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
             log.exception("Overview: could not apply the rail's filters to %s", cwd)
             return False
 
+    # A rail helper that raises is logged once per poll, not once per session.
+    failed: set[str] = set()
+
     def is_live(session, provider: str) -> bool:
         try:
             return bool(deps.session_is_live(snapshot, session, provider))
         except Exception:
+            if "live" not in failed:
+                failed.add("live")
+                log.exception("Overview: could not apply the rail's live rule to %s",
+                              session.session_id)
             return False
 
-    # (provider, sid) -> (session, cwd, held, live)
+    # (provider, sid) -> (session, cwd, held, live, transcript path or None).
+    # The path is set only where it was found without the cwd (`_find_cwdless`).
     cands: dict[tuple[str, str], tuple] = {}
 
     # (a) Held sessions. The cwd comes from the supervisor's record.
@@ -664,13 +763,21 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
         cwd = original or held_cwd
         if session is None:
             session = data.Session(sid, _NEW_SESSION_TITLE, cwd, "", "", "", "", "")
-        cands[(_HELD_PROVIDER, sid)] = (session, cwd, True, is_live(session, _HELD_PROVIDER))
+        cands[(_HELD_PROVIDER, sid)] = (session, cwd, True, is_live(session, _HELD_PROVIDER), None)
 
     if not only_held:
         # (b) Session ids on a process command line or in a sidecar. Checked
         # against SESSION_ID_RE before anything is looked up by them.
         for provider, sid, norm in snapshot.live_sids():
-            if (provider, sid) in cands or not SESSION_ID_RE.fullmatch(sid or ""):
+            if (provider, sid) in cands or not data.SESSION_ID_RE.fullmatch(sid or ""):
+                continue
+            if not norm:
+                # The process's cwd could not be read (the rail still shows
+                # its dot, from the record's own cwd): the workspace comes
+                # from the transcript instead.
+                cand = _cwdless_candidate(provider, sid, originals, shown, sessions_in, is_live)
+                if cand is not None:
+                    cands[(provider, sid)] = cand
                 continue
             original = originals.get(norm)
             if not original or not shown(provider, original):
@@ -678,7 +785,7 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
             session = next((s for s in sessions_in(provider, original)
                             if s.session_id == sid), None)
             if session is not None and is_live(session, provider):
-                cands[(provider, sid)] = (session, original, False, True)
+                cands[(provider, sid)] = (session, original, False, True, None)
         # (c) Sessions in a cwd a provider process runs in, written recently.
         for provider, norm in snapshot.live_cwd_pairs():
             original = originals.get(norm)
@@ -687,23 +794,23 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
             for session in sessions_in(provider, original):
                 key = (provider, session.session_id)
                 if key not in cands and is_live(session, provider):
-                    cands[key] = (session, original, False, True)
+                    cands[key] = (session, original, False, True, None)
 
     now = time.time()
     rows = []
-    for (provider, sid), (session, cwd, is_held, live) in cands.items():
+    for (provider, sid), (session, cwd, is_held, live, found) in cands.items():
         path = None
         st = None
         activity = 0.0
         try:
-            path = _transcript_path(sid, provider, cwd)
+            path = found or _transcript_path(sid, provider, cwd)
             if path is not None:
                 st = path.stat()
                 activity = st.st_mtime
         except (OSError, ValueError):
             path = st = None
         if not activity:
-            activity = _epoch_of(session.updated_at)
+            activity = _epoch(session.updated_at) or 0.0
         # A held session with no transcript and no record time is one just
         # created: it sorts as active now, so the cap never cuts it. Its shown
         # activity stays unknown. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
@@ -759,6 +866,9 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
         try:
             title = deps.row_title(session) or ""
         except Exception:
+            if "title" not in failed:
+                failed.add("title")
+                log.exception("Overview: could not title the tile of %s", sid)
             title = ""
         tiles.append({
             "id": sid,
@@ -937,15 +1047,18 @@ def _iter_lines(fh, limit: int):
 
 
 def _epoch(ts) -> float | None:
+    """The epoch seconds of an ISO 8601 timestamp (`Z` accepted, naive read as
+    UTC), or None for anything that is not one. The one parser for the live
+    tiles' record times and the usage records' timestamps."""
     if not isinstance(ts, str) or not ts:
         return None
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, OverflowError, OSError):
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
 
 
 def _local_day(epoch: float) -> str:
@@ -1140,7 +1253,22 @@ def _parse_claude_usage(path: Path, subagent: bool = False) -> dict:
 
 def _parse_usage_file(path: Path, provider: str) -> dict:
     """Parse one transcript into its summary. Module-level and called by name
-    so a test can count the parses."""
+    so a test can count the parses; `_summarize` memoises it per path on
+    `(mtime_ns, size)`, and the worker child calls it directly.
+
+    `{"provider", "session_id", "cwd", "model", "subagent", "days"}`
+    (`_SUMMARY_KEYS`), where `days` maps a local `YYYY-MM-DD` to `{"active",
+    "agent_seconds", "tools": {name: {"calls", "failed"}}, "tokens":
+    {"input", "output", "cache_read", "cache_creation"}, "context_peak"}`.
+    `model` is the v3 `modelId` or the most frequent Claude `message.model`;
+    `context_peak` the v3 maximum `usagePercentage` (0-100) recorded that
+    day, else None. `subagent` is True for a Claude Code sub-agent transcript
+    (`provider` `_CLAUDE_SUB`), whose `session_id` is its parent session's.
+    Lines over `USAGE_MAX_LINE_BYTES` are skipped, and one unreadable line
+    skips that line only. The v3 `session.json` fields (cwd, model) are
+    memoised under `messages.jsonl`'s key; they do not change during a
+    session. Changing this shape means bumping `_USAGE_SCHEMA`.
+    """
     if provider == _V3:
         return _parse_v3_usage(path)
     return _parse_claude_usage(path, subagent=provider == _CLAUDE_SUB)
@@ -1157,25 +1285,6 @@ def _summarize(path: Path, provider: str, st) -> tuple[dict, bool]:
     with _usage_memo_lock:
         _usage_memo[key] = (st.st_mtime_ns, st.st_size, summary)
     return summary, True
-
-
-def summarize_file(path, provider: str) -> dict:
-    """One transcript's usage summary, memoised per path on `(mtime_ns, size)`.
-
-    `{"provider", "session_id", "cwd", "model", "subagent", "days"}`, where
-    `days` maps a local `YYYY-MM-DD` to `{"active", "agent_seconds", "tools":
-    {name: {"calls", "failed"}}, "tokens": {"input", "output", "cache_read",
-    "cache_creation"}, "context_peak"}`. `model` is the v3 `modelId` or the
-    most frequent Claude `message.model`; `context_peak` the v3 maximum
-    `usagePercentage` (0-100) recorded that day, else None. `subagent` is True
-    for a Claude Code sub-agent transcript (`provider` `_CLAUDE_SUB`), whose
-    `session_id` is its parent session's. Lines over `USAGE_MAX_LINE_BYTES` are skipped, and one
-    unreadable line skips that line only. The v3 `session.json` fields (cwd,
-    model) are memoised under `messages.jsonl`'s key; they do not change during
-    a session.
-    """
-    path = Path(path)
-    return _summarize(path, provider, path.stat())[0]
 
 
 def _window(now: float) -> tuple[list[str], float]:
@@ -1308,17 +1417,25 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     from . import data
 
     now = time.time() if now is None else now
+    # A filter that raises is logged once per aggregate, not once per file.
+    failed: set[str] = set()
 
     def shown(provider: str) -> bool:
         try:
             return provider_shown is None or bool(provider_shown(provider))
         except Exception:
+            if "shown" not in failed:
+                failed.add("shown")
+                log.exception("Overview: the provider filter failed for usage (%s)", provider)
             return False
 
     def is_hidden(cwd: str) -> bool:
         try:
             return hidden is not None and bool(hidden(cwd))
         except Exception:
+            if "hidden" not in failed:
+                failed.add("hidden")
+                log.exception("Overview: the hidden-workspace filter failed for usage (%s)", cwd)
             return True
 
     day_list, since = _window(now)

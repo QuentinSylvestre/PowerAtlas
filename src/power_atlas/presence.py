@@ -439,15 +439,16 @@ class Snapshot:
         return {c for p, c in self._live_cwds if p in providers}
 
     def live_sids(self) -> list[tuple[str, str, str]]:
-        """``(provider, session_id, normalized_cwd)`` for every live session id
-        whose cwd is known. An id seen without a cwd is left out.
+        """``(provider, session_id, normalized_cwd)`` for every live session
+        id; ``normalized_cwd`` is ``""`` when the process's cwd could not be
+        read.
 
         For the dashboard Overview's live tiles, which need each id's workspace
-        to find its record. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+        to find its record, and find it from the transcript when the cwd is
+        ``""``. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
         """
-        return [(prov, sid, self._sid_to_cwd[(prov, sid)])
-                for prov, sid in self._live_sids
-                if self._sid_to_cwd.get((prov, sid))]
+        return [(prov, sid, self._sid_to_cwd.get((prov, sid)) or "")
+                for prov, sid in self._live_sids]
 
     def live_cwd_pairs(self) -> list[tuple[str, str]]:
         """``(provider, normalized_cwd)`` for every cwd a provider process runs in.

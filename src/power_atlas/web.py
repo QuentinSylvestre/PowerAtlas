@@ -3329,8 +3329,9 @@ _DASHBOARD_OVERVIEW_SUMMARY_PATH = "/api/dashboard/overview/summary"
 # How long a plan scan is reused (D23). Home/Escape toggles and several open
 # tabs would otherwise rescan every workspace's `plans/` on each entry.
 _OVERVIEW_PLANS_REUSE_SECONDS = 30.0
-# (monotonic time of the scan, its result). Reset by the tests.
-_overview_plans_cache: list = [0.0, None]
+# (monotonic time of the scan, its result, the rail filters' key it was
+# scanned under). Reset by the tests.
+_overview_plans_cache: list = [0.0, None, None]
 _overview_plans_lock = threading.Lock()
 
 
@@ -3362,11 +3363,12 @@ def _overview_rail_filters():
 def _overview_workspaces() -> list[tuple[str, str]]:
     """`(cwd, name)` for every workspace the rail can show, once each.
 
-    The rail's own exclusions (`_overview_rail_filters`). Rows are filtered by
-    provider **before** de-duplication, so a folder with sessions under both a
-    disabled and an enabled provider is kept. Blocking; runs off the loop.
+    The rail's own exclusions, through the Overview's cached copy
+    (`_overview_filters_cached`). Rows are filtered by provider **before**
+    de-duplication, so a folder with sessions under both a disabled and an
+    enabled provider is kept. Blocking; runs off the loop.
     """
-    providers, hidden = _overview_rail_filters()
+    providers, hidden = _overview_filters_cached()
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for cwd, _count, _updated, prov in data.discover_workspaces_with_counts(None):
@@ -3391,21 +3393,28 @@ def _overview_summary() -> dict:
     scan's own deadline (`overview.scan_plans`, D21), and every caller is
     already on a worker thread. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 
+    The scan is reused only under the same rail filters: it is keyed on
+    `(providers, hidden.key)`, as `usage_payload` keys its aggregate, so a
+    newly hidden workspace or a disabled provider leaves the list within the
+    filters' own 5 s reuse rather than after 30 s.
+
     Usage comes from `overview.usage_payload`, which owns its own 30 s reuse
     and single-flight and never parses the whole window on this thread (from
     `cold` or `error` it starts a background pass and returns at once, and
     while that pass is in its second stage it returns a partial aggregate
-    computed from the memo). It
-    reads the rail's filters through `_overview_live_filters`, the 5 s cached
-    copy, because it compares them on every request: a filter change
-    recomputes the aggregate from the memo instead of waiting out the reuse.
+    computed from the memo). Both halves read the rail's filters through
+    `_overview_filters_cached`, the 5 s cached copy, because both compare
+    them on every request.
     """
+    providers, hidden = _overview_filters_cached()
+    key = (frozenset(providers), getattr(hidden, "key", hidden))
     with _overview_plans_lock:
-        at, plans = _overview_plans_cache
-        if plans is None or time.monotonic() - at >= _OVERVIEW_PLANS_REUSE_SECONDS:
+        at, plans, cached_key = _overview_plans_cache
+        if (plans is None or cached_key != key
+                or time.monotonic() - at >= _OVERVIEW_PLANS_REUSE_SECONDS):
             plans = overview.scan_plans(_overview_workspaces())
-            _overview_plans_cache[:] = [time.monotonic(), plans]
-    usage, usage_state = overview.usage_payload(_overview_live_filters)
+            _overview_plans_cache[:] = [time.monotonic(), plans, key]
+    usage, usage_state = overview.usage_payload(_overview_filters_cached)
     return {"plans": plans, "usage": usage, "usage_state": usage_state}
 
 
@@ -3435,28 +3444,28 @@ async def api_dashboard_overview_summary(response: Response):
 
 _DASHBOARD_OVERVIEW_LIVE_PATH = "/api/dashboard/overview/live"
 
-# How long the live route and the summary route's usage half reuse
-# `_overview_rail_filters()`. Each 2 s poll would otherwise re-read
-# config.toml; a hidden tag or a provider toggle shows on the tiles, and in
-# Usage, within this many seconds.
+# How long the Overview's routes reuse `_overview_rail_filters()`: the live
+# tiles, the plan list and Usage. Each 2 s poll would otherwise re-read
+# config.toml; a hidden tag or a provider toggle shows on the tiles, in the
+# plans and in Usage within this many seconds.
 # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
-_OVERVIEW_LIVE_FILTERS_REUSE_SECONDS = 5.0
+_OVERVIEW_FILTERS_REUSE_SECONDS = 5.0
 # (monotonic time of the read, (providers, hidden)). Reset by the tests.
-_overview_live_filters_cache: list = [0.0, None]
-_overview_live_filters_lock = threading.Lock()
+_overview_filters_cache: list = [0.0, None]
+_overview_filters_lock = threading.Lock()
 
 
-def _overview_live_filters():
-    """`_overview_rail_filters()`, reused for `_OVERVIEW_LIVE_FILTERS_REUSE_SECONDS`.
+def _overview_filters_cached():
+    """`_overview_rail_filters()`, reused for `_OVERVIEW_FILTERS_REUSE_SECONDS`.
 
-    The lock covers the read too, so concurrent polls share one config read.
-    Blocking; runs off the loop.
+    The one copy every Overview route reads. The lock covers the read too,
+    so concurrent polls share one config read. Blocking; runs off the loop.
     """
-    with _overview_live_filters_lock:
-        at, filters = _overview_live_filters_cache
-        if filters is None or time.monotonic() - at >= _OVERVIEW_LIVE_FILTERS_REUSE_SECONDS:
+    with _overview_filters_lock:
+        at, filters = _overview_filters_cache
+        if filters is None or time.monotonic() - at >= _OVERVIEW_FILTERS_REUSE_SECONDS:
             filters = _overview_rail_filters()
-            _overview_live_filters_cache[:] = [time.monotonic(), filters]
+            _overview_filters_cache[:] = [time.monotonic(), filters]
         return filters
 
 
@@ -3470,7 +3479,7 @@ def _overview_live(held: dict[str, str], filter_: str) -> dict:
     `data.get_sessions` (see `overview.live_sessions`).
     """
     snapshot = presence.get_snapshot()
-    providers, hidden = _overview_live_filters()
+    providers, hidden = _overview_filters_cached()
     originals: dict[str, str] = {}
     for cwd, _count, _updated, _prov in data.discover_workspaces_with_counts(None):
         originals.setdefault(data._normalize_path(cwd), cwd)
@@ -5697,7 +5706,7 @@ async def api_session_transcript(sid: str = "", provider: str = "kiro-cli-v3", c
     (not polled), so this does no caching of its own beyond whatever
     `data.get_full_transcript`'s provider adapter already does.
     """
-    if not overview.SESSION_ID_RE.fullmatch(sid):
+    if not data.SESSION_ID_RE.fullmatch(sid):
         return JSONResponse({"error": "invalid session id"}, status_code=400)
     from . import transcript_translator
 
@@ -5729,7 +5738,7 @@ async def api_session_availability(response: Response, sid: str = "", cwd: str =
     liveness reading with a lifetime of seconds, not something to cache.
     """
     response.headers["Cache-Control"] = "no-store"
-    if not overview.SESSION_ID_RE.fullmatch(sid):
+    if not data.SESSION_ID_RE.fullmatch(sid):
         return JSONResponse({"error": "invalid session id"}, status_code=400)
 
     def _compute() -> tuple[str, str]:

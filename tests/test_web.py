@@ -129,7 +129,7 @@ def isolated_config(tmp_path, monkeypatch):
     # that is reset too. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
     monkeypatch.setattr(overview_mod, "_usage_stop", threading.Event())
     monkeypatch.setattr(overview_mod, "_usage_bg", [None])
-    monkeypatch.setattr(web_mod, "_overview_live_filters_cache", [0.0, None])
+    monkeypatch.setattr(web_mod, "_overview_filters_cache", [0.0, None])
     yield tmp_path
     thread = overview_mod._usage_bg[0]
     if thread is not None:
@@ -29907,10 +29907,10 @@ class TestOverviewPlans:
     def _fresh(self):
         from power_atlas import overview, web as web_mod
         overview._plan_memo.clear()
-        web_mod._overview_plans_cache[:] = [0.0, None]
+        web_mod._overview_plans_cache[:] = [0.0, None, None]
         yield
         overview._plan_memo.clear()
-        web_mod._overview_plans_cache[:] = [0.0, None]
+        web_mod._overview_plans_cache[:] = [0.0, None, None]
 
     @staticmethod
     def _ws(root, name, files):
@@ -30022,21 +30022,40 @@ class TestOverviewPlans:
         ws = self._ws(tmp_path, "proj", {"bad.md": _OV_PHASES_PLAN, "ok.md": _OV_COMPLETE_PLAN})
         real = overview._read_plan_file
 
-        def flaky(path):
+        def flaky(path, st=None):
             if path.name == "bad.md":
                 raise PermissionError("locked")
-            return real(path)
+            return real(path, st)
 
         monkeypatch.setattr(overview, "_read_plan_file", flaky)
         assert [p["file"] for p in self._scan(ws)] == ["ok.md"]
 
     def test_unc_and_relative_cwds_are_skipped_without_a_filesystem_call(self, monkeypatch):
+        """The string check runs before any call that touches the path:
+        `realpath` opens it on Windows, so it would stall on a dead host
+        exactly as a `stat` does."""
         from power_atlas import overview
         calls = []
-        monkeypatch.setattr(overview.Path, "is_dir", lambda self: calls.append(self) or False)
-        assert overview.scan_plans([("\\\\server\\share\\proj", "proj"),
-                                    ("//server/share/proj", "proj"),
-                                    ("relative\\proj", "proj")]) == []
+
+        def record(name, result):
+            def fake(*args, **kwargs):
+                calls.append((name, args[:1]))
+                if isinstance(result, type) and issubclass(result, BaseException):
+                    raise result("no filesystem call may reach a UNC or relative cwd")
+                return result(*args) if callable(result) else result
+            return fake
+        with monkeypatch.context() as m:
+            m.setattr(overview.os.path, "realpath", record("realpath", lambda p, *a: str(p)))
+            m.setattr(overview.os, "stat", record("os.stat", OSError))
+            m.setattr(overview.os, "lstat", record("os.lstat", OSError))
+            m.setattr(overview.Path, "is_dir", record("is_dir", False))
+            m.setattr(overview.Path, "stat", record("Path.stat", OSError))
+            m.setattr(overview.Path, "lstat", record("Path.lstat", OSError))
+            m.setattr(overview.Path, "glob", record("glob", lambda *a: iter(())))
+            got = overview.scan_plans([("\\\\server\\share\\proj", "proj"),
+                                       ("//server/share/proj", "proj"),
+                                       ("relative\\proj", "proj")])
+        assert got == []
         assert calls == []
 
     def test_no_further_cwd_is_scanned_after_the_deadline(self, tmp_path):
@@ -30051,7 +30070,7 @@ class TestOverviewPlans:
         reads = []
         real = overview._read_plan_file
         monkeypatch.setattr(overview, "_read_plan_file",
-                            lambda path: reads.append(path.name) or real(path))
+                            lambda path, st=None: reads.append(path.name) or real(path, st))
         first = self._scan(ws)
         assert sorted(reads) == ["a.md", "b.md"]
         reads.clear()
@@ -30150,6 +30169,54 @@ class TestOverviewPlans:
             web_mod._overview_plans_cache[0] -= web_mod._OVERVIEW_PLANS_REUSE_SECONDS + 1
             client.get("/api/dashboard/overview/summary")
         assert len(scans) == 2
+
+    def test_a_newly_hidden_workspace_leaves_the_plans_within_the_filters_reuse(
+            self, client, workspaces, monkeypatch):
+        """The scan is keyed on the rail's filters, as the usage aggregate is:
+        hiding a workspace does not wait out the scan's 30 s.
+        260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE final review (F8)"""
+        from power_atlas import overview, web as web_mod
+        shown, hidden = workspaces
+        scans = []
+        real = overview.scan_plans
+        monkeypatch.setattr(overview, "scan_plans",
+                            lambda ws, **kw: scans.append(1) or real(ws, **kw))
+
+        def plans(config):
+            with patch("power_atlas.web.load_config", return_value=config):
+                body = client.get("/api/dashboard/overview/summary").json()
+            return sorted(p["workspace"] for p in body["plans"])
+        assert plans(self._config()) == ["hidden", "shown"]
+        web_mod._overview_filters_cache[:] = [0.0, None]      # its 5 s have passed
+        assert plans(self._config(workspace_settings={
+            str(hidden): {"tags": ["hidden"], "color": ""}})) == ["shown"]
+        assert len(scans) == 2, "a filter change rescans inside the 30 s reuse"
+        assert plans(self._config(workspace_settings={
+            str(hidden): {"tags": ["hidden"], "color": ""}})) == ["shown"]
+        assert len(scans) == 2, "unchanged filters reuse the scan"
+
+    def test_a_file_swapped_between_the_stat_and_the_open_is_not_read(self, tmp_path, monkeypatch):
+        """The open handle's `fstat` must describe the file `lstat` saw.
+        260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE final review (F9)"""
+        from power_atlas import overview
+        ws = self._ws(tmp_path, "proj", {"a.md": _OV_PHASES_PLAN, "b.md": _OV_COMPLETE_PLAN})
+        a, b = ws / "plans" / "a.md", ws / "plans" / "b.md"
+        real_lstat = Path.lstat
+        other = real_lstat(b)
+        mine = real_lstat(a)
+
+        def swapped(self):
+            if self == a:
+                # What `lstat` saw: a regular file of a.md's size, but not
+                # the one the open lands on.
+                return os.stat_result((mine.st_mode, other.st_ino or 7, mine.st_dev, 1, 0, 0,
+                                       mine.st_size, mine.st_atime, mine.st_mtime, mine.st_ctime))
+            return real_lstat(self)
+        monkeypatch.setattr(overview.Path, "lstat", swapped)
+        assert [p["file"] for p in self._scan(ws)] == ["b.md"]
+        assert str(a) not in overview._plan_memo, "a skipped read is not memoised"
+        monkeypatch.setattr(overview.Path, "lstat", real_lstat)
+        assert sorted(p["file"] for p in self._scan(ws)) == ["a.md", "b.md"], "the next scan reads it"
 
     def test_route_refused_without_the_cookie(self, anonymous_client, client, workspaces):
         assert _is_json_403(anonymous_client.get("/api/dashboard/overview/summary"))
@@ -30341,10 +30408,12 @@ class TestOverviewLive:
     def _fresh(self):
         from power_atlas import overview, web as web_mod
         overview._tail_memo.clear()
-        web_mod._overview_live_filters_cache[:] = [0.0, None]
+        overview._cwdless_memo.clear()
+        web_mod._overview_filters_cache[:] = [0.0, None]
         yield
         overview._tail_memo.clear()
-        web_mod._overview_live_filters_cache[:] = [0.0, None]
+        overview._cwdless_memo.clear()
+        web_mod._overview_filters_cache[:] = [0.0, None]
 
     # --- fixtures ----------------------------------------------------------
 
@@ -30426,13 +30495,14 @@ class TestOverviewLive:
     def _snap(live_sids=(), live_cwds=()):
         """A presence snapshot: `live_sids` are `(provider, sid, cwd)`,
         `live_cwds` are `(provider, cwd)`; cwds are normalised as a scan
-        normalises them."""
+        normalises them. A `""` cwd is a process whose cwd could not be read:
+        its id is live, and no cwd is recorded for it."""
         from power_atlas import data, presence
         n = data._normalize_path
         return presence.Snapshot(
             live_sids={(p, s) for p, s, _c in live_sids},
-            live_cwds={(p, n(c)) for p, c in live_cwds} | {(p, n(c)) for p, _s, c in live_sids},
-            sid_to_cwd={(p, s): n(c) for p, s, c in live_sids},
+            live_cwds={(p, n(c)) for p, c in live_cwds} | {(p, n(c)) for p, _s, c in live_sids if c},
+            sid_to_cwd={(p, s): n(c) for p, s, c in live_sids if c},
         )
 
     @staticmethod
@@ -30452,7 +30522,8 @@ class TestOverviewLive:
         snap = presence.Snapshot({("claude-code", "a"), ("claude-code", "b")},
                                  {("claude-code", "c:\\w"), ("kiro-cli-v3", "c:\\k")},
                                  {("claude-code", "a"): "c:\\w"})
-        assert snap.live_sids() == [("claude-code", "a", "c:\\w")], "an id without a cwd is left out"
+        assert sorted(snap.live_sids()) == [("claude-code", "a", "c:\\w"), ("claude-code", "b", "")], \
+            "an id without a cwd is listed with an empty one"
         assert sorted(snap.live_cwd_pairs()) == [("claude-code", "c:\\w"), ("kiro-cli-v3", "c:\\k")]
 
     # --- the rail's rule, by expected-set equality --------------------------
@@ -30473,9 +30544,24 @@ class TestOverviewLive:
         store.add(_OV_CC, w_hidden, _ov_uuid(6), age_s=3600)  # cmdline id, hidden workspace
         store.add(_OV_V3, w_hidden, held_hidden)
         store.add(_OV_CC, w_bad, "not-a-uuid")
+        # Live ids whose process cwd could not be read: the workspace comes
+        # from the transcript. 10 records none (a minimal tile), 11 records a
+        # hidden one (left out), 12 a discovered one with a store record (its
+        # record is used), 13 one the rail never discovered (minimal tile).
+        # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE final review (F5)
+        w_undiscovered = str(tmp_path / "Elsewhere")
+        store.add(_OV_CC, w_cmd, _ov_uuid(12), age_s=3600, title="Recorded title")
+        for n, cwd in ((10, None), (11, w_hidden), (12, w_cmd), (13, w_undiscovered)):
+            f = tmp_path / "transcripts" / f"{_ov_uuid(n)}.jsonl"
+            head = {"type": "system", "subtype": "init"} if cwd is None else \
+                {"type": "system", "subtype": "init", "cwd": cwd}
+            f.write_text(json.dumps(head) + "\n" + _ov_cc_line("assistant", f"reply {n}") + "\n",
+                         encoding="utf-8")
+            store.files[_ov_uuid(n)] = f
         snap = self._snap(
             live_sids=[(_OV_CC, _ov_uuid(2), w_cmd), (_OV_CC, "not-a-uuid", w_bad),
-                       (_OV_CC, _ov_uuid(6), w_hidden)],
+                       (_OV_CC, _ov_uuid(6), w_hidden), (_OV_CC, "not-a-uuid-either", "")]
+                      + [(_OV_CC, _ov_uuid(n), "") for n in (10, 11, 12, 13)],
             live_cwds=[(_OV_CC, w_cwd), (_OV_CC, w_hidden)])
         # The non-UUID id's cwd is only reachable through the cmdline entry.
         from power_atlas import data
@@ -30487,8 +30573,18 @@ class TestOverviewLive:
         tiles = self._live({held_sid: neutral, held_hidden: w_hidden}, snap,
                            self._deps(recent={_ov_uuid(3), _ov_uuid(5)}, hidden={w_hidden}),
                            self._originals(w_cmd, w_cwd, w_hidden, w_bad))
-        assert {t["id"] for t in tiles} == {held_sid, _ov_uuid(2), _ov_uuid(3)}
+        assert {t["id"] for t in tiles} == {held_sid, _ov_uuid(2), _ov_uuid(3),
+                                            _ov_uuid(10), _ov_uuid(12), _ov_uuid(13)}
         by_id = {t["id"]: t for t in tiles}
+        assert (by_id[_ov_uuid(10)]["title"], by_id[_ov_uuid(10)]["cwd"],
+                by_id[_ov_uuid(10)]["name"]) == ("Live session", "", "")
+        assert by_id[_ov_uuid(10)]["events"] == [
+            {"kind": "text", "role": "assistant", "text": "reply 10"}], "its transcript was found"
+        assert (by_id[_ov_uuid(12)]["title"], by_id[_ov_uuid(12)]["cwd"]) == ("Recorded title", w_cmd)
+        assert (by_id[_ov_uuid(13)]["title"], by_id[_ov_uuid(13)]["cwd"]) == (
+            "Live session", w_undiscovered)
+        assert (w_undiscovered, _OV_CC) not in store.calls, "an undiscovered cwd is never loaded"
+        assert "not-a-uuid-either" not in store.paths
         assert by_id[held_sid]["title"] == "New session"
         assert by_id[held_sid]["cwd"] == neutral
         assert by_id[held_sid]["availability"] == "held"
@@ -30845,6 +30941,43 @@ class TestOverviewLive:
         assert tiles[0]["last_activity"] == ""
         assert [t["id"] for t in tiles[1:]] == ids[:7]
 
+    def test_a_cwdless_live_id_is_found_from_its_transcript_once(self, monkeypatch, tmp_path):
+        """No process cwd: a Claude Code transcript is found in whichever
+        project folder holds it and a kiro-cli one by id; the workspace is
+        the one each records, and a complete answer is not looked up again.
+        260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE final review (F5)"""
+        from power_atlas import data_claude, overview, status_classifier
+        claude_root, v3_root = tmp_path / "claude", tmp_path / "v3"
+        monkeypatch.setattr(data_claude, "CLAUDE_PROJECTS_DIR", claude_root)
+        monkeypatch.setattr(status_classifier, "_V3_SESSIONS_ROOT", v3_root)
+        cc = claude_root / "C--ws-proj" / f"{_ov_uuid(1)}.jsonl"
+        cc.parent.mkdir(parents=True)
+        cc.write_text(json.dumps({"type": "system", "subtype": "init"}) + "\n"
+                      + json.dumps({"type": "user", "cwd": "C:\\ws\\proj"}) + "\n", encoding="utf-8")
+        v3_sid = "sess_" + _ov_uuid(2)
+        v3 = v3_root / "HASH" / v3_sid / "messages.jsonl"
+        v3.parent.mkdir(parents=True)
+        v3.write_text(_ov_v3_line("assistant", content="hi") + "\n", encoding="utf-8")
+        (v3.parent / "session.json").write_text(json.dumps({"workspacePaths": ["C:\\ws\\kiro"]}),
+                                                encoding="utf-8")
+        globs = []
+        real_glob = overview.Path.glob
+        monkeypatch.setattr(overview.Path, "glob",
+                            lambda self, pattern: globs.append(pattern) or real_glob(self, pattern))
+        assert overview._find_cwdless(_OV_CC, _ov_uuid(1)) == (cc, "C:\\ws\\proj")
+        assert overview._find_cwdless(_OV_V3, v3_sid) == (v3, "C:\\ws\\kiro")
+        assert overview._find_cwdless(_OV_CC, _ov_uuid(9)) == (None, "")
+        assert len(globs) == 2
+        assert overview._find_cwdless(_OV_CC, _ov_uuid(1)) == (cc, "C:\\ws\\proj")
+        assert overview._find_cwdless(_OV_CC, _ov_uuid(9)) == (None, "")
+        assert len(globs) == 2, "a found transcript, and a recent miss, are not looked up again"
+
+    def test_a_cwdless_live_id_of_a_disabled_provider_is_left_out(self, store, tmp_path):
+        store.add(_OV_CC, str(tmp_path / "Ws"), _ov_uuid(1))
+        snap = self._snap(live_sids=[(_OV_CC, _ov_uuid(1), "")])
+        assert [t["id"] for t in self._live({}, snap, self._deps(), {})] == [_ov_uuid(1)]
+        assert self._live({}, snap, self._deps(disabled={_OV_CC}), {}) == []
+
     # --- the route ---------------------------------------------------------
 
     @pytest.fixture
@@ -30901,7 +31034,7 @@ class TestOverviewLive:
             assert cfg.call_count == once, "a poll inside the window reuses the filters"
             # Age the cache past the window rather than patching
             # `time.monotonic`, which the test client's loop reads too.
-            web_mod._overview_live_filters_cache[0] -= web_mod._OVERVIEW_LIVE_FILTERS_REUSE_SECONDS + 1
+            web_mod._overview_filters_cache[0] -= web_mod._OVERVIEW_FILTERS_REUSE_SECONDS + 1
             client.get("/api/dashboard/overview/live")
             assert cfg.call_count == once * 2, "an expired window reads the config again"
 
@@ -31554,7 +31687,7 @@ class TestOverviewUsage:
                 cwd="C:\\ws\\open", hash_="h2")
 
         def get(settings):
-            web_mod._overview_live_filters_cache[:] = [0.0, None]   # its 5 s have passed
+            web_mod._overview_filters_cache[:] = [0.0, None]   # its 5 s have passed
             with patch.object(data, "available_providers", lambda: ["kiro-cli-v3"]), \
                     patch("power_atlas.web.load_config",
                           return_value=Config(workspace_settings=settings)):
@@ -31726,7 +31859,7 @@ class TestOverviewUsage:
             self.c_asst(now + 60, [{"type": "text", "text": "done"}], mid="m2",
                         usage={"input_tokens": 1, "output_tokens": 0}),
         ])
-        summary = overview.summarize_file(path, overview._CLAUDE)
+        summary = overview._parse_usage_file(path, overview._CLAUDE)
         assert summary["cwd"] == "C:\\ws\\first"
         day = summary["days"][_ov_day(now)]
         assert day["tools"] == {"Bash": {"calls": 1, "failed": 1}, "Read": {"calls": 1, "failed": 0}}

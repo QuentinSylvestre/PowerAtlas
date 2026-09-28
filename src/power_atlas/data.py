@@ -4,6 +4,7 @@ Shared types (Session, _FileInfo) and the compound-keyed SessionCache live here.
 Provider adapters (data_claude, data_kiro_ide, data_kiro_v3) handle discovery and parsing.
 """
 
+import re
 import sys
 import threading
 import time
@@ -11,6 +12,16 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+
+
+# A session id as the dashboard's routes accept it: kiro-cli-v3 ids carry a
+# `sess_` prefix, Claude Code ids are bare UUIDs. Checked before any path is
+# built from an id taken from a request or a process command line (the
+# Overview's live tiles, `/api/session-transcript`, `/api/session-availability`).
+# Here, below both `web` and `overview`, so each imports it from one place.
+# 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+SESSION_ID_RE = re.compile(
+    r"(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 # Simple TTL cache to avoid re-reading hundreds of files on every request
