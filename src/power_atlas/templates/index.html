@@ -1813,22 +1813,36 @@ function dashOvUsageWeek(rows){
   block.appendChild(list);
   return block;
 }
-// 14 stacked bars of `key` ("agent_s" or "sessions"), one segment per
-// provider. Heights are percentages of the tallest day, clamped by dashOvPct.
-function dashOvUsageBars(days, key, label, fmt){
-  var block = dashOvBlock(label, '');
+// The day's session counts for a bar's tooltip: the total, then each
+// provider that had any, e.g. "4 sessions (Claude Code 2, kiro-cli 1, Kiro IDE 1)".
+function dashOvUsageSessionText(sessions){
+  var m = dashOvObj(sessions), total = 0, parts = [];
+  DASH_OV_USAGE_PROVIDERS.forEach(function(p){
+    var n = dashOvCount(dashOvOwn(m, p[0]));
+    total += n;
+    if (n) parts.push(p[2] + ' ' + n);
+  });
+  return total + (total === 1 ? ' session' : ' sessions') +
+    (parts.length ? ' (' + parts.join(', ') + ')' : '');
+}
+// 14 stacked bars of agent time per day, one segment per provider. Heights
+// are percentages of the tallest day, clamped by dashOvPct. Session counts
+// are in each bar's tooltip rather than a second chart.
+function dashOvUsageChart(days){
+  var block = dashOvBlock('Agent time per day', '');
   var totals = days.map(function(d){
-    var m = dashOvObj(d[key]);
+    var m = dashOvObj(d.agent_s);
     return DASH_OV_USAGE_PROVIDERS.reduce(function(sum, p){ return sum + dashOvOwn(m, p[0]); }, 0);
   });
   var max = totals.reduce(function(a, b){ return Math.max(a, b); }, 0);
   var chart = document.createElement('div');
   chart.className = 'dash-ov-bars';
   days.forEach(function(d, i){
-    var m = dashOvObj(d[key]);
+    var m = dashOvObj(d.agent_s);
     var col = document.createElement('div');
     col.className = 'dash-ov-bar';
-    col.title = (d.date == null ? '' : String(d.date)) + ': ' + fmt(totals[i]);
+    col.title = (d.date == null ? '' : String(d.date)) + ': ' + dashOvDuration(totals[i]) +
+      ' · ' + dashOvUsageSessionText(d.sessions);
     var stack = document.createElement('div');
     stack.className = 'dash-ov-bar-stack';
     stack.style.height = dashOvPct(totals[i], max) + '%';
@@ -1988,9 +2002,7 @@ function dashOvRenderUsage(usage, state){
   body.textContent = '';
   var days = dashOvArr(usage.daily).slice(-14);
   body.appendChild(dashOvUsageWeek(usage.by_workspace));
-  body.appendChild(dashOvUsageBars(days, 'agent_s', 'Agent time per day', dashOvDuration));
-  body.appendChild(dashOvUsageBars(days, 'sessions', 'Sessions per day',
-    function(n){ return dashOvCount(n) + ' sessions'; }));
+  body.appendChild(dashOvUsageChart(days));
   body.appendChild(dashOvUsageLegend());
   var partial = usage.partial === true;
   var tools = dashOvUsageTools(usage.tools);

@@ -17822,10 +17822,11 @@ check("dashboard overview usage: week, daily bars, tools, context, models and to
   assertEqual(rows[2].querySelector(".dash-ov-usage-delta").textContent, "new");
   assertEqual(rows[0].querySelector(".dash-ov-usage-ws-name").title, "C:\\ws\\alpha");
   const charts = b.querySelectorAll(".dash-ov-bars");
-  assertEqual(charts.length, 2, "agent time and sessions");
-  const [time, sessions] = charts.map((c) => c.querySelectorAll(".dash-ov-bar"));
+  assertEqual(charts.length, 1, "one combined chart: agent time, with session counts on hover");
+  const time = charts[0].querySelectorAll(".dash-ov-bar");
   assertEqual(time.length, 14);
-  assertEqual(sessions.length, 14);
+  assert(!b.querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent).includes("Sessions per day"),
+    "no separate sessions chart");
   // Agent time: day 12 (800 s) is the tallest; day 13 (400 s) half of it.
   assertEqual(time[12].querySelector(".dash-ov-bar-stack").style.height, "100%");
   assertEqual(time[13].querySelector(".dash-ov-bar-stack").style.height, "50%");
@@ -17834,8 +17835,11 @@ check("dashboard overview usage: week, daily bars, tools, context, models and to
   assertEqual(segs.map((s) => s.className).join("|"),
     "dash-ov-bar-seg is-claude|dash-ov-bar-seg is-kiro-cli");
   assertEqual(segs.map((s) => s.style.height).join("|"), "75%|25%");
-  assertEqual(sessions[13].querySelectorAll(".dash-ov-bar-seg").length, 3, "Kiro IDE counts as sessions");
-  assertEqual(time[13].title, "2026-09-25: 7m");
+  // Session counts, total and per provider, are in the bar's tooltip;
+  // Kiro IDE has no agent time that day but still counts as a session.
+  assertEqual(time[13].title, "2026-09-25: 7m · 4 sessions (Claude Code 2, kiro-cli 1, Kiro IDE 1)");
+  assertEqual(time[12].title, "2026-09-24: 13m · 1 session (kiro-cli 1)");
+  assertEqual(time[0].title, "2026-09-12: 0m · 0 sessions");
   assertEqual(b.querySelector(".dash-ov-legend").textContent, "Claude Codekiro-cliKiro IDE");
   const tools = b.querySelectorAll(".dash-ov-tool-row");
   assertEqual(tools[0].textContent, "Bash1.2k calls3% failed");
