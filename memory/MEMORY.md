@@ -2,6 +2,12 @@
 
 ## Pattern
 
+### Restarting PowerAtlas from an agent: POST `/api/restart`, then wait for a fresh "Server ready" line
+
+**Why**: Restarts in the Overview plan were done by POSTing `/api/restart` with the `pa_local` cookie plus `Origin`/`Referer` headers; the old process keeps answering for a moment, so a script that polls a static file sees "up" too early (one QA run measured a false 1.6 s "up" time that way).
+**How to apply**: Only restart under a user grant (AGENTS.md); after the POST, wait for a `Server ready` line in `orchestrator.log` stamped after the request, and time startup-dependent checks from that line.
+**Source**: `plans/done/260928-1249_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE.md` § Phase 4 QA notes | **Verified**: 2026-09-28 (session, empirical)
+
 ### Driving PowerAtlas's tray and peek doors for live QA on Windows
 
 **Why**: The door check (tray Open, peek double-tap, Copy login link) looked GUI-only, but was automated on 2026-09-23 with four non-obvious tricks. The tray icon sits in the hidden-icons overflow; UI Automation `Invoke` on the `PowerAtlas` button (class `SystemTray.NormalButton`) runs pystray's default item, **Open**. pystray's context menu (`#32768`) exposes no items to UI Automation, and a right-click lands on the wrong spot unless the PowerShell process first calls `SetProcessDPIAware` (UIA rects are physical pixels) — then Down, Down, Enter selects **Copy login link** (menu order: Open, Copy login link, Logs, Restart, Quit — miscounting reaches Restart/Quit). Peek taps come from `pynput.keyboard.Controller` (ctrl+shift+z; double-tap window 0.5 s). A locked session (`LogonUI` process present) makes SendKeys and the clipboard fail with "Access is denied".
