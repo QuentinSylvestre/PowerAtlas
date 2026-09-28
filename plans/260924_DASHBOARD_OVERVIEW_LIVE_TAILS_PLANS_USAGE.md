@@ -1,7 +1,7 @@
 # Dashboard Overview: Live Session Tails, Active Plans and Usage Insights
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phases 1-5 implemented, final review and full QA pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete — all phases done, final review and live QA passed; ready for /qclose  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the dashboard's empty Transcript panel with an Overview (live session tails, active plans, 14-day usage insights), reachable again after a session is opened
 > **Estimated effort**: 2-4 days
@@ -762,7 +762,7 @@ Changes:
 - [x] `plans/tests/260701_POWERATLAS.md` §2.16, §2.1 and the new route briefs are updated.
 - [x] The `_acp_csp` docstring is corrected.
 - [x] `node tests/acp_page.test.mjs` and `.venv-PowerAtlas/Scripts/python -m pytest tests/ -q --timeout=300` pass.
-- [ ] A live QA pass over SC-1…SC-10 against the running instance (the Playwright recipe in AGENTS.md § Verification Setup).
+- [x] A live QA pass over SC-1…SC-10 against the running instance (the Playwright recipe in AGENTS.md § Verification Setup).
 
 **Implementation (2026-09-28, code: 23e3965)**
 
@@ -829,7 +829,7 @@ QA: the live QA pass over SC-1…SC-10 is the Step 9b exhaustive QA, run after t
 | 2 | Active plans | Done | code d198d70, 0c87284 |
 | 3 | Live now tiles | Done | code 8952918, 9bbf18b |
 | 4 | Usage insights | Done | code 0eec979, 28f5fdc, c700d20, 9f2deb6, 56713da |
-| 5 | Docs, roadmap and full QA | In Progress | code 23e3965, c4b49a4; live QA at Step 9b |
+| 5 | Docs, roadmap and full QA | Done | code 23e3965, c4b49a4; live QA at Step 9b (2026-09-28) |
 
 ## 9) Implementation Divergences from Plan
 
@@ -874,7 +874,7 @@ Phase 3:
 10. The tile grid is persistent and patched in place; a tile is rebuilt only when its data changed. Reason: rebuilding every 2 s dropped keyboard focus (review finding).
 11. One bad transcript line (e.g. a Claude `user` record with `message: null`, or deeply nested JSON) is skipped silently and the rest of the tail is memoised. Reason: it previously emptied the tile and logged a traceback every 2 s; per-line logging would flood the log.
 12. A held session with no transcript and no `updated_at` sorts first, using the current time as its ordering key, while its displayed `last_activity` stays empty. Reason: otherwise a new held session could be cut by the 8-tile cap.
-13. Known gap (not fixed): a live session id whose process cwd could not be read (psutil access denied, no sidecar cwd) gets a rail dot but no tile, because `live_sids()` needs a cwd. None existed on 2026-09-25.
+13. A live session id whose process cwd could not be read (psutil access denied, no sidecar cwd) now gets a minimal tile: its workspace is read from the transcript when found (then the hidden and provider filters apply), else it is titled "Live session" with no workspace. Fixed at the final review (94c1d0b) per user decision on 2026-09-28. Degraded case: a Claude Code transcript that records no cwd opens with an empty transcript.
 14. Measured costs differ from §4 (2026-09-25, warm, 5 live sids, 8 candidate tiles): a presence rescan took 86–182 ms (§4: 42–75 ms; still in the worker per D24); a `discover_workspaces_with_counts` miss (130–211 ms) is paid by one poll every 30 s; a warm live poll took about 100–140 ms before the hash fix, most of it the v3 hash walk (divergence 9).
 
 Phase 4:
@@ -885,7 +885,7 @@ Phase 4:
 4. Claude tokens are counted once per `message.id`. Reason: Claude Code repeats `message.usage` on every record of a split message (44–53 % of assistant records), so summing per record roughly doubles the totals.
 5. A Claude prompt is a `user` record that is not `isMeta` or `isCompactSummary` and has non-empty string content or list content with no `tool_result` block; slash-command messages count as prompts. Reason: slash-command-driven turns would otherwise get no agent time; compaction summaries would split long turns.
 6. Claude Code sub-agent transcripts (`<project>/<uuid>/subagents/*.jsonl`, 548 in-window files on 2026-09-28) count toward Claude tokens and tool reliability only, never sessions, agent time, models or per-workspace time. Reason: review finding; they held about 3.1 B cache-read tokens and 22k tool calls the plan's search rule missed. Known gap: 7 `message.id`s appear in both a sub-agent file and its parent, so those few are counted twice.
-7. `usage_state` semantics: `warming` while a pass runs (with a non-null partial `usage` once stage 1 is done); `ready` with a complete aggregate; `error` when a compute fails (a background pass is restarted, and the page shows "Could not load usage."); `cold` only at shutdown. The route never parses on the request thread. `reparsed` means files parsed for this response.
+7. `usage_state` semantics: `warming` while a pass runs (with a non-null partial `usage` once stage 1 is done); `ready` with a complete aggregate; `error` when a warm or background pass fails (another background pass is started, and the page shows "Could not load usage."); `cold` only at shutdown. When the state is `ready` and a request's recompute fails, the route returns `(None, "error")` but the state stays `ready` and no pass starts; the page keeps the numbers already drawn and adds "Could not refresh usage." (corrected at the final review). The route never parses on the request thread. `reparsed` means files parsed for this response.
 8. The 30 s usage reuse is keyed on the rail's filters (providers and the hidden set), so a newly hidden workspace disappears at once without re-parsing. Filters are read through the live route's 5 s cache.
 9. Two-stage warm pass with a partial state and a "Still counting sub-agent transcripts…" note. Reason: user decision on 2026-09-28 ("Usage speed": "Two-stage pass").
 10. The warm pass parses in one child process (`_UsageWorker`) rather than a server thread, with an in-thread fallback. Reason: user decision on 2026-09-28 ("Usage timing": "Fix it now") after the two-stage pass still rendered 19 s / 26 s after a restart. Attribution (reproduction of the real app with two headless dashboard clients; the hidden peek webview is a second client): the CPU-bound parse shared the GIL with request threads; lock serialisation was ruled out. The remaining live-only gap before the fix was not isolated.
@@ -1002,7 +1002,7 @@ Implementation health: Green.
 |---|---|---|---|
 | 1 | High | The Status-line comment regex ran in quadratic time on long whitespace, so one crafted plan file could hold executor threads for minutes per request. | Fixed -- Status capped at 500 chars, comment stripped without regex, 100k-space time-bound test (0c87284). |
 | 2 | Medium | D23 promised server-side single-flight, but concurrent cold requests each ran a full scan. | Fixed -- lock held across check, scan and store; concurrent test asserts one scan (0c87284). |
-| 3 | Medium | Mapped drives or junctions to dead shares passed the string check, and the deadline was checked only between cwds. | Fixed -- per-file deadline and realpath-UNC skip; dead mapped drives recorded as residual risk (0c87284). |
+| 3 | Medium | Mapped drives or junctions to dead shares passed the string check, and the deadline was checked only between cwds. | User: accepted — UNC and junction cases fixed (0c87284); dead mapped-drive stall accepted as documented risk (user, 2026-09-28, "Dead drive": "Accept, documented"). |
 | 4 | Medium | The 30 s reuse test never checked expiry, so a never-expiring cache would pass. | Fixed -- test ages the cache 31 s and asserts a second scan (0c87284). |
 | 5 | Medium | On real trackers `current` was usually null, so the bar never named a phase (SC-6). | Fixed -- falls back to the first not-done row, labelled "Next: phase N" (0c87284). |
 | 6 | Low | "Not started" and "implemented / review pending" tracker statuses showed as "Other". | Fixed -- mapped to pending and in progress, with a table test (0c87284). |
@@ -1039,8 +1039,8 @@ Implementation health: Green.
 | 11 | Low | The session-id regex existed in three copies. | Fixed -- web.py uses `overview.SESSION_ID_RE` (9bbf18b). |
 | 12 | Low | A held "New session" with no transcript sorted last and could be cut by the cap. | Fixed -- sorts first, display unchanged (9bbf18b). |
 | 13 | Low | A Phase 2 node check sliced source with `"\n}\n"`, failing on CRLF checkouts. | Fixed -- normalised before slicing (9bbf18b). |
-| 14 | Low | A live sid with an unreadable cwd gets a rail dot but no tile; D8 does not name this. | Fixed -- recorded as a known gap in §9 (Phase 3 item 13). |
-| 15 | Low | Dropping held sessions of a disabled provider departs from D8's literal parity formula. | Fixed -- reading recorded in §9 (Phase 3 item 1). |
+| 14 | Low | A live sid with an unreadable cwd gets a rail dot but no tile; D8 does not name this. | Fixed -- minimal tile for cwd-less live sessions, per user decision 2026-09-28 ("Cwd-less sid": "Fix: minimal tile") (94c1d0b). |
+| 15 | Low | Dropping held sessions of a disabled provider departs from D8's literal parity formula. | User: accepted — held sessions of a disabled provider stay hidden like the rail (user, 2026-09-28, "Disabled prov": "Hide, like the rail"). |
 | 16 | Low | Plan §4 cost figures no longer match measurement. | Fixed -- measured figures recorded in §9 (Phase 3 item 14). |
 | 17 | Low | §9 held no Phase 3 divergences at the reviewed commit. | Fixed -- recorded in §9 by the Step 7 plan update. |
 
@@ -1092,6 +1092,64 @@ Implementation health: Green.
 
 Cycle 2 was not run, per the user's 1-cycle cap; the fixes are prose only and the Step 9 final review covers them.
 
+### 2026-09-28 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor, Performance engineer, Reliability engineer.
+26 findings (1 High, 5 Medium, 20 Low).
+QA verification: PASS (5 surfaces verified, 55 probes executed).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Overview shell, navigation, detach | pass | PASS | node 850, pytest 2637 at the phase; 15/15 live |
+| 2: Active plans | pass | PASS | 9/9 live, plans equal an independent glob |
+| 3: Live now tiles | pass | PASS | 20/20 live, tiles equal rail dots |
+| 4: Usage insights | pass | PASS | Failed twice on time-to-data; fixed by the two-stage pass and child process; 9/9 live |
+| 5: Docs, roadmap and full QA | pass | PASS | Docs only; live QA below |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | [Reliability] The usage warm pass hung forever if its child process died before finishing the main transcripts. | Fixed -- end-of-stream is sticky and the pass finishes in-thread; kill-before-stage-0 test (742d80f). |
+| 2 | Medium | [Security] The UNC-cwd skip was unpinned: a test watching only `Path.is_dir` missed `realpath` touching the share. | Fixed -- test fails on any filesystem call for a UNC cwd; stall risk documented (94c1d0b). |
+| 3 | Medium | [Performance] The stop check inside the worker's stage wait was untested. | Fixed -- mid-stage stop test with a real child, mutation-verified (742d80f). |
+| 4 | Medium | [Reliability] Close, then Home before a refused close returned, left the session watched. | Fixed -- the left-behind close is remembered past Home and released with `unsubscribe` (8d6c389). |
+| 5 | Medium | Three per-phase findings were marked Fixed with no fix and no user decision. | Fixed -- one fixed (cwd-less tile), two relabelled with the user's 2026-09-28 decisions. |
+| 6 | Medium | [Senior engineer] A live sid with an unreadable cwd had a rail dot but no tile (SC-4 parity). | Fixed -- minimal tile, per user decision 2026-09-28 (94c1d0b). |
+| 7 | Low | [Security] The usage child ran with the server's cwd first on `sys.path`. | Fixed -- started with `-P` (742d80f). |
+| 8 | Low | [Security] The child could store summaries from a different code version after an edit. | Fixed -- schema handshake and key validation (742d80f). |
+| 9 | Low | Plan-scan reuse ignored rail filter changes, and the routes read filters two ways. | Fixed -- plans cache keyed on filters; one `_overview_filters_cached` accessor (94c1d0b). |
+| 10 | Low | [Security] A plan file swapped for a symlink between `lstat` and open was read. | Fixed -- `fstat` of the open handle must match the `lstat` (94c1d0b). |
+| 11 | Low | "Final state published before the child is reaped" had no test. | Fixed -- blocking-close test, mutation-verified (742d80f). |
+| 12 | Low | [Reliability] "Worker ended early" logged exit code None and discarded stderr. | Fixed -- real exit code and the last 2 KiB of stderr logged (742d80f). |
+| 13 | Low | [Reliability] A successful usage pass wrote nothing to the log. | Fixed -- one INFO line per pass with stage timings and counts (742d80f). |
+| 14 | Low | [Reliability] Several Overview callbacks swallowed exceptions silently. | Fixed -- `log.exception`, paths and ids only (94c1d0b). |
+| 15 | Low | The summary poll had no abort or timeout, so one hung request froze Plans and Usage. | Fixed -- abort and timeout moved into `dashOverviewFetch` for both pollers (8d6c389). |
+| 16 | Low | [Reliability] Stale tiles gave no cue, and Home after sign-out showed old content. | Fixed -- "Not refreshing" note after 3 failures; signed-out Home shows the note (8d6c389). |
+| 17 | Low | A failed usage refresh on a drawn aggregate showed no cue; §9 misdescribed the state machine. | Fixed -- "Could not refresh usage." note; §9 Phase 4 item 7 corrected (8d6c389). |
+| 18 | Low | [Senior engineer] The plan list rebuilt on every summary response, dropping focus. | Fixed -- unchanged lists are not rebuilt (8d6c389). |
+| 19 | Low | Three "Could not load" helpers repeated one check; three memos repeat one pattern. | Fixed -- one `dashOvFirstLoadFailed`; the memo helper was skipped because the memos evict differently. |
+| 20 | Low | [Senior engineer] Two ISO-to-epoch parsers with different contracts; `summarize_file` used only by a test. | Fixed -- one `_epoch`; `summarize_file` removed (94c1d0b). |
+| 21 | Low | [Senior engineer] Core routes imported `SESSION_ID_RE` from the feature module. | Fixed -- moved to `data.py` (94c1d0b). |
+| 22 | Low | [Performance] The hidden peek webview might poll the Overview for the server's life. | Fixed -- verified not polling in Step 9b (no connections to 4915, idle CPU). |
+| 23 | Low | [Performance] Steady-state summary cost was not recorded. | Fixed -- recorded below. |
+| 24 | Low | [Senior engineer] Plans reuse and usage reuse used different filter conventions. | Fixed -- merged into finding 9's single accessor (94c1d0b). |
+| 25 | Low | [Security] Plans held stale for up to 30 s after a workspace was hidden. | Fixed -- see finding 9 (94c1d0b). |
+| 26 | Low | [Reliability] Refactor candidates across the memos and failure helpers. | Fixed -- see finding 19. |
+
+Findings 5, 9 and 15 were raised by two or more personas; 25 and 26 duplicate 9 and 19 and are listed for traceability. The user capped review at 1 cycle per phase, which also covers Step 9's loop, so the fixes were not re-reviewed; each key fix was mutation-verified, and the live QA below ran after them. The fix sub-agent reported that `memory/MEMORY.md` referred to renamed identifiers; a search of both memory stores found no such reference.
+
+Steady state (Performance engineer, 2026-09-28, separate process, real stores): one tab's 60 s summary poll outlasts every 30 s reuse window and pays workspace discovery (172 ms), the plan scan (21–35 ms) and a usage recompute (a glob and stat of about 738 in-window files, 105–125 ms, then aggregation and re-parses of changed transcripts, about 230–290 ms). A warm live poll costs 2–5 ms. The usage child peaks at 34 MB RSS. The in-thread fallback, if the child cannot start, parses about 8.5 s cold on the server.
+
+QA verification (Step 9b, 2026-09-28, live after a restart the user granted for this plan). Surfaces: the page's navigation, the `unsubscribe` frame, the summary route and Active plans, the live route and Live now, and the Usage section.
+- Usage: 9/9. Partial data rendered 10.3 s and complete data 16.8 s after "Server ready", during a period of low system memory (5.9 s / 9.0 s on the earlier run). Labels, the 14-day bars, non-zero this-week totals and `reparsed == 0` all held.
+- Navigation: 17/17. Overview on load with three sections; open, Home, Escape and click-again return paths; Escape guards in the search field, rail settings menu, picker and composer; `unsubscribe` logged for a held session; user Close and Delete of the open session each return to the Overview with one `[data-empty]` child; no page errors.
+- Active plans: 9/9. The listed plans equal an independent glob of the plan files (6), badges match mtime and state, agent-playbook's QDREAM plan shows 11/13 with "Next: phase 12", and rows expand and collapse.
+- Live now: 16/16 plus 3/4 on the held-session script. Tiles equal rail rows with a dot (6 = 6), a Claude terminal session in a collapsed workspace keeps its original-case name, no `/overview/live` requests while the transcript is open or the tab is hidden, no `subscribe` from tiles, focus survives re-renders, and a tile click marks both rendered rail rows `.viewing`. The held-session script's "within 3 s" check reported 6.8 s because it matched its own prompt text; the file timestamps show the tile updated about 1.1 s after kiro-cli wrote the prompt.
+- Peek webview: with only the hidden peek window, the server held no connections to port 4915 and used 0.2–0.3 s CPU per 30 s; one visible Overview client raised it to 1.2–1.5 s. The peek does not poll.
+- The first attempt at this QA run was stopped by Claude Code for low system memory after the Usage script; its leftover test session was closed and deleted, and the run was repeated one script at a time at the user's request. All test sessions were closed and deleted.
+
 ## Harness Improvement Opportunities
 
 - The governance rule "a sub-agent's deliverable is a file" conflicts with the harness. All three
@@ -1122,3 +1180,12 @@ Cycle 2 was not run, per the user's 1-cycle cap; the fixes are prose only and th
   `shared/AGENTS.md § Continuous Improvement`. — cost: none observed yet; a fix regression would
   surface only at Step 9 — suggested change: none unless Step 9 finds a regression that a cycle 2
   would have caught.
+- Claude Code's memory-pressure reaper stopped two long background QA runs (each chained several
+  Playwright scripts). The second stop left a held test session and orphaned headless browsers,
+  cleaned up by hand. — cost: one full QA rerun and about 10 minutes of cleanup — suggested change:
+  in AGENTS.md § Verification Setup, say to run live-QA scripts one per foreground call, and to
+  create test sessions in a `try/finally` that closes them.
+- The Step 9 final review found 1 High in code added after the per-phase reviews (the usage child
+  process, verified only by live QA under the 1-cycle cap). — cost: a hang that only a restart would
+  clear would otherwise have shipped — suggested change: when a phase gains substantial code after
+  its review (a QA-driven redesign), treat that code as a new review target even under a cycle cap.
