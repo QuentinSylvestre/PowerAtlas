@@ -113,6 +113,7 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(overview_mod, "_usage_roots",
                         lambda: (empty / "v3", empty / "claude", empty / "kiro-ide"))
     monkeypatch.setattr(overview_mod, "_usage_state", ["cold"])
+    monkeypatch.setattr(overview_mod, "_usage_stage1", [False])
     monkeypatch.setattr(overview_mod, "_usage_cache", [0.0, None, None])
     monkeypatch.setattr(overview_mod, "_usage_memo", {})
     # The shutdown event is set by every `lifespan` a test runs, and the
@@ -31285,7 +31286,7 @@ class TestOverviewUsage:
         from power_atlas import overview
         self.v3("sess_a", [(time.time(), {"type": "usage_summary", "elapsedTime": 4000})])
 
-        def broken(since):
+        def broken(since, subagents=True):
             raise OSError("store gone")
         real = overview._usage_files
         monkeypatch.setattr(overview, "_usage_files", broken)
@@ -31604,3 +31605,86 @@ class TestOverviewUsage:
         overview._set_usage_state("cold")
         assert overview.usage_payload(filters) == (None, "cold")
         assert overview._usage_bg[0] is None, "no background pass starts during shutdown"
+
+    # -- two-stage warm pass (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    #    Phase 4 QA, user decision 2026-09-28) --
+
+    def two_stage_stores(self):
+        """A kiro-cli session, a Claude session with 1 input token, and one
+        sub-agent transcript of that session with 10 input tokens and a Grep
+        call. Returns the sub-agent file."""
+        now = time.time()
+        sid = "77777777-7777-7777-7777-777777777777"
+        self.v3("sess_a", [(now, {"type": "usage_summary", "elapsedTime": 4000})])
+        self.claude(sid, [self.c_user(now, "go"),
+                          self.c_asst(now + 1, [{"type": "text", "text": "ok"}], mid="p1",
+                                      usage={"input_tokens": 1, "output_tokens": 0})])
+        return _ov_jsonl(self.roots.claude / "C--ws-beta" / sid / "subagents" / "agent-a1.jsonl", [
+            self.c_asst(now + 2, [{"type": "tool_use", "id": "s1", "name": "Grep", "input": {}}],
+                        mid="s-m1", usage={"input_tokens": 10, "output_tokens": 0})])
+
+    def test_stage_one_publishes_before_any_sub_agent_transcript_is_parsed(
+            self, client, monkeypatch):
+        from power_atlas import overview
+        sub = self.two_stage_stores()
+        release = threading.Event()
+        seen = []
+        real = overview._parse_usage_file
+
+        def parse(path, provider):
+            seen.append(provider)
+            if provider == overview._CLAUDE_SUB:
+                release.wait(timeout=10)
+            return real(path, provider)
+        monkeypatch.setattr(overview, "_parse_usage_file", parse)
+        try:
+            body = client.get("/api/dashboard/overview/summary").json()
+            assert body["usage"] is None and body["usage_state"] == "warming"
+            deadline = time.monotonic() + 10
+            while not overview._usage_stage1[0] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert overview._usage_stage1[0], "stage 1 finished while sub-agent parses are held"
+            body = client.get("/api/dashboard/overview/summary").json()
+            assert body["usage_state"] == "warming", "the page keeps re-fetching"
+            usage = body["usage"]
+            assert usage["partial"] is True
+            assert sorted(r["name"] for r in usage["by_workspace"]) == ["alpha", "beta"]
+            assert usage["claude_tokens"]["input"] == 1, "main transcripts only"
+            assert usage["tools"]["top"] == []
+            assert overview._usage_cache[1] is None, "a partial aggregate is never cached"
+            assert set(seen[:2]) == {overview._V3, overview._CLAUDE}
+        finally:
+            release.set()
+        overview._usage_bg[0].join(timeout=10)
+        assert seen.count(overview._CLAUDE_SUB) == 1 and str(sub) in overview._usage_memo
+        assert overview.usage_state() == "ready" and not overview._usage_stage1[0]
+        body = client.get("/api/dashboard/overview/summary").json()
+        assert body["usage_state"] == "ready"
+        usage = body["usage"]
+        assert usage["partial"] is False
+        assert usage["claude_tokens"]["input"] == 11
+        assert [t["name"] for t in usage["tools"]["top"]] == ["Grep"]
+        assert usage["reparsed"] == 0, "the two stages filled the memo"
+
+    def test_a_stop_in_stage_two_marks_nothing_complete(self, client, monkeypatch):
+        from power_atlas import overview
+        sub = self.two_stage_stores()
+        # A second sub-agent file: the stop is seen before it.
+        _ov_jsonl(sub.parent / "agent-a2.jsonl", [self.c_asst(time.time(), [], mid="s-m2")])
+        real = overview._parse_usage_file
+
+        def parse(path, provider):
+            if provider == overview._CLAUDE_SUB:
+                overview._usage_stop.set()
+            return real(path, provider)
+        monkeypatch.setattr(overview, "_parse_usage_file", parse)
+        overview._usage_memo["C:\\gone\\messages.jsonl"] = (0, 0, {})
+        overview.warm_usage(overview._usage_stop)
+        assert overview.usage_state() == "cold", "not ready"
+        assert overview._usage_stage1[0], "stage 1 had finished"
+        assert "C:\\gone\\messages.jsonl" in overview._usage_memo, "nothing is evicted"
+        assert overview._usage_cache[1] is None
+        body = client.get("/api/dashboard/overview/summary").json()
+        assert body["usage"] is None and body["usage_state"] == "cold"
+        assert overview._usage_cache[1] is None, "no aggregate is cached as complete"
+        assert overview._usage_bg[0] is None, "no pass starts during shutdown"

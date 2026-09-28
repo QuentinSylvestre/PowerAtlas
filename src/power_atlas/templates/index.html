@@ -1205,7 +1205,9 @@ function dashOverviewRefreshSummary(){
   dashOverviewFetch(DASH_OV_SUMMARY_URL).then(function(data){
     dashOvRenderPlans(data && data.plans);
     dashOvRenderUsage(data && data.usage, data && data.usage_state);
-    if (data && data.usage == null && data.usage_state === 'warming') dashOvUsageRetrySoon();
+    // Null usage (stage 1) and a partial aggregate (stage 2) both come with
+    // "warming": the page keeps re-fetching until the complete one is ready.
+    if (data && data.usage_state === 'warming') dashOvUsageRetrySoon();
   }).catch(function(){
     dashOvPlansFailed();
     dashOvUsageFailed();
@@ -1633,7 +1635,11 @@ function dashOvLiveFailed(){
 // server's startup pass is still reading transcripts (usage_state
 // "warming"): the section shows a skeleton and the summary is fetched again
 // DASH_OV_USAGE_RETRY_MS later rather than at the next 60 s poll, so real data
-// replaces the skeleton within seconds. Built from DOM nodes only (D26):
+// replaces the skeleton within seconds. The pass reads the main transcripts
+// first: after that `usage` is a partial aggregate (`usage.partial`, still
+// "warming") without the Claude Code sub-agent transcripts, drawn with a note
+// under Tool reliability and Tokens, and re-fetched on the same 3 s timer
+// until the complete aggregate ("ready") replaces it. Built from DOM nodes only (D26):
 // workspace, tool and model names are free text from transcripts; the only
 // styles written are clamped numbers, and provider colours come from the
 // fixed class map below, never from the response.
@@ -1867,11 +1873,29 @@ function dashOvUsageSkeleton(){
   for (var i = 0; i < 3; i++) wrap.appendChild(dashOvText('span', 'dash-ov-skel-line', ''));
   return wrap;
 }
+var DASH_OV_USAGE_PARTIAL_TEXT = 'Still counting sub-agent transcripts…';
+var DASH_OV_USAGE_STALLED_TEXT = 'Sub-agent transcripts are not counted yet.';
+function dashOvUsagePartialNote(){
+  return dashOvText('div', 'dash-ov-usage-partial', DASH_OV_USAGE_PARTIAL_TEXT);
+}
+// The partial notes drawn, if any, say the count stopped: a failed summary
+// or a pass that failed ends the 3 s re-fetch, so "Still counting…" would
+// otherwise stay up until the next 60 s poll redraws the section.
+function dashOvUsagePartialStalled(){
+  var body = document.getElementById('dashOvUsageBody');
+  if (!body) return;
+  body.querySelectorAll('.dash-ov-usage-partial').forEach(function(n){
+    n.textContent = DASH_OV_USAGE_STALLED_TEXT;
+  });
+}
 function dashOvRenderUsage(usage, state){
   var body = document.getElementById('dashOvUsageBody');
   if (!body) return;
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
-    if (_dashOvUsageDrawn) return;
+    if (_dashOvUsageDrawn) {
+      if (state === 'error') dashOvUsagePartialStalled();
+      return;
+    }
     body.textContent = '';
     if (state === 'error') body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load usage.'));
     else body.appendChild(dashOvUsageSkeleton());
@@ -1885,10 +1909,15 @@ function dashOvRenderUsage(usage, state){
   body.appendChild(dashOvUsageBars(days, 'sessions', 'Sessions per day',
     function(n){ return dashOvCount(n) + ' sessions'; }));
   body.appendChild(dashOvUsageLegend());
-  body.appendChild(dashOvUsageTools(usage.tools));
+  var partial = usage.partial === true;
+  var tools = dashOvUsageTools(usage.tools);
+  if (partial) tools.appendChild(dashOvUsagePartialNote());
+  body.appendChild(tools);
   body.appendChild(dashOvUsageContext(usage.context_pressure));
   body.appendChild(dashOvUsageModels(usage.models));
-  body.appendChild(dashOvUsageTokens(usage.claude_tokens));
+  var tokens = dashOvUsageTokens(usage.claude_tokens);
+  if (partial) tokens.appendChild(dashOvUsagePartialNote());
+  body.appendChild(tokens);
   body.appendChild(dashOvText('div', 'dash-ov-usage-note',
     'Claude agent time is estimated from message timestamps.'));
 }
@@ -1899,7 +1928,11 @@ function dashOvRenderUsage(usage, state){
 // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 function dashOvUsageFailed(){
   var body = document.getElementById('dashOvUsageBody');
-  if (!body || _dashOvUsageDrawn) return;
+  if (!body) return;
+  if (_dashOvUsageDrawn) {
+    dashOvUsagePartialStalled();
+    return;
+  }
   var kids = body.children || body.childNodes || [];
   if (kids.length === 1 &&
       (kids[0].className === 'dash-ov-loading' || kids[0].className === 'dash-ov-skel')) {

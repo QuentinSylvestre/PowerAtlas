@@ -17932,6 +17932,64 @@ check("dashboard overview usage: a failed re-fetch while the skeleton shows says
   assertEqual(ovUsageBody(p).textContent, "Could not load usage.");
 });
 
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE Phase 4 QA (two-stage pass,
+// user decision 2026-09-28): the main transcripts are published first as a
+// partial aggregate, still "warming"; the sub-agent transcripts follow.
+check("dashboard overview usage: a partial aggregate shows a note and is re-fetched every 3 s until complete", async () => {
+  const p = loadDashPicker();
+  let body = { plans: [], usage: ovUsage({ partial: true }), usage_state: "warming" };
+  const calls = [];
+  p.sandbox.fetch = (url) => {
+    calls.push(String(url));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+  };
+  p.sandbox._dashOverviewActive = true;
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  const notes = () => ovUsageBody(p).querySelectorAll(".dash-ov-usage-partial");
+  assert(ovUsageBody(p).querySelector(".dash-ov-usage-ws"), "the partial data is drawn");
+  assertEqual(notes().length, 2, "one note under Tool reliability, one under Tokens");
+  assertEqual(notes()[0].textContent, "Still counting sub-agent transcripts…");
+  let retry = p.timers.filter((t) => t.ms === 3000);
+  assertEqual(retry.length, 1, "a 3 s re-fetch is scheduled while partial");
+  // The same gates as the warming re-fetch: a hidden tab does not fetch.
+  p.setVisibility("hidden");
+  retry[0].fn();
+  await p.settle();
+  assertEqual(calls.length, 1, "no fetch from a hidden tab");
+  p.setVisibility("visible");
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  retry = p.timers.filter((t) => t.ms === 3000);
+  assertEqual(retry.length, 2, "still partial: another re-fetch");
+  body = { plans: [], usage: ovUsage({ partial: false }), usage_state: "ready" };
+  retry[1].fn();
+  await p.settle(); await p.settle();
+  assertEqual(calls.length, 3);
+  assertEqual(notes().length, 0, "the note is gone once complete");
+  assertEqual(p.timers.filter((t) => t.ms === 3000).length, 2, "no re-fetch once complete");
+});
+
+check("dashboard overview usage: a partial note says the count stopped when the pass fails or the re-fetch fails", async () => {
+  for (const failure of ["error", "fetch"]) {
+    const p = loadDashPicker();
+    p.sandbox.fetch = () => Promise.resolve({ ok: true, status: 200,
+      json: () => Promise.resolve({ plans: [], usage: ovUsage({ partial: true }), usage_state: "warming" }) });
+    p.sandbox._dashOverviewActive = true;
+    p.sandbox.dashOverviewRefreshSummary();
+    await p.settle(); await p.settle();
+    p.sandbox.fetch = () => Promise.resolve(failure === "error"
+      ? { ok: true, status: 200, json: () => Promise.resolve({ plans: [], usage: null, usage_state: "error" }) }
+      : { ok: false, status: 500, json: () => Promise.resolve({}) });
+    p.timers.filter((t) => t.ms === 3000)[0].fn();
+    await p.settle(); await p.settle();
+    const notes = ovUsageBody(p).querySelectorAll(".dash-ov-usage-partial");
+    assertEqual(notes.length, 2, `${failure}: the partial data stays drawn`);
+    assertEqual(notes[0].textContent, "Sub-agent transcripts are not counted yet.", failure);
+    assertEqual(p.timers.filter((t) => t.ms === 3000).length, 1, `${failure}: no further re-fetch`);
+  }
+});
+
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
   assertEqual(typeof p.sandbox.dashHandleSub, "function");

@@ -785,6 +785,15 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
 # the memo after startup (D12), and a request re-parses only files that changed
 # since. Nothing is written to disk. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 #
+# The warm pass runs in two stages (user decision, 2026-09-28). Stage 1 parses
+# the main transcripts (kiro-cli v3 and Claude Code sessions); once it is done
+# the summary route returns an aggregate marked `partial`, computed from the
+# memo without the Claude Code sub-agent transcripts. Stage 2 then parses the
+# sub-agent transcripts, which only add Claude tokens and tool calls, and the
+# route returns the complete aggregate. Measured 2026-09-28 out of process:
+# the sub-agent files were 548 of the 682 in-window files and about half of a
+# cold pass. A pass that starts with the memo filled finds stage 1 all hits.
+#
 # Definitions the section is built on:
 #
 # - Days are local calendar days. The window is today and the 13 days before.
@@ -853,6 +862,12 @@ _usage_memo_lock = threading.Lock()
 # `cold` until the warm pass starts, `warming` while it runs, then `ready`, or
 # `error` when it failed as a whole. A one-element list so tests can reset it.
 _usage_state: list[str] = ["cold"]
+# True once the running warm pass has finished its stage 1 (the main
+# transcripts are in the memo): while `warming`, the route then returns a
+# partial aggregate instead of None. Cleared whenever the state turns
+# `warming`, and when the pass ends `ready` or `error`; a pass stopped in
+# stage 2 leaves it set, with the state `cold`.
+_usage_stage1: list[bool] = [False]
 # The last aggregate: (monotonic time it was computed, payload, filter key).
 # Reused for `USAGE_REUSE_SECONDS` while the rail's filters are unchanged
 # (D23); the lock makes the computation single-flight.
@@ -888,6 +903,8 @@ def usage_state() -> str:
 
 
 def _set_usage_state(state: str) -> None:
+    if state == "warming":
+        _usage_stage1[0] = False
     _usage_state[0] = state
 
 
@@ -1150,18 +1167,21 @@ def _window(now: float) -> tuple[list[str], float]:
     return days, start
 
 
-def _usage_files(since: float) -> list[tuple[Path, str, object]]:
+def _usage_files(since: float, subagents: bool = True) -> list[tuple[Path, str, object]]:
     """`(path, provider, stat)` for each transcript modified at or after
     `since`: kiro-cli v3 `<root>/<hash>/sess_*/messages.jsonl`, Claude Code
-    `<root>/<project>/<uuid>.jsonl`, and Claude Code sub-agent transcripts
-    `<root>/<project>/<uuid>/subagents/*.jsonl` (tagged `_CLAUDE_SUB`)."""
+    `<root>/<project>/<uuid>.jsonl`, and, unless `subagents` is False, Claude
+    Code sub-agent transcripts `<root>/<project>/<uuid>/subagents/*.jsonl`
+    (tagged `_CLAUDE_SUB`)."""
     from . import data_claude
 
     v3_root, claude_root, _ide_root = _usage_roots()
     found: list[tuple[Path, str, object]] = []
-    for provider, paths in ((_V3, v3_root.glob("*/sess_*/messages.jsonl")),
-                            (_CLAUDE, claude_root.glob("*/*.jsonl")),
-                            (_CLAUDE_SUB, claude_root.glob("*/*/subagents/*.jsonl"))):
+    sources = [(_V3, v3_root.glob("*/sess_*/messages.jsonl")),
+               (_CLAUDE, claude_root.glob("*/*.jsonl"))]
+    if subagents:
+        sources.append((_CLAUDE_SUB, claude_root.glob("*/*/subagents/*.jsonl")))
+    for provider, paths in sources:
         for path in paths:
             if provider == _CLAUDE and not data_claude._is_session_file(path.name):
                 continue
@@ -1177,17 +1197,19 @@ def _usage_files(since: float) -> list[tuple[Path, str, object]]:
     return found
 
 
-def _refresh(now: float, stop_event=None) -> tuple[list[dict], int, bool]:
+def _refresh(now: float, stop_event=None, subagents: bool = True) -> tuple[list[dict], int, bool]:
     """Summaries of every in-window transcript, how many were parsed now, and
     whether the pass ran to the end. One file that raises is logged (path
-    only) and skipped. A complete pass evicts memo paths no longer in the
-    window."""
+    only) and skipped. With `subagents` False the Claude Code sub-agent
+    transcripts are neither listed nor parsed (stage 1 of the warm pass, and
+    the partial aggregate). Only a complete pass over every kind of file
+    evicts memo paths no longer in the window."""
     _days, since = _window(now)
     summaries: list[dict] = []
     reparsed = 0
     keep: set[str] = set()
     complete = True
-    for path, provider, st in _usage_files(since):
+    for path, provider, st in _usage_files(since, subagents):
         if stop_event is not None and stop_event.is_set():
             complete = False
             break
@@ -1199,7 +1221,7 @@ def _refresh(now: float, stop_event=None) -> tuple[list[dict], int, bool]:
             continue
         reparsed += parsed
         summaries.append(summary)
-    if complete:
+    if complete and subagents:
         with _usage_memo_lock:
             for key in [k for k in _usage_memo if k not in keep]:
                 del _usage_memo[key]
@@ -1236,7 +1258,8 @@ def _ide_daily(days: set[str], since: float, shown: Callable, hidden: Callable) 
 
 
 def usage_summary(now: float | None = None, provider_shown: Callable | None = None,
-                  hidden: Callable | None = None, stop_event=None) -> dict:
+                  hidden: Callable | None = None, stop_event=None,
+                  partial: bool = False) -> dict:
     """The Usage section's aggregate over the last `USAGE_WINDOW_DAYS` days.
 
     Blocking; runs in a worker thread. `provider_shown(provider)` and
@@ -1255,9 +1278,10 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     in-window peak `usagePercentage` reached 80), `models` (sessions per
     model), `claude_tokens` (with `cache_hit_ratio` = cache reads / (input +
     cache reads + cache writes), 0 when that is 0), `reparsed` (files parsed
-    for this call rather than taken from the memo) and `aggregate_age_s`.
-    Claude Code sub-agent transcripts count in `tools` and `claude_tokens`
-    only.
+    for this call rather than taken from the memo), `aggregate_age_s` and
+    `partial`. Claude Code sub-agent transcripts count in `tools` and
+    `claude_tokens` only; with `partial` True they are left out (neither listed
+    nor parsed, nothing is evicted) and the result says `partial: True`.
     """
     from . import data
 
@@ -1278,7 +1302,7 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     day_list, since = _window(now)
     day_set = set(day_list)
     this_week = set(day_list[USAGE_WINDOW_DAYS - 7:])
-    summaries, reparsed, complete = _refresh(now, stop_event)
+    summaries, reparsed, complete = _refresh(now, stop_event, subagents=not partial)
     if not complete:
         raise _UsageStopped()
 
@@ -1384,6 +1408,7 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
                                                        if denom else 0.0)),
         "reparsed": reparsed,
         "aggregate_age_s": 0.0,
+        "partial": partial,
     }
 
 
@@ -1398,7 +1423,10 @@ def warm_usage(stop_event) -> None:
     next Overview request finds it filled (D12).
 
     Runs in its own worker thread: after startup, started by `web.lifespan`,
-    and from `cold` or `error`, started by `usage_payload`. `stop_event`, a
+    and from `cold` or `error`, started by `usage_payload`. Two stages: the
+    main transcripts first, then `_usage_stage1` is set so the route can
+    return a partial aggregate, then every file, sub-agent transcripts
+    included (the main ones are memo hits by then). `stop_event`, a
     `threading.Event`, is checked between files; once set the pass returns
     after the file in hand, leaves the state `cold` and evicts nothing. One
     file that fails is skipped (`_refresh`); a failure of the pass as a whole
@@ -1407,11 +1435,16 @@ def warm_usage(stop_event) -> None:
     _set_usage_state("warming")
     state = "error"
     try:
-        _summaries, _reparsed, complete = _refresh(time.time(), stop_event)
+        _summaries, _reparsed, complete = _refresh(time.time(), stop_event, subagents=False)
+        if complete:
+            _usage_stage1[0] = True
+            _summaries, _reparsed, complete = _refresh(time.time(), stop_event)
         state = "ready" if complete else "cold"
     except Exception:
         log.exception("Overview: the usage warm pass failed")
     finally:
+        if state != "cold":
+            _usage_stage1[0] = False
         _set_usage_state(state)
 
 
@@ -1436,7 +1469,12 @@ def _start_background_pass() -> bool:
 def usage_payload(filters: Callable) -> tuple[dict | None, str]:
     """`(usage, usage_state)` for the summary route. Blocking; runs off the loop.
 
-    - `warming` (a warm pass is running): `(None, "warming")`.
+    - `warming` (a warm pass is running): `(None, "warming")` during its
+      stage 1; once stage 1 is done, a partial aggregate (`partial: True`, no
+      Claude Code sub-agent transcripts) computed now from the memo and never
+      cached, with `"warming"`, so the page keeps re-fetching until the
+      complete aggregate is `ready`. Held under the same lock as a complete
+      computation.
     - `cold` or `error` (no pass finished, or the last one failed as a whole):
       one warm pass is started in the background and the call returns at once,
       so the route never makes plans wait for a full parse. `cold` gives
@@ -1457,7 +1495,7 @@ def usage_payload(filters: Callable) -> tuple[dict | None, str]:
     caches nothing and gives `(None, "cold")`.
     """
     state = usage_state()
-    if state == "warming":
+    if state == "warming" and not _usage_stage1[0]:
         return None, "warming"
     if state in ("cold", "error"):
         started = _start_background_pass()
@@ -1470,6 +1508,17 @@ def usage_payload(filters: Callable) -> tuple[dict | None, str]:
     except Exception:
         log.exception("Overview: could not read the rail's filters for usage")
         return None, "error"
+    if state == "warming":
+        with _usage_compute_lock:
+            try:
+                usage = usage_summary(provider_shown=lambda p: p in providers, hidden=hidden,
+                                      stop_event=_usage_stop, partial=True)
+            except _UsageStopped:
+                return None, "cold"
+            except Exception:
+                log.exception("Overview: could not compute the partial usage")
+                return None, "warming"
+        return usage, "warming"
     with _usage_compute_lock:
         at, cached, cached_key = _usage_cache
         age = time.monotonic() - at

@@ -3391,7 +3391,9 @@ def _overview_summary() -> dict:
 
     Usage comes from `overview.usage_payload`, which owns its own 30 s reuse
     and single-flight and never parses the whole window on this thread (from
-    `cold` or `error` it starts a background pass and returns at once). It
+    `cold` or `error` it starts a background pass and returns at once, and
+    while that pass is in its second stage it returns a partial aggregate
+    computed from the memo). It
     reads the rail's filters through `_overview_live_filters`, the 5 s cached
     copy, because it compares them on every request: a filter change
     recomputes the aggregate from the memo instead of waiting out the reuse.
@@ -3411,8 +3413,11 @@ async def api_dashboard_overview_summary(response: Response):
 
     `plans` is `overview.scan_plans`'s list. `usage` is
     `overview.usage_summary`'s aggregate, or `None` while `usage_state` is
-    `"warming"` (a warm pass is running), `"error"` (the last pass failed; a
-    new one has been started) or `"cold"` (shutting down).
+    `"warming"` (stage 1 of a warm pass is running), `"error"` (the last pass
+    failed; a new one has been started) or `"cold"` (shutting down). During
+    stage 2 of a warm pass `usage_state` stays `"warming"` and `usage` is a
+    partial aggregate (`usage.partial` true: no Claude Code sub-agent
+    transcripts yet); the page keeps re-fetching until `"ready"`.
     """
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(_overview_summary)

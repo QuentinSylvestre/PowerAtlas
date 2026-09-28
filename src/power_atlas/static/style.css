@@ -1373,6 +1373,9 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .dash-ov-chip { display: inline-flex; align-items: baseline; gap: 6px; padding: 1px 8px; border-radius: 10px; background: var(--surface); font-size: 11px; }
 .dash-ov-chip-n { color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .dash-ov-usage-note { margin-top: 12px; font-size: 11px; font-style: italic; color: var(--text-dim); }
+/* Stage 2 of the usage warm pass: tools and tokens lack the Claude Code
+   sub-agent transcripts. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE */
+.dash-ov-usage-partial { margin-top: 4px; font-size: 11px; font-style: italic; color: var(--text-dim); }
 .dash-ov-skel { display: flex; flex-direction: column; gap: 6px; }
 .dash-ov-skel-line { display: block; height: 10px; border-radius: 4px; background: var(--surface); }
 .dash-ov-skel-line:nth-of-type(2) { width: 80%; }
