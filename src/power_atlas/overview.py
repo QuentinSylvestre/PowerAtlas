@@ -889,6 +889,12 @@ _usage_bg_lock = threading.Lock()
 _USAGE_WORKER = True
 # The running worker's process, if any (tests poll it).
 _usage_worker_proc: list = [None]
+# The file summary's format, sent to the worker and echoed back by it: bump it
+# whenever a parser's output changes shape, so a child running newer code from
+# disk than this server loaded is ignored rather than mixed into the memo.
+_USAGE_SCHEMA = 1
+# The keys `usage_summary` reads from a file summary.
+_SUMMARY_KEYS = frozenset({"provider", "session_id", "cwd", "model", "subagent", "days"})
 
 
 class _UsageStopped(Exception):
@@ -1431,13 +1437,16 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
 def _usage_worker_main() -> None:
     """The warm pass's child process (`_UsageWorker`). Never called in the server.
 
-    Reads one request line from stdin, `{"stages": [[[path, provider], ...],
-    ...]}`, parses every file of each stage in order and writes one JSON line
-    per file, `[path, mtime_ns, size, summary]` (`[path, null, null, null]`
-    when the file could not be read), then `["stage", i]` at the end of stage
-    `i`. It exits as soon as stdin reaches end of file: the parent closes it
-    when it is done or stopping, and the pipe breaks when the parent dies, so
-    the child never outlives the server. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    Reads one request line from stdin, `{"schema": n, "stages": [[[path,
+    provider], ...], ...]}`, and first writes `["schema", _USAGE_SCHEMA]`, its
+    own summary format; when that differs from the request's `schema` it
+    stops there. Otherwise it parses every file of each stage in order and
+    writes one JSON line per file, `[path, mtime_ns, size, summary]` (`[path,
+    null, null, null]` when the file could not be read), then `["stage", i]`
+    at the end of stage `i`. It exits as soon as stdin reaches end of file:
+    the parent closes it when it is done or stopping, and the pipe breaks when
+    the parent dies, so the child never outlives the server.
+    260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
     """
     import sys
     stdin, out = sys.stdin.buffer, sys.stdout.buffer
@@ -1450,6 +1459,11 @@ def _usage_worker_main() -> None:
             os._exit(0)
 
     threading.Thread(target=watch_parent, daemon=True).start()
+    out.write(json.dumps(["schema", _USAGE_SCHEMA]).encode("utf-8") + b"\n")
+    out.flush()
+    if request.get("schema") != _USAGE_SCHEMA:
+        out.close()
+        os._exit(0)
     for index, stage in enumerate(request["stages"]):
         for path, provider in stage:
             try:
@@ -1471,16 +1485,25 @@ class _UsageWorker:
     finds the files as memo hits, parses in-thread whatever the child did not
     deliver or what changed since, and applies the eviction rules as before.
     So a child that fails to start, dies or is stopped costs time, never
-    correctness. The child is started with `sys._base_executable` inside a
-    venv, as `multiprocessing` does, so killing it kills the interpreter and
-    not a redirector; it never imports `power_atlas.__main__` or `web`.
+    correctness: once its output ends, every `wait_stage` returns False at
+    once and the pass parses in-thread. The child is started with
+    `sys._base_executable` inside a venv, as `multiprocessing` does, so
+    killing it kills the interpreter and not a redirector; it never imports
+    `power_atlas.__main__` or `web`. It runs with `-P`, so the server's own
+    working directory is not first on its `sys.path`.
+
+    The child imports `overview` from disk, which can be newer than the code
+    this server loaded. Its records are stored only after it has reported
+    the same `_USAGE_SCHEMA`, and only when each summary has the keys
+    `usage_summary` reads (`_SUMMARY_KEYS`).
     260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
     """
 
     POLL_SECONDS = 0.1
+    # How much of the child's stderr is kept, from the end, for the log.
+    STDERR_TAIL_BYTES = 2048
 
     def __init__(self, stages: list[list[tuple[str, str]]]):
-        import queue
         import subprocess
         import sys
 
@@ -1493,22 +1516,69 @@ class _UsageWorker:
         # not installed.
         src = str(Path(__file__).resolve().parent.parent)
         env["PYTHONPATH"] = os.pathsep.join(p for p in (src, env.get("PYTHONPATH")) if p)
+        self._init_state()
         self._proc = subprocess.Popen(
-            [exe, "-c", "from power_atlas.overview import _usage_worker_main; _usage_worker_main()"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+            [exe, "-P", "-c", "from power_atlas.overview import _usage_worker_main; _usage_worker_main()"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         _usage_worker_proc[0] = self._proc
-        self._lines: "queue.Queue[bytes | None]" = queue.Queue()
-        self._queue_empty = queue.Empty
         self._reader = threading.Thread(target=self._read, daemon=True,
                                         name="overview-usage-worker-reader")
         self._reader.start()
+        # Drained by a thread of its own: a full stderr pipe would block the
+        # child.
+        self._stderr_reader = threading.Thread(target=self._drain_stderr, daemon=True,
+                                               name="overview-usage-worker-stderr")
+        self._stderr_reader.start()
         try:
-            self._proc.stdin.write(json.dumps({"stages": stages}).encode("utf-8") + b"\n")
+            self._proc.stdin.write(json.dumps({"schema": _USAGE_SCHEMA, "stages": stages})
+                                   .encode("utf-8") + b"\n")
             self._proc.stdin.flush()
         except OSError:
             # The child is already gone: `wait_stage` reads its end of file.
             pass
+
+    def _init_state(self) -> None:
+        """Everything but the process and its threads; a test builds a worker
+        around a fake process with this."""
+        import queue
+
+        self._lines: "queue.Queue[bytes | None]" = queue.Queue()
+        self._queue_empty = queue.Empty
+        # Set once `wait_stage` has read the end of the child's output: the
+        # end-of-file marker is queued once, and every later wait must see it.
+        self._ended = False
+        # Set once the child reported the schema this server expects.
+        self._schema_ok = False
+        # Summaries stored in the memo, for the pass's log line.
+        self.delivered = 0
+        self._stderr_tail = b""
+        self._stderr_reader = None
+
+    def _drain_stderr(self) -> None:
+        try:
+            for chunk in iter(lambda: self._proc.stderr.read(4096), b""):
+                self._stderr_tail = (self._stderr_tail + chunk)[-self.STDERR_TAIL_BYTES:]
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                self._proc.stderr.close()
+            except OSError:
+                pass
+
+    def _exit_details(self) -> tuple[int | None, str]:
+        """The child's exit code (None if it has not exited within a second)
+        and the end of its stderr."""
+        import subprocess
+
+        try:
+            code = self._proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            code = None
+        if self._stderr_reader is not None:
+            self._stderr_reader.join(timeout=1.0)
+        return code, self._stderr_tail.decode("utf-8", errors="replace").strip()
 
     def _read(self) -> None:
         try:
@@ -1527,9 +1597,13 @@ class _UsageWorker:
 
     def wait_stage(self, index: int, stop_event) -> bool:
         """Store the child's summaries in the memo until it reports the end of
-        stage `index`. False when `stop_event` is set first or the child ended
-        without reaching it."""
+        stage `index`. False when `stop_event` is set first, or the child's
+        output ended without reaching it; once it has ended, every later call
+        returns False at once. A child that reports another `_USAGE_SCHEMA`
+        is treated as ended."""
         while True:
+            if self._ended:
+                return False
             if stop_event is not None and stop_event.is_set():
                 return False
             try:
@@ -1537,21 +1611,39 @@ class _UsageWorker:
             except self._queue_empty:
                 continue
             if line is None:
+                self._ended = True
+                code, stderr = self._exit_details()
                 log.warning("Overview: the usage worker ended early (exit code %s); "
-                            "parsing in the server", self._proc.poll())
+                            "parsing in the server%s", code,
+                            f"; its stderr ends: {stderr}" if stderr else "")
                 return False
             try:
                 record = json.loads(line)
+                if record[0] == "schema":
+                    self._schema_ok = record[1] == _USAGE_SCHEMA
+                    if not self._schema_ok:
+                        self._ended = True
+                        log.warning("Overview: the usage worker reported summary format %r, "
+                                    "not %r (the code on disk changed); parsing in the server",
+                                    record[1], _USAGE_SCHEMA)
+                        return False
+                    continue
+                if not self._schema_ok:
+                    continue
                 if record[0] == "stage":
                     if record[1] == index:
                         return True
                     continue
                 path, mtime_ns, size, summary = record
-            except (ValueError, TypeError, IndexError):
+            except (ValueError, TypeError, IndexError, KeyError):
                 continue
-            if isinstance(summary, dict) and isinstance(mtime_ns, int) and isinstance(size, int):
+            if (isinstance(path, str) and isinstance(summary, dict)
+                    and _SUMMARY_KEYS <= summary.keys()
+                    and isinstance(summary["days"], dict)
+                    and isinstance(mtime_ns, int) and isinstance(size, int)):
                 with _usage_memo_lock:
                     _usage_memo[path] = (mtime_ns, size, summary)
+                self.delivered += 1
 
     def close(self) -> None:
         """Close the child's stdin, which ends it; kill it if it is still
@@ -1568,6 +1660,8 @@ class _UsageWorker:
                 pass
         proc.wait()
         self._reader.join(timeout=1.0)
+        if self._stderr_reader is not None:
+            self._stderr_reader.join(timeout=1.0)
         if _usage_worker_proc[0] is proc:
             _usage_worker_proc[0] = None
 
@@ -1619,21 +1713,34 @@ def warm_usage(stop_event) -> None:
     while the child works); once set the pass kills the child and returns
     after the file in hand, leaves the state `cold` and evicts nothing. One
     file that fails is skipped (`_refresh`); a failure of the pass as a whole
-    sets `error`.
+    sets `error`. A child whose output ends early (it crashed, was killed, or
+    could not start its interpreter) is not waited for again: the pass parses
+    the rest in-thread and still ends `ready`.
+
+    Each pass logs one INFO line: its final state, how long each stage took
+    and how many files the child and this thread parsed.
     """
     _set_usage_state("warming")
     state = "error"
     worker = None
+    started = time.monotonic()
+    stage1_s = stage2_s = None
+    in_thread = 0
     try:
         worker = _start_usage_worker(time.time())
         if worker is not None:
             worker.wait_stage(0, stop_event)
-        _summaries, _reparsed, complete = _refresh(time.time(), stop_event, subagents=False)
+        _summaries, reparsed, complete = _refresh(time.time(), stop_event, subagents=False)
+        in_thread += reparsed
         if complete:
+            stage1_s = time.monotonic() - started
             _usage_stage1[0] = True
             if worker is not None:
                 worker.wait_stage(1, stop_event)
-            _summaries, _reparsed, complete = _refresh(time.time(), stop_event)
+            _summaries, reparsed, complete = _refresh(time.time(), stop_event)
+            in_thread += reparsed
+            if complete:
+                stage2_s = time.monotonic() - started - stage1_s
         state = "ready" if complete else "cold"
     except Exception:
         log.exception("Overview: the usage warm pass failed")
@@ -1647,6 +1754,12 @@ def warm_usage(stop_event) -> None:
                 worker.close()
             except Exception:
                 log.exception("Overview: could not stop the usage worker")
+        log.info("Overview: usage pass ended %s after %.1f s (stage 1 %s, stage 2 %s); "
+                 "%d files parsed by the worker, %d in the server",
+                 state, time.monotonic() - started,
+                 "%.1f s" % stage1_s if stage1_s is not None else "not finished",
+                 "%.1f s" % stage2_s if stage2_s is not None else "not finished",
+                 getattr(worker, "delivered", 0), in_thread)
 
 
 def _start_background_pass() -> bool:

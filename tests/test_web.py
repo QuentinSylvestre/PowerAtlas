@@ -31802,6 +31802,8 @@ class TestOverviewUsage:
                         usage={"input_tokens": 1}) for i in range(400)])
         worker = overview._UsageWorker([[(str(path), overview._CLAUDE)] * 5000, []])
         try:
+            header = worker._lines.get(timeout=30)
+            assert header is not None and json.loads(header) == ["schema", overview._USAGE_SCHEMA]
             first = worker._lines.get(timeout=30)
             assert first is not None and json.loads(first)[0] == str(path)
             worker._proc.stdin.close()
@@ -31829,3 +31831,129 @@ class TestOverviewUsage:
         overview.warm_usage(threading.Event())
         assert overview.usage_state() == "ready"
         assert len(parses) == 3, "every file parsed in the server"
+
+    # -- worker reliability (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    #    Step 9 final review) --
+
+    def test_a_worker_that_dies_before_stage_0_still_ends_ready(self, monkeypatch, parses):
+        """The child's end of output is read once; every later wait must see
+        it too, or stage 1's wait blocks forever and the state stays warming."""
+        from power_atlas import overview
+        self.two_stage_stores()
+        monkeypatch.setattr(overview, "_USAGE_WORKER", True)
+        started = []
+        real_init = overview._UsageWorker.__init__
+
+        def init(worker, stages):
+            real_init(worker, stages)
+            started.append(worker)
+            worker._proc.kill()          # an import failure, a crash, an AV kill
+        monkeypatch.setattr(overview._UsageWorker, "__init__", init)
+        stop = threading.Event()
+        thread = threading.Thread(target=overview.warm_usage, args=(stop,), daemon=True)
+        thread.start()
+        try:
+            thread.join(timeout=20)
+            assert not thread.is_alive(), "the pass hung waiting for a child that is gone"
+        finally:
+            stop.set()                    # frees a hung pass, so it cannot outlive the test
+            thread.join(timeout=10)
+        assert overview.usage_state() == "ready"
+        assert len(started) == 1
+        assert len(parses) == 3, "every file parsed in the server instead"
+        assert started[0]._proc.poll() is not None and overview._usage_worker_proc[0] is None
+
+    def test_setting_the_stop_mid_stage_returns_from_the_wait_within_a_second(self):
+        """`wait_stage`'s own stop check, not the `_refresh` after it: the
+        child is still streaming a long stage when the stop is set."""
+        from power_atlas import overview
+        path = self.claude("99999999-9999-9999-9999-999999999999", [
+            self.c_asst(self.now + i, [{"type": "text", "text": "y" * 2000}], mid=f"m{i}",
+                        usage={"input_tokens": 1}) for i in range(400)])
+        worker = overview._UsageWorker([[(str(path), overview._CLAUDE)] * 5000, []])
+        stop = threading.Event()
+        result = []
+        waiter = threading.Thread(target=lambda: result.append(worker.wait_stage(0, stop)),
+                                  daemon=True)
+        try:
+            waiter.start()
+            deadline = time.monotonic() + 30
+            while worker.delivered < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert worker.delivered >= 1, "fixture: the child is streaming stage 0"
+            t0 = time.monotonic()
+            stop.set()
+            waiter.join(timeout=5)
+            assert not waiter.is_alive(), "the wait ignored the stop"
+            assert time.monotonic() - t0 < 1.0
+            assert result == [False]
+        finally:
+            worker.close()
+            waiter.join(timeout=10)
+        assert worker._proc.poll() is not None, "the child is reaped"
+
+    @staticmethod
+    def fake_worker():
+        from power_atlas import overview
+        worker = overview._UsageWorker.__new__(overview._UsageWorker)
+        worker._init_state()
+        worker._proc = types.SimpleNamespace(poll=lambda: 0, wait=lambda timeout=None: 0)
+        return worker
+
+    def test_worker_records_need_the_same_schema_and_the_summary_keys(self):
+        """The child imports `overview` from disk, which may be newer than the
+        server's: nothing it sends is stored before it reports the server's
+        summary format, and a summary without the keys the aggregate reads is
+        dropped."""
+        from power_atlas import overview
+        good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
+                "subagent": False, "days": {}}
+
+        def line(record):
+            return json.dumps(record).encode("utf-8") + b"\n"
+        other = self.fake_worker()
+        for record in (["C:/early.jsonl", 1, 1, good],             # before any header
+                       ["schema", overview._USAGE_SCHEMA + 1],
+                       ["C:/late.jsonl", 1, 1, good], ["stage", 0]):
+            other._lines.put(line(record))
+        assert other.wait_stage(0, None) is False, "another format ends the worker"
+        assert other.wait_stage(1, None) is False
+        assert overview._usage_memo == {}
+        same = self.fake_worker()
+        for record in (["schema", overview._USAGE_SCHEMA],
+                       ["C:/no-days.jsonl", 1, 1, {k: v for k, v in good.items() if k != "days"}],
+                       ["C:/ok.jsonl", 1, 1, good], ["stage", 0]):
+            same._lines.put(line(record))
+        assert same.wait_stage(0, None) is True
+        assert overview._usage_memo == {"C:/ok.jsonl": (1, 1, good)}
+        assert same.delivered == 1
+
+    def test_the_final_state_is_published_before_the_worker_is_reaped(self, monkeypatch):
+        """Reaping the child can take a while (a kill, then a wait); the page
+        must not see `warming` for that long."""
+        from power_atlas import overview
+        self.two_stage_stores()
+        entered, release = threading.Event(), threading.Event()
+        at_close = []
+
+        class Worker:
+            delivered = 0
+
+            def wait_stage(self, index, stop_event):
+                return True
+
+            def close(self):
+                at_close.append((overview.usage_state(), overview._usage_stage1[0]))
+                entered.set()
+                release.wait(timeout=10)
+        monkeypatch.setattr(overview, "_start_usage_worker", lambda now: Worker())
+        thread = threading.Thread(target=overview.warm_usage, args=(threading.Event(),),
+                                  daemon=True)
+        thread.start()
+        try:
+            assert entered.wait(timeout=20), "fixture: the pass reached close()"
+            assert overview.usage_state() == "ready", "published while close() still blocks"
+            assert at_close == [("ready", False)]
+        finally:
+            release.set()
+            thread.join(timeout=10)
