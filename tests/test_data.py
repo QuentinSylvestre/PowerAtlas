@@ -606,6 +606,23 @@ class TestKiroIdeLoadSessions:
         assert sessions[0].first_prompt == ""
         assert sessions[0].last_reply_tail == ""
 
+    def test_sessions_json_with_utf8_bom(self, tmp_path, monkeypatch):
+        """A sessions.json written with a UTF-8 BOM (seen on a real Kiro IDE
+        store) is still discovered and loaded, not silently skipped."""
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        folder = self._make_workspace_with_sessions(sessions_dir, "C:\\BomProject", [
+            ("sess-bom", "BOM Session", "1700000000000", None),
+        ], folder_name="bom_folder")
+        index = folder / "sessions.json"
+        index.write_bytes(b"\xef\xbb\xbf" + index.read_bytes())
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        assert [r[0] for r in data_kiro_ide.discover_workspaces()] == ["C:\\BomProject"]
+        sessions, _ = data_kiro_ide.load_sessions("C:\\BomProject")
+        assert [s.session_id for s in sessions] == ["sess-bom"]
+
     def test_returns_empty_for_unknown_workspace(self, tmp_path, monkeypatch):
         sessions_dir = tmp_path / "workspace-sessions"
         sessions_dir.mkdir()

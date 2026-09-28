@@ -73,7 +73,7 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
         if not sessions_file.exists():
             continue
         try:
-            data = json.loads(sessions_file.read_text(encoding="utf-8"))
+            data = json.loads(sessions_file.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
         if not isinstance(data, list) or not data:
@@ -134,7 +134,7 @@ def _find_workspace_folder(cwd: str) -> Path | None:
         if not sessions_file.exists():
             continue
         try:
-            data = json.loads(sessions_file.read_text(encoding="utf-8"))
+            data = json.loads(sessions_file.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
         if not isinstance(data, list) or not data:
@@ -159,7 +159,7 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
     try:
         st = sessions_file.stat()
         file_stats[str(sessions_file)] = _FileInfo(mtime=st.st_mtime, size=st.st_size)
-        data = json.loads(sessions_file.read_text(encoding="utf-8"))
+        data = json.loads(sessions_file.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return sessions, file_stats
 
@@ -193,7 +193,7 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
         try:
             sess_st = session_file.stat()
             file_stats[str(session_file)] = _FileInfo(mtime=sess_st.st_mtime, size=sess_st.st_size)
-            sess_data = json.loads(session_file.read_text(encoding="utf-8"))
+            sess_data = json.loads(session_file.read_text(encoding="utf-8-sig"))
             history = sess_data.get("history", [])
             if isinstance(history, list):
                 first_prompt, last_prompt, last_reply_tail = _extract_from_history(history)
@@ -301,7 +301,7 @@ def get_session_tail(session_id: str, cwd: str, max_lines: int = 15) -> list[str
 
     session_file = folder / f"{session_id}.json"
     try:
-        sess_data = json.loads(session_file.read_text(encoding="utf-8"))
+        sess_data = json.loads(session_file.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return []
 
@@ -341,7 +341,7 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
 
     session_file = folder / f"{session_id}.json"
     try:
-        sess_data = json.loads(session_file.read_text(encoding="utf-8"))
+        sess_data = json.loads(session_file.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         _first_prompt_cache[session_id] = (time.time(), "")
         return ""
@@ -386,7 +386,7 @@ def get_full_transcript(session_id: str, cwd: str) -> list:
 
     session_file = folder / f"{session_id}.json"
     try:
-        sess_data = json.loads(session_file.read_text(encoding="utf-8"))
+        sess_data = json.loads(session_file.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return []
 
@@ -440,7 +440,7 @@ def _build_reverse_index() -> dict[str, str]:
         if not sessions_file.exists():
             continue
         try:
-            data = json.loads(sessions_file.read_text(encoding="utf-8"))
+            data = json.loads(sessions_file.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
         if not isinstance(data, list) or not data:
