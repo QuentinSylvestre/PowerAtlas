@@ -20,6 +20,7 @@
 ### Platform
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext; serving them was fixed, storing them safely is not yet
 - **Parked items** — creating a session in a workspace with no prior sessions · two SECURITY items
+- **Separate the ACP half into its own module** — the atlas side imports `agent_profile` and `acp` directly today, so retiring or replacing the ACP half would be surgery rather than a delete
 - **`launch_custom` env scrub excluded (follow-up)**: CLAUDE_CODE_* markers are not scrubbed from `launch_custom`-launched sessions — user-defined scripts may rely on inherited environment. See `plans/done/260818_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` Follow-up #2.
 - **`launch_terminal` env scrub excluded (follow-up)**: `launch_terminal` (~`launcher.py:595`) opens a bare shell without env scrubbing — the user manually starts a process inside it. Follow-up #5 of the same plan.
 
@@ -30,8 +31,10 @@
 - **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured); now the agent-definition half of *Decide permission requests by rule for unattended sessions* (the interactive permission item shipped 2026-09-23 in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`)
 - **A "needs you" inbox** — one cross-session list of pending permission requests, unanswered clarifying questions and finished turns, borrowed from Kiro Crew's activity view
 - **A fresh git worktree per session** — a checkbox in the new-session picker; table stakes in Conductor, Crystal and Vibe Kanban, and two `/acp` sessions in one workspace share a working tree today
-- **Spike: drive Claude Code over ACP through an adapter** — would make `/acp` multi-provider, which Kiro Crew is not; not covered by the closed takeover investigations, which concern sessions already live in a terminal
+- **Spike: drive Claude Code over ACP through an adapter** — would make `/acp` multi-provider; Kiro Crew already does this (corrected 2026-09-28), so it is a capability, not a differentiator; not covered by the closed takeover investigations, which concern sessions already live in a terminal
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely
+- **Reconsider the Yolo default** — in Yolo, Protected emits no rules, so the default posture is Always blocked plus allow-all, weaker than the Manual design suggests
+- **Crew verification spikes** — five one-off checks, run in a throwaway VM or Windows profile, each a trigger for reopening the 2026-09-28 keep-and-borrow decision
 - **[P2b] Session stores PowerAtlas cannot see** — closed; sqlite `conversations_v2` sessions permanently inaccessible post-v2-removal (2026-09-17); v3 covered
 
 ### Misc
@@ -84,6 +87,35 @@
 > execution-boundary permission model, Crew's single "needs you" view, and the tools' worktree per
 > session. Memory, lessons, apps and chat integrations stay out.
 >
+> **Corrected 2026-09-28, from Crew's source at commit `6a8cb5e`.** The note above understated Crew in
+> one respect. Crew is not kiro-only: it ships eight selectable ACP backends, among them Claude Code
+> (through `@agentclientprotocol/claude-agent-acp`) and Codex (`src/kiro_crew/agent_sdk/backends.py`
+> L207-266). The "machine-wide visibility over sessions it did not start" claim still holds, and more
+> firmly: Crew resumes only sessions it created, and its onboarding spec says session and transcript
+> import "does not exist, and must not be added back" (`docs/system-specs/modules/onboarding-import.md`
+> L661-683). Three more findings bear on any future borrowing:
+> - Crew has no native Windows sandbox. Non-Kiro backends run unconfined there by default (`sandbox.py`,
+>   `docs/guides/windows-install.md`).
+> - Crew's trust and yolo session modes auto-answer `ask` rules, the same way PowerAtlas's Yolo mode
+>   emits none (`dashboard/chat_runner.py` L5390-5399).
+> - Crew's own sessions are written into kiro-cli's `~/.kiro/sessions` store, the one the atlas parses.
+>
+> **Decided 2026-09-28: keep and borrow.** The ACP half stays PowerAtlas's own engine. Crew is a
+> reference, not a dependency: mine it at Crew release points, not per commit. The user chose this
+> after a council of seven options, which voted 4-1 for it; the dissent was "freeze ACP features and
+> decide on evidence". The rejected alternatives were migrating to Crew, splitting the atlas from a
+> Crew-driven runtime, retiring the ACP half, interposing under Crew, and a plans-and-sessions
+> cockpit. Each broke on a concrete finding in Crew's source:
+> - the tray, peek overlay and hotkey cannot live in a Crew App;
+> - Crew's sessions collide with the atlas's kiro-cli store;
+> - a proxy cannot reach Claude Code's ACP stream;
+> - Crew's `prompt.md` and lesson injection conflict with the playbook's gates.
+>
+> Vendoring Crew's backend adapters was also rejected. Three items follow from the decision:
+> *Separate the ACP half into its own module* (Platform), *Reconsider the Yolo default* and
+> *Crew verification spikes* (Session Control & Integration). **Reopen when** a Crew verification
+> spike passes, or when ACP work stops being something the user wants to build.
+>
 > **What would invalidate it**: the unattended keystone shipping — *Decide permission requests by rule for unattended sessions*, under
 > `## Session Control & Integration`, which is not in this table and gates all six
 > `## Automation & Workflows` items; or kiro-cli gaining — or being found to already have — a per-request permission mechanism on
@@ -94,7 +126,7 @@
 |---|---|---|---|
 | 3 | *A fresh git worktree per session* | days | A checkbox in the picker that shipped 2026-09-19; removes the working-tree collision between parallel sessions in one workspace. Sharper now that an ungated agent writes wherever it likes |
 | 4 | *A "needs you" inbox* | days | Status grouping already buckets Working/Waiting/Errored; this adds clarifying questions across every session in one place. Now also where a notification lands you — the toast tells you *a* session needs you, not *which*. Note the "pending permissions" half may have nothing to show (item 2) |
-| 5 | *Spike: Claude Code over ACP through an adapter* | week | The one thing Kiro Crew structurally cannot do. A spike, not a commitment: the supervisor is kiro-cli-specific in its `initialize`/`session/new` shapes and would need a second driver |
+| 5 | *Spike: Claude Code over ACP through an adapter* | week | ~~The one thing Kiro Crew structurally cannot do~~ — false, corrected 2026-09-28: Crew already drives Claude Code over ACP, so this is worth doing only as a capability PowerAtlas wants for itself. A spike, not a commitment: the supervisor is kiro-cli-specific in its `initialize`/`session/new` shapes and would need a second driver |
 
 **Parked, deliberately**: creating a session in a workspace that
 has none · secret-aware custom-launcher env vars (shape (a) — durable, not urgent) · the `None` →
@@ -167,6 +199,11 @@ condition).
 
 - **Electron app** — package PowerAtlas as an Electron desktop app, replacing the current Python/pywebview stack. Removes the Python runtime dependency for end users, enables a distributable binary (no venv setup), and gives native access to the Chromium renderer without the pywebview abstraction layer. The web UI (`src/power_atlas/`) is already framework-free HTML/JS/CSS and would port directly; the Python backend logic (`data.py`, `web.py`, `acp.py`, etc.) would need a rewrite in Node.js or a bundled subprocess boundary to be decided at spike time. Not a near-term item — the current stack works and the rewrite cost is substantial.
 
+- **Separate the ACP half into its own module** — make retiring or replacing the ACP half a delete, not surgery. Follows from the 2026-09-28 keep-and-borrow decision (see the positioning note under the ranking).
+  - *What exists* — `web.py` imports `agent_profile` at module level (L48) and `acp` (L62), and mentions `acp` 286 times. That includes the session gate that waits on `agent_profile`'s generation lock and the permission-settings routes. The atlas modules (`data*.py`, `presence.py`, `status_classifier.py`, `launcher.py`, `overview.py`) do not depend on the ACP half. The coupling sits in `web.py`, `index.html` (the dashboard ACP panel) and `config.py`.
+  - *Shape* — the ACP routes, the WebSocket handlers and the permission-settings routes move behind one registration call, for example an `acp_web` module that `web.py` mounts if present. The dashboard panel loads as its own script.
+  - *Done when* — the atlas starts, serves the dashboard and passes its tests with the ACP modules absent.
+
 ---
 
 ## Session Control & Integration
@@ -199,10 +236,21 @@ condition).
   - *What it touches* — the picker (`acp.html` and the dashboard copy shipped 2026-09-19), `_handle_new`/`new_session` for the cwd, and the rail: a worktree path is a distinct cwd, so it becomes its own workspace group in the rail and in kiro-cli's session store unless grouped back under its parent. Decide the grouping before building; cleanup of finished worktrees is a second decision.
 
 - **Spike: drive Claude Code over ACP through an adapter** — make `/acp` a second-provider surface by running a Claude Code ACP adapter as a second supervised process.
-  - *Why it is open* — `plans/CLOSED_INVESTIGATIONS.md` closes *taking over* a Claude Code session already live in someone's terminal (the `messagingSocketPath` and remote-control entries). Starting a **new** Claude Code session over ACP from PowerAtlas is a different question, and one nobody has asked of the code. Kiro Crew is kiro-only by design, so this is where PowerAtlas's multi-provider shape would show.
+  - *Why it is open* — `plans/CLOSED_INVESTIGATIONS.md` closes *taking over* a Claude Code session already live in someone's terminal (the `messagingSocketPath` and remote-control entries). Starting a **new** Claude Code session over ACP from PowerAtlas is a different question, and one nobody has asked of the code. It is no longer a differentiator: Kiro Crew already drives Claude Code through `@agentclientprotocol/claude-agent-acp` (corrected 2026-09-28; this line used to say Crew was kiro-only by design). That package is the adapter to spike against. Crew's source shows how it launches it, with `CLAUDE_CODE_EXECUTABLE` pointing the adapter at the `claude` binary (`src/kiro_crew/acp/client.py` L365-376, L2138-2156).
+  - *A security gap to close before shipping* — the Always blocked and Protected rules are compiled into kiro-cli's derived agent (`compile_block` in `agent_profile.py`), so a Claude Code session would not see them. Extend Always blocked to the second driver before it drives anything.
   - *What it would cost* — the supervisor is kiro-specific in more than its binary: `_build_kas_session_params`, the `_kiro/*` extension methods, the token fulfilment, the session-store paths for `_lock_holder_v3`. A second provider means a driver abstraction, not a config change. Spike first: confirm an adapter exists for the installed Claude Code, that it answers `initialize`/`session/new`/`session/prompt` over stdio, and what its permission and session-persistence story is. Budget a week; exit with a go/no-go, not a feature.
 
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely.
+
+- **Reconsider the Yolo default** — Yolo is the default permission mode (`agent_profile.py` L1828-1829), and in Yolo `compile_block` returns the Always blocked rules plus one `all: allow` before any Protected rule is emitted (L1086-1089). So Protected folders ask only in Manual, and the posture most sessions actually run under is Always blocked plus allow-all. Found by the 2026-09-28 council, where it cut both ways: PowerAtlas's security edge over Kiro Crew is smaller than the Manual design suggests.
+  - *To decide* — whether the default should become Manual, or Yolo should keep the Protected rules. The cost of each is prompt volume in everyday sessions. The deliberate choice recorded in `load_config` (an unreadable config falls back to defaults) must still hold.
+
+- **Crew verification spikes** — five one-off checks, each a trigger for reopening the 2026-09-28 keep-and-borrow decision. Not a trial and not a freeze. Run them in a throwaway VM or a separate Windows user profile: installing Crew writes about 10 agent files into the shared `~/.kiro/agents` and injects MCP servers.
+  1. A phone-driven kiro-cli session works on Windows through Tailscale or cloudflared.
+  2. A kiro-cli session under Crew is refused a read of a planted dummy `~/.ssh` file. This measures what kiro-cli's built-in sandbox enforces on Windows, which nobody has established.
+  3. A project skill loads in a Windows project through kiro-cli's native `skill://` loader, given the per-session cwd Crew passes.
+  4. Playbook skills run when invoked as `$name` with Crew's lesson injection off, and the playbook's gates still win over Crew's `prompt.md`.
+  5. A hooks-only App can list sessions from outside Crew on Windows.
 
 ---
 
