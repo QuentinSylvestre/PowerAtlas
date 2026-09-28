@@ -881,6 +881,14 @@ _usage_stop = threading.Event()
 # lock that makes starting one single-flight.
 _usage_bg: list = [None]
 _usage_bg_lock = threading.Lock()
+# Whether the warm pass parses in a child process (`_UsageWorker`). The parse
+# is CPU-bound Python, and in the server it shares one GIL with every request
+# thread: measured 2026-09-28, stage 1 took 3.4 s alone and 6.9-7.7 s with two
+# dashboard clients loading (19 s live). The tests turn it off so that their
+# `_parse_usage_file` hooks see every parse.
+_USAGE_WORKER = True
+# The running worker's process, if any (tests poll it).
+_usage_worker_proc: list = [None]
 
 
 class _UsageStopped(Exception):
@@ -1050,6 +1058,14 @@ def _parse_claude_usage(path: Path, subagent: bool = False) -> dict:
 
     with path.open("rb") as fh:
         for line in _iter_lines(fh, USAGE_MAX_LINE_BYTES):
+            # Once `cwd` is known only user and assistant records are read,
+            # and a line holding neither word as a JSON string cannot be one:
+            # Claude Code writes compact JSON and never escapes a letter. It
+            # skips about a third of the bytes (attachments, progress, queue
+            # and mode records), and `json.loads` is most of the parse.
+            # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+            if cwd and b'"user"' not in line and b'"assistant"' not in line:
+                continue
             try:
                 obj = json.loads(line)
                 if not isinstance(obj, dict):
@@ -1412,6 +1428,173 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     }
 
 
+def _usage_worker_main() -> None:
+    """The warm pass's child process (`_UsageWorker`). Never called in the server.
+
+    Reads one request line from stdin, `{"stages": [[[path, provider], ...],
+    ...]}`, parses every file of each stage in order and writes one JSON line
+    per file, `[path, mtime_ns, size, summary]` (`[path, null, null, null]`
+    when the file could not be read), then `["stage", i]` at the end of stage
+    `i`. It exits as soon as stdin reaches end of file: the parent closes it
+    when it is done or stopping, and the pipe breaks when the parent dies, so
+    the child never outlives the server. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    """
+    import sys
+    stdin, out = sys.stdin.buffer, sys.stdout.buffer
+    request = json.loads(stdin.readline() or b"null")
+
+    def watch_parent():
+        try:
+            stdin.read()
+        finally:
+            os._exit(0)
+
+    threading.Thread(target=watch_parent, daemon=True).start()
+    for index, stage in enumerate(request["stages"]):
+        for path, provider in stage:
+            try:
+                st = os.stat(path)
+                record = [path, st.st_mtime_ns, st.st_size, _parse_usage_file(Path(path), provider)]
+            except Exception:
+                record = [path, None, None, None]
+            out.write(json.dumps(record, separators=(",", ":")).encode("utf-8") + b"\n")
+        out.write(json.dumps(["stage", index]).encode("utf-8") + b"\n")
+        out.flush()
+    out.close()
+    os._exit(0)
+
+
+class _UsageWorker:
+    """A child process that parses the warm pass's memo misses (`_USAGE_WORKER`).
+
+    It only fills the memo: the pass then runs its usual `_refresh`, which
+    finds the files as memo hits, parses in-thread whatever the child did not
+    deliver or what changed since, and applies the eviction rules as before.
+    So a child that fails to start, dies or is stopped costs time, never
+    correctness. The child is started with `sys._base_executable` inside a
+    venv, as `multiprocessing` does, so killing it kills the interpreter and
+    not a redirector; it never imports `power_atlas.__main__` or `web`.
+    260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    """
+
+    POLL_SECONDS = 0.1
+
+    def __init__(self, stages: list[list[tuple[str, str]]]):
+        import queue
+        import subprocess
+        import sys
+
+        exe, env = sys.executable, dict(os.environ)
+        base = getattr(sys, "_base_executable", exe)
+        if sys.platform == "win32" and base and os.path.normcase(base) != os.path.normcase(exe):
+            env["__PYVENV_LAUNCHER__"] = exe
+            exe = base
+        # The package's parent folder, for a run from a source tree that is
+        # not installed.
+        src = str(Path(__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (src, env.get("PYTHONPATH")) if p)
+        self._proc = subprocess.Popen(
+            [exe, "-c", "from power_atlas.overview import _usage_worker_main; _usage_worker_main()"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        _usage_worker_proc[0] = self._proc
+        self._lines: "queue.Queue[bytes | None]" = queue.Queue()
+        self._queue_empty = queue.Empty
+        self._reader = threading.Thread(target=self._read, daemon=True,
+                                        name="overview-usage-worker-reader")
+        self._reader.start()
+        try:
+            self._proc.stdin.write(json.dumps({"stages": stages}).encode("utf-8") + b"\n")
+            self._proc.stdin.flush()
+        except OSError:
+            # The child is already gone: `wait_stage` reads its end of file.
+            pass
+
+    def _read(self) -> None:
+        try:
+            for line in self._proc.stdout:
+                self._lines.put(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._lines.put(None)
+
+    def wait_stage(self, index: int, stop_event) -> bool:
+        """Store the child's summaries in the memo until it reports the end of
+        stage `index`. False when `stop_event` is set first or the child ended
+        without reaching it."""
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return False
+            try:
+                line = self._lines.get(timeout=self.POLL_SECONDS)
+            except self._queue_empty:
+                continue
+            if line is None:
+                log.warning("Overview: the usage worker ended early (exit code %s); "
+                            "parsing in the server", self._proc.poll())
+                return False
+            try:
+                record = json.loads(line)
+                if record[0] == "stage":
+                    if record[1] == index:
+                        return True
+                    continue
+                path, mtime_ns, size, summary = record
+            except (ValueError, TypeError, IndexError):
+                continue
+            if isinstance(summary, dict) and isinstance(mtime_ns, int) and isinstance(size, int):
+                with _usage_memo_lock:
+                    _usage_memo[path] = (mtime_ns, size, summary)
+
+    def close(self) -> None:
+        """Close the child's stdin, which ends it; kill it if it is still
+        running, and reap it. Idempotent."""
+        proc = self._proc
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        proc.wait()
+        self._reader.join(timeout=1.0)
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+        if _usage_worker_proc[0] is proc:
+            _usage_worker_proc[0] = None
+
+
+def _start_usage_worker(now: float):
+    """A `_UsageWorker` over the in-window files the memo does not hold, main
+    transcripts as stage 0 and sub-agent transcripts as stage 1; None when the
+    worker is off, nothing needs parsing, or the child could not be started
+    (the pass then parses in-thread, as it always did)."""
+    if not _USAGE_WORKER:
+        return None
+    try:
+        _days, since = _window(now)
+        stages: list[list[tuple[str, str]]] = [[], []]
+        for path, provider, st in _usage_files(since):
+            key = str(path)
+            with _usage_memo_lock:
+                hit = _usage_memo.get(key)
+            if hit is None or hit[0] != st.st_mtime_ns or hit[1] != st.st_size:
+                stages[provider == _CLAUDE_SUB].append((key, provider))
+        if not stages[0] and not stages[1]:
+            return None
+        return _UsageWorker(stages)
+    except Exception:
+        log.warning("Overview: could not start the usage worker; parsing in the server",
+                    exc_info=True)
+        return None
+
+
 def usage_stop_event() -> threading.Event:
     """The shutdown event every usage pass checks (`_usage_stop`). `web.lifespan`
     clears it at startup and sets it on shutdown."""
@@ -1426,23 +1609,38 @@ def warm_usage(stop_event) -> None:
     and from `cold` or `error`, started by `usage_payload`. Two stages: the
     main transcripts first, then `_usage_stage1` is set so the route can
     return a partial aggregate, then every file, sub-agent transcripts
-    included (the main ones are memo hits by then). `stop_event`, a
-    `threading.Event`, is checked between files; once set the pass returns
+    included (the main ones are memo hits by then). The parsing itself is done
+    ahead of each `_refresh` by a child process (`_UsageWorker`), which fills
+    the memo without holding this process's GIL; the `_refresh` calls then
+    find memo hits, and parse in-thread only what the child did not deliver.
+    `stop_event`, a `threading.Event`, is checked between files (every 0.1 s
+    while the child works); once set the pass kills the child and returns
     after the file in hand, leaves the state `cold` and evicts nothing. One
     file that fails is skipped (`_refresh`); a failure of the pass as a whole
     sets `error`.
     """
     _set_usage_state("warming")
     state = "error"
+    worker = None
     try:
+        worker = _start_usage_worker(time.time())
+        if worker is not None:
+            worker.wait_stage(0, stop_event)
         _summaries, _reparsed, complete = _refresh(time.time(), stop_event, subagents=False)
         if complete:
             _usage_stage1[0] = True
+            if worker is not None:
+                worker.wait_stage(1, stop_event)
             _summaries, _reparsed, complete = _refresh(time.time(), stop_event)
         state = "ready" if complete else "cold"
     except Exception:
         log.exception("Overview: the usage warm pass failed")
     finally:
+        if worker is not None:
+            try:
+                worker.close()
+            except Exception:
+                log.exception("Overview: could not stop the usage worker")
         if state != "cold":
             _usage_stage1[0] = False
         _set_usage_state(state)

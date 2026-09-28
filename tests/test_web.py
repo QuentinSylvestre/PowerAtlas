@@ -116,6 +116,11 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(overview_mod, "_usage_stage1", [False])
     monkeypatch.setattr(overview_mod, "_usage_cache", [0.0, None, None])
     monkeypatch.setattr(overview_mod, "_usage_memo", {})
+    # The warm pass parses in a child process in production; here in-thread,
+    # so every test's `_parse_usage_file` hook sees each parse. The tests of
+    # the child itself turn it back on.
+    monkeypatch.setattr(overview_mod, "_USAGE_WORKER", False)
+    monkeypatch.setattr(overview_mod, "_usage_worker_proc", [None])
     # The shutdown event is set by every `lifespan` a test runs, and the
     # summary route starts a background pass from `cold`: each test gets its
     # own event, and a pass it started is joined before the patches above
@@ -31688,3 +31693,137 @@ class TestOverviewUsage:
         assert body["usage"] is None and body["usage_state"] == "cold"
         assert overview._usage_cache[1] is None, "no aggregate is cached as complete"
         assert overview._usage_bg[0] is None, "no pass starts during shutdown"
+
+    # -- the Claude pre-filter and the worker process
+    #    (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE Phase 4, perf) --
+
+    def test_the_claude_pre_filter_keeps_every_record_that_carries_usage(self, monkeypatch):
+        """Only lines with neither `"user"` nor `"assistant"` are skipped, and
+        only once `cwd` is known; every record the summary reads is decoded."""
+        from power_atlas import overview
+        now = self.now
+        decoded = []
+        real_loads = json.loads
+        monkeypatch.setattr(overview, "json", types.SimpleNamespace(
+            loads=lambda b: decoded.append(real_loads(b)) or decoded[-1], dumps=json.dumps))
+        path = self.claude("88888888-8888-8888-8888-888888888888", [
+            # `cwd` from a record the filter would otherwise skip.
+            {"type": "system", "subtype": "init", "cwd": "C:\\ws\\first", "timestamp": _ov_iso(now)},
+            {"type": "attachment", "attachment": {"kind": "file", "text": "x" * 500}},
+            {"type": "queue-operation", "operation": "enqueue", "content": "later"},
+            self.c_user(now + 1, "go"),
+            {"type": "progress", "data": {"message": {"type": "assistant", "text": "sub"}}},
+            self.c_asst(now + 2, [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                                  {"type": "tool_use", "id": "t2", "name": "Read", "input": {}}],
+                        mid="m1", usage={"input_tokens": 5, "output_tokens": 7,
+                                         "cache_read_input_tokens": 11,
+                                         "cache_creation_input_tokens": 13}),
+            self.c_user(now + 3, [{"type": "tool_result", "tool_use_id": "t1", "is_error": True},
+                                  {"type": "tool_result", "tool_use_id": "t2"}]),
+            {"type": "attachment", "attachment": {"kind": "diagnostics"}},
+            self.c_asst(now + 60, [{"type": "text", "text": "done"}], mid="m2",
+                        usage={"input_tokens": 1, "output_tokens": 0}),
+        ])
+        summary = overview.summarize_file(path, overview._CLAUDE)
+        assert summary["cwd"] == "C:\\ws\\first"
+        day = summary["days"][_ov_day(now)]
+        assert day["tools"] == {"Bash": {"calls": 1, "failed": 1}, "Read": {"calls": 1, "failed": 0}}
+        assert day["tokens"] == {"input": 6, "output": 7, "cache_read": 11, "cache_creation": 13}
+        assert day["agent_seconds"] == 59.0
+        assert summary["model"] == "claude-opus-5-5"
+        kinds = [d.get("type") for d in decoded]
+        assert kinds == ["system", "user", "progress", "assistant", "user", "assistant"], \
+            "the attachment and queue lines are skipped once cwd is known, nothing else"
+
+    def with_worker(self, monkeypatch):
+        from power_atlas import overview
+        monkeypatch.setattr(overview, "_USAGE_WORKER", True)
+        started = []
+        real_init = overview._UsageWorker.__init__
+
+        def init(worker, stages):
+            real_init(worker, stages)
+            started.append(worker)
+        monkeypatch.setattr(overview._UsageWorker, "__init__", init)
+        return started
+
+    def test_the_worker_fills_the_memo_before_each_refresh(self, monkeypatch, parses):
+        from power_atlas import overview
+        sub = self.two_stage_stores()
+        started = self.with_worker(monkeypatch)
+        memo_at_refresh = []
+        real_refresh = overview._refresh
+
+        def refresh(now, stop_event=None, subagents=True):
+            with overview._usage_memo_lock:
+                memo_at_refresh.append((subagents, set(overview._usage_memo)))
+            return real_refresh(now, stop_event, subagents)
+        monkeypatch.setattr(overview, "_refresh", refresh)
+        overview.warm_usage(threading.Event())
+        assert overview.usage_state() == "ready"
+        assert len(started) == 1, "one child for the pass"
+        assert parses == [], "the child parsed every file; the refreshes found memo hits"
+        files = {str(p) for p, _prov, _st in overview._usage_files(0.0)}
+        mains = files - {str(sub)}
+        assert memo_at_refresh[0][0] is False and mains <= memo_at_refresh[0][1], \
+            "stage 1 is published only once the main transcripts are in the memo"
+        assert memo_at_refresh[1] == (True, files)
+        # The child's summaries are the ones the server would have parsed.
+        for path, provider, _st in overview._usage_files(0.0):
+            assert overview._usage_memo[str(path)][2] == overview._parse_usage_file(path, provider)
+        assert started[0]._proc.poll() is not None, "the child is reaped"
+        assert overview._usage_worker_proc[0] is None
+
+    def test_a_stop_kills_the_worker_and_marks_nothing_complete(self, monkeypatch):
+        from power_atlas import overview
+        self.two_stage_stores()
+        started = self.with_worker(monkeypatch)
+        stop = threading.Event()
+        real_wait = overview._UsageWorker.wait_stage
+
+        def wait_stage(worker, index, stop_event):
+            stop.set()
+            return real_wait(worker, index, stop_event)
+        monkeypatch.setattr(overview._UsageWorker, "wait_stage", wait_stage)
+        overview._usage_memo["C:\\gone\\messages.jsonl"] = (0, 0, {})
+        overview.warm_usage(stop)
+        assert overview.usage_state() == "cold"
+        assert "C:\\gone\\messages.jsonl" in overview._usage_memo, "nothing is evicted"
+        assert started[0]._proc.poll() is not None, "the child does not outlive the pass"
+
+    def test_the_worker_exits_when_its_parent_goes_away(self):
+        """The parent dying breaks the child's stdin; closing it is the same
+        end of file. The child must stop mid-stage, never finish the list."""
+        from power_atlas import overview
+        path = self.claude("99999999-9999-9999-9999-999999999999", [
+            self.c_asst(self.now + i, [{"type": "text", "text": "y" * 2000}], mid=f"m{i}",
+                        usage={"input_tokens": 1}) for i in range(400)])
+        worker = overview._UsageWorker([[(str(path), overview._CLAUDE)] * 5000, []])
+        try:
+            first = worker._lines.get(timeout=30)
+            assert first is not None and json.loads(first)[0] == str(path)
+            worker._proc.stdin.close()
+            worker._proc.wait(timeout=10)
+            worker._reader.join(timeout=10)
+            lines = []
+            while not worker._lines.empty():
+                lines.append(worker._lines.get())
+            assert lines[-1] is None
+            assert not any(b'"stage"' in line for line in lines[:-1]), \
+                "the child stopped before finishing its list"
+        finally:
+            worker.close()
+
+    def test_a_worker_that_cannot_start_falls_back_to_parsing_in_thread(
+            self, monkeypatch, parses):
+        import subprocess
+        from power_atlas import overview
+        self.two_stage_stores()
+        monkeypatch.setattr(overview, "_USAGE_WORKER", True)
+
+        def refuse(*args, **kwargs):
+            raise OSError("no interpreter")
+        monkeypatch.setattr(subprocess, "Popen", refuse)
+        overview.warm_usage(threading.Event())
+        assert overview.usage_state() == "ready"
+        assert len(parses) == 3, "every file parsed in the server"
