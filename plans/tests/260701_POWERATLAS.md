@@ -144,7 +144,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ## 2. Web API + UI (`web.py` + `templates/`)
 
-> **2.1–2.25 is the dashboard surface, and it is no longer the whole web surface.** The ACP surface —
+> **2.1–2.25 and 2.28–2.29 are the dashboard surface, and it is no longer the whole web surface.** 2.26 and 2.27 are ACP-scoped: they describe the `/api/acp/sessions/delete` route and share the ACP surface's exclusion below. *(Widened 2026-09-28 for the Overview routes, `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE`.)* The ACP surface —
 > `/acp`, the `/ws/acp` WebSocket, `GET /api/acp/sessions`, `/remote-auth` and the two loopback-only
 > `/api/remote-access*` routes — has no brief here. **The reason changed on 2026-08-01 and the scoping
 > did not.** It was originally scoped out as a throwaway prototype; `260731_ACP_REMOTE_CLIENT_PRODUCTIZATION`
@@ -583,13 +583,13 @@ Per the automatable-only scope decision, these are documented but NOT part of th
 
 ## Coverage manifest (for run mode)
 
-In scope (full briefs): Data layer (1.1–1.12), Web API+UI (2.1–2.25), Launcher Windows subset (3.1–3.8),
+In scope (full briefs): Data layer (1.1–1.12), Web API+UI (2.1–2.25, 2.28–2.29; 2.26–2.27 are ACP-scoped), Launcher Windows subset (3.1–3.8),
 Icons (4.1–4.4), Config (5.1–5.5), Autostart Windows (6.1), Lifecycle Windows subset (7.1–7.6).
 Scoped-out: native tray clicks, peek native behavior, all Linux paths (see above), and the ACP surface
 (`/acp`, `/ws/acp`, `GET /api/acp/sessions`, `/remote-auth`, `/api/remote-access*`) — see the note under
 §2, whose *reason* changed on 2026-08-01 while the scoping did not: that surface is product now, not a
 prototype, and it stays out because probing it spawns a real `-a` agent and writes to the user's session
-store, not because it is disposable. *(Corrected 2026-09-23: not `-a`; see the dated note under §2.)* **2.1–2.25 is the dashboard web surface, not the whole web
+store, not because it is disposable. *(Corrected 2026-09-23: not `-a`; see the dated note under §2.)* **2.1–2.25 and 2.28–2.29 are the dashboard web surface, not the whole web
 surface**; a run that covers all of §2 must not report the web layer as fully covered. Two further
 scoping notes for anyone widening this: the remote authorization controls are inert from loopback by
 design, so covering them means driving a non-loopback peer with the user's explicit authorization; and

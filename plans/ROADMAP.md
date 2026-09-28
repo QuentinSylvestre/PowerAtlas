@@ -148,7 +148,7 @@ condition).
 
 ## Workspace Intelligence
 
-- **Session status extensions** — "stale /qdev never completed" heuristics and detecting fresh terminal sessions. Live status dots shipped in `260712_LIVE_SESSION_STATUS`; notifications shipped 2026-09-19. What is left is below.
+- **Session status extensions** — "stale /qdev never completed" heuristics, partly addressed by the Overview's plan `stale` badge, and detecting fresh terminal sessions. Live status dots shipped in `260712_LIVE_SESSION_STATUS`; notifications shipped 2026-09-19. What is left is below.
   - *Stale /qdev detection* — partly addressed by the Overview's plan `stale` badge (plan file unchanged > 7 days), shipped in `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE`; the session-level > 24 h marker heuristic remains open. `/qdev` writes a progress marker into the plan file on each phase; a session that last wrote a marker >24 h ago with a non-complete status is "stale". Would require reading plan files on every status poll — expensive. Deferred until status poll performance is better understood.
   - *Notifications for terminal-hosted sessions* — the ACP half shipped; this half did not, and cannot take the same route. PowerAtlas does not host a terminal session, so there is no frame to fire from: the only signal is the `messages.jsonl` tail the status poll already reads, which makes a poll-side hook the sole option. Nothing reads it today.
   - *Fresh terminal sessions* — sessions started in a terminal after PowerAtlas was launched are picked up on the next `refresh_stale_entries` tick (15–30 s). No gap for ACP sessions (PowerAtlas creates them). Terminal-session detection latency is bounded by the refresh interval, not by process monitoring.

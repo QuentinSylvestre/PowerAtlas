@@ -4609,7 +4609,9 @@ class TestAcpContentSecurityPolicy:
     def test_no_policy_leaks_onto_the_dashboard(self, raw_client):
         """base.html is shared. index.html carries substantial inline script and
         static/htmx.min.js binds at DOMContentLoaded, so this policy would risk
-        the dashboard for no gain — it renders no agent-authored text."""
+        the dashboard. The dashboard does render agent-authored text (the
+        transcript panel and the Overview's live tiles); a dashboard CSP is a
+        deferred follow-up, so none is served there today."""
         resp = raw_client.get("/")
         assert resp.status_code == 200
         assert "content-security-policy" not in resp.headers

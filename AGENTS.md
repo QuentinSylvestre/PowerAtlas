@@ -49,7 +49,10 @@ Recipe for live QA of /acp and the dashboard against the running instance. It wo
   or click it again to "make sure". The Overview's live tiles have no `data-sid`, so
   `[data-sid="<id>"]` matches rail rows only. To find a tile, use the page's global
   `_dashOvTileEls` map, keyed by session id: `page.evaluate("id => !!_dashOvTileEls[id]", sid)`
-  tells whether it is shown, and `_dashOvTileEls[id].click()` opens it.
+  tells whether it is shown, and `_dashOvTileEls[id].click()` opens it. The map reflects the
+  last poll only while the Overview is showing, and it is empty until the first 2 s poll lands.
+  Check it only in overview mode, and wait for the tile first:
+  `wait_for_function("id => !!_dashOvTileEls[id]", arg=sid)`.
 - **Protocol questions** (what kiro-cli advertises, or what a method does to disk): run a
   second `kiro-cli acp --agent-engine v3`, or drive `power_atlas.acp._supervisor` from a
   separate Python process. Never probe through the running instance. The token request is
