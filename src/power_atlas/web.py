@@ -2166,8 +2166,12 @@ def _acp_csp(nonce: str, host: str) -> str:
 
     It is not applied globally. ``index.html`` holds substantial inline script
     and ``static/htmx.min.js`` binds at ``DOMContentLoaded``; a policy there
-    would risk the dashboard for no gain, and the dashboard does not render
-    agent-authored text.
+    would risk the dashboard. That is no longer a trade for no gain: the
+    dashboard's Overview renders agent-authored text in its live tiles
+    (assistant text, tool names and tool arguments), and the transcript panel
+    renders it too. The Overview builds those nodes with ``textContent`` only,
+    and a dashboard CSP is a deferred follow-up.
+    260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 
     ``connect-src`` names the WebSocket origins rather than leaning on
     ``'self'``: whether ``'self'`` covers a ``ws://`` upgrade from an ``http:``

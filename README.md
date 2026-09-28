@@ -109,6 +109,25 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   attachments, a read-only sub-agent/crew panel for fan-outs, and automatic reconnect with exponential
   backoff if the connection drops. `/acp` remains the only surface reachable from another device — the
   dashboard's panel is loopback-only, like the rest of the dashboard
+- When no session is open, the dashboard's right panel shows an **Overview** with three sections.
+  *Live now* shows up to 8 tiles, one per live session, each with the last few events of its
+  transcript (assistant text, tool calls, ✓/✗ results), refreshed about every 2 s while the Overview
+  and the tab are visible; an All/PowerAtlas filter narrows it to the sessions PowerAtlas holds, a tile
+  idle for over 2 minutes is dimmed, and clicking a tile opens that session. *Active plans* lists the
+  `plans/*.md` files across your workspaces whose Status is In Progress, or Complete but not yet moved
+  to `plans/done/` ("Ready to close"), with phase progress from the plan's Progress Tracker, the phase in
+  progress or the next one, and a `stale` badge when an In Progress plan has not changed for 7 days;
+  click a row to see its tracker. *Usage* covers the last 14 days: agent time per workspace this week
+  against the week before, daily agent time and session counts by provider, tool reliability, context
+  pressure, model mix, and Claude Code token totals with the cache-hit ratio. It is computed in memory
+  in the background after startup, so it shows a loading state first, then a partial view while Claude
+  Code sub-agent transcripts are still being counted. Claude Code agent time is estimated from message
+  timestamps; context pressure is kiro-cli only; token totals are Claude Code only, with no cost
+  estimate. Return to the Overview with the Home button in the panel header, with Escape (when focus
+  is not in the composer, the search field or a dialog; if a sub-agent's view is open, the first Escape
+  closes it), by clicking the open session's row again, or by closing or deleting the open session.
+  The Overview reads transcript files and never subscribes to a session, so it does not suppress
+  notifications. Like the rest of the dashboard, it is loopback-only
 - Drive kiro-cli sessions from the browser at `/acp`, with no terminal — create a session or resume an
   exited one over ACP, stream the agent's output, cancel a turn, close the session, queue a prompt for
   after the current turn, or steer the agent mid-turn. Paste a screenshot

@@ -15,13 +15,11 @@
 - **Plan-file shortcuts** — detect `plans/*.md` files and offer one-click `/qdev` buttons; same read-from-prompt convention
 
 ### Workspace Intelligence
-- **Session status extensions** — "stale /qdev never completed" heuristics and detecting fresh terminal sessions (live status dots and notifications both shipped)
-- **Plan progress overlay** — show phase completion (e.g. "Phase 3/5") on workspace cards by reading plan files
-- **kiro-cli usage stats** — dashboard showing session counts, durations, and tool-usage patterns over time
+- **Session status extensions** — "stale /qdev never completed" heuristics, partly addressed by the Overview's plan `stale` badge, and detecting fresh terminal sessions (live status dots and notifications both shipped)
 
 ### Platform
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext; serving them was fixed, storing them safely is not yet
-- **Parked items** — usage stats · plan-progress overlay · creating a session in a workspace with no prior sessions · two SECURITY items
+- **Parked items** — creating a session in a workspace with no prior sessions · two SECURITY items
 - **`launch_custom` env scrub excluded (follow-up)**: CLAUDE_CODE_* markers are not scrubbed from `launch_custom`-launched sessions — user-defined scripts may rely on inherited environment. See `plans/done/260818_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` Follow-up #2.
 - **`launch_terminal` env scrub excluded (follow-up)**: `launch_terminal` (~`launcher.py:595`) opens a bare shell without env scrubbing — the user manually starts a process inside it. Follow-up #5 of the same plan.
 
@@ -98,7 +96,7 @@
 | 4 | *A "needs you" inbox* | days | Status grouping already buckets Working/Waiting/Errored; this adds clarifying questions across every session in one place. Now also where a notification lands you — the toast tells you *a* session needs you, not *which*. Note the "pending permissions" half may have nothing to show (item 2) |
 | 5 | *Spike: Claude Code over ACP through an adapter* | week | The one thing Kiro Crew structurally cannot do. A spike, not a commitment: the supervisor is kiro-cli-specific in its `initialize`/`session/new` shapes and would need a second driver |
 
-**Parked, deliberately**: usage stats · plan-progress overlay · creating a session in a workspace that
+**Parked, deliberately**: creating a session in a workspace that
 has none · secret-aware custom-launcher env vars (shape (a) — durable, not urgent) · the `None` →
 `"working"` fallback revisit · the accepted `[SECURITY]` NetBird item (carries its own reopen
 condition).
@@ -151,13 +149,11 @@ condition).
 ## Workspace Intelligence
 
 - **Session status extensions** — "stale /qdev never completed" heuristics and detecting fresh terminal sessions. Live status dots shipped in `260712_LIVE_SESSION_STATUS`; notifications shipped 2026-09-19. What is left is below.
-  - *Stale /qdev detection* — `/qdev` writes a progress marker into the plan file on each phase; a session that last wrote a marker >24 h ago with a non-complete status is "stale". Would require reading plan files on every status poll — expensive. Deferred until status poll performance is better understood.
+  - *Stale /qdev detection* — partly addressed by the Overview's plan `stale` badge (plan file unchanged > 7 days), shipped in `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE`; the session-level > 24 h marker heuristic remains open. `/qdev` writes a progress marker into the plan file on each phase; a session that last wrote a marker >24 h ago with a non-complete status is "stale". Would require reading plan files on every status poll — expensive. Deferred until status poll performance is better understood.
   - *Notifications for terminal-hosted sessions* — the ACP half shipped; this half did not, and cannot take the same route. PowerAtlas does not host a terminal session, so there is no frame to fire from: the only signal is the `messages.jsonl` tail the status poll already reads, which makes a poll-side hook the sole option. Nothing reads it today.
   - *Fresh terminal sessions* — sessions started in a terminal after PowerAtlas was launched are picked up on the next `refresh_stale_entries` tick (15–30 s). No gap for ACP sessions (PowerAtlas creates them). Terminal-session detection latency is bounded by the refresh interval, not by process monitoring.
 
-- **Plan progress overlay** — show phase completion (e.g. "Phase 3/5") on workspace cards by reading plan files.
-
-- **kiro-cli usage stats** — dashboard showing session counts, durations, and tool-usage patterns over time.
+- **Plan progress overlay** and **kiro-cli usage stats** — shipped in `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE` as the dashboard Overview's *Active plans* and *Usage* sections, not as an overlay on rail rows. Active plans shows each In Progress or not-yet-archived Complete plan with its tracker progress; Usage covers 14 days of sessions, agent time, tool reliability, context pressure (kiro-cli only), model mix and Claude Code tokens.
 
 - **LLM-generated session name alias** — when kiro-cli has not set a session title, call `claude-haiku-4-6` with the first user message to generate a short, task-oriented label; shown in the rail and transcript panel without a user action. Keeps the existing kiro-cli-written title where one exists; only fills the gap where the title is absent or equals the session id.
 
