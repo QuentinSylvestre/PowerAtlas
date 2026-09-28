@@ -1518,6 +1518,12 @@ class _UsageWorker:
             pass
         finally:
             self._lines.put(None)
+            # Closed here, by the thread that reads it: a close from another
+            # thread would wait on this one's read.
+            try:
+                self._proc.stdout.close()
+            except OSError:
+                pass
 
     def wait_stage(self, index: int, stop_event) -> bool:
         """Store the child's summaries in the memo until it reports the end of
@@ -1562,10 +1568,6 @@ class _UsageWorker:
                 pass
         proc.wait()
         self._reader.join(timeout=1.0)
-        try:
-            proc.stdout.close()
-        except OSError:
-            pass
         if _usage_worker_proc[0] is proc:
             _usage_worker_proc[0] = None
 
@@ -1636,14 +1638,15 @@ def warm_usage(stop_event) -> None:
     except Exception:
         log.exception("Overview: the usage warm pass failed")
     finally:
+        # The state first: reaping the child must never hold it at `warming`.
+        if state != "cold":
+            _usage_stage1[0] = False
+        _set_usage_state(state)
         if worker is not None:
             try:
                 worker.close()
             except Exception:
                 log.exception("Overview: could not stop the usage worker")
-        if state != "cold":
-            _usage_stage1[0] = False
-        _set_usage_state(state)
 
 
 def _start_background_pass() -> bool:
