@@ -1,7 +1,7 @@
 # Dashboard Overview: Live Session Tails, Active Plans and Usage Insights
 
 > **Date**: 2026-09-24
-> **Status**: In Progress — Phases 1-4 complete, Phase 5 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 1-5 implemented, final review and full QA pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Replace the dashboard's empty Transcript panel with an Overview (live session tails, active plans, 14-day usage insights), reachable again after a session is opened
 > **Estimated effort**: 2-4 days
@@ -752,17 +752,29 @@ Changes:
 - **`web.py`.** Correct the `_acp_csp` docstring premise: the dashboard now renders agent-authored text in tiles.
 
 **Exit criteria**:
-- [ ] `README.md` updated with the Overview description and its caveats.
-- [ ] `plans/ROADMAP.md`:
+- [x] `README.md` updated with the Overview description and its caveats.
+- [x] `plans/ROADMAP.md`:
   - Workspace Intelligence reflects the shipped items;
   - both Parked lists are updated;
   - the "stale /qdev" wording reads "partly addressed";
   - LLM session names are still present.
-- [ ] `AGENTS.md` "ACP UI iteration" names `overview.py` and `presence.py` as restart-required, and § Verification Setup covers the Overview landing and click-again.
-- [ ] `plans/tests/260701_POWERATLAS.md` §2.16, §2.1 and the new route briefs are updated.
-- [ ] The `_acp_csp` docstring is corrected.
-- [ ] `node tests/acp_page.test.mjs` and `.venv-PowerAtlas/Scripts/python -m pytest tests/ -q --timeout=300` pass.
+- [x] `AGENTS.md` "ACP UI iteration" names `overview.py` and `presence.py` as restart-required, and § Verification Setup covers the Overview landing and click-again.
+- [x] `plans/tests/260701_POWERATLAS.md` §2.16, §2.1 and the new route briefs are updated.
+- [x] The `_acp_csp` docstring is corrected.
+- [x] `node tests/acp_page.test.mjs` and `.venv-PowerAtlas/Scripts/python -m pytest tests/ -q --timeout=300` pass.
 - [ ] A live QA pass over SC-1…SC-10 against the running instance (the Playwright recipe in AGENTS.md § Verification Setup).
+
+**Implementation (2026-09-28, code: 23e3965)**
+
+Commit 23e3965 documents the dashboard Overview as it was built, not as first planned. `README.md` gains a bullet after the dashboard panel bullet covering the three sections, their refresh cadences and filters, the return paths, the caveats (Claude agent time estimated, context pressure kiro-cli only, tokens Claude Code only, no cost estimate), and that the Overview never subscribes to a session and is loopback-only. `plans/ROADMAP.md` removes "Plan progress overlay" and "kiro-cli usage stats" from the summary list and replaces them in § Workspace Intelligence with a note that they shipped as the Overview's Active plans and Usage sections; "stale /qdev" reads "partly addressed by the Overview's plan `stale` badge", with the session-level > 24 h heuristic still open; "usage stats · plan-progress overlay" is removed from both Parked lists; LLM session names, the terminal-notification and fresh-terminal sub-bullets and "Timed prompts" are untouched. `AGENTS.md` adds `overview.py` and `presence.py` to the restart-required list, notes that `#dashOverview` markup and CSS need only a hard reload, and says in "Dashboard attach" that `/` lands on the Overview, that clicking the open row again returns to it, and how a QA script finds a tile through `_dashOvTileEls`. `plans/tests/260701_POWERATLAS.md` §2.1 names the Overview as the no-session state, §2.16 adds `warm_usage` as a fifth lifespan concern, and briefs 2.28 and 2.29 cover the two new routes. `web.py`'s `_acp_csp` docstring no longer claims the dashboard renders no agent-authored text.
+
+**Implementation (2026-09-28, code: c4b49a4) — review fixes**
+
+The test plan's three "2.1–2.25" scope statements now include 2.28–2.29 and name 2.26/2.27 as ACP-scoped. The `test_no_policy_leaks_onto_the_dashboard` docstring in `tests/test_web.py` (outside Phase 5's declared scope, at the orchestrator's direction; docstring only) and the `_acp_csp` docstring now say plainly that the dashboard renders agent-authored text in the transcript panel and the Overview's live tiles, and that a dashboard CSP is a deferred follow-up. The README Overview bullet is split into short sentences under Live now, Active plans, Usage and Return paths, and states the exact stale boundary, that only rows with a tracker expand, and every Escape guard. The AGENTS.md tile recipe says `_dashOvTileEls` is meaningful only in overview mode after the first poll. The ROADMAP "stale /qdev" section lead bullet also says "partly addressed".
+
+Tests: node 880 passed; pytest 2741 passed, 3 skipped.
+
+QA: the live QA pass over SC-1…SC-10 is the Step 9b exhaustive QA, run after the final review; this criterion is ticked there.
 
 ## 6) Risk Assessment
 
@@ -817,7 +829,7 @@ Changes:
 | 2 | Active plans | Done | code d198d70, 0c87284 |
 | 3 | Live now tiles | Done | code 8952918, 9bbf18b |
 | 4 | Usage insights | Done | code 0eec979, 28f5fdc, c700d20, 9f2deb6, 56713da |
-| 5 | Docs, roadmap and full QA | Pending | |
+| 5 | Docs, roadmap and full QA | In Progress | code 23e3965, c4b49a4; live QA at Step 9b |
 
 ## 9) Implementation Divergences from Plan
 
@@ -881,6 +893,14 @@ Phase 4:
 12. Kiro IDE `sessions.json` is read with `utf-8-sig`. One real file starts with a BOM; `data_kiro_ide.discover_workspaces` and `load_sessions` silently skip that workspace (pre-existing, not fixed; recorded in `docs/KNOWLEDGE.md`).
 13. Frontend: `id="dashOvUsageBody"`, a "last 14 days" note, two daily charts (agent time, sessions) plus a provider legend instead of one combined bar, and "Could not load usage." on a failed first load or `error`.
 14. The autouse `isolated_config` test fixture points `overview._usage_roots` at empty folders, disables the child-process worker, and resets usage state, cache, stop event and filter cache for every test. Reason: lifespan and summary-route tests would otherwise parse the developer's real stores.
+
+Phase 5:
+
+1. The README Overview description is a sibling bullet after "Click any session in the dashboard's workspaces rail…", not an extension of it. Reason: that bullet is about the transcript panel; the Overview reads more clearly on its own.
+2. `tests/test_web.py`'s `test_no_policy_leaks_onto_the_dashboard` docstring was corrected (docstring only). Reason: it repeated the `_acp_csp` premise this phase corrects; the file is outside Phase 5's declared scope.
+3. The test plan's dashboard scope now reads 2.1–2.25 plus 2.28–2.29, with 2.26/2.27 named ACP-scoped. Reason: the new route briefs would otherwise fall outside `/qtest` run mode's declared scope.
+4. The `_acp_csp` docstring also names the transcript panel as rendering agent-authored text. Reason: it did so before this plan (dashboard ACP feature parity).
+5. The `#dashOverview` reload-only note sits inline in the existing "ACP UI iteration" bullet of AGENTS.md, and § Verification Setup also documents the `_dashOvTileEls` tile lookup. Reason: live tiles carry no `data-sid`, which cost the Phase 3 QA several script iterations.
 
 ## Follow-up Work (Deferred)
 
@@ -1053,6 +1073,24 @@ Implementation health: Green.
 | 18 | Low | §9 held no Phase 4 divergences at the reviewed commit. | Fixed -- recorded in §9 by the Step 7 plan update. |
 
 Cycle 2 was not run, per the user's 1-cycle cap; the two later timing fixes (two-stage pass, child process) were verified by live QA rather than re-review, and the Step 9 final review covers them. Finding 8 was raised by both personas. The Senior engineer's read-only cross-check reproduced every v3 day's agent seconds, every daily session count and the Claude token totals exactly. The fix sub-agent was interrupted once by the end of a Claude Code session and resumed with its uncommitted work intact.
+
+### 2026-09-28 -- Implementation Review (after Phase 5, persona: Senior engineer)
+
+Implementation health: Green.
+8 findings (0 High, 1 Medium, 7 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | The test plan's "2.1–2.25" scope statements left the new briefs 2.28/2.29 outside `/qtest` run mode's scope. | Fixed -- all three statements widened, 2.26/2.27 named ACP-scoped (c4b49a4). |
+| 2 | Low | A `tests/test_web.py` docstring still claimed the dashboard renders no agent-authored text. | Fixed -- docstring corrected, assertion unchanged (c4b49a4). |
+| 3 | Low | The corrected `_acp_csp` docstring misdated when its premise became false and read poorly. | Fixed -- reworded plainly (c4b49a4). |
+| 4 | Low | The README Overview text was one long semicolon-chained paragraph in an undeclared new bullet. | Fixed -- split under four sub-bullets; placement recorded in §9 (c4b49a4). |
+| 5 | Low | Three README details were imprecise (tracker expansion, the stale boundary, Escape guards). | Fixed -- all three stated exactly (c4b49a4). |
+| 6 | Low | The AGENTS.md tile recipe did not say `_dashOvTileEls` is meaningful only in overview mode after the first poll. | Fixed -- recipe says so, with a `wait_for_function` example (c4b49a4). |
+| 7 | Low | The ROADMAP "stale /qdev" section lead bullet was not reworded. | Fixed -- now says "partly addressed" too (c4b49a4). |
+| 8 | Low | §9 held no Phase 5 divergences at the reviewed commit. | Fixed -- recorded in §9 by the Step 7 plan update. |
+
+Cycle 2 was not run, per the user's 1-cycle cap; the fixes are prose only and the Step 9 final review covers them.
 
 ## Harness Improvement Opportunities
 
