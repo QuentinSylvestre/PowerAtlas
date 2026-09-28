@@ -12937,7 +12937,8 @@ const DASH_OVERVIEW_NAMES = [
   "function dashEscapeMayLeave", "_dashUserClosedSid", "_dashTranscriptLoaded",
   "_dashEmptyPlaceholder", "send('unsubscribe')",
   "function dashOvLiveTick", "function dashOvRenderLive", "function dashOvOpenTile",
-  "function dashOvRenderUsage",
+  "function dashOvRenderUsage", "_dashCloseLeftSid", "function dashOvFirstLoadFailed",
+  "function dashOvLiveStaleNote",
 ];
 
 function dashPickerSource() {
@@ -17988,6 +17989,156 @@ check("dashboard overview usage: a partial note says the count stopped when the 
     assertEqual(notes[0].textContent, "Sub-agent transcripts are not counted yet.", failure);
     assertEqual(p.timers.filter((t) => t.ms === 3000).length, 1, `${failure}: no further re-fetch`);
   }
+});
+
+// ---- Overview: Step 9 final review ------------------------------------------
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE final review (F4, F14-F17).
+
+check("dashboard overview: a Close refused after Home releases the session with unsubscribe (F4, D18)", () => {
+  const p = dashUserCloseFixture();
+  p.el("dashHome").dispatch("click");
+  assertEqual(p.sentOf("unsubscribe").length, 0, "fixture: no unsubscribe while the close is in flight");
+  assertEqual(p.sandbox._dashCloseLeftSid, "sess-1", "the close left behind is remembered past Home");
+  p.sandbox.dashHandle({ type: "error", sessionId: "sess-1",
+    payload: { code: "turn_in_progress", message: "This session is still answering." } });
+  assertEqual(p.sentOf("unsubscribe").length, 1, "the refused close leaves the socket watching: release it");
+  assertEqual(p.sandbox._dashCloseLeftSid, null, "consumed");
+  p.sandbox.dashHandle({ type: "error", sessionId: "sess-1",
+    payload: { code: "not_subscribed", message: "Subscribe first." } });
+  assertEqual(p.sentOf("unsubscribe").length, 1, "only once");
+  assert(dashInOverview(p), "the page stays on the Overview");
+});
+
+check("dashboard overview: a close left behind that completes, or is still running, sends no unsubscribe (F4)", () => {
+  const p = dashUserCloseFixture();
+  p.el("dashHome").dispatch("click");
+  p.sandbox.dashHandle({ type: "error", sessionId: "sess-1",
+    payload: { code: "close_in_progress", message: "This session is already being closed." } });
+  assertEqual(p.sandbox._dashCloseLeftSid, "sess-1", "that close is still running");
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  assertEqual(p.sandbox._dashCloseLeftSid, null, "its session_closed ends it");
+  assertEqual(p.sentOf("unsubscribe").length, 0, "a completed close detached the socket already");
+});
+
+check("dashboard overview: a refusal landing while another attach is in flight sends no unsubscribe (F4)", async () => {
+  const cases = {
+    "a load in flight": (p) => { p.sandbox._dashLoadingSid = "sess-C"; },
+    "a create in flight": (p) => { p.sandbox._dashCreateInFlight = true; },
+  };
+  for (const [what, arrange] of Object.entries(cases)) {
+    const p = dashUserCloseFixture();
+    p.el("dashHome").dispatch("click");
+    arrange(p);
+    p.sandbox.dashHandle({ type: "error", sessionId: "sess-1",
+      payload: { code: "internal_error", message: "boom" } });
+    assertEqual(p.sentOf("unsubscribe").length, 0,
+      `${what}: an unsubscribe landing after the next attach would detach that one`);
+  }
+  const p = dashUserCloseFixture();
+  p.el("dashHome").dispatch("click");
+  await dashOpenFixture(p, "sess-2");
+  assertEqual(p.sandbox._dashCloseLeftSid, null, "opening a session forgets the close left behind");
+});
+
+check("dashboard overview: a summary request that hangs times out, and the next poll asks again (F14)", async () => {
+  const p = loadDashPicker();
+  const signals = [];
+  p.sandbox.fetch = (url, init) => {
+    const signal = init && init.signal;
+    signals.push(signal);
+    return new Promise((_resolve, reject) => {
+      if (signal) signal.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+  };
+  p.sandbox._dashOverviewActive = true;
+  p.sandbox.dashOverviewRefreshSummary();
+  assertEqual(signals.length, 1);
+  assert(signals[0] && signals[0].aborted === false, "the summary request carries a signal");
+  p.sandbox.dashOverviewRefreshSummary();
+  assertEqual(signals.length, 1, "one summary request in flight");
+  const timeout = p.timers.filter((t) => t.ms === 30000);
+  assertEqual(timeout.length, 1, "the summary request has a timeout");
+  timeout[0].fn();
+  assertEqual(signals[0].aborted, true, "a hung summary is aborted at the timeout");
+  await p.settle(); await p.settle();
+  assertEqual(p.el("dashOvPlansBody").textContent, "Could not load plans.", "a timeout is a failed refresh");
+  p.sandbox.dashOverviewRefreshSummary();
+  assertEqual(signals.length, 2, "the poller is free again");
+});
+
+check("dashboard overview: an answered request clears its timeout (F14)", async () => {
+  const p = loadDashPicker();
+  const cleared = [];
+  const realClear = p.sandbox.clearTimeout;
+  p.sandbox.clearTimeout = (id) => { cleared.push(id); if (realClear) realClear(id); };
+  p.sandbox.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ plans: [] }) });
+  await p.sandbox.dashOverviewFetch("/api/dashboard/overview/summary", null, 30000);
+  assert(cleared.length >= 1, "the timeout of an answered request is cleared");
+});
+
+check("dashboard overview live: three failed polls in a row say how old the tiles are; a success clears it (F15)", async () => {
+  const p = loadDashPicker();
+  ovLoadRailHelpers(p);
+  let fail = false;
+  p.sandbox.fetch = (url) => String(url).indexOf(OV_LIVE_URL) === 0 && fail
+    ? Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
+    : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ tiles: [ovTile()], plans: [] }) });
+  p.sandbox.dashOverviewStart();
+  await p.settle(); await p.settle();
+  assertEqual(ovTiles(p).length, 1, "fixture: tiles drawn");
+  const stale = () => p.el("dashOvLiveBody").querySelector(".dash-ov-stale");
+  fail = true;
+  for (let i = 0; i < 2; i += 1) { p.runTimers(); await p.settle(); await p.settle(); }
+  assertEqual(stale(), null, "two failures are not yet stale");
+  p.runTimers(); await p.settle(); await p.settle();
+  assert(stale(), "the third failure in a row marks the tiles stale");
+  assertEqual(stale().textContent, "Not refreshing. Last updated just now.");
+  assertEqual(ovTiles(p).length, 1, "the tiles stay");
+  fail = false;
+  p.runTimers(); await p.settle(); await p.settle();
+  assertEqual(stale(), null, "a successful poll clears the note");
+});
+
+check("dashboard overview: Home after the Overview was signed out shows the signed-out note, not frozen sections (F15)", async () => {
+  const p = loadDashPicker({ realConnect: true, pageStatus: 403 });
+  p.sandbox.dashSetComposerNote = () => {};
+  p.sandbox.fetch = () => Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({}) });
+  await p.sandbox.dashOverviewFetch("/api/dashboard/overview/live").then(() => {}, () => {});
+  assertEqual(p.sandbox._dashOverviewSignedOut, true, "fixture: signed out");
+  await dashOpenFixture(p);
+  p.sandbox.dashShowOverview();
+  assert(!dashInOverview(p), "the Overview's sections would only show stale data");
+  assert(/signed out/i.test(p.el("dashTranscript").textContent), "the signed-out note is shown");
+});
+
+check("dashboard overview usage: a failed recompute keeps the numbers and says they were not refreshed (F16)", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovUsage(), "ready");
+  p.sandbox.dashOvRenderUsage(null, "error");
+  const b = ovUsageBody(p);
+  assert(b.querySelector(".dash-ov-usage-ws"), "the numbers drawn stay");
+  assertEqual(b.querySelectorAll(".dash-ov-usage-stale").length, 1);
+  assertEqual(b.querySelector(".dash-ov-usage-stale").textContent, "Could not refresh usage.");
+  p.sandbox.dashOvRenderUsage(null, "error");
+  assertEqual(b.querySelectorAll(".dash-ov-usage-stale").length, 1, "one note, not one per failure");
+  p.sandbox.dashOvRenderUsage(ovUsage(), "ready");
+  assertEqual(b.querySelector(".dash-ov-usage-stale"), null, "a fresh aggregate clears it");
+  p.sandbox.dashOvRenderUsage(null, "warming");
+  assertEqual(b.querySelector(".dash-ov-usage-stale"), null, "warming is not a failure");
+});
+
+check("dashboard overview plans: a focused plan row keeps its element and the focus across an unchanged refresh (F17)", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderPlans([ovPlan(), ovPlan({ file: "B.md" })]);
+  const head = ovPlanRows(p)[1].querySelector(".dash-ov-plan-head");
+  head.focus();
+  p.sandbox.dashOvRenderPlans([ovPlan(), ovPlan({ file: "B.md" })]);
+  assert(ovPlanRows(p)[1].querySelector(".dash-ov-plan-head") === head,
+    "unchanged data: the row is not rebuilt, so the focused element is still on the page");
+  assert(p.sandbox.document.activeElement === head);
+  p.sandbox.dashOvRenderPlans([ovPlan(), ovPlan({ file: "B.md", detail: "moved on" })]);
+  assertEqual(ovPlanRows(p)[1].querySelector(".dash-ov-plan-detail").textContent, "moved on",
+    "changed data is redrawn");
 });
 
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {

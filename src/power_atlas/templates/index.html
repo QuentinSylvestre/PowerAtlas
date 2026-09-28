@@ -1103,6 +1103,16 @@ function dashSessionMetaRender(session, workspace){
 // `close_in_progress`: that close is already running and its session_closed
 // is still coming.
 var _dashUserClosedSid = null;
+// The close that was still in flight when the page entered the Overview: the
+// user's own Close (_dashUserClosedSid), or the close dashCloseIfAbandoned()
+// sent for an unprompted dashboard session. Entering the Overview sends no
+// `unsubscribe` while one is pending, so if that close is then refused or
+// fails, the socket is still watching the session: its `error` frame, landing
+// on the idle Overview, sends the `unsubscribe` then. Cleared by that frame, by
+// the close's `session_closed`, by opening a session and by a socket drop; a
+// `close_in_progress` refusal keeps it, since that close is still running.
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE final review (F4, D18)
+var _dashCloseLeftSid = null;
 // Whether the pane holds a transcript, as opposed to "Loading transcript…" or
 // "Could not load this transcript.". Clicking the open row again returns to
 // the Overview only when it does; otherwise the click reloads, as before (D20).
@@ -1164,11 +1174,26 @@ function dashOverviewPoll(){
 // Every Overview request goes through here. A plain fetch 403 never reaches
 // the htmx signed-out handling, so a 403 is reported here, once, and the
 // pollers stop: repeating it on every poll would say nothing new. `signal`,
-// optional, is an AbortSignal: the live poller aborts its request on halt and
-// on timeout. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+// optional, is an AbortSignal (the live poller aborts its request on halt);
+// `timeoutMs`, optional, aborts a request not answered in that long, so one
+// hung request cannot freeze a poller that waits for it. An abort rejects,
+// as a failed request does. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 var _dashOverviewSignedOut = false;
-function dashOverviewFetch(url, signal){
-  return fetch(url, signal ? {signal: signal} : undefined).then(function(r){
+function dashOverviewFetch(url, signal, timeoutMs){
+  var ctl = (signal || timeoutMs) && typeof AbortController === 'function' ? new AbortController() : null;
+  var timer = null;
+  if (ctl) {
+    if (signal) {
+      if (signal.aborted) ctl.abort();
+      else signal.addEventListener('abort', function(){ ctl.abort(); });
+    }
+    if (timeoutMs) timer = setTimeout(function(){ ctl.abort(); }, timeoutMs);
+  }
+  function settled(){
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+  }
+  return fetch(url, ctl ? {signal: ctl.signal} : undefined).then(function(r){
+    settled();
     if (r.status === 403) {
       dashOverviewStop();
       if (!_dashOverviewSignedOut) {
@@ -1179,6 +1204,9 @@ function dashOverviewFetch(url, signal){
     }
     if (!r.ok) throw new Error(String(r.status));
     return r.json();
+  }, function(err){
+    settled();
+    throw err;
   });
 }
 // ---- Active plans (SC-6) ----------------------------------------------------
@@ -1188,6 +1216,10 @@ function dashOverviewFetch(url, signal){
 // titles, details and tracker notes are free text from files on disk.
 // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 var DASH_OV_SUMMARY_URL = '/api/dashboard/overview/summary';
+// A summary not answered in this long is aborted and counts as a failed
+// refresh, so the next poll can ask again (the server's plan scan has a 2 s
+// deadline and usage never parses on the request thread from cold).
+var DASH_OV_SUMMARY_TIMEOUT_MS = 30000;
 var _dashOvSummaryBusy = false;
 // Which plans the user expanded, so a refresh does not fold them back.
 var _dashOvPlanOpen = Object.create(null);
@@ -1202,7 +1234,7 @@ var DASH_OV_TRACKER_STATUS = {
 function dashOverviewRefreshSummary(){
   if (_dashOvSummaryBusy || _dashOverviewSignedOut) return;
   _dashOvSummaryBusy = true;
-  dashOverviewFetch(DASH_OV_SUMMARY_URL).then(function(data){
+  dashOverviewFetch(DASH_OV_SUMMARY_URL, null, DASH_OV_SUMMARY_TIMEOUT_MS).then(function(data){
     dashOvRenderPlans(data && data.plans);
     dashOvRenderUsage(data && data.usage, data && data.usage_state);
     // Null usage (stage 1) and a partial aggregate (stage 2) both come with
@@ -1331,13 +1363,29 @@ function dashOvPlanRow(plan){
   }
   return li;
 }
+// The list drawn last and the data it was drawn from. A refresh with the same
+// data (every 3 s while usage warms, every 60 s after) keeps the rows, so a
+// focused or expanded row stays as it is; only the ages, which follow the
+// clock, are updated. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE (F17)
+var _dashOvPlansKey = null;
+var _dashOvPlansNode = null;
 function dashOvRenderPlans(plans){
   var body = document.getElementById('dashOvPlansBody');
   if (!body) return;
-  body.textContent = '';
   var shown = Array.isArray(plans) ? plans.filter(function(p){ return p && typeof p === 'object'; }) : [];
+  var key = null;
+  try { key = JSON.stringify(shown); } catch (e) { key = null; }
+  if (key !== null && key === _dashOvPlansKey && _dashOvPlansNode && _dashOvPlansNode.parentNode === body) {
+    body.querySelectorAll('.dash-ov-plan-age').forEach(function(n, i){
+      if (shown[i]) n.textContent = dashOvAgo(shown[i].mtime);
+    });
+    return;
+  }
+  _dashOvPlansKey = key;
+  body.textContent = '';
   if (!shown.length) {
-    body.appendChild(dashOvText('div', 'dash-ov-empty', 'No active plans'));
+    _dashOvPlansNode = dashOvText('div', 'dash-ov-empty', 'No active plans');
+    body.appendChild(_dashOvPlansNode);
     return;
   }
   // Forget the expand state of plans no longer listed, so the map does not
@@ -1351,17 +1399,22 @@ function dashOvRenderPlans(plans){
   list.className = 'dash-ov-plans';
   shown.forEach(function(p){ list.appendChild(dashOvPlanRow(p)); });
   body.appendChild(list);
+  _dashOvPlansNode = list;
 }
-// A failed refresh keeps the rows already drawn; only a section that never
-// loaded says so.
-function dashOvPlansFailed(){
-  var body = document.getElementById('dashOvPlansBody');
+// A failed refresh keeps what a section already drew; only a section still
+// showing its first "Loading…" (or the usage skeleton) says it could not load.
+function dashOvFirstLoadFailed(bodyId, text){
+  var body = document.getElementById(bodyId);
   if (!body) return;
   var kids = body.children || body.childNodes || [];
-  if (kids.length === 1 && kids[0].className === 'dash-ov-loading') {
+  if (kids.length === 1 &&
+      (kids[0].className === 'dash-ov-loading' || kids[0].className === 'dash-ov-skel')) {
     body.textContent = '';
-    body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load plans.'));
+    body.appendChild(dashOvText('div', 'dash-ov-empty', text));
   }
+}
+function dashOvPlansFailed(){
+  dashOvFirstLoadFailed('dashOvPlansBody', 'Could not load plans.');
 }
 // ---- Live now (SC-4, SC-5) --------------------------------------------------
 // A tile per live session, polled about every 2 s from transcript files. The
@@ -1380,7 +1433,8 @@ var DASH_OV_LIVE_URL = '/api/dashboard/overview/live';
 var DASH_OV_LIVE_MS = 2000;
 var DASH_OV_LIVE_BACKOFF_MS = 10000;
 // A request not answered in this long is aborted and counts as a failed poll
-// (so it backs off); without it a hung request would freeze the tiles.
+// (so it backs off); without it a hung request would freeze the tiles. The
+// abort is dashOverviewFetch()'s.
 var DASH_OV_LIVE_TIMEOUT_MS = 15000;
 var DASH_OV_IDLE_MS = 120000;
 var DASH_OV_FILTER_KEY = 'pa_dash_ov_filter';
@@ -1435,27 +1489,52 @@ function dashOvLiveTick(gen){
   _dashOvLiveBusy = true;
   var ctl = typeof AbortController === 'function' ? new AbortController() : null;
   _dashOvLiveAbort = ctl;
-  var timeout = ctl ? setTimeout(function(){
-    if (_dashOvLiveAbort === ctl) ctl.abort();
-  }, DASH_OV_LIVE_TIMEOUT_MS) : null;
   function settled(){
-    if (timeout !== null) clearTimeout(timeout);
     if (_dashOvLiveAbort === ctl) _dashOvLiveAbort = null;
   }
   dashOverviewFetch(DASH_OV_LIVE_URL + '?filter=' + encodeURIComponent(_dashOvFilter),
-      ctl ? ctl.signal : undefined).then(function(data){
+      ctl ? ctl.signal : undefined, DASH_OV_LIVE_TIMEOUT_MS).then(function(data){
     settled();
     if (gen !== _dashOvLiveGen) return;
     _dashOvLiveBusy = false;
+    _dashOvLiveFails = 0;
+    _dashOvLiveOkAt = Date.now();
     dashOvRenderLive(data && data.tiles);
+    dashOvLiveStaleNote();
     dashOvLiveSchedule(gen, DASH_OV_LIVE_MS);
   }, function(){
     settled();
     if (gen !== _dashOvLiveGen) return;
     _dashOvLiveBusy = false;
+    _dashOvLiveFails += 1;
     dashOvLiveFailed();
+    dashOvLiveStaleNote();
     dashOvLiveSchedule(gen, DASH_OV_LIVE_BACKOFF_MS);
   });
+}
+// After DASH_OV_LIVE_STALE_AFTER failed polls in a row, the tiles drawn say
+// how old they are: a note above them, set with textContent, updated at each
+// further failure and removed by the next successful poll. Nothing is shown
+// when no poll ever succeeded (the section then says it could not load).
+// 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE final review (F15)
+var DASH_OV_LIVE_STALE_AFTER = 3;
+var _dashOvLiveFails = 0;
+var _dashOvLiveOkAt = null;
+function dashOvLiveStaleNote(){
+  var body = document.getElementById('dashOvLiveBody');
+  if (!body) return;
+  var note = body.querySelector('.dash-ov-stale');
+  if (_dashOvLiveFails < DASH_OV_LIVE_STALE_AFTER || _dashOvLiveOkAt === null) {
+    if (note && note.parentNode) note.parentNode.removeChild(note);
+    return;
+  }
+  if (!note) {
+    note = dashOvText('div', 'dash-ov-stale', '');
+    var kids = body.childNodes || [];
+    body.insertBefore(note, kids.length ? kids[0] : null);
+  }
+  note.textContent = 'Not refreshing. Last updated ' +
+    dashOvAgo(new Date(_dashOvLiveOkAt).toISOString()) + '.';
 }
 function dashOvSetFilter(value){
   _dashOvFilter = value === 'poweratlas' ? 'poweratlas' : 'all';
@@ -1622,13 +1701,7 @@ function dashOvRenderLive(tiles){
 // A failed poll keeps the tiles already drawn; only a section that never
 // loaded says so.
 function dashOvLiveFailed(){
-  var body = document.getElementById('dashOvLiveBody');
-  if (!body) return;
-  var kids = body.children || body.childNodes || [];
-  if (kids.length === 1 && kids[0].className === 'dash-ov-loading') {
-    body.textContent = '';
-    body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load live sessions.'));
-  }
+  dashOvFirstLoadFailed('dashOvLiveBody', 'Could not load live sessions.');
 }
 // ---- Usage (SC-7, SC-8) -----------------------------------------------------
 // 14 days of usage, from the summary route. `usage` is null while the
@@ -1893,7 +1966,17 @@ function dashOvRenderUsage(usage, state){
   if (!body) return;
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
     if (_dashOvUsageDrawn) {
-      if (state === 'error') dashOvUsagePartialStalled();
+      if (state === 'error') {
+        // The numbers drawn stay; a note says they were not refreshed. The
+        // next aggregate drawn clears the section, and the note with it.
+        // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE final review (F16)
+        dashOvUsagePartialStalled();
+        if (!body.querySelector('.dash-ov-usage-stale')) {
+          var kids = body.childNodes || [];
+          body.insertBefore(dashOvText('div', 'dash-ov-usage-stale', 'Could not refresh usage.'),
+            kids.length ? kids[0] : null);
+        }
+      }
       return;
     }
     body.textContent = '';
@@ -1927,18 +2010,11 @@ function dashOvRenderUsage(usage, state){
 // message until the next 60 s poll.
 // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
 function dashOvUsageFailed(){
-  var body = document.getElementById('dashOvUsageBody');
-  if (!body) return;
   if (_dashOvUsageDrawn) {
     dashOvUsagePartialStalled();
     return;
   }
-  var kids = body.children || body.childNodes || [];
-  if (kids.length === 1 &&
-      (kids[0].className === 'dash-ov-loading' || kids[0].className === 'dash-ov-skel')) {
-    body.textContent = '';
-    body.appendChild(dashOvText('div', 'dash-ov-empty', 'Could not load usage.'));
-  }
+  dashOvFirstLoadFailed('dashOvUsageBody', 'Could not load usage.');
 }
 // The transcript pane. Called before anything is drawn into it: opening a
 // session, creating one, and the signed-out note.
@@ -1952,7 +2028,9 @@ function dashShowPane(){
 function dashShowOverview(){
   // A dashboard-created session nothing was sent to is closed here, as on
   // any session switch. close_session detaches every socket itself.
+  var attachedSid = _dashAttachedSid;
   var closing = dashCloseIfAbandoned();
+  var leftSid = _dashUserClosedSid || (closing ? attachedSid : null);
   // Release the server-side subscription (D18): a watched session gets no
   // notifications and the idle sweeper skips it. dashCloseIfAbandoned() has
   // already cleared _dashAttachedSid, and a subscribe still in flight has not
@@ -1967,6 +2045,7 @@ function dashShowOverview(){
   _dashAttachedSid = null;
   dashUpdateCloseButton();
   _dashUserClosedSid = null;
+  _dashCloseLeftSid = leftSid;
   _dashTranscriptLoaded = false;
   dashCloseSubagentView();
   dashRemoveAllCrewPanels();
@@ -1989,6 +2068,13 @@ function dashShowOverview(){
   if (pane) {
     pane.textContent = '';
     pane.appendChild(dashEmptyPlaceholderNode());
+  }
+  // Signed out, the Overview's requests are all refused and its sections
+  // would only show what they held before: the signed-out note replaces the
+  // placeholder instead. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+  if (_dashOverviewSignedOut) {
+    dashReportSignedOut();
+    return;
   }
   dashSetPanelMode('overview');
   dashOverviewStart();
@@ -2057,6 +2143,7 @@ function openSessionTranscript(target, session, workspace){
   if(!sid) return;
   dashShowPane();
   _dashUserClosedSid = null;
+  _dashCloseLeftSid = null;
   _dashTranscriptLoaded = false;
   dashCloseIfAbandoned();
   document.querySelectorAll('.acp-rail-row.viewing').forEach(function(r){r.classList.remove('viewing')});
@@ -2390,6 +2477,8 @@ function dashConnect(onReady){
     // not arrive here. The tail's dashUpdateCloseButton() restores the button
     // from "Closing…". 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D3
     _dashUserClosedSid = null;
+    // The server detaches a dead socket, so nothing is left to unsubscribe.
+    _dashCloseLeftSid = null;
 
     // ---- SC7 (Phase 6): restore or tear down the full Phases 1-5 state ----
     // ---- surface a drop leaves behind -------------------------------------
@@ -4399,6 +4488,19 @@ function dashHandle(frame){
     dashReloadBtn.hidden = true;
     return;
   }
+  // The close left behind on entering the Overview (_dashCloseLeftSid) ends
+  // here, ahead of the staleness guard below, which drops every frame for a
+  // sid no longer on screen. A refusal or failure means this socket still
+  // watches the session: released now if the page is on the idle Overview,
+  // under the same conditions as a late `session` frame above (D18).
+  // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE final review (F4)
+  if (sid && sid === _dashCloseLeftSid && (type === 'error' || type === 'session_closed') &&
+      !(type === 'error' && payload && payload.code === 'close_in_progress')) {
+    _dashCloseLeftSid = null;
+    if (type === 'error' && _viewingSid === null && !_dashLoadingSid && !_dashCreateInFlight) {
+      send('unsubscribe');
+    }
+  }
   if (sid && sid !== _viewingSid) return; // stale frame for a session no longer on screen
 
   if (type === 'history') {
@@ -4865,6 +4967,8 @@ function dashHandle(frame){
       dashShowOverview();
       _dashPendingCreate = pendingCreate;
       _dashUserClosedSid = null;
+      // This close completed: nothing is left behind to release.
+      _dashCloseLeftSid = null;
     }
     dashRailRefreshSoon(); // session just released — update the dot promptly
     dashPickerRunPending(); // fire pending close-then-create if any
