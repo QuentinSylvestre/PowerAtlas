@@ -8280,7 +8280,7 @@ function _launcherConfirm(text, noLabel, yesLabel, warn, onYes){
   _lm('launcherConfirmText').textContent = text;
   _lm('launcherConfirmNo').textContent = noLabel;
   _lm('launcherConfirmYes').textContent = yesLabel;
-  bar.classList.toggle('launcher-confirm-warn', !!warn);
+  bar.classList.toggle('pa-modal-confirm-warn', !!warn);
   _lm('launcherConfirmNo').onclick = _launcherConfirmHide;
   _lm('launcherConfirmYes').onclick = function(){ _launcherConfirmHide(); onYes(); };
   bar.hidden = false;
@@ -8487,7 +8487,7 @@ function deleteLauncher(){
       var row = remove.parentElement, next = row.nextElementSibling || row.previousElementSibling;
       row.remove();
       _launcherEnvSync();
-      (next ? next.querySelector('.launcher-env-key') : form.querySelector('.launcher-link-btn')).focus();
+      (next ? next.querySelector('.launcher-env-key') : form.querySelector('.pa-modal-link-btn')).focus();
     }
   });
   // Enter walks the rows (name -> value -> next name, a new row after the
@@ -8562,6 +8562,11 @@ function saveProfile(){var payload={id:document.getElementById('profileId').valu
 function deleteProfile(){var id=document.getElementById('profileId').value;if(!id||id==='__new__')return;if(_launchProfiles.length<=1){showToast('<div class="toast toast-error">Cannot delete the last profile<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');return}if(id===_activeLaunchProfile&&!confirm('This is the active profile. Delete and switch to another?'))return;fetch('/api/launch-profile/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.text()}).then(function(t){showToast(t);return fetch('/api/settings')}).then(function(r){return r.json()}).then(function(d){_launchProfiles=d.launch_profiles;_activeLaunchProfile=d.active_launch_profile;renderProfileList();document.getElementById('profileForm').style.display='none';var btn=document.getElementById('profileNameBtn');var active=_launchProfiles.find(function(p){return p.id===_activeLaunchProfile});if(btn&&active){var lbl=btn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}).catch(function(){showToast('<div class="toast toast-error">Delete failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 </script>
 <script>
+// ---- workspace settings modal (partials/workspace_settings_modal.html) ----
+// One dialog for a single workspace or a bulk selection (Settings opened on a
+// row while two or more are selected). Built like the launcher modal: a
+// snapshot taken at open enables Save only on a change and makes Escape,
+// Cancel and a backdrop click ask before discarding one; refusals show inline.
 var _wsAllTags=[];
 var _wsTags=[];
 var _wsAcIndex=-1;
@@ -8572,19 +8577,275 @@ var _wsTagsToRemove=[];
 var _wsTagsFull=[];
 var _wsTagsPartial=[];
 var _wsColorChanged=false;
+var _wsColorMixed=false;
+var _wsSnapshot='';
+var _wsBusy=false;
+var _wsDownOnBackdrop=false;
+var WS_TAG_LIMIT=10;
+function _ws(id){ return document.getElementById(id); }
+function _wsBase(cwd){ return cwd.split(/[\\/]/).filter(Boolean).pop() || cwd; }
+
 function openWorkspaceSettings(btn){var card=btn.closest('[data-cwd]');var cwd=card.dataset.cwd;var selectedCwds=getSelectedWorkspaceCwds();if(selectedCwds.length>0&&selectedCwds.indexOf(cwd)<0){selectedCwds.push(cwd)}if(selectedCwds.length>1){openBulkWorkspaceSettings(selectedCwds)}else{openSingleWorkspaceSettings(cwd)}}
-function openSingleWorkspaceSettings(cwd){fetch('/api/workspace-settings?cwd='+encodeURIComponent(cwd)).then(function(r){return r.json()}).then(function(d){var m=document.getElementById('workspaceSettingsModal');document.getElementById('wsSettingsCwd').value=cwd;document.getElementById('wsSettingsColor').value=d.settings.color||'';_wsAllTags=d.all_tags||[];_wsTags=(d.settings.tags||[]).slice();_wsBulkMode=false;renderWsTags();var info=document.getElementById('wsTagsInfo');if(info)info.style.display='none';document.querySelectorAll('#wsColorPicker .color-swatch').forEach(function(s){s.classList.toggle('selected',s.dataset.color===(d.settings.color||''))});document.getElementById('wsSettingsTitle').textContent='Settings \u2014 '+cwd.split(/[\\/]/).pop();m.showModal();document.getElementById('wsTagsInput').focus()}).catch(function(){showToast('<div class="toast toast-error">Failed to load settings<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
-function openBulkWorkspaceSettings(cwds){fetch('/api/workspace-settings-bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cwds:cwds})}).then(function(r){return r.json()}).then(function(d){var m=document.getElementById('workspaceSettingsModal');_wsBulkMode=true;_wsBulkCwds=cwds;_wsTagsToAdd=[];_wsTagsToRemove=[];_wsColorChanged=false;_wsAllTags=d.all_tags||[];var tagCounts={};cwds.forEach(function(c){var ws=d.workspaces[c];if(ws&&ws.tags){ws.tags.forEach(function(t){tagCounts[t]=(tagCounts[t]||0)+1})}});_wsTagsFull=[];_wsTagsPartial=[];Object.keys(tagCounts).forEach(function(t){if(tagCounts[t]===cwds.length){_wsTagsFull.push(t)}else{_wsTagsPartial.push({tag:t,count:tagCounts[t]})}});renderBulkWsTags();var colors=cwds.map(function(c){return(d.workspaces[c]&&d.workspaces[c].color)||''});var allSame=colors.every(function(c){return c===colors[0]});document.getElementById('wsSettingsColor').value=allSame?colors[0]:'';document.querySelectorAll('#wsColorPicker .color-swatch').forEach(function(s){s.classList.toggle('selected',allSame&&s.dataset.color===colors[0])});document.getElementById('wsSettingsTitle').textContent='Settings \u2014 '+cwds.length+' workspaces';m.showModal();document.getElementById('wsTagsInput').focus()}).catch(function(){showToast('<div class="toast toast-error">Failed to load bulk settings<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
-function renderBulkWsTags(){var chips=document.getElementById('wsTagsChips');chips.innerHTML='';var container=document.getElementById('wsTagsContainer');var info=document.getElementById('wsTagsInfo');if(!info){info=document.createElement('div');info.id='wsTagsInfo';info.className='ws-tags-info';container.parentNode.insertBefore(info,container)}info.style.display='block';info.innerHTML='<span class="ws-info-line">Filled tags = on all workspaces. Dimmed = on some only.</span><span class="ws-info-line">Changes apply to all '+_wsBulkCwds.length+' selected workspaces.</span>';_wsTagsFull.forEach(function(tag){if(_wsTagsToRemove.indexOf(tag)>=0)return;var chip=document.createElement('span');chip.className='ws-tag-chip ws-tag-full';chip.textContent=tag;var x=document.createElement('button');x.type='button';x.className='ws-tag-remove';x.textContent='\u00d7';x.setAttribute('aria-label','Remove tag '+tag+' from all workspaces');x.onclick=function(){_wsTagsToRemove.push(tag);renderBulkWsTags();document.getElementById('wsTagsInput').focus()};chip.appendChild(x);chips.appendChild(chip)});_wsTagsPartial.forEach(function(item){if(_wsTagsToRemove.indexOf(item.tag)>=0)return;var chip=document.createElement('span');chip.className='ws-tag-chip ws-tag-partial';chip.textContent=item.tag;chip.title='On '+item.count+' of '+_wsBulkCwds.length+' workspaces';chip.setAttribute('aria-label',item.tag+' \u2014 on '+item.count+' of '+_wsBulkCwds.length+' workspaces');var x=document.createElement('button');x.type='button';x.className='ws-tag-remove';x.textContent='\u00d7';x.setAttribute('aria-label','Remove tag '+item.tag+' from all workspaces');x.onclick=function(){_wsTagsToRemove.push(item.tag);renderBulkWsTags();document.getElementById('wsTagsInput').focus()};chip.appendChild(x);chips.appendChild(chip)});_wsTagsToAdd.forEach(function(tag,i){var chip=document.createElement('span');chip.className='ws-tag-chip ws-tag-new';chip.textContent=tag;var x=document.createElement('button');x.type='button';x.className='ws-tag-remove';x.textContent='\u00d7';x.setAttribute('aria-label','Remove tag '+tag+' from all workspaces');x.onclick=function(){_wsTagsToAdd.splice(i,1);renderBulkWsTags();document.getElementById('wsTagsInput').focus()};chip.appendChild(x);chips.appendChild(chip)})}
-function renderWsTags(){var chips=document.getElementById('wsTagsChips');chips.innerHTML='';_wsTags.forEach(function(tag,i){var chip=document.createElement('span');chip.className='ws-tag-chip';chip.textContent=tag;var x=document.createElement('button');x.type='button';x.className='ws-tag-remove';x.textContent='\u00d7';x.setAttribute('aria-label','Remove tag '+tag);x.onclick=function(){_wsTags.splice(i,1);renderWsTags();document.getElementById('wsTagsInput').focus()};chip.appendChild(x);chips.appendChild(chip)})}
-function addWsTag(tag){tag=tag.trim().replace(/,/g,'');if(!tag||tag.length>64)return;if(_wsBulkMode){if(_wsTagsToAdd.indexOf(tag)>=0)return;if(_wsTagsFull.indexOf(tag)>=0)return;var inPartial=_wsTagsPartial.some(function(p){return p.tag===tag});if(inPartial)return;var rmIdx=_wsTagsToRemove.indexOf(tag);if(rmIdx>=0){_wsTagsToRemove.splice(rmIdx,1)}else{_wsTagsToAdd.push(tag)}renderBulkWsTags();document.getElementById('wsTagsInput').value='';hideWsAutocomplete();return}if(_wsTags.indexOf(tag)>=0)return;if(_wsTags.length>=10){showToast('<div class="toast toast-error">Max 10 tags<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');return}_wsTags.push(tag);renderWsTags();document.getElementById('wsTagsInput').value='';hideWsAutocomplete()}
-function showWsAutocomplete(){var input=document.getElementById('wsTagsInput');var val=input.value.trim().toLowerCase();var ac=document.getElementById('wsTagsAutocomplete');var exclude;if(_wsBulkMode){var partialTags=_wsTagsPartial.map(function(p){return p.tag});exclude=_wsTagsFull.concat(partialTags).concat(_wsTagsToAdd);exclude=exclude.filter(function(t){return _wsTagsToRemove.indexOf(t)<0})}else{exclude=_wsTags}var matches=_wsAllTags.filter(function(t){return exclude.indexOf(t)<0&&(val===''||t.toLowerCase().indexOf(val)>=0)});if(!matches.length){ac.style.display='none';_wsAcIndex=-1;return}ac.innerHTML='';matches.forEach(function(t,i){var div=document.createElement('div');div.className='ws-ac-item';div.textContent=t;div.dataset.index=i;div.onmousedown=function(e){e.preventDefault();addWsTag(t)};ac.appendChild(div)});ac.style.display='block';_wsAcIndex=-1}
-function hideWsAutocomplete(){var ac=document.getElementById('wsTagsAutocomplete');ac.style.display='none';_wsAcIndex=-1}
-function navigateWsAutocomplete(dir){var ac=document.getElementById('wsTagsAutocomplete');var items=ac.querySelectorAll('.ws-ac-item');if(!items.length)return;items.forEach(function(it){it.classList.remove('highlighted')});_wsAcIndex+=dir;if(_wsAcIndex<0)_wsAcIndex=items.length-1;if(_wsAcIndex>=items.length)_wsAcIndex=0;items[_wsAcIndex].classList.add('highlighted');items[_wsAcIndex].scrollIntoView({block:'nearest'})}
-(function(){var input=document.getElementById('wsTagsInput');input.addEventListener('input',function(){showWsAutocomplete()});input.addEventListener('focus',function(){showWsAutocomplete()});input.addEventListener('blur',function(){setTimeout(hideWsAutocomplete,150)});input.addEventListener('keydown',function(e){var ac=document.getElementById('wsTagsAutocomplete');if(e.key==='Enter'||e.key===','){e.preventDefault();if(_wsAcIndex>=0){var items=ac.querySelectorAll('.ws-ac-item');if(items[_wsAcIndex])addWsTag(items[_wsAcIndex].textContent)}else{addWsTag(input.value)}}else if(e.key==='Backspace'&&!input.value&&!_wsBulkMode&&_wsTags.length){_wsTags.pop();renderWsTags()}else if(e.key==='ArrowDown'&&ac.style.display==='block'){e.preventDefault();navigateWsAutocomplete(1)}else if(e.key==='ArrowUp'&&ac.style.display==='block'){e.preventDefault();navigateWsAutocomplete(-1)}else if(e.key==='Escape'){if(ac.style.display==='block'){hideWsAutocomplete();e.stopPropagation()}}})}());
-document.getElementById('wsColorPicker').addEventListener('click',function(e){var btn=e.target.closest('.color-swatch');if(!btn)return;var picker=document.getElementById('wsColorPicker');var input=document.getElementById('wsSettingsColor');picker.querySelectorAll('.color-swatch').forEach(function(s){s.classList.remove('selected')});btn.classList.add('selected');input.value=btn.dataset.color;_wsColorChanged=true});
-function saveWorkspaceSettings(e){e.preventDefault();if(_wsBulkMode){var payload={cwds:_wsBulkCwds,tags_add:_wsTagsToAdd,tags_remove:_wsTagsToRemove};if(_wsColorChanged){payload.color=document.getElementById('wsSettingsColor').value}fetch('/api/workspace-settings/save-bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('workspaceSettingsModal').close();dashRailReload();initWorkspaceFilters()}).catch(function(){showToast('<div class="toast toast-error">Bulk save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')});return}var cwd=document.getElementById('wsSettingsCwd').value;var color=document.getElementById('wsSettingsColor').value;fetch('/api/workspace-settings/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cwd:cwd,tags:_wsTags,color:color})}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('workspaceSettingsModal').close();dashRailReload();initWorkspaceFilters()}).catch(function(){showToast('<div class="toast toast-error">Save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
-document.getElementById('workspaceSettingsModal').addEventListener('close',function(){_wsBulkMode=false;_wsBulkCwds=[];_wsTagsToAdd=[];_wsTagsToRemove=[];_wsTagsFull=[];_wsTagsPartial=[];_wsColorChanged=false;var info=document.getElementById('wsTagsInfo');if(info)info.style.display='none'});
+
+function openSingleWorkspaceSettings(cwd){
+  fetch('/api/workspace-settings?cwd='+encodeURIComponent(cwd)).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).then(function(d){
+    _wsBulkMode=false;
+    _ws('wsSettingsCwd').value=cwd;
+    _wsAllTags=d.all_tags||[];
+    _wsTags=(d.settings.tags||[]).slice();
+    _wsColorChanged=false;
+    _wsColorMixed=false;
+    _wsOpen('Settings — '+_wsBase(cwd), cwd, cwd, d.settings.color||'');
+  }).catch(function(){showToast('<div class="toast toast-error">Failed to load settings<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>')});
+}
+function openBulkWorkspaceSettings(cwds){
+  fetch('/api/workspace-settings-bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cwds:cwds})}).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).then(function(d){
+    _wsBulkMode=true;_wsBulkCwds=cwds;_wsTagsToAdd=[];_wsTagsToRemove=[];_wsColorChanged=false;_wsAllTags=d.all_tags||[];
+    var tagCounts={};
+    cwds.forEach(function(c){var ws=d.workspaces[c];if(ws&&ws.tags){ws.tags.forEach(function(t){tagCounts[t]=(tagCounts[t]||0)+1})}});
+    _wsTagsFull=[];_wsTagsPartial=[];
+    Object.keys(tagCounts).forEach(function(t){if(tagCounts[t]===cwds.length){_wsTagsFull.push(t)}else{_wsTagsPartial.push({tag:t,count:tagCounts[t]})}});
+    var colors=cwds.map(function(c){return(d.workspaces[c]&&d.workspaces[c].color)||''});
+    var allSame=colors.every(function(c){return c===colors[0]});
+    // Mixed colors select no swatch, which would read as "No color"; the
+    // section heading says so instead, and Save sends no color until one
+    // is picked (_wsColorChanged), as before.
+    _wsColorMixed=!allSame;
+    _wsOpen('Settings — '+cwds.length+' workspaces', cwds.map(_wsBase).join(', '), cwds.join('\n'), allSame?colors[0]:'');
+  }).catch(function(){showToast('<div class="toast toast-error">Failed to load bulk settings<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>')});
+}
+function _wsOpen(title, pathText, pathTitle, color){
+  _ws('wsSettingsTitle').textContent=title;
+  var single=!_wsBulkMode;
+  _ws('wsSettingsPath').textContent=single?'‎'+pathText+'‎':pathText;
+  _ws('wsSettingsPath').classList.toggle('from-start',single);
+  _ws('wsSettingsPath').title=pathTitle;
+  // Text left in the box from the last open would otherwise land on this one.
+  _ws('wsTagsInput').value='';
+  hideWsAutocomplete();
+  _wsTagError('');
+  _wsFormError('');
+  _wsConfirmHide();
+  _wsBusy=false;
+  _ws('wsSaveBtn').textContent='Save';
+  if(_wsBulkMode) renderBulkWsTags(); else renderWsTags();
+  _wsSetColor(color);
+  _wsSnapshot=_wsState();
+  _wsUpdate();
+  var m=_ws('workspaceSettingsModal');
+  if(!m.open) m.showModal();
+  _ws('wsTagsInput').focus();
+}
+
+// The "a swatch was clicked" flag is a change only while the colors are
+// mixed, where it decides whether a color is sent at all; elsewhere the
+// value alone says whether the color changed.
+function _wsState(){
+  return JSON.stringify([_wsTags,_wsTagsToAdd,_wsTagsToRemove,_ws('wsSettingsColor').value,_wsColorMixed&&_wsColorChanged,_ws('wsTagsInput').value.trim()]);
+}
+function _wsIsDirty(){ return _wsState()!==_wsSnapshot; }
+function _wsUpdate(){
+  var color=_ws('wsSettingsColor').value;
+  _ws('workspaceSettingsModal').style.setProperty('--stripe', color||'transparent');
+  _ws('wsColorMixed').hidden=!(_wsColorMixed&&!_wsColorChanged);
+  var count=_ws('wsTagsCount');
+  if(_wsBulkMode){ count.hidden=true; }
+  else { count.hidden=false; count.textContent=_wsTags.length+' / '+WS_TAG_LIMIT; count.classList.toggle('at-limit',_wsTags.length>=WS_TAG_LIMIT); }
+  _ws('wsSaveBtn').disabled=_wsBusy||!_wsIsDirty();
+}
+function _wsSetColor(color){
+  _ws('wsSettingsColor').value=color||'';
+  var none=_wsColorMixed&&!_wsColorChanged;
+  _ws('wsColorPicker').querySelectorAll('.color-swatch').forEach(function(s){
+    var on=!none&&s.dataset.color===(color||'');
+    s.classList.toggle('selected',on);
+    s.setAttribute('aria-pressed',on?'true':'false');
+  });
+}
+function _wsTagError(msg){
+  var el=_ws('wsTagsError');el.textContent=msg||'';el.hidden=!msg;
+  if(msg) _ws('wsTagsContainer').setAttribute('aria-invalid','true'); else _ws('wsTagsContainer').removeAttribute('aria-invalid');
+}
+function _wsFormError(msg){ var el=_ws('wsFormError'); el.textContent=msg||''; el.hidden=!msg; }
+
+function _wsTagColor(tag){
+  var t=(window._tagColorData||[]).find(function(x){return x.name===tag});
+  return t&&t.color||'';
+}
+// One chip: the tag's own color dot, its name, an optional "2/3" badge and
+// a remove button.
+function _wsChip(tag, cls, onRemove, removeLabel, badge, title){
+  var chip=document.createElement('span');
+  chip.className='ws-tag-chip'+(cls?' '+cls:'');
+  var color=_wsTagColor(tag);
+  if(color){ var dot=document.createElement('span'); dot.className='ws-tag-dot'; dot.style.background=color; dot.setAttribute('aria-hidden','true'); chip.appendChild(dot); }
+  chip.appendChild(document.createTextNode(tag));
+  if(badge){ var b=document.createElement('span'); b.className='ws-tag-count-badge'; b.textContent=badge; chip.appendChild(b); }
+  if(title){ chip.title=title; chip.setAttribute('aria-label',tag+' — '+title); }
+  var x=document.createElement('button');
+  x.type='button';x.className='ws-tag-remove';x.textContent='×';x.setAttribute('aria-label',removeLabel);
+  x.onclick=function(){ onRemove(); _wsTagError(''); _ws('wsTagsInput').focus(); };
+  chip.appendChild(x);
+  return chip;
+}
+function renderWsTags(){
+  var chips=_ws('wsTagsChips');chips.innerHTML='';
+  _ws('wsTagsInfo').hidden=true;
+  _wsTags.forEach(function(tag,i){
+    chips.appendChild(_wsChip(tag,'',function(){_wsTags.splice(i,1);renderWsTags()},'Remove tag '+tag));
+  });
+  _wsUpdate();
+}
+function renderBulkWsTags(){
+  var chips=_ws('wsTagsChips');chips.innerHTML='';
+  var n=_wsBulkCwds.length;
+  var info=_ws('wsTagsInfo');
+  info.hidden=false;
+  info.textContent='Changes apply to all '+n+' workspaces. A dimmed tag is on some of them only.';
+  _wsTagsFull.forEach(function(tag){
+    if(_wsTagsToRemove.indexOf(tag)>=0)return;
+    chips.appendChild(_wsChip(tag,'ws-tag-full',function(){_wsTagsToRemove.push(tag);renderBulkWsTags()},'Remove tag '+tag+' from all workspaces'));
+  });
+  _wsTagsPartial.forEach(function(item){
+    if(_wsTagsToRemove.indexOf(item.tag)>=0)return;
+    chips.appendChild(_wsChip(item.tag,'ws-tag-partial',function(){_wsTagsToRemove.push(item.tag);renderBulkWsTags()},'Remove tag '+item.tag+' from all workspaces',item.count+'/'+n,'on '+item.count+' of '+n+' workspaces'));
+  });
+  _wsTagsToAdd.forEach(function(tag,i){
+    chips.appendChild(_wsChip(tag,'ws-tag-new',function(){_wsTagsToAdd.splice(i,1);renderBulkWsTags()},'Remove tag '+tag+' from all workspaces'));
+  });
+  _wsUpdate();
+}
+// Returns false when the tag was refused (and says why), so Save can stop
+// rather than drop what was typed.
+function addWsTag(tag){
+  tag=tag.trim().replace(/,/g,'');
+  var input=_ws('wsTagsInput');
+  if(!tag){ input.value=''; return true; }
+  if(tag.length>64){ _wsTagError('Tags are at most 64 characters.'); return false; }
+  _wsTagError('');
+  if(_wsBulkMode){
+    var present=_wsTagsToAdd.indexOf(tag)>=0||_wsTagsFull.indexOf(tag)>=0||_wsTagsPartial.some(function(p){return p.tag===tag});
+    var rmIdx=_wsTagsToRemove.indexOf(tag);
+    if(rmIdx>=0){_wsTagsToRemove.splice(rmIdx,1)}else if(!present){_wsTagsToAdd.push(tag)}
+    input.value='';hideWsAutocomplete();renderBulkWsTags();return true;
+  }
+  if(_wsTags.indexOf(tag)>=0){ input.value=''; hideWsAutocomplete(); _wsUpdate(); return true; }
+  if(_wsTags.length>=WS_TAG_LIMIT){ _wsTagError('A workspace can have at most '+WS_TAG_LIMIT+' tags. Remove one first.'); return false; }
+  _wsTags.push(tag);input.value='';hideWsAutocomplete();renderWsTags();return true;
+}
+function showWsAutocomplete(all){
+  var input=_ws('wsTagsInput');var val=input.value.trim().toLowerCase();var ac=_ws('wsTagsAutocomplete');
+  if(!val&&!all){ hideWsAutocomplete(); return; }
+  var exclude;
+  if(_wsBulkMode){var partialTags=_wsTagsPartial.map(function(p){return p.tag});exclude=_wsTagsFull.concat(partialTags).concat(_wsTagsToAdd);exclude=exclude.filter(function(t){return _wsTagsToRemove.indexOf(t)<0})}else{exclude=_wsTags}
+  var matches=_wsAllTags.filter(function(t){return exclude.indexOf(t)<0&&(val===''||t.toLowerCase().indexOf(val)>=0)});
+  if(!matches.length){hideWsAutocomplete();return}
+  ac.innerHTML='';
+  matches.forEach(function(t,i){
+    var div=document.createElement('div');div.className='ws-ac-item';div.setAttribute('role','option');div.id='wsAcItem'+i;
+    var color=_wsTagColor(t);
+    if(color){var dot=document.createElement('span');dot.className='ws-tag-dot';dot.style.background=color;dot.style.display='inline-block';div.appendChild(dot)}
+    div.appendChild(document.createTextNode(t));div.dataset.tag=t;
+    div.onmousedown=function(e){e.preventDefault();addWsTag(t)};
+    ac.appendChild(div);
+  });
+  ac.style.display='block';input.setAttribute('aria-expanded','true');_wsAcIndex=-1;
+}
+function hideWsAutocomplete(){var ac=_ws('wsTagsAutocomplete');ac.style.display='none';_wsAcIndex=-1;var input=_ws('wsTagsInput');input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant')}
+function navigateWsAutocomplete(dir){var ac=_ws('wsTagsAutocomplete');var items=ac.querySelectorAll('.ws-ac-item');if(!items.length)return;items.forEach(function(it){it.classList.remove('highlighted')});_wsAcIndex+=dir;if(_wsAcIndex<0)_wsAcIndex=items.length-1;if(_wsAcIndex>=items.length)_wsAcIndex=0;items[_wsAcIndex].classList.add('highlighted');items[_wsAcIndex].scrollIntoView({block:'nearest'});_ws('wsTagsInput').setAttribute('aria-activedescendant',items[_wsAcIndex].id)}
+function _wsAcOpen(){ return _ws('wsTagsAutocomplete').style.display==='block'; }
+
+function _wsConfirmShow(){ _ws('wsConfirm').hidden=false; _ws('wsActions').hidden=true; _ws('wsConfirmNo').focus(); }
+function _wsConfirmHide(){
+  var wasOpen=!_ws('wsConfirm').hidden;
+  _ws('wsConfirm').hidden=true; _ws('wsActions').hidden=false;
+  if(wasOpen) _ws('wsTagsInput').focus();
+}
+function wsSettingsRequestClose(){
+  var m=_ws('workspaceSettingsModal');
+  if(!m.open||_wsBusy) return;
+  if(!_ws('wsConfirm').hidden){ _wsConfirmHide(); return; }
+  if(_wsIsDirty()){ _wsConfirmShow(); return; }
+  m.close();
+}
+
+function saveWorkspaceSettings(e){
+  e.preventDefault();
+  if(_wsBusy||!_ws('wsConfirm').hidden) return;
+  // A tag typed but not yet entered is part of what the user means to save.
+  if(_ws('wsTagsInput').value.trim()&&!addWsTag(_ws('wsTagsInput').value)){ _ws('wsTagsInput').focus(); return; }
+  var url, payload;
+  if(_wsBulkMode){
+    url='/api/workspace-settings/save-bulk';
+    payload={cwds:_wsBulkCwds,tags_add:_wsTagsToAdd,tags_remove:_wsTagsToRemove};
+    if(_wsColorChanged){payload.color=_ws('wsSettingsColor').value}
+  } else {
+    url='/api/workspace-settings/save';
+    payload={cwd:_ws('wsSettingsCwd').value,tags:_wsTags,color:_ws('wsSettingsColor').value};
+  }
+  _wsBusy=true;_ws('wsSaveBtn').textContent='Saving…';_wsFormError('');_wsUpdate();
+  fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+    .then(function(r){return r.text().then(function(t){return{status:r.status,ok:r.ok,text:t}})})
+    .then(function(res){
+      // The save endpoints refuse with an error toast at HTTP 200, as the
+      // launcher's do; the same reader decides.
+      var err=_launcherResponseError(res.status,res.ok,res.text);
+      _wsBusy=false;_ws('wsSaveBtn').textContent='Save';
+      if(err){_wsFormError(err);_wsUpdate();return}
+      showToast(res.text);
+      _wsSnapshot=_wsState();
+      _ws('workspaceSettingsModal').close();
+      dashRailReload();initWorkspaceFilters();
+    })
+    .catch(function(){_wsBusy=false;_ws('wsSaveBtn').textContent='Save';_wsFormError(_wsBulkMode?'Bulk save failed — try again':'Save failed — try again');_wsUpdate()});
+}
+
+(function(){
+  var m=_ws('workspaceSettingsModal'),form=_ws('wsSettingsForm'),input=_ws('wsTagsInput');
+  // Suggestions open on typing or ArrowDown, not on focus: the modal focuses
+  // this field on open, and a list over the color picker before anything was
+  // typed hid it.
+  input.addEventListener('input',function(){_wsTagError('');showWsAutocomplete(false);_wsUpdate()});
+  input.addEventListener('blur',function(){setTimeout(hideWsAutocomplete,150)});
+  input.addEventListener('keydown',function(e){
+    var open=_wsAcOpen();
+    if(e.key==='Enter'&&(e.ctrlKey||e.metaKey))return; // the dialog's Ctrl+Enter
+    if(e.key==='Enter'||e.key===','){
+      if(e.key==='Enter'&&!input.value.trim()&&_wsAcIndex<0)return; // empty: Enter submits
+      e.preventDefault();
+      if(_wsAcIndex>=0){var items=_ws('wsTagsAutocomplete').querySelectorAll('.ws-ac-item');if(items[_wsAcIndex])addWsTag(items[_wsAcIndex].dataset.tag)}else{addWsTag(input.value)}
+    }else if(e.key==='Tab'&&open&&_wsAcIndex>=0&&!e.shiftKey){
+      e.preventDefault();var it=_ws('wsTagsAutocomplete').querySelectorAll('.ws-ac-item')[_wsAcIndex];if(it)addWsTag(it.dataset.tag);
+    }else if(e.key==='Backspace'&&!input.value&&!_wsBulkMode&&_wsTags.length){
+      _wsTags.pop();_wsTagError('');renderWsTags();
+    }else if(e.key==='ArrowDown'){
+      e.preventDefault();if(!open)showWsAutocomplete(true);if(_wsAcOpen())navigateWsAutocomplete(1);
+    }else if(e.key==='ArrowUp'&&open){
+      e.preventDefault();navigateWsAutocomplete(-1);
+    }else if(e.key==='Escape'&&open){
+      // preventDefault, not only stopPropagation: the dialog's own Escape
+      // close is the key's default action and closed the whole modal here.
+      e.preventDefault();e.stopPropagation();hideWsAutocomplete();
+    }
+  });
+  _ws('wsColorPicker').addEventListener('click',function(e){
+    var btn=e.target.closest('.color-swatch');if(!btn)return;
+    _wsColorChanged=true;_wsSetColor(btn.dataset.color);_wsUpdate();
+  });
+  _ws('wsConfirmNo').addEventListener('click',_wsConfirmHide);
+  _ws('wsConfirmYes').addEventListener('click',function(){_ws('wsConfirm').hidden=true;_ws('wsActions').hidden=false;m.close()});
+  // Escape on keydown as well as `cancel`: Chromium lets a page refuse a
+  // dialog's cancel once per user activation (see the launcher modal).
+  m.addEventListener('cancel',function(e){e.preventDefault();wsSettingsRequestClose()});
+  m.addEventListener('keydown',function(e){
+    if(e.key==='Escape'&&!e.isComposing&&!e.defaultPrevented){e.preventDefault();wsSettingsRequestClose();return}
+    if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();if(!_ws('wsSaveBtn').disabled&&_ws('wsConfirm').hidden)form.requestSubmit(_ws('wsSaveBtn'))}
+  });
+  function outside(e){var r=m.getBoundingClientRect();return e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom}
+  m.addEventListener('mousedown',function(e){_wsDownOnBackdrop=e.target===m&&outside(e)});
+  m.addEventListener('click',function(e){if(_wsDownOnBackdrop&&e.target===m&&outside(e))wsSettingsRequestClose();_wsDownOnBackdrop=false});
+  m.addEventListener('close',function(){_wsBulkMode=false;_wsBulkCwds=[];_wsTagsToAdd=[];_wsTagsToRemove=[];_wsTagsFull=[];_wsTagsPartial=[];_wsColorChanged=false;_wsColorMixed=false;hideWsAutocomplete();_ws('wsConfirm').hidden=true;_ws('wsActions').hidden=false});
+})();
 
 // ---- Remote access panel (D22, D24) --------------------------------------
 //

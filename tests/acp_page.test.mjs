@@ -20159,6 +20159,54 @@ check("launcher modal: Enter while the delete or discard question is up does not
   assertEqual(fetches.length, 0, "a save was sent while the question was pending");
 });
 
+// The workspace settings modal (partials/workspace_settings_modal.html).
+// A tag typed but not entered used to be dropped by Save: the payload went
+// out with the tags as they were before the user typed.
+function wsModalBox(over = {}) {
+  const els = {
+    wsConfirm: { hidden: true }, wsTagsInput: { value: "", focus() {} },
+    wsSettingsCwd: { value: "/ws" }, wsSettingsColor: { value: "" }, wsSaveBtn: { textContent: "Save" },
+  };
+  const sent = [], errors = [];
+  const box = {
+    _ws: (id) => els[id], _wsBusy: false, _wsBulkMode: false, _wsTags: [], WS_TAG_LIMIT: 10,
+    _wsTagError: (m) => { if (m) errors.push(m); }, _wsFormError: () => {}, _wsUpdate: () => {},
+    hideWsAutocomplete: () => {}, renderWsTags: () => {}, renderBulkWsTags: () => {},
+    fetch: (u, o) => { sent.push({ url: u, body: JSON.parse(o.body) }); return new Promise(() => {}); },
+    JSON, ...over,
+  };
+  vm.createContext(box);
+  vm.runInContext(launcherPick("addWsTag") + "\n" + launcherPick("saveWorkspaceSettings"), box);
+  return { box, els, sent, errors };
+}
+
+check("workspace settings: Save commits a tag that was typed but not entered", () => {
+  const { box, els, sent } = wsModalBox();
+  box._wsTags = ["kept"];
+  els.wsTagsInput.value = "  typed  ";
+  box.saveWorkspaceSettings({ preventDefault() {} });
+  assertEqual(sent.length, 1, "no save was sent");
+  assertEqual(JSON.stringify(sent[0].body.tags), JSON.stringify(["kept", "typed"]), "the typed tag was not saved");
+});
+
+check("workspace settings: a typed tag over the limit stops Save and says why, instead of being dropped", () => {
+  const { box, els, sent, errors } = wsModalBox();
+  box._wsTags = Array.from({ length: 10 }, (_, i) => "t" + i);
+  els.wsTagsInput.value = "eleventh";
+  box.saveWorkspaceSettings({ preventDefault() {} });
+  assertEqual(sent.length, 0, "a save went out without the typed tag");
+  assert(errors.some((m) => /at most 10 tags/.test(m)), `no limit message: ${JSON.stringify(errors)}`);
+  assertEqual(els.wsTagsInput.value, "eleventh", "the refused text was cleared");
+  assertEqual(box.addWsTag("x".repeat(65)), false, "a 65-character tag was accepted");
+});
+
+check("workspace settings: no save while the discard question is up", () => {
+  const { box, els, sent } = wsModalBox();
+  els.wsConfirm.hidden = false;
+  box.saveWorkspaceSettings({ preventDefault() {} });
+  assertEqual(sent.length, 0, "a save was sent while the question was pending");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

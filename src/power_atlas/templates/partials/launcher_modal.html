@@ -1,9 +1,9 @@
-<dialog class="launcher-modal" id="launcherModal" aria-labelledby="launcherModalTitle">
+<dialog class="pa-modal launcher-modal" id="launcherModal" aria-labelledby="launcherModalTitle">
   <form method="dialog" id="launcherForm" onsubmit="saveLauncher(event)" novalidate>
     <input type="hidden" id="launcherId" value="">
     <input type="hidden" id="launcherColor" value="">
-    <div class="launcher-modal-header">
-      <img class="launcher-modal-icon" id="launcherModalIcon" alt="" aria-hidden="true" hidden>
+    <div class="pa-modal-header">
+      <img class="pa-modal-icon" id="launcherModalIcon" alt="" aria-hidden="true" hidden>
       <h3 id="launcherModalTitle">New Launcher</h3>
       {# Provider mode only: the switch that overrides everything below it, so it sits in the header. #}
       <label class="launcher-checkbox launcher-enabled-switch" id="launcherEnabledRow" hidden>
@@ -14,17 +14,17 @@
       <button type="button" class="modal-close" aria-label="Close" onclick="launcherModalRequestClose()">&times;</button>
     </div>
 
-    <section class="launcher-section" aria-labelledby="launcherSecCommand">
-      <h4 class="launcher-section-title" id="launcherSecCommand">Command</h4>
+    <section class="pa-modal-section" aria-labelledby="launcherSecCommand">
+      <h4 class="pa-modal-section-title" id="launcherSecCommand">Command</h4>
       <div class="launcher-field">
         <label for="launcherName">Name</label>
         <input type="text" id="launcherName" required placeholder="e.g. Zed" autocomplete="off" aria-describedby="launcherNameError">
-        <div class="launcher-field-error" id="launcherNameError" hidden></div>
+        <div class="pa-modal-field-error" id="launcherNameError" hidden></div>
       </div>
       <div class="launcher-field">
         <label for="launcherCommand">Command</label>
         <input type="text" id="launcherCommand" class="launcher-mono" required placeholder="e.g. code, or C:\Tools\app.exe" autocomplete="off" spellcheck="false" aria-describedby="launcherCommandError">
-        <div class="launcher-field-error" id="launcherCommandError" hidden></div>
+        <div class="pa-modal-field-error" id="launcherCommandError" hidden></div>
       </div>
       <div class="launcher-field">
         <label for="launcherArgs">Default args</label>
@@ -33,20 +33,20 @@
       <div class="launcher-field">
         <label for="launcherCwd">Working directory</label>
         <input type="text" id="launcherCwd" class="launcher-mono" maxlength="512" autocomplete="off" spellcheck="false" aria-describedby="launcherCwdHint">
-        <div class="launcher-hint" id="launcherCwdHint"></div>
+        <div class="pa-modal-hint" id="launcherCwdHint"></div>
       </div>
       <div class="launcher-field" id="launcherEnvField">
         <div class="launcher-field-label-row">
           <span class="launcher-field-label" id="launcherEnvLabel">Environment variables</span>
-          <button type="button" class="launcher-link-btn" onclick="launcherEnvAddRow('', '', true)">+ Add variable</button>
+          <button type="button" class="pa-modal-link-btn" onclick="launcherEnvAddRow('', '', true)">+ Add variable</button>
         </div>
         <div class="launcher-env-rows" id="launcherEnvRows" role="group" aria-labelledby="launcherEnvLabel"></div>
-        <div class="launcher-hint" id="launcherEnvEmpty"></div>
+        <div class="pa-modal-hint" id="launcherEnvEmpty"></div>
       </div>
     </section>
 
-    <section class="launcher-section" aria-labelledby="launcherSecAppearance">
-      <h4 class="launcher-section-title" id="launcherSecAppearance">Appearance</h4>
+    <section class="pa-modal-section" aria-labelledby="launcherSecAppearance">
+      <h4 class="pa-modal-section-title" id="launcherSecAppearance">Appearance</h4>
       <div class="launcher-appearance">
         <div class="launcher-preview-wrap" aria-hidden="true">
           <div class="launcher-tile launcher-preview" id="launcherPreview">
@@ -77,8 +77,8 @@
       </div>
     </section>
 
-    <section class="launcher-section" aria-labelledby="launcherSecBehaviour">
-      <h4 class="launcher-section-title" id="launcherSecBehaviour">Behaviour</h4>
+    <section class="pa-modal-section" aria-labelledby="launcherSecBehaviour">
+      <h4 class="pa-modal-section-title" id="launcherSecBehaviour">Behaviour</h4>
       <label class="launcher-checkbox">
         <input type="checkbox" id="launcherTerminal" checked class="launcher-toggle-input">
         <span class="launcher-checkbox-label">Open in terminal</span>
@@ -94,19 +94,19 @@
         <span class="launcher-checkbox-label">Show in workspace card quick actions</span>
         <span class="launcher-toggle-track"><span class="launcher-toggle-knob"></span></span>
       </label>
-      <div class="launcher-hint" id="launcherLockedHint" hidden>Built-in providers always launch this way, so these two are fixed.</div>
+      <div class="pa-modal-hint" id="launcherLockedHint" hidden>Built-in providers always launch this way, so these two are fixed.</div>
     </section>
 
-    <div class="launcher-form-error" id="launcherFormError" role="alert" hidden></div>
+    <div class="pa-modal-form-error" id="launcherFormError" role="alert" hidden></div>
     {# One bar for both questions this modal asks: delete, and discard unsaved changes. #}
-    <div class="launcher-confirm" id="launcherConfirm" role="alertdialog" aria-labelledby="launcherConfirmText" hidden>
-      <span class="launcher-confirm-text" id="launcherConfirmText"></span>
+    <div class="pa-modal-confirm" id="launcherConfirm" role="alertdialog" aria-labelledby="launcherConfirmText" hidden>
+      <span class="pa-modal-confirm-text" id="launcherConfirmText"></span>
       <button type="button" class="modal-cancel-btn" id="launcherConfirmNo"></button>
       <button type="button" class="modal-delete-btn" id="launcherConfirmYes"></button>
     </div>
     <div class="modal-actions" id="launcherActions">
       <button type="button" class="modal-delete-btn" id="launcherDeleteBtn" onclick="deleteLauncher()">Delete</button>
-      <span class="launcher-shortcut-hint" aria-hidden="true">Ctrl+Enter to save</span>
+      <span class="pa-modal-shortcut" aria-hidden="true">Ctrl+Enter to save</span>
       <span class="topbar-spacer"></span>
       <button type="button" class="modal-cancel-btn" onclick="launcherModalRequestClose()">Cancel</button>
       <button type="submit" class="btn-primary" id="launcherSaveBtn">Save</button>

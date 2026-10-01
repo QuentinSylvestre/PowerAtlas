@@ -1,40 +1,66 @@
-<dialog class="workspace-settings-modal" id="workspaceSettingsModal" aria-labelledby="wsSettingsTitle">
-  <form method="dialog" onsubmit="saveWorkspaceSettings(event)">
-    <h3 id="wsSettingsTitle">Workspace Settings</h3>
+<dialog class="pa-modal workspace-settings-modal" id="workspaceSettingsModal" aria-labelledby="wsSettingsTitle" aria-describedby="wsSettingsPath">
+  <form method="dialog" id="wsSettingsForm" onsubmit="saveWorkspaceSettings(event)" novalidate>
     <input type="hidden" id="wsSettingsCwd" value="">
     <input type="hidden" id="wsSettingsColor" value="">
-    <div class="ws-tags-field">
-      <span class="ws-tags-label">Tags</span>
+    <div class="pa-modal-header">
+      <div class="ws-modal-heading">
+        <h3 id="wsSettingsTitle">Workspace Settings</h3>
+        <div class="ws-modal-path" id="wsSettingsPath"></div>
+      </div>
+      <button type="button" class="modal-close" aria-label="Close" onclick="wsSettingsRequestClose()">&times;</button>
+    </div>
+
+    <section class="pa-modal-section" aria-labelledby="wsSecTags">
+      <div class="ws-modal-section-head">
+        <h4 class="pa-modal-section-title" id="wsSecTags">Tags</h4>
+        <span class="ws-tags-count" id="wsTagsCount" aria-live="polite"></span>
+      </div>
+      <div class="ws-tags-info" id="wsTagsInfo" hidden></div>
       <div class="ws-tags-container" id="wsTagsContainer">
         <div class="ws-tags-chips" id="wsTagsChips"></div>
         <div class="ws-tags-input-wrap">
-          <input type="text" id="wsTagsInput" class="ws-tags-input" placeholder="Add tag..." autocomplete="off" aria-label="Add tag">
-          <div class="ws-tags-autocomplete" id="wsTagsAutocomplete"></div>
+          <input type="text" id="wsTagsInput" class="ws-tags-input" placeholder="Add tag..." autocomplete="off" spellcheck="false"
+                 aria-label="Add tag" aria-describedby="wsTagsHint wsTagsError" aria-autocomplete="list" aria-controls="wsTagsAutocomplete" aria-expanded="false">
+          <div class="ws-tags-autocomplete" id="wsTagsAutocomplete" role="listbox" aria-label="Existing tags"></div>
         </div>
       </div>
-    </div>
-    <div class="color-picker-field">
-      <span class="color-picker-label">Folder color</span>
-      <div class="color-picker-swatches" id="wsColorPicker">
-        <button type="button" class="color-swatch color-swatch-none" data-color="" style="background:var(--surface);border:1px dashed var(--border)" aria-label="No color" title="Reset color">✕</button>
-        <button type="button" class="color-swatch" data-color="#ef4444" style="background:#ef4444" aria-label="Red"></button>
-        <button type="button" class="color-swatch" data-color="#f97316" style="background:#f97316" aria-label="Orange"></button>
-        <button type="button" class="color-swatch" data-color="#eab308" style="background:#eab308" aria-label="Yellow"></button>
-        <button type="button" class="color-swatch" data-color="#22c55e" style="background:#22c55e" aria-label="Green"></button>
-        <button type="button" class="color-swatch" data-color="#14b8a6" style="background:#14b8a6" aria-label="Teal"></button>
-        <button type="button" class="color-swatch" data-color="#06b6d4" style="background:#06b6d4" aria-label="Cyan"></button>
-        <button type="button" class="color-swatch" data-color="#3b82f6" style="background:#3b82f6" aria-label="Blue"></button>
-        <button type="button" class="color-swatch" data-color="#6366f1" style="background:#6366f1" aria-label="Indigo"></button>
-        <button type="button" class="color-swatch" data-color="#8b5cf6" style="background:#8b5cf6" aria-label="Violet"></button>
-        <button type="button" class="color-swatch" data-color="#d946ef" style="background:#d946ef" aria-label="Fuchsia"></button>
-        <button type="button" class="color-swatch" data-color="#ec4899" style="background:#ec4899" aria-label="Pink"></button>
-        <button type="button" class="color-swatch" data-color="#64748b" style="background:#64748b" aria-label="Slate"></button>
+      <div class="pa-modal-field-error" id="wsTagsError" hidden></div>
+      <div class="pa-modal-hint" id="wsTagsHint">Enter or comma adds a tag. &darr; lists existing tags; Tab picks the highlighted one.</div>
+    </section>
+
+    <section class="pa-modal-section" aria-labelledby="wsSecAppearance">
+      <h4 class="pa-modal-section-title" id="wsSecAppearance">Appearance <span class="ws-color-mixed" id="wsColorMixed" hidden>&middot; mixed, unchanged unless you pick one</span></h4>
+      <div class="color-picker-field">
+        <span class="color-picker-label" id="wsColorLabel">Folder color</span>
+        <div class="color-picker-swatches" id="wsColorPicker" role="group" aria-labelledby="wsColorLabel">
+          <button type="button" class="color-swatch color-swatch-none" data-color="" aria-label="No color" title="No color"></button>
+          <button type="button" class="color-swatch" data-color="#ef4444" style="background:#ef4444" aria-label="Red" title="Red"></button>
+          <button type="button" class="color-swatch" data-color="#f97316" style="background:#f97316" aria-label="Orange" title="Orange"></button>
+          <button type="button" class="color-swatch" data-color="#eab308" style="background:#eab308" aria-label="Yellow" title="Yellow"></button>
+          <button type="button" class="color-swatch" data-color="#22c55e" style="background:#22c55e" aria-label="Green" title="Green"></button>
+          <button type="button" class="color-swatch" data-color="#14b8a6" style="background:#14b8a6" aria-label="Teal" title="Teal"></button>
+          <button type="button" class="color-swatch" data-color="#06b6d4" style="background:#06b6d4" aria-label="Cyan" title="Cyan"></button>
+          <button type="button" class="color-swatch" data-color="#3b82f6" style="background:#3b82f6" aria-label="Blue" title="Blue"></button>
+          <button type="button" class="color-swatch" data-color="#6366f1" style="background:#6366f1" aria-label="Indigo" title="Indigo"></button>
+          <button type="button" class="color-swatch" data-color="#8b5cf6" style="background:#8b5cf6" aria-label="Violet" title="Violet"></button>
+          <button type="button" class="color-swatch" data-color="#d946ef" style="background:#d946ef" aria-label="Fuchsia" title="Fuchsia"></button>
+          <button type="button" class="color-swatch" data-color="#ec4899" style="background:#ec4899" aria-label="Pink" title="Pink"></button>
+          <button type="button" class="color-swatch" data-color="#64748b" style="background:#64748b" aria-label="Slate" title="Slate"></button>
+        </div>
       </div>
+    </section>
+
+    <div class="pa-modal-form-error" id="wsFormError" role="alert" hidden></div>
+    <div class="pa-modal-confirm pa-modal-confirm-warn" id="wsConfirm" role="alertdialog" aria-labelledby="wsConfirmText" hidden>
+      <span class="pa-modal-confirm-text" id="wsConfirmText">Discard unsaved changes?</span>
+      <button type="button" class="modal-cancel-btn" id="wsConfirmNo">Keep editing</button>
+      <button type="button" class="modal-delete-btn" id="wsConfirmYes">Discard</button>
     </div>
-    <div class="modal-actions">
+    <div class="modal-actions" id="wsActions">
+      <span class="pa-modal-shortcut" aria-hidden="true">Ctrl+Enter to save</span>
       <span class="topbar-spacer"></span>
-      <button type="button" class="modal-cancel-btn" onclick="document.getElementById('workspaceSettingsModal').close()">Cancel</button>
-      <button type="submit" class="action-btn launch">Save</button>
+      <button type="button" class="modal-cancel-btn" onclick="wsSettingsRequestClose()">Cancel</button>
+      <button type="submit" class="btn-primary" id="wsSaveBtn">Save</button>
     </div>
   </form>
 </dialog>

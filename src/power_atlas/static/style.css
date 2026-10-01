@@ -743,29 +743,30 @@ script { display: none; }
    pass), and this tile is now too small for the two to share a corner. */
 .launcher-lock { position: absolute; top: 4px; left: 4px; width: 11px; height: 11px; display: block; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; color: var(--text-dim); opacity: 0.65; }
 
-/* Launcher modal (partials/launcher_modal.html) -- new launcher, edit launcher
-   and provider settings share it. `margin: auto` restores the native <dialog>
+/* Shared settings-dialog shell (.pa-modal): the launcher modal and the
+   workspace settings modal. `margin: auto` restores the native <dialog>
    centring that `* { margin: 0 }` removes, as .profile-modal does; without it
-   the modal opened pinned to the viewport's top-left corner. Open only (a bare
+   both opened pinned to the viewport's top-left corner. Open only (a bare
    display would beat the UA's dialog:not([open]) { display: none }): a column
-   capped at the viewport whose form scrolls. `--stripe` is the chosen card
-   color, drawn as the same top bar a launcher tile has. */
-.launcher-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 0; max-width: 460px; width: 90vw; margin: auto; overflow: hidden; box-shadow: 0 16px 48px rgba(0,0,0,0.45); }
-.launcher-modal[open] { display: flex; flex-direction: column; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); animation: launcherModalIn 0.16s ease-out; }
-.launcher-modal::before { content: ''; display: block; flex: none; height: 3px; background: var(--stripe, transparent); transition: background 0.15s; }
-.launcher-modal::backdrop { background: rgba(0,0,0,0.5); animation: launcherBackdropIn 0.16s ease-out; }
-@keyframes launcherModalIn { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
-@keyframes launcherBackdropIn { from { opacity: 0; } to { opacity: 1; } }
-.launcher-modal form { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 14px 20px 16px; }
-.launcher-modal-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-.launcher-modal-header h3 { flex: 1; min-width: 0; font-size: 15px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.launcher-modal-icon { width: 22px; height: 22px; object-fit: contain; border-radius: 4px; flex-shrink: 0; }
-.launcher-modal-icon[hidden] { display: none; }
-.launcher-modal .modal-close { line-height: 1; padding: 0 2px; border-radius: var(--radius-sm); }
-.launcher-modal .modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.launcher-section { padding: 12px 0 4px; border-top: 1px solid var(--card-border); }
-.launcher-modal-header + .launcher-section { border-top: none; padding-top: 6px; }
-.launcher-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin: 0 0 8px; }
+   capped at the viewport whose form scrolls. `--stripe` is the chosen color,
+   drawn as the same top bar a launcher tile has. */
+.pa-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 0; max-width: 460px; width: 90vw; margin: auto; overflow: hidden; box-shadow: 0 16px 48px rgba(0,0,0,0.45); }
+.pa-modal[open] { display: flex; flex-direction: column; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); animation: paModalIn 0.16s ease-out; }
+.pa-modal::before { content: ''; display: block; flex: none; height: 3px; background: var(--stripe, transparent); transition: background 0.15s; }
+.pa-modal::backdrop { background: rgba(0,0,0,0.5); animation: paBackdropIn 0.16s ease-out; }
+@keyframes paModalIn { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes paBackdropIn { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .pa-modal[open], .pa-modal::backdrop { animation: none; } }
+.pa-modal > form { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 14px 20px 16px; }
+.pa-modal-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.pa-modal-header h3 { flex: 1; min-width: 0; font-size: 15px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pa-modal-icon { width: 22px; height: 22px; object-fit: contain; border-radius: 4px; flex-shrink: 0; }
+.pa-modal-icon[hidden] { display: none; }
+.pa-modal .modal-close { line-height: 1; padding: 0 2px; border-radius: var(--radius-sm); }
+.pa-modal .modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pa-modal-section { padding: 12px 0 4px; border-top: 1px solid var(--card-border); }
+.pa-modal-header + .pa-modal-section { border-top: none; padding-top: 6px; }
+.pa-modal-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin: 0 0 8px; }
 .launcher-field { margin-bottom: 10px; }
 .launcher-field > label, .launcher-field-label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
 .launcher-field-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
@@ -778,13 +779,13 @@ script { display: none; }
 /* Provider mode: name and command are fixed. They render as plain text, not
    as a field that looks editable and then refuses input. */
 .launcher-modal input[type="text"][readonly] { background: transparent; border-color: transparent; padding-left: 0; padding-right: 0; color: var(--text); box-shadow: none; cursor: default; }
-.launcher-field-error { font-size: 11.5px; color: #f87171; margin-top: 4px; }
-.launcher-hint { font-size: 11px; line-height: 1.45; color: var(--text-dim); margin-top: 4px; overflow-wrap: anywhere; }
-.launcher-hint code { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 10.5px; color: var(--text-muted); }
-.launcher-field-error[hidden], .launcher-hint[hidden], .launcher-field[hidden] { display: none; }
-.launcher-link-btn { background: none; border: none; padding: 0; color: var(--accent); font-size: 12px; cursor: pointer; }
-.launcher-link-btn:hover { text-decoration: underline; }
-.launcher-link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.pa-modal-field-error { font-size: 11.5px; color: #f87171; margin-top: 4px; }
+.pa-modal-hint { font-size: 11px; line-height: 1.45; color: var(--text-dim); margin-top: 4px; overflow-wrap: anywhere; }
+.pa-modal-hint code { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 10.5px; color: var(--text-muted); }
+.pa-modal-field-error[hidden], .pa-modal-hint[hidden], .launcher-field[hidden] { display: none; }
+.pa-modal-link-btn { background: none; border: none; padding: 0; color: var(--accent); font-size: 12px; cursor: pointer; }
+.pa-modal-link-btn:hover { text-decoration: underline; }
+.pa-modal-link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 /* Env editor: one KEY = VALUE row per variable, values masked by default.
    -webkit-text-security rather than type=password, so no password manager
    offers to save a launcher's token as this site's login. */
@@ -810,10 +811,11 @@ script { display: none; }
 .launcher-preview-placeholder[hidden] { display: none; }
 .launcher-preview-caption { font-size: 10px; color: var(--text-dim); }
 .launcher-appearance .color-picker-field { flex: 1; min-width: 228px; margin-bottom: 0; }
-/* 13 swatches beside the preview wrap 10 + 3 in a flex row; a 7-column grid
-   splits them evenly instead. The field's 228px minimum is that grid's width,
-   so on a narrow screen the row wraps and the preview sits above it. */
-.launcher-appearance .color-picker-swatches { display: grid; grid-template-columns: repeat(7, 24px); gap: 8px 10px; }
+/* 13 swatches wrap unevenly in a flex row (10 + 3 beside the launcher
+   preview, 12 + 1 in the workspace modal); a 7-column grid splits them evenly.
+   The launcher field's 228px minimum is that grid's width, so on a narrow
+   screen its row wraps and the preview sits above the swatches. */
+.pa-modal .color-picker-swatches { display: grid; grid-template-columns: repeat(7, 24px); gap: 8px 10px; }
 /* Toggle rows. `.launcher-modal .launcher-checkbox`, not the bare class, so it
    beats any generic label rule: before, `.launcher-modal label { display:
    block }` won, the rows stayed block layout and the inline track span had a
@@ -837,17 +839,17 @@ script { display: none; }
 .launcher-suboption:not([hidden]) { animation: launcherSubIn 0.16s ease-out; }
 @keyframes launcherSubIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 .launcher-modal .launcher-checkbox.launcher-enabled-switch { flex: none; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--text-muted); gap: 6px; }
-@media (prefers-reduced-motion: reduce) { .launcher-modal[open], .launcher-modal::backdrop, .launcher-suboption:not([hidden]) { animation: none; } }
-.launcher-form-error { margin-top: 10px; padding: 8px 10px; border: 1px solid rgba(248,113,113,0.5); background: rgba(248,113,113,0.1); border-radius: var(--radius-sm); color: #fca5a5; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.launcher-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding: 8px 10px; border: 1px solid #f87171; border-radius: var(--radius-sm); background: rgba(248,113,113,0.08); font-size: 12px; }
-.launcher-confirm.launcher-confirm-warn { border-color: var(--amber); background: rgba(251,191,36,0.08); }
-.launcher-confirm-text { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
-.launcher-form-error[hidden], .launcher-confirm[hidden], .modal-actions[hidden] { display: none; }
-.launcher-modal .modal-actions { margin-top: 14px; }
-.launcher-shortcut-hint { font-size: 10.5px; color: var(--text-dim); }
-.launcher-modal .btn-primary { padding: 6px 18px; }
-.launcher-modal .btn-primary:disabled { opacity: 0.45; cursor: default; background: var(--accent); }
-.launcher-modal .btn-primary:focus-visible, .launcher-modal .modal-cancel-btn:focus-visible, .launcher-modal .modal-delete-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .launcher-suboption:not([hidden]) { animation: none; } }
+.pa-modal-form-error { margin-top: 10px; padding: 8px 10px; border: 1px solid rgba(248,113,113,0.5); background: rgba(248,113,113,0.1); border-radius: var(--radius-sm); color: #fca5a5; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.pa-modal-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding: 8px 10px; border: 1px solid #f87171; border-radius: var(--radius-sm); background: rgba(248,113,113,0.08); font-size: 12px; }
+.pa-modal-confirm.pa-modal-confirm-warn { border-color: var(--amber); background: rgba(251,191,36,0.08); }
+.pa-modal-confirm-text { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.pa-modal-form-error[hidden], .pa-modal-confirm[hidden], .modal-actions[hidden] { display: none; }
+.pa-modal .modal-actions { margin-top: 14px; }
+.pa-modal-shortcut { font-size: 10.5px; color: var(--text-dim); }
+.pa-modal .btn-primary { padding: 6px 18px; }
+.pa-modal .btn-primary:disabled { opacity: 0.45; cursor: default; background: var(--accent); }
+.pa-modal .btn-primary:focus-visible, .pa-modal .modal-cancel-btn:focus-visible, .pa-modal .modal-delete-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .modal-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
 .modal-delete-btn { background: none; border: 1px solid #f87171; border-radius: var(--radius-sm); color: #f87171; cursor: pointer; padding: 6px 12px; font-size: 12px; }
 .modal-delete-btn:hover { background: rgba(248,113,113,0.12); }
@@ -1020,28 +1022,39 @@ script { display: none; }
 }
 
 
-/* Workspace settings modal */
-.workspace-settings-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 20px; max-width: 420px; width: 90vw; }
-.workspace-settings-modal::backdrop { background: rgba(0,0,0,0.5); }
-.workspace-settings-modal h3 { margin-bottom: 12px; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* Tag chip input */
-.ws-tags-field { margin-bottom: 12px; }
-.ws-tags-label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 4px; }
+/* Workspace settings modal (partials/workspace_settings_modal.html). The
+   dialog shell, header, sections and footer are .pa-modal's; these are the
+   parts only this modal has. */
+.ws-modal-heading { flex: 1; min-width: 0; }
+.ws-modal-path { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+/* A single path is cut from its start, so the folder name stays visible;
+   the LRM marks _wsOpen adds keep rtl from moving the path's punctuation. */
+.ws-modal-path.from-start { direction: rtl; text-align: left; }
+.ws-modal-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.ws-tags-count { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.ws-tags-count.at-limit { color: var(--amber); }
+.ws-tags-count[hidden], .ws-color-mixed[hidden] { display: none; }
+.ws-color-mixed { font-size: 11px; color: var(--text-dim); margin-left: 6px; font-weight: 400; text-transform: none; letter-spacing: 0; }
 .ws-tags-container { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 6px; background: var(--bg); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: 34px; }
-.ws-tags-container:focus-within { border-color: var(--accent); }
+.ws-tags-container:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.ws-tags-container[aria-invalid="true"] { border-color: #f87171; }
 .ws-tags-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .ws-tag-chip { display: inline-flex; align-items: center; gap: 2px; background: var(--accent-dim); color: var(--text); border: 1px solid transparent; border-radius: 12px; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
 .ws-tag-remove { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
 .ws-tag-remove:hover { color: var(--text); }
 .ws-tags-input-wrap { position: relative; flex: 1; min-width: 80px; }
 .ws-tags-input { border: none; background: transparent; color: var(--text); font-size: 13px; outline: none; width: 100%; padding: 4px 0; }
+.ws-tags-input::placeholder { color: var(--text-dim); }
+/* The tag's own color from Tag Management, beside its name. */
+.ws-tag-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; margin-right: 3px; }
+.ws-tag-count-badge { font-size: 10px; color: var(--text-muted); margin-left: 4px; font-variant-numeric: tabular-nums; }
 .ws-tags-autocomplete { display: none; position: absolute; left: 0; top: 100%; width: 200px; max-height: 160px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
 .ws-ac-item { padding: 6px 10px; font-size: 12px; cursor: pointer; }
 .ws-ac-item:hover, .ws-ac-item.highlighted { background: var(--accent-dim); }
 .ws-tag-chip.ws-tag-partial { opacity: 0.5; border-style: dashed; border-color: var(--text-muted); }
 .ws-tag-chip.ws-tag-new { background: var(--accent); color: white; border-color: var(--accent); }
-.ws-tags-info { font-size: 11px; color: var(--text-muted); padding: 4px 0 6px; line-height: 1.5; }
-.ws-info-line { display: block; }
+.ws-tags-info { font-size: 11px; color: var(--text-muted); padding: 0 0 6px; line-height: 1.5; }
+.ws-tags-info[hidden] { display: none; }
 
 /* Agent orchestrator page (/acp) */
 /* The logo at phone width, where the banner is 376 px of a 390 px row. Plain
