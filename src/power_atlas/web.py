@@ -95,11 +95,13 @@ PROVIDER_COLORS = {
     "claude-code": "#c2590f",
     "kiro-ide": "#8b5cf6",
     "kiro-cli-v3": "#7138cc",
+    "codex": "#ffffff",  # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
 }
 PROVIDER_DISPLAY_NAMES = {
     "claude-code": "Claude Code",
     "kiro-ide": "Kiro IDE",
     "kiro-cli-v3": "kiro-cli v3",
+    "codex": "Codex",
 }
 PROVIDER_BADGES = {
     "claude-code": "C",
@@ -110,6 +112,7 @@ _PROVIDER_BINARY_DISPLAY = {
     "claude-code": "claude",
     "kiro-ide": "kiro",
     "kiro-cli-v3": "kiro-cli chat --agent-engine v3 --trust-tools *",
+    "codex": "codex",
 }
 
 
@@ -5710,8 +5713,19 @@ async def api_session_transcript(sid: str = "", provider: str = "kiro-cli-v3", c
         return JSONResponse({"error": "invalid session id"}, status_code=400)
     from . import transcript_translator
 
-    events = await asyncio.to_thread(data.get_full_transcript, sid, provider, cwd)
-    frames = transcript_translator.translate_transcript(events, sid)
+    # The markdown parse per message is real work on a transcript of thousands
+    # of events, so it runs in the same thread hop as the file read, off the
+    # event loop. A rollout that vanishes mid-read (Codex deletes and rewrites
+    # them) is an empty transcript, not a 500.
+    # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
+    def _read_and_translate() -> list:
+        events = data.get_full_transcript(sid, provider, cwd)
+        return transcript_translator.translate_transcript(events, sid)
+
+    try:
+        frames = await asyncio.to_thread(_read_and_translate)
+    except OSError:
+        frames = []
     return {"events": frames}
 
 

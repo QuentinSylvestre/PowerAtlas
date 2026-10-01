@@ -1,7 +1,7 @@
 """Provider-aware session data orchestrator.
 
 Shared types (Session, _FileInfo) and the compound-keyed SessionCache live here.
-Provider adapters (data_claude, data_kiro_ide, data_kiro_v3) handle discovery and parsing.
+Provider adapters (data_claude, data_codex, data_kiro_ide, data_kiro_v3) handle discovery and parsing.
 """
 
 import re
@@ -69,6 +69,10 @@ class TranscriptEvent:
     tool_args: the tool's raw call arguments -- "tool_call" only.
     success: whether the tool succeeded -- "tool_result" only (None if unknown).
     timestamp: ISO-ish on-disk timestamp when the provider's format has one, else "".
+    outcome_unknown: "tool_result" only: the call finished but the file records no
+        outcome for it (success stays None). Only the Codex adapter sets it, so a
+        result with an unknown outcome from any other provider is unchanged
+        (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, D13).
     """
     kind: str
     text: str = ""
@@ -77,6 +81,7 @@ class TranscriptEvent:
     tool_args: dict = field(default_factory=dict, hash=False, compare=False)
     success: bool | None = None
     timestamp: str = ""
+    outcome_unknown: bool = False
 
 
 @dataclass
@@ -169,7 +174,7 @@ class BoundedCache:
 
 
 # Import provider modules AFTER defining shared types to avoid circular import
-from . import data_claude, data_kiro_ide, data_kiro_v3  # noqa: E402
+from . import data_claude, data_codex, data_kiro_ide, data_kiro_v3  # noqa: E402
 
 
 # Provider registry: name -> module
@@ -177,6 +182,8 @@ PROVIDERS: dict[str, object] = {
     "claude-code": data_claude,
     "kiro-ide": data_kiro_ide,
     "kiro-cli-v3": data_kiro_v3,
+    # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
+    "codex": data_codex,
 }
 
 

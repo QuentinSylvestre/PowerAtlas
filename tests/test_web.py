@@ -130,7 +130,21 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(overview_mod, "_usage_stop", threading.Event())
     monkeypatch.setattr(overview_mod, "_usage_bg", [None])
     monkeypatch.setattr(web_mod, "_overview_filters_cache", [0.0, None])
+    # Codex is a registered provider, so `lifespan`'s warm-up, the provider
+    # list and the transcript route would otherwise read the developer's real
+    # ~/.codex. The three roots move to tmp_path, the 5 s memos are switched
+    # off, and every Codex cache starts empty.
+    # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
+    from power_atlas import data_codex as data_codex_mod
+    monkeypatch.setattr(data_codex_mod, "CODEX_SESSIONS_DIR", tmp_path / "codex-home" / "sessions")
+    monkeypatch.setattr(data_codex_mod, "CODEX_SESSION_INDEX",
+                        tmp_path / "codex-home" / "session_index.jsonl")
+    monkeypatch.setattr(data_codex_mod, "CODEX_LOCKS_DIR", tmp_path / "codex-home" / "thread-writer-locks")
+    monkeypatch.setattr(data_codex_mod, "_STORE_TTL", 0.0)
+    monkeypatch.setattr(data_codex_mod, "_AVAILABLE_TTL", 0.0)
+    data_codex_mod._clear_caches()
     yield tmp_path
+    data_codex_mod._clear_caches()
     thread = overview_mod._usage_bg[0]
     if thread is not None:
         thread.join(timeout=30)
@@ -671,6 +685,121 @@ class TestSessionTranscriptAPI:
                 "/api/session-transcript?sid=sess_aabbccdd-1234-5678-abcd-ef0123456789")
         assert resp.status_code == 200
         mock_full.assert_called_once()
+
+
+class TestCodexProviderSurface:
+    """Codex as a built-in provider: its registry entry, colour, name, and the
+    transcript route's thread hop. Fixtures are synthetic rollouts written into
+    the redirected Codex root; no real session content enters this file.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1"""
+
+    _SID = "0000000a-1111-4222-8333-00000000000a"
+
+    @staticmethod
+    def _write_rollout(root, sid, records):
+        folder = root / "codex-home" / "sessions" / "2026" / "09" / "01"
+        folder.mkdir(parents=True, exist_ok=True)
+        meta = {"ordinal": 0, "timestamp": "2026-09-01T10:00:00Z", "type": "session_meta", "payload": {
+            "id": sid, "cwd": "C:\\Work\\Proj", "source": "cli", "timestamp": "2026-09-01T10:00:00Z"}}
+        lines = [json.dumps(r) for r in [meta] + records]
+        (folder / f"rollout-2026-09-01T10-00-00-{sid}.jsonl").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _item(item_type, text, content_type):
+        return {"ordinal": 1, "timestamp": "2026-09-01T10:00:01Z", "type": "event_msg", "payload": {
+            "type": "item_completed",
+            "item": {"type": item_type, "content": [{"type": content_type, "text": text}]}}}
+
+    def test_codex_roots_are_redirected_from_the_real_home(self, isolated_config):
+        """Fails if the fixture left a Codex root under the real ~/.codex: the
+        lifespan warm-up and every provider listing would read a developer's store."""
+        from power_atlas import data_codex
+        real = [Path.home() / ".codex"]
+        if os.environ.get("CODEX_HOME", "").strip():
+            real.append(Path(os.environ["CODEX_HOME"]))
+        for root in (data_codex.CODEX_SESSIONS_DIR, data_codex.CODEX_SESSION_INDEX,
+                     data_codex.CODEX_LOCKS_DIR):
+            assert Path(root).resolve().is_relative_to(isolated_config.resolve()), root
+            for forbidden in real:
+                assert not Path(root).resolve().is_relative_to(forbidden.resolve()), root
+
+    def test_provider_tables_know_codex(self):
+        from power_atlas import web as web_mod
+        assert web_mod.PROVIDER_COLORS["codex"] == "#ffffff"
+        assert web_mod.PROVIDER_DISPLAY_NAMES["codex"] == "Codex"
+        assert web_mod._PROVIDER_BINARY_DISPLAY["codex"] == "codex"
+
+    def test_codex_is_listed_only_when_its_store_has_a_rollout(self, client, isolated_config):
+        names = [p["name"] for p in client.get("/api/available-providers").json()]
+        assert "codex" not in names
+        self._write_rollout(isolated_config, self._SID, [])
+        listed = {p["name"]: p for p in client.get("/api/available-providers").json()}
+        assert listed["codex"] == {"name": "codex", "display": "Codex", "color": "#ffffff"}
+
+    def test_a_disabled_codex_is_not_listed(self, client, isolated_config):
+        from power_atlas.config import Config
+        self._write_rollout(isolated_config, self._SID, [])
+        config = Config(provider_settings={"codex": {"enabled": False}})
+        with patch("power_atlas.web.load_config", return_value=config):
+            names = [p["name"] for p in client.get("/api/available-providers").json()]
+        assert "codex" not in names
+
+    def test_provider_color_is_white_and_a_user_color_overrides_it(self):
+        from power_atlas import web as web_mod
+        from power_atlas.config import Config
+        assert web_mod._get_provider_color("codex", Config()) == "#ffffff"
+        custom = Config(provider_settings={"codex": {"color": "#123456"}})
+        assert web_mod._get_provider_color("codex", custom) == "#123456"
+        # Another provider's setting does not leak into Codex's colour.
+        other = Config(provider_settings={"claude-code": {"color": "#123456"}})
+        assert web_mod._get_provider_color("codex", other) == "#ffffff"
+
+    def test_codex_transcript_route_returns_frames_for_a_real_rollout(self, client, isolated_config):
+        self._write_rollout(isolated_config, self._SID, [
+            self._item("UserMessage", "list the files", "text"),
+            self._item("AgentMessage", "here they are", "Text"),
+            {"ordinal": 3, "timestamp": "2026-09-01T10:00:03Z", "type": "response_item", "payload": {
+                "type": "custom_tool_call", "name": "exec", "input": "ls", "call_id": "e1"}},
+            {"ordinal": 4, "timestamp": "2026-09-01T10:00:04Z", "type": "response_item", "payload": {
+                "type": "custom_tool_call_output", "call_id": "e1",
+                "output": [{"type": "input_text", "text": "Script completed"}]}},
+        ])
+        resp = client.get(f"/api/session-transcript?sid={self._SID}&provider=codex&cwd=C%3A%5CWork%5CProj")
+        assert resp.status_code == 200
+        frames = resp.json()["events"]
+        assert [f["type"] for f in frames] == [
+            "chunk", "rendered", "chunk", "rendered", "tool_call", "tool_update"]
+        assert [f["payload"].get("text") for f in frames if f["type"] == "chunk"] == [
+            "list the files", "here they are"]
+        assert frames[-1]["payload"] == {"toolCallId": "e1", "status": "completed"}
+
+    def test_translation_runs_off_the_event_loop(self, client):
+        """`translate_transcript` is a markdown parse per message; on the event
+        loop a transcript of thousands of events would stall every other route."""
+        from power_atlas import transcript_translator
+        seen = []
+        real = transcript_translator.translate_transcript
+
+        def spy(events, sid):
+            try:
+                asyncio.get_running_loop()
+                seen.append("on the loop")
+            except RuntimeError:
+                seen.append("off the loop")
+            return real(events, sid)
+
+        with patch("power_atlas.web.data.get_full_transcript", return_value=[]), \
+                patch.object(transcript_translator, "translate_transcript", spy):
+            resp = client.get(f"/api/session-transcript?sid={self._SID}&provider=codex")
+        assert resp.status_code == 200
+        assert seen == ["off the loop"]
+
+    def test_a_rollout_that_vanishes_mid_read_is_an_empty_transcript(self, client):
+        with patch("power_atlas.web.data.get_full_transcript", side_effect=FileNotFoundError("gone")):
+            resp = client.get(f"/api/session-transcript?sid={self._SID}&provider=codex")
+        assert resp.status_code == 200
+        assert resp.json() == {"events": []}
 
 
 class TestSessionAvailabilityAPI:

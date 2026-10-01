@@ -1,9 +1,12 @@
 """Tests for data module."""
 
+import ast
+import builtins
 import contextlib
 import itertools
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -13,6 +16,8 @@ from unittest.mock import patch
 
 import pytest
 
+from power_atlas import data as data_mod
+from power_atlas import data_codex
 from power_atlas.data import (
     Session, SessionCache, _FileInfo,
     get_sessions, session_cache,
@@ -1683,3 +1688,1017 @@ def test_read_tail_lines_discards_partial_first_line(tmp_path):
 
 
 
+
+# --- Codex adapter (data_codex.py) ---
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
+#
+# Every fixture here is SYNTHETIC, built by the helpers below from the record
+# key paths measured in Phase 0 (plan section 9, item 4). No real session text,
+# id, path or folder name from any developer's store belongs in this file: the
+# repository is public.
+
+_CX_TS = "2026-09-01T10:00:00.000Z"
+_CX_OLD = 1_577_836_800  # 2020-01-01T00:00:00Z: older than every record timestamp below
+
+
+def _cx_id(n: int) -> str:
+    """A synthetic thread id, distinct per n and never a real one."""
+    return f"{n:08x}-1111-4222-8333-{n:012x}"
+
+
+@pytest.fixture(autouse=True)
+def codex_home(tmp_path, monkeypatch):
+    """Point the three Codex roots at tmp_path and drop every Codex cache.
+
+    Autouse and unconditional: the adapter is registered in `data.PROVIDERS`, so
+    any test that lists providers would otherwise read the developer's real
+    ~/.codex. The 5 s memos are disabled so a test sees each store mutation.
+    """
+    home = tmp_path / "codex-home"
+    monkeypatch.setattr(data_codex, "CODEX_SESSIONS_DIR", home / "sessions")
+    monkeypatch.setattr(data_codex, "CODEX_SESSION_INDEX", home / "session_index.jsonl")
+    monkeypatch.setattr(data_codex, "CODEX_LOCKS_DIR", home / "thread-writer-locks")
+    monkeypatch.setattr(data_codex, "_STORE_TTL", 0.0)
+    monkeypatch.setattr(data_codex, "_AVAILABLE_TTL", 0.0)
+    data_codex._clear_caches()
+    yield home
+    data_codex._clear_caches()
+
+
+def _cx_rec(rtype, payload, ts=_CX_TS):
+    return {"ordinal": 0, "timestamp": ts, "type": rtype, "payload": payload}
+
+
+def _cx_meta(sid, cwd, *, source="cli", ts=_CX_TS, base_chars=17000, **extra):
+    payload = {
+        "id": sid, "session_id": sid, "timestamp": ts, "cwd": cwd,
+        "originator": "codex_cli_rs", "cli_version": "0.159.2", "source": source,
+        "model_provider": "openai", "history_mode": "full",
+        "base_instructions": {"text": "b" * base_chars},
+    }
+    payload.update(extra)
+    return _cx_rec("session_meta", payload, ts)
+
+
+def _cx_user(text, ts=_CX_TS):
+    return _cx_rec("event_msg", {
+        "type": "item_completed", "thread_id": "t", "turn_id": "u", "completed_at_ms": 1,
+        "item": {"type": "UserMessage", "id": "i1",
+                 "content": [{"type": "text", "text": text, "text_elements": []}]},
+    }, ts)
+
+
+def _cx_agent(text, ts=_CX_TS):
+    return _cx_rec("event_msg", {
+        "type": "item_completed", "thread_id": "t", "turn_id": "u", "completed_at_ms": 2,
+        "item": {"type": "AgentMessage", "id": "i2", "phase": "final_answer",
+                 "content": [{"type": "Text", "text": text}]},
+    }, ts)
+
+
+def _cx_injected(text):
+    """A user-role response_item message: injected context, never a prompt."""
+    return _cx_rec("response_item", {
+        "type": "message", "role": "user", "id": "m1",
+        "content": [{"type": "input_text", "text": text}],
+    })
+
+
+def _cx_call(name, arguments, call_id, ts=_CX_TS):
+    return _cx_rec("response_item", {
+        "type": "function_call", "name": name, "arguments": arguments, "call_id": call_id}, ts)
+
+
+def _cx_custom_call(name, input_text, call_id, ts=_CX_TS):
+    return _cx_rec("response_item", {
+        "type": "custom_tool_call", "name": name, "input": input_text,
+        "call_id": call_id, "status": "completed"}, ts)
+
+
+def _cx_output(call_id, output, *, custom=False, ts=_CX_TS):
+    kind = "custom_tool_call_output" if custom else "function_call_output"
+    return _cx_rec("response_item", {"type": kind, "call_id": call_id, "output": output}, ts)
+
+
+def _cx_line(rec) -> bytes:
+    return json.dumps(rec, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def _cx_write(home, sid, cwd, records=(), *, day="2026/09/01", source="cli", ts=_CX_TS,
+              first=None, name=None, tail=b"", mtime=None) -> Path:
+    """Write one rollout. `first` overrides the first line, `tail` is appended raw,
+    `mtime` (epoch seconds) overrides the strictly increasing fixture mtime."""
+    folder = home / "sessions" / day
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (name or f"rollout-2026-09-01T10-00-00-{sid}.jsonl")
+    head = first if first is not None else _cx_line(_cx_meta(sid, cwd, source=source, ts=ts))
+    path.write_bytes(head + b"".join(_cx_line(r) for r in records) + tail)
+    if mtime is None:
+        _bump_mtime(path)
+    else:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def _cx_index(home, entries):
+    path = home / "session_index.jsonl"
+    path.write_bytes(b"".join(
+        _cx_line({"id": i, "thread_name": n, "updated_at": _CX_TS}) for i, n in entries))
+    _bump_mtime(path)
+    return path
+
+
+class _CountingFile:
+    """Wraps a handle and counts the bytes the adapter actually reads from it."""
+
+    def __init__(self, fh, counter):
+        self._fh, self._counter = fh, counter
+
+    def read(self, *args):
+        chunk = self._fh.read(*args)
+        self._counter[0] += len(chunk)
+        return chunk
+
+    def readline(self, *args):
+        line = self._fh.readline(*args)
+        self._counter[0] += len(line)
+        return line
+
+    def seek(self, *args):
+        return self._fh.seek(*args)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._fh.close()
+
+
+@pytest.fixture
+def counted_reads(monkeypatch):
+    """A one-element list holding the bytes read through `open_shared` since patching."""
+    counter = [0]
+    real = data_codex.open_shared
+    monkeypatch.setattr(data_codex, "open_shared",
+                        lambda path, mode="rb": _CountingFile(real(path, mode), counter))
+    return counter
+
+
+def _cx_filler(n_lines, width=1000):
+    """Lines that carry no message and no tool record: they only take space."""
+    return [_cx_rec("turn_context", {"model": "m", "cwd": "C:\\x", "pad": "p" * width})
+            for _ in range(n_lines)]
+
+
+class TestCodexGuards:
+    def test_roots_are_redirected_from_the_real_home(self):
+        """Fails if any Codex root still resolves under the real ~/.codex (or
+        $CODEX_HOME): an unpatched root would let a test read a developer's store."""
+        real = [Path.home() / ".codex"]
+        if os.environ.get("CODEX_HOME", "").strip():
+            real.append(Path(os.environ["CODEX_HOME"]))
+        for root in (data_codex.CODEX_SESSIONS_DIR, data_codex.CODEX_SESSION_INDEX,
+                     data_codex.CODEX_LOCKS_DIR):
+            for forbidden in real:
+                assert not Path(root).resolve().is_relative_to(forbidden.resolve()), root
+
+    def test_codex_is_a_registered_provider(self):
+        assert data_mod.PROVIDERS["codex"] is data_codex
+
+    def test_platform_modules_are_not_imported_at_top_level(self):
+        """D23: a top-level `import msvcrt` / `fcntl` breaks import on the other OS."""
+        tree = ast.parse(Path(data_codex.__file__).read_text(encoding="utf-8"))
+        top = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                top.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top.add(node.module.split(".")[0])
+        assert not top & {"msvcrt", "fcntl", "ctypes", "winreg"}
+
+    def test_open_shared_posix_branch(self, tmp_path, monkeypatch):
+        p = tmp_path / "f.bin"
+        p.write_bytes(b"abc")
+        monkeypatch.setattr(sys, "platform", "linux")
+        with data_codex.open_shared(p) as fh:
+            assert fh.read() == b"abc"
+
+    def test_open_shared_never_creates_and_rejects_text_modes(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            data_codex.open_shared(tmp_path / "absent.lock", "r+b")
+        with pytest.raises(ValueError):
+            data_codex.open_shared(tmp_path / "x", "r")
+
+
+class TestCodexSharedDelete:
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows file-sharing semantics")
+    def test_another_process_can_rename_and_remove_while_a_reader_is_open(self, tmp_path):
+        target = tmp_path / "rollout.jsonl"
+        script = ("import os, sys\n"
+                  "src, dst = sys.argv[1:3]\n"
+                  "os.rename(src, dst)\n"
+                  "os.remove(dst)\n"
+                  "print('renamed-and-removed')\n")
+
+        def attempt(opener):
+            target.write_bytes(b"line\n")
+            with opener(target) as fh:
+                assert fh.read(1) == b"l"
+                return subprocess.run(
+                    [sys.executable, "-c", script, str(target), str(tmp_path / "moved.jsonl")],
+                    capture_output=True, text=True, timeout=60)
+
+        # Control: a plain open() blocks both (winerror 32), which is the defect
+        # open_shared exists to avoid.
+        blocked = attempt(lambda p: open(p, "rb"))
+        assert blocked.returncode != 0
+        assert "renamed-and-removed" not in blocked.stdout
+        assert target.exists()
+
+        shared = attempt(data_codex.open_shared)
+        assert shared.returncode == 0, shared.stderr
+        assert "renamed-and-removed" in shared.stdout
+        assert not target.exists()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows file-sharing semantics")
+    def test_read_write_handle_does_not_block_removal_either(self, tmp_path):
+        """The two lock files of Phase 3 are opened `r+b`; Codex removes them."""
+        target = tmp_path / "x.lock"
+        target.write_bytes(b"")
+        with data_codex.open_shared(target, "r+b") as fh:
+            fh.seek(0)
+            os.remove(target)  # same process: needs FILE_SHARE_DELETE on the handle
+        assert not target.exists()
+
+    def test_no_public_function_reads_a_rollout_through_builtins_open(
+            self, codex_home, monkeypatch):
+        """Every rollout read goes through open_shared (D10). `activity_epoch` is
+        Phase 3 and is not part of this check yet."""
+        sid, cwd = _cx_id(1), "C:\\Work\\One"
+        _cx_write(codex_home, sid, cwd, [_cx_user("hello there"), _cx_agent("hi back"),
+                                         _cx_call("shell_command", '{"command":"ls"}', "c1"),
+                                         _cx_output("c1", "Exit code: 0\nOutput:\nok")])
+        real_open = builtins.open
+        root = str(data_codex.CODEX_SESSIONS_DIR).lower()
+
+        def guarded(file, *args, **kwargs):
+            if isinstance(file, (str, os.PathLike)) and os.fspath(file).lower().startswith(root):
+                raise AssertionError(f"builtins.open used for a rollout: {file}")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", guarded)
+        # Each result is non-neutral: a contained AssertionError would otherwise
+        # read as a pass.
+        assert data_codex.is_available() is True
+        found = data_codex.discover_workspaces()
+        assert [(c, n) for c, n, _ in found] == [(cwd, 1)]
+        sessions, stats = data_codex.load_sessions(cwd)
+        assert [s.first_prompt for s in sessions] == ["hello there"]
+        assert data_codex.find_session_workspace(sid) == cwd
+        path = data_codex.rollout_path(sid)
+        assert path is not None
+        assert data_codex.read_meta(path)["cwd"] == cwd
+        assert data_codex.is_subagent_rollout(path) is False
+        assert data_codex.get_session_tail(sid, cwd) == ["hi back"]
+        assert data_codex.get_first_prompt(sid, cwd) == "hello there"
+        assert [e.kind for e in data_codex.get_full_transcript(sid, cwd)] == [
+            "user", "assistant", "tool_call", "tool_result"]
+        assert data_codex.refresh_stale_entries_for_cwd(data_mod._normalize_path(cwd), stats) is False
+
+
+class TestCodexAvailability:
+    def test_unavailable_without_rollouts(self, codex_home):
+        assert data_codex.is_available() is False
+        (codex_home / "sessions" / "2026" / "09" / "01").mkdir(parents=True)
+        assert data_codex.is_available() is False
+
+    def test_available_with_a_rollout_in_any_date_folder(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", day="2031/12/31")
+        assert data_codex.is_available() is True
+
+    def test_archived_sessions_sibling_is_ignored(self, codex_home):
+        archived = codex_home / "archived_sessions"
+        archived.mkdir(parents=True)
+        (archived / f"rollout-2026-09-01T10-00-00-{_cx_id(1)}.jsonl").write_bytes(
+            _cx_line(_cx_meta(_cx_id(1), "C:\\W")))
+        assert data_codex.is_available() is False
+        assert data_codex.discover_workspaces() == []
+
+    def test_unreadable_root_is_false_and_does_not_raise(self, codex_home, monkeypatch):
+        _cx_write(codex_home, _cx_id(1), "C:\\W")
+        assert data_codex.is_available() is True
+
+        def denied(*args, **kwargs):
+            raise PermissionError("denied")
+        monkeypatch.setattr(os, "scandir", denied)
+        data_codex._clear_caches()
+        assert data_codex.is_available() is False
+        assert data_codex.discover_workspaces() == []
+
+    def test_root_that_is_a_file_is_unavailable(self, codex_home, monkeypatch):
+        not_a_dir = codex_home / "plain-file"
+        codex_home.mkdir(parents=True, exist_ok=True)
+        not_a_dir.write_bytes(b"x")
+        monkeypatch.setattr(data_codex, "CODEX_SESSIONS_DIR", not_a_dir)
+        assert data_codex.is_available() is False
+
+
+class TestCodexDiscovery:
+    def test_subagent_rollouts_are_excluded_and_every_top_level_source_kept(self, codex_home):
+        cwd = "C:\\Work\\Proj"
+        spawn = {"subagent": {"thread_spawn": {"agent_nickname": None, "agent_path": None,
+                                               "agent_role": None, "depth": 1,
+                                               "parent_thread_id": _cx_id(1)}}}
+        guardian = {"subagent": {"other": "guardian"}}
+        _cx_write(codex_home, _cx_id(1), cwd, source="cli")
+        _cx_write(codex_home, _cx_id(2), cwd, source="vscode")
+        # A string that merely says "subagent", and an object without the key,
+        # are top-level: only an object containing the key `subagent` is a child.
+        _cx_write(codex_home, _cx_id(3), cwd, source="subagent")
+        _cx_write(codex_home, _cx_id(4), cwd, source={"other_key": 1})
+        _cx_write(codex_home, _cx_id(5), cwd, source=spawn)
+        _cx_write(codex_home, _cx_id(6), cwd, source=guardian)
+        sessions, _ = data_codex.load_sessions(cwd)
+        assert {s.session_id for s in sessions} == {_cx_id(1), _cx_id(2), _cx_id(3), _cx_id(4)}
+        assert [(c, n) for c, n, _ in data_codex.discover_workspaces()] == [(cwd, 4)]
+        assert data_codex.find_session_workspace(_cx_id(5)) is None
+        # ... while the file itself is still found, and classified as a child.
+        child = data_codex.rollout_path(_cx_id(5))
+        assert data_codex.is_subagent_rollout(child) is True
+        assert data_codex.is_subagent_rollout(data_codex.rollout_path(_cx_id(3))) is False
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="drive-letter case folding is Windows-only")
+    def test_cwds_differing_only_in_drive_letter_case_are_one_workspace(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\Work\\Proj", mtime=_CX_OLD)
+        _cx_write(codex_home, _cx_id(2), "c:\\Work\\Proj")  # newer, lower-case spelling
+        _cx_write(codex_home, _cx_id(3), "C:\\Work\\Other", mtime=_CX_OLD + 5)
+        found = {c: n for c, n, _ in data_codex.discover_workspaces()}
+        # The display spelling is the one the most recently modified session used.
+        assert found == {"c:\\Work\\Proj": 2, "C:\\Work\\Other": 1}
+        sessions, _ = data_codex.load_sessions("C:\\Work\\Proj")
+        assert {s.session_id for s in sessions} == {_cx_id(1), _cx_id(2)}
+
+    def test_workspaces_come_back_newest_first_with_session_counts(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\A", mtime=_CX_OLD)
+        _cx_write(codex_home, _cx_id(2), "C:\\B", mtime=_CX_OLD + 100)
+        _cx_write(codex_home, _cx_id(3), "C:\\B", mtime=_CX_OLD + 50)
+        _cx_write(codex_home, _cx_id(4), "C:\\B", mtime=_CX_OLD + 10)
+        found = data_codex.discover_workspaces()
+        assert [(c, n) for c, n, _ in found] == [("C:\\B", 3), ("C:\\A", 1)]
+        assert found[0][2] == "2020-01-01T00:01:40.000000+00:00"
+
+    @pytest.mark.parametrize("case", [
+        "legacy_without_payload", "torn_first_line", "first_line_over_cap", "non_dict_first_line",
+        "wrong_typed_cwd", "list_cwd", "empty_cwd", "blank_cwd", "wrong_typed_id", "non_uuid_id",
+        "id_differs_from_filename", "recursion_bomb", "empty_file", "binary_garbage", "payload_not_a_dict",
+        "not_session_meta",
+    ])
+    def test_a_bad_file_is_skipped_and_never_affects_other_sessions(self, codex_home, case):
+        good_cwd = "C:\\Work\\Good"
+        bad_sid = _cx_id(2)
+        _cx_write(codex_home, _cx_id(1), good_cwd)
+        bad_cwd = "C:\\Work\\Bad"
+        meta = _cx_meta(bad_sid, bad_cwd)
+        first = {
+            "legacy_without_payload": _cx_line({"id": bad_sid, "timestamp": _CX_TS, "cwd": bad_cwd,
+                                                "instructions": "x"}),
+            "torn_first_line": b'{"ordinal":0,"timestamp":"2026-09-01T10:0',
+            "first_line_over_cap": _cx_line(_cx_meta(bad_sid, bad_cwd, base_chars=300_000)),
+            "non_dict_first_line": b"[1,2,3]\n",
+            "wrong_typed_cwd": _cx_line(_cx_meta(bad_sid, 5)),
+            "list_cwd": _cx_line(_cx_meta(bad_sid, [bad_cwd])),
+            "empty_cwd": _cx_line(_cx_meta(bad_sid, "")),
+            "blank_cwd": _cx_line(_cx_meta(bad_sid, "   ")),
+            "wrong_typed_id": _cx_line({**meta, "payload": {**meta["payload"], "id": 7}}),
+            "non_uuid_id": _cx_line({**meta, "payload": {**meta["payload"], "id": "not-a-uuid"}}),
+            "id_differs_from_filename": _cx_line(_cx_meta(_cx_id(99), bad_cwd)),
+            # Under the 256 KiB cap so it reaches json.loads: the nesting, not
+            # the size, is what is being tolerated.
+            "recursion_bomb": b"[" * 100_000 + b"]" * 100_000 + b"\n",
+            "empty_file": b"",
+            "binary_garbage": bytes(range(256)) * 8 + b"\n",
+            "payload_not_a_dict": _cx_line({**meta, "payload": [1, 2]}),
+            "not_session_meta": _cx_line({**meta, "type": "event_msg"}),
+        }[case]
+        _cx_write(codex_home, bad_sid, bad_cwd, first=first)
+        sessions, stats = data_codex.load_sessions(good_cwd)
+        assert [s.session_id for s in sessions] == [_cx_id(1)]
+        assert [(c, n) for c, n, _ in data_codex.discover_workspaces()] == [(good_cwd, 1)]
+        assert data_codex.load_sessions(bad_cwd)[0] == []
+        assert data_codex.find_session_workspace(bad_sid) is None
+
+    def test_wrong_typed_timestamp_falls_back_to_the_file_mtime(self, codex_home):
+        """D10 (the plan's test list says such a file is skipped; the decision
+        text says its timestamp falls back to the mtime: the decision is
+        followed and the divergence recorded)."""
+        meta = _cx_meta(_cx_id(1), "C:\\W")
+        meta["payload"]["timestamp"] = ["not", "a", "time"]
+        _cx_write(codex_home, _cx_id(1), "C:\\W", first=_cx_line(meta), mtime=_CX_OLD)
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.created_at == "2020-01-01T00:00:00.000000+00:00"
+
+    def test_created_at_is_normalised_to_utc_iso(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", ts="2026-09-01T12:30:00+02:00")
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.created_at == "2026-09-01T10:30:00.000000+00:00"
+
+    def test_unknown_record_types_and_cli_version_are_tolerated(self, codex_home):
+        meta = _cx_meta(_cx_id(1), "C:\\W", cli_version="99.0.0-future", novel_key={"a": [1]})
+        _cx_write(codex_home, _cx_id(1), "C:\\W", first=_cx_line(meta), records=[
+            _cx_rec("novel_future_type", {"x": 1}), _cx_user("still found"),
+            _cx_rec("event_msg", {"type": "brand_new_event"})])
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.first_prompt == "still found"
+
+    def test_two_rollouts_for_one_thread_id_the_newer_wins(self, codex_home):
+        sid, cwd = _cx_id(1), "C:\\W"
+        older = _cx_write(codex_home, sid, cwd, [_cx_user("from the older file")], day="2026/09/01")
+        newer = _cx_write(codex_home, sid, cwd, [_cx_user("from the newer file")], day="2026/09/02",
+                          name=f"rollout-2026-09-02T10-00-00-{sid}.jsonl")
+        assert os.stat(newer).st_mtime_ns > os.stat(older).st_mtime_ns
+        sessions, stats = data_codex.load_sessions(cwd)
+        assert [s.first_prompt for s in sessions] == ["from the newer file"]
+        assert [(c, n) for c, n, _ in data_codex.discover_workspaces()] == [(cwd, 1)]
+        assert data_codex.rollout_path(sid) == newer
+        assert str(newer) in stats and str(older) not in stats
+        # The other way round: the file with the later mtime wins, not the later name.
+        _bump_mtime(older)
+        data_codex._clear_caches()
+        assert data_codex.rollout_path(sid) == older
+        assert data_codex.load_sessions(cwd)[0][0].first_prompt == "from the older file"
+
+
+class TestCodexPrompts:
+    def test_first_real_prompt_ignores_a_40kb_injected_user_message(self, codex_home):
+        injected = "# AGENTS.md instructions for C:\\Work\\Proj\n" + "rule " * 8000  # about 40 KB
+        assert len(injected) >= 40_000
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [
+            _cx_injected(injected), _cx_user("fix the flaky parser"), _cx_agent("on it")])
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.first_prompt == "fix the flaky parser"
+        assert session.title == "fix the flaky parser"
+        assert not session.first_prompt.startswith("# AGENTS.md")
+
+    def test_a_session_with_only_injected_context_has_no_prompt_and_is_titled_by_its_id(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [_cx_injected("# AGENTS.md instructions\nrules")])
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.first_prompt == "" and session.last_prompt == ""
+        assert session.title == _cx_id(1)
+
+    def test_first_prompt_last_prompt_and_reply_tail_come_from_the_right_ends(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [
+            _cx_user("first question"), _cx_agent("first answer"),
+            _cx_user("second question"), _cx_agent("second answer"),
+            _cx_rec("token_count", {"type": "token_count", "info": None})])
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.first_prompt == "first question"
+        assert session.last_prompt == "second question"
+        assert session.last_reply_tail == "second answer"
+
+    def test_text_caps(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [
+            _cx_user("p" * 500), _cx_agent("r" * 500), _cx_user("q" * 500)])
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert len(session.first_prompt) == 200 and len(session.last_prompt) == 200
+        assert len(session.last_reply_tail) == 100
+        assert len(session.title) == 80
+
+    def test_multi_element_content_and_non_text_elements(self, codex_home):
+        rec = _cx_user("unused")
+        rec["payload"]["item"]["content"] = [
+            {"type": "text", "text": "look at"}, {"type": "local_image", "path": "x.png"},
+            {"type": "image"}, {"type": "text", "text": "this"}]
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [rec])
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.first_prompt == "look at this"
+
+    def test_wrong_typed_record_fields_are_ignored(self, codex_home):
+        junk = [
+            {"ordinal": 1, "timestamp": _CX_TS, "type": "event_msg", "payload": "text"},
+            {"ordinal": 2, "timestamp": _CX_TS, "type": "event_msg",
+             "payload": {"type": "item_completed", "item": [1, 2]}},
+            {"ordinal": 3, "timestamp": 5, "type": "event_msg",
+             "payload": {"type": "item_completed", "item": {"type": "UserMessage", "content": "no list"}}},
+            {"ordinal": 4, "timestamp": _CX_TS, "type": "event_msg",
+             "payload": {"type": "item_completed", "item": {"type": "UserMessage",
+                                                            "content": [{"type": "text", "text": 42}]}}},
+            {"ordinal": 5, "timestamp": _CX_TS, "type": 7, "payload": {}},
+            [1, 2], "a string", 3,
+        ]
+        _cx_write(codex_home, _cx_id(1), "C:\\W", junk + [_cx_user("the real one")])
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.first_prompt == "the real one"
+        events = data_codex.get_full_transcript(_cx_id(1), "C:\\W")
+        assert [e.text for e in events] == ["the real one"]
+
+    def test_a_prompt_beyond_the_first_tail_window_is_found_by_widening(self, codex_home):
+        """The last UserMessage sits more than 256 KiB from the end, behind
+        filler whose line length makes the window start mid-line."""
+        records = ([_cx_user("opening prompt")] + _cx_filler(3)
+                   + [_cx_user("closing prompt"), _cx_agent("closing reply")]
+                   + _cx_filler(700, width=1013))
+        _cx_write(codex_home, _cx_id(1), "C:\\W", records)
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.first_prompt == "opening prompt"
+        assert session.last_prompt == "closing prompt"
+        assert session.last_reply_tail == "closing reply"
+
+    def test_a_user_message_over_the_line_cap_is_skipped_and_the_next_one_is_the_first_prompt(
+            self, codex_home):
+        huge = _cx_user("H" * 300_000)  # a valid UserMessage, over 256 KiB
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [huge, _cx_user("small real prompt")])
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.first_prompt == "small real prompt"
+        assert session.title == "small real prompt"
+
+    def test_get_first_prompt_and_get_session_tail_smoke(self, codex_home):
+        sid = _cx_id(1)
+        _cx_write(codex_home, sid, "C:\\W", [
+            _cx_injected("ctx"), _cx_user("ask one"), _cx_agent("answer one"),
+            _cx_user("ask two"), _cx_agent("answer two"), _cx_agent("answer three")])
+        assert data_codex.get_first_prompt(sid, "C:\\W") == "ask one"
+        assert data_codex.get_session_tail(sid, "C:\\W") == ["answer one", "answer two", "answer three"]
+        assert data_codex.get_session_tail(sid, "C:\\W", max_lines=2) == ["answer two", "answer three"]
+        assert data_codex.get_session_tail(sid, "C:\\W", max_lines=0) == []
+        assert data_codex.get_first_prompt(_cx_id(2), "C:\\W") == ""
+        assert data_codex.get_session_tail("../../etc/passwd", "C:\\W") == []
+
+
+class TestCodexTitles:
+    def test_index_name_beats_the_first_prompt_and_the_last_duplicate_wins(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [_cx_user("a prompt")])
+        _cx_write(codex_home, _cx_id(2), "C:\\W", [_cx_user("another prompt")])
+        _cx_index(codex_home, [(_cx_id(1), "Old name"), (_cx_id(1), "New name"),
+                               (_cx_id(3), "Other thread")])
+        titles = {s.session_id: s.title for s in data_codex.load_sessions("C:\\W")[0]}
+        assert titles == {_cx_id(1): "New name", _cx_id(2): "another prompt"}
+
+    def test_blank_or_malformed_index_entries_do_not_name_a_session(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [_cx_user("a prompt")])
+        index = codex_home / "session_index.jsonl"
+        index.write_bytes(_cx_line({"id": _cx_id(1), "thread_name": "   "}) + b"not json\n"
+                          + _cx_line({"id": 5, "thread_name": "x"}) + _cx_line([1]))
+        assert data_codex.load_sessions("C:\\W")[0][0].title == "a prompt"
+
+    def test_a_rename_with_an_unchanged_rollout_shows_and_marks_the_workspace_stale(self, codex_home):
+        cwd = "C:\\W"
+        _cx_write(codex_home, _cx_id(1), cwd, [_cx_user("a prompt")])
+        _cx_index(codex_home, [(_cx_id(1), "AAAA")])
+        sessions, stats = data_codex.load_sessions(cwd)
+        assert sessions[0].title == "AAAA"
+        norm = data_mod._normalize_path(cwd)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is False
+        _cx_index(codex_home, [(_cx_id(1), "BBBB")])  # same size, only the mtime moves
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is True
+        assert data_codex.load_sessions(cwd)[0][0].title == "BBBB"
+
+    def test_the_index_appearing_or_vanishing_marks_the_workspace_stale(self, codex_home):
+        cwd = "C:\\W"
+        _cx_write(codex_home, _cx_id(1), cwd, [_cx_user("a prompt")])
+        norm = data_mod._normalize_path(cwd)
+        _sessions, absent = data_codex.load_sessions(cwd)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, absent) is False
+        index = _cx_index(codex_home, [(_cx_id(1), "Named")])
+        assert data_codex.refresh_stale_entries_for_cwd(norm, absent) is True
+        _sessions, present = data_codex.load_sessions(cwd)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, present) is False
+        os.remove(index)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, present) is True
+
+
+class TestCodexUpdatedAt:
+    def test_the_last_complete_record_beats_a_frozen_older_mtime(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [
+            _cx_user("a", ts="2026-09-01T10:01:00Z"), _cx_agent("b", ts="2026-09-01T10:05:00Z")],
+            mtime=_CX_OLD)
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.updated_at == "2026-09-01T10:05:00.000000+00:00"
+
+    def test_a_newer_mtime_beats_an_older_last_record(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [_cx_user("a", ts="2026-09-01T10:01:00Z")],
+                  mtime=1_900_000_000)  # 2030-03-17
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.updated_at == "2030-03-17T17:46:40.000000+00:00"
+
+    def test_a_torn_last_line_is_not_a_record(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [_cx_user("a", ts="2026-09-01T10:01:00Z")],
+                  tail=b'{"ordinal":9,"timestamp":"2026-09-01T23:59:59Z","type":"event_ms', mtime=_CX_OLD)
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.updated_at == "2026-09-01T10:01:00.000000+00:00"
+
+    def test_a_future_record_timestamp_cannot_pin_a_session(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [_cx_user("a", ts="2999-01-01T00:00:00Z")],
+                  mtime=_CX_OLD)
+        (session,), _ = data_codex.load_sessions("C:\\W")
+        assert session.updated_at < "2100"
+        assert datetime.fromisoformat(session.updated_at) <= datetime.now(timezone.utc)
+
+
+class TestCodexParseCache:
+    def test_a_frozen_mtime_with_a_growing_size_is_reparsed(self, codex_home):
+        """Windows freezes the mtime of a rollout Codex holds open while it grows."""
+        sid, cwd = _cx_id(1), "C:\\W"
+        path = _cx_write(codex_home, sid, cwd, [_cx_user("first"), _cx_user("second")])
+        assert data_codex.load_sessions(cwd)[0][0].last_prompt == "second"
+        frozen = os.stat(path).st_mtime_ns
+        with open(path, "ab") as fh:
+            fh.write(_cx_line(_cx_user("third")))
+        os.utime(path, ns=(frozen, frozen))
+        assert os.stat(path).st_mtime_ns == frozen
+        sessions, stats = data_codex.load_sessions(cwd)
+        assert sessions[0].last_prompt == "third"
+        assert sessions[0].first_prompt == "first"
+        assert stats[str(path)].size == os.stat(path).st_size
+
+    def test_a_rewritten_smaller_file_is_reparsed(self, codex_home):
+        """Compaction rewrites a rollout in place; a file only ever shrinking
+        or changing size at the same mtime must not serve the old parse."""
+        sid, cwd = _cx_id(1), "C:\\W"
+        path = _cx_write(codex_home, sid, cwd, [_cx_user("before compaction " + "x" * 3000),
+                                                _cx_agent("long reply " + "y" * 3000)])
+        assert data_codex.load_sessions(cwd)[0][0].first_prompt.startswith("before compaction")
+        mtime = os.stat(path).st_mtime_ns
+        big = os.stat(path).st_size
+        path.write_bytes(_cx_line(_cx_meta(sid, cwd)) + _cx_line(_cx_user("after")))
+        os.utime(path, ns=(mtime, mtime))
+        assert os.stat(path).st_size < big
+        (session,), _ = data_codex.load_sessions(cwd)
+        assert session.first_prompt == "after"
+        assert session.last_reply_tail == ""
+
+    def test_an_unchanged_file_is_not_reparsed(self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        _cx_write(codex_home, _cx_id(1), cwd, [_cx_user("a")])
+        calls = []
+        real = data_codex._parse_rollout
+        monkeypatch.setattr(data_codex, "_parse_rollout", lambda p: calls.append(p) or real(p))
+        data_codex.load_sessions(cwd)
+        data_codex.load_sessions(cwd)
+        data_codex.discover_workspaces()
+        assert len(calls) == 1
+
+    def test_the_store_index_is_reused_within_its_ttl(self, codex_home, monkeypatch):
+        _cx_write(codex_home, _cx_id(1), "C:\\W")
+        monkeypatch.setattr(data_codex, "_STORE_TTL", 5.0)
+        walks = []
+        real = data_codex._walk_rollouts
+        monkeypatch.setattr(data_codex, "_walk_rollouts", lambda root: walks.append(root) or real(root))
+        for _ in range(3):
+            data_codex.discover_workspaces()
+            data_codex.find_session_workspace(_cx_id(1))
+            data_codex.rollout_path(_cx_id(1))
+        assert len(walks) == 1
+        # A rollout that appears is seen once the memo is rebuilt (never a glob per call).
+        _cx_write(codex_home, _cx_id(2), "C:\\W")
+        monkeypatch.setattr(data_codex, "_STORE_TTL", 0.0)
+        assert [n for _, n, _ in data_codex.discover_workspaces()] == [2]
+
+    def test_the_caches_are_larger_than_the_store(self):
+        """A cache smaller than a sequential scan thrashes on every pass (D10)."""
+        assert data_codex._parse_cache._maxsize >= 4096
+        assert data_codex._verdict_cache._maxsize >= 4096
+
+
+class TestCodexBoundedReads:
+    def test_head_and_tail_scans_read_no_more_than_their_caps(self, codex_home, counted_reads):
+        """No message anywhere in 7 MB: the head scan runs to its 1 MiB cap and the
+        tail scan widens to its 2 MiB cap, and neither reads one byte more."""
+        sid, cwd = _cx_id(1), "C:\\W"
+        path = _cx_write(codex_home, sid, cwd, _cx_filler(7000))
+        first_line = len(_cx_line(_cx_meta(sid, cwd)))
+        assert path.stat().st_size > 7_000_000
+        (session,), _ = data_codex.load_sessions(cwd)
+        assert session.first_prompt == ""
+        reads = counted_reads[0]
+        # One first-line read for the verdict, then head (first line included) <= 1 MiB,
+        # tail <= 2 MiB.
+        assert reads <= first_line + 1 * 1024 * 1024 + 2 * 1024 * 1024
+        assert reads >= 3 * 1024 * 1024 - 64 * 1024, "the scans did not run to their caps"
+
+    def test_a_small_file_is_read_once_per_scan_not_per_widening(self, codex_home, counted_reads):
+        _cx_write(codex_home, _cx_id(1), "C:\\W", [_cx_user("a"), _cx_agent("b")])
+        size = next((codex_home / "sessions").rglob("*.jsonl")).stat().st_size
+        data_codex.load_sessions("C:\\W")
+        first_line = len(_cx_line(_cx_meta(_cx_id(1), "C:\\W")))
+        assert counted_reads[0] <= first_line + size + size  # verdict + head + tail, nothing more
+
+    def test_transcript_reads_at_most_8_mib_and_keeps_the_last_3000_events(
+            self, codex_home, counted_reads):
+        sid, cwd = _cx_id(1), "C:\\W"
+        pad = "z" * 1200
+        records = [_cx_agent(f"msg-{i:06d} {pad}") for i in range(24_000)]
+        path = _cx_write(codex_home, sid, cwd, records)
+        assert path.stat().st_size > 28_000_000
+        events = data_codex.get_full_transcript(sid, cwd)
+        first_line = len(_cx_line(_cx_meta(sid, cwd)))  # read once to classify the file
+        assert counted_reads[0] <= 8 * 1024 * 1024 + 1 + first_line  # the window, one byte early
+        assert len(events) == 3000 + 1
+        notice, *kept = events
+        assert notice.kind == "assistant" and notice.text.startswith("(Earlier events omitted")
+        # The last 3000 of the 24,000 (independent of the code): ids 21000..23999.
+        assert kept[0].text.startswith("msg-021000 ") and kept[-1].text.startswith("msg-023999 ")
+        assert [e.text[:10] for e in kept] == [f"msg-{i:06d}" for i in range(21_000, 24_000)]
+
+    def test_event_cap_alone_says_how_many_were_left_out(self, codex_home):
+        sid, cwd = _cx_id(1), "C:\\W"
+        _cx_write(codex_home, sid, cwd, [_cx_agent(f"m{i}") for i in range(3005)])
+        events = data_codex.get_full_transcript(sid, cwd)
+        assert events[0].text == "(Earlier events omitted: showing the last 3000 of 3005.)"
+        assert events[1].text == "m5" and events[-1].text == "m3004"
+
+    def test_a_transcript_within_every_cap_has_no_notice(self, codex_home):
+        sid, cwd = _cx_id(1), "C:\\W"
+        _cx_write(codex_home, sid, cwd, [_cx_agent("only")])
+        assert [e.text for e in data_codex.get_full_transcript(sid, cwd)] == ["only"]
+
+    @pytest.mark.parametrize("window, expected", [(4095, 3), (4096, 4), (4097, 4), (4098, 4)])
+    def test_the_window_starts_at_the_first_complete_line(self, codex_home, monkeypatch, window, expected):
+        """Six 1024-byte lines: a window of 4096 starts exactly on a line boundary
+        and keeps that line; one byte less starts inside it and drops it."""
+        sid, cwd = _cx_id(1), "C:\\W"
+
+        def line_of_1024(i):
+            base = len(_cx_line(_cx_agent(f"line-{i}-")))
+            return _cx_agent(f"line-{i}-" + "k" * (1024 - base))
+
+        records = [line_of_1024(i) for i in range(6)]
+        assert all(len(_cx_line(r)) == 1024 for r in records)
+        _cx_write(codex_home, sid, cwd, records)
+        monkeypatch.setattr(data_codex, "_TRANSCRIPT_WINDOW", window)
+        events = data_codex.get_full_transcript(sid, cwd)
+        assert events[0].text.startswith("(Earlier events omitted")
+        kept = [e.text.split("-")[1] for e in events[1:]]
+        assert kept == [str(i) for i in range(6 - expected, 6)]
+
+    def test_a_line_over_the_cap_is_skipped_without_losing_the_lines_after_it(self, codex_home):
+        sid, cwd = _cx_id(1), "C:\\W"
+        _cx_write(codex_home, sid, cwd, [
+            _cx_user("before"), _cx_agent("H" * 300_000), _cx_agent("after the giant"),
+            _cx_user("U" * 300_000), _cx_agent("last")])
+        texts = [e.text for e in data_codex.get_full_transcript(sid, cwd)]
+        assert texts == ["before", "after the giant", "last"]
+
+    def test_a_line_that_is_not_json_is_skipped_and_the_rest_still_read(self, codex_home):
+        sid, cwd = _cx_id(1), "C:\\W"
+        path = _cx_write(codex_home, sid, cwd, [_cx_user("one")])
+        with open(path, "ab") as fh:
+            fh.write(b'{"torn line\n' + b"\xff\xfe not utf-8 \n" + b"[" * 50_000 + b"\n")
+            fh.write(_cx_line(_cx_agent("two")))
+        assert [e.text for e in data_codex.get_full_transcript(sid, cwd)] == ["one", "two"]
+
+
+class TestCodexLookups:
+    def test_find_session_workspace_and_rollout_path(self, codex_home):
+        sid, cwd = _cx_id(1), "C:\\Work\\Proj"
+        path = _cx_write(codex_home, sid, cwd)
+        assert data_codex.find_session_workspace(sid) == cwd
+        assert data_codex.find_session_workspace(sid.upper()) == cwd
+        assert data_codex.rollout_path(sid) == path
+        assert data_codex.find_session_workspace(_cx_id(2)) is None
+        assert data_codex.rollout_path(_cx_id(2)) is None
+
+    @pytest.mark.parametrize("bad", ["", "..", "../x", "not-a-uuid", _cx_id(1) + "/..",
+                                     _cx_id(1)[:-1], None, 5])
+    def test_an_invalid_id_is_refused_before_any_lookup(self, codex_home, monkeypatch, bad):
+        monkeypatch.setattr(data_codex, "_store_index",
+                            lambda: pytest.fail("the store was consulted for an invalid id"))
+        assert data_codex.rollout_path(bad) is None
+        assert data_codex.find_session_workspace(bad) is None
+
+    def test_a_kiro_style_id_is_simply_not_found(self, codex_home):
+        _cx_write(codex_home, _cx_id(1), "C:\\W")
+        assert data_codex.rollout_path("sess_" + _cx_id(1)) is None
+
+    def test_the_negative_memo_is_bounded_and_a_new_rollout_is_still_found(self, codex_home):
+        for n in range(1000, 1000 + 700):
+            assert data_codex.rollout_path(_cx_id(n)) is None
+        assert len(data_codex._missing) <= 512
+        # The last id looked up is still remembered as missing; a rollout that
+        # then appears must be found anyway.
+        _cx_write(codex_home, _cx_id(1699), "C:\\W")
+        assert data_codex.rollout_path(_cx_id(1699)) is not None
+
+    def test_refresh_stale_entries_for_cwd(self, codex_home):
+        cwd = "C:\\W"
+        norm = data_mod._normalize_path(cwd)
+        keep = _cx_write(codex_home, _cx_id(1), cwd, [_cx_user("a")], day="2026/09/01")
+        gone = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("b")], day="2026/09/01")
+        _sessions, stats = data_codex.load_sessions(cwd)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is False
+        assert data_codex.refresh_stale_entries_for_cwd(norm, {}) is False
+        # A new rollout in a date folder far from today's.
+        _cx_write(codex_home, _cx_id(3), cwd, day="2019/02/03")
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is True
+        # ... a sub-agent rollout for the same cwd is not a new session ...
+        _sessions, stats = data_codex.load_sessions(cwd)
+        _cx_write(codex_home, _cx_id(4), cwd, source={"subagent": {"other": "guardian"}})
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is False
+        # ... a changed file ...
+        with open(keep, "ab") as fh:
+            fh.write(_cx_line(_cx_agent("more")))
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is True
+        _sessions, stats = data_codex.load_sessions(cwd)
+        # ... and a deleted one.
+        os.remove(gone)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is True
+
+    def test_read_meta_and_is_subagent_rollout(self, codex_home):
+        path = _cx_write(codex_home, _cx_id(1), "C:\\W", source="vscode")
+        meta = data_codex.read_meta(path)
+        assert meta["cwd"] == "C:\\W" and meta["source"] == "vscode" and meta["id"] == _cx_id(1)
+        assert "base_instructions" not in meta  # 17 KB to 42 KB per file, never needed
+        bad = _cx_write(codex_home, _cx_id(2), "C:\\W", first=b"[1]\n")
+        assert data_codex.read_meta(bad) is None
+        assert data_codex.read_meta(codex_home / "missing.jsonl") is None
+        assert data_codex.is_subagent_rollout(codex_home / "missing.jsonl") is False
+        legacy = _cx_write(codex_home, _cx_id(3), "C:\\W", first=_cx_line({"id": _cx_id(3)}))
+        assert data_codex.is_subagent_rollout(legacy) is False  # legacy is skipped, not a child
+
+
+class TestCodexTranscript:
+    def _transcript(self, codex_home, records):
+        sid, cwd = _cx_id(1), "C:\\W"
+        _cx_write(codex_home, sid, cwd, records)
+        return data_codex.get_full_transcript(sid, cwd)
+
+    def test_message_mapping_ignores_injected_context_and_other_records(self, codex_home):
+        events = self._transcript(codex_home, [
+            _cx_injected("# AGENTS.md instructions " + "x" * 100),
+            _cx_user("question", ts="2026-09-01T10:00:01Z"),
+            _cx_rec("response_item", {"type": "message", "role": "assistant",
+                                      "content": [{"type": "output_text", "text": "duplicate of the item"}]}),
+            _cx_rec("response_item", {"type": "reasoning", "encrypted_content": "zz"}),
+            _cx_rec("event_msg", {"type": "token_count", "info": None}),
+            _cx_agent("answer", ts="2026-09-01T10:00:02Z")])
+        assert [(e.kind, e.text, e.timestamp) for e in events] == [
+            ("user", "question", "2026-09-01T10:00:01Z"),
+            ("assistant", "answer", "2026-09-01T10:00:02Z")]
+
+    def test_tool_success_comes_from_the_tools_own_exit_code(self, codex_home):
+        events = self._transcript(codex_home, [
+            _cx_call("shell_command", '{"command":"ls","workdir":"C:\\\\w"}', "c0"),
+            _cx_output("c0", "Exit code: 0\nWall time: 0.1 seconds\nOutput:\nfine"),
+            _cx_call("shell_command", '{"command":"false"}', "c1"),
+            _cx_output("c1", "Exit code: 1\nWall time: 0.1 seconds\nOutput:\n"),
+            _cx_call("shell_command", '{"command":"x"}', "c2"),
+            _cx_output("c2", "Exit code: 10\nWall time: 0.1 seconds"),
+            _cx_call("shell", '{"command":["git","status"]}', "c3"),
+            _cx_output("c3", json.dumps({"output": "ok", "metadata": {"exit_code": 0, "duration_seconds": 0.1}})),
+            _cx_call("shell", '{"command":["false"]}', "c4"),
+            _cx_output("c4", json.dumps({"output": "no", "metadata": {"exit_code": 2, "duration_seconds": 0.1}})),
+            _cx_custom_call("apply_patch", "*** Begin Patch\n*** End Patch", "c5"),
+            _cx_output("c5", json.dumps({"output": "Done", "metadata": {"exit_code": 0}}), custom=True),
+            _cx_custom_call("apply_patch", "*** Begin Patch", "c6"),
+            _cx_output("c6", "Exit code: 3\nWall time: 0s", custom=True),
+        ])
+        calls = {e.tool_call_id: e for e in events if e.kind == "tool_call"}
+        results = {e.tool_call_id: e.success for e in events if e.kind == "tool_result"}
+        assert results == {"c0": True, "c1": False, "c2": False, "c3": True, "c4": False,
+                           "c5": True, "c6": False}
+        assert calls["c0"].tool_name == "shell_command"
+        assert calls["c0"].tool_args == {"command": "ls", "workdir": "C:\\w"}
+        assert calls["c3"].tool_args == {"command": ["git", "status"]}
+        assert calls["c5"].tool_args == {"content": "*** Begin Patch\n*** End Patch"}
+        assert not any(e.outcome_unknown for e in events)
+
+    def test_an_exec_output_is_completed_with_an_unknown_outcome_not_a_success(self, codex_home):
+        events = self._transcript(codex_home, [
+            _cx_custom_call("exec", "text('hi')", "e1"),
+            _cx_output("e1", [{"type": "input_text", "text": "Script completed\nWall time 0.0 seconds"}],
+                       custom=True),
+            _cx_custom_call("exec", "text('there')", "e2"),
+            _cx_output("e2", "Script running with cell ID 7", custom=True),
+            _cx_call("update_plan", '{"plan":[]}', "u1"),
+            _cx_output("u1", "Plan updated"),
+        ])
+        results = {e.tool_call_id: e for e in events if e.kind == "tool_result"}
+        for call_id in ("e1", "e2"):
+            assert results[call_id].success is None
+            assert results[call_id].outcome_unknown is True
+        # Only `exec` carries the flag: another tool with no exit code is unchanged.
+        assert results["u1"].success is None and results["u1"].outcome_unknown is False
+
+    def test_exec_is_shown_as_completed_not_started_in_the_translated_frames(self, codex_home):
+        from power_atlas.transcript_translator import translate_transcript
+        sid = _cx_id(1)
+        events = self._transcript(codex_home, [
+            _cx_custom_call("exec", "text('hi')", "e1"),
+            _cx_output("e1", [{"type": "input_text", "text": "Script completed"}], custom=True),
+            _cx_call("update_plan", '{"plan":[]}', "u1"),
+            _cx_output("u1", "Plan updated")])
+        frames = translate_transcript(events, sid)
+        assert [(f["type"], f["payload"]["toolCallId"], f["payload"]["status"]) for f in frames] == [
+            ("tool_call", "e1", "started"), ("tool_update", "e1", "completed"),
+            ("tool_call", "u1", "started")]
+
+    def test_tool_arguments_are_cut_and_odd_shapes_survive(self, codex_home):
+        events = self._transcript(codex_home, [
+            _cx_call("shell_command", json.dumps({"command": "x" * 5000, "nested": ["y" * 5000] * 3}), "a1"),
+            _cx_custom_call("apply_patch", "p" * 5000, "a2"),
+            _cx_call("weird", "not json {", "a3"),
+            _cx_call("weird", "[1, 2]", "a4"),
+            _cx_call("weird", "r" * 5000, "a5"),
+            _cx_call("many", json.dumps({"items": list(range(500))}), "a6"),
+            _cx_rec("response_item", {"type": "function_call", "name": "no_id", "arguments": "{}"}),
+        ])
+        args = {e.tool_call_id: e.tool_args for e in events if e.kind == "tool_call"}
+        assert len(args["a1"]["command"]) == 2000 and args["a1"]["command"] == "x" * 2000
+        assert [len(s) for s in args["a1"]["nested"]] == [2000] * 3
+        assert len(args["a2"]["content"]) == 2000
+        assert args["a3"] == {"raw": "not json {"}
+        assert args["a4"] == {"raw": "[1, 2]"}
+        assert len(args["a5"]["raw"]) == 2000
+        assert len(args["a6"]["items"]) == 50
+        assert set(args) == {"a1", "a2", "a3", "a4", "a5", "a6"}  # a call without an id is dropped
+
+    def test_a_result_whose_call_is_before_the_window_keeps_no_flag(self, codex_home, monkeypatch):
+        """The call (and so its name) was left out by the window: no guess."""
+        sid, cwd = _cx_id(1), "C:\\W"
+        records = [_cx_custom_call("exec", "x", "e1")] + _cx_filler(40) + [
+            _cx_output("e1", "Script completed", custom=True)]
+        _cx_write(codex_home, sid, cwd, records)
+        monkeypatch.setattr(data_codex, "_TRANSCRIPT_WINDOW", 8 * 1024)
+        events = data_codex.get_full_transcript(sid, cwd)
+        results = [e for e in events if e.kind == "tool_result"]
+        assert [(e.tool_call_id, e.outcome_unknown) for e in results] == [("e1", False)]
+        assert not [e for e in events if e.kind == "tool_call"]
+
+
+class TestCodexFailureIsolation:
+    def test_every_public_function_contains_a_raising_helper(self, codex_home, monkeypatch):
+        sid, cwd = _cx_id(1), "C:\\W"
+        path = _cx_write(codex_home, sid, cwd, [_cx_user("a")])
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(data_codex, "_store_index", boom)
+        monkeypatch.setattr(data_codex, "_walk_rollouts", boom)
+        monkeypatch.setattr(data_codex, "_read_meta_payload", boom)
+        monkeypatch.setattr(data_codex, "open_shared", boom)
+        assert data_codex.is_available() is False
+        assert data_codex.discover_workspaces() == []
+        assert data_codex.load_sessions(cwd) == ([], {})
+        st = path.stat()
+        assert data_codex.refresh_stale_entries_for_cwd(
+            "c:\\w", {str(path): _FileInfo(st.st_mtime, st.st_size)}) is False
+        assert data_codex.find_session_workspace(sid) is None
+        assert data_codex.rollout_path(sid) is None
+        assert data_codex.get_session_tail(sid, cwd) == []
+        assert data_codex.get_first_prompt(sid, cwd) == ""
+        assert data_codex.get_full_transcript(sid, cwd) == []
+        assert data_codex.read_meta(path) is None
+        assert data_codex.is_subagent_rollout(path) is False
+
+    def test_a_raising_adapter_does_not_stop_warmup_all(self, codex_home, monkeypatch):
+        sid = _cx_id(1)
+        _cx_write(codex_home, sid, "C:\\W")
+        monkeypatch.setattr(data_mod, "PROVIDERS", {"codex": data_codex})
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(data_codex, "_store_index", boom)
+        data_mod.warmup_done.clear()
+        data_mod.warmup_all([str(codex_home)], [sid])
+        assert data_mod.warmup_done.is_set()
+
+    def test_a_file_that_cannot_be_opened_is_skipped_by_discovery_and_listing(self, codex_home, monkeypatch):
+        """A rollout another process holds exclusively, or one deleted between the
+        walk and the read, must cost one session and nothing else."""
+        cwd = "C:\\W"
+        _cx_write(codex_home, _cx_id(1), cwd, [_cx_user("fine")])
+        locked = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("locked")])
+        real = data_codex._read_meta_payload
+
+        def read_meta_payload(path):
+            if path == str(locked):
+                raise PermissionError("held exclusively")
+            return real(path)
+        monkeypatch.setattr(data_codex, "_read_meta_payload", read_meta_payload)
+        assert [(c, n) for c, n, _ in data_codex.discover_workspaces()] == [(cwd, 1)]
+        assert [s.session_id for s in data_codex.load_sessions(cwd)[0]] == [_cx_id(1)]
+        assert data_codex.find_session_workspace(_cx_id(2)) is None
+
+    def test_one_file_that_fails_while_listing_does_not_blank_the_workspace(self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        _cx_write(codex_home, _cx_id(1), cwd, [_cx_user("fine")])
+        bad = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("poisoned")])
+        real = data_codex._parse_rollout
+
+        def parse(path):
+            if path == str(bad):
+                raise RuntimeError("boom")
+            return real(path)
+        monkeypatch.setattr(data_codex, "_parse_rollout", parse)
+        assert [s.session_id for s in data_codex.load_sessions(cwd)[0]] == [_cx_id(1)]
+
+    def test_the_failure_log_is_throttled_and_carries_no_content(self, codex_home, monkeypatch, caplog):
+        sid, cwd = _cx_id(1), "C:\\W"
+        path = _cx_write(codex_home, sid, cwd, [_cx_user("SECRET-PROMPT-TEXT")])
+        monkeypatch.setattr(data_codex, "_read_meta_payload",
+                            lambda p: (_ for _ in ()).throw(RuntimeError("SECRET-PROMPT-TEXT")))
+        with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
+            for _ in range(5):
+                data_codex.read_meta(path)
+        messages = [r.getMessage() for r in caplog.records]
+        assert len(messages) == 1
+        assert "SECRET-PROMPT-TEXT" not in messages[0] and "RuntimeError" in messages[0]

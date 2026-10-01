@@ -158,3 +158,64 @@ class TestDeriveToolDisplay:
         for tool_name in tt._TOOL_KIND_BY_NAME:
             _, kind, _ = tt._derive_tool_display(tool_name, {})
             assert kind in known_kinds
+
+
+class TestCodexToolNames:
+    """261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, D14."""
+
+    @pytest.mark.parametrize("name, kind, title", [
+        ("shell_command", "execute", "Run command"),
+        ("exec", "execute", "Run command"),
+        ("apply_patch", "edit", "Apply patch"),
+        ("view_image", "read", "View image"),
+    ])
+    def test_codex_tool_names_have_their_own_kind_and_title(self, name, kind, title):
+        got_title, got_kind, _ = tt._derive_tool_display(name, {})
+        assert (got_kind, got_title) == (kind, title)
+
+    def test_a_shell_command_call_shows_its_command(self):
+        frames = tt.translate_transcript([TranscriptEvent(
+            kind="tool_call", tool_call_id="c1", tool_name="shell_command",
+            tool_args={"command": "git status", "workdir": "C:\\w"})], "s")
+        assert frames[0]["payload"]["command"] == "git status"
+        assert frames[0]["payload"]["kind"] == "execute"
+
+    def test_an_unlisted_codex_tool_still_falls_back_safely(self):
+        _, kind, _ = tt._derive_tool_display("spawn_agent", {"task": "x"})
+        assert kind == "other"
+
+
+class TestOutcomeUnknownResults:
+    """A result flagged `outcome_unknown` (only the Codex adapter sets it) is shown
+    as completed; every other unknown result behaves exactly as before."""
+
+    @staticmethod
+    def _frames(result):
+        return tt.translate_transcript([
+            TranscriptEvent(kind="tool_call", tool_call_id="c1", tool_name="exec", tool_args={}),
+            result], "s")
+
+    def test_flagged_unknown_outcome_is_completed(self):
+        frames = self._frames(TranscriptEvent(
+            kind="tool_result", tool_call_id="c1", success=None, outcome_unknown=True))
+        assert [f["type"] for f in frames] == ["tool_call", "tool_update"]
+        assert frames[1]["payload"] == {"toolCallId": "c1", "status": "completed"}
+
+    def test_unflagged_unknown_outcome_stays_started(self):
+        frames = self._frames(TranscriptEvent(kind="tool_result", tool_call_id="c1", success=None))
+        assert [f["type"] for f in frames] == ["tool_call"]
+
+    def test_a_known_outcome_wins_over_the_flag(self):
+        failed = self._frames(TranscriptEvent(
+            kind="tool_result", tool_call_id="c1", success=False, outcome_unknown=True))
+        assert failed[1]["payload"]["status"] == "failed"
+        ok = self._frames(TranscriptEvent(
+            kind="tool_result", tool_call_id="c1", success=True, outcome_unknown=True))
+        assert ok[1]["payload"]["status"] == "completed"
+
+    def test_flagged_result_without_its_call_is_still_dropped(self):
+        assert tt.translate_transcript([TranscriptEvent(
+            kind="tool_result", tool_call_id="orphan", success=None, outcome_unknown=True)], "s") == []
+
+    def test_only_a_flag_can_change_the_outcome_a_transcript_event_defaults_to(self):
+        assert TranscriptEvent(kind="tool_result").outcome_unknown is False

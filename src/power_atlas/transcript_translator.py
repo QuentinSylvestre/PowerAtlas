@@ -30,6 +30,8 @@ _TOOL_KIND_BY_NAME: dict[str, str] = {
     "delete": "delete", "rm": "delete",
     "move": "move", "rename": "move",
     "fetch": "fetch", "web_fetch": "fetch",
+    # Codex tool names (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, D14)
+    "shell_command": "execute", "exec": "execute", "apply_patch": "edit", "view_image": "read",
 }
 
 _TOOL_TITLE_BY_NAME: dict[str, str] = {
@@ -40,6 +42,8 @@ _TOOL_TITLE_BY_NAME: dict[str, str] = {
     "delete": "Delete", "rm": "Delete",
     "move": "Move", "rename": "Rename",
     "fetch": "Fetch URL", "web_fetch": "Fetch URL",
+    "shell_command": "Run command", "exec": "Run command",
+    "apply_patch": "Apply patch", "view_image": "View image",
 }
 
 # Same input-key priority acp.py's own _tool_input_text uses to pick the
@@ -116,7 +120,10 @@ def translate_transcript(events: list[TranscriptEvent], session_id: str) -> list
     A `tool_result` with no preceding `tool_call` for the same id, or whose
     outcome is unknown (`success is None`), is dropped rather than guessed
     at -- the call simply stays at "started", the same as a live call this
-    client never saw resolve.
+    client never saw resolve. One exception: a result flagged `outcome_unknown`
+    (set only by the Codex adapter, for a call that finished but whose file
+    records no exit code) is shown as "completed" rather than left at "started"
+    (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, D13).
     """
     frames: list[dict] = []
     open_tool_calls: set[str] = set()
@@ -151,6 +158,8 @@ def translate_transcript(events: list[TranscriptEvent], session_id: str) -> list
                 status = "completed"
             elif event.success is False:
                 status = "failed"
+            elif event.outcome_unknown:
+                status = "completed"
             else:
                 continue
             frames.append(_envelope("tool_update", {
