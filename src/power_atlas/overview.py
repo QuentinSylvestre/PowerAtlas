@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import stat as stat_mod
+import subprocess
 import threading
 import time
 from collections import OrderedDict
@@ -36,9 +37,16 @@ log = logging.getLogger(__name__)
 # user's workspaces is well under 100 KiB; a megabyte file in `plans/` is not a
 # plan this list can summarise.
 PLAN_MAX_BYTES = 1024 * 1024
-# An In Progress plan whose file has not changed for longer than this is badged
-# `stale` (D7).
+# An In Progress plan with no activity for longer than this is badged `stale`
+# (D7). Activity is `_plan_activity`, not the file's mtime.
 PLAN_STALE_SECONDS = 7 * 24 * 3600
+# One bound per git call in `_plan_activity`; a plan costs at most two.
+_GIT_TIMEOUT_SECONDS = 3.0
+# A plan slug is the file stem. Anything else is not interpolated into a git
+# pattern.
+_SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+")
+# Variables that would point a `git -C <cwd>` call at some other repository.
+_GIT_REDIRECT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
 # Files in `plans/` that are not plans. Compared case-insensitively.
 _PLAN_SKIP_NAMES = frozenset({"ROADMAP.MD", "CLOSED_INVESTIGATIONS.MD"})
 _PLAN_STATES = ("In Progress", "Complete")
@@ -227,6 +235,59 @@ def _resolves_to_unc(real: str) -> bool:
     return real.startswith("\\\\") or real.startswith("//")
 
 
+def _git_output(cwd: str, *args: str) -> str | None:
+    """stdout of `git -C cwd <args>`, or None when git is missing, `cwd` is not
+    a repository, the call times out or exits non-zero.
+
+    Read-only: `GIT_OPTIONAL_LOCKS=0` keeps `status` from refreshing the index.
+    No console window, so the tray app does not flash one.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_REDIRECT_ENV}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        res = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_GIT_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return res.stdout if res.returncode == 0 else None
+
+
+def _plan_activity(cwd: str, path: Path, mtime: float) -> float:
+    """When work on the plan last happened, as epoch seconds.
+
+    The file's mtime is not that: a bulk rewrite of plan files (a history
+    remap, a checkout) moves it without any work on the plan. So, in a git
+    repository, it is the author date of the latest commit whose subject is
+    scoped to the plan's slug, `type(<plan-slug>): ...` (the playbook's
+    Conventional Commits scope for a planned project), which counts a code
+    commit as well as a plan edit. The author date, not the committer date,
+    because a rebase resets the latter.
+
+    The file's own mtime stands when the plan has uncommitted changes (it is
+    being edited now), and when anything is unavailable: not a repository, no
+    such commit, a git failure, a slug that is not a plain file stem.
+    """
+    slug = path.stem
+    if not _SLUG_RE.fullmatch(slug):
+        return mtime
+    stamp = _git_output(cwd, "log", "-1", "--format=%at", "--extended-regexp",
+                        "--grep=^[a-z]+\\(" + slug + "\\)!?:")
+    try:
+        committed = int(stamp.strip()) if stamp and stamp.strip() else None
+    except ValueError:
+        committed = None
+    if committed is None:
+        return mtime
+    dirty = _git_output(cwd, "status", "--porcelain", "--", str(path))
+    if dirty is None or dirty.strip():
+        return mtime
+    return float(committed)
+
+
 def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) -> list[dict]:
     """Active plans across `workspaces`, a list of `(cwd, name)` pairs.
 
@@ -252,6 +313,11 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
     Parsed files are memoised per path on `(mtime_ns, size)` (D22), so a
     repeat scan of unchanged files costs one `stat` each. Paths not seen by a
     scan that ran to completion are evicted.
+
+    Each plan's `activity` is `_plan_activity`, not its mtime; the `stale`
+    badge and the sort are measured on it. It costs up to two `git` calls per
+    listed plan on every scan, so a scan is as slow as git is for the plans it
+    lists; the web layer reuses a scan for 30 s.
 
     `now` is the wall-clock time the `stale` badge is measured against;
     tests pass it to make that comparison deterministic.
@@ -310,6 +376,11 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
             if parsed is None:
                 continue
             mtime = st.st_mtime_ns / 1e9
+            # Not memoised with the parse: a code commit scoped to the plan
+            # is activity and does not touch the file. Past the deadline the
+            # mtime stands, so git never extends the scan.
+            activity = (_plan_activity(cwd, path, mtime)
+                        if time.monotonic() < deadline else mtime)
             out.append({
                 "cwd": cwd,
                 "workspace": name,
@@ -317,22 +388,22 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
                 "title": _plan_title(path.name),
                 "state": parsed["state"],
                 "detail": parsed["detail"],
-                "mtime": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+                "activity": datetime.fromtimestamp(activity, tz=timezone.utc).isoformat(),
                 "stale": (parsed["state"] == "In Progress"
-                          and now - mtime > PLAN_STALE_SECONDS),
+                          and now - activity > PLAN_STALE_SECONDS),
                 "ready_to_close": parsed["state"] == "Complete",
                 "progress": parsed["progress"],
                 "tracker": parsed["tracker"],
-                "_mtime": mtime,
+                "_activity": activity,
             })
     if complete:
         with _plan_memo_lock:
             for key in [k for k in _plan_memo if k not in seen]:
                 del _plan_memo[key]
-    out.sort(key=lambda p: p["_mtime"], reverse=True)
+    out.sort(key=lambda p: p["_activity"], reverse=True)
     out.sort(key=lambda p: 0 if p["state"] == "In Progress" else 1)
     for plan in out:
-        del plan["_mtime"]
+        del plan["_activity"]
     return out
 
 

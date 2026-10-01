@@ -29988,6 +29988,102 @@ class TestOverviewPlans:
         assert plans["old.md"]["stale"] is True
         assert plans["new.md"]["stale"] is False, "exactly 7 days is not yet stale"
 
+    # -- activity: the slug-scoped commit date, not the file mtime ------------
+
+    _SLUG = "260916_ALPHA"
+    _OLD = dt.datetime(2026, 9, 16, 12, tzinfo=dt.timezone.utc)
+    _REMAP = dt.datetime(2026, 9, 25, 12, tzinfo=dt.timezone.utc)
+    _NOW = dt.datetime(2026, 10, 1, 12, tzinfo=dt.timezone.utc)
+
+    @staticmethod
+    def _git(ws, when, *args):
+        import subprocess
+        stamp = when.isoformat()
+        env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+                        "-c", "commit.gpgsign=false", "-C", str(ws), *args],
+                       check=True, capture_output=True, env=env)
+
+    def _plan_repo(self, tmp_path):
+        """A repo whose plan was last worked on 2026-09-16 and whose file was
+        then rewritten, under another plan's scope, on 2026-09-25 (a history
+        remap): the mtime says 09-25, the plan's own work says 09-16."""
+        ws = self._ws(tmp_path, "proj", {self._SLUG + ".md": _OV_PHASES_PLAN})
+        plan = ws / "plans" / (self._SLUG + ".md")
+        self._git(ws, self._OLD, "init", "-q")
+        self._git(ws, self._OLD, "add", "plans")
+        self._git(ws, self._OLD, "commit", "-q", "-m", f"docs({self._SLUG}): phase 1")
+        plan.write_text(_OV_PHASES_PLAN + "\nremapped\n", encoding="utf-8")
+        self._git(ws, self._REMAP, "commit", "-q", "-a", "-m",
+                  "docs(260925_OTHER_PLAN): remap commit references")
+        ts = self._REMAP.timestamp()
+        os.utime(plan, (ts, ts))
+        return ws, plan
+
+    @pytest.fixture
+    def _need_git(self):
+        import shutil
+        if shutil.which("git") is None:
+            pytest.skip("git is not installed")
+
+    def test_activity_is_the_slug_commit_not_a_later_rewrite(self, tmp_path, _need_git):
+        ws, _ = self._plan_repo(tmp_path)
+        [plan] = self._scan(ws, now=self._NOW.timestamp())
+        assert plan["activity"] == self._OLD.isoformat()
+        assert plan["stale"] is True, "15 days since the plan's work; the 6-day-old rewrite is not work"
+
+    def test_a_slug_scoped_code_commit_counts_as_activity(self, tmp_path, _need_git):
+        ws, _ = self._plan_repo(tmp_path)
+        when = dt.datetime(2026, 9, 30, 12, tzinfo=dt.timezone.utc)
+        (ws / "code.txt").write_text("x", encoding="utf-8")
+        self._git(ws, when, "add", "code.txt")
+        self._git(ws, when, "commit", "-q", "-m", f"feat({self._SLUG}): phase 2 code")
+        [plan] = self._scan(ws, now=self._NOW.timestamp())
+        assert plan["activity"] == when.isoformat()
+        assert plan["stale"] is False
+
+    def test_a_body_mention_of_the_slug_is_not_activity(self, tmp_path, _need_git):
+        ws, _ = self._plan_repo(tmp_path)
+        (ws / "code.txt").write_text("x", encoding="utf-8")
+        self._git(ws, self._REMAP, "add", "code.txt")
+        self._git(ws, self._REMAP, "commit", "-q", "-m",
+                  f"chore: unrelated\n\nmentions ({self._SLUG}): in its body")
+        [plan] = self._scan(ws, now=self._NOW.timestamp())
+        assert plan["activity"] == self._OLD.isoformat()
+
+    def test_uncommitted_edits_count_from_the_file_mtime(self, tmp_path, _need_git):
+        ws, plan_path = self._plan_repo(tmp_path)
+        plan_path.write_text(_OV_PHASES_PLAN + "\nediting now\n", encoding="utf-8")
+        edited = (self._NOW - dt.timedelta(hours=1)).timestamp()
+        os.utime(plan_path, (edited, edited))
+        [plan] = self._scan(ws, now=self._NOW.timestamp())
+        assert plan["stale"] is False
+        assert plan["activity"] == dt.datetime.fromtimestamp(
+            edited, tz=dt.timezone.utc).isoformat()
+
+    def test_no_slug_commit_falls_back_to_the_file_mtime(self, tmp_path, _need_git):
+        ws = self._ws(tmp_path, "proj", {self._SLUG + ".md": _OV_PHASES_PLAN})
+        self._git(ws, self._OLD, "init", "-q")
+        self._git(ws, self._OLD, "add", "plans")
+        self._git(ws, self._OLD, "commit", "-q", "-m", "chore: add plan")
+        ts = self._REMAP.timestamp()
+        os.utime(ws / "plans" / (self._SLUG + ".md"), (ts, ts))
+        [plan] = self._scan(ws, now=self._NOW.timestamp())
+        assert plan["activity"] == self._REMAP.isoformat()
+        assert plan["stale"] is False
+
+    def test_git_failure_falls_back_to_the_file_mtime(self, tmp_path, monkeypatch):
+        from power_atlas import overview
+        ws = self._ws(tmp_path, "proj", {"old.md": _OV_PHASES_PLAN})
+        ts = self._REMAP.timestamp()
+        os.utime(ws / "plans" / "old.md", (ts, ts))
+
+        def boom(*a, **k):
+            raise FileNotFoundError("git")
+        monkeypatch.setattr(overview.subprocess, "run", boom)
+        [plan] = self._scan(ws, now=self._NOW.timestamp())
+        assert plan["activity"] == self._REMAP.isoformat()
+
     def test_order_is_in_progress_first_then_newest(self, tmp_path):
         ws = self._ws(tmp_path, "proj", {"a.md": _OV_PHASES_PLAN, "b.md": _OV_PHASES_PLAN,
                                          "c.md": _OV_COMPLETE_PLAN})

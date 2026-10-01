@@ -1306,7 +1306,7 @@ function dashOvPlanRow(plan){
     top.appendChild(dashOvText('span', 'dash-ov-plan-count',
       dashOvCount(prog.done) + '/' + dashOvCount(prog.total)));
   }
-  top.appendChild(dashOvText('span', 'dash-ov-plan-age', dashOvAgo(plan.mtime)));
+  top.appendChild(dashOvText('span', 'dash-ov-plan-age', dashOvAgo(plan.activity)));
   head.appendChild(top);
   if (tracked) {
     var bar = document.createElement('span');
@@ -1377,7 +1377,7 @@ function dashOvRenderPlans(plans){
   try { key = JSON.stringify(shown); } catch (e) { key = null; }
   if (key !== null && key === _dashOvPlansKey && _dashOvPlansNode && _dashOvPlansNode.parentNode === body) {
     body.querySelectorAll('.dash-ov-plan-age').forEach(function(n, i){
-      if (shown[i]) n.textContent = dashOvAgo(shown[i].mtime);
+      if (shown[i]) n.textContent = dashOvAgo(shown[i].activity);
     });
     return;
   }

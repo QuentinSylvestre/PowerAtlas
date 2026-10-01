@@ -120,7 +120,10 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   - *Active plans* lists the `plans/*.md` files across your workspaces whose Status is In Progress, or
     Complete but not yet moved to `plans/done/` ("Ready to close"). Each row shows progress from the
     plan's Progress Tracker and names the phase in progress, or the next one. An In Progress plan
-    unchanged for more than 7 days gets a `stale` badge. Click a row with a tracker to expand it.
+    with no activity for more than 7 days gets a `stale` badge, and the row's age counts from the
+    same moment. Activity is the date of the plan's latest `type(<plan-slug>): ...` commit. A plan
+    with uncommitted edits, or one in a folder that is not a git repository or has no such commit,
+    counts from the file's modification time. Click a row with a tracker to expand it.
   - *Usage* covers the last 14 days: agent time per workspace this week against the week before,
     daily agent time and session counts by provider, tool reliability, context pressure, model mix,
     and Claude Code token totals with the cache-hit ratio. It is computed in memory in the background

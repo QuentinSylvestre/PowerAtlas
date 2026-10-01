@@ -17216,7 +17216,7 @@ function ovSummaryFetch(p, body) {
 function ovPlan(over = {}) {
   return Object.assign({
     cwd: "C:\\ws\\proj", workspace: "proj", file: "260920_ALPHA.md", title: "ALPHA",
-    state: "In Progress", detail: "Phase 2 underway", mtime: new Date(Date.now() - 5 * 60000).toISOString(),
+    state: "In Progress", detail: "Phase 2 underway", activity: new Date(Date.now() - 5 * 60000).toISOString(),
     stale: false, ready_to_close: false,
     progress: { done: 1, total: 3, current: { id: "2", name: "Second", state: "in_progress" } },
     tracker: [
@@ -17313,7 +17313,7 @@ check("dashboard overview plans: clicking a row expands its tracker rows, and a 
 check("dashboard overview plans: markup in a title, detail or tracker note stays text (D26)", () => {
   const p = loadDashPicker();
   p.sandbox.dashOvRenderPlans([ovPlan({
-    cwd: OV_XSS, workspace: OV_XSS, title: OV_XSS, detail: OV_XSS, mtime: OV_XSS, file: OV_XSS,
+    cwd: OV_XSS, workspace: OV_XSS, title: OV_XSS, detail: OV_XSS, activity: OV_XSS, file: OV_XSS,
     progress: { done: OV_XSS, total: "3); background:url(x", current: { id: OV_XSS, name: OV_XSS } },
     tracker: [{ id: OV_XSS, name: OV_XSS, status: OV_XSS, notes: OV_XSS },
               { id: "2", name: "n", status: "__proto__", notes: "" }],
