@@ -743,33 +743,111 @@ script { display: none; }
    pass), and this tile is now too small for the two to share a corner. */
 .launcher-lock { position: absolute; top: 4px; left: 4px; width: 11px; height: 11px; display: block; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; color: var(--text-dim); opacity: 0.65; }
 
-/* Launcher modal */
-.launcher-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 20px; max-width: 420px; width: 90vw; }
-.launcher-modal::backdrop { background: rgba(0,0,0,0.5); }
-.launcher-modal h3 { margin-bottom: 12px; font-size: 15px; }
-.launcher-modal label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
-.launcher-checkbox { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-.launcher-checkbox input { margin: 0; }
-.launcher-checkbox-label { flex: 1; }
-/* The real checkbox stays in the DOM with its id/checked/disabled wired
-   exactly as before (saveLauncher, editLauncher, openProviderLauncherModal
-   all read/write these by id) -- only visually replaced by a track+knob
-   pair, same 30x18/14x14 metrics as the topbar's own Autostart switch
-   (.topbar-switch/.topbar-switch-knob), so this modal's four checkboxes
-   read as the same toggle language instead of a bare native checkbox.
-   Higher specificity than `.launcher-modal input` (which sets width:100%
-   etc. for the text/textarea fields in this same modal) is required here,
-   not just source order, so this wins regardless of file position. */
+/* Launcher modal (partials/launcher_modal.html) -- new launcher, edit launcher
+   and provider settings share it. `margin: auto` restores the native <dialog>
+   centring that `* { margin: 0 }` removes, as .profile-modal does; without it
+   the modal opened pinned to the viewport's top-left corner. Open only (a bare
+   display would beat the UA's dialog:not([open]) { display: none }): a column
+   capped at the viewport whose form scrolls. `--stripe` is the chosen card
+   color, drawn as the same top bar a launcher tile has. */
+.launcher-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 0; max-width: 460px; width: 90vw; margin: auto; overflow: hidden; box-shadow: 0 16px 48px rgba(0,0,0,0.45); }
+.launcher-modal[open] { display: flex; flex-direction: column; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); animation: launcherModalIn 0.16s ease-out; }
+.launcher-modal::before { content: ''; display: block; flex: none; height: 3px; background: var(--stripe, transparent); transition: background 0.15s; }
+.launcher-modal::backdrop { background: rgba(0,0,0,0.5); animation: launcherBackdropIn 0.16s ease-out; }
+@keyframes launcherModalIn { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes launcherBackdropIn { from { opacity: 0; } to { opacity: 1; } }
+.launcher-modal form { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 14px 20px 16px; }
+.launcher-modal-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.launcher-modal-header h3 { flex: 1; min-width: 0; font-size: 15px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.launcher-modal-icon { width: 22px; height: 22px; object-fit: contain; border-radius: 4px; flex-shrink: 0; }
+.launcher-modal-icon[hidden] { display: none; }
+.launcher-modal .modal-close { line-height: 1; padding: 0 2px; border-radius: var(--radius-sm); }
+.launcher-modal .modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.launcher-section { padding: 12px 0 4px; border-top: 1px solid var(--card-border); }
+.launcher-modal-header + .launcher-section { border-top: none; padding-top: 6px; }
+.launcher-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin: 0 0 8px; }
+.launcher-field { margin-bottom: 10px; }
+.launcher-field > label, .launcher-field-label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.launcher-field-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.launcher-field-label-row .launcher-field-label { margin-bottom: 0; }
+.launcher-modal input[type="text"] { display: block; width: 100%; padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 13px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+.launcher-modal input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.launcher-modal input[type="text"]::placeholder { color: var(--text-dim); }
+.launcher-modal input.launcher-mono { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; }
+.launcher-modal input[aria-invalid="true"] { border-color: #f87171; }
+/* Provider mode: name and command are fixed. They render as plain text, not
+   as a field that looks editable and then refuses input. */
+.launcher-modal input[type="text"][readonly] { background: transparent; border-color: transparent; padding-left: 0; padding-right: 0; color: var(--text); box-shadow: none; cursor: default; }
+.launcher-field-error { font-size: 11.5px; color: #f87171; margin-top: 4px; }
+.launcher-hint { font-size: 11px; line-height: 1.45; color: var(--text-dim); margin-top: 4px; overflow-wrap: anywhere; }
+.launcher-hint code { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 10.5px; color: var(--text-muted); }
+.launcher-field-error[hidden], .launcher-hint[hidden], .launcher-field[hidden] { display: none; }
+.launcher-link-btn { background: none; border: none; padding: 0; color: var(--accent); font-size: 12px; cursor: pointer; }
+.launcher-link-btn:hover { text-decoration: underline; }
+.launcher-link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+/* Env editor: one KEY = VALUE row per variable, values masked by default.
+   -webkit-text-security rather than type=password, so no password manager
+   offers to save a launcher's token as this site's login. */
+.launcher-env-rows { display: flex; flex-direction: column; gap: 6px; }
+.launcher-env-rows:empty { display: none; }
+.launcher-env-row { display: flex; align-items: center; gap: 6px; }
+.launcher-modal .launcher-env-row input.launcher-env-key { flex: 0 0 38%; min-width: 0; }
+.launcher-modal .launcher-env-row input.launcher-env-val { flex: 1 1 auto; min-width: 0; }
+.launcher-env-val.masked { -webkit-text-security: disc; }
+.launcher-env-eq { color: var(--text-dim); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; }
+.launcher-icon-btn { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; background: none; border: none; border-radius: 999px; color: var(--text-muted); cursor: pointer; transition: background 0.15s, color 0.15s; }
+.launcher-icon-btn:hover { background: rgba(148,163,184,0.18); color: var(--text); }
+.launcher-icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.launcher-icon-btn svg { width: 15px; height: 15px; display: block; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.launcher-icon-btn[aria-pressed="true"] { color: var(--accent); }
+/* Appearance: a live tile beside the swatches. It reuses .launcher-tile so it
+   looks exactly like the grid, minus the hover lift and the pointer. */
+.launcher-appearance { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 16px; margin-bottom: 8px; }
+.launcher-preview-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: none; }
+.launcher-tile.launcher-preview { width: 92px; cursor: default; pointer-events: none; }
+.launcher-preview .launcher-icon[hidden] { display: none; }
+.launcher-preview-placeholder { width: 20px; height: 20px; border-radius: 4px; background: var(--border); }
+.launcher-preview-placeholder[hidden] { display: none; }
+.launcher-preview-caption { font-size: 10px; color: var(--text-dim); }
+.launcher-appearance .color-picker-field { flex: 1; min-width: 228px; margin-bottom: 0; }
+/* 13 swatches beside the preview wrap 10 + 3 in a flex row; a 7-column grid
+   splits them evenly instead. The field's 228px minimum is that grid's width,
+   so on a narrow screen the row wraps and the preview sits above it. */
+.launcher-appearance .color-picker-swatches { display: grid; grid-template-columns: repeat(7, 24px); gap: 8px 10px; }
+/* Toggle rows. `.launcher-modal .launcher-checkbox`, not the bare class, so it
+   beats any generic label rule: before, `.launcher-modal label { display:
+   block }` won, the rows stayed block layout and the inline track span had a
+   width of 0 -- only the knob rendered. The real checkbox stays in the DOM
+   with its id/checked/disabled read by the modal's script; the track and knob
+   use the topbar Autostart switch's 30x18/14x14 metrics. */
+.launcher-modal .launcher-checkbox { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 12.5px; color: var(--text); padding: 5px 0; margin: 0; position: relative; }
+.launcher-modal .launcher-checkbox[hidden] { display: none; }
+.launcher-modal .launcher-checkbox:has(.launcher-toggle-input:disabled) { cursor: default; }
+.launcher-checkbox-label { flex: 1; min-width: 0; }
 .launcher-checkbox .launcher-toggle-input { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; }
-.launcher-toggle-track { width: 30px; height: 18px; border-radius: 999px; background: var(--border); position: relative; flex-shrink: 0; transition: background 0.2s; }
+.launcher-toggle-track { display: block; width: 30px; height: 18px; border-radius: 999px; background: var(--border); position: relative; flex-shrink: 0; transition: background 0.2s; }
 .launcher-toggle-knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-muted); transition: left 0.2s, background 0.2s; }
 .launcher-toggle-input:checked ~ .launcher-toggle-track { background: var(--success); }
 .launcher-toggle-input:checked ~ .launcher-toggle-track .launcher-toggle-knob { left: 14px; background: #fff; }
 .launcher-toggle-input:disabled ~ .launcher-checkbox-label { opacity: 0.6; }
 .launcher-toggle-input:disabled ~ .launcher-toggle-track { opacity: 0.5; }
 .launcher-toggle-input:focus-visible ~ .launcher-toggle-track { outline: 2px solid var(--accent); outline-offset: 2px; }
-.launcher-modal input, .launcher-modal textarea { display: block; width: 100%; margin-top: 4px; padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 13px; outline: none; }
-.launcher-modal input:focus, .launcher-modal textarea:focus { border-color: var(--accent); }
+/* Only meaningful while "Use selected workspaces" is on: indented under it. */
+.launcher-modal .launcher-checkbox.launcher-suboption { margin-left: 6px; padding-left: 12px; border-left: 2px solid var(--card-border); }
+.launcher-suboption:not([hidden]) { animation: launcherSubIn 0.16s ease-out; }
+@keyframes launcherSubIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.launcher-modal .launcher-checkbox.launcher-enabled-switch { flex: none; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--text-muted); gap: 6px; }
+@media (prefers-reduced-motion: reduce) { .launcher-modal[open], .launcher-modal::backdrop, .launcher-suboption:not([hidden]) { animation: none; } }
+.launcher-form-error { margin-top: 10px; padding: 8px 10px; border: 1px solid rgba(248,113,113,0.5); background: rgba(248,113,113,0.1); border-radius: var(--radius-sm); color: #fca5a5; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.launcher-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding: 8px 10px; border: 1px solid #f87171; border-radius: var(--radius-sm); background: rgba(248,113,113,0.08); font-size: 12px; }
+.launcher-confirm.launcher-confirm-warn { border-color: var(--amber); background: rgba(251,191,36,0.08); }
+.launcher-confirm-text { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.launcher-form-error[hidden], .launcher-confirm[hidden], .modal-actions[hidden] { display: none; }
+.launcher-modal .modal-actions { margin-top: 14px; }
+.launcher-shortcut-hint { font-size: 10.5px; color: var(--text-dim); }
+.launcher-modal .btn-primary { padding: 6px 18px; }
+.launcher-modal .btn-primary:disabled { opacity: 0.45; cursor: default; background: var(--accent); }
+.launcher-modal .btn-primary:focus-visible, .launcher-modal .modal-cancel-btn:focus-visible, .launcher-modal .modal-delete-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .modal-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
 .modal-delete-btn { background: none; border: 1px solid #f87171; border-radius: var(--radius-sm); color: #f87171; cursor: pointer; padding: 6px 12px; font-size: 12px; }
 .modal-delete-btn:hover { background: rgba(248,113,113,0.12); }
@@ -873,9 +951,15 @@ script { display: none; }
 /* Color picker (shared by launcher modal) */
 .color-picker-label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; }
 .color-picker-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
-.color-swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; transition: border-color 0.15s, transform 0.15s; }
+.color-swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s; }
 .color-swatch:hover { transform: scale(1.15); }
-.color-swatch.selected { border-color: white; box-shadow: 0 0 0 2px var(--accent); }
+.color-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Selected: a ring in the surface color, then the accent -- reads as a gap
+   around the swatch instead of the pure-white border that glared on dark. */
+.color-swatch.selected { border-color: var(--surface); box-shadow: 0 0 0 2px var(--accent); }
+/* "No color": an empty dashed circle crossed by a slash. */
+.color-swatch-none { background: linear-gradient(135deg, transparent calc(50% - 1px), var(--text-dim) calc(50% - 1px), var(--text-dim) calc(50% + 1px), transparent calc(50% + 1px)), var(--bg); border: 1px dashed var(--text-dim); }
+.color-swatch-none.selected { border-style: solid; border-color: var(--surface); }
 
 /* Port control */
 .port-group { display: flex; align-items: center; gap: 6px; }

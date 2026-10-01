@@ -8125,8 +8125,6 @@ var _providerSettings={{provider_settings|tojson}};
 var _globalDefaultDirectory={{default_directory|tojson}};
 var _providerBinaryDisplay={'kiro-cli':'kiro-cli chat','claude-code':'claude','kiro-ide':'kiro','kiro-cli-v3':'kiro-cli chat --agent-engine v3 --trust-tools *'};
 var _providerTerminal={'kiro-cli':true,'claude-code':true,'kiro-ide':false,'kiro-cli-v3':true};
-function openProviderLauncherModal(id){var key=id.slice('provider--'.length);fetch('/api/provider/'+encodeURIComponent(key)).then(function(r){return r.json()}).then(function(d){var m=document.getElementById('launcherModal');document.getElementById('launcherId').value=id;document.getElementById('launcherName').value=d.provider||key;document.getElementById('launcherName').readOnly=true;document.getElementById('launcherCommand').value=_providerBinaryDisplay[key]||key;document.getElementById('launcherCommand').readOnly=true;document.getElementById('launcherArgs').value=d.default_args||'';document.getElementById('launcherCwd').value=d.default_directory||'';document.getElementById('launcherCwd').readOnly=false;document.getElementById('launcherEnv').value='';document.getElementById('launcherEnv').disabled=true;document.getElementById('launcherColor').value=d.color||'';document.getElementById('launcherTerminal').checked=_providerTerminal[key]!==false;document.getElementById('launcherTerminal').disabled=true;document.getElementById('launcherUseSelected').checked=true;document.getElementById('launcherUseSelected').disabled=true;document.getElementById('launcherShowInHoverRow').style.display='';document.getElementById('launcherShowInHover').checked=d.show_in_workspace_hover!==false;document.getElementById('launcherDeleteBtn').style.display='none';document.getElementById('launcherEnabledRow').style.display='';document.getElementById('launcherEnabled').checked=d.enabled!==false;document.getElementById('launcherModalTitle').textContent='Provider Settings \u2014 '+key;document.querySelectorAll('.color-swatch').forEach(function(s){s.classList.toggle('selected',s.dataset.color===(d.color||''))});m.showModal()})}
-document.getElementById('launcherModal').addEventListener('close',function(){var m=document.getElementById('launcherModal');m.querySelector('#launcherName').readOnly=false;m.querySelector('#launcherCommand').readOnly=false;m.querySelector('#launcherCwd').readOnly=false;m.querySelector('#launcherEnv').disabled=false;m.querySelector('#launcherTerminal').disabled=false;m.querySelector('#launcherUseSelected').disabled=false;document.getElementById('launcherEnabledRow').style.display='none';document.getElementById('launcherShowInHoverRow').style.display='none'});
 (function(){if(_providerSettings&&_providerSettings['kiro-cli']&&_providerSettings['kiro-cli'].default_args==='-a'&&!localStorage.getItem('pa_migration_toast')){localStorage.setItem('pa_migration_toast','1');setTimeout(function(){showToast('<div class="toast toast-success">Trust All is now per-provider \u2014 click \u2699\ufe0f on the provider tile to configure.<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')},1000)}})();
 (function(){if(!localStorage.getItem('pa_profile_toast')){localStorage.setItem('pa_profile_toast','1');setTimeout(function(){showToast('<div class="toast toast-success">Terminal config is now Launch Profiles \u2014 click \u2699\ufe0f in the top bar to manage.<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')},1500)}})();
 </script>
@@ -8165,7 +8163,6 @@ document.getElementById('launcher-tiles').addEventListener('mouseover', function
   if (tile) positionLauncherTooltip(tile);
 });
 function runLauncherById(id){if(id==='builtin--terminal'){var selected=getSelectedWorkspaceCwds();if(selected.length>0){selected.forEach(function(w){fetch('/api/launch-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:w})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Terminal launch failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})});}else{fetch('/api/launch-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:''})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Terminal launch failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')});}return;}if(id.startsWith('provider--')){var key=id.slice('provider--'.length);var selected=getSelectedWorkspaceCwds();if(selected.length>0){var sessions=selected.map(function(w){return{workspace:w,provider:key}});fetch('/api/launch-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:sessions})}).then(function(r){return r.text()}).then(showToast)}else{var provDir=(_providerSettings[key]||{}).default_directory||'';var globalDir=_globalDefaultDirectory||'';var fallbackDir=provDir||globalDir||'';fetch('/api/launch-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:[{workspace:fallbackDir,provider:key}]})}).then(function(r){return r.text()}).then(showToast)}return}var l=_launchers.find(function(x){return x.id===id});if(!l)return;if(l.use_selected_workspaces){var selected=getSelectedWorkspaceCwds();if(selected.length>0){fetch('/api/launcher/run-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:l.id,workspaces:selected})}).then(function(r){return r.text()}).then(showToast);return}}var cwd=l.cwd||'';fetch('/api/launcher/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:l.id,command:l.command,custom_args:l.custom_args||'',cwd:cwd,name:l.name,terminal:l.terminal})}).then(function(r){return r.text()}).then(showToast)}
-function openNewLauncher(){var m=document.getElementById('launcherModal');document.getElementById('launcherId').value='';document.getElementById('launcherName').value='';document.getElementById('launcherCommand').value='';document.getElementById('launcherArgs').value='';document.getElementById('launcherCwd').value='';document.getElementById('launcherEnv').value='';document.getElementById('launcherColor').value='';document.getElementById('launcherTerminal').checked=true;document.getElementById('launcherUseSelected').checked=false;document.getElementById('launcherShowInHoverRow').style.display='none';document.getElementById('launcherShowInHover').checked=false;document.getElementById('launcherDeleteBtn').style.display='none';document.getElementById('launcherModalTitle').textContent='New Launcher';document.querySelectorAll('.color-swatch').forEach(function(s){s.classList.remove('selected')});m.showModal();m.querySelector('input[type=text]').focus()}
 // `env` is deliberately absent from every launcher payload this page is served -- it holds
 // credentials, so /api/launchers, /api/settings and the |tojson bootstrap all strip it (see
 // _launchers_without_env in web.py). The edit modal is the only consumer, so it asks for one
@@ -8176,11 +8173,381 @@ function openNewLauncher(){var m=document.getElementById('launcherModal');docume
 // so degrading to empty on a failed fetch would silently wipe the credentials the moment the
 // user pressed Save. Refusing to open is the recoverable failure; opening empty is not.
 function editLauncher(id){if(id.startsWith('provider--')){openProviderLauncherModal(id);return}if(id==='builtin--terminal')return;var l=_launchers.find(function(x){return x.id===id});if(!l)return;fetch('/api/launcher/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(function(d){openLauncherEditor(l,d.env||{})}).catch(function(){showToast('<div class="toast toast-error">Could not read this launcher’s environment — not opening, so a save cannot wipe it<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>')})}
-function openLauncherEditor(l,env){var m=document.getElementById('launcherModal');document.getElementById('launcherId').value=l.id;document.getElementById('launcherName').value=l.name||'';document.getElementById('launcherCommand').value=l.command||'';document.getElementById('launcherArgs').value=l.custom_args||'';document.getElementById('launcherCwd').value=l.cwd||'';document.getElementById('launcherEnv').value=Object.entries(env||{}).map(function(e){return e[0]+'='+e[1]}).join('\n');document.getElementById('launcherColor').value=l.color||'';document.getElementById('launcherTerminal').checked=l.terminal!==false;document.getElementById('launcherUseSelected').checked=l.use_selected_workspaces||false;var showHoverRow=document.getElementById('launcherShowInHoverRow');showHoverRow.style.display=l.use_selected_workspaces?'':'none';document.getElementById('launcherShowInHover').checked=l.show_in_workspace_hover||false;document.getElementById('launcherDeleteBtn').style.display='';document.getElementById('launcherModalTitle').textContent='Edit Launcher';document.querySelectorAll('.color-swatch').forEach(function(s){s.classList.toggle('selected',s.dataset.color===l.color)});m.showModal();m.querySelector('input[type=text]').focus()}
-function saveLauncher(e){e.preventDefault();var id=document.getElementById('launcherId').value;if(id.startsWith('provider--')){var key=id.slice('provider--'.length);var payload={provider:key,default_args:document.getElementById('launcherArgs').value,color:document.getElementById('launcherColor').value,enabled:document.getElementById('launcherEnabled').checked,default_directory:document.getElementById('launcherCwd').value.trim(),show_in_workspace_hover:document.getElementById('launcherShowInHover').checked};fetch('/api/provider/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('launcherModal').close();_providerSettings[key]=payload;fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){var el=document.getElementById('launcher-tiles');el.innerHTML=html;if(window.htmx)htmx.process(el)});dashRailReload()}).catch(function(){showToast('<div class="toast toast-error">Save failed \u2014 try again<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')});return}var envText=document.getElementById('launcherEnv').value;var env={};envText.split('\n').forEach(function(line){var eq=line.indexOf('=');if(eq>0)env[line.slice(0,eq).trim()]=line.slice(eq+1).trim()});var useSelected=document.getElementById('launcherUseSelected').checked;var payload={name:document.getElementById('launcherName').value,command:document.getElementById('launcherCommand').value,custom_args:document.getElementById('launcherArgs').value,cwd:document.getElementById('launcherCwd').value,env:env,color:document.getElementById('launcherColor').value,terminal:document.getElementById('launcherTerminal').checked,use_selected_workspaces:useSelected,show_in_workspace_hover:useSelected&&document.getElementById('launcherShowInHover').checked};var url=id?'/api/launcher/update':'/api/launcher/create';if(id)payload.id=id;fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);return fetch('/api/launchers')}).then(function(r){return r.json()}).then(function(d){_launchers=d;document.getElementById('launcherModal').close();fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){var el=document.getElementById('launcher-tiles');el.innerHTML=html;if(window.htmx)htmx.process(el)})}).catch(function(){showToast('<div class="toast toast-error">Save failed \u2014 try again<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
-function deleteLauncher(){var id=document.getElementById('launcherId').value;if(!id)return;fetch('/api/launcher/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.text()}).then(function(t){showToast(t);return fetch('/api/launchers')}).then(function(r){return r.json()}).then(function(d){_launchers=d;document.getElementById('launcherModal').close();fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){var el=document.getElementById('launcher-tiles');el.innerHTML=html;if(window.htmx)htmx.process(el)})}).catch(function(){showToast('<div class="toast toast-error">Delete failed \u2014 try again<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
-document.getElementById('launcherColorPicker').addEventListener('click',function(e){var btn=e.target.closest('.color-swatch');if(!btn)return;var picker=document.getElementById('launcherColorPicker');var input=document.getElementById('launcherColor');var wasSelected=btn.classList.contains('selected');picker.querySelectorAll('.color-swatch').forEach(function(s){s.classList.remove('selected')});if(wasSelected){input.value=''}else{btn.classList.add('selected');input.value=btn.dataset.color}});
-document.getElementById('launcherUseSelected').addEventListener('change',function(){var row=document.getElementById('launcherShowInHoverRow');if(this.checked){row.style.display=''}else{row.style.display='none';document.getElementById('launcherShowInHover').checked=false}});
+// ---- launcher modal (partials/launcher_modal.html) ----
+// One dialog, three modes: new launcher, edit launcher, provider settings.
+// Every opener goes through _launcherModalOpen, which sets every field (so no
+// mode inherits another's read-only or hidden state) and snapshots the form.
+// The snapshot is what enables Save only on a change, and what makes Escape,
+// Cancel and a backdrop click ask before discarding one.
+var _launcherModalSnapshot = '';
+var _launcherModalBusy = false;
+var _launcherModalMode = 'new';
+var _launcherDownOnBackdrop = false;
+var LAUNCHER_ICON_EYE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
+var LAUNCHER_ICON_X = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+function _lm(id){ return document.getElementById(id); }
+
+function launcherEnvAddRow(key, val, focus){
+  var row = document.createElement('div');
+  row.className = 'launcher-env-row';
+  row.innerHTML = '<input type="text" class="launcher-env-key launcher-mono" placeholder="KEY" aria-label="Variable name" autocomplete="off" spellcheck="false">'
+    + '<span class="launcher-env-eq" aria-hidden="true">=</span>'
+    + '<input type="text" class="launcher-env-val launcher-mono masked" placeholder="value" aria-label="Value" autocomplete="off" spellcheck="false">'
+    + '<button type="button" class="launcher-icon-btn launcher-env-reveal" aria-pressed="false" aria-label="Show value" title="Show value">' + LAUNCHER_ICON_EYE + '</button>'
+    + '<button type="button" class="launcher-icon-btn launcher-env-remove" aria-label="Remove variable" title="Remove variable">' + LAUNCHER_ICON_X + '</button>';
+  row.querySelector('.launcher-env-key').value = key || '';
+  row.querySelector('.launcher-env-val').value = val || '';
+  _lm('launcherEnvRows').appendChild(row);
+  _launcherEnvSync();
+  if (focus) row.querySelector('.launcher-env-key').focus();
+  return row;
+}
+function _launcherEnvSync(){
+  var n = _lm('launcherEnvRows').children.length;
+  _lm('launcherEnvEmpty').innerHTML = n
+    ? 'Values are masked. Paste <code>KEY=VALUE</code> lines into a name field to add several at once.'
+    : 'None. To add several, use <em>Add variable</em> and paste <code>KEY=VALUE</code> lines into the name field.';
+  _launcherModalUpdate();
+}
+// Same normalisation the old KEY=VAL textarea applied: trimmed, and a row
+// with no name is dropped rather than saved as an empty key.
+function _launcherEnvRead(){
+  var env = {};
+  _lm('launcherEnvRows').querySelectorAll('.launcher-env-row').forEach(function(r){
+    var k = r.querySelector('.launcher-env-key').value.trim();
+    if (k) env[k] = r.querySelector('.launcher-env-val').value.trim();
+  });
+  return env;
+}
+
+function _launcherModalState(){
+  return JSON.stringify([
+    _lm('launcherName').value, _lm('launcherCommand').value, _lm('launcherArgs').value,
+    _lm('launcherCwd').value, _lm('launcherColor').value, _lm('launcherTerminal').checked,
+    _lm('launcherUseSelected').checked, _lm('launcherShowInHover').checked,
+    _lm('launcherEnabled').checked, _launcherEnvRead()
+  ]);
+}
+function _launcherModalIsDirty(){ return _launcherModalState() !== _launcherModalSnapshot; }
+
+// Header stripe, Save state, preview tile and the command field's full-path
+// tooltip all follow the form; one function keeps them from drifting apart.
+function _launcherModalUpdate(){
+  var m = _lm('launcherModal');
+  var color = _lm('launcherColor').value;
+  m.style.setProperty('--stripe', color || 'transparent');
+  _lm('launcherPreview').style.setProperty('--stripe', color || 'transparent');
+  _lm('launcherPreviewName').textContent = _lm('launcherName').value.trim() || 'New launcher';
+  _lm('launcherCommand').title = _lm('launcherCommand').value;
+  var save = _lm('launcherSaveBtn');
+  save.disabled = _launcherModalBusy || !_launcherModalIsDirty();
+}
+function _launcherSetColor(color){
+  _lm('launcherColor').value = color || '';
+  _lm('launcherColorPicker').querySelectorAll('.color-swatch').forEach(function(s){
+    var on = s.dataset.color === (color || '');
+    s.classList.toggle('selected', on);
+    s.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  _launcherModalUpdate();
+}
+function _launcherSetIcon(iconId){
+  [_lm('launcherModalIcon'), _lm('launcherPreviewIcon')].forEach(function(img){
+    img.onerror = function(){ img.hidden = true; if (img.id === 'launcherPreviewIcon') _lm('launcherPreviewPlaceholder').hidden = false; };
+    if (iconId){ img.src = '/api/launcher-icon/' + encodeURIComponent(iconId); img.hidden = false; }
+    else { img.removeAttribute('src'); img.hidden = true; }
+  });
+  _lm('launcherPreviewPlaceholder').hidden = !!iconId;
+}
+function _launcherFieldError(inputId, msg){
+  var input = _lm(inputId), err = _lm(inputId + 'Error');
+  if (msg){ input.setAttribute('aria-invalid', 'true'); } else { input.removeAttribute('aria-invalid'); }
+  if (err){ err.textContent = msg || ''; err.hidden = !msg; }
+}
+function _launcherFormError(msg){ var el = _lm('launcherFormError'); el.textContent = msg || ''; el.hidden = !msg; }
+function _launcherSetBusy(busy, label){
+  _launcherModalBusy = busy;
+  _lm('launcherSaveBtn').textContent = busy && label ? label : 'Save';
+  _lm('launcherDeleteBtn').disabled = busy;
+  _launcherModalUpdate();
+}
+
+// One inline bar for both questions: delete, and discard unsaved changes.
+// Inline rather than confirm(): a native dialog would block the page's
+// polling and, inside the peek webview, has no window to anchor to.
+function _launcherConfirm(text, noLabel, yesLabel, warn, onYes){
+  var bar = _lm('launcherConfirm');
+  _lm('launcherConfirmText').textContent = text;
+  _lm('launcherConfirmNo').textContent = noLabel;
+  _lm('launcherConfirmYes').textContent = yesLabel;
+  bar.classList.toggle('launcher-confirm-warn', !!warn);
+  _lm('launcherConfirmNo').onclick = _launcherConfirmHide;
+  _lm('launcherConfirmYes').onclick = function(){ _launcherConfirmHide(); onYes(); };
+  bar.hidden = false;
+  _lm('launcherActions').hidden = true;
+  _lm('launcherConfirmNo').focus();
+}
+function _launcherConfirmHide(){
+  var wasOpen = !_lm('launcherConfirm').hidden;
+  _lm('launcherConfirm').hidden = true;
+  _lm('launcherActions').hidden = false;
+  if (!wasOpen) return;
+  if (!_lm('launcherSaveBtn').disabled) _lm('launcherSaveBtn').focus();
+  else (_launcherModalMode === 'provider' ? _lm('launcherArgs') : _lm('launcherName')).focus();
+}
+
+function launcherModalRequestClose(){
+  var m = _lm('launcherModal');
+  if (!m.open) return;
+  // In flight: stay open so a refusal still has somewhere to be shown.
+  if (_launcherModalBusy) return;
+  // A pending question is answered "no" first, never replaced by another.
+  if (!_lm('launcherConfirm').hidden){ _launcherConfirmHide(); return; }
+  if (_launcherModalIsDirty()){
+    _launcherConfirm('Discard unsaved changes?', 'Keep editing', 'Discard', true, function(){ m.close(); });
+    return;
+  }
+  m.close();
+}
+
+// o: {mode: 'new'|'edit'|'provider', id, title, iconId, name, command, args,
+// cwd, color, terminal, useSelected, showInHover, enabled, env}
+function _launcherModalOpen(o){
+  var provider = o.mode === 'provider';
+  _launcherModalMode = o.mode;
+  _lm('launcherId').value = o.id || '';
+  _lm('launcherModalTitle').textContent = o.title;
+  _lm('launcherName').value = o.name || '';
+  _lm('launcherName').readOnly = provider;
+  _lm('launcherCommand').value = o.command || '';
+  _lm('launcherCommand').readOnly = provider;
+  _lm('launcherArgs').value = o.args || '';
+  _lm('launcherCwd').value = o.cwd || '';
+  if (provider){
+    _lm('launcherCwd').placeholder = 'Default: ' + (_globalDefaultDirectory || 'home folder');
+    _lm('launcherCwdHint').textContent = 'Used when launched without a workspace. Empty falls back to the default shown.';
+  } else {
+    _lm('launcherCwd').placeholder = 'Optional';
+    _lm('launcherCwdHint').textContent = 'Used when launched without a selected workspace. Empty runs it in PowerAtlas’s own folder.';
+  }
+  _lm('launcherEnvRows').innerHTML = '';
+  Object.keys(o.env || {}).forEach(function(k){ launcherEnvAddRow(k, o.env[k], false); });
+  _lm('launcherEnvField').hidden = provider;
+  _launcherEnvSync();
+  _lm('launcherTerminal').checked = o.terminal !== false;
+  _lm('launcherTerminal').disabled = provider;
+  _lm('launcherUseSelected').checked = !!o.useSelected;
+  _lm('launcherUseSelected').disabled = provider;
+  _lm('launcherShowInHover').checked = !!o.showInHover;
+  _lm('launcherShowInHoverRow').hidden = !o.useSelected;
+  _lm('launcherLockedHint').hidden = !provider;
+  _lm('launcherEnabledRow').hidden = !provider;
+  _lm('launcherEnabled').checked = o.enabled !== false;
+  _lm('launcherDeleteBtn').hidden = o.mode !== 'edit';
+  _launcherSetIcon(o.iconId || '');
+  ['launcherName', 'launcherCommand'].forEach(function(id){ _launcherFieldError(id, ''); });
+  _launcherFormError('');
+  _launcherConfirmHide();
+  _launcherModalBusy = false;
+  _lm('launcherSaveBtn').textContent = 'Save';
+  _lm('launcherDeleteBtn').disabled = false;
+  _launcherSetColor(o.color || '');
+  _launcherModalSnapshot = _launcherModalState();
+  _launcherModalUpdate();
+  var m = _lm('launcherModal');
+  if (!m.open) m.showModal();
+  (provider ? _lm('launcherArgs') : _lm('launcherName')).focus();
+}
+
+function openNewLauncher(){
+  _launcherModalOpen({mode: 'new', title: 'New Launcher', terminal: true, useSelected: false, showInHover: false, env: {}});
+}
+function openLauncherEditor(l, env){
+  _launcherModalOpen({mode: 'edit', id: l.id, title: 'Edit Launcher', iconId: l.id, name: l.name, command: l.command,
+    args: l.custom_args, cwd: l.cwd, color: l.color, terminal: l.terminal, useSelected: l.use_selected_workspaces,
+    showInHover: l.show_in_workspace_hover, env: env || {}});
+}
+function openProviderLauncherModal(id){
+  var key = id.slice('provider--'.length);
+  fetch('/api/provider/' + encodeURIComponent(key)).then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function(d){
+    var meta = (window._availableProviders || []).find(function(p){ return p.name === key; });
+    _launcherModalOpen({mode: 'provider', id: id, title: 'Provider Settings — ' + (meta && meta.display || key), iconId: id,
+      name: meta && meta.display || d.provider || key, command: _providerBinaryDisplay[key] || key, args: d.default_args,
+      cwd: d.default_directory, color: d.color, terminal: _providerTerminal[key] !== false, useSelected: true,
+      showInHover: d.show_in_workspace_hover !== false, enabled: d.enabled !== false, env: {}});
+  }).catch(function(){ showToast('<div class="toast toast-error">Could not load provider settings<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>'); });
+}
+
+function _launcherReloadTiles(){
+  return fetch('/partials/launchers').then(function(r){ return r.text(); }).then(function(html){
+    var el = _lm('launcher-tiles'); el.innerHTML = html; if (window.htmx) htmx.process(el);
+  });
+}
+// The save endpoints answer with a toast partial, an error one included, at
+// HTTP 200 -- so a failure is read from the markup as well as the status.
+function _launcherResponseError(status, ok, text){
+  if (!ok){
+    try { var j = JSON.parse(text); if (j && (j.error || j.detail)) return String(j.error || j.detail); } catch (e) {}
+    return 'Request failed (HTTP ' + status + ')';
+  }
+  if (text.indexOf('toast-error') === -1) return '';
+  var div = document.createElement('div'); div.innerHTML = text;
+  div.querySelectorAll('button').forEach(function(b){ b.remove(); });
+  return div.textContent.trim() || 'The request was refused';
+}
+// Success closes the modal first and refreshes after, so a slow or failed
+// refresh can never be reported as a failed save.
+function _launcherSend(url, payload, busyLabel, failText, after){
+  _launcherSetBusy(true, busyLabel);
+  _launcherFormError('');
+  fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)})
+    .then(function(r){ return r.text().then(function(t){ return {status: r.status, ok: r.ok, text: t}; }); })
+    .then(function(res){
+      var err = _launcherResponseError(res.status, res.ok, res.text);
+      _launcherSetBusy(false);
+      if (err){ _launcherFormError(err); return; }
+      showToast(res.text);
+      _launcherModalSnapshot = _launcherModalState();
+      _lm('launcherModal').close();
+      Promise.resolve().then(after).catch(function(){});
+    })
+    .catch(function(){ _launcherSetBusy(false); _launcherFormError(failText); });
+}
+function saveLauncher(e){
+  e.preventDefault();
+  // A hidden submit button still answers Enter in a field, so a pending
+  // delete or discard question would otherwise be skipped by a save.
+  if (_launcherModalBusy || !_lm('launcherConfirm').hidden) return;
+  var id = _lm('launcherId').value;
+  if (id.startsWith('provider--')){
+    var key = id.slice('provider--'.length);
+    var ppayload = {provider: key, default_args: _lm('launcherArgs').value, color: _lm('launcherColor').value,
+      enabled: _lm('launcherEnabled').checked, default_directory: _lm('launcherCwd').value.trim(),
+      show_in_workspace_hover: _lm('launcherShowInHover').checked};
+    _launcherSend('/api/provider/save', ppayload, 'Saving…', 'Save failed — try again', function(){
+      _providerSettings[key] = ppayload; dashRailReload(); return _launcherReloadTiles();
+    });
+    return;
+  }
+  var bad = null;
+  if (!_lm('launcherName').value.trim()){ _launcherFieldError('launcherName', 'A launcher needs a name.'); bad = bad || 'launcherName'; }
+  if (!_lm('launcherCommand').value.trim()){ _launcherFieldError('launcherCommand', 'Enter the program to run.'); bad = bad || 'launcherCommand'; }
+  var badKey = null;
+  _lm('launcherEnvRows').querySelectorAll('.launcher-env-key').forEach(function(k){
+    var v = k.value.trim();
+    if (v && /[=\s]/.test(v)){ k.setAttribute('aria-invalid', 'true'); badKey = badKey || k; } else { k.removeAttribute('aria-invalid'); }
+  });
+  if (bad){ _lm(bad).focus(); return; }
+  if (badKey){ _launcherFormError('A variable name cannot contain "=" or spaces.'); badKey.focus(); return; }
+  var useSelected = _lm('launcherUseSelected').checked;
+  var payload = {name: _lm('launcherName').value, command: _lm('launcherCommand').value, custom_args: _lm('launcherArgs').value,
+    cwd: _lm('launcherCwd').value, env: _launcherEnvRead(), color: _lm('launcherColor').value, terminal: _lm('launcherTerminal').checked,
+    use_selected_workspaces: useSelected, show_in_workspace_hover: useSelected && _lm('launcherShowInHover').checked};
+  if (id) payload.id = id;
+  _launcherSend(id ? '/api/launcher/update' : '/api/launcher/create', payload, 'Saving…', 'Save failed — try again', function(){
+    return fetch('/api/launchers').then(function(r){ return r.json(); }).then(function(d){ _launchers = d; return _launcherReloadTiles(); });
+  });
+}
+function deleteLauncher(){
+  var id = _lm('launcherId').value;
+  if (!id || _launcherModalBusy) return;
+  var name = _lm('launcherName').value.trim() || 'this launcher';
+  _launcherConfirm('Delete “' + name + '”? This cannot be undone.', 'Keep', 'Delete', false, function(){
+    _launcherSend('/api/launcher/delete', {id: id}, 'Deleting…', 'Delete failed — try again', function(){
+      return fetch('/api/launchers').then(function(r){ return r.json(); }).then(function(d){ _launchers = d; return _launcherReloadTiles(); });
+    });
+  });
+}
+
+(function(){
+  var m = _lm('launcherModal'), form = _lm('launcherForm');
+  _lm('launcherColorPicker').addEventListener('click', function(e){
+    var btn = e.target.closest('.color-swatch');
+    if (btn) _launcherSetColor(btn.dataset.color);
+  });
+  _lm('launcherUseSelected').addEventListener('change', function(){
+    _lm('launcherShowInHoverRow').hidden = !this.checked;
+    if (!this.checked) _lm('launcherShowInHover').checked = false;
+  });
+  form.addEventListener('input', function(e){
+    if (e.target.id === 'launcherName' || e.target.id === 'launcherCommand') _launcherFieldError(e.target.id, '');
+    if (e.target.classList.contains('launcher-env-key')) e.target.removeAttribute('aria-invalid');
+    _launcherModalUpdate();
+  });
+  form.addEventListener('change', _launcherModalUpdate);
+  _lm('launcherEnvRows').addEventListener('click', function(e){
+    var reveal = e.target.closest('.launcher-env-reveal'), remove = e.target.closest('.launcher-env-remove');
+    if (reveal){
+      var val = reveal.parentElement.querySelector('.launcher-env-val');
+      var shown = val.classList.toggle('masked') === false;
+      reveal.setAttribute('aria-pressed', shown ? 'true' : 'false');
+      reveal.setAttribute('aria-label', shown ? 'Hide value' : 'Show value');
+      reveal.title = shown ? 'Hide value' : 'Show value';
+    } else if (remove){
+      var row = remove.parentElement, next = row.nextElementSibling || row.previousElementSibling;
+      row.remove();
+      _launcherEnvSync();
+      (next ? next.querySelector('.launcher-env-key') : form.querySelector('.launcher-link-btn')).focus();
+    }
+  });
+  // Enter walks the rows (name -> value -> next name, a new row after the
+  // last) instead of submitting the form, as the old textarea's Enter added
+  // a line.
+  _lm('launcherEnvRows').addEventListener('keydown', function(e){
+    if (e.key !== 'Enter' || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    var t = e.target, row = t.closest('.launcher-env-row');
+    if (!row || t.tagName !== 'INPUT') return;
+    e.preventDefault();
+    if (t.classList.contains('launcher-env-key')) { row.querySelector('.launcher-env-val').focus(); return; }
+    var next = row.nextElementSibling;
+    if (next) next.querySelector('.launcher-env-key').focus(); else launcherEnvAddRow('', '', true);
+  });
+  // Pasting KEY=VALUE lines (the old textarea's format) into a name field
+  // fills that row and adds one row per further line.
+  _lm('launcherEnvRows').addEventListener('paste', function(e){
+    if (!e.target.classList.contains('launcher-env-key')) return;
+    var text = (e.clipboardData || window.clipboardData).getData('text') || '';
+    var pairs = text.split(/\r?\n/).map(function(line){ line = line.replace(/^\s*export\s+/, ''); var eq = line.indexOf('='); return eq > 0 ? [line.slice(0, eq).trim(), line.slice(eq + 1).trim()] : null; }).filter(Boolean);
+    if (!pairs.length) return;
+    e.preventDefault();
+    var row = e.target.closest('.launcher-env-row'), key = e.target;
+    // The first pair fills this row only if that overwrites nothing: an
+    // empty row, or a paste replacing all of what was typed.
+    var whole = !key.value || (key.selectionStart === 0 && key.selectionEnd === key.value.length);
+    var reuse = whole && !row.querySelector('.launcher-env-val').value;
+    pairs.forEach(function(p, i){
+      var target = i === 0 && reuse ? row : launcherEnvAddRow('', '', false);
+      target.querySelector('.launcher-env-key').value = p[0];
+      target.querySelector('.launcher-env-val').value = p[1];
+    });
+    _launcherEnvSync();
+  });
+  // Escape: dismiss an open question first, else close (asking if dirty).
+  // Handled on keydown, not only on `cancel`: Chromium lets a page refuse a
+  // dialog's cancel once per user activation, so a second Escape on the
+  // discard question could close the dialog and lose the edits. `cancel`
+  // stays for close requests that do not come from a key.
+  m.addEventListener('cancel', function(e){
+    e.preventDefault();
+    launcherModalRequestClose();
+  });
+  m.addEventListener('keydown', function(e){
+    if (e.key === 'Escape' && !e.isComposing){ e.preventDefault(); launcherModalRequestClose(); return; }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)){
+      e.preventDefault();
+      if (!_lm('launcherSaveBtn').disabled && _lm('launcherConfirm').hidden) form.requestSubmit(_lm('launcherSaveBtn'));
+    }
+  });
+  // Backdrop click closes. Both ends of the click must land outside the box,
+  // so a text selection dragged out of a field does not close the modal.
+  function outside(e){ var r = m.getBoundingClientRect(); return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom; }
+  m.addEventListener('mousedown', function(e){ _launcherDownOnBackdrop = e.target === m && outside(e); });
+  m.addEventListener('click', function(e){
+    if (_launcherDownOnBackdrop && e.target === m && outside(e)) launcherModalRequestClose();
+    _launcherDownOnBackdrop = false;
+  });
+  m.addEventListener('close', _launcherConfirmHide);
+})();
 </script>
 {% include "partials/launch_profile_modal.html" %}
 {% include "partials/acp_permission_rules_modal.html" %}

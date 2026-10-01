@@ -20090,6 +20090,75 @@ check("dashboard: an optimistic change refused by the server reverts and says wh
   }
 });
 
+// The launcher modal (partials/launcher_modal.html, its script in index.html).
+// The save endpoints answer with a toast partial at HTTP 200 even when they
+// refuse, so the modal reads a refusal from the markup: before, it closed the
+// dialog and recorded the refused provider settings as saved.
+function launcherPick(name) {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const at = src.indexOf("function " + name + "(");
+  assert(at >= 0, `index.html no longer defines ${name}`);
+  let depth = 0;
+  for (let i = src.indexOf("{", at); i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) return src.slice(at, i + 1);
+  }
+  throw new Error(`${name} is unterminated`);
+}
+
+check("launcher modal: a refusal is read from the toast markup and the status, not only the status", () => {
+  // Just enough element for the function's own steps: parse, drop the
+  // dismiss button, read the remaining text.
+  const fakeDiv = () => {
+    let html = "";
+    return {
+      set innerHTML(v) { html = v; },
+      querySelectorAll: (sel) => sel === "button"
+        ? [...html.matchAll(/<button[\s\S]*?<\/button>/g)].map((m) => ({ remove: () => { html = html.replace(m[0], ""); } }))
+        : [],
+      get textContent() { return html.replace(/<[^>]*>/g, ""); },
+    };
+  };
+  const box = { document: { createElement: () => fakeDiv() }, JSON, String };
+  vm.createContext(box);
+  vm.runInContext(launcherPick("_launcherResponseError"), box);
+  const f = box._launcherResponseError;
+  assertEqual(f(200, true, '<div class="toast toast-success" role="alert">Launcher updated<button class="toast-dismiss">&times;</button></div>'), "",
+    "a success toast was read as a refusal");
+  assertEqual(f(200, true, '<div class="toast toast-error" role="alert">Default args too long (max 256 chars)<button class="toast-dismiss">&times;</button></div>'),
+    "Default args too long (max 256 chars)", "an error toast at HTTP 200 was not read as a refusal, or kept its dismiss button");
+  assertEqual(f(403, false, '{"error": "Open PowerAtlas from the tray"}'), "Open PowerAtlas from the tray",
+    "a JSON refusal's error was not shown");
+  assertEqual(f(500, false, "Internal Server Error"), "Request failed (HTTP 500)",
+    "a non-JSON failure was not reported with its status");
+});
+
+check("launcher modal: env rows are trimmed and a row with no name is dropped, as the old KEY=VAL box did", () => {
+  const row = (k, v) => ({ querySelector: (sel) => ({ value: sel === ".launcher-env-key" ? k : v }) });
+  const rows = [row(" API_KEY ", " abc "), row("", "orphan"), row("  ", "blank"), row("PATH", "C:\\a=b")];
+  const box = { _lm: () => ({ querySelectorAll: () => rows }) };
+  vm.createContext(box);
+  vm.runInContext(launcherPick("_launcherEnvRead"), box);
+  assertEqual(JSON.stringify(box._launcherEnvRead()), JSON.stringify({ API_KEY: "abc", PATH: "C:\\a=b" }),
+    "env rows were not normalised the way the textarea parse did");
+});
+
+check("launcher modal: Enter while the delete or discard question is up does not save", () => {
+  const fetches = [];
+  const confirmBar = { hidden: false };
+  const box = {
+    _launcherModalBusy: false,
+    _lm: (id) => (id === "launcherConfirm" ? confirmBar : { value: "", checked: false, hidden: true }),
+    fetch: (u) => { fetches.push(u); return new Promise(() => {}); },
+  };
+  vm.createContext(box);
+  vm.runInContext(launcherPick("saveLauncher"), box);
+  let prevented = false;
+  box.saveLauncher({ preventDefault: () => { prevented = true; } });
+  assert(prevented, "the native submit was not prevented");
+  assertEqual(fetches.length, 0, "a save was sent while the question was pending");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
