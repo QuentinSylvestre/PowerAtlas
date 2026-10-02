@@ -1,8 +1,10 @@
 #!/bin/sh
 # Two checks on what is staged:
 #
-#   1. _check_public_ids.py, on every commit: refuse an added line that holds a
-#      session id found in a local session store (this repository is public).
+#   1. _check_public_ids.py, on every commit: refuse an added line, an added file
+#      name or a UTF-16 file that holds a session id found in a local session
+#      store (this repository is public). The commit message is checked by the
+#      companion commit-msg hook, _commit_msg_hook.sh.
 #   2. _check_test_names.py, only when a tests/*.py file is staged: refuse a
 #      duplicate definition in a test module.
 #
