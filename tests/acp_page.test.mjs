@@ -17907,7 +17907,7 @@ check("dashboard overview usage: week, daily bars, tools, context, models and to
   assertEqual(time[13].getAttribute("aria-label"), time[13].title);
   assertEqual(time[13].getAttribute("role"), "img");
   // Kiro IDE has no agent time, so no segment; its legend item says so.
-  assertEqual(b.querySelector(".dash-ov-legend").textContent, "Claude Codekiro-cliKiro IDE (sessions only)");
+  assertEqual(b.querySelector(".dash-ov-legend").textContent, "Claude Codekiro-cliKiro IDE (sessions only)Codex");
   const tools = b.querySelectorAll(".dash-ov-tool-row");
   assertEqual(tools[0].textContent, "Bash1.2k calls3% failed");
   assertEqual(tools[1].textContent, "shell4 of 1040%");
@@ -17919,7 +17919,111 @@ check("dashboard overview usage: week, daily bars, tools, context, models and to
   assertEqual(lines[1], "Input 1.5k · Output 2.0M · Cache read 9.0M · Cache write 500.0k · Cache hit 85%");
   assertEqual(b.querySelector(".dash-ov-chip").textContent, "claude-opus-5-53");
   assertEqual(b.querySelector(".dash-ov-usage-note").textContent,
-    "Claude agent time is estimated from message timestamps.");
+    "Claude agent time is estimated from message timestamps. " +
+    "Codex agent time is exact from 0.139 and estimated before; Codex sub-agent threads are not counted.");
+  // No Codex usage in this payload: no empty Codex block for a machine without Codex.
+  assert(!labels.includes("TokensCodex"), `no Codex block without Codex tokens: ${labels}`);
+});
+
+// 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4: Codex in the usage section.
+const OV_CODEX_TOKENS = { input: 2166246, output: 216916, cache_read: 38767744, cache_creation: 0,
+                          cache_hit_ratio: 0.9471 };
+
+function ovCodexUsage(over = {}) {
+  return ovUsage(Object.assign({
+    daily: ovUsageDays((i) => (i === 13
+      ? { sessions: { "claude-code": 1, codex: 3 }, agent_s: { "claude-code": 100, codex: 300 } }
+      : i === 12 ? { sessions: { codex: 1 }, agent_s: { codex: 800 } } : {})),
+    codex_tokens: OV_CODEX_TOKENS,
+  }, over));
+}
+
+check("dashboard overview usage: a Codex segment, legend entry and tooltip text", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage(), "ready");
+  const b = ovUsageBody(p);
+  const time = b.querySelectorAll(".dash-ov-bar");
+  const segs = time[13].querySelectorAll(".dash-ov-bar-seg");
+  assertEqual(segs.map((s) => s.className).join("|"), "dash-ov-bar-seg is-claude|dash-ov-bar-seg is-codex");
+  assertEqual(segs.map((s) => s.style.height).join("|"), "25%|75%", "claude 100 s and codex 300 s of 400 s");
+  assertEqual(time[12].querySelectorAll(".dash-ov-bar-seg").map((s) => s.className).join("|"),
+    "dash-ov-bar-seg is-codex");
+  assertEqual(time[13].title, "2026-09-25: 7m · 4 sessions (Claude Code 1, Codex 3)");
+  assertEqual(time[12].title, "2026-09-24: 13m · 1 session (Codex 1)");
+  assertEqual(time[13].getAttribute("aria-label"), time[13].title);
+  const legend = b.querySelectorAll(".dash-ov-legend-item");
+  assertEqual(legend.map((l) => l.className).join("|"),
+    "dash-ov-legend-item is-claude|dash-ov-legend-item is-kiro-cli|dash-ov-legend-item is-kiro-ide|dash-ov-legend-item is-codex");
+  assertEqual(legend[3].textContent, "Codex");
+  // The Codex tile in the Live now list has an icon (DASH_OV_PROVIDERS).
+  assert(p.sandbox.DASH_OV_PROVIDERS.codex === true, "a Codex tile draws the provider icon");
+});
+
+check("style.css colours the Codex bar segment and legend swatch (no CSS engine here: the browser check owns the look)", () => {
+  const css = fs.readFileSync(STYLESHEET, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = css.match(/\.dash-ov-bar-seg\.is-codex,\s*\.dash-ov-legend-item\.is-codex::before\s*\{([^}]*)\}/);
+  assert(rule, "no `.dash-ov-bar-seg.is-codex, .dash-ov-legend-item.is-codex::before` rule in style.css");
+  assert(/background:\s*#e5e7eb\s*;/i.test(rule[1]), "the Codex colour is #e5e7eb: " + rule[1]);
+  for (const cls of ["is-claude", "is-kiro-cli", "is-kiro-ide"]) {
+    assert(css.includes(`.dash-ov-bar-seg.${cls}`), `the ${cls} rule is still there`);
+  }
+});
+
+check("dashboard overview usage: the Tokens area shows a Claude Code block and a Codex block with no Cache write for Codex", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage(), "ready");
+  const b = ovUsageBody(p);
+  const labels = b.querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent);
+  assert(labels.includes("TokensClaude Code only"), `the Claude block keeps its label: ${labels}`);
+  assert(labels.includes("TokensCodex"), `the Codex block is labelled Codex: ${labels}`);
+  assert(labels.indexOf("TokensClaude Code only") < labels.indexOf("TokensCodex"), "Claude first, then Codex");
+  const lines = b.querySelectorAll(".dash-ov-usage-line").map((l) => l.textContent);
+  assertEqual(lines[1], "Input 1.5k · Output 2.0M · Cache read 9.0M · Cache write 500.0k · Cache hit 85%");
+  assertEqual(lines[2], "Input 2.2M · Output 216.9k · Cache read 38.8M · Cache hit 95%");
+  assert(!lines[2].includes("Cache write"), "Codex records no cache write");
+  // Both Codex clauses, and the Claude clause, are in the one note.
+  const note = b.querySelector(".dash-ov-usage-note").textContent;
+  assert(note.includes("Claude agent time is estimated from message timestamps."), note);
+  assert(note.includes("Codex agent time is exact from 0.139 and estimated before"), note);
+  assert(note.includes("Codex sub-agent threads are not counted."), note);
+  assertEqual(b.querySelectorAll(".dash-ov-usage-note").length, 1, "one note, not a second section");
+});
+
+check("dashboard overview usage: a partial aggregate attaches the sub-agent note to the Claude block only", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({ partial: true }), "warming");
+  const b = ovUsageBody(p);
+  const blocks = b.querySelectorAll(".dash-ov-usage-block");
+  const claude = blocks.find((x) => x.textContent.startsWith("TokensClaude Code only"));
+  const codex = blocks.find((x) => x.textContent.startsWith("TokensCodex"));
+  assert(claude && codex, "both token blocks are drawn");
+  assertEqual(claude.querySelectorAll(".dash-ov-usage-partial").length, 1, "the Claude block carries the note");
+  assertEqual(codex.querySelectorAll(".dash-ov-usage-partial").length, 0, "the Codex block does not");
+  assertEqual(b.querySelectorAll(".dash-ov-usage-partial").length, 2, "and one more under Tool reliability, as before");
+});
+
+check("dashboard overview usage: hostile Codex fields stay text and numbers (D26)", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({
+    codex_tokens: { input: OV_XSS, output: "9", cache_read: 5, cache_creation: "x", cache_hit_ratio: OV_XSS },
+    daily: ovUsageDays(() => ({ date: "2026-09-12", sessions: { codex: OV_XSS }, agent_s: { codex: "50%; color:red" } })),
+  }), "ready");
+  const b = ovUsageBody(p);
+  const allowed = new Set(["DIV", "SPAN", "UL", "LI"]);
+  for (const n of b.descendants()) assert(allowed.has(n.tagName), `<${n.tagName}> came from the data`);
+  assertEqual(b.querySelector(".dash-ov-bar").title, "2026-09-12: 0m · 0 sessions");
+  assert(b.querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent).includes("TokensCodex"),
+    "a payload with one real count still draws the Codex block");
+});
+
+check("dashboard overview usage: no Codex block for an absent or empty Codex payload", () => {
+  const p = loadDashPicker();
+  for (const codex_tokens of [undefined, null, "x", { input: 0, output: 0, cache_read: 0, cache_creation: 0, cache_hit_ratio: 0 }]) {
+    p.sandbox.dashOvRenderUsage(ovUsage({ codex_tokens }), "ready");
+    const labels = ovUsageBody(p).querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent);
+    assert(!labels.includes("TokensCodex"), `no block for ${JSON.stringify(codex_tokens)}: ${labels}`);
+    assert(labels.includes("TokensClaude Code only"), "the Claude block stays");
+  }
 });
 
 check("dashboard overview usage: markup in a workspace, tool or model name stays text, and bar heights are numbers only (D26)", () => {
@@ -17969,7 +18073,8 @@ check("dashboard overview usage: markup in a workspace, tool or model name stays
   assertEqual(b.querySelectorAll(".dash-ov-chip").length, 1, "a non-object model entry is skipped");
   const segClasses = new Set(b.querySelectorAll(".dash-ov-bar-seg").map((s) => s.className));
   for (const c of segClasses) {
-    assert(["dash-ov-bar-seg is-claude", "dash-ov-bar-seg is-kiro-cli", "dash-ov-bar-seg is-kiro-ide"].includes(c),
+    assert(["dash-ov-bar-seg is-claude", "dash-ov-bar-seg is-kiro-cli", "dash-ov-bar-seg is-kiro-ide",
+            "dash-ov-bar-seg is-codex"].includes(c),
       `a segment class comes from the fixed map, got ${c}`);
   }
   // A hostile date lands in the bar tooltip and accessible name as text;

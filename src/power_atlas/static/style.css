@@ -1461,6 +1461,8 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .dash-ov-bar-seg.is-claude, .dash-ov-legend-item.is-claude::before { background: #d97757; }
 .dash-ov-bar-seg.is-kiro-cli, .dash-ov-legend-item.is-kiro-cli::before { background: var(--accent); }
 .dash-ov-bar-seg.is-kiro-ide, .dash-ov-legend-item.is-kiro-ide::before { background: #a78bfa; }
+/* 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4 */
+.dash-ov-bar-seg.is-codex, .dash-ov-legend-item.is-codex::before { background: #e5e7eb; }
 .dash-ov-usage-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .dash-ov-tool-head { margin-bottom: 2px; font-size: 11px; color: var(--text-dim); }
 .dash-ov-tool-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }

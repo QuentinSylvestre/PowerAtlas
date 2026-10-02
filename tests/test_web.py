@@ -116,6 +116,8 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(overview_mod, "_usage_stage1", [False])
     monkeypatch.setattr(overview_mod, "_usage_cache", [0.0, None, None])
     monkeypatch.setattr(overview_mod, "_usage_memo", {})
+    # The Codex re-parse limit's side table (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4).
+    monkeypatch.setattr(overview_mod, "_codex_parsed_at", {})
     # The warm pass parses in a child process in production; here in-thread,
     # so every test's `_parse_usage_file` hook sees each parse. The tests of
     # the child itself turn it back on.
@@ -30878,6 +30880,103 @@ def _ov_cc_line(otype, content, **extra) -> str:
                        "message": {"role": otype, "content": content}, **extra})
 
 
+# --- Codex rollouts for the Overview ---------------------------------------------
+# Synthetic records built from the key-path skeletons in section 9 (the pre-flight results, item 4)
+# of plans/261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW.md. Nothing
+# here is read from a developer's store.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+
+
+def _ovx_id(n: int) -> str:
+    return f"{n:08x}-1111-4222-8333-444444444444"
+
+
+def _ovx_rec(at, rtype, payload) -> dict:
+    return {"ordinal": 1, "timestamp": _ov_iso(at), "type": rtype, "payload": payload}
+
+
+def _ovx_event(at, ptype, **fields) -> dict:
+    return _ovx_rec(at, "event_msg", {"type": ptype, **fields})
+
+
+def _ovx_user(at, text="hello") -> dict:
+    return _ovx_event(at, "item_completed", thread_id="t", turn_id="u1", completed_at_ms=1,
+                      item={"type": "UserMessage", "id": "i1",
+                            "content": [{"type": "text", "text": text, "text_elements": []}]})
+
+
+def _ovx_agent(at, text="done") -> dict:
+    return _ovx_event(at, "item_completed", thread_id="t", turn_id="u1", completed_at_ms=1,
+                      item={"type": "AgentMessage", "id": "i2", "phase": "final_answer",
+                            "content": [{"type": "Text", "text": text}]})
+
+
+def _ovx_tokens(at, input_=0, cached=0, output=0, write=None) -> dict:
+    usage = {"input_tokens": input_, "cached_input_tokens": cached, "output_tokens": output,
+             "reasoning_output_tokens": 0, "total_tokens": input_ + output}
+    if write is not None:
+        usage["cache_write_input_tokens"] = write
+    return _ovx_event(at, "token_count", rate_limits=None,
+                      info={"total_token_usage": usage, "last_token_usage": usage,
+                            "model_context_window": 258400})
+
+
+def _ovx_started(at, turn="u1") -> dict:
+    return _ovx_event(at, "task_started", turn_id=turn, collaboration_mode_kind="default",
+                      model_context_window=258400)
+
+
+def _ovx_complete(at, turn="u1", **extra) -> dict:
+    return _ovx_event(at, "task_complete", turn_id=turn, last_agent_message=None, **extra)
+
+
+def _ovx_aborted(at, turn="u1") -> dict:
+    return _ovx_event(at, "turn_aborted", turn_id=turn, reason="interrupted")
+
+
+def _ovx_call(at, name, call_id, arguments='{"command":"ls","workdir":"C:\\\\ws"}') -> dict:
+    return _ovx_rec(at, "response_item", {"type": "function_call", "name": name,
+                                          "arguments": arguments, "call_id": call_id})
+
+
+def _ovx_custom(at, name, call_id, text="*** Begin Patch") -> dict:
+    return _ovx_rec(at, "response_item", {"type": "custom_tool_call", "name": name, "input": text,
+                                          "call_id": call_id, "status": "completed"})
+
+
+def _ovx_output(at, call_id, output, custom=False) -> dict:
+    return _ovx_rec(at, "response_item", {
+        "type": "custom_tool_call_output" if custom else "function_call_output",
+        "call_id": call_id, "output": output})
+
+
+def _ovx_context(at, model) -> dict:
+    return _ovx_rec(at, "turn_context", {"model": model, "cwd": "C:\\ws", "turn_id": "u1",
+                                         "approval_policy": "never", "effort": "high"})
+
+
+def _ovx_meta(at, sid, cwd, source="cli", **extra) -> dict:
+    payload = {"id": sid, "session_id": sid, "timestamp": _ov_iso(at), "cwd": cwd,
+               "originator": "codex-tui", "cli_version": "0.159.2", "source": source,
+               "model_provider": "openai", "history_mode": "full",
+               "base_instructions": {"text": "x"}}
+    payload.update(extra)
+    return _ovx_rec(at, "session_meta", payload)
+
+
+def _ovx_rollout(root, n, records, *, cwd="C:\\ws\\gamma", source="cli", at=None, mtime=None,
+                 first=None, **extra) -> Path:
+    """`<root>/2026/10/01/rollout-<ts>-<uuid n>.jsonl` with a session_meta first line
+    (or `first`, a raw first record), then `records`; `mtime` stamps the file."""
+    sid = _ovx_id(n)
+    path = root / "2026" / "10" / "01" / f"rollout-2026-10-01T10-00-00-{sid}.jsonl"
+    head = first if first is not None else _ovx_meta(at or time.time(), sid, cwd, source, **extra)
+    _ov_jsonl(path, [head, *records])
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
 class TestOverviewLive:
     """`overview.live_sessions`, `overview.tail_events`, the presence
     accessors, and `GET /api/dashboard/overview/live`."""
@@ -31230,6 +31329,212 @@ class TestOverviewLive:
             {"kind": "result", "ok": False},
             {"kind": "result", "ok": True},
         ]
+
+    # --- Codex tiles (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4) ---
+
+    def test_line_events_dispatch_is_explicit_and_an_unknown_provider_gives_nothing(self):
+        """SC-6: the three providers each have their own reader, and a provider the
+        function does not know is never parsed as another one (it used to be read as
+        kiro-cli v3)."""
+        from power_atlas import overview
+        cc = _ov_cc_line("user", "claude text").encode()
+        v3 = _ov_v3_line("user", content="kiro text").encode()
+        cx = json.dumps(_ovx_user(1.0, "codex text")).encode()
+        assert overview._line_events(cc, _OV_CC) == [{"kind": "text", "role": "user", "text": "claude text"}]
+        assert overview._line_events(v3, _OV_V3) == [{"kind": "text", "role": "user", "text": "kiro text"}]
+        assert overview._line_events(cx, "codex") == [{"kind": "text", "role": "user", "text": "codex text"}]
+        for unknown in ("kiro-ide", "claude-code-subagent", "Codex", "mystery", ""):
+            for line in (cc, v3, cx):
+                assert overview._line_events(line, unknown) == [], (unknown, line[:30])
+        # No reader accepts another's lines.
+        assert overview._line_events(cc, "codex") == [] and overview._line_events(v3, "codex") == []
+        assert overview._line_events(cx, _OV_V3) == [] and overview._line_events(cx, _OV_CC) == []
+
+    def test_codex_events(self):
+        from power_atlas import overview
+
+        def events(record):
+            return overview._line_events(json.dumps(record).encode(), "codex")
+        assert events(_ovx_user(1.0, "  please\n fix  it ")) == [
+            {"kind": "text", "role": "user", "text": "please fix it"}]
+        [long] = events(_ovx_agent(1.0, "a" * 300))
+        assert long["role"] == "assistant" and len(long["text"]) == 240 and long["text"].endswith("…")
+        # The first string of the arguments, skipping a non-string value before it.
+        assert events(_ovx_call(1.0, "shell_command", "c1",
+                                '{"timeout_ms": 5, "command": "git status", "workdir": "C:\\\\ws"}')) == [
+            {"kind": "tool", "name": "shell_command", "arg": "git status"}]
+        # Arguments that are not JSON are shown as they are; a name that is not text is "tool".
+        assert events(_ovx_call(1.0, "shell", "c2", "ls -la")) == [
+            {"kind": "tool", "name": "shell", "arg": "ls -la"}]
+        assert events(_ovx_call(1.0, 7, "c3", "{}")) == [{"kind": "tool", "name": "tool", "arg": ""}]
+        assert events(_ovx_custom(1.0, "apply_patch", "c4", "*** Begin Patch\n*** Add File: a.py")) == [
+            {"kind": "tool", "name": "apply_patch", "arg": "*** Begin Patch *** Add File: a.py"}]
+        # A result carries `ok` from the tool's own exit code, and nothing when it records none.
+        ok = [{"kind": "result", "ok": True}]
+        bad = [{"kind": "result", "ok": False}]
+        assert events(_ovx_output(1.0, "c1", "Exit code: 0\nWall time: 1.2 seconds\nOutput:\nx")) == ok
+        assert events(_ovx_output(1.0, "c1", "Exit code: 2\nWall time: 0.1 seconds")) == bad
+        assert events(_ovx_output(1.0, "c1", json.dumps({"output": "x", "metadata": {"exit_code": 1}}))) == bad
+        assert events(_ovx_output(1.0, "c1", [{"type": "input_text", "text": "Exit code: 0\nok"}],
+                                  custom=True)) == ok
+        assert events(_ovx_output(1.0, "c1", "Script completed\nWall time: 1s")) == []
+        assert events(_ovx_output(1.0, "c1", None)) == []
+        assert events(_ovx_output(1.0, "c1", "Exit code: " + "9" * 5000)) == [], "an absurd code is unknown"
+        # Everything else a rollout holds is not a tile event.
+        injected = _ovx_rec(1.0, "response_item", {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "# AGENTS.md instructions for C:\\ws"}]})
+        command = _ovx_event(1.0, "item_completed", item={"type": "CommandExecution", "command": "ls"})
+        for record in (injected, command, _ovx_tokens(1.0, 5, 1, 2), _ovx_context(1.0, "m"),
+                       _ovx_started(1.0), _ovx_meta(1.0, _ovx_id(1), "C:\\ws"),
+                       _ovx_rec(1.0, "response_item", {"type": "reasoning", "summary": []})):
+            assert events(record) == [], record["type"]
+
+    def test_a_malformed_codex_line_gives_no_events_and_costs_no_other_line(self, tmp_path):
+        from power_atlas import data_codex, overview
+        good = [_ovx_user(1.0, "one"), _ovx_agent(2.0, "two")]
+        garbage = [b'{"type": "event_msg", "payload": ', b"[1, 2]", b"null", b'"text"',
+                   b'{"type":"response_item","payload":null}',
+                   b'{"type":"event_msg","payload":{"type":"item_completed","item":"x"}}',
+                   b'{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":"x"}}}',
+                   b'{"type":"response_item","payload":{"type":"function_call","name":null,"arguments":5}}',
+                   (b'{"a":' * 5000) + b"1" + (b"}" * 5000)]
+        for line in garbage:
+            assert overview._line_events(line, "codex") in ([], [{"kind": "tool", "name": "tool", "arg": ""}]), line[:30]
+        path = _ovx_rollout(data_codex.CODEX_SESSIONS_DIR, 1, [])
+        with path.open("ab") as fh:
+            fh.write(json.dumps(good[0]).encode() + b"\n")
+            for line in garbage:
+                fh.write(line + b"\n")
+            fh.write(json.dumps(good[1]).encode() + b"\n")
+        got = overview.tail_events(path, "codex", n=5)
+        assert [e["text"] for e in got if e["kind"] == "text"] == ["one", "two"]
+
+    def test_a_codex_tail_reads_the_last_events_and_widens_like_the_others(self, tmp_path):
+        from power_atlas import data_codex, overview
+        now = time.time()
+        records = [_ovx_user(now - 90, "first prompt"),
+                   _ovx_call(now - 80, "shell_command", "c1", '{"command":"pytest -q"}'),
+                   _ovx_output(now - 79, "c1", "Exit code: 1\nWall time: 4 seconds"),
+                   _ovx_event(now - 70, "token_count", info=None, rate_limits=None)]
+        # Enough lines that no tail window of 64 KiB holds the five events.
+        records += [_ovx_rec(now - 60, "response_item", {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "z" * 3000}]}) for _ in range(30)]
+        records += [_ovx_agent(now - 5, "all green")]
+        path = _ovx_rollout(data_codex.CODEX_SESSIONS_DIR, 1, records)
+        assert path.stat().st_size > overview.TAIL_FIRST_BYTES
+        assert overview.tail_events(path, "codex") == [
+            {"kind": "text", "role": "user", "text": "first prompt"},
+            {"kind": "tool", "name": "shell_command", "arg": "pytest -q"},
+            {"kind": "result", "ok": False},
+            {"kind": "text", "role": "assistant", "text": "all green"},
+        ]
+
+    def test_every_codex_read_of_a_tile_goes_through_open_shared(self, tmp_path, monkeypatch):
+        """D10: a plain `open()` of a rollout blocks Codex's own rename and delete on
+        Windows. `Path.open` calls `io.open`, so both names are guarded; `os.fdopen`
+        (inside `open_shared`) passes a descriptor, which the guard lets through."""
+        import builtins
+        import io
+
+        from power_atlas import data_codex, overview
+        root = data_codex.CODEX_SESSIONS_DIR
+        now = time.time()
+        path = _ovx_rollout(root, 1, [_ovx_user(now - 9, "hi"), _ovx_agent(now - 3, "yo")],
+                            cwd="C:\\ws\\gamma")
+        real = builtins.open
+        shown = str(root).lower()
+
+        def guarded(file, *args, **kwargs):
+            if isinstance(file, (str, os.PathLike)) and os.fspath(file).lower().startswith(shown):
+                raise AssertionError(f"a plain open of a rollout: {file}")
+            return real(file, *args, **kwargs)
+        monkeypatch.setattr(builtins, "open", guarded)
+        monkeypatch.setattr(io, "open", guarded)
+        with pytest.raises(AssertionError):
+            path.open("rb")          # the guard itself works, for Path.open too
+        assert [e["text"] for e in overview.tail_events(path, "codex")] == ["hi", "yo"]
+        assert overview._transcript_cwd(path, "codex") == "C:\\ws\\gamma"
+        assert overview._find_cwdless("codex", _ovx_id(1)) == (path, "C:\\ws\\gamma")
+        # The same guard does stop a provider's plain read (the control).
+        other = tmp_path / "plain.jsonl"
+        other.write_text(_ov_cc_line("assistant", "x") + "\n")
+        monkeypatch.setattr(builtins, "open", real)
+        monkeypatch.setattr(io, "open", real)
+        assert overview.tail_events(other, _OV_CC)
+
+    def test_transcript_cwd_reads_a_codex_first_line_of_any_realistic_size(self, tmp_path):
+        from power_atlas import data_codex, overview
+        root = data_codex.CODEX_SESSIONS_DIR
+        small = _ovx_rollout(root, 1, [], cwd="C:\\ws\\small")
+        big = _ovx_rollout(root, 2, [], cwd="C:\\ws\\big", base_instructions={"text": "b" * 42_000})
+        assert len(big.read_bytes().split(b"\n")[0]) > 42_000
+        assert overview._transcript_cwd(small, "codex") == "C:\\ws\\small"
+        assert overview._transcript_cwd(big, "codex") == "C:\\ws\\big", "a 42 KB first line (the measured maximum)"
+        # A first line that is no session_meta, a missing file and a non-text cwd give "".
+        assert overview._transcript_cwd(_ovx_rollout(root, 3, [], first={"type": "event_msg"}), "codex") == ""
+        assert overview._transcript_cwd(root / "nope.jsonl", "codex") == ""
+        assert overview._transcript_cwd(
+            _ovx_rollout(root, 4, [], first=_ovx_meta(1.0, _ovx_id(4), 5)), "codex") == ""
+
+    def test_transcript_cwd_of_an_unknown_provider_is_empty_not_a_claude_read(self, tmp_path):
+        """It used to read every non-kiro provider as Claude Code (D18)."""
+        from power_atlas import overview
+        claude_shaped = tmp_path / "t.jsonl"
+        claude_shaped.write_text(json.dumps({"type": "user", "cwd": "C:\\ws\\proj"}) + "\n")
+        assert overview._transcript_cwd(claude_shaped, _OV_CC) == "C:\\ws\\proj"
+        for unknown in ("mystery", "kiro-ide", "claude-code-subagent", ""):
+            assert overview._transcript_cwd(claude_shaped, unknown) == ""
+
+    def test_a_cwdless_live_codex_id_gets_its_cwd_events_and_activity(self, tmp_path):
+        """The exit criterion deferred from the live-state phase: a live Codex tile shows its
+        events, its real cwd, and a recency from the last record, not the frozen mtime."""
+        from power_atlas import data_codex
+        now = time.time()
+        sid = _ovx_id(7)
+        _ovx_rollout(data_codex.CODEX_SESSIONS_DIR, 7,
+                     [_ovx_user(now - 40, "ship it"), _ovx_call(now - 30, "shell_command", "c1"),
+                      _ovx_agent(now - 12, "shipped")],
+                     cwd="C:\\ws\\gamma", at=now - 9000, mtime=now - 5000)
+        data_codex._clear_caches()
+        snap = self._snap(live_sids=[("codex", sid, "")])
+        [tile] = self._live({}, snap, self._deps(), {})
+        assert (tile["id"], tile["provider"], tile["cwd"]) == (sid, "codex", "C:\\ws\\gamma")
+        assert [(e["kind"], e.get("text") or e.get("name")) for e in tile["events"]] == [
+            ("text", "ship it"), ("tool", "shell_command"), ("text", "shipped")]
+        seen = dt.datetime.fromisoformat(tile["last_activity"]).timestamp()
+        assert abs(seen - (now - 12)) < 2, "the last record, not the mtime 5000 s ago"
+
+    def test_a_codex_tile_with_a_frozen_mtime_outranks_a_stale_claude_tile(self, store, tmp_path):
+        from power_atlas import data_codex
+        ws = str(tmp_path / "Ws")
+        cc_sid, cx_sid = _ov_uuid(1), _ovx_id(2)
+        store.add(_OV_CC, ws, cc_sid, age_s=200)
+        store.add("codex", ws, cx_sid, transcript=False)
+        now = time.time()
+        store.files[cx_sid] = _ovx_rollout(
+            data_codex.CODEX_SESSIONS_DIR, 2,
+            [_ovx_user(now - 30, "hi"), _ovx_agent(now - 8, "working")],
+            at=now - 9000, mtime=now - 5000)
+        tiles = self._live({}, self._snap(live_cwds=[(_OV_CC, ws), ("codex", ws)]),
+                           self._deps(recent={cc_sid, cx_sid}), self._originals(ws))
+        assert [t["id"] for t in tiles] == [cx_sid, cc_sid]
+        stamp = {t["id"]: dt.datetime.fromisoformat(t["last_activity"]).timestamp() for t in tiles}
+        assert abs(stamp[cx_sid] - (now - 8)) < 2
+        assert abs(stamp[cc_sid] - (now - 200)) < 2, "another provider still ranks by its mtime"
+        assert [e["text"] for e in tiles[0]["events"]] == ["hi", "working"]
+
+    def test_a_codex_tile_whose_records_are_all_old_ranks_below_a_recent_claude_tile(self, store, tmp_path):
+        from power_atlas import data_codex
+        ws = str(tmp_path / "Ws")
+        cc_sid, cx_sid = _ov_uuid(1), _ovx_id(2)
+        store.add(_OV_CC, ws, cc_sid, age_s=200)
+        store.add("codex", ws, cx_sid, transcript=False)
+        now = time.time()
+        store.files[cx_sid] = _ovx_rollout(data_codex.CODEX_SESSIONS_DIR, 2,
+                                           [_ovx_agent(now - 4000, "old")], at=now - 9000, mtime=now - 5000)
+        tiles = self._live({}, self._snap(live_cwds=[(_OV_CC, ws), ("codex", ws)]),
+                           self._deps(recent={cc_sid, cx_sid}), self._originals(ws))
+        assert [t["id"] for t in tiles] == [cc_sid, cx_sid]
 
     def test_widens_when_the_first_window_holds_too_few_events(self, tmp_path, monkeypatch):
         from power_atlas import overview
@@ -31599,14 +31904,17 @@ class TestOverviewUsage:
         """Fixture stores behind the real store constants, and `_usage_roots`
         pointed back at those constants (the autouse `isolated_config` points
         it at empty folders)."""
-        from power_atlas import data_claude, data_kiro_ide, overview, status_classifier
+        from power_atlas import data_claude, data_codex, data_kiro_ide, overview, status_classifier
         roots = types.SimpleNamespace(v3=tmp_path / "v3", claude=tmp_path / "claude",
-                                      ide=tmp_path / "ide")
+                                      ide=tmp_path / "ide", codex=tmp_path / "codex")
         for root in vars(roots).values():
             root.mkdir()
         monkeypatch.setattr(status_classifier, "_V3_SESSIONS_ROOT", roots.v3)
         monkeypatch.setattr(data_claude, "CLAUDE_PROJECTS_DIR", roots.claude)
         monkeypatch.setattr(data_kiro_ide, "SESSIONS_DIR", roots.ide)
+        # Codex's sessions folder, redirected like the other three
+        # (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4).
+        monkeypatch.setattr(data_codex, "CODEX_SESSIONS_DIR", roots.codex)
         monkeypatch.setattr(overview, "_usage_roots", _REAL_USAGE_ROOTS)
         # Local noon today: every "k days ago" below lands on a known local day.
         self.now = dt.datetime.now().replace(hour=12, minute=0, second=0,
@@ -32568,6 +32876,638 @@ class TestOverviewUsage:
         finally:
             release.set()
             thread.join(timeout=10)
+
+    # --- Codex usage (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4) ---
+
+    def codex(self, n, records, **kw):
+        """A top-level Codex rollout under the fixture store; its meta line is stamped an
+        hour before `self.now`, and its mtime is the real write time unless given."""
+        kw.setdefault("at", self.now - 3600)
+        return _ovx_rollout(self.roots.codex, n, records, **kw)
+
+    def cx_days(self, path):
+        from power_atlas import overview
+        return overview._parse_usage_file(path, overview._CODEX)["days"]
+
+    @staticmethod
+    def cx_total(days, key):
+        return sum(d["tokens"][key] for d in days.values())
+
+    def test_the_schema_is_2_and_an_older_worker_is_ignored(self):
+        """`_parse_usage_file` gained a `codex` provider and lost its Claude fall-through:
+        a child on the old format must not mix its summaries into the memo."""
+        from power_atlas import overview
+        assert overview._USAGE_SCHEMA == 2
+        old = self.fake_worker()
+        good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
+                "subagent": False, "days": {}}
+        for record in (["schema", 1], ["C:/x.jsonl", 1, 1, good], ["stage", 0]):
+            old._lines.put(json.dumps(record).encode() + b"\n")
+        assert old.wait_stage(0, None) is False
+        assert overview._usage_memo == {}
+
+    def test_codex_usage_roots_stay_a_triple_and_the_codex_root_has_its_own_seam(self):
+        from power_atlas import data_codex, overview
+        assert len(overview._usage_roots()) == 3
+        assert overview._codex_usage_root() == self.roots.codex == data_codex.CODEX_SESSIONS_DIR
+
+    def test_codex_days_are_local_days_and_a_turn_across_midnight_counts_on_the_day_it_ends(self):
+        now = self.now
+        midnight = dt.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0,
+                                                          microsecond=0).timestamp()
+        yday, today = _ov_day(midnight - 10), _ov_day(midnight + 10)
+        assert yday != today
+        path = self.codex(1, [
+            _ovx_user(midnight - 40, "late"), _ovx_tokens(midnight - 30, 1000, 640, 77),
+            _ovx_started(midnight - 60), _ovx_complete(midnight + 60),     # ends after midnight
+            _ovx_agent(midnight + 10, "early"), _ovx_tokens(midnight + 20, 1500, 1100, 140),
+        ])
+        days = self.cx_days(path)
+        assert set(days) == {yday, today}
+        assert days[yday]["active"] is True and days[today]["active"] is True
+        assert days[yday]["tokens"] == {"input": 360, "output": 77, "cache_read": 640, "cache_creation": 0}
+        # 500 more input of which 460 cached, 63 more output.
+        assert days[today]["tokens"] == {"input": 40, "output": 63, "cache_read": 460, "cache_creation": 0}
+        assert days[yday]["agent_seconds"] == 0.0 and days[today]["agent_seconds"] == 120.0
+        usage = self.summary()
+        assert self.daily(usage, yday)["sessions"] == {"codex": 1}
+        assert self.daily(usage, today)["sessions"] == {"codex": 1}
+        assert self.daily(usage, today)["agent_s"] == {"codex": 120.0}
+
+    def test_codex_tokens_are_growth_of_the_cumulative_counters(self):
+        """A repeated event counts once, a counter that goes down is a reset and counts
+        its new value, and an event with no `info` is nothing."""
+        t = self.now - 7200
+        path = self.codex(1, [
+            _ovx_tokens(t, 1000, 640, 77),
+            _ovx_tokens(t + 1, 1000, 640, 77),                     # the same event again
+            _ovx_event(t + 2, "token_count", info=None, rate_limits=None),
+            _ovx_tokens(t + 3, 1500, 1100, 140),
+            _ovx_tokens(t + 4, 200, 50, 9),                        # a reset: lower on every counter
+            _ovx_tokens(t + 5, 230, 50, 19),
+        ])
+        days = self.cx_days(path)
+        # input: (1000-640) + (500-460) + (200-50) + (30-0); cache: 640 + 460 + 50 + 0; output: 77 + 63 + 9 + 10
+        assert self.cx_total(days, "input") == 360 + 40 + 150 + 30
+        assert self.cx_total(days, "cache_read") == 640 + 460 + 50
+        assert self.cx_total(days, "output") == 77 + 63 + 9 + 10
+        assert self.cx_total(days, "cache_creation") == 0
+
+    def test_a_counter_that_goes_down_alone_is_a_reset_of_that_counter_only(self):
+        t = self.now - 7200
+        days = self.cx_days(self.codex(1, [
+            _ovx_tokens(t, 1000, 600, 500),
+            _ovx_tokens(t + 1, 1300, 800, 90),                     # output went down: reset to 90
+        ]))
+        assert self.cx_total(days, "output") == 500 + 90
+        assert self.cx_total(days, "input") == (1000 - 600) + (300 - 200)
+        assert self.cx_total(days, "cache_read") == 600 + 200
+
+    def test_the_input_is_never_negative_and_cache_write_is_its_own_counter(self):
+        t = self.now - 7200
+        days = self.cx_days(self.codex(1, [
+            _ovx_tokens(t, 100, 40, 10, write=30),
+            _ovx_tokens(t + 1, 110, 90, 11, write=45),            # +10 input but +50 cached
+        ]))
+        assert self.cx_total(days, "input") == 60 + 0, "the second event's input clamps at 0"
+        assert self.cx_total(days, "cache_read") == 40 + 50
+        assert self.cx_total(days, "cache_creation") == 45
+        absent = self.cx_days(self.codex(2, [_ovx_tokens(t, 100, 40, 10)]))
+        assert self.cx_total(absent, "cache_creation") == 0, "no cache_write_input_tokens counts 0"
+
+    def test_hostile_token_values_count_nothing_and_do_not_disturb_the_next_event(self):
+        t = self.now - 7200
+
+        def raw(at, total):
+            return _ovx_event(at, "token_count", rate_limits=None, info={"total_token_usage": total})
+        hostile = [
+            {"input_tokens": "999", "cached_input_tokens": -5, "output_tokens": 1.5,
+             "cache_write_input_tokens": True},
+            {"input_tokens": None, "cached_input_tokens": [3], "output_tokens": {"a": 1}},
+            {"input_tokens": 10 ** 18, "output_tokens": float("inf")},
+            {}, "not a dict", [1, 2, 3], None,
+        ]
+        records = [_ovx_tokens(t, 100, 40, 10)]
+        records += [raw(t + 1 + i, h) for i, h in enumerate(hostile)]
+        records += [_ovx_event(t + 20, "token_count", info="x", rate_limits=None),
+                    _ovx_event(t + 21, "token_count", info={"total_token_usage": 5}, rate_limits=None),
+                    _ovx_tokens(t + 30, 150, 60, 25)]
+        days = self.cx_days(self.codex(1, records))
+        # (100-40) + (50-20); the hostile events counted nothing and left the baseline alone.
+        assert self.cx_total(days, "input") == 60 + 30
+        assert self.cx_total(days, "cache_read") == 40 + 20
+        assert self.cx_total(days, "output") == 10 + 15
+        assert self.cx_total(days, "cache_creation") == 0
+
+    def test_a_token_event_with_no_timestamp_is_skipped_and_the_next_one_still_counts_the_growth(self):
+        t = self.now - 7200
+        broken = _ovx_tokens(t, 100, 40, 10)
+        broken["timestamp"] = "not a time"
+        days = self.cx_days(self.codex(1, [broken, _ovx_tokens(t + 1, 150, 60, 25)]))
+        assert self.cx_total(days, "input") == 90 and self.cx_total(days, "output") == 25
+
+    def test_codex_agent_time_is_exact_when_recorded_and_capped_when_estimated(self):
+        t0 = self.now - 6 * 3600
+        days = self.cx_days(self.codex(1, [
+            _ovx_started(t0), _ovx_complete(t0 + 60, duration_ms=45_500),                  # exact: 45.5
+            _ovx_started(t0 + 100), _ovx_complete(t0 + 190),                               # stamps: 90
+            _ovx_started(t0 + 300), _ovx_complete(t0 + 300 + 3600),                        # capped: 1800
+            _ovx_started(t0 + 5000), _ovx_aborted(t0 + 5000 + 120),                        # aborted: 120
+            _ovx_started(t0 + 6000), _ovx_aborted(t0 + 6000 + 7200),                       # aborted, capped: 1800
+            _ovx_started(t0 + 14000),                                                      # never ends: 0
+            _ovx_started(t0 + 14100), _ovx_complete(t0 + 14130),                           # stamps: 30
+            _ovx_started(t0 + 14500), _ovx_complete(t0 + 14570, duration_ms="x"),          # bad: stamps 70
+            _ovx_started(t0 + 15000), _ovx_complete(t0 + 15055, duration_ms=-5),           # bad: stamps 55
+            _ovx_started(t0 + 15200), _ovx_complete(t0 + 15262, duration_ms=True),         # bool: stamps 62
+            _ovx_complete(t0 + 15400, duration_ms=2000),                                   # no start: exact 2
+            _ovx_complete(t0 + 15500),                                                     # no start, no duration
+        ]))
+        [day] = days.values()
+        assert day["agent_seconds"] == 45.5 + 90 + 1800 + 120 + 1800 + 30 + 70 + 55 + 62 + 2
+        assert day["active"] is True
+
+    def test_a_codex_day_is_active_for_a_message_a_turn_or_a_tool_call_only(self):
+        t = self.now - 2 * self.DAY
+        quiet = self.cx_days(self.codex(1, [
+            _ovx_tokens(t, 10, 1, 1), _ovx_context(t, "m"), _ovx_complete(t, duration_ms=5),
+            _ovx_output(t, "c9", "Exit code: 0"),
+            _ovx_event(t, "item_completed", item={"type": "Reasoning"}),
+            _ovx_rec(t, "response_item", {"type": "message", "role": "user", "content": []})]))
+        assert [d["active"] for d in quiet.values()] == [False]
+        for n, record in enumerate([_ovx_user(t), _ovx_agent(t), _ovx_started(t),
+                                    _ovx_call(t, "shell_command", "c1"),
+                                    _ovx_custom(t, "apply_patch", "c2")], start=2):
+            days = self.cx_days(self.codex(n, [record]))
+            assert [d["active"] for d in days.values()] == [True], record["type"]
+
+    def test_codex_tools_fail_on_a_non_zero_exit_code(self):
+        t = self.now - 7200
+        big = "Exit code: 3\nWall time: 1 seconds\nOutput:\n" + "x" * 100_000
+        big_ok = "Exit code: 0\nWall time: 1 seconds\nOutput:\n" + "y" * 100_000
+        days = self.cx_days(self.codex(1, [
+            _ovx_call(t, "shell_command", "c1"), _ovx_output(t + 1, "c1", "Exit code: 0\nWall time: 1s"),
+            _ovx_call(t + 2, "shell_command", "c2"), _ovx_output(t + 3, "c2", "Exit code: 1\nWall time: 1s"),
+            _ovx_call(t + 4, "shell", "c3"),
+            _ovx_output(t + 5, "c3", json.dumps({"output": "x", "metadata": {"exit_code": 2}})),
+            _ovx_custom(t + 6, "apply_patch", "c4"),
+            _ovx_output(t + 7, "c4", "patched with no exit code", custom=True),
+            _ovx_call(t + 8, "shell_command", "c5"), _ovx_output(t + 9, "c5", big),
+            _ovx_call(t + 10, "shell_command", "c6"), _ovx_output(t + 11, "c6", big_ok),
+            _ovx_output(t + 12, "orphan", "Exit code: 9\nWall time: 1s"),   # no such call: nothing
+            _ovx_call(t + 13, "shell_command", "c7"),
+            _ovx_output(t + 14, "c7", [{"type": "input_text", "text": "Exit code: 4\nlist form"}]),
+            _ovx_call(t + 15, None, "c8"), _ovx_call(t + 16, "", "c9"),    # unnamed: not counted
+        ]))
+        [day] = days.values()
+        assert day["tools"] == {"shell_command": {"calls": 5, "failed": 3},
+                                "shell": {"calls": 1, "failed": 1},
+                                "apply_patch": {"calls": 1, "failed": 0}}
+
+    def test_a_large_codex_output_line_is_read_by_its_head_and_never_parsed_whole(self, monkeypatch):
+        """D19: a long tool output is tested for `Exit code:` by slicing its head, not by
+        `json.loads` of the whole line. A line that holds none of the record words is not
+        parsed at all."""
+        from power_atlas import overview
+        t = self.now - 7200
+        big = "Exit code: 5\nWall time: 1 seconds\nOutput:\n" + "x" * 200_000
+        noise = _ovx_rec(t, "response_item", {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "# AGENTS.md " + "y" * 100_000}]})
+        path = self.codex(1, [_ovx_call(t, "shell_command", "c1"), _ovx_output(t + 1, "c1", big), noise,
+                              _ovx_call(t + 2, "shell_command", "c2"),
+                              _ovx_output(t + 3, "c2", "Exit code: 0\nWall time: 1s")])
+        parsed = []
+        real = json.loads
+        monkeypatch.setattr(json, "loads", lambda raw, *a, **k: parsed.append(len(raw)) or real(raw, *a, **k))
+        [day] = overview._parse_usage_file(path, "codex")["days"].values()
+        assert day["tools"] == {"shell_command": {"calls": 2, "failed": 1}}
+        assert max(parsed) < 64 * 1024, f"a long line was parsed whole: {sorted(parsed)[-3:]}"
+
+    def test_a_codex_output_is_only_matched_to_its_own_call(self):
+        """A second output for the same call id, or an output that arrives before its call,
+        cannot fail a later call."""
+        t = self.now - 7200
+        days = self.cx_days(self.codex(1, [
+            _ovx_output(t, "c1", "Exit code: 1\nx"),
+            _ovx_call(t + 1, "shell_command", "c1"), _ovx_output(t + 2, "c1", "Exit code: 0\nx"),
+            _ovx_output(t + 3, "c1", "Exit code: 1\nx"),
+        ]))
+        assert days[next(iter(days))]["tools"] == {"shell_command": {"calls": 1, "failed": 0}}
+
+    def test_a_codex_summary_has_the_models_the_session_and_the_workspace(self):
+        t = self.now - 7200
+        path = self.codex(1, [_ovx_context(t, "gpt-a"), _ovx_context(t + 1, "gpt-b"),
+                              _ovx_context(t + 2, "gpt-b"), _ovx_context(t + 3, "gpt-a"),
+                              _ovx_context(t + 4, "gpt-b"), _ovx_context(t + 5, "<synthetic>"),
+                              _ovx_context(t + 6, 7), _ovx_context(t + 7, ""), _ovx_user(t + 8)],
+                          cwd="C:\\ws\\Delta")
+        from power_atlas import overview
+        s = overview._parse_usage_file(path, "codex")
+        assert (s["provider"], s["session_id"], s["cwd"], s["model"], s["subagent"]) == (
+            "codex", _ovx_id(1), "C:\\ws\\Delta", "gpt-b", False)
+        assert set(s) == overview._SUMMARY_KEYS
+
+    def test_a_sub_agent_rollout_contributes_nothing_whatever_its_start_ordinal(self, parses):
+        """D7: a child's history copy would double the parent's total. Both layers: the
+        listing drops it before any parse, and a parse of one that reaches the parser
+        anyway returns no days."""
+        from power_atlas import overview
+        t = self.now - 7200
+        parent = self.codex(1, [_ovx_user(t, "go"), _ovx_tokens(t + 1, 900, 400, 50)])
+        copy = [_ovx_user(t, "go"), _ovx_tokens(t + 1, 900, 400, 50), _ovx_tokens(t + 2, 5000, 3000, 400),
+                _ovx_call(t + 3, "shell_command", "c1"), _ovx_output(t + 4, "c1", "Exit code: 1")]
+        spawn = {"subagent": {"thread_spawn": {"parent_thread_id": _ovx_id(1), "depth": 1}}}
+        children = [
+            self.codex(2, copy, source=spawn, subagent_history_start_ordinal=7, parent_thread_id=_ovx_id(1)),
+            self.codex(3, copy, source=spawn, subagent_history_start_ordinal=None),
+            self.codex(4, copy, source=spawn),
+            self.codex(5, copy, source={"subagent": {"other": "guardian"}}, subagent_history_start_ordinal=0),
+        ]
+        _days, since = overview._window(self.now)
+        assert [(p, prov) for p, prov, _st in overview._usage_files(since) if prov == "codex"] == [
+            (parent, "codex")]
+        usage = self.summary()
+        assert parses == [str(parent)], "no child reaches a parser"
+        assert usage["codex_tokens"] == {"input": 500, "output": 50, "cache_read": 400,
+                                         "cache_creation": 0, "cache_hit_ratio": round(400 / 900, 4)}
+        assert self.daily(usage, _ov_day(t))["sessions"] == {"codex": 1}
+        assert usage["tools"]["top"] == []
+        for child in children:
+            assert overview._parse_codex_usage(child)["days"] == {}, child.name
+
+    def test_a_legacy_rollout_without_the_payload_wrapper_is_skipped(self):
+        from power_atlas import overview
+        t = self.now - 3600
+        legacy = _ovx_rollout(self.roots.codex, 1, [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"record_type": "token_count", "timestamp": _ov_iso(t),
+             "info": {"total_token_usage": {"input_tokens": 99}}},
+            {"timestamp": _ov_iso(t), "type": "event_msg", "payload": None},
+        ], first={"id": _ovx_id(1), "timestamp": _ov_iso(t), "instructions": "legacy"})
+        torn = self.codex(2, [_ovx_user(t, "x")], first=None)
+        torn.write_bytes(b'{"ordinal": 0, "type": "session_met')
+        for path in (legacy, torn):
+            assert overview._parse_usage_file(path, "codex")["days"] == {}, path.name
+        usage = self.summary()
+        assert self.daily(usage, _ov_day(t))["sessions"] == {}
+        assert usage["codex_tokens"]["input"] == 0 and usage["models"] == []
+
+    def test_a_top_level_rollout_with_a_frozen_mtime_is_in_the_window_by_its_last_record(
+            self, parses, monkeypatch):
+        """Windows freezes the mtime of a rollout Codex holds open (D16, D19). Tail reads
+        happen only for a top-level file whose mtime is outside the window, once."""
+        from power_atlas import data_codex, overview
+        t = self.now - 3600
+        real_now = time.time()
+        frozen = self.codex(1, [_ovx_user(t, "still going"), _ovx_tokens(t + 1, 70, 20, 5)],
+                            mtime=real_now - 20 * self.DAY)
+        old = self.codex(2, [_ovx_user(self.now - 20 * self.DAY, "ancient")],
+                         mtime=real_now - 20 * self.DAY)
+        fresh = self.codex(3, [_ovx_user(t, "fresh")])
+        reads = []
+        real_read = data_codex._read_last_event
+        monkeypatch.setattr(data_codex, "_read_last_event",
+                            lambda path: reads.append(os.path.basename(path)) or real_read(path))
+        _days, since = overview._window(self.now)
+        listed = {p.name for p, prov, _st in overview._usage_files(since) if prov == "codex"}
+        assert listed == {frozen.name, fresh.name}
+        assert sorted(reads) == sorted([frozen.name, old.name]), "none for the file inside the window"
+        overview._usage_files(since)
+        assert len(reads) == 2, "cached by (mtime_ns, size): no second read"
+        usage = self.summary()
+        assert self.daily(usage, _ov_day(t))["sessions"] == {"codex": 2}
+        assert usage["codex_tokens"]["input"] == 50
+        assert str(old) not in parses
+        # Growing the frozen file (size changes, mtime does not) is a new key.
+        _ov_jsonl(frozen, [_ovx_agent(t + 5, "more")])
+        os.utime(frozen, (real_now - 20 * self.DAY, real_now - 20 * self.DAY))
+        overview._usage_files(since)
+        assert len(reads) == 3
+
+    def test_a_codex_rollout_older_than_the_window_in_both_ways_is_not_listed(self, parses):
+        real_now = time.time()
+        self.codex(1, [_ovx_user(self.now - 30 * self.DAY, "gone")], mtime=real_now - 30 * self.DAY)
+        usage = self.summary()
+        assert all(not d["sessions"] for d in usage["daily"]) and parses == []
+
+    # -- the 60 s limit on re-parsing a changed Codex rollout (D19) --
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        from power_atlas import overview
+        now = [1000.0]
+        monkeypatch.setattr(overview, "_debounce_clock", lambda: now[0])
+        return now
+
+    def refresh(self):
+        from power_atlas import overview
+        summaries, reparsed, complete = overview._refresh(self.now)
+        assert complete
+        return summaries, reparsed
+
+    def codex_input(self):
+        summaries, _ = self.refresh()
+        return sum(self.cx_total(s["days"], "input") for s in summaries if s["provider"] == "codex")
+
+    def test_a_changed_codex_file_keeps_its_summary_for_60_seconds(self, parses, clock):
+        t = self.now - 3600
+        path = self.codex(1, [_ovx_user(t, "go"), _ovx_tokens(t + 1, 100, 40, 10)])
+        assert self.codex_input() == 60 and parses == [str(path)]
+        _ov_jsonl(path, [_ovx_tokens(t + 2, 300, 100, 30)])
+        clock[0] = 1030.0
+        assert self.codex_input() == 60 and parses == [str(path)], "30 s after: the old summary"
+        clock[0] = 1059.9
+        assert self.codex_input() == 60 and len(parses) == 1, "just inside the limit"
+        clock[0] = 1060.0
+        assert self.codex_input() == 60 + 140 and len(parses) == 2, "60 s after the last parse"
+        # The limit restarts at that parse, and an unchanged file is a plain memo hit.
+        _ov_jsonl(path, [_ovx_tokens(t + 3, 400, 100, 40)])
+        clock[0] = 1100.0
+        assert self.codex_input() == 200 and len(parses) == 2
+        clock[0] = 1120.0
+        assert self.codex_input() == 300 and len(parses) == 3
+        assert self.codex_input() == 300 and len(parses) == 3
+
+    def test_the_first_parse_of_a_codex_file_is_never_delayed(self, parses, clock):
+        t = self.now - 3600
+        first = self.codex(1, [_ovx_user(t, "go")])
+        self.refresh()
+        clock[0] = 1005.0
+        second = self.codex(2, [_ovx_user(t, "new session")])
+        summaries, reparsed = self.refresh()
+        assert reparsed == 1 and parses == [str(first), str(second)]
+        assert len([s for s in summaries if s["provider"] == "codex"]) == 2
+
+    def test_only_a_codex_file_is_debounced(self, parses, clock):
+        t = self.now - 3600
+        claude = self.claude("55555555-5555-5555-5555-555555555555", [self.c_user(t, "hi")])
+        v3 = self.v3("sess_x", [(t, {"type": "user", "content": "hi"})])
+        self.refresh()
+        assert sorted(parses) == sorted([str(claude), str(v3)])
+        _ov_jsonl(claude, [self.c_asst(t + 5, [{"type": "text", "text": "ok"}], mid="m1",
+                                       usage={"input_tokens": 7})])
+        _ov_jsonl(v3, [{"id": "9", "timestamp": _ov_iso(t + 5), "payload": {"type": "assistant", "content": "ok"}}])
+        clock[0] = 1001.0                      # one second after the first parse
+        _summaries, reparsed = self.refresh()
+        assert reparsed == 2 and len(parses) == 4, "Claude Code and kiro-cli re-parse at once"
+
+    def test_an_unreadable_previous_entry_is_parsed_at_once(self, parses, clock):
+        from power_atlas import overview
+        t = self.now - 3600
+        path = self.codex(1, [_ovx_user(t, "go")])
+        self.refresh()
+        _ov_jsonl(path, [_ovx_user(t + 1, "more")])
+        for junk in ("not a summary", {}, {"days": {}}, None):
+            overview._usage_memo[str(path)] = (1, 1, junk)
+            clock[0] += 1
+            overview._codex_parsed_at[str(path)] = clock[0]
+            before = len(parses)
+            _s, n, _c = overview._refresh(self.now)
+            assert n == 1 and len(parses) == before + 1, junk
+        # And a Codex entry whose parse time is unknown (not in the side table) parses too.
+        overview._codex_parsed_at.clear()
+        _ov_jsonl(path, [_ovx_user(t + 2, "again")])
+        before = len(parses)
+        overview._refresh(self.now)
+        assert len(parses) == before + 1
+
+    def test_a_clock_that_runs_backwards_does_not_hold_a_summary(self, parses, clock):
+        t = self.now - 3600
+        path = self.codex(1, [_ovx_user(t, "go")])
+        self.refresh()
+        _ov_jsonl(path, [_ovx_user(t + 1, "more")])
+        clock[0] = 500.0
+        self.refresh()
+        assert len(parses) == 2
+
+    def test_a_debounced_codex_file_is_not_sent_to_the_worker_either(self, parses, clock, monkeypatch):
+        """The child would parse what the memo keeps, and `wait_stage` would overwrite it."""
+        from power_atlas import overview
+        t = self.now - 3600
+        codex = self.codex(1, [_ovx_user(t, "go")])
+        claude = self.claude("66666666-6666-6666-6666-666666666666", [self.c_user(t, "hi")])
+        self.refresh()
+        sent = []
+        monkeypatch.setattr(overview, "_USAGE_WORKER", True)
+        monkeypatch.setattr(overview, "_UsageWorker", lambda stages: sent.append(stages) or object())
+        assert overview._start_usage_worker(self.now) is None and sent == [], "nothing changed"
+        _ov_jsonl(codex, [_ovx_user(t + 1, "more")])
+        clock[0] = 1030.0
+        assert overview._start_usage_worker(self.now) is None and sent == [], "debounced: not sent"
+        _ov_jsonl(claude, [self.c_user(t + 2, "again")])
+        assert overview._start_usage_worker(self.now) is not None
+        assert sent == [[[(str(claude), "claude-code")], []]], "a Claude file is sent at once"
+        clock[0] = 1061.0
+        sent.clear()
+        assert overview._start_usage_worker(self.now) is not None
+        assert sent == [[[(str(claude), "claude-code"), (str(codex), "codex")], []]], "60 s on: sent"
+
+    def test_a_summary_the_worker_delivers_starts_the_codex_clock(self, clock):
+        from power_atlas import overview
+        worker = self.fake_worker()
+        codex = {"provider": "codex", "session_id": "s", "cwd": "", "model": None,
+                 "subagent": False, "days": {}}
+        claude = dict(codex, provider="claude-code")
+        clock[0] = 4242.0
+        for record in (["schema", overview._USAGE_SCHEMA], ["C:/cx.jsonl", 1, 1, codex],
+                       ["C:/cc.jsonl", 1, 1, claude], ["stage", 0]):
+            worker._lines.put(json.dumps(record).encode() + b"\n")
+        assert worker.wait_stage(0, None) is True
+        assert overview._codex_parsed_at == {"C:/cx.jsonl": 4242.0}
+        assert overview._usage_memo["C:/cx.jsonl"] == (1, 1, codex)
+
+    def test_the_worker_child_parses_a_codex_rollout_like_the_server(self):
+        """The child is a real process: it imports `overview` and `data_codex` from disk and
+        parses the rollout through `_parse_usage_file`; the summary survives the JSON line
+        and equals the server's own parse, and its arrival starts the 60 s clock."""
+        from power_atlas import overview
+        t = self.now - 3600
+        path = self.codex(1, [_ovx_context(t, "gpt-x"), _ovx_user(t, "go"), _ovx_started(t),
+                              _ovx_tokens(t + 1, 1000, 640, 77), _ovx_call(t + 2, "shell", "c1"),
+                              _ovx_output(t + 3, "c1", "Exit code: 1\nx"), _ovx_complete(t + 9, duration_ms=8_250)])
+        worker = overview._UsageWorker([[(str(path), overview._CODEX)], []])
+        try:
+            assert worker.wait_stage(0, None) is True
+        finally:
+            worker.close()
+        entry = overview._usage_memo[str(path)]
+        assert entry[2] == overview._parse_usage_file(path, "codex")
+        assert entry[2]["model"] == "gpt-x" and entry[2]["days"][_ov_day(t)]["agent_seconds"] == 8.25
+        assert str(path) in overview._codex_parsed_at
+
+    def test_a_complete_pass_forgets_the_parse_time_of_a_file_that_left_the_window(self, clock):
+        from power_atlas import overview
+        path = self.codex(1, [_ovx_user(self.now - 3600, "go")])
+        self.refresh()
+        assert str(path) in overview._codex_parsed_at
+        path.unlink()
+        self.refresh()
+        assert overview._codex_parsed_at == {} and overview._usage_memo == {}
+
+    # -- explicit dispatch --
+
+    def test_parse_usage_file_dispatches_each_provider_to_its_own_parser(self, monkeypatch, tmp_path):
+        from power_atlas import overview
+        calls = []
+        monkeypatch.setattr(overview, "_parse_v3_usage", lambda p: calls.append(("v3", p)) or {"w": "v3"})
+        monkeypatch.setattr(overview, "_parse_claude_usage",
+                            lambda p, subagent=False: calls.append(("claude", p, subagent)) or {"w": "cc"})
+        monkeypatch.setattr(overview, "_parse_codex_usage", lambda p: calls.append(("codex", p)) or {"w": "cx"})
+        p = tmp_path / "x.jsonl"
+        assert overview._parse_usage_file(p, overview._V3) == {"w": "v3"}
+        assert overview._parse_usage_file(p, overview._CLAUDE) == {"w": "cc"}
+        assert overview._parse_usage_file(p, overview._CLAUDE_SUB) == {"w": "cc"}
+        assert overview._parse_usage_file(p, overview._CODEX) == {"w": "cx"}
+        assert calls == [("v3", p), ("claude", p, False), ("claude", p, True), ("codex", p)]
+        calls.clear()
+        for unknown in ("kiro-ide", "mystery", "", "Codex", "claude"):
+            assert overview._parse_usage_file(p, unknown) == {
+                "provider": unknown, "session_id": "", "cwd": "", "model": None,
+                "subagent": False, "days": {}}
+        assert calls == [], "an unknown provider reaches no parser"
+
+    def test_an_unknown_provider_is_not_parsed_as_claude_code(self):
+        from power_atlas import overview
+        t = self.now - 3600
+        path = self.claude("77777777-7777-7777-7777-777777777777", [
+            self.c_user(t, "hi"), self.c_asst(t + 5, [{"type": "text", "text": "x"}], mid="m1",
+                                              usage={"input_tokens": 7})])
+        assert overview._parse_usage_file(path, "claude-code")["days"], "the fixture is a real Claude file"
+        assert overview._parse_usage_file(path, "mystery")["days"] == {}
+
+    def test_a_codex_listing_failure_does_not_cost_the_other_providers_their_pass(
+            self, caplog, monkeypatch):
+        from power_atlas import overview
+        t = self.now - 3600
+        v3 = self.v3("sess_a", [(t, {"type": "user", "content": "hi"})])
+        claude = self.claude("88888888-8888-8888-8888-888888888888", [self.c_user(t, "hi")])
+        codex = self.codex(1, [_ovx_user(t, "go")])
+        _days, since = overview._window(self.now)
+
+        class Denied:
+            def glob(self, pattern):
+                raise OSError("access is denied: SECRET-DETAIL")
+
+            def __str__(self):
+                return "C:/the-codex-root"
+
+        class DiesHalfway(Denied):
+            def glob(self, pattern):
+                yield codex
+                raise OSError("device removed: SECRET-DETAIL")
+
+        real_root = overview._codex_usage_root
+        for root, kept in ((Denied(), set()), (DiesHalfway(), {(codex, "codex")})):
+            monkeypatch.setattr(overview, "_codex_usage_root", lambda root=root: root)
+            caplog.clear()
+            with caplog.at_level("WARNING"):
+                found = {(p, prov) for p, prov, _st in overview._usage_files(since)}
+            assert found == {(v3, "kiro-cli-v3"), (claude, "claude-code")} | kept
+            assert "SECRET-DETAIL" not in caplog.text, "the log names the folder, not the error"
+            assert "could not list the Codex rollouts under C:/the-codex-root" in caplog.text
+        # The whole pass still ends ready for the others, and Codex is back with its root.
+        monkeypatch.setattr(overview, "_codex_usage_root", real_root)
+        assert [prov for _p, prov, _st in overview._usage_files(since)].count("codex") == 1
+
+    # -- the aggregate --
+
+    def codex_store(self):
+        """Two rollouts in different workspaces and a Claude Code session, with known sums."""
+        t = self.now - 7200
+        self.codex(1, [
+            _ovx_context(t, "gpt-x"), _ovx_user(t, "go"), _ovx_started(t),
+            _ovx_tokens(t + 10, 1000, 640, 77), _ovx_tokens(t + 70, 1500, 1100, 140),
+            _ovx_call(t + 71, "shell_command", "c1"), _ovx_output(t + 72, "c1", "Exit code: 1\nx"),
+            _ovx_call(t + 73, "shell_command", "c2"), _ovx_output(t + 74, "c2", "Exit code: 0\nx"),
+            _ovx_complete(t + 80, duration_ms=75_000),
+        ], cwd="C:\\ws\\gamma")
+        self.codex(2, [_ovx_context(t, "gpt-x"), _ovx_agent(t), _ovx_started(t + 5),
+                       _ovx_complete(t + 65)], cwd="C:\\ws\\delta")
+        u1 = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 70,
+              "cache_creation_input_tokens": 10}
+        self.claude("99999999-9999-9999-9999-aaaaaaaaaaaa", [
+            self.c_user(t, "hi"), self.c_asst(t + 30, [{"type": "text", "text": "x"}], mid="m1", usage=u1)])
+        return t
+
+    def test_usage_summary_carries_codex_beside_the_other_providers(self):
+        t = self.codex_store()
+        usage = self.summary()
+        # input (1000-640)+(40) = 400; cache 640+460 = 1100; ratio 1100 / (400 + 1100 + 0)
+        assert usage["codex_tokens"] == {"input": 400, "output": 140, "cache_read": 1100,
+                                         "cache_creation": 0, "cache_hit_ratio": 0.7333}
+        day = self.daily(usage, _ov_day(t))
+        assert day["sessions"] == {"codex": 2, "claude-code": 1}
+        assert day["agent_s"] == {"codex": 75.0 + 60.0, "claude-code": 30.0}
+        assert {r["name"]: r["this_week_s"] for r in usage["by_workspace"]} == {
+            "gamma": 75.0, "delta": 60.0, "beta": 30.0}
+        assert usage["models"] == [{"model": "gpt-x", "sessions": 2}, {"model": "claude-opus-5-5", "sessions": 1}]
+        assert usage["tools"]["top"] == [{"name": "shell_command", "calls": 2, "fail_rate": 0.5}]
+        assert usage["claude_tokens"]["input"] == 10 and usage["claude_tokens"]["cache_read"] == 70
+
+    def test_codex_follows_the_providers_and_the_hidden_workspaces_of_the_rail(self):
+        t = self.codex_store()
+        usage = self.summary(provider_shown=lambda p: p != "codex")
+        day = self.daily(usage, _ov_day(t))
+        assert day["sessions"] == {"claude-code": 1} and day["agent_s"] == {"claude-code": 30.0}
+        assert usage["codex_tokens"] == {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
+                                         "cache_hit_ratio": 0.0}
+        assert [m["model"] for m in usage["models"]] == ["claude-opus-5-5"] and usage["tools"]["top"] == []
+        assert [r["name"] for r in usage["by_workspace"]] == ["beta"]
+        usage = self.summary(hidden=lambda cwd: cwd == "C:\\ws\\gamma")
+        assert usage["codex_tokens"]["input"] == 0, "the hidden workspace's tokens are left out"
+        assert sorted(r["name"] for r in usage["by_workspace"]) == ["beta", "delta"]
+        assert usage["tools"]["top"] == []
+        assert self.daily(usage, _ov_day(t))["sessions"] == {"codex": 1, "claude-code": 1}
+
+    def test_claude_tokens_are_exactly_what_they_were_before_codex(self):
+        """The accumulation below is `usage_summary`'s own code at HEAD before this phase
+        (git show HEAD:src/power_atlas/overview.py), run over the same summaries; the
+        payload is compared as JSON text, so key order and number types count."""
+        from power_atlas import overview
+        t = self.codex_store()
+        self.claude("99999999-9999-9999-9999-bbbbbbbbbbbb", [
+            self.c_user(t + 100, "again"),
+            self.c_asst(t + 130, [{"type": "text", "text": "y"}], mid="m2",
+                        usage={"input_tokens": 3, "output_tokens": 2, "cache_read_input_tokens": 31,
+                               "cache_creation_input_tokens": 7})])
+        sub = self.roots.claude / "C--ws-beta" / "99999999-9999-9999-9999-aaaaaaaaaaaa" / "subagents"
+        _ov_jsonl(sub / "agent-1.jsonl", [
+            self.c_asst(t + 40, [{"type": "tool_use", "id": "s1", "name": "Read", "input": {}}],
+                        mid="m3", usage={"input_tokens": 1, "output_tokens": 1,
+                                         "cache_read_input_tokens": 11, "cache_creation_input_tokens": 0})])
+        summaries, _n, _c = overview._refresh(self.now)
+        day_set = set(overview._window(self.now)[0])
+        tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
+        for s in summaries:
+            provider = s["provider"]
+            for day_key, day in s["days"].items():
+                if day_key not in day_set:
+                    continue
+                if provider == overview._CLAUDE:
+                    for key in tokens:
+                        tokens[key] += day["tokens"][key]
+        denom = tokens["input"] + tokens["cache_read"] + tokens["cache_creation"]
+        old = dict(tokens, cache_hit_ratio=(round(tokens["cache_read"] / denom, 4) if denom else 0.0))
+        assert old["input"] == 14 and old["cache_read"] == 112, "the fixture reaches every Claude path"
+        assert json.dumps(self.summary()["claude_tokens"]) == json.dumps(old)
+        assert list(self.summary()["claude_tokens"]) == ["input", "output", "cache_read", "cache_creation",
+                                                         "cache_hit_ratio"]
+
+    def test_every_codex_read_of_the_usage_pass_goes_through_open_shared(self, monkeypatch):
+        import builtins
+        import io
+        t = self.codex_store()
+        real = builtins.open
+        shown = str(self.roots.codex).lower()
+
+        def guarded(file, *args, **kwargs):
+            if isinstance(file, (str, os.PathLike)) and os.fspath(file).lower().startswith(shown):
+                raise AssertionError(f"a plain open of a rollout: {file}")
+            return real(file, *args, **kwargs)
+        monkeypatch.setattr(builtins, "open", guarded)
+        monkeypatch.setattr(io, "open", guarded)
+        usage = self.summary()
+        assert usage["codex_tokens"]["input"] == 400, "the readers still work with plain open forbidden"
+        assert self.daily(usage, _ov_day(t))["sessions"]["codex"] == 2
 
 
 
