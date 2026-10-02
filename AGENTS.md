@@ -16,6 +16,7 @@
 - A duplicate module-level or class-level definition in a test module is caught by `_check_test_names.py`, run as a **pre-commit hook** against the staged content. Python rebinds a repeated `def` silently, so a second fixture of the same name is not an error — it is simply the only one that exists, and every test written against the first now receives the second's value. The one time this happened it cost a full-suite run: **79 failures and 35 errors**, all of them in unrelated tests hundreds of lines from the duplicate, with nothing in the output naming it. A `conftest.py` would not help and the repo has none — the same rebinding rules apply there.
   - `.git/hooks/` is not version controlled, so **a fresh clone has no hook.** Reinstall with `cp _pre_commit_hook.sh .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
   - Run it by hand any time with `.venv-PowerAtlas/Scripts/python _check_test_names.py` (~270 ms over the whole tree).
+- **Tests never read the real `~/.codex`.** Codex's three folders (`CODEX_SESSIONS_DIR`, `CODEX_SESSION_INDEX`, `CODEX_LOCKS_DIR` in `data_codex`) are redirected to a temporary folder by an autouse fixture in each test module that reaches them: `codex_home` in `tests/test_data.py`, and `isolated_config` plus the `TestOverviewUsage.stores` fixture in `tests/test_web.py`. `test_codex_roots_are_redirected_from_the_real_home` guards the second one. A new test module that touches the Codex adapter needs the same redirect, or a test will read your real sessions and show their data in a failure message.
 - `src/power_atlas/static/prism.js` is **generated** — the syntax highlighter behind /acp's code blocks, built by `_build_prism.mjs` from the `prismjs` npm tarball. Never hand-edit it: change the language list in `_build_prism.mjs` and rebuild (`npm pack prismjs@<version> && tar -xzf prismjs-<version>.tgz && node _build_prism.mjs ./package`). The languages are concatenated in dependency order and a grammar added out of order throws at load. `tests/acp_page.test.mjs` runs the committed bundle for real, so a bad rebuild fails there rather than in a browser.
 - `pytest-timeout` is a dev dependency (`.venv-PowerAtlas/Scripts/python -m pip install -e ".[dev]"` picks it up). Use `pytest tests/test_web.py --timeout=300` when running the full suite after a change to session-close/concurrency code — a test whose mocking strategy assumes a code path that no longer exists can hang on an `asyncio.Event` that nothing will ever set, rather than failing fast; the flag turns that into a loud stack dump at 300s instead of an indefinitely stuck run.
 - **Every loopback page and API needs the `pa_local` cookie** (since `plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` Phase 5). A bare `curl`, `/qqa` or browser-automation visit to `http://127.0.0.1:<port>/` gets the "open from the tray" page or a JSON 403, not the app. Only `/local-auth` and `/static` are open. For live QA, an agent signs in on the same-user path accepted as R-19. Either sign a cookie from the on-disk secret, or mint a one-time login code in-process and navigate to `/local-auth?code=<code>` once:
@@ -70,6 +71,12 @@ Recipe for live QA of /acp and the dashboard against the running instance. It wo
   (`ACP watchdog:`), and every `_kiro/*` notification without a dedicated handler in full at
   INFO. Grep it before
   concluding that a code path fired or did not fire.
+- **Codex QA when the Windows screen is locked.** An interactive `codex` in a new console starts
+  no session while the screen is locked, so a launch test finds no rollout. Use the non-interactive
+  `codex exec resume <id> "<prompt>"` on a throwaway session instead (add
+  `-c 'projects."<cwd>".trust_level="trusted"'` and `-s read-only`). It writes to the same rollout
+  and holds the same writer lock, so the live dot and the Resume gate can be checked with it. Never
+  print the session id or the prompt, and list the throwaway session for cleanup.
 
 ## Terminology
 
