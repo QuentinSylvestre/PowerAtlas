@@ -352,7 +352,9 @@ class TestLaunchSession:
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "cmd": "C:\\cmd.exe"}.get(n)
         result = launch_session(str(bad_dir), launch_profile=LaunchProfile(terminal_command="C:\\cmd.exe"))
         assert result.success is False
-        assert "metacharacters" in result.error.lower()
+        # Review finding R3 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2, round 2): the failure text is terminal-neutral now, because a None
+        # from _build_command also covers the PowerShell refusal of a control character; it matches launch_terminal's wording.
+        assert result.error == "Path contains characters unsafe for this terminal"
         mock_popen.assert_not_called()
 
     @patch("power_atlas.launcher.subprocess.Popen")
@@ -747,6 +749,74 @@ class TestTerminalQuoting:
         assert custom[2] == 'title abcd&& cd /d "C:\\proj" && npm start'
         only = _build_terminal_only_command(self._CMD, "C:\\proj", title="a<b>c^d")
         assert only[2] == 'title abcd&& cd /d "C:\\proj"'
+
+    # -- R1 (round 2): "%" in a cmd title expands %CMDCMDLINE:~N,1% into "&" --
+
+    _PCT_TITLE = "x%CMDCMDLINE:~15,1%y 100% done"
+    _PCT_TITLE_CLEAN = "xCMDCMDLINE:~15,1y 100 done"
+
+    def test_sanitize_cmd_title_removes_percent_but_the_shared_sanitizer_keeps_it(self):
+        assert _sanitize_cmd_title(self._PCT_TITLE) == self._PCT_TITLE_CLEAN
+        assert _sanitize_title(self._PCT_TITLE) == self._PCT_TITLE
+
+    def test_every_cmd_builder_removes_percent_from_the_title(self):
+        session = _build_command(self._CMD, "C:\\proj", ["kiro-cli"], title=self._PCT_TITLE, wt_profile="PowerShell")
+        custom = _build_custom_command(self._CMD, "C:\\proj", "npm start", self._PCT_TITLE, wt_profile="PowerShell")
+        only = _build_terminal_only_command(self._CMD, "C:\\proj", title=self._PCT_TITLE)
+        prefix = f"title {self._PCT_TITLE_CLEAN}&& cd /d "
+        assert session[2].startswith(prefix)
+        assert custom[2].startswith(prefix)
+        assert only[2].startswith(prefix)
+        for cmd in (session, custom, only):
+            assert "%" not in cmd[2]
+
+    def test_cmd_titles_without_special_characters_are_unchanged(self):
+        for title in ("Codex - proj - fix: the bug (2)", "kiro-cli - my project [x]"):
+            assert _build_command(self._CMD, "C:\\proj", ["kiro-cli"], title=title, wt_profile="PowerShell")[2].startswith(f"title {title}&& ")
+            assert _build_custom_command(self._CMD, "C:\\proj", "npm", title, wt_profile="PowerShell")[2].startswith(f"title {title}&& ")
+            assert _build_terminal_only_command(self._CMD, "C:\\proj", title=title)[2].startswith(f"title {title}&& ")
+
+    def test_percent_stays_in_the_title_for_non_cmd_terminals(self):
+        title = "100% done"
+        pwsh = _build_command(self._TERM, "C:\\proj", ["codex"], title=title, wt_profile="PowerShell")
+        assert pwsh[3].startswith("$Host.UI.RawUI.WindowTitle = '100% done'; ")
+        wt = _build_command("C:\\wt.exe", "C:\\proj", ["codex"], title=title, wt_profile="PowerShell")
+        assert wt[wt.index("--title") + 1] == title
+
+    # -- R4 (round 2): a user template that runs cmd gets a cmd-safe {title} --
+
+    _HOSTILE = "a<b>c^d%e&f"
+
+    @pytest.mark.parametrize("template", [
+        "cmd.exe /k title {title} && cd /d {cwd}",
+        "C:\\Windows\\System32\\CMD.EXE /c title {title}",
+        '"C:\\Windows\\System32\\cmd.exe" /k title {title}',
+        "wt.exe --title {title} -d {cwd} -- cmd /k {pscmd}",
+    ], ids=["bare-exe", "upper-case-full-path", "quoted-path", "inside-wt-command"])
+    def test_a_template_that_runs_cmd_sanitizes_the_title_for_cmd(self, template):
+        got = _build_command(template, "C:\\proj", ["codex"], title=self._HOSTILE, wt_profile="PowerShell")
+        assert "abcdef" in got
+        only = _build_terminal_only_command(template, "C:\\proj", title=self._HOSTILE)
+        assert "abcdef" in only
+        for ch in "<>^%":
+            assert ch not in "".join(got) and ch not in "".join(only)
+
+    @pytest.mark.parametrize("template", [
+        "myterm --title {title} -d {cwd}",
+        "C:\\tools\\cmd\\myterm.exe --title {title} -d {cwd}",
+        "C:\\cmdline\\term.exe --title {title} -d {cwd}",
+        "/opt/cmd/term --title {title} -d {cwd}",
+        "myterm {cmd} --title {title} -d {cwd}",
+    ], ids=["no-cmd", "cmd-folder", "cmdline-folder", "posix-cmd-folder", "cmd-placeholder"])
+    def test_a_template_that_does_not_run_cmd_keeps_the_shared_sanitizer(self, template):
+        # "cmd" only inside a folder name, or as the {cmd} placeholder, is not cmd.exe.
+        got = _build_command(template, "C:\\proj", ["codex"], title=self._HOSTILE, wt_profile="PowerShell")
+        assert "a<b>c^d%ef" in got
+        only = _build_terminal_only_command(template, "C:\\proj", title=self._HOSTILE)
+        assert "a<b>c^d%ef" in only
+
+    def test_a_cmd_template_with_no_title_keeps_an_empty_title_element(self):
+        assert "" in _build_command("cmd /k title {title}", "C:\\proj", ["codex"], title="", wt_profile="PowerShell")
 
     @pytest.mark.parametrize("ch", ["\n", "\r", "\t", chr(0x7F)], ids=["lf", "cr", "tab", "del"])
     def test_cmd_fallback_refuses_a_folder_or_argument_with_a_control_character(self, ch):
@@ -1178,6 +1248,58 @@ class TestLaunchCustomWorkspaceArg:
         cmd_str = mock_popen.call_args[0][0]
         # Should contain quoted path
         assert f'"{cwd}"' in cmd_str
+
+
+class TestLaunchCustomWorkspaceArgMetacharacters:
+    """Review finding R2 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2, round 2): the workspace
+    path is appended to a string that cmd.exe runs, so a metacharacter in it must not start a second command."""
+
+    @pytest.mark.parametrize("name", ["d&calc", "a|b", "a^b"], ids=["amp", "pipe", "caret"])
+    @pytest.mark.parametrize("use_terminal", [False, True], ids=["direct", "terminal"])
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_a_workspace_with_a_cmd_metacharacter_is_quoted(self, _, mock_popen, use_terminal, name):
+        cwd = "C:\\work\\" + name
+        profile = LaunchProfile(terminal_command="C:\\wt.exe")
+        with patch("pathlib.Path.exists", return_value=True), patch("power_atlas.launcher.sys.platform", "win32"):
+            result = launch_custom("test", "code", cwd=cwd, launch_profile=profile, use_terminal=use_terminal, pass_workspace_arg=True)
+        assert result.success is True
+        popen_cmd = mock_popen.call_args[0][0]
+        cmd_str = popen_cmd if isinstance(popen_cmd, str) else popen_cmd[-1]
+        assert cmd_str == f'code "{cwd}"'
+
+    @pytest.mark.parametrize("name", ["p%PATH%x", "a%b", 'a"b', "a\nb"], ids=["pct-var", "pct", "quote", "newline"])
+    @pytest.mark.parametrize("use_terminal", [False, True], ids=["direct", "terminal"])
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_a_workspace_that_cannot_be_quoted_is_refused(self, _, mock_popen, use_terminal, name):
+        cwd = "C:\\work\\" + name
+        profile = LaunchProfile(terminal_command="C:\\wt.exe")
+        with patch("pathlib.Path.exists", return_value=True), patch("power_atlas.launcher.sys.platform", "win32"):
+            result = launch_custom("test", "code", cwd=cwd, launch_profile=profile, use_terminal=use_terminal, pass_workspace_arg=True)
+        assert result.success is False
+        assert result.error == "Path contains characters unsafe for this terminal"
+        mock_popen.assert_not_called()
+
+    @pytest.mark.parametrize("cwd,expected", [
+        ("C:\\work\\proj", "code C:\\work\\proj"),
+        ("C:\\work\\proj (2)", 'code "C:\\work\\proj (2)"'),
+        ("C:\\work\\proj(2)", "code C:\\work\\proj(2)"),
+    ], ids=["plain", "spaced", "parens-only"])
+    @patch("subprocess.Popen")
+    def test_an_ordinary_workspace_command_string_is_unchanged(self, mock_popen, cwd, expected):
+        with patch("pathlib.Path.exists", return_value=True), patch("power_atlas.launcher.sys.platform", "win32"):
+            result = launch_custom("test", "code", cwd=cwd, use_terminal=False, pass_workspace_arg=True)
+        assert result.success is True
+        assert mock_popen.call_args[0][0] == expected
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_a_metacharacter_workspace_is_harmless_when_the_argument_is_not_requested(self, _, mock_popen):
+        with patch("pathlib.Path.exists", return_value=True), patch("power_atlas.launcher.sys.platform", "win32"):
+            result = launch_custom("test", "code", cwd="C:\\work\\p%x", use_terminal=False, pass_workspace_arg=False)
+        assert result.success is True
+        assert mock_popen.call_args[0][0] == "code"
 
 
 class TestLaunchCustomBatchWorkspaceArg:

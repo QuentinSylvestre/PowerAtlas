@@ -268,7 +268,7 @@ def launch_session(
 
     cmd = _build_command(terminal, cwd, cli_args, title=title, wt_profile=profile.wt_profile)
     if cmd is None:
-        return LaunchResult(False, session_id, cwd, error="Path contains shell metacharacters unsafe for cmd.exe")
+        return LaunchResult(False, session_id, cwd, error="Path contains characters unsafe for this terminal")
 
     try:
         kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
@@ -318,8 +318,11 @@ _TITLE_UNSAFE_RE = re.compile(r'[\"\'&|;$`]')
 # U+2018-U+201F: every typographic quote. PowerShell reads four of them as
 # single-quote delimiters; the rest are removed with them for symmetry.
 _TITLE_TYPOGRAPHIC_QUOTES_RE = re.compile(r"[\u2018-\u201f]")
-# cmd.exe redirection and escape characters, stripped from titles for cmd only.
-_CMD_TITLE_UNSAFE_RE = re.compile(r"[<>^]")
+# cmd.exe redirection, escape and expansion characters, stripped from titles for cmd only.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: "%" is here because %CMDCMDLINE:~N,1% in a title expands to "&" and starts a second command.
+_CMD_TITLE_UNSAFE_RE = re.compile(r"[<>^%]")
+# A folder appended to a cmd command line cannot be quoted safely when it holds one of these ("%" expands even inside double quotes), so it is refused.
+_CMD_UNQUOTABLE_RE = re.compile(r'[%"\x00-\x1f\x7f]')
 
 
 def _sanitize_title(title: str) -> str:
@@ -336,8 +339,30 @@ def _sanitize_title(title: str) -> str:
 
 
 def _sanitize_cmd_title(title: str) -> str:
-    """`_sanitize_title` plus the cmd.exe characters `<`, `>` and `^`."""
+    """`_sanitize_title` plus the cmd.exe characters `<`, `>`, `^` and `%`."""
     return _CMD_TITLE_UNSAFE_RE.sub("", _sanitize_title(title))
+
+
+def _template_invokes_cmd(template: str) -> bool:
+    """True when a user terminal template runs cmd.exe (`cmd` or `cmd.exe`, in any folder).
+
+    Only the literal text between placeholders is read, and only the final path
+    component of each word, so a folder that merely contains "cmd" does not count.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: a {title} handed to cmd must lose the characters cmd.exe interprets.
+    """
+    for part in re.split(r"\{(?:cwd|cmd|pscmd|title|wt_profile)\}", template):
+        for word in part.split():
+            name = re.split(r"[\\/]", word.strip("\"'"))[-1].lower()
+            if name in ("cmd", "cmd.exe"):
+                return True
+    return False
+
+
+def _template_title(template: str, title: str) -> str:
+    """The {title} value for a user template: cmd-safe when the template runs cmd."""
+    if not title:
+        return ""
+    return _sanitize_cmd_title(title) if _template_invokes_cmd(template) else _sanitize_title(title)
 
 
 def _build_template_command(template: str, cwd: str, kiro_args: list[str], title: str = "", wt_profile: str = "PowerShell") -> list[str]:
@@ -363,7 +388,7 @@ def _build_template_command(template: str, cwd: str, kiro_args: list[str], title
         elif part == "{pscmd}":
             result.append(_build_powershell_invocation(kiro_args))
         elif part == "{title}":
-            result.append(_sanitize_title(title) if title else "")
+            result.append(_template_title(template, title))
         elif part == "{wt_profile}":
             result.append(wt_profile)
         else:
@@ -496,7 +521,10 @@ def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "",
         if sys.platform == "win32":
             # Quote paths with spaces; no inner-quote escaping needed since NTFS
             # forbids " in filenames so work_dir can never contain one.
-            quoted_ws = f'"{work_dir}"' if " " in work_dir else work_dir
+            # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: a folder with a cmd metacharacter (for example "d&calc") is quoted like a spaced one, else cmd runs the tail as a second command; "%" is refused.
+            if _CMD_UNQUOTABLE_RE.search(work_dir):
+                return LaunchResult(False, None, work_dir, error="Path contains characters unsafe for this terminal")
+            quoted_ws = f'"{work_dir}"' if " " in work_dir or _CMD_METACHAR_RE.search(work_dir) else work_dir
         else:
             quoted_ws = shlex.quote(work_dir)
         full_cmd_str = f"{full_cmd_str} {quoted_ws}"
@@ -583,7 +611,7 @@ def _build_terminal_only_command(terminal: str, cwd: str, title: str = "", wt_pr
             elif part in ("{cmd}", "{pscmd}"):
                 continue  # no command to inject
             elif part == "{title}":
-                result.append(_sanitize_title(title) if title else "")
+                result.append(_template_title(terminal, title))
             elif part == "{wt_profile}":
                 result.append(wt_profile)
             else:
