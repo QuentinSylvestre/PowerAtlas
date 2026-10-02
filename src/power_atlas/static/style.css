@@ -813,7 +813,8 @@ script { display: none; }
 .launcher-appearance .color-picker-field { flex: 1; min-width: 228px; margin-bottom: 0; }
 /* 14 swatches (launcher modal: No color, twelve hues, White) wrap unevenly in
    a flex row; a 7-column grid splits them into two even rows of 7 (7 x 2). The
-   workspace modal has 13 and wraps 12 + 1 as a flex row.
+   workspace modal is also a .pa-modal and has 13 (No color, eleven hues,
+   Slate), which this same 7-column grid fills as 7 + 6.
    The launcher field's 228px minimum is that grid's width, so on a narrow
    screen its row wraps and the preview sits above the swatches. */
 .pa-modal .color-picker-swatches { display: grid; grid-template-columns: repeat(7, 24px); gap: 8px 10px; }

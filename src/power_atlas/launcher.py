@@ -131,14 +131,45 @@ def _build_provider_args(provider: str, binary: str, session_id: str | None) -> 
     return args
 
 
+# PowerShell treats U+2018, U+2019, U+201A and U+201B, as well as ASCII ', as the
+# delimiter of a single-quoted literal, and a doubled delimiter as one literal
+# character. Escaping only ASCII ' therefore leaves a curly quote free to close
+# the literal early (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2).
+_PS_SINGLE_QUOTES_RE = re.compile(r"['\u2018\u2019\u201a\u201b]")
+
+# Characters that end a statement or a line in a script: C0 controls, DEL, NEL,
+# LINE SEPARATOR and PARAGRAPH SEPARATOR.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
+
+
 def _quote_powershell_arg(arg: str) -> str:
-    """Render one argv element as a PowerShell single-quoted literal."""
-    return "'" + arg.replace("'", "''") + "'"
+    """Render one value as a PowerShell single-quoted literal.
+
+    Every single-quote character PowerShell recognises is doubled, so the value
+    cannot close the literal. This is the only place that escapes; callers must
+    pass the raw value, never one already escaped.
+    """
+    return "'" + _PS_SINGLE_QUOTES_RE.sub(lambda m: m.group(0) * 2, arg) + "'"
 
 
 def _build_powershell_invocation(args: list[str]) -> str:
     """Render argv as a typed PowerShell command line."""
     return "& " + " ".join(_quote_powershell_arg(arg) for arg in args)
+
+
+def _build_powershell_location(cwd: str, title: str) -> str | None:
+    """Render the window-title and Set-Location statements of a pwsh script.
+
+    The title is sanitized, then quoted; the folder is quoted as given. Returns
+    None when the folder holds a control character: no real Windows folder does,
+    and refusing is safer than embedding a line break in a script.
+    """
+    if _CONTROL_CHARS_RE.search(cwd):
+        return None
+    script = ""
+    if title:
+        script = f"$Host.UI.RawUI.WindowTitle = {_quote_powershell_arg(_sanitize_title(title))}; "
+    return script + f"Set-Location -LiteralPath {_quote_powershell_arg(cwd)}"
 
 
 def _is_windows_terminal(terminal: str) -> bool:
@@ -280,13 +311,33 @@ def launch_batch(
     return results
 
 
-_CMD_METACHAR_RE = re.compile(r'[&|<>^%"]')
+# Control characters are included: a newline ends a cmd.exe command line, so an
+# argument or folder holding one could start a second command.
+_CMD_METACHAR_RE = re.compile(r'[&|<>^%"\x00-\x1f\x7f]')
 _TITLE_UNSAFE_RE = re.compile(r'[\"\'&|;$`]')
+# U+2018-U+201F: every typographic quote. PowerShell reads four of them as
+# single-quote delimiters; the rest are removed with them for symmetry.
+_TITLE_TYPOGRAPHIC_QUOTES_RE = re.compile(r"[\u2018-\u201f]")
+# cmd.exe redirection and escape characters, stripped from titles for cmd only.
+_CMD_TITLE_UNSAFE_RE = re.compile(r"[<>^]")
 
 
 def _sanitize_title(title: str) -> str:
-    """Strip chars unsafe for shell title injection."""
-    return _TITLE_UNSAFE_RE.sub("", title)
+    """Strip chars unsafe for shell title injection.
+
+    Beyond the ASCII shell metacharacters this removes control characters (a
+    newline starts a new statement in a PowerShell or cmd script) and the
+    typographic quotes (PowerShell treats some as the single-quote delimiter).
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: titles now carry Codex prompts and thread names.
+    """
+    title = _TITLE_UNSAFE_RE.sub("", title)
+    title = _CONTROL_CHARS_RE.sub("", title)
+    return _TITLE_TYPOGRAPHIC_QUOTES_RE.sub("", title)
+
+
+def _sanitize_cmd_title(title: str) -> str:
+    """`_sanitize_title` plus the cmd.exe characters `<`, `>` and `^`."""
+    return _CMD_TITLE_UNSAFE_RE.sub("", _sanitize_title(title))
 
 
 def _build_template_command(template: str, cwd: str, kiro_args: list[str], title: str = "", wt_profile: str = "PowerShell") -> list[str]:
@@ -383,13 +434,10 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
             cmd += ["--", *kiro_args]
         return cmd
     if t == "pwsh":
-        escaped_cwd = cwd.replace("'", "''")
-        script = ""
-        if title:
-            safe = _sanitize_title(title).replace("'", "''")
-            script = f"$Host.UI.RawUI.WindowTitle = '{safe}'; "
-        script += f"Set-Location -LiteralPath '{escaped_cwd}'; {_build_powershell_invocation(kiro_args)}"
-        return [terminal, "-NoExit", "-Command", script]
+        location = _build_powershell_location(cwd, title)
+        if location is None:
+            return None
+        return [terminal, "-NoExit", "-Command", f"{location}; {_build_powershell_invocation(kiro_args)}"]
 
     # Linux terminals via dispatch table
     if t in _LINUX_TERMINALS:
@@ -404,7 +452,7 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
     # _CMD_METACHAR_RE is cmd.exe-specific; reject args containing its metacharacters
     if _CMD_METACHAR_RE.search(kiro_cmd):
         return None
-    prefix = f"title {_sanitize_title(title)}&& " if title else ""
+    prefix = f"title {_sanitize_cmd_title(title)}&& " if title else ""
     return [terminal, "/k", f'{prefix}cd /d "{cwd}" && {kiro_cmd}']
 
 
@@ -494,10 +542,10 @@ def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str, *, 
     if t == "wt":
         return [terminal, "--title", title, "-p", wt_profile, "-d", cwd, "--", "cmd", "/c", cmd_str]
     if t == "pwsh":
-        escaped_cwd = cwd.replace("'", "''")
-        escaped_title = title.replace("'", "''")
-        script = f"$Host.UI.RawUI.WindowTitle = '{escaped_title}'; Set-Location -LiteralPath '{escaped_cwd}'; & cmd /c '{cmd_str}'"
-        return [terminal, "-NoExit", "-Command", script]
+        location = _build_powershell_location(cwd, title)
+        if location is None:
+            return None
+        return [terminal, "-NoExit", "-Command", f"{location}; & cmd /c {_quote_powershell_arg(cmd_str)}"]
 
     # Linux terminals
     if t in _LINUX_TERMINALS:
@@ -514,7 +562,7 @@ def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str, *, 
         return None
     if _CMD_METACHAR_RE.search(cwd):
         return None
-    safe_title = _sanitize_title(title)
+    safe_title = _sanitize_cmd_title(title)
     return [terminal, "/k", f'title {safe_title}&& cd /d "{cwd}" && {cmd_str}']
 
 
@@ -550,13 +598,10 @@ def _build_terminal_only_command(terminal: str, cwd: str, title: str = "", wt_pr
         return cmd
 
     if stem == "pwsh":
-        escaped_cwd = cwd.replace("'", "''")
-        script = ""
-        if title:
-            safe = _sanitize_title(title).replace("'", "''")
-            script = f"$Host.UI.RawUI.WindowTitle = '{safe}'; "
-        script += f"Set-Location -LiteralPath '{escaped_cwd}'"
-        return [terminal, "-NoExit", "-Command", script]
+        location = _build_powershell_location(cwd, title)
+        if location is None:
+            return None
+        return [terminal, "-NoExit", "-Command", location]
 
     # Linux terminals via dispatch table
     if stem in _LINUX_TERMINALS:
@@ -585,7 +630,7 @@ def _build_terminal_only_command(terminal: str, cwd: str, title: str = "", wt_pr
         return None
     if _CMD_METACHAR_RE.search(cwd):
         return None
-    prefix = f"title {_sanitize_title(title)}&& " if title else ""
+    prefix = f"title {_sanitize_cmd_title(title)}&& " if title else ""
     return [terminal, "/k", f'{prefix}cd /d "{cwd}"']
 
 

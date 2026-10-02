@@ -1,5 +1,6 @@
 """Tests for launcher module."""
 
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +21,8 @@ from power_atlas.launcher import (
     _build_provider_args,
     _build_template_command,
     _build_terminal_only_command,
+    _quote_powershell_arg,
+    _sanitize_cmd_title,
     _sanitize_title,
 )
 from power_atlas.icons import _resolve_cmd_to_exe
@@ -456,6 +459,17 @@ class TestCodexLaunch:
         "\n0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40",
         " 0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40",
         "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40 --last",
+        # ASCII only: each of these is 36 characters of the right shape, so a
+        # pattern using \d, [0-9a-f\-]{36} or \w would accept it.
+        chr(0xFF10) + "199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40",       # fullwidth zero in a digit position
+        "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d4" + chr(0xFF10),       # fullwidth zero in the last position
+        "-" * 36,                                                    # right length, right alphabet, no structure
+        "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d4" + chr(0x212A),       # Kelvin sign (case-folds to k)
+        "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d4" + chr(0),            # NUL
+    ], ids=[
+        "flag", "h", "last", "short-word", "sess-id", "one-short", "one-long", "no-hyphens",
+        "non-hex", "trailing-newline", "leading-newline", "leading-space", "trailing-flag",
+        "fullwidth-digit-first", "fullwidth-digit-last", "36-hyphens", "kelvin-sign", "nul",
     ])
     def test_a_non_uuid_id_is_refused(self, bad):
         with pytest.raises(ValueError, match="Invalid Codex session id"):
@@ -500,6 +514,21 @@ class TestCodexLaunch:
         assert cmd_str.endswith("-- codex resume " + self._SID)
         assert "kiro" not in cmd_str and "--resume" not in cmd_str
 
+    @patch("power_atlas.launcher.subprocess.Popen")
+    @patch("power_atlas.launcher.shutil.which")
+    def test_launch_session_default_terminal_quotes_the_codex_invocation_for_pwsh(self, mock_which, mock_popen, tmp_path):
+        """With pwsh on PATH the wt terminal runs one quoted PowerShell command line
+        (each argv element in single quotes), not the bare args of the fallback."""
+        mock_which.side_effect = lambda n: {"codex": "C:\\codex.exe", "wt": "C:\\wt.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
+        result = launch_session(str(tmp_path), session_id=self._SID, provider="codex",
+                                default_args="--model gpt-x",
+                                launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is True
+        cmd = mock_popen.call_args[0][0]
+        sep = cmd.index("--")
+        assert cmd[sep:] == ["--", "C:\\pwsh.exe", "-NoExit", "-Command",
+                             "& 'codex' 'resume' '" + self._SID + "' '--model' 'gpt-x'"]
+
     @pytest.mark.parametrize("bad", ["--flag", "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40\n"])
     @patch("power_atlas.launcher.subprocess.Popen")
     @patch("power_atlas.launcher.shutil.which")
@@ -520,6 +549,221 @@ class TestCodexLaunch:
         assert result.success is False
         assert "'codex' not found on PATH" in result.error
         assert "Codex" in result.error
+
+
+# The four single-quote characters PowerShell treats as a literal's delimiter
+# besides ASCII ': U+2018, U+2019, U+201A, U+201B. Built with chr() so the test
+# source holds no invisible or look-alike characters.
+_CURLY_SINGLES = [chr(0x2018), chr(0x2019), chr(0x201A), chr(0x201B)]
+# Characters that end a statement or line: C0 controls, DEL, NEL, U+2028, U+2029.
+_LINE_BREAKERS = [chr(c) for c in (*range(0x20), 0x7F, 0x85, 0x2028, 0x2029)]
+_TYPOGRAPHIC_QUOTES = [chr(c) for c in range(0x2018, 0x2020)]
+
+
+def _find_powershell() -> str | None:
+    return shutil.which("pwsh") or shutil.which("powershell")
+
+
+_PARSE_ONLY_SCRIPT = (
+    "$ErrorActionPreference='Stop';"
+    "$in=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:PA_TEST_SCRIPTS_B64))|ConvertFrom-Json;"
+    "$out=@();"
+    "foreach($b in $in){"
+    "$s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b));"
+    "$e=$null;$t=$null;"
+    "$ast=[System.Management.Automation.Language.Parser]::ParseInput($s,[ref]$t,[ref]$e);"
+    "$st=@($ast.EndBlock.Statements);"
+    "$v='';"
+    "if($st.Count -gt 0 -and $st[0].PipelineElements -and $st[0].PipelineElements[0].Expression -is [System.Management.Automation.Language.StringConstantExpressionAst]){"
+    "$v=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($st[0].PipelineElements[0].Expression.Value))};"
+    "$out+=[pscustomobject]@{n=$st.Count;errors=@($e).Count;value=$v}};"
+    "ConvertTo-Json -Compress -InputObject @($out)"
+)
+
+
+def _parse_only(scripts: list[str]) -> list[dict]:
+    """Parse each script with PowerShell's own parser, in one subprocess.
+
+    ParseInput builds a syntax tree and executes nothing. Returns, per script,
+    the number of top-level statements, the parse-error count and (when the
+    first statement is a bare string literal) that literal's decoded value.
+    """
+    import base64
+    import json
+    import os
+
+    exe = _find_powershell()
+    if exe is None:
+        pytest.skip("no PowerShell on PATH")
+    payload = base64.b64encode(json.dumps(
+        [base64.b64encode(s.encode("utf-8")).decode("ascii") for s in scripts]).encode("utf-8")).decode("ascii")
+    done = subprocess.run(
+        [exe, "-NoProfile", "-NonInteractive", "-Command", _PARSE_ONLY_SCRIPT],
+        env={**os.environ, "PA_TEST_SCRIPTS_B64": payload},
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    rows = json.loads(done.stdout)
+    for row in rows:
+        row["value"] = base64.b64decode(row["value"]).decode("utf-8") if row["value"] else None
+    return rows
+
+
+class TestTerminalQuoting:
+    """261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2:
+    titles and folders reach a PowerShell or cmd script string; they must stay data."""
+
+    _TERM = "C:\\pwsh.exe"
+    _CMD = "C:\\cmd.exe"
+
+    # -- _sanitize_title ----------------------------------------------------
+
+    @pytest.mark.parametrize("ch", _LINE_BREAKERS, ids=lambda c: f"U+{ord(c):04X}")
+    def test_sanitize_title_removes_every_line_breaking_character(self, ch):
+        assert _sanitize_title("a" + ch + "b") == "ab"
+
+    @pytest.mark.parametrize("ch", _TYPOGRAPHIC_QUOTES, ids=lambda c: f"U+{ord(c):04X}")
+    def test_sanitize_title_removes_every_typographic_quote(self, ch):
+        assert _sanitize_title("a" + ch + "b") == "ab"
+
+    def test_sanitize_title_keeps_ordinary_text_unchanged(self):
+        for ordinary in ("Codex - proj - fix the bug", "kiro-cli - my project (2)", "a_b-c.d [e]", "Caf" + chr(0xE9) + " - " + chr(0x4E2D) + chr(0x6587)):
+            assert _sanitize_title(ordinary) == ordinary
+
+    def test_sanitize_cmd_title_also_removes_redirection_and_escape_characters(self):
+        assert _sanitize_cmd_title("a<b>c^d") == "abcd"
+        assert _sanitize_cmd_title("kiro-cli - proj") == "kiro-cli - proj"
+        # The shared sanitizer is unchanged for the other terminals: < > ^ stay.
+        assert _sanitize_title("a<b>c^d") == "a<b>c^d"
+
+    # -- the quoting helper -------------------------------------------------
+
+    @pytest.mark.parametrize("ch", ["'", *_CURLY_SINGLES], ids=lambda c: f"U+{ord(c):04X}")
+    def test_quote_doubles_each_single_quote_character_exactly_once(self, ch):
+        # Twice, not four times: a value is escaped by this helper only.
+        assert _quote_powershell_arg("x" + ch + "y") == "'x" + ch + ch + "y'"
+
+    def test_quote_doubles_an_ascii_quote_next_to_a_curly_one(self):
+        rsq, lsq = _CURLY_SINGLES[1], _CURLY_SINGLES[0]
+        assert _quote_powershell_arg("a'" + rsq + "b" + lsq + "'") == "'a''" + rsq + rsq + "b" + lsq + lsq + "''" + "'"
+
+    def test_quote_leaves_an_ordinary_value_alone(self):
+        assert _quote_powershell_arg("C:\\Program Files\\x") == "'C:\\Program Files\\x'"
+
+    def test_invocation_quotes_a_hostile_binary_and_argument(self):
+        rsq = _CURLY_SINGLES[1]
+        got = _build_powershell_invocation(["C:\\it" + rsq + "s\\codex.exe", "a'" + rsq])
+        assert got == "& 'C:\\it" + rsq + rsq + "s\\codex.exe' 'a''" + rsq + rsq + "'"
+
+    # -- the pwsh scripts: string level -------------------------------------
+
+    @pytest.mark.parametrize("title", [
+        "x" + _CURLY_SINGLES[1] + "\ncalc.exe\n" + _CURLY_SINGLES[1] + "x",
+        "x" + _CURLY_SINGLES[0] + "\r\ncalc.exe\r\n" + _CURLY_SINGLES[3] + "x",
+        "x" + _CURLY_SINGLES[2] + chr(0x2028) + "calc.exe" + chr(0x2029) + _CURLY_SINGLES[1] + "x",
+        "x'" + _CURLY_SINGLES[1] + "\ncalc.exe\n'" + _CURLY_SINGLES[0] + "x",
+    ], ids=["rsquo-lf", "lsquo-crlf-low9", "low9-ls-ps", "ascii-curly-mix"])
+    @pytest.mark.parametrize("builder", ["session", "terminal_only", "custom"])
+    def test_a_hostile_title_leaves_no_quote_or_line_break_in_the_script(self, builder, title):
+        script = self._script(builder, cwd="C:\\proj", title=title)
+        # The title reduces to "xcalc.exex"; nothing in it can reach the script as syntax.
+        assert script.startswith("$Host.UI.RawUI.WindowTitle = 'xcalc.exex'; Set-Location -LiteralPath 'C:\\proj'")
+        for ch in _LINE_BREAKERS + _CURLY_SINGLES:
+            assert ch not in script
+
+    @pytest.mark.parametrize("quote", ["'", *_CURLY_SINGLES], ids=lambda c: f"U+{ord(c):04X}")
+    @pytest.mark.parametrize("builder", ["session", "terminal_only", "custom"])
+    def test_a_folder_quote_is_doubled_in_the_set_location_literal(self, builder, quote):
+        script = self._script(builder, cwd="C:\\it" + quote + "s", title="t")
+        assert "Set-Location -LiteralPath 'C:\\it" + quote + quote + "s'" in script
+
+    @pytest.mark.parametrize("builder", ["session", "terminal_only", "custom"])
+    def test_a_folder_quote_mix_is_doubled_without_double_escaping(self, builder):
+        rsq, lsq = _CURLY_SINGLES[1], _CURLY_SINGLES[0]
+        script = self._script(builder, cwd="C:\\a'" + rsq + lsq + "b", title="t")
+        assert "Set-Location -LiteralPath 'C:\\a''" + rsq + rsq + lsq + lsq + "b'" in script
+
+    @pytest.mark.parametrize("ch", _LINE_BREAKERS, ids=lambda c: f"U+{ord(c):04X}")
+    @pytest.mark.parametrize("builder", ["session", "terminal_only", "custom"])
+    def test_a_folder_with_a_line_breaking_character_is_refused(self, builder, ch):
+        assert self._script(builder, cwd="C:\\pr" + ch + "oj", title="t") is None
+
+    def test_a_custom_command_string_is_quoted_not_spliced(self):
+        rsq = _CURLY_SINGLES[1]
+        cmd = _build_custom_command(self._TERM, "C:\\proj", "run it's" + rsq, "t", wt_profile="PowerShell")
+        assert cmd[3].endswith("; & cmd /c 'run it''s" + rsq + rsq + "'")
+
+    def test_wt_with_pwsh_quotes_a_hostile_argument(self):
+        rsq = _CURLY_SINGLES[1]
+        with patch("shutil.which", return_value="C:\\pwsh.exe"):
+            cmd = _build_command("C:\\wt.exe", "C:\\proj", ["codex", "resume", "a'" + rsq], title="t", wt_profile="PowerShell")
+        assert cmd[-1] == "& 'codex' 'resume' 'a''" + rsq + rsq + "'"
+
+    def test_ordinary_title_and_folder_script_is_unchanged(self):
+        cmd = _build_command(self._TERM, "C:\\Users\\normal path", ["codex", "resume", "abc"], title="Codex - proj", wt_profile="PowerShell")
+        assert cmd == [self._TERM, "-NoExit", "-Command",
+                       "$Host.UI.RawUI.WindowTitle = 'Codex - proj'; Set-Location -LiteralPath 'C:\\Users\\normal path'; & 'codex' 'resume' 'abc'"]
+
+    # -- the pwsh scripts: parsed by PowerShell itself (parse only) ----------
+
+    @pytest.mark.parametrize("builder", ["session", "terminal_only", "custom"])
+    def test_powershell_parses_a_hostile_script_to_the_same_statements_as_a_benign_one(self, builder):
+        rsq, lsq = _CURLY_SINGLES[1], _CURLY_SINGLES[0]
+        injected = "x" + rsq + "\ncalc.exe\n" + rsq + "x"
+        benign = self._script(builder, cwd="C:\\proj", title="Codex - proj")
+        hostile_title = self._script(builder, cwd="C:\\proj", title=injected)
+        hostile_cwd = self._script(builder, cwd="C:\\pr" + rsq + " calc.exe " + rsq + "o'" + lsq + "j", title="t")
+        base, from_title, from_cwd = _parse_only([benign, hostile_title, hostile_cwd])
+        assert base["errors"] == 0
+        assert from_title == {**base, "value": from_title["value"]}
+        assert from_cwd == {**base, "value": from_cwd["value"]}
+
+    @pytest.mark.parametrize("value", [
+        "plain",
+        "it's",
+        "x" + _CURLY_SINGLES[1] + "y",
+        "'" + _CURLY_SINGLES[0],
+        _CURLY_SINGLES[2] + _CURLY_SINGLES[3] + "'",
+        "a'" + _CURLY_SINGLES[1] + "\ncalc.exe\n" + _CURLY_SINGLES[1] + "b",
+    ], ids=["plain", "ascii", "rsquo", "ascii-lsquo", "low9-rev9-ascii", "injection-shaped"])
+    def test_powershell_reads_a_quoted_value_back_as_the_original_single_literal(self, value):
+        (row,) = _parse_only([_quote_powershell_arg(value)])
+        assert row["errors"] == 0
+        assert row["n"] == 1
+        assert row["value"] == value
+
+    # -- the cmd fallback ----------------------------------------------------
+
+    def test_cmd_fallback_title_drops_redirection_and_escape_characters(self):
+        cmd = _build_command(self._CMD, "C:\\proj", ["kiro-cli"], title="a<b>c^d - p", wt_profile="PowerShell")
+        assert cmd[2] == 'title abcd - p&& cd /d "C:\\proj" && kiro-cli'
+
+    def test_cmd_fallback_title_drops_a_line_break(self):
+        cmd = _build_command(self._CMD, "C:\\proj", ["kiro-cli"], title="a\r\nnotepad\nb", wt_profile="PowerShell")
+        assert cmd[2] == 'title anotepadb&& cd /d "C:\\proj" && kiro-cli'
+
+    def test_cmd_fallback_custom_and_terminal_only_titles_drop_them_too(self):
+        custom = _build_custom_command(self._CMD, "C:\\proj", "npm start", "a<b>c^d", wt_profile="PowerShell")
+        assert custom[2] == 'title abcd&& cd /d "C:\\proj" && npm start'
+        only = _build_terminal_only_command(self._CMD, "C:\\proj", title="a<b>c^d")
+        assert only[2] == 'title abcd&& cd /d "C:\\proj"'
+
+    @pytest.mark.parametrize("ch", ["\n", "\r", "\t", chr(0x7F)], ids=["lf", "cr", "tab", "del"])
+    def test_cmd_fallback_refuses_a_folder_or_argument_with_a_control_character(self, ch):
+        assert _build_command(self._CMD, "C:\\a" + ch + "b", ["kiro-cli"], wt_profile="PowerShell") is None
+        assert _build_command(self._CMD, "C:\\a", ["kiro-cli", "x" + ch + "y"], wt_profile="PowerShell") is None
+        assert _build_terminal_only_command(self._CMD, "C:\\a" + ch + "b") is None
+        assert _build_custom_command(self._CMD, "C:\\a" + ch + "b", "npm", "t", wt_profile="PowerShell") is None
+
+    def _script(self, builder, *, cwd, title):
+        if builder == "session":
+            cmd = _build_command(self._TERM, cwd, ["codex", "resume", "abc"], title=title, wt_profile="PowerShell")
+        elif builder == "terminal_only":
+            cmd = _build_terminal_only_command(self._TERM, cwd, title=title)
+        else:
+            cmd = _build_custom_command(self._TERM, cwd, "npm start", title, wt_profile="PowerShell")
+        return None if cmd is None else cmd[3]
+
 
 
 class TestLaunchBatch:

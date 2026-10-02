@@ -901,7 +901,7 @@ function _setToolStatus(el, wireStatus) {
   if (!label) return;                         // unknown value: leave as-is
   el.textContent = label;
   // `wireStatus` reaches an attribute only after the map has vouched for it,
-  // so the value in the DOM is one of four literals rather than agent text.
+  // so the value in the DOM is one of the map's literals rather than agent text.
   el.setAttribute('data-status', wireStatus);
   el.hidden = false;
 }
