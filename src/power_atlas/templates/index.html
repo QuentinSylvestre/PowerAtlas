@@ -6586,7 +6586,7 @@ function dashRailRowNode(session, flat, workspace){
   var actions = document.createElement('div');
   actions.className = 'acp-rail-menu-wrap acp-rail-menu-wrap-ghost';
   if (state !== 'locked' && (session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3' ||
-      session.provider === 'claude-code' || session.provider === 'kiro-ide')) {
+      session.provider === 'claude-code' || session.provider === 'kiro-ide' || session.provider === 'codex')) {
     var resumeBtn = document.createElement('button');
     resumeBtn.type = 'button';
     resumeBtn.className = 'acp-rail-ghost-btn acp-rail-ghost-primary';
@@ -8123,8 +8123,8 @@ function _updateFilterUI(){
 <script>
 var _providerSettings={{provider_settings|tojson}};
 var _globalDefaultDirectory={{default_directory|tojson}};
-var _providerBinaryDisplay={'kiro-cli':'kiro-cli chat','claude-code':'claude','kiro-ide':'kiro','kiro-cli-v3':'kiro-cli chat --agent-engine v3 --trust-tools *'};
-var _providerTerminal={'kiro-cli':true,'claude-code':true,'kiro-ide':false,'kiro-cli-v3':true};
+var _providerBinaryDisplay={'kiro-cli':'kiro-cli chat','claude-code':'claude','kiro-ide':'kiro','kiro-cli-v3':'kiro-cli chat --agent-engine v3 --trust-tools *','codex':'codex'};
+var _providerTerminal={'kiro-cli':true,'claude-code':true,'kiro-ide':false,'kiro-cli-v3':true,'codex':true};
 (function(){if(_providerSettings&&_providerSettings['kiro-cli']&&_providerSettings['kiro-cli'].default_args==='-a'&&!localStorage.getItem('pa_migration_toast')){localStorage.setItem('pa_migration_toast','1');setTimeout(function(){showToast('<div class="toast toast-success">Trust All is now per-provider \u2014 click \u2699\ufe0f on the provider tile to configure.<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')},1000)}})();
 (function(){if(!localStorage.getItem('pa_profile_toast')){localStorage.setItem('pa_profile_toast','1');setTimeout(function(){showToast('<div class="toast toast-success">Terminal config is now Launch Profiles \u2014 click \u2699\ufe0f in the top bar to manage.<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')},1500)}})();
 </script>

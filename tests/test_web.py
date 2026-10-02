@@ -1299,6 +1299,91 @@ def test_disabled_provider_not_in_launcher_grid(mock_load, mock_providers, clien
     assert 'provider--kiro-cli' not in resp.text
 
 
+class TestCodexLauncherSurfaces:
+    """261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2:
+    the launcher tile, the provider settings round trip and the Card color swatches."""
+
+    @patch("power_atlas.web.data.available_providers")
+    @patch("power_atlas.web.load_config")
+    def test_launcher_grid_has_a_white_codex_tile_beside_the_others(self, mock_load, mock_providers, client):
+        from power_atlas.config import Config
+        mock_load.return_value = Config(
+            provider_settings={"kiro-cli-v3": {"default_args": "", "color": "#112233", "enabled": True}})
+        mock_providers.return_value = ["kiro-cli-v3", "codex"]
+        resp = client.get("/partials/launchers")
+        assert resp.status_code == 200
+        tile = resp.text.split('data-id="provider--codex"', 1)[1].split('data-id="', 1)[0]
+        assert "--stripe: #ffffff" in tile
+        assert '<span class="launcher-name">Codex</span>' in tile
+        assert "<strong>Command:</strong> codex" in tile
+        assert 'src="/api/launcher-icon/provider--codex"' in tile
+        # The other tile keeps its own colour, so the stripe above is Codex's own.
+        other = resp.text.split('data-id="provider--kiro-cli-v3"', 1)[1].split('data-id="', 1)[0]
+        assert "--stripe: #112233" in other
+
+    @patch("power_atlas.web.data.available_providers")
+    @patch("power_atlas.web.load_config")
+    def test_codex_tile_takes_the_users_colour_and_default_args_and_hides_when_disabled(
+            self, mock_load, mock_providers, client):
+        from power_atlas.config import Config
+        mock_providers.return_value = ["codex"]
+        mock_load.return_value = Config(
+            provider_settings={"codex": {"default_args": "--search", "color": "#14b8a6", "enabled": True}})
+        tile = client.get("/partials/launchers").text.split('data-id="provider--codex"', 1)[1]
+        tile = tile.split('data-id="', 1)[0]
+        assert "--stripe: #14b8a6" in tile and "#ffffff" not in tile
+        assert "<strong>Command:</strong> codex --search" in tile
+        mock_load.return_value = Config(
+            provider_settings={"codex": {"default_args": "", "color": "", "enabled": False}})
+        assert "provider--codex" not in client.get("/partials/launchers").text
+
+    def test_provider_settings_for_codex_round_trip_through_the_real_config(self, client):
+        resp = client.post("/api/provider/save", json={
+            "provider": "codex", "default_args": "--search", "color": "#ffffff",
+            "enabled": True, "default_directory": "D:/work"})
+        assert resp.status_code == 200 and "saved" in resp.text.lower()
+        body = client.get("/api/provider/codex").json()
+        assert body["provider"] == "codex"
+        assert (body["default_args"], body["color"], body["enabled"], body["default_directory"]) == (
+            "--search", "#ffffff", True, "D:/work")
+        # A second save replaces the first one rather than merging into it.
+        client.post("/api/provider/save", json={
+            "provider": "codex", "default_args": "", "color": "#06b6d4", "enabled": False})
+        body = client.get("/api/provider/codex").json()
+        assert (body["default_args"], body["color"], body["enabled"]) == ("", "#06b6d4", False)
+        # Saving Codex touched no other provider's settings.
+        assert client.get("/api/provider/claude-code").json()["color"] == ""
+
+    def test_api_launch_passes_codex_and_its_own_default_args_to_the_launcher(self, client, tmp_path):
+        from power_atlas.launcher import LaunchResult
+        sid = "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40"
+        client.post("/api/provider/save", json={
+            "provider": "codex", "default_args": "--search", "color": "", "enabled": True})
+        client.post("/api/provider/save", json={
+            "provider": "claude-code", "default_args": "--other", "color": "", "enabled": True})
+        with patch("power_atlas.web.launcher.launch_session",
+                   return_value=LaunchResult(True, sid, str(tmp_path))) as mock_launch:
+            resp = client.post("/api/launch", json={
+                "session_id": sid, "workspace": str(tmp_path), "provider": "codex"})
+        assert resp.status_code == 200 and "Session launched" in resp.text
+        kwargs = mock_launch.call_args.kwargs
+        assert (kwargs["provider"], kwargs["session_id"], kwargs["default_args"]) == ("codex", sid, "--search")
+
+    def test_launcher_modal_card_color_group_ends_with_a_white_swatch(self, client):
+        html = client.get("/").text
+        group = html.split('id="launcherColorPicker"', 1)[1].split("</div>", 1)[0]
+        swatches = re.findall(r'<button type="button" class="color-swatch[^"]*" data-color="([^"]*)"[^>]*>', group)
+        assert len(swatches) == 14
+        assert swatches[0] == "" and swatches[-1] == "#ffffff"
+        assert len(set(swatches)) == 14
+        last = re.findall(r'<button [^>]*>', group)[-1]
+        assert 'aria-label="White"' in last and 'title="White"' in last
+        assert "background:#ffffff" in last
+        # The workspace colour picker is a separate group and stays at 13.
+        ws = html.split('id="wsColorPicker"', 1)[1].split("</div>", 1)[0]
+        assert ws.count('class="color-swatch') == 13 and "#ffffff" not in ws
+
+
 @patch("power_atlas.web.launcher.launch_custom_batch")
 @patch("power_atlas.web.load_config")
 def test_launcher_run_batch_passes_workspace_arg_for_non_terminal(mock_load, mock_batch, client):

@@ -7270,6 +7270,64 @@ check("a tool row badge carries data-status for its wire value", (tpl) => {
     "data-status should follow the row's status");
 });
 
+// 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: the
+// neutral `finished` status a Codex tool result with no recorded outcome gets.
+check("a `finished` tool result shows a `finished` badge, set by a tool_update on a started row", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "fin1", title: "Run command", kind: "execute",
+               status: "started", command: "ls" } });
+  const badge = page.el("acpTranscript").querySelector(".acp-tool-status");
+  assertEqual(badge.hidden, true, "fixture: `started` is not in the closed set, so no badge yet");
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "fin1", status: "finished" } });
+  assertEqual(badge.getAttribute("data-status"), "finished", "data-status carries the wire value");
+  assertEqual(badge.textContent, "finished", "the badge shows the label");
+  assert(badge.hidden === false, "a `finished` badge must be visible");
+});
+
+check("the group tally counts `finished` apart from completed and failed", async (tpl) => {
+  // Asymmetric counts (3 finished, 2 completed, 1 failed, in that first-seen
+  // order) so a tally that folded `finished` into either neighbour, or lost it,
+  // gives a different header.
+  const { page, live } = connected(tpl);
+  const order = ["finished", "completed", "finished", "completed", "finished", "failed"];
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  order.forEach((status, i) => {
+    page.deliver({ type: "tool_call", sessionId: live,
+      payload: { toolCallId: "ft" + i, title: "Run command", kind: "execute",
+                 status: "started", command: "c" + i } });
+    page.deliver({ type: "tool_update", sessionId: live,
+      payload: { toolCallId: "ft" + i, status } });
+  });
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } });
+  await page.settle();
+  const toggle = page.el("acpTranscript").querySelector(".acp-tool-group-toggle");
+  assert(toggle, "group has no toggle button");
+  assert(toggle.textContent.endsWith(" · finished ×3, completed ×2, failed"),
+    "tally should list finished, completed and failed separately: " + toggle.textContent);
+  // The existing statuses are unchanged by the new entry: a group with no
+  // `finished` row has no `finished` in its header.
+  await deliverTurn(page, live, [
+    { toolCallId: "nf1", title: "shell", kind: "execute", status: "completed", command: "a" },
+    { toolCallId: "nf2", title: "shell", kind: "execute", status: "failed", command: "b" },
+  ]);
+  const headers = page.el("acpTranscript").querySelectorAll(".acp-tool-group-toggle")
+    .map((t) => t.textContent);
+  assert(headers.length === 2 && !headers[1].includes("finished"),
+    "a group of completed and failed rows must not mention finished: " + headers[1]);
+  assert(headers[1].endsWith(" · completed, failed"), "unchanged tally wording: " + headers[1]);
+});
+
+check("style.css gives `finished` a dim rule that is neither green nor red (no CSS engine here: the browser check owns the rendered colour)", () => {
+  const css = fs.readFileSync(STYLESHEET, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = css.match(/\.acp-tool-status\[data-status="finished"\]\s*\{([^}]*)\}/);
+  assert(rule, "no `.acp-tool-status[data-status=\"finished\"]` rule in style.css");
+  assert(/color:\s*var\(--text-dim\)/.test(rule[1]), "finished should use the dim neutral: " + rule[1]);
+  assert(!/--success|74,\s*222,\s*128|#4ade80|#ef4444|239,\s*68,\s*68/i.test(rule[1]),
+    "finished must not borrow the success green or the failed red: " + rule[1]);
+});
+
 check("a tool_call with no status leaves the badge off the row", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({ type: "tool_call", sessionId: live,
@@ -18860,6 +18918,53 @@ for (const available of [true, false]) {
       `the new-session picker must ${available ? "open" : "stay closed"}`);
   });
 }
+
+// 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: the
+// Resume button whitelist in dashRailRowNode.
+check("dashboard rail: a Codex row has a Resume button, kiro-ide keeps its own title, an unlisted provider has none", () => {
+  const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
+  const resumeBtns = (row) => row.descendants()
+    .filter((n) => String(n.className).split(/\s+/).includes("acp-rail-ghost-primary"));
+  const want = {
+    "codex": "Resume session",
+    "claude-code": "Resume session",
+    "kiro-cli": "Resume session",
+    "kiro-cli-v3": "Resume session",
+    "kiro-ide": "Open workspace in Kiro IDE",
+    "gemini": null,
+    "": null,
+  };
+  for (const [provider, title] of Object.entries(want)) {
+    const resumed = [];
+    const { box } = runDashSentinel(slice, true, { resumeSession: (b) => resumed.push(b) });
+    const row = box.dashRailRowNode(
+      { id: "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40", provider, availability: "available" }, true, null);
+    const btns = resumeBtns(row);
+    if (title === null) {
+      assertEqual(btns.length, 0, `a ${provider || "provider-less"} row must not get a Resume button`);
+      continue;
+    }
+    assertEqual(btns.length, 1, `a ${provider} row must get exactly one Resume button`);
+    assertEqual(btns[0].title, title, `the ${provider} Resume button title`);
+    assertEqual(btns[0].getAttribute("aria-label"), "Resume session", `the ${provider} Resume aria-label`);
+    assertEqual(row.dataset.provider, provider, `the row carries its provider for resumeSession to read`);
+    btns[0].dispatch("click");
+    assertEqual(resumed.length, 1, `clicking the ${provider} Resume button calls resumeSession once`);
+    assert(resumed[0] === btns[0], "resumeSession receives the clicked button");
+  }
+});
+
+check("dashboard: the provider maps behind the launcher settings and the New menu list Codex as a terminal provider", () => {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const display = src.match(/var _providerBinaryDisplay=\{([^}]*)\};/);
+  const terminal = src.match(/var _providerTerminal=\{([^}]*)\};/);
+  assert(display && terminal, "the two provider maps were not found in index.html");
+  assert(/'codex':'codex'/.test(display[1]), "_providerBinaryDisplay has no codex entry: " + display[1]);
+  assert(/'codex':true/.test(terminal[1]), "_providerTerminal has no codex:true entry: " + terminal[1]);
+  // Existing entries are untouched.
+  assert(/'kiro-ide':false/.test(terminal[1]) && /'claude-code':'claude'/.test(display[1]),
+    "existing provider map entries changed");
+});
 
 check("dashboard: reconnect — clicking Reconnect opens a socket and resubscribes the previously-attached session", () => {
   const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1" });

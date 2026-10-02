@@ -703,15 +703,18 @@ function addSystemMessage(text) {
 
 // ---- tool-call rendering ---------------------------------------------------
 //
-// A status kiro-cli adds later renders as no badge rather than as a raw
+// A status this map does not list renders as no badge rather than as a raw
 // string, which is the same trade the tally has always made. Add the key
 // here — and a colour beside `.acp-tool-status[data-status=…]` in style.css
 // — to bring it back into view.
+//
+// 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: `finished` is not an ACP status. The Codex transcript translator sends it for a tool result whose outcome the rollout does not record. It is a neutral badge, never green, and the group tally counts it apart from `completed`.
 var TOOL_STATUS_LABEL = Object.create(null);
 TOOL_STATUS_LABEL.pending     = 'pending';
 TOOL_STATUS_LABEL.in_progress = 'in progress';
 TOOL_STATUS_LABEL.completed   = 'completed';
 TOOL_STATUS_LABEL.failed      = 'failed';
+TOOL_STATUS_LABEL.finished    = 'finished';
 
 function elapsedText(startedAt, endAt) {
   if (typeof startedAt !== 'number' || !startedAt) return '';

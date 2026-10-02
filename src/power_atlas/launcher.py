@@ -24,6 +24,9 @@ class LaunchResult:
 
 _SESSION_ID_RE = re.compile(r"^[\w\-]+$")
 
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: Codex thread ids are UUIDs; _SESSION_ID_RE above accepts a leading "-", so `codex resume --flag` needs this stricter check.
+_CODEX_SESSION_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+
 # Keys stripped from the child env to prevent marker leakage from the PowerAtlas
 # tray process into launched provider sessions.
 # NOTE: A copy of this function AND the _SCRUB_PREFIXES/_SCRUB_EXACT constants
@@ -82,18 +85,21 @@ _PROVIDER_DISPLAY = {
     "claude-code": "Claude Code",
     "kiro-ide": "Kiro IDE",
     "kiro-cli-v3": "kiro-cli v3",
+    "codex": "Codex",
 }
 
 _PROVIDER_BINARY = {
     "claude-code": "claude",
     "kiro-ide": "kiro",
     "kiro-cli-v3": "kiro-cli",
+    "codex": "codex",
 }
 
 _PROVIDER_TERMINAL = {
     "claude-code": True,
     "kiro-ide": False,
     "kiro-cli-v3": True,
+    "codex": True,
 }
 
 
@@ -112,6 +118,14 @@ def _build_provider_args(provider: str, binary: str, session_id: str | None) -> 
         args = [binary, "chat", "--agent-engine", "v3", "--trust-tools", "*"]
         if session_id:
             args += ["--resume-id", session_id]
+    elif provider == "codex":
+        # No baked flags: the user's config.toml governs; default_args are appended by launch_session.
+        args = [binary]
+        if session_id:
+            # fullmatch, not match: "$" would let a trailing newline through.
+            if not _CODEX_SESSION_ID_RE.fullmatch(session_id):
+                raise ValueError("Invalid Codex session id")
+            args += ["resume", session_id]
     else:
         raise ValueError(f"Unknown provider: {provider}")
     return args

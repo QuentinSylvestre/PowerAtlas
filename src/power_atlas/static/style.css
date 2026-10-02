@@ -811,8 +811,9 @@ script { display: none; }
 .launcher-preview-placeholder[hidden] { display: none; }
 .launcher-preview-caption { font-size: 10px; color: var(--text-dim); }
 .launcher-appearance .color-picker-field { flex: 1; min-width: 228px; margin-bottom: 0; }
-/* 13 swatches wrap unevenly in a flex row (10 + 3 beside the launcher
-   preview, 12 + 1 in the workspace modal); a 7-column grid splits them evenly.
+/* 14 swatches (launcher modal: No color, twelve hues, White) wrap unevenly in
+   a flex row; a 7-column grid splits them into two even rows of 7 (7 x 2). The
+   workspace modal has 13 and wraps 12 + 1 as a flex row.
    The launcher field's 228px minimum is that grid's width, so on a narrow
    screen its row wraps and the preview sits above the swatches. */
 .pa-modal .color-picker-swatches { display: grid; grid-template-columns: repeat(7, 24px); gap: 8px 10px; }
@@ -1649,7 +1650,7 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .acp-tool-time { font-size: 10px; color: var(--text-dim); }
 .acp-tool-status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
 /* Tool-call status badge, one rule per value of the ACP `ToolCallStatus` enum
-   — and only those four; the JS closed set (`TOOL_STATUS_LABEL` in acp.html)
+   — and only those four, plus the neutral `finished` below; the JS closed set (`TOOL_STATUS_LABEL` in transcript-renderer.js)
    is what decides whether `data-status` is written at all, so a value with no
    rule here renders as an unstyled pill rather than as nothing, and a value
    the map rejects never reaches this selector.
@@ -1665,6 +1666,8 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .acp-tool-status[data-status="in_progress"] { color: #3b82f6; border-color: rgba(59, 130, 246, 0.45); animation: status-pulse 2s ease-in-out infinite; }
 .acp-tool-status[data-status="completed"] { color: var(--success); border-color: rgba(74, 222, 128, 0.4); }
 .acp-tool-status[data-status="failed"] { color: #ef4444; border-color: rgba(239, 68, 68, 0.45); }
+/* 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: `finished` is the Codex result with no recorded outcome (see TOOL_STATUS_LABEL in transcript-renderer.js). Dim neutral like `pending`, and never green: it must not read as a success claim. */
+.acp-tool-status[data-status="finished"] { color: var(--text-dim); }
 @media (prefers-reduced-motion: reduce) { .acp-tool-status[data-status="in_progress"] { animation: none; } }
 .acp-tool-toggle {
   background: none;

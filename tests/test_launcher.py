@@ -4,6 +4,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from power_atlas.config import LaunchProfile
 from power_atlas.launcher import (
     detect_terminal,
@@ -412,6 +414,112 @@ class TestLaunchSession:
         assert "CLAUDE_CODE_SESSION_ID" not in env
         assert "CLAUDE_PID" not in env
         assert env["POWER_ATLAS_SESSION"] == "1"
+
+
+class TestCodexLaunch:
+    """261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2:
+    Codex launches as `codex` / `codex resume <uuid>` with no baked flags."""
+
+    _SID = "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40"
+
+    def test_the_three_launcher_tables_know_codex(self):
+        from power_atlas.launcher import _PROVIDER_BINARY, _PROVIDER_DISPLAY, _PROVIDER_TERMINAL
+        assert _PROVIDER_DISPLAY["codex"] == "Codex"
+        assert _PROVIDER_BINARY["codex"] == "codex"
+        assert _PROVIDER_TERMINAL["codex"] is True
+
+    def test_new_session_is_the_bare_binary(self):
+        assert _build_provider_args("codex", "codex", None) == ["codex"]
+        # An empty id is falsy and means "new session", as for Claude Code.
+        assert _build_provider_args("codex", "codex", "") == ["codex"]
+
+    def test_resume_takes_the_subcommand_then_the_id_and_nothing_else(self):
+        # The binary argument is used as given (a resolved path, not the id "codex").
+        args = _build_provider_args("codex", "codex-bin", self._SID)
+        assert args == ["codex-bin", "resume", self._SID]
+
+    def test_an_upper_case_uuid_is_accepted(self):
+        sid = self._SID.upper()
+        assert _build_provider_args("codex", "codex", sid) == ["codex", "resume", sid]
+
+    @pytest.mark.parametrize("bad", [
+        "--flag",                       # passes launcher._SESSION_ID_RE, must not reach `codex resume`
+        "-h",
+        "--last",
+        "abc123",
+        "sess_abc",
+        "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d4",     # one hex digit short
+        "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40a",   # one hex digit long
+        "0199c8f27a3b7c419e5d3b8a1f6e2d40",         # no hyphens
+        "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2dg0",     # non-hex digit
+        "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40\n",   # "$" would accept a trailing newline
+        "\n0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40",
+        " 0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40",
+        "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40 --last",
+    ])
+    def test_a_non_uuid_id_is_refused(self, bad):
+        with pytest.raises(ValueError, match="Invalid Codex session id"):
+            _build_provider_args("codex", "codex", bad)
+
+    @patch("power_atlas.launcher._build_command", return_value=["term"])
+    @patch("power_atlas.launcher.subprocess.Popen")
+    @patch("power_atlas.launcher.shutil.which")
+    def test_launch_session_runs_codex_resume_with_default_args_after_the_id(
+            self, mock_which, mock_popen, mock_build, tmp_path):
+        mock_which.side_effect = lambda n: {"codex": "C:\\codex.exe", "wt": "C:\\wt.exe"}.get(n)
+        result = launch_session(str(tmp_path), session_id=self._SID, provider="codex",
+                                default_args="--model gpt-x --flag2",
+                                launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is True
+        assert result.session_id == self._SID
+        cli_args = mock_build.call_args[0][2]
+        assert cli_args == ["codex", "resume", self._SID, "--model", "gpt-x", "--flag2"]
+        assert "Codex" in mock_build.call_args.kwargs["title"]
+        mock_popen.assert_called_once()
+        assert mock_popen.call_args[0][0] == ["term"]
+
+    @patch("power_atlas.launcher._build_command", return_value=["term"])
+    @patch("power_atlas.launcher.subprocess.Popen")
+    @patch("power_atlas.launcher.shutil.which")
+    def test_launch_session_new_codex_session_has_no_flags(
+            self, mock_which, mock_popen, mock_build, tmp_path):
+        mock_which.side_effect = lambda n: {"codex": "C:\\codex.exe", "wt": "C:\\wt.exe"}.get(n)
+        result = launch_session(str(tmp_path), session_id=None, provider="codex",
+                                launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is True
+        assert mock_build.call_args[0][2] == ["codex"]
+
+    @patch("power_atlas.launcher.subprocess.Popen")
+    @patch("power_atlas.launcher.shutil.which")
+    def test_launch_session_command_line_carries_resume_and_id(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"codex": "C:\\codex.exe", "wt": "C:\\wt.exe"}.get(n)
+        result = launch_session(str(tmp_path), session_id=self._SID, provider="codex",
+                                launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is True
+        cmd_str = " ".join(mock_popen.call_args[0][0])
+        assert cmd_str.endswith("-- codex resume " + self._SID)
+        assert "kiro" not in cmd_str and "--resume" not in cmd_str
+
+    @pytest.mark.parametrize("bad", ["--flag", "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40\n"])
+    @patch("power_atlas.launcher.subprocess.Popen")
+    @patch("power_atlas.launcher.shutil.which")
+    def test_launch_session_refuses_a_non_uuid_codex_id_without_launching(
+            self, mock_which, mock_popen, bad, tmp_path):
+        """Both ids pass the generic launcher id check (leading "-" and a trailing
+        newline are accepted by it); the Codex branch is what stops them."""
+        mock_which.side_effect = lambda n: {"codex": "C:\\codex.exe", "wt": "C:\\wt.exe"}.get(n)
+        result = launch_session(str(tmp_path), session_id=bad, provider="codex",
+                                launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is False
+        assert "Invalid Codex session id" in result.error
+        mock_popen.assert_not_called()
+
+    @patch("power_atlas.launcher.shutil.which", return_value=None)
+    def test_launch_session_reports_a_missing_codex_binary(self, _which, tmp_path):
+        result = launch_session(str(tmp_path), provider="codex")
+        assert result.success is False
+        assert "'codex' not found on PATH" in result.error
+        assert "Codex" in result.error
 
 
 class TestLaunchBatch:
