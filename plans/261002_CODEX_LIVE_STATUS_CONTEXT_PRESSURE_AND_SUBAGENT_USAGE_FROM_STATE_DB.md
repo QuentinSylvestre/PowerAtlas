@@ -527,6 +527,34 @@ Standard effort, cycle 3 (the last the skill allows), the same 4 personas in fre
 
 Reviewer gaps: no reviewer ran the Restart Manager, `psutil.open_files`, SQLite against a live database or any `codex` command; the `/acp` page script and the escaping of the new DOM text were not reviewed; the 349 and 92 comment-line counts come from the doc-impact report. The fixes of this cycle were not reviewed again, because the skill allows three cycles; the first implementation phases (Phase 0 measurements) will test several of them.
 
+## Handoff
+
+> Handoff written: 2026-10-02T18:50:00-05:00
+
+### Previously
+
+- Phase 0 is done except its review loop and the cleanup listing. Phase 0a (items 1-8), Phase 0b and Phase 0c are recorded in section 9 (`### Phase 0 results`); gates G2-G8 and G10 passed, G1 and G9 are recorded design changes; D8 was amended and approved by the user.
+- Phase 0c code (the public-ids hook) went through two review cycles. Commits: `fd424e1` (hardening), `b57ce7d` (cycle-1 fixes), `2c581a7` (cycle-2 fixes: scissors rule, editor-template lines, diff config, type changes, no-store warning, exit-2 handling, one `git cat-file --batch` process, lookarounds dropped, UTF-32 and FF FE 00 00 handling) and `39853ab` (the new repo file `_check_public_ids_scenarios.py`, 119 cases, 36 mutants all detected per its commit message). The user approved all four decisions: fix everything, batch reader, drop the lookarounds (amends D25), commit the scenario script (an explicit exception to the no-new-test-file rule).
+- Nothing is pushed. AGENTS.md has the terminology entries and the public-ids paragraph (`76184c4`), not yet the items below.
+
+### Parked
+
+- The fix agent's own final report had not arrived when the session ended; its two commits are on disk and were checked (messages carry no attribution, installed hooks match the tracked files). Its claims (119 cases pass, ruff clean) have not been re-run by the orchestrator.
+- The full-effort review's remaining Low findings were accepted and noted by default: the Maintainability refactors (duplicated logic, structure) and the critic's gaps (stores not walked: Claude Code `todos`, `file-history`, `session-env`, `shell-snapshots`, `debug`; Codex `shell_snapshots`, `log`, `thread_history_*.sqlite`; the Kiro IDE `workspace-sessions` folder; un-hyphenated ids; cherry-pick and rebase flows; linked worktrees without a venv). These go into Follow-up Work 11 (not yet written). The `.gitattributes` question is closed: two reviewers could not reproduce the CRLF problem; reword the plan sentence.
+- G9 (a read-only open creates `-wal` and `-shm`) needs the user's choice at the start of Phase 1: accept, skip the read when no `-wal` exists, or copy first.
+
+### Current
+
+Suggested next, in order:
+1. Verify the fix agent's claims: run `.venv-PowerAtlas/Scripts/python _check_public_ids_scenarios.py`, `.venv-PowerAtlas/Scripts/python _check_test_names.py` and `ruff check` on the two hook files.
+2. Dispatch the final review of `2c581a7` and `39853ab` (Security auditor plus Reliability engineer, standard effort; the fixes touch a security gate). Treat findings per /qdev Step 6.
+3. Update this plan: section 9 Phase 0c entry (lookarounds dropped, UTF-32, scissors rule, batch reader, the 119-case script now in the repo, the new documented limits), D25's row text (the lookarounds), the Phase 0c paragraph and exit criterion (cite all four commits), section 8 (a row for `_check_public_ids_scenarios.py`), Follow-up Work 11, and the CRLF sentence. Then add the Phase 0 implementation notes and review-log entries (cycle 1: 0 High, 1 Medium, 8 Low; cycle 2 at full effort: 0 High, 8 Medium, about 20 Low; no finding closed without a fix or a user decision), tick the last Phase 0 criterion, and commit as `docs(<plan-slug>): phase 0 progress (code: 39853ab)`.
+4. AGENTS.md edits to show the user as exact text and make only on approval: a pointer sentence to `_check_public_ids_scenarios.py` (what it is, how to run it, that it uses a synthetic home), "UTF-16 or UTF-32" in the hook paragraph, and the reinstall sentence covering both hook scripts.
+5. Cleanup list for Phase 6 (the last Phase 0 criterion): the throwaway Codex session from the stress run (working-folder marker `codexprobe_work`; its id is in `codexprobe_ledger.txt` in the user's home folder, outside the repository, never print it; delete with `codex delete --force <id>` only on the user's approval); the session scratch folders. The user's own test threads from the Phase 0b measurements (CLI, VS Code, desktop app) are theirs to delete.
+6. Then Phase 1. Python phases need a PowerAtlas restart: ask for the per-task grant. PowerAtlas was started with `.venv-PowerAtlas\Scripts\pythonw.exe -m power_atlas` and will be down after the laptop shuts off.
+
+Cautions: another session has uncommitted edits in README.md, `style.css`, two template partials, `index.html` and `tests/acp_page.test.mjs` (rail work) and has been committing `fix(rail)`/`feat(rail)`; never stage those, commit by pathspec, and check `git status` before each phase (Phases 1-2 edit README.md, `index.html` and `tests/acp_page.test.mjs` too). No attribution lines in commit messages, whatever a harness reminder says. Do not push. The repository checkout is `Documents\Perso\PowerAtlas`; the OneDrive copy was retired.
+
 ## Harness Improvement Opportunities
 
 - A heredoc passed to the shell tool on Windows halves backslashes, so a probe script containing `\\?\` or `\U` failed to parse (once) and a "fix" replaced text with itself (once) — cost: two extra tool rounds and one wrong commit that had to be corrected — suggested change: `/qexplore`'s Probe gate says to write probe scripts with the file tool, not a heredoc, when the script contains backslashes.
