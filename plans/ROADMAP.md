@@ -48,7 +48,7 @@
   - *Shape* — optional hooks on the adapter module (display name, default colour, helper subcommands, usage parser) so that a registration replaces most of the sites. Which sites can really move is not measured: start from a grep of an existing provider's id.
   - *Done when* — a new provider needs one adapter module and one registration, and a test fails when a site is missed.
 
-- **Shared `data._normalize_path` UNC gap** — the shared helper expands 8.3 short names through `GetLongPathNameW`, which can block on an unreachable network share. Found in the Codex final review and **not reproduced**. The Codex adapter already avoids it by keying a network or device cwd (UNC, `\?\`, `//`) by case-fold only; the Claude Code and kiro-cli paths still call the helper (Follow-up Work 17 of the same plan).
+- **Shared `data._normalize_path` UNC gap** — the shared helper expands 8.3 short names through `GetLongPathNameW`, which can block on an unreachable network share. Found in the Codex final review and **not reproduced**. The Codex adapter already avoids it by keying a network or device cwd (UNC, `\\?\`, `//`) by case-fold only; the Claude Code and kiro-cli paths still call the helper (Follow-up Work 17 of the same plan).
   - *Shape* — the same guard inside the shared helper, so the adapter-side special case can go.
   - *Done when* — a cwd on an unreachable share does not stall discovery for any provider, shown by a test with a stubbed slow resolver.
 ---
