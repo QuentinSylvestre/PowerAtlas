@@ -3225,13 +3225,27 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
             _mark_resume_locked(d, s, prov_name)
         return d
 
-    return {
+    payload = {
         "sessions": [_session_dict(s, prov) for s, prov in flat_rows],
         "pinned": [_session_dict(s, prov) for s, prov in pinned_raw],
         "page": page,
         "has_more": has_more,
         "capacity": capacity,
     }
+    if include_provider:
+        # Dashboard-only. A flat row names its folder but not whether that
+        # folder is pinned or coloured; the rail needs both to draw a
+        # workspace header (pin button, colour bar) when Project is grouped
+        # inside Date or Status. One entry per folder on this page, keyed by
+        # the spelling the rows carry.
+        from .data import _normalize_path
+        pinned_folders = frozenset(_normalize_path(f) for f in config.pinned_folders)
+        payload["workspaces"] = {
+            ws_cwd: {"pinned": _normalize_path(ws_cwd) in pinned_folders,
+                     "color": _resolve_workspace_color(ws_cwd, config)}
+            for ws_cwd in order
+        }
+    return payload
 
 
 @app.get(_ACP_LISTING_PATH)

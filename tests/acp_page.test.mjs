@@ -20512,6 +20512,526 @@ check("workspace settings: no save while the discard question is up", () => {
   assertEqual(sent.length, 0, "a save was sent while the question was pending");
 });
 
+// ---- dashboard rail: ACP sessions section, labelled rows, multi-level Group by
+//
+// The rail's script is inline in index.html and its pieces are cut out by
+// marker, the way the Codex checks above do. Each piece runs in a vm context
+// holding only the stand-ins it reads.
+
+function dashRailCut(fromMarker, toMarker) {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const from = src.indexOf(fromMarker);
+  if (from < 0) throw new Error(`index.html no longer contains ${fromMarker}`);
+  const to = src.indexOf(toMarker, from);
+  if (to < 0) throw new Error(`index.html no longer has ${toMarker} after ${fromMarker}`);
+  return src.slice(from, to);
+}
+
+// The row's own text is what the labelled-row checks read; dashRailTitleText,
+// dashRailWhenShort and dashRailSetHighlighted are the page's, simplified.
+function dashLabelledRowBox() {
+  const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
+  return runDashSentinel(slice, true, {
+    dashRailTitleText: (s) => s.title || "untitled session",
+    dashRailWhenShort: () => "Sep 28",
+  }).box;
+}
+const rowTitleOf = (row) => row.querySelector(".acp-rail-row-title").textContent;
+const rowWhenOf = (row) => row.querySelector(".acp-rail-row-when");
+
+check("dashboard rail: a labelled row is prefixed with its workspace and shows its last-activity time", () => {
+  const box = dashLabelledRowBox();
+  const session = { id: "s1", title: "Fix it", name: "Demo", cwd: "/w/Demo", provider: "claude-code", availability: "available", updated_at: "2026-09-28T10:00:00Z" };
+  const row = box.dashRailRowNode(session, true, session, true);
+  assertEqual(rowTitleOf(row), "Demo - Fix it", "the displayed title names the workspace");
+  const when = rowWhenOf(row);
+  assert(when, "a labelled row shows its time");
+  assertEqual(when.textContent, "Sep 28", "the time is the row's updated_at, short form");
+});
+
+check("dashboard rail: an unlabelled flat row (Date/Status bucket) keeps its bare title and no time", () => {
+  const box = dashLabelledRowBox();
+  const session = { id: "s1", title: "Fix it", name: "Demo", cwd: "/w/Demo", provider: "claude-code", availability: "available" };
+  const row = box.dashRailRowNode(session, true, null);
+  assertEqual(rowTitleOf(row), "Fix it", "no prefix without the labelled flag");
+  assertEqual(rowWhenOf(row), null, "no time without the labelled flag");
+  const inGroup = box.dashRailRowNode(session, false, { cwd: "/w/Demo", name: "Demo" });
+  assert(rowWhenOf(inGroup), "a workspace row still shows its time, as before");
+  assertEqual(rowTitleOf(inGroup), "Fix it", "a workspace row is not prefixed (its header already names the workspace)");
+});
+
+check("dashboard rail: a labelled row without a workspace name is not prefixed with 'undefined'", () => {
+  const box = dashLabelledRowBox();
+  const session = { id: "s1", title: "Fix it", provider: "claude-code", availability: "available" };
+  assertEqual(rowTitleOf(box.dashRailRowNode(session, true, session, true)), "Fix it");
+});
+
+check("dashboard rail: the labelled flag does not change the row's dataset.cwd or its title text elsewhere", () => {
+  const box = dashLabelledRowBox();
+  const session = { id: "s1", title: "Fix it", name: "Demo", cwd: "/w/Demo", provider: "claude-code", availability: "available" };
+  const plain = box.dashRailRowNode(session, true, session);
+  const labelled = box.dashRailRowNode(session, true, session, true);
+  assertEqual(labelled.dataset.cwd, plain.dataset.cwd, "dataset.cwd is the session's own cwd either way");
+  assertEqual(labelled.dataset.cwd, "/w/Demo");
+});
+
+// -- the ACP sessions section
+function dashTopSectionsBox(extra = {}) {
+  const slice = dashRailCut("function dashRenderPinnedSection(){", "// ---- the two renderers");
+  const calls = [];
+  const groupsEl = new El("div");
+  const box = {
+    document: { createElement: (tag) => new El(tag) },
+    dashRailGroupsEl: groupsEl,
+    dashRailCollapsed: Object.create(null),
+    dashRailFilter: "",
+    dashRailPinned: [],
+    dashRailAcp: [],
+    dashRailMatchesFlat: () => true,
+    dashRailHeadNode: (key, label, count) => {
+      const head = new El("div");
+      head.dataset.head = key;
+      head.textContent = `${label}|${count}`;
+      return head;
+    },
+    dashRailRowNode: (s, flat, workspace, labelled) => {
+      calls.push({ id: s.id, flat, sameWorkspace: workspace === s, labelled, pinned: s.pinned });
+      const row = new El("div");
+      row.dataset.sid = s.id;
+      return row;
+    },
+    ...extra,
+  };
+  vm.createContext(box);
+  vm.runInContext(slice, box, { filename: "index.html#top-sections" });
+  return { box, calls, groupsEl };
+}
+const headsIn = (el) => el.childNodes.map((g) => g.childNodes[0].textContent);
+
+check("dashboard rail: ACP sessions draws below Pinned sessions, as labelled rows, and is absent while none runs", () => {
+  const held = { id: "a", name: "Demo", cwd: "/w/Demo", availability: "held" };
+  const { box, calls, groupsEl } = dashTopSectionsBox({
+    dashRailPinned: [{ id: "p", name: "Other", cwd: "/w/Other" }],
+    dashRailAcp: [held],
+  });
+  assertEqual(box.dashRenderTopSections(), 2, "both sections' rows are counted");
+  assertEqual(headsIn(groupsEl).join(","), "Pinned sessions|1,ACP sessions|1", "ACP sessions follows Pinned sessions");
+  const acp = calls.find((c) => c.id === "a");
+  assert(acp.flat && acp.sameWorkspace && acp.labelled, "ACP rows are built flat, with themselves as workspace, labelled");
+  const pinned = calls.find((c) => c.id === "p");
+  assert(pinned.flat && pinned.sameWorkspace && pinned.labelled, "pinned rows are labelled too");
+
+  const none = dashTopSectionsBox({ dashRailPinned: [{ id: "p", name: "Other" }], dashRailAcp: [] });
+  assertEqual(none.box.dashRenderTopSections(), 1);
+  assertEqual(headsIn(none.groupsEl).join(","), "Pinned sessions|1", "no ACP header when nothing is held");
+});
+
+check("dashboard rail: an ACP row's pin state follows Pinned sessions, and a collapsed ACP section hides its rows", () => {
+  const { box, calls, groupsEl } = dashTopSectionsBox({
+    dashRailPinned: [{ id: "a" }],
+    dashRailAcp: [{ id: "a" }, { id: "b" }],
+  });
+  box.dashRenderAcpSection();
+  assertEqual(calls.map((c) => `${c.id}:${c.pinned}`).join(","), "a:true,b:false", "pinned flag set from the pinned list at render time");
+  box.dashRailCollapsed["p:acp"] = true;
+  groupsEl.textContent = "";
+  calls.length = 0;
+  assertEqual(box.dashRenderAcpSection(), 2, "the header still counts the sessions");
+  assertEqual(calls.length, 0, "a collapsed section draws no rows");
+});
+
+check("dashboard rail: the filter narrows the ACP sessions section like it does Pinned sessions", () => {
+  const { box, groupsEl } = dashTopSectionsBox({
+    dashRailAcp: [{ id: "a", name: "Demo" }, { id: "b", name: "Other" }],
+    dashRailMatchesFlat: (s) => s.name === "Demo",
+  });
+  assertEqual(box.dashRenderAcpSection(), 1);
+  assertEqual(headsIn(groupsEl).join(","), "ACP sessions|1");
+});
+
+// -- loading the held sessions
+function dashAcpLoadBox(extra = {}) {
+  const slice = dashRailCut("function dashRailLoadAcp(){", "function loadGroupSessions(");
+  const fetched = [];
+  const pending = [];
+  const renders = { n: 0 };
+  const box = {
+    ACP_AVAILABLE: true,
+    DASH_OV_LIVE_URL: "/api/dashboard/overview/live",
+    DASH_OV_LIVE_TIMEOUT_MS: 15000,
+    dashRailAcp: [],
+    dashRailAcpBusy: false,
+    dashRailBusy: false,
+    dashRenderRail: () => { renders.n += 1; },
+    dashOverviewFetch: (url) => {
+      fetched.push(url);
+      return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+    },
+    ...extra,
+  };
+  vm.createContext(box);
+  vm.runInContext(slice, box, { filename: "index.html#acp-load" });
+  const settle = () => new Promise((r) => setImmediate(r));
+  return { box, fetched, pending, renders, settle };
+}
+const liveTile = (over = {}) => ({
+  id: "sess_1", provider: "kiro-cli-v3", title: "T", cwd: "/w/Demo", name: "Demo",
+  created_at: "c", updated_at: "u", availability: "held", status: "working", live: true,
+  last_activity: "x", events: [{ kind: "text", text: "noise" }], ...over,
+});
+
+check("dashboard rail: the ACP list is fed by the held-sessions live route and keeps only row fields", async () => {
+  const { box, fetched, pending, renders, settle } = dashAcpLoadBox();
+  box.dashRailLoadAcp();
+  assertEqual(fetched.length, 1);
+  assert(fetched[0].includes("filter=poweratlas"), `the route is filtered to this PowerAtlas's sessions: ${fetched[0]}`);
+  pending[0].resolve({ filter: "poweratlas", tiles: [liveTile(), null, { title: "no id" }] });
+  await settle();
+  assertEqual(box.dashRailAcp.length, 1, "a tile with no id is dropped");
+  assertEqual(box.dashRailAcp[0].events, undefined, "the event tail is not kept");
+  assertEqual(box.dashRailAcp[0].last_activity, undefined, "last_activity is not kept");
+  assertEqual(box.dashRailAcp[0].name, "Demo");
+  assertEqual(renders.n, 1, "a changed list redraws the rail");
+});
+
+check("dashboard rail: an unchanged ACP list does not redraw, and a changed status does", async () => {
+  const { box, pending, renders, settle } = dashAcpLoadBox();
+  box.dashRailLoadAcp(); pending[0].resolve({ tiles: [liveTile()] }); await settle();
+  box.dashRailLoadAcp(); pending[1].resolve({ tiles: [liveTile({ events: [] , last_activity: "y" })] }); await settle();
+  assertEqual(renders.n, 1, "only the event tail and last_activity changed: nothing a row shows");
+  box.dashRailLoadAcp(); pending[2].resolve({ tiles: [liveTile({ status: "waiting" })] }); await settle();
+  assertEqual(renders.n, 2, "a changed status is a change");
+  box.dashRailLoadAcp(); pending[3].resolve({ tiles: [] }); await settle();
+  assertEqual(box.dashRailAcp.length, 0, "the last held session closing empties the list");
+  assertEqual(renders.n, 3);
+});
+
+check("dashboard rail: an ACP list that lands during a listing load is kept but not drawn over the emptied rail", async () => {
+  const { box, pending, renders, settle } = dashAcpLoadBox({ dashRailBusy: true });
+  box.dashRailLoadAcp(); pending[0].resolve({ tiles: [liveTile()] }); await settle();
+  assertEqual(box.dashRailAcp.length, 1, "the list is stored for the listing's own render");
+  assertEqual(renders.n, 0, "no redraw while the listing is loading");
+});
+
+check("dashboard rail: ACP loading is off without ACP, one request at a time, and a failure does not wedge it", async () => {
+  const off = dashAcpLoadBox({ ACP_AVAILABLE: false });
+  off.box.dashRailLoadAcp();
+  assertEqual(off.fetched.length, 0, "no request when ACP is unavailable");
+
+  const { box, fetched, pending, settle } = dashAcpLoadBox();
+  box.dashRailLoadAcp(); box.dashRailLoadAcp();
+  assertEqual(fetched.length, 1, "a second call while one is in flight is dropped");
+  pending[0].reject(new Error("boom")); await settle();
+  box.dashRailLoadAcp();
+  assertEqual(fetched.length, 2, "after a failure the next call fetches again");
+});
+
+// -- Group by: persistence, toggling, bucketing
+function dashGroupingBox(store = {}, extra = {}) {
+  const parts = [
+    dashRailCut("var DASH_RAIL_AVAILABILITY = Object.create(null);", "// ---- fetch + status line"),
+    dashRailCut("function dashRailPad2(n)", "// ---- row/title/hover text"),
+    dashRailCut("var DASH_RAIL_MODE_KEY", "var DASH_RAIL_SORT_KEY"),
+    dashRailCut("// ---- grouping levels", "function dashRenderPinnedSection(){"),
+    dashRailCut("function dashRailSetGroupBy(next){", "function dashRailSetProjectSort(sort){"),
+  ];
+  const stored = { ...store };
+  const counts = { renders: 0, loads: 0 };
+  const box = {
+    document: { createElement: (tag) => new El(tag) },
+    dashRailStored: (k) => (k in stored ? stored[k] : null),
+    dashRailStore: (k, v) => { stored[k] = v; },
+    dashRailRevealed: Object.create(null),
+    dashRailCollapsed: Object.create(null),
+    dashRailWorkspaces: Object.create(null),
+    dashRailSelected: new Set(),
+    // Records what a workspace bucket hands the shared header controls.
+    dashRailGroupActions: (wrap, head, group) => { box.actionCalls.push({ wrap, head, group }); },
+    actionCalls: [],
+    dashRailIsCollapsed: (key, def) => (key in box.dashRailCollapsed ? box.dashRailCollapsed[key] : !!def),
+    dashRailHeadNode: (key, label, count, opts) => {
+      const head = new El("div");
+      head.dataset.head = key;
+      head.textContent = label;
+      head.dataset.count = count;
+      head.dataset.title = (opts && opts.title) || "";
+      head.dataset.dot = opts && opts.dot ? "1" : "";
+      head.dataset.badge = opts && opts.badge ? opts.badge.textContent : "";
+      return head;
+    },
+    dashRenderRail: () => { counts.renders += 1; },
+    dashRailLoadFirstPage: () => { counts.loads += 1; },
+    dashRailFlat: [{ id: "x" }], dashRailFlatPage: 3, dashRailFlatHasMore: true,
+    dashRailGroups: [{ cwd: "g" }], dashRailGroupsByCwd: { g: 1 }, dashRailGroupPage: 3, dashRailHasMore: true,
+    ...extra,
+  };
+  vm.createContext(box);
+  vm.runInContext(parts.join("\n"), box, { filename: "index.html#group-by" });
+  return { box, stored, counts };
+}
+
+check("dashboard rail: Group by loads the stored order, drops unknown and repeated levels, and falls back to Project", () => {
+  const cases = [
+    [{}, ["project"], "project"],
+    [{ pa_dash_rail_mode: "status" }, ["status"], "flat"],
+    [{ pa_dash_rail_mode: "bogus" }, ["project"], "project"],
+    [{ pa_dash_rail_groupby: JSON.stringify(["date", "project", "status"]) }, ["date", "project", "status"], "flat"],
+    [{ pa_dash_rail_groupby: JSON.stringify(["project", "date"]) }, ["project", "date"], "project"],
+    [{ pa_dash_rail_groupby: JSON.stringify(["date", "bogus", "date", "status"]) }, ["date", "status"], "flat"],
+    [{ pa_dash_rail_groupby: JSON.stringify([]) }, ["project"], "project"],
+    [{ pa_dash_rail_groupby: "not json", pa_dash_rail_mode: "date" }, ["date"], "flat"],
+    [{ pa_dash_rail_groupby: JSON.stringify(["status"]), pa_dash_rail_mode: "date" }, ["status"], "flat"],
+  ];
+  for (const [store, want, mode] of cases) {
+    const { box } = dashGroupingBox(store);
+    assertEqual(JSON.stringify(box.dashRailGroupBy), JSON.stringify(want), `order for ${JSON.stringify(store)}`);
+    assertEqual(box.dashRailMode, mode, `listing mode for ${JSON.stringify(store)}`);
+  }
+});
+
+check("dashboard rail: toggling a level appends it, removing renumbers, and the last level stays", () => {
+  const { box, stored, counts } = dashGroupingBox();
+  box.dashRailToggleLevel("date");
+  assertEqual(box.dashRailGroupBy.join(), "project,date", "a picked level goes last");
+  assertEqual(stored.pa_dash_rail_groupby, JSON.stringify(["project", "date"]), "the order is stored");
+  box.dashRailToggleLevel("status");
+  assertEqual(box.dashRailGroupBy.join(), "project,date,status");
+  box.dashRailToggleLevel("date");
+  assertEqual(box.dashRailGroupBy.join(), "project,status", "removing the middle one renumbers the rest");
+  box.dashRailToggleLevel("status");
+  box.dashRailToggleLevel("project");
+  assertEqual(box.dashRailGroupBy.join(), "project", "the last level cannot be removed");
+  assertEqual(counts.renders, 4, "each change redraws once; the refused one does not");
+});
+
+check("dashboard rail: only a change of the outermost kind swaps the listing; regrouping inside a kind just redraws", () => {
+  const { box, counts } = dashGroupingBox();
+  box.dashRailToggleLevel("date");           // project -> project,date: same listing
+  assertEqual(counts.loads, 0, "adding an inner level reloads nothing");
+  assertEqual(box.dashRailMode, "project");
+  assertEqual(box.dashRailFlat.length, 1, "the flat store is untouched");
+  box.dashRailToggleLevel("project");        // project,date -> date: outermost leaves Project
+  assertEqual(box.dashRailMode, "flat");
+  assertEqual(counts.loads, 1, "the flat listing is fetched");
+  assertEqual(box.dashRailGroups.length, 0, "the grouped store is emptied");
+  assertEqual(box.dashRailGroupPage, 1);
+  box.dashRailToggleLevel("status");         // date -> date,status: still flat
+  assertEqual(counts.loads, 1, "adding a level inside the flat kind reloads nothing");
+  box.dashRailToggleLevel("project");        // date,status -> date,status,project: still flat
+  assertEqual(counts.loads, 1);
+  box.dashRailToggleLevel("date");           // -> status,project: still flat
+  assertEqual(counts.loads, 1);
+  assertEqual(box.dashRailMode, "flat");
+});
+
+check("dashboard rail: Project coming back to the front swaps to the grouped listing and empties the flat store", () => {
+  const { box, counts } = dashGroupingBox({ pa_dash_rail_groupby: JSON.stringify(["date", "project"]) });
+  assertEqual(box.dashRailMode, "flat");
+  box.dashRailSetGroupBy(["project", "date"]);
+  assertEqual(box.dashRailMode, "project");
+  assertEqual(counts.loads, 1);
+  assertEqual(box.dashRailFlat.length, 0);
+  assertEqual(box.dashRailFlatPage, 1);
+  assertEqual(box.dashRailFlatHasMore, false);
+});
+
+const bucketRow = (id, over = {}) => ({ id, updated_at: "2026-10-02T12:00:00Z", cwd: "/w/a", name: "a", availability: "available", ...over });
+function renderLevels(box, sessions, levels, cap = 10) {
+  const parent = new El("div");
+  box.dashRailAppendLevels(parent, sessions, levels, "", 0, (s) => {
+    const row = new El("div");
+    row.className = "row";
+    row.dataset.sid = s.id;
+    return row;
+  }, cap);
+  return parent;
+}
+const dataHeads = (el) => el.childNodes.filter((c) => c.dataset.level).map((c) => c.childNodes[0].dataset.head);
+
+check("dashboard rail: Date buckets run newest day first whatever the input order, undated last", () => {
+  const { box } = dashGroupingBox();
+  const parent = renderLevels(box, [
+    bucketRow("old", { updated_at: "2026-09-28T12:00:00Z" }),
+    bucketRow("none", { updated_at: "" }),
+    bucketRow("new", { updated_at: "2026-10-02T12:00:00Z" }),
+    bucketRow("mid", { updated_at: "2026-10-01T12:00:00Z" }),
+  ], ["date"]);
+  assertEqual(dataHeads(parent).join(","), "/date:2026-10-02,/date:2026-10-01,/date:2026-09-28,/date:undated");
+});
+
+check("dashboard rail: Status buckets keep the fixed order, and Project buckets follow each folder's newest session", () => {
+  const { box } = dashGroupingBox();
+  const byStatus = renderLevels(box, [
+    bucketRow("l", { availability: "locked" }),
+    bucketRow("a", { availability: "available" }),
+    bucketRow("w", { availability: "held", status: "waiting" }),
+    bucketRow("k", { availability: "held", status: "working" }),
+  ], ["status"]);
+  assertEqual(dataHeads(byStatus).join(","), "/status:working,/status:waiting,/status:available,/status:locked");
+  const byProject = renderLevels(box, [
+    bucketRow("1", { cwd: "/w/b", name: "b" }), bucketRow("2", { cwd: "/w/a", name: "a" }), bucketRow("3", { cwd: "/w/b", name: "b" }),
+  ], ["project"]);
+  assertEqual(dataHeads(byProject).join(","), "/project:/w/b,/project:/w/a");
+  assertEqual(byProject.childNodes[0].childNodes[0].dataset.title, "/w/b", "a Project bucket's hover text is its path");
+});
+
+check("dashboard rail: levels nest in the user's order, each bucket keyed by its full path, indented below the first level", () => {
+  const { box } = dashGroupingBox();
+  const parent = renderLevels(box, [
+    bucketRow("1", { updated_at: "2026-10-02T12:00:00Z", cwd: "/w/a", name: "a" }),
+    bucketRow("2", { updated_at: "2026-10-02T12:00:00Z", cwd: "/w/b", name: "b" }),
+    bucketRow("3", { updated_at: "2026-10-01T12:00:00Z", cwd: "/w/a", name: "a" }),
+  ], ["date", "project"]);
+  const day = parent.childNodes[0];
+  assertEqual(day.className, "acp-rail-group", "the outermost bucket is a plain rail group");
+  assertEqual(day.dataset.level, "date");
+  const inner = day.childNodes.filter((c) => c.dataset.level);
+  assertEqual(inner.map((c) => c.childNodes[0].dataset.head).join(","),
+    "/date:2026-10-02/project:/w/a,/date:2026-10-02/project:/w/b", "the project bucket's key includes its day");
+  assert(inner.every((c) => c.className.split(" ").includes("acp-rail-subgroup")), "inner buckets are subgroups");
+  assertEqual(inner[0].childNodes.filter((c) => c.dataset.sid).map((c) => c.dataset.sid).join(), "1");
+  assertEqual(day.dataset.cwd, undefined, "a Date bucket carries no data-cwd (selection and focus key off it)");
+  assertEqual(inner.map((el) => el.dataset.cwd).join(), "/w/a,/w/b", "a Project bucket is a workspace: it carries its cwd");
+  const second = parent.childNodes[1];
+  assertEqual(second.childNodes[0].dataset.head, "/date:2026-10-01");
+  assertEqual(second.childNodes.filter((c) => c.dataset.level)[0].childNodes[0].dataset.head, "/date:2026-10-01/project:/w/a",
+    "the same project under another day is a separate bucket with its own key");
+});
+
+check("dashboard rail: a nested workspace bucket gets the workspace controls, with its pin, colour and liveness", () => {
+  const { box } = dashGroupingBox({}, {});
+  box.dashRailWorkspaces["/w/a"] = { pinned: true, color: "#112233" };
+  box.dashRailSelected.add("/w/b");
+  const parent = renderLevels(box, [
+    bucketRow("1", { cwd: "/w/a", name: "a", live: true }),
+    bucketRow("2", { cwd: "/w/b", name: "b", exists: false }),
+    bucketRow("3", { cwd: "", name: "" }),
+  ], ["date", "project"]);
+  const inner = parent.childNodes[0].childNodes.filter((c) => c.dataset.level);
+  assertEqual(box.actionCalls.length, 2, "the two folders get controls; a session with no folder does not");
+  const [a, b] = box.actionCalls.map((c) => c.group);
+  assertEqual(a.cwd, "/w/a"); assertEqual(a.pinned, true, "pin state comes from the per-folder map");
+  assertEqual(a.color, "#112233"); assertEqual(a.active, true, "a live session lights the header dot");
+  assertEqual(a.total, 1); assertEqual(a.sessions.length, 1);
+  assertEqual(b.pinned, false, "a folder the map does not know is unpinned"); assertEqual(b.exists, false);
+  assertEqual(inner[0].style.borderLeftColor, "#112233", "the workspace colour bar");
+  assert(inner[1].className.includes("acp-rail-group-gone") && inner[1].className.includes("selected"), "missing and selected state");
+  assertEqual(inner[1].childNodes[0].dataset.badge, "MISSING");
+  const plain = parent.childNodes[0].childNodes.filter((c) => c.dataset.level)[2];
+  assertEqual(plain.dataset.cwd, undefined, "a folderless bucket has no data-cwd");
+  assertEqual(box.actionCalls[0].wrap, inner[0]);
+});
+
+check("dashboard rail: ticking one copy of a workspace ticks every copy of it", () => {
+  const src = dashRailCut("function dashRailMirrorSelection(wrap){", "function dashRailSyncSelection(){");
+  const mk = (cwd, on) => { const g = new El("div"); g.className = "acp-rail-group" + (on ? " selected" : ""); g.dataset.cwd = cwd; return g; };
+  const [a1, a2, b1, day] = [mk("/w/a", true), mk("/w/a", false), mk("/w/b", false), mk(undefined, false)];
+  day.dataset = {};
+  const box = { document: { querySelectorAll: () => [a1, a2, b1, day] } };
+  vm.createContext(box);
+  vm.runInContext(src, box);
+  box.dashRailMirrorSelection(a1);
+  assert(a2.classList.contains("selected"), "the other copy follows");
+  assert(!b1.classList.contains("selected") && !day.classList.contains("selected"), "other workspaces and buckets are left alone");
+  a1.classList.remove("selected");
+  box.dashRailMirrorSelection(a1);
+  assert(!a2.classList.contains("selected"), "unticking clears the other copy too");
+});
+
+check("dashboard rail: a collapsed bucket draws no children, and a leaf bucket reveals past its cap on request", () => {
+  const { box, counts } = dashGroupingBox();
+  box.dashRailCollapsed["/date:2026-10-02"] = true;
+  const folded = renderLevels(box, [bucketRow("1")], ["date", "project"]);
+  assertEqual(folded.childNodes[0].childNodes.length, 1, "only the header of a folded bucket");
+  delete box.dashRailCollapsed["/date:2026-10-02"];
+
+  const many = Array.from({ length: 12 }, (_, i) => bucketRow(String(i)));
+  const capped = renderLevels(box, many, ["date"], 10);
+  const rows = capped.childNodes[0].childNodes;
+  assertEqual(rows.filter((c) => c.dataset.sid).length, 10, "ten rows shown");
+  const more = rows.find((c) => c.tagName === "BUTTON");
+  assertEqual(more.textContent, "Show 2 more");
+  more.dispatch("click");
+  assertEqual(box.dashRailRevealed["/date:2026-10-02"], true, "the reveal is stored under the bucket's own path");
+  assertEqual(counts.renders, 1);
+  const open = renderLevels(box, many, ["date"], 10);
+  assertEqual(open.childNodes[0].childNodes.filter((c) => c.dataset.sid).length, 12, "all rows once revealed");
+
+  const uncapped = renderLevels(box, many, ["date"], Infinity);
+  assertEqual(uncapped.childNodes[0].childNodes.filter((c) => c.tagName === "BUTTON").length, 0, "no cap, no Show more (a workspace pages itself)");
+});
+
+check("dashboard rail: with no levels left the rows are drawn straight into the parent", () => {
+  const { box } = dashGroupingBox();
+  const parent = new El("div");
+  box.dashRailAppendLevels(parent, [bucketRow("1"), bucketRow("2")], [], "g:/w/a", 1, (s) => {
+    const r = new El("div"); r.dataset.sid = s.id; return r;
+  }, Infinity);
+  assertEqual(parent.childNodes.map((c) => c.dataset.sid).join(), "1,2");
+});
+
+// -- the Group by popover
+function dashSettingsBox(groupBy) {
+  const slice = dashRailCut("function dashRailSettingOption(level){", "var dashRailMenuGuard = false;");
+  const menu = new El("div");
+  // The harness has no attribute selectors; the page looks its item up by
+  // data-level to hand focus back after redrawing.
+  menu.querySelector = (sel) => {
+    const m = /^\[data-level="(\w+)"\]$/.exec(sel);
+    return m ? menu.descendants().find((n) => n.dataset && n.dataset.level === m[1]) || null : null;
+  };
+  const toggled = [];
+  const box = {
+    document: { createElement: (tag) => new El(tag) },
+    DASH_RAIL_LEVELS: ["date", "project", "status"],
+    DASH_RAIL_LEVEL_LABEL: { date: "Date", project: "Project", status: "Status" },
+    dashRailGroupBy: groupBy,
+    dashRailMode: groupBy[0] === "project" ? "project" : "flat",
+    dashRailProjectSort: "recent",
+    dashRailSettingsMenu: menu,
+    dashRailSortOption: (sort, label) => { const o = new El("button"); o.dataset.sort = sort; o.textContent = label; return o; },
+    dashRailToggleLevel: (level) => {
+      toggled.push(level);
+      const at = box.dashRailGroupBy.indexOf(level);
+      box.dashRailGroupBy = at === -1 ? box.dashRailGroupBy.concat([level]) : box.dashRailGroupBy.filter((l) => l !== level);
+    },
+  };
+  vm.createContext(box);
+  vm.runInContext(slice, box, { filename: "index.html#group-by-menu" });
+  return { box, menu, toggled };
+}
+const menuItems = (menu) => menu.childNodes.filter((n) => n.dataset && n.dataset.level);
+const badgeOf = (item) => item.childNodes[1].textContent;
+
+check("dashboard rail: the Group by popover numbers the picked levels in order and leaves the others blank", () => {
+  const { box, menu } = dashSettingsBox(["status", "project"]);
+  box.dashRailSettingsRender();
+  const got = menuItems(menu).map((i) => `${i.dataset.level}:${badgeOf(i)}:${i.getAttribute("aria-checked")}:${i.getAttribute("role")}`);
+  assertEqual(got.join(","), "date::false:menuitemcheckbox,project:2:true:menuitemcheckbox,status:1:true:menuitemcheckbox");
+  assertEqual(menuItems(menu).find((i) => i.dataset.level === "status").getAttribute("aria-label"), "Status, grouping level 1");
+  assertEqual(menuItems(menu).find((i) => i.dataset.level === "date").getAttribute("aria-label"), "Date");
+});
+
+check("dashboard rail: clicking a level toggles it, keeps the popover open and redraws the numbers", () => {
+  const { box, menu, toggled } = dashSettingsBox(["project"]);
+  box.dashRailSettingsRender();
+  let stopped = 0;
+  menuItems(menu).find((i) => i.dataset.level === "date").dispatch("click", { stopPropagation: () => { stopped += 1; } });
+  assertEqual(toggled.join(), "date");
+  assertEqual(stopped, 1, "the click is stopped so the page's outside-click handler does not close the popover");
+  assertEqual(menuItems(menu).map(badgeOf).join(","), "2,1,", "the redrawn badges read project 1, date 2");
+});
+
+check("dashboard rail: Sort by shows only while Project is the outermost level", () => {
+  const sortHeads = (menu) => menu.childNodes.filter((n) => n.textContent === "Sort by").length;
+  const project = dashSettingsBox(["project", "date"]);
+  project.box.dashRailSettingsRender();
+  assertEqual(sortHeads(project.menu), 1);
+  const flat = dashSettingsBox(["date", "project"]);
+  flat.box.dashRailSettingsRender();
+  assertEqual(sortHeads(flat.menu), 0, "no workspace list left to reorder");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

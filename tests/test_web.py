@@ -15630,6 +15630,26 @@ class TestDashboardListingEndpoint:
                          params={"mode": "recent"}).json()["sessions"][0]
         assert "provider" not in row
 
+    def test_the_flat_shape_reports_each_workspace_pin_and_colour(
+            self, client, monkeypatch, multi_collector):
+        """Grouping Project inside Date or Status draws a workspace header from
+        flat rows, which name a folder but not its pin or colour. The dashboard
+        route adds one entry per folder on the page; /api/acp/sessions, whose
+        field set is asserted exactly elsewhere, must not."""
+        import power_atlas.web as web_mod
+        from power_atlas.config import Config
+        monkeypatch.setattr(web_mod, "load_config", lambda: Config(
+            pinned_folders=[r"C:\ws\w1"],
+            workspace_settings={r"C:\ws\w0": {"color": "#112233"}}))
+        body = client.get(self._PATH, params={"mode": "recent"}).json()
+        assert body["workspaces"] == {
+            r"C:\ws\w0": {"pinned": False, "color": "#112233"},
+            r"C:\ws\w1": {"pinned": True, "color": ""},
+            r"C:\ws\w2": {"pinned": False, "color": ""},
+        }
+        plain = client.get("/api/acp/sessions", params={"mode": "recent"}).json()
+        assert "workspaces" not in plain
+
     @pytest.fixture
     def grouped_multi_store(self, monkeypatch):
         """A synthetic two-provider store for grouped-mode merge testing.

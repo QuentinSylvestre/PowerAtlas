@@ -2280,6 +2280,15 @@ mark.rail-hit { background: color-mix(in srgb, var(--accent) 32%, transparent); 
    keeps this transparent default, same footprint either way so the row
    doesn't shift depending on whether a color was set. */
 .acp-rail-group { display: flex; flex-direction: column; gap: 2px; border-left: 3px solid transparent; border-radius: 0 8px 8px 0; }
+/* A bucket nested inside another by a second or third Group by level: indented
+   under its parent with a thin guide line instead of the workspace colour bar.
+   Declared after `.acp-rail-group` so its border wins at equal specificity. Its
+   header is not sticky -- a sticky inner header would stop at the same top
+   edge as its parent's and cover it while the rows scroll. `relative`, not
+   `static`: a workspace bucket's hover actions are absolutely positioned
+   against the header, which must therefore stay a positioned box. */
+.acp-rail-subgroup { margin-left: 8px; border-left: 1px solid var(--border); border-radius: 0; }
+.acp-rail-subgroup > .acp-rail-group-head { position: relative; }
 /* Sticky, so the group you are reading stays named while its rows scroll past.
    `.acp-rail-groups` is the rail's only scroller, so this sticks against that
    container rather than against the page. The background must be opaque —
@@ -2461,6 +2470,13 @@ mark.rail-hit { background: color-mix(in srgb, var(--accent) 32%, transparent); 
    as one list rather than as two ragged ones. */
 .acp-rail-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .acp-rail-setting-tick { flex-shrink: 0; width: 12px; text-align: right; color: var(--accent); }
+/* The Group by order badge: 1, 2, 3 in the order the levels were picked. It
+   replaces the tick as a small filled circle, and takes no room while empty
+   beyond the tick's own column. */
+.acp-rail-setting-order:not(:empty) { width: 16px; height: 16px; line-height: 16px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; text-align: center; }
+/* text-transform is set because the popover inherits uppercase from an ancestor
+   (its header rows rely on it); a sentence in capitals is hard to read. */
+.acp-rail-menu-hint { font-size: 10px; color: var(--text-dim); padding: 0 10px 4px; line-height: 1.3; text-transform: none; letter-spacing: normal; }
 /* Grouped by day a row has no workspace header above it, so the missing-folder
    warning becomes the row's own. Dimmed and not struck through or badged: the
    row is deliberately title-only, and the session is still selectable — the

@@ -756,7 +756,7 @@ function _buildWorkspaceQs(){var qs='provider='+encodeURIComponent(window._activ
 // (openWorkspaceSettings), both otherwise unchanged.
 var _lastClicked=new WeakMap();
 function handleItemClick(item,event,selector){var container=item.parentElement;if(!container)return;if(event.shiftKey){var last=_lastClicked.get(container);if(last&&last!==item&&container.contains(last)){var items=Array.from(container.querySelectorAll(selector));var idxA=items.indexOf(last);var idxB=items.indexOf(item);if(idxA!==-1&&idxB!==-1){var start=Math.min(idxA,idxB);var end=Math.max(idxA,idxB);for(var i=start;i<=end;i++){items[i].classList.add('selected')}}updateActionBar();return}}_lastClicked.set(container,item);item.classList.toggle('selected');updateActionBar()}
-function updateActionBar(){var workspaceCount=document.querySelectorAll('.acp-rail-group.selected').length;document.getElementById('selCount').textContent=workspaceCount;document.getElementById('actionBar').classList.toggle('visible',workspaceCount>0);var railGroups=document.getElementById('dashRailGroups');if(railGroups)railGroups.classList.toggle('has-selection',workspaceCount>0);updateLauncherBadges()}
+function updateActionBar(){var workspaceCount=getSelectedWorkspaceCwds().length;document.getElementById('selCount').textContent=workspaceCount;document.getElementById('actionBar').classList.toggle('visible',workspaceCount>0);var railGroups=document.getElementById('dashRailGroups');if(railGroups)railGroups.classList.toggle('has-selection',workspaceCount>0);updateLauncherBadges()}
 
 // ---- panel widths (Launchers | Workspaces | Sessions, panel resize) -----
 //
@@ -5746,6 +5746,8 @@ function pinSession(btn){
       }
     }
     if (!found) { for (var fi = 0; fi < dashRailFlat.length && !found; fi++) { if (dashRailFlat[fi].id === sid) found = dashRailFlat[fi]; } }
+    // An ACP row can sit in a workspace the project listing has not loaded.
+    if (!found) { for (var ai = 0; ai < dashRailAcp.length && !found; ai++) { if (dashRailAcp[ai].id === sid) found = dashRailAcp[ai]; } }
     if (found) {
       found.pinned = true;
       dashRailPinned = dashRailPinned.concat([found]);
@@ -5753,6 +5755,7 @@ function pinSession(btn){
   }
   // Keep session.pinned flag in sync across groups and flat list
   (function(list){ list.forEach(function(s){ if (s.id === sid) s.pinned = !pinned; }); })(dashRailFlat);
+  (function(list){ list.forEach(function(s){ if (s.id === sid) s.pinned = !pinned; }); })(dashRailAcp);
   dashRailGroups.forEach(function(g){
     var touched = false;
     g.sessions.forEach(function(s){ if (s.id === sid) { s.pinned = !pinned; touched = true; } });
@@ -5776,6 +5779,7 @@ function pinSession(btn){
         dashRailPinned = dashRailPinned.filter(function(s){ return s.id !== sid; });
       }
       (function(list){ list.forEach(function(s){ if (s.id === sid) s.pinned = pinned; }); })(dashRailFlat);
+      (function(list){ list.forEach(function(s){ if (s.id === sid) s.pinned = pinned; }); })(dashRailAcp);
       dashRailGroups.forEach(function(g){ g.sessions.forEach(function(s){ if (s.id === sid) s.pinned = pinned; }); });
       dashRenderRail();
       _refusedToast('Failed to '+(pinned?'unpin':'pin'), err);
@@ -5790,6 +5794,9 @@ function pinWorkspace(btn){
   btn.classList.toggle('pinned');
   // Update in-memory group and re-render immediately
   dashRailGroups.forEach(function(g){ if (g.cwd === cwd) g.pinned = !pinned; });
+  // The flat listing's per-folder map, which the workspace headers nested
+  // under Date/Status read their pin state from.
+  (dashRailWorkspaces[cwd] || (dashRailWorkspaces[cwd] = {})).pinned = !pinned;
   if (!pinned) {
     // Move to front of the (now-pinned) tier.
     dashRailBumpGroup(cwd);
@@ -5817,6 +5824,7 @@ function pinWorkspace(btn){
       // Revert
       btn.classList.toggle('pinned');
       dashRailGroups.forEach(function(g){ if (g.cwd === cwd) g.pinned = pinned; });
+      (dashRailWorkspaces[cwd] || (dashRailWorkspaces[cwd] = {})).pinned = pinned;
       dashRenderRail();
       _refusedToast('Failed to '+(pinned?'unpin':'pin'), err);
     });
@@ -6085,7 +6093,7 @@ function dashRailFailed(what, err){
 }
 function dashRailSummary(){
   var text;
-  if (dashRailMode === 'date' || dashRailMode === 'status') {
+  if (dashRailMode === 'flat') {
     var n = dashRailFlat.length;
     text = n ? (n + ' session' + (n === 1 ? '' : 's') + ' loaded') : 'no sessions found';
     if (dashRailFlatHasMore) text += ', more available';
@@ -6238,9 +6246,36 @@ function wsSearchInit(){
 // ones -- the two rails are independent preferences, not one shared setting.
 function dashRailStored(key){ try { return localStorage.getItem(key); } catch (e) { return null; } }
 function dashRailStore(key, value){ try { localStorage.setItem(key, value); } catch (e) {} }
-var DASH_RAIL_MODE_KEY = 'pa_dash_rail_mode';
-var _dashStoredMode = dashRailStored(DASH_RAIL_MODE_KEY);
-var dashRailMode = _dashStoredMode === 'date' ? 'date' : _dashStoredMode === 'status' ? 'status' : 'project';
+//
+// Group by is an ordered list of levels, outermost first. The first entry
+// also decides which listing feeds the rail, which is what `dashRailMode`
+// answers: 'project' when Project is outermost (the grouped, paged-by-
+// workspace listing, with the later levels nested inside each workspace),
+// 'flat' otherwise (the recency-ordered session listing, every level cut
+// client-side). Never empty; Project alone is the default.
+var DASH_RAIL_MODE_KEY = 'pa_dash_rail_mode'; // the single-choice key this replaced; read once as a fallback
+var DASH_RAIL_GROUPBY_KEY = 'pa_dash_rail_groupby';
+var DASH_RAIL_LEVELS = ['date', 'project', 'status'];
+var DASH_RAIL_LEVEL_LABEL = Object.create(null);
+DASH_RAIL_LEVEL_LABEL.date = 'Date';
+DASH_RAIL_LEVEL_LABEL.project = 'Project';
+DASH_RAIL_LEVEL_LABEL.status = 'Status';
+function dashRailLoadGroupBy(){
+  var parsed = null;
+  var raw = dashRailStored(DASH_RAIL_GROUPBY_KEY);
+  if (raw) { try { parsed = JSON.parse(raw); } catch (e) { parsed = null; } }
+  if (!Array.isArray(parsed)) {
+    var legacy = dashRailStored(DASH_RAIL_MODE_KEY);
+    parsed = legacy ? [legacy] : [];
+  }
+  var out = [];
+  parsed.forEach(function(level){
+    if (DASH_RAIL_LEVELS.indexOf(level) !== -1 && out.indexOf(level) === -1) out.push(level);
+  });
+  return out.length ? out : ['project'];
+}
+var dashRailGroupBy = dashRailLoadGroupBy();
+var dashRailMode = dashRailGroupBy[0] === 'project' ? 'project' : 'flat';
 // Project-mode-only ordering (dashboard/ACP-merge QA follow-up): the other
 // two modes already impose their own order (by day, by status), so this
 // preference is meaningless there and the settings menu only offers it
@@ -6263,6 +6298,16 @@ var dashRailFlat = [];
 var dashRailFlatPage = 1;
 var dashRailFlatHasMore = false;
 var dashRailPinned = [];
+// Sessions this PowerAtlas holds open (the "ACP sessions" section). Fed by the
+// Overview's live route, not by the rail listing: that listing skips
+// unpinned workspaces' sessions entirely (lazy per-workspace loading), so a
+// held session in one would never be in it.
+var dashRailAcp = [];
+var dashRailAcpBusy = false;
+// Flat rows name their folder but not its pin or colour; the flat listing
+// sends those per folder ({cwd: {pinned, color}}) for the workspace headers
+// drawn when Project sits inside Date or Status.
+var dashRailWorkspaces = Object.create(null);
 var dashRailBusy = false;
 var dashRailRevealed = Object.create(null);
 var dashRailCollapsed = Object.create(null);
@@ -6387,6 +6432,11 @@ function loadFlatPage(page, silent){
     dashRailFlatPage = data.page;
     dashRailFlatHasMore = data.has_more;
     dashRailPinned = data.pinned || [];
+    // Merged across pages; an older server sends none, and the headers then
+    // fall back to unpinned and uncoloured.
+    if (data.workspaces && typeof data.workspaces === 'object') {
+      Object.keys(data.workspaces).forEach(function(k){ dashRailWorkspaces[k] = data.workspaces[k]; });
+    }
     dashRailSummary();
     dashRenderRail();
   }).catch(function(err){
@@ -6395,8 +6445,42 @@ function loadFlatPage(page, silent){
   });
 }
 function dashRailLoadFirstPage(){
+  dashRailLoadAcp();
   if (dashRailMode === 'project') loadGroupPage(1);
   else loadFlatPage(1);
+}
+// The held sessions come from /api/dashboard/overview/live?filter=poweratlas:
+// exactly the sessions this PowerAtlas holds, newest activity first, capped at
+// the supervisor's own session limit. Only the row fields are kept -- the
+// tile's event tail changes on every poll and would make every comparison
+// below a change. Re-renders only when what the rows show changed.
+function dashRailLoadAcp(){
+  if (!ACP_AVAILABLE || dashRailAcpBusy) return;
+  dashRailAcpBusy = true;
+  dashOverviewFetch(DASH_OV_LIVE_URL + '?filter=poweratlas', undefined, DASH_OV_LIVE_TIMEOUT_MS).then(function(data){
+    dashRailAcpBusy = false;
+    var rows = ((data && data.tiles) || []).filter(function(t){
+      return t && typeof t === 'object' && t.id;
+    }).map(function(t){
+      return {
+        id: String(t.id), provider: t.provider, title: t.title, cwd: t.cwd, name: t.name,
+        created_at: t.created_at, updated_at: t.updated_at,
+        availability: t.availability, status: t.status, live: t.live,
+      };
+    });
+    // `pinned` is not carried: it is set at render time from dashRailPinned,
+    // which this load can beat or trail.
+    var same = rows.length === dashRailAcp.length && rows.every(function(r, i){
+      var old = dashRailAcp[i];
+      return Object.keys(r).every(function(k){ return r[k] === old[k]; });
+    });
+    if (same) return;
+    dashRailAcp = rows;
+    // A listing load in flight has already emptied the stores it refills and
+    // draws them itself when it lands; drawing now would blank the rail until
+    // then (this fetch usually answers first).
+    if (!dashRailBusy) dashRenderRail();
+  }).catch(function(){ dashRailAcpBusy = false; });
 }
 function loadGroupSessions(group){
   if (dashRailBusy) return;
@@ -6478,6 +6562,15 @@ function dashRailBuckets(sessions){
     }
     byKey[key].sessions.push(s);
   });
+  // Newest day first, undated last. Input order is not enough once Date is not
+  // the outermost level: a workspace's rows list its pinned sessions first.
+  // Day keys are YYYY-MM-DD, so they sort as text.
+  order.sort(function(a, b){
+    if (a.key === b.key) return 0;
+    if (a.key === 'undated') return 1;
+    if (b.key === 'undated') return -1;
+    return a.key < b.key ? 1 : -1;
+  });
   return order;
 }
 
@@ -6522,7 +6615,14 @@ function dashRailDotClass(session){
 // wrapping .acp-rail-item, not inside the row itself. The wrapper carries
 // the same dataset as the row so those sibling buttons' `closest('[data-sid]')`
 // (resumeSession/pinSession, both shared with the transcript panel) finds it.
-function dashRailRowNode(session, flat, workspace){
+//
+// `labelled` is for the cross-workspace sections at the top of the rail
+// (Pinned sessions, ACP sessions): their rows come from any workspace and
+// have no day or workspace header above them, so the row names its own
+// workspace ("{workspace} - {title}") and shows its last-activity time.
+// `flat` alone cannot carry this -- it also decides `dataset.cwd` and the
+// folder-missing styling, which those rows need as they are.
+function dashRailRowNode(session, flat, workspace, labelled){
   var wrap = document.createElement('div');
   wrap.className = 'acp-rail-item';
   wrap.dataset.sid = session.id;
@@ -6575,12 +6675,18 @@ function dashRailRowNode(session, flat, workspace){
   }
   var title = document.createElement('span');
   title.className = 'acp-rail-row-title';
-  dashRailSetHighlighted(title, dashRailTitleText(session));
+  // Prefix the displayed text only, before highlighting, so a filter that
+  // matched on the workspace name marks the prefix. dashRailTitleText itself
+  // stays bare: it feeds aria-labels, the delete confirmation and the
+  // refresh diff.
+  var shownTitle = dashRailTitleText(session);
+  if (labelled && session.name) shownTitle = session.name + ' - ' + shownTitle;
+  dashRailSetHighlighted(title, shownTitle);
   row.appendChild(title);
   // Re-rendering the viewed row refreshes the transcript panel's metadata
   // strip too, so its status/updated time track the rail's own refreshes.
   if (_viewingSid === session.id) dashSessionMetaRender(session, workspace);
-  if (!flat) {
+  if (!flat || labelled) {
     var when = document.createElement('span');
     when.className = 'acp-rail-row-when';
     when.textContent = dashRailWhenShort(session.updated_at);
@@ -6908,6 +7014,35 @@ function dashRailGroupNode(group){
       if (!group.session_page && group.has_more) loadGroupSessions(group);
     }});
 
+  dashRailGroupActions(wrap, head, group);
+
+  wrap.appendChild(head);
+  if (!dashRailIsCollapsed('g:' + group.cwd, !group.pinned)) {
+    // Project is the outermost level here, so the levels after it (Date,
+    // Status, in the user's order) nest inside the workspace. A workspace
+    // pages its own sessions in ("More in ..." below), so no per-bucket
+    // reveal cap: what is loaded is what is shown.
+    dashRailAppendLevels(wrap, matched, dashRailGroupBy.slice(1), 'g:' + group.cwd, 1,
+      function(s){ return dashRailRowNode(s, false, group); }, Infinity);
+    if (group.has_more) {
+      var more = document.createElement('button');
+      more.className = 'acp-btn acp-rail-group-more';
+      more.type = 'button';
+      more.textContent = 'More in ' + (group.name || group.cwd);
+      more.addEventListener('click', function(){ loadGroupSessions(group); });
+      wrap.appendChild(more);
+    }
+  }
+  return wrap;
+}
+
+// The workspace header's controls: the selection checkbox before the toggle
+// and, after it, the folder / terminal / app / new-session / pin / more
+// buttons, whose dropdown menus go on `wrap` (see the aiMenu comment below).
+// Shared by a workspace group (Project outermost) and a workspace bucket
+// nested under Date or Status -- both are `.acp-rail-group[data-cwd]`, which
+// is what every handler here (`closest('[data-cwd]')`) resolves to.
+function dashRailGroupActions(wrap, head, group){
   // Selection checkbox + row actions live beside the toggle, as siblings --
   // the toggle above is itself a <button>, so these cannot nest inside it.
   var check = document.createElement('span');
@@ -6916,7 +7051,7 @@ function dashRailGroupNode(group){
   check.setAttribute('tabindex', '0');
   check.setAttribute('aria-label', 'Select ' + (group.name || group.cwd));
   if (dashRailSelected.has(group.cwd)) wrap.classList.add('selected');
-  check.addEventListener('click', function(e){ e.stopPropagation(); handleItemClick(wrap, e, '.acp-rail-group'); dashRailSyncSelection(); });
+  check.addEventListener('click', function(e){ e.stopPropagation(); handleItemClick(wrap, e, '.acp-rail-group'); dashRailMirrorSelection(wrap); dashRailSyncSelection(); });
   check.addEventListener('keydown', function(e){ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); check.click(); } });
   head.insertBefore(check, head.firstChild);
 
@@ -7156,20 +7291,6 @@ function dashRailGroupNode(group){
   actions.appendChild(moreBtn);
   wrap.appendChild(moreMenu); // see the aiMenu comment above for why this goes on `wrap`, not `head`/`actions`
   head.appendChild(actions);
-
-  wrap.appendChild(head);
-  if (!dashRailIsCollapsed('g:' + group.cwd, !group.pinned)) {
-    matched.forEach(function(s){ wrap.appendChild(dashRailRowNode(s, false, group)); });
-    if (group.has_more) {
-      var more = document.createElement('button');
-      more.className = 'acp-btn acp-rail-group-more';
-      more.type = 'button';
-      more.textContent = 'More in ' + (group.name || group.cwd);
-      more.addEventListener('click', function(){ loadGroupSessions(group); });
-      wrap.appendChild(more);
-    }
-  }
-  return wrap;
 }
 
 // ---- custom-launcher quick launch, session/workspace delete ---------------
@@ -7399,26 +7520,115 @@ function dashDeleteWorkspace(group){
   if (input) input.focus();
 }
 
-function dashRailBucketNode(bucket){
-  var wrap = document.createElement('div');
-  wrap.className = 'acp-rail-group';
-  wrap.dataset.day = bucket.key;
-  var matched = bucket.sessions.filter(dashRailMatchesFlat);
-  var revealed = !!dashRailRevealed['d:' + bucket.key];
-  var shown = revealed ? matched : matched.slice(0, DASH_RAIL_SESSION_SIZE);
-  wrap.appendChild(dashRailHeadNode('d:' + bucket.key, bucket.name, String(matched.length), null));
-  if (!dashRailCollapsed['d:' + bucket.key]) {
-    shown.forEach(function(s){ wrap.appendChild(dashRailRowNode(s, true)); });
-    if (matched.length > shown.length) {
+// ---- grouping levels ----------------------------------------------------
+//
+// Group by is an ordered list (dashRailGroupBy): the first entry is the
+// outermost level. Splits one list of sessions by one level into ordered
+// buckets {key, name, title, sessions}; `title` is the hover text and only
+// Project has one (the folder path).
+function dashRailBucketBy(level, sessions){
+  if (level === 'date') {
+    return dashRailBuckets(sessions).map(function(b){
+      return {key: b.key, name: b.name, title: '', sessions: b.sessions};
+    });
+  }
+  if (level === 'status') {
+    var byStatus = Object.create(null);
+    sessions.forEach(function(s){
+      var k = dashStatusBucketKey(s);
+      (byStatus[k] || (byStatus[k] = [])).push(s);
+    });
+    return DASH_STATUS_BUCKET_ORDER.filter(function(k){ return byStatus[k]; }).map(function(k){
+      return {key: k, name: DASH_STATUS_BUCKET_LABEL[k], title: '', sessions: byStatus[k]};
+    });
+  }
+  // project: by folder, in order of each folder's first (newest) session.
+  var order = [];
+  var byCwd = Object.create(null);
+  sessions.forEach(function(s){
+    var k = s.cwd || '';
+    if (!byCwd[k]) {
+      byCwd[k] = {key: k, name: s.name || s.cwd || 'No folder', title: k, sessions: []};
+      order.push(byCwd[k]);
+    }
+    byCwd[k].sessions.push(s);
+  });
+  return order;
+}
+// Header and controls for a workspace bucket nested under another level. The
+// controls take a group-shaped object; what the flat rows do not carry (pinned
+// folder, colour) comes from the flat listing's per-folder map. `total` is the
+// bucket's loaded rows -- flat paging loads more of every folder at once, so
+// there is no per-folder "More in ..." here.
+function dashRailWorkspaceHead(wrap, key, bucket){
+  var meta = dashRailWorkspaces[bucket.key] || {};
+  var first = bucket.sessions[0] || {};
+  var group = {
+    cwd: bucket.key, name: bucket.name, total: bucket.sessions.length,
+    sessions: bucket.sessions, exists: first.exists, pinned: !!meta.pinned, color: meta.color || '',
+    active: bucket.sessions.some(function(s){ return s.live || dashRailAvailability(s.availability) === 'held'; }),
+  };
+  wrap.dataset.cwd = group.cwd;
+  if (group.exists === false) wrap.classList.add('acp-rail-group-gone');
+  if (group.color) wrap.style.borderLeftColor = group.color;
+  if (dashRailSelected.has(group.cwd)) wrap.classList.add('selected');
+  var badge = null;
+  if (group.exists === false) {
+    badge = document.createElement('span');
+    badge.className = 'acp-rail-group-missing';
+    badge.textContent = 'MISSING';
+    badge.title = 'This folder no longer exists on disk.';
+  }
+  var head = dashRailHeadNode(key, group.name, String(group.total),
+    {title: group.cwd, badge: badge, dot: group.active, highlight: true});
+  dashRailGroupActions(wrap, head, group);
+  wrap.appendChild(head);
+}
+// Draws `sessions` into `parent`, split by `levels` (outermost first); with no
+// levels left it draws the rows themselves. `path` is the key prefix for this
+// subtree: collapse and reveal state is stored under the full path, so the
+// same day under two workspaces folds independently. `rowFor` builds a row,
+// and `cap` is how many rows a bucket shows before "Show N more" (Infinity for
+// none). `depth` 0 is the rail itself, whose buckets are plain rail groups;
+// deeper buckets are indented subgroups. Only a workspace carries `data-cwd` (a
+// Project bucket, via dashRailWorkspaceHead): bulk selection and focus
+// restoration both key off that attribute, so a Date or Status bucket must
+// not have one.
+function dashRailAppendLevels(parent, sessions, levels, path, depth, rowFor, cap){
+  if (!levels.length) {
+    var revealed = !!dashRailRevealed[path];
+    var rows = revealed ? sessions : sessions.slice(0, cap);
+    rows.forEach(function(s){ parent.appendChild(rowFor(s)); });
+    if (sessions.length > rows.length) {
       var more = document.createElement('button');
       more.className = 'acp-btn acp-rail-group-more';
       more.type = 'button';
-      more.textContent = 'Show ' + (matched.length - shown.length) + ' more';
-      more.addEventListener('click', function(){ dashRailRevealed['d:' + bucket.key] = true; dashRenderRail(); });
-      wrap.appendChild(more);
+      more.textContent = 'Show ' + (sessions.length - rows.length) + ' more';
+      more.addEventListener('click', function(){ dashRailRevealed[path] = true; dashRenderRail(); });
+      parent.appendChild(more);
     }
+    return;
   }
-  return wrap;
+  var level = levels[0];
+  dashRailBucketBy(level, sessions).forEach(function(bucket){
+    var key = path + '/' + level + ':' + bucket.key;
+    var wrap = document.createElement('div');
+    wrap.className = 'acp-rail-group' + (depth > 0 ? ' acp-rail-subgroup' : '');
+    wrap.dataset.level = level;
+    if (level === 'project' && bucket.key) {
+      // A workspace bucket is a real workspace header: same controls as a
+      // workspace group, and `data-cwd` so they, selection and focus
+      // restoration find it. A session with no folder keeps a plain header.
+      dashRailWorkspaceHead(wrap, key, bucket);
+    } else {
+      wrap.appendChild(dashRailHeadNode(key, bucket.name, String(bucket.sessions.length),
+        {title: bucket.title, highlight: level === 'project'}));
+    }
+    if (!dashRailIsCollapsed(key, false)) {
+      dashRailAppendLevels(wrap, bucket.sessions, levels.slice(1), key, depth + 1, rowFor, cap);
+    }
+    parent.appendChild(wrap);
+  });
 }
 function dashRenderPinnedSection(){
   var matched = dashRailPinned.filter(dashRailMatchesFlat);
@@ -7428,30 +7638,40 @@ function dashRenderPinnedSection(){
   wrap.dataset.day = 'pinned';
   wrap.appendChild(dashRailHeadNode('p:pinned', 'Pinned sessions', String(matched.length), null));
   if (!dashRailCollapsed['p:pinned']) {
-    matched.forEach(function(s){ wrap.appendChild(dashRailRowNode(s, true, s)); });
+    matched.forEach(function(s){ wrap.appendChild(dashRailRowNode(s, true, s, true)); });
   }
   dashRailGroupsEl.appendChild(wrap);
   return matched.length;
 }
-
-// ---- the three mode renderers + top-level render ------------------------
-
-function renderRailDate(){
-  var shown = dashRenderPinnedSection();
-  var matched = dashRailFlat.filter(dashRailMatchesFlat);
-  if (shown && matched.length) {
-    var sep = document.createElement('div');
-    sep.className = 'pinned-separator';
-    sep.setAttribute('aria-hidden', 'true');
-    dashRailGroupsEl.appendChild(sep);
+// Sessions this PowerAtlas holds open, in the same cross-workspace shape as
+// Pinned sessions and directly below it. Absent while none is running.
+function dashRenderAcpSection(){
+  var pinnedIds = Object.create(null);
+  dashRailPinned.forEach(function(s){ pinnedIds[s.id] = true; });
+  dashRailAcp.forEach(function(s){ s.pinned = !!pinnedIds[s.id]; });
+  var matched = dashRailAcp.filter(dashRailMatchesFlat);
+  if (!matched.length) return 0;
+  var wrap = document.createElement('div');
+  wrap.className = 'acp-rail-group';
+  wrap.dataset.day = 'acp';
+  wrap.appendChild(dashRailHeadNode('p:acp', 'ACP sessions', String(matched.length), null));
+  if (!dashRailCollapsed['p:acp']) {
+    matched.forEach(function(s){ wrap.appendChild(dashRailRowNode(s, true, s, true)); });
   }
-  dashRailBuckets(matched).forEach(function(bucket){
-    dashRailGroupsEl.appendChild(dashRailBucketNode(bucket));
-  });
-  return shown + matched.length;
+  dashRailGroupsEl.appendChild(wrap);
+  return matched.length;
 }
-function renderRailStatus(){
-  var shown = dashRenderPinnedSection();
+// Both top sections, in order; returns how many rows they drew in all, which
+// the two renderers use to place the separator and report "anything
+// shown".
+function dashRenderTopSections(){
+  return dashRenderPinnedSection() + dashRenderAcpSection();
+}
+
+// ---- the two renderers (flat and project-first) + top-level render ------
+
+function renderRailFlat(){
+  var shown = dashRenderTopSections();
   var matched = dashRailFlat.filter(dashRailMatchesFlat);
   if (shown && matched.length) {
     var sep = document.createElement('div');
@@ -7459,39 +7679,12 @@ function renderRailStatus(){
     sep.setAttribute('aria-hidden', 'true');
     dashRailGroupsEl.appendChild(sep);
   }
-  var byKey = Object.create(null);
-  matched.forEach(function(s){
-    var key = dashStatusBucketKey(s);
-    (byKey[key] || (byKey[key] = [])).push(s);
-  });
-  DASH_STATUS_BUCKET_ORDER.forEach(function(key){
-    var sessions = byKey[key];
-    if (!sessions || !sessions.length) return;
-    var wrap = document.createElement('div');
-    wrap.className = 'acp-rail-group';
-    wrap.dataset.head = 's:' + key;
-    wrap.appendChild(dashRailHeadNode('s:' + key, DASH_STATUS_BUCKET_LABEL[key], String(sessions.length), null));
-    if (!dashRailCollapsed['s:' + key]) {
-      var revealed = !!dashRailRevealed['s:' + key];
-      var rows = revealed ? sessions : sessions.slice(0, DASH_RAIL_SESSION_SIZE);
-      rows.forEach(function(s){ wrap.appendChild(dashRailRowNode(s, true)); });
-      if (sessions.length > rows.length) {
-        (function(k, total, shownCount){
-          var more = document.createElement('button');
-          more.className = 'acp-btn acp-rail-group-more';
-          more.type = 'button';
-          more.textContent = 'Show ' + (total - shownCount) + ' more';
-          more.addEventListener('click', function(){ dashRailRevealed[k] = true; dashRenderRail(); });
-          wrap.appendChild(more);
-        })('s:' + key, sessions.length, rows.length);
-      }
-    }
-    dashRailGroupsEl.appendChild(wrap);
-  });
+  dashRailAppendLevels(dashRailGroupsEl, matched, dashRailGroupBy, '', 0,
+    function(s){ return dashRailRowNode(s, true); }, DASH_RAIL_SESSION_SIZE);
   return shown + matched.length;
 }
 function renderRailProject(){
-  var shown = dashRenderPinnedSection();
+  var shown = dashRenderTopSections();
   var any = shown > 0;
   dashRailGroups.forEach(function(group, idx){
     var matched = group.sessions.filter(function(s){ return dashRailMatches(group, s); });
@@ -7520,9 +7713,7 @@ function renderRailProject(){
 }
 function dashRenderRail(){
   dashRailGroupsEl.textContent = '';
-  var shown = dashRailMode === 'date' ? renderRailDate()
-            : dashRailMode === 'status' ? renderRailStatus()
-            : renderRailProject();
+  var shown = dashRailMode === 'project' ? renderRailProject() : renderRailFlat();
   if (!shown) {
     var empty = document.createElement('div');
     empty.className = 'acp-rail-empty';
@@ -7580,8 +7771,21 @@ function dashRenderRail(){
 // but only drawn rows count as selected: getSelectedWorkspaceCwds and the
 // action bar both read the DOM, so nothing off-screen is ever acted on.
 var dashRailSelected = new Set();
+// The same workspace can be drawn more than once (a bucket per day under
+// Date, then Project). One tick selects the workspace, not one copy of it:
+// every copy follows the one just clicked, so the Set below and the action
+// bar's count stay consistent.
+function dashRailMirrorSelection(wrap){
+  var on = wrap.classList.contains('selected');
+  document.querySelectorAll('#dashRailGroups .acp-rail-group').forEach(function(g){
+    if (g !== wrap && g.dataset.cwd === wrap.dataset.cwd) g.classList.toggle('selected', on);
+  });
+}
 function dashRailSyncSelection(){
   document.querySelectorAll('#dashRailGroups .acp-rail-group').forEach(function(g){
+    // Date/Status/Project buckets and the top sections are groups too, but
+    // only a workspace group (data-cwd) is ever selectable.
+    if (!g.dataset.cwd) return;
     if (g.classList.contains('selected')) dashRailSelected.add(g.dataset.cwd);
     else dashRailSelected.delete(g.dataset.cwd);
   });
@@ -7642,15 +7846,30 @@ function dashRailRestoreFocus(){
 
 // ---- mode switching + settings popover ----------------------------------
 
-function dashRailSetMode(mode){
-  var next = mode === 'date' ? 'date' : mode === 'status' ? 'status' : 'project';
-  if (next === dashRailMode) return;
-  dashRailMode = next;
-  dashRailStore(DASH_RAIL_MODE_KEY, next);
-  if (next === 'project') { dashRailFlat = []; dashRailFlatPage = 1; dashRailFlatHasMore = false; }
+// Sets the whole ordered list. A change of the outermost level between
+// Project and anything else swaps the listing that feeds the rail, so it
+// empties the store being left and reloads; a change that keeps the same
+// outermost kind only regroups what is already loaded.
+function dashRailSetGroupBy(next){
+  if (next.join() === dashRailGroupBy.join()) return;
+  dashRailGroupBy = next;
+  dashRailStore(DASH_RAIL_GROUPBY_KEY, JSON.stringify(next));
+  var nextMode = next[0] === 'project' ? 'project' : 'flat';
+  if (nextMode === dashRailMode) { dashRenderRail(); return; }
+  dashRailMode = nextMode;
+  if (nextMode === 'project') { dashRailFlat = []; dashRailFlatPage = 1; dashRailFlatHasMore = false; }
   else { dashRailGroups = []; dashRailGroupsByCwd = Object.create(null); dashRailGroupPage = 1; dashRailHasMore = false; }
   dashRenderRail();
   dashRailLoadFirstPage();
+}
+// A level not in the list is appended (it becomes the next, innermost level);
+// one in the list is removed and the rest renumber. The last remaining level
+// stays: with none selected there would be nothing to group by.
+function dashRailToggleLevel(level){
+  var at = dashRailGroupBy.indexOf(level);
+  if (at === -1) { dashRailSetGroupBy(dashRailGroupBy.concat([level])); return; }
+  if (dashRailGroupBy.length === 1) return;
+  dashRailSetGroupBy(dashRailGroupBy.filter(function(l){ return l !== level; }));
 }
 function dashRailSetProjectSort(sort){
   var next = sort === 'alpha' ? 'alpha' : 'recent';
@@ -7681,24 +7900,34 @@ function dashRailSortOption(sort, label){
   });
   return item;
 }
-function dashRailSettingOption(mode, label){
+// One Group by entry: a checkbox, not a radio -- several can be on. The badge
+// is the level's 1-based place in the nesting order (empty while off). The
+// menu stays open, so the order can be built in a few clicks.
+function dashRailSettingOption(level){
+  var at = dashRailGroupBy.indexOf(level);
+  var label = DASH_RAIL_LEVEL_LABEL[level];
   var item = document.createElement('button');
   item.type = 'button';
   item.className = 'acp-rail-menu-item acp-rail-setting';
-  item.setAttribute('role', 'menuitemradio');
-  item.setAttribute('aria-checked', dashRailMode === mode ? 'true' : 'false');
-  item.dataset.mode = mode;
+  item.setAttribute('role', 'menuitemcheckbox');
+  item.setAttribute('aria-checked', at !== -1 ? 'true' : 'false');
+  item.setAttribute('aria-label', at !== -1 ? label + ', grouping level ' + (at + 1) : label);
+  item.dataset.level = level;
   var name = document.createElement('span');
   name.textContent = label;
   item.appendChild(name);
-  var tick = document.createElement('span');
-  tick.className = 'acp-rail-setting-tick';
-  tick.setAttribute('aria-hidden', 'true');
-  tick.textContent = dashRailMode === mode ? '✓' : '';
-  item.appendChild(tick);
-  item.addEventListener('click', function(){
-    dashRailCloseMenus();
-    dashRailSetMode(mode);
+  var badge = document.createElement('span');
+  badge.className = 'acp-rail-setting-tick acp-rail-setting-order';
+  badge.setAttribute('aria-hidden', 'true');
+  badge.textContent = at !== -1 ? String(at + 1) : '';
+  item.appendChild(badge);
+  item.addEventListener('click', function(e){
+    // Not a close-the-menu click: the document handler below would close it.
+    e.stopPropagation();
+    dashRailToggleLevel(level);
+    dashRailSettingsRender();
+    var again = dashRailSettingsMenu.querySelector('[data-level="' + level + '"]');
+    if (again && again.focus) again.focus();
   });
   return item;
 }
@@ -7708,12 +7937,16 @@ function dashRailSettingsRender(){
   head.className = 'acp-rail-menu-head';
   head.textContent = 'Group by';
   dashRailSettingsMenu.appendChild(head);
-  dashRailSettingsMenu.appendChild(dashRailSettingOption('date', 'Date'));
-  dashRailSettingsMenu.appendChild(dashRailSettingOption('project', 'Project'));
-  dashRailSettingsMenu.appendChild(dashRailSettingOption('status', 'Status'));
-  // Meaningless in Date/Status mode, which already impose their own order
-  // (by day, by status) -- offered only where there is a workspace list left
-  // for it to reorder.
+  var hint = document.createElement('div');
+  hint.className = 'acp-rail-menu-hint';
+  hint.textContent = 'Pick several. The number is the nesting order.';
+  dashRailSettingsMenu.appendChild(hint);
+  DASH_RAIL_LEVELS.forEach(function(level){
+    dashRailSettingsMenu.appendChild(dashRailSettingOption(level));
+  });
+  // Orders the workspace list, so it only applies while Project is the
+  // outermost level; otherwise there is no workspace list left to reorder
+  // (the outer levels impose their own order).
   if (dashRailMode === 'project') {
     var divider = document.createElement('div');
     divider.className = 'acp-rail-menu-divider';
@@ -7751,7 +7984,7 @@ document.addEventListener('keydown', function(e){
 dashRailReloadBtn.addEventListener('click', function(){ dashRailReload(); });
 dashRailMoreEl.addEventListener('click', function(){
   dashRailFocus = { more: true };
-  if (dashRailMode === 'date' || dashRailMode === 'status') { loadFlatPage(dashRailFlatPage + 1); return; }
+  if (dashRailMode === 'flat') { loadFlatPage(dashRailFlatPage + 1); return; }
   loadGroupPage(dashRailGroupPage + 1);
 });
 var dashRailNewAcpBtn = document.getElementById('dashRailNewAcp');
@@ -7806,6 +8039,7 @@ function dashRailRefreshStates(incoming){
   return changed;
 }
 function dashRailRefresh(){
+  dashRailLoadAcp();
   if (dashRailMode !== 'project') {
     loadFlatPage(1, true);
     return;
