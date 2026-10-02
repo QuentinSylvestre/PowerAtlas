@@ -23,6 +23,7 @@ record is type-checked, and no public function raises (D10, D13, D27):
 This module must not import ``overview``, ``web`` or ``presence``.
 """
 
+import errno
 import functools
 import json
 import logging
@@ -60,8 +61,8 @@ def _codex_home() -> Path:
 _CODEX_HOME = _codex_home()
 CODEX_SESSIONS_DIR = _CODEX_HOME / "sessions"
 CODEX_SESSION_INDEX = _CODEX_HOME / "session_index.jsonl"
-# Read by the writer-lock probe of 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3;
-# declared here so the test fixtures already redirect it.
+# Read by the writer-lock probe (session_writer_locked); tests redirect it.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
 CODEX_LOCKS_DIR = _CODEX_HOME / "thread-writer-locks"
 
 
@@ -101,8 +102,8 @@ _EXEC_MARKERS = (("Script completed", True), ("Script failed", False), ("aborted
 
 # A rollout whose parse fails with an OSError (a sharing violation on an idle file)
 # is retried by later refresh polls, at most _RETRY_MAX times and no closer together
-# than _RETRY_SPACING seconds (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW
-# Phase 1, finding 21).
+# than _RETRY_SPACING seconds.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, finding 21.
 _RETRY_MAX = 3
 _RETRY_SPACING = 5.0
 
@@ -1061,8 +1062,8 @@ def _transcript_events(obj, exec_calls: set[str]) -> list[TranscriptEvent]:
 
     `exec_calls` holds the call ids of the `exec` calls seen so far in this
     transcript (this function adds to it): an exec marker maps an outcome only
-    for a result of one of those calls (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW
-    Phase 1, finding 22).
+    for a result of one of those calls.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, finding 22.
     """
     if not isinstance(obj, dict):
         return []
@@ -1178,6 +1179,204 @@ def get_full_transcript(session_id: str, cwd: str) -> list[TranscriptEvent]:
     return [TranscriptEvent(kind="assistant", text=notice)] + result
 
 
+# --- Recency of a rollout whose mtime is frozen (D16) -------------------------------
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+
+ACTIVITY_WINDOW = 300.0     # seconds: the live rule's recency window (web._session_is_live)
+_FUTURE_SKEW = 5.0          # a stamp this far past now is a clock error, not activity
+
+# path -> (mtime_ns, size, epoch of the last complete record or None). Keyed by
+# (mtime_ns, size) because Windows freezes the mtime of a file Codex holds open while
+# the size grows. Separate from _parse_cache so a read here is its own, countable event.
+_last_event_cache = BoundedCache(_CACHE_MIN)
+
+
+def _read_last_event(path: str) -> float | None:
+    with open_shared(path) as fh:
+        size = fh.seek(0, 2)
+        for line in _iter_lines_reverse(fh, size):
+            when = _record_time(_loads(line))
+            if when is not None:
+                return when.timestamp()
+    return None
+
+
+def _last_event(path: str, st) -> float | None:
+    cached = _last_event_cache.get(path)
+    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+        return cached[2]
+    epoch = _read_last_event(path)
+    _last_event_cache.put(path, (st.st_mtime_ns, st.st_size, epoch))
+    return epoch
+
+
+@_safe("last_event_epoch", lambda: None, path_arg=True)
+def last_event_epoch(path) -> float | None:
+    """POSIX time of the last complete record's ``timestamp``, or None (no such record,
+    unreadable file). A torn last line is skipped. Cached by (mtime_ns, size)."""
+    target = os.fspath(path)
+    return _last_event(target, os.stat(target))
+
+
+def activity_epoch(path, st) -> float:
+    """When the rollout last showed activity: the later of its mtime and, only when
+    the mtime is older than ACTIVITY_WINDOW, the last complete record's timestamp (D16).
+
+    Windows freezes the mtime of a rollout Codex holds open, so the mtime alone would
+    switch the live dot off during an active turn. A warm active file costs one stat:
+    the tail is read only when the mtime check fails. A timestamp (or mtime) more than
+    _FUTURE_SKEW past now is not trusted and is dropped, never clamped to now, so it
+    cannot keep a session live. Total: any failure returns the mtime.
+    """
+    try:
+        mtime = float(st.st_mtime)
+    except Exception:
+        return 0.0
+    try:
+        now = time.time()
+        trusted = mtime if mtime <= now + _FUTURE_SKEW else 0.0
+        if trusted and now - trusted <= ACTIVITY_WINDOW:
+            return min(trusted, now)
+        stamp = _last_event(os.fspath(path), st)
+        if stamp is not None and stamp <= now + _FUTURE_SKEW:
+            trusted = max(trusted, stamp)
+        return min(trusted, now)
+    except Exception as exc:
+        _warn("activity_epoch", exc, os.fspath(path))
+        return mtime if mtime <= time.time() + _FUTURE_SKEW else 0.0
+
+
+# --- Writer lock (D17) ---------------------------------------------------------------------
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+#
+# Codex's acquire() takes thread-writer-locks/.coordination.lock (blocking, whole file)
+# and then try-locks <id>.lock; a drop removes the file under the coordination lock. A
+# plain try-lock on <id>.lock from here made an emulated acquirer fail in 2.4-4.1 % of
+# cycles (measured before this code existed), so the probe serialises on the coordination
+# lock first.
+
+_LOCK_TTL = 5.0             # seconds a per-id answer is reused
+_LOCK_RETRIES = 3           # coordination busy: retries per call ...
+_LOCK_RETRY_SLEEP = 0.005   # ... this far apart (one budget per call)
+_lock_cache = BoundedCache(512)     # id -> (monotonic time, bool); an expired entry is the stale fallback
+_probe_lock = threading.Lock()      # one probe at a time in this process; held only around the probe
+_COORDINATION = ".coordination.lock"
+_BUSY_WIN = {errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
+_BUSY_POSIX = {errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK}
+
+
+def _lock_byte(fh) -> bool:
+    """Try a non-blocking one-byte lock. True: taken. False: someone holds it.
+    Any other OSError is raised."""
+    if sys.platform == "win32":
+        import msvcrt  # lazy: a top-level import would break import on POSIX (D23)
+        try:
+            os.lseek(fh.fileno(), 0, 0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError as exc:
+            if exc.errno in _BUSY_WIN:
+                return False
+            raise
+    import fcntl  # lazy, see above
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+    except OSError as exc:
+        if exc.errno in _BUSY_POSIX:
+            return False
+        raise
+
+
+def _unlock_byte(fh) -> None:
+    """Release a lock taken by _lock_byte. Best effort: closing the handle releases it too."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            os.lseek(fh.fileno(), 0, 0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        _warn("writer_lock.unlock", exc)
+
+
+def _thread_lock_held(path: str) -> bool:
+    """True when another process holds <id>.lock. Runs under the coordination lock: only
+    open, try-lock, unlock and close happen here. A vanished file is False."""
+    try:
+        fh = open_shared(path, "r+b")
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            got = _lock_byte(fh)
+        except OSError as exc:  # EBADF, ENOTSUP, EINVAL...: not contention, fail open
+            _warn("writer_lock.lock", exc, path)
+            return False
+        if got:
+            _unlock_byte(fh)
+            return False
+        return True
+    finally:
+        fh.close()  # first: a Python handle on a lock file blocks Codex's removal of it
+
+
+def _probe_writer_lock(lock_path: str, coord_path: str) -> bool | None:
+    """True / False for the thread lock, None when the coordination lock is busy
+    (Codex is mid acquire, cleanup or publication)."""
+    try:
+        coord = open_shared(coord_path, "r+b")  # never created: without it, not held
+    except FileNotFoundError:
+        return False
+    try:
+        if not _lock_byte(coord):
+            return None
+        try:
+            return _thread_lock_held(lock_path)
+        finally:
+            _unlock_byte(coord)  # last: Codex's blocking lock() has no timeout
+    finally:
+        coord.close()
+
+
+@_safe("session_writer_locked", lambda: False)
+def session_writer_locked(session_id: str) -> bool:
+    """True when a running Codex process holds the thread's writer lock (so `codex resume`
+    would refuse it). Fails open: any error is False.
+
+    Order: validate the id; stat <id>.lock (missing is False, one stat); the 5 s per-id
+    cache; then, one probe at a time in this process, the probe under Codex's
+    .coordination.lock. A busy coordination lock is retried 3 times at 5 ms (sleeping
+    outside the process lock), then the last cached value, even an expired one, else False.
+    """
+    if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+        return False
+    key = session_id  # already lower-case: SESSION_ID_RE is
+    lock_path = str(Path(CODEX_LOCKS_DIR) / f"{key}.lock")
+    coord_path = str(Path(CODEX_LOCKS_DIR) / _COORDINATION)
+    try:
+        os.stat(lock_path)
+    except OSError:
+        return False
+    stale = _lock_cache.get(key)
+    for attempt in range(_LOCK_RETRIES + 1):
+        with _probe_lock:
+            fresh = _lock_cache.get(key)  # another thread may have just probed this id
+            if fresh is not None and time.monotonic() - fresh[0] < _LOCK_TTL:
+                return fresh[1]
+            held = _probe_writer_lock(lock_path, coord_path)
+            if held is not None:
+                _lock_cache.put(key, (time.monotonic(), held))
+                return held
+        if attempt < _LOCK_RETRIES:
+            time.sleep(_LOCK_RETRY_SLEEP)
+    return stale[1] if stale is not None else False
+
+
 # --- Test seam ---------------------------------------------------------------------
 
 
@@ -1193,5 +1392,7 @@ def _clear_caches() -> None:
     _parse_cache = BoundedCache(_cache_cap)
     _missing.clear()
     _parse_failed.clear()
+    _last_event_cache.clear()
+    _lock_cache.clear()
     with _warn_lock:
         _warned.clear()

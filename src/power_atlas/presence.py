@@ -22,6 +22,7 @@ even when the exact session id could not be matched.
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,7 +67,30 @@ except Exception as _e:  # pragma: no cover - import guard
 _PROVIDER_SPECS: dict[str, tuple[tuple[str, ...], str]] = {
     "claude-code": (("claude", "claude.exe", "claude.cmd"), "--resume"),
     "kiro-cli-v3": (("kiro-cli", "kiro-cli.exe", "kiro-cli.cmd"), "--resume-id"),
+    # Only `resume` carries a thread id. `fork` is a TUI but is not an id carrier:
+    # `fork <uuid>` must never mark its source thread live.
+    "codex": (("codex", "codex.exe", "codex.cmd"), "resume"),
 }
+
+# codex.exe is also the binary of long-running helpers (an `app-server` daemon, an
+# `exec-server`, a pid-update loop) that hold no terminal session. A matched codex
+# process with any of these tokens anywhere after argv0 is not a session. A deny-list,
+# not an allow-list: a prompt is free text. It ages when a Codex release adds a helper
+# subcommand (reopen on a reported false dot; docs/KNOWLEDGE.md says to re-check it on
+# each Codex upgrade). `fork` is deliberately absent: it is a TUI.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+_CODEX_HELPER_SUBCOMMANDS: frozenset[str] = frozenset({
+    "app-server", "exec-server", "exec", "e", "mcp", "mcp-server", "plugin", "login",
+    "logout", "review", "remote-control", "app", "completion", "update", "doctor",
+    "sandbox", "debug", "apply", "a", "queue", "archive", "delete", "unarchive",
+    "migrate-rollouts", "cloud", "features", "agents", "help", "daemon",
+})
+
+# A Codex thread id is a UUID. The token after `resume` can also be `--last` or a
+# prompt or a session name, none of which names a thread: those leave the process
+# live by workspace only. Lower-cased: a session row carries the lower-case id.
+_CODEX_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 
 # kiro-cli-v3 is the only remaining kiro provider. _KIRO_PROVIDERS exists as a
 # family set so the D32 guard (below) can check membership without naming the
@@ -541,6 +565,8 @@ def _match_provider(name: str, cmdline: list[str]) -> str | None:
         candidates.add(Path(argv0).name.lower())
     for provider, (binaries, _flag) in _PROVIDER_SPECS.items():
         if candidates & set(binaries):
+            if provider == "codex" and any(a in _CODEX_HELPER_SUBCOMMANDS for a in cmdline[1:]):
+                return None
             return provider
     return None
 
@@ -582,6 +608,9 @@ def _scan() -> Snapshot:
             pid = info.get("pid")
             _binaries, flag = _PROVIDER_SPECS[provider]
             sid = _extract_session_id(cmdline, flag)
+            if provider == "codex":
+                # Anything but a UUID (`--last`, a prompt, `<uuid>` plus a newline) is no thread id.
+                sid = sid.lower() if sid and _CODEX_UUID_RE.fullmatch(sid) else None
             if pid is not None:
                 try:
                     provider_pids[pid] = (provider, proc.create_time())

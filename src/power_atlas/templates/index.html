@@ -6585,7 +6585,10 @@ function dashRailRowNode(session, flat, workspace){
 
   var actions = document.createElement('div');
   actions.className = 'acp-rail-menu-wrap acp-rail-menu-wrap-ghost';
-  if (state !== 'locked' && (session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3' ||
+  // resume_locked (Codex rows only): the thread's writer lock is held by a running Codex, which refuses
+  // `codex resume`. Only the Resume button goes; the row, its transcript and its bucket are unchanged.
+  // 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+  if (state !== 'locked' && !session.resume_locked && (session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3' ||
       session.provider === 'claude-code' || session.provider === 'kiro-ide' || session.provider === 'codex')) {
     var resumeBtn = document.createElement('button');
     resumeBtn.type = 'button';
@@ -7767,6 +7770,13 @@ function dashRailRefreshStates(incoming){
     }
     if (!!s.live !== !!fresh.live) {
       s.live = fresh.live;
+      changed = true;
+    }
+    // A Codex row whose thread's writer lock was taken or released since the last poll: the
+    // Resume button follows it, so it must count as a change or the button stays stale.
+    // 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+    if (!!s.resume_locked !== !!fresh.resume_locked) {
+      s.resume_locked = fresh.resume_locked;
       changed = true;
     }
     if (dashRailTitleText(s) !== dashRailTitleText(fresh)) {

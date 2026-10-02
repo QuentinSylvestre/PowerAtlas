@@ -114,6 +114,13 @@ def _resolve_jsonl_path_uncached(
         if folder is None:
             return None
         path = folder / f"{session_id}.jsonl"
+    elif provider == "codex":
+        # An index lookup (D11), not a path built from the id. A Codex row has a
+        # rollout path for the live rule's recency and for tiles; it has no
+        # semantic status (non-goal), see _classify_from_path.
+        # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+        from . import data_codex
+        return data_codex.rollout_path(session_id)
     else:
         return None
 
@@ -490,6 +497,11 @@ def _classify_from_path(
     path: Path, provider: str, file_size: int | None = None
 ) -> Optional[SemanticStatus]:
     """Read JSONL tail from a resolved path and classify via provider parser."""
+    if provider == "codex":
+        # No semantic status for Codex (non-goal), and no read: this reader opens with
+        # a plain open(), which on Windows blocks Codex's own rename or delete of the
+        # rollout (D10). 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+        return None
     tail_lines = _read_tail_lines(path, file_size=file_size)
     if not tail_lines:
         return None

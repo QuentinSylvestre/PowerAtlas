@@ -32568,3 +32568,213 @@ class TestOverviewUsage:
         finally:
             release.set()
             thread.join(timeout=10)
+
+
+
+class TestCodexLiveDotAndResumeLock:
+    """Codex rows in the dashboard rail: the live rule's recency reads the last record
+    when the mtime is frozen (D16), and a row whose thread's writer lock is held carries
+    `resume_locked` (a field of its own, never `availability`: D17).
+    Synthetic rollouts only; the three Codex roots are redirected by `isolated_config`.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3"""
+
+    _CWD = "C:\\Work\\Proj"
+    _SID = "0000000b-1111-4222-8333-00000000000b"
+
+    @staticmethod
+    def _iso(epoch):
+        return dt.datetime.fromtimestamp(epoch, tz=dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _rollout(self, root, sid, last_ts, mtime, cwd=None):
+        folder = root / "codex-home" / "sessions" / "2026" / "09" / "01"
+        folder.mkdir(parents=True, exist_ok=True)
+        meta = {"ordinal": 0, "timestamp": "2026-09-01T10:00:00Z", "type": "session_meta", "payload": {
+            "id": sid, "cwd": cwd or self._CWD, "source": "cli", "timestamp": "2026-09-01T10:00:00Z"}}
+        last = {"ordinal": 1, "timestamp": self._iso(last_ts), "type": "event_msg", "payload": {
+            "type": "item_completed",
+            "item": {"type": "AgentMessage", "content": [{"type": "Text", "text": "ok"}]}}}
+        path = folder / f"rollout-2026-09-01T10-00-00-{sid}.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in (meta, last)) + "\n", encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def _live(self, session_cwd=None, snapshot_cwds=None, ids=()):
+        from power_atlas import data_codex, presence
+        from power_atlas.data import _normalize_path
+        data_codex._clear_caches()
+        cwds = {("codex", _normalize_path(self._CWD))} if snapshot_cwds is None else snapshot_cwds
+        snap = presence.Snapshot({("codex", i) for i in ids}, cwds)
+        session = Session(session_id=self._SID, title="t", cwd=session_cwd or self._CWD, created_at="",
+                          updated_at="", first_prompt="", last_prompt="", last_reply_tail="")
+        from power_atlas.web import _session_is_live
+        return _session_is_live(snap, session, "codex")
+
+    def test_an_old_mtime_with_a_recent_last_record_is_live(self, isolated_config):
+        now = time.time()
+        self._rollout(isolated_config, self._SID, now - 40, now - 5000)
+        assert self._live() is True
+
+    def test_both_older_than_the_window_is_not_live(self, isolated_config):
+        now = time.time()
+        self._rollout(isolated_config, self._SID, now - 2000, now - 5000)
+        assert self._live() is False
+
+    def test_a_last_record_from_the_future_does_not_keep_a_session_live(self, isolated_config):
+        now = time.time()
+        self._rollout(isolated_config, self._SID, now + 3600, now - 5000)
+        assert self._live() is False
+
+    def test_a_recent_mtime_alone_is_live_and_the_window_is_300_seconds(self, isolated_config):
+        now = time.time()
+        self._rollout(isolated_config, self._SID, now - 9000, now - 280)
+        assert self._live() is True
+        self._rollout(isolated_config, self._SID, now - 9000, now - 320)
+        assert self._live() is False
+
+    def test_recent_activity_needs_a_codex_process_in_the_workspace(self, isolated_config):
+        now = time.time()
+        self._rollout(isolated_config, self._SID, now - 10, now - 10)
+        assert self._live(snapshot_cwds=set()) is False
+        assert self._live(snapshot_cwds={("codex", "c:\\somewhere\\else")}) is False
+
+    def test_an_id_on_a_process_command_line_is_live_whatever_the_rollout_says(self, isolated_config):
+        now = time.time()
+        self._rollout(isolated_config, self._SID, now - 9000, now - 9000)
+        assert self._live(snapshot_cwds=set(), ids=[self._SID]) is True
+
+    def test_a_session_with_no_rollout_is_not_live_by_workspace(self, isolated_config):
+        assert self._live() is False
+
+    def test_another_providers_recency_rule_is_still_the_plain_mtime(self, tmp_path):
+        """The record-timestamp rule is Codex's alone."""
+        from power_atlas import presence
+        from power_atlas.data import _normalize_path
+        from power_atlas.web import _session_is_live
+        jsonl = tmp_path / "t.jsonl"
+        jsonl.write_text(json.dumps({"timestamp": self._iso(time.time() - 10)}) + "\n")
+        old = time.time() - 5000
+        os.utime(jsonl, (old, old))
+        snap = presence.Snapshot(set(), {("claude-code", _normalize_path(self._CWD))})
+        session = Session(session_id="s1", title="t", cwd=self._CWD, created_at="", updated_at="",
+                          first_prompt="", last_prompt="", last_reply_tail="")
+        with patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=jsonl):
+            assert _session_is_live(snap, session, "claude-code") is False
+
+    # -- the rail rows ---------------------------------------------------------------
+
+    @pytest.fixture
+    def rail(self, monkeypatch):
+        """A two-provider store served through the dashboard listing, and a recorder in
+        place of the real lock probe."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import data as data_mod
+        from power_atlas import data_codex
+
+        state = {"locked": set(), "asked": [], "sessions": {}}
+
+        def probe(sid):
+            state["asked"].append(sid)
+            return sid in state["locked"]
+
+        def add(provider, ids, cwd="C:\\dev\\ws"):
+            state["sessions"][(cwd, provider)] = [_acp_row(i, cwd=cwd) for i in ids]
+
+        state["add"] = add
+        monkeypatch.setattr(data_codex, "session_writer_locked", probe)
+        monkeypatch.setattr(data_mod, "discover_workspaces_with_counts", lambda provider=None: [
+            (cwd, len(rows), "2026-07-31T00:00:00Z", prov) for (cwd, prov), rows in state["sessions"].items()
+            if provider in (None, prov)])
+        monkeypatch.setattr(data_mod, "get_sessions",
+                            lambda cwd, provider="kiro-cli": list(state["sessions"].get((cwd, provider), [])))
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["claude-code", "codex"])
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda sid, wh=None: None)
+        monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
+        return state
+
+    @staticmethod
+    def _rows(body):
+        return {s["id"]: s for g in body["groups"] for s in g["sessions"]}
+
+    def test_a_codex_row_carries_resume_locked_only_when_its_lock_is_held(self, client, rail):
+        rail["add"]("codex", ["c-locked", "c-free"])
+        rail["locked"].add("c-locked")
+        rows = self._rows(client.get("/api/dashboard/sessions", params={"cwd": "C:\\dev\\ws"}).json())
+        assert rows["c-locked"]["resume_locked"] is True
+        assert "resume_locked" not in rows["c-free"]
+
+    def test_the_lock_never_touches_availability_or_status_or_the_other_fields(self, client, rail):
+        """`availability: locked` would disable the row, block its transcript and file it
+        under "Locked elsewhere"; a held Codex thread is still readable."""
+        rail["add"]("codex", ["c1"])
+        free = self._rows(client.get("/api/dashboard/sessions", params={"cwd": "C:\\dev\\ws"}).json())["c1"]
+        rail["locked"].add("c1")
+        held = self._rows(client.get("/api/dashboard/sessions", params={"cwd": "C:\\dev\\ws"}).json())["c1"]
+        assert held["availability"] == free["availability"] == "available"
+        assert held["status"] == free["status"] == ""
+        assert {k: v for k, v in held.items() if k != "resume_locked"} == free
+
+    def test_a_row_of_another_provider_never_carries_it_and_is_never_probed(self, client, rail):
+        rail["add"]("claude-code", ["cc1"])
+        rail["add"]("codex", ["cx1"])
+        rail["locked"].update({"cc1", "cx1"})          # a probe that said yes to everything
+        rows = self._rows(client.get("/api/dashboard/sessions", params={"cwd": "C:\\dev\\ws"}).json())
+        assert "resume_locked" not in rows["cc1"] and rows["cx1"]["resume_locked"] is True
+        assert rail["asked"] == ["cx1"], "the lock is asked about Codex threads only"
+
+    def test_the_flat_listing_marks_codex_rows_the_same_way(self, client, rail, monkeypatch):
+        from power_atlas import data as data_mod
+        rows = [(_acp_row("cx-held", cwd="C:\\dev\\a"), "codex"), (_acp_row("cx-free", cwd="C:\\dev\\b"), "codex"),
+                (_acp_row("cc1", cwd="C:\\dev\\c"), "claude-code")]
+        monkeypatch.setattr(data_mod, "get_all_sessions_paginated",
+                            lambda page=1, page_size=20, provider=None, pinned_sessions=None,
+                            enabled_providers=None, exclude_cwds=None: (rows, False))
+        rail["locked"].update({"cx-held", "cc1"})
+        body = client.get("/api/dashboard/sessions", params={"mode": "recent"}).json()
+        by_id = {s["id"]: s for s in body["sessions"]}
+        assert by_id["cx-held"]["resume_locked"] is True
+        assert "resume_locked" not in by_id["cx-free"] and "resume_locked" not in by_id["cc1"]
+        assert by_id["cx-held"]["availability"] == "available"
+        assert rail["asked"] == ["cx-held", "cx-free"]
+
+    def test_the_acp_route_never_carries_the_field(self, client, rail, monkeypatch):
+        """/api/acp/sessions is kiro-cli only and its payload is the audit surface: the
+        field rides only the dashboard feed (`include_provider`)."""
+        from power_atlas import data as data_mod
+        rows = [(_acp_row("v3-1", cwd="C:\\dev\\a"), "kiro-cli-v3")]
+        monkeypatch.setattr(data_mod, "get_all_sessions_paginated",
+                            lambda page=1, page_size=20, provider=None, pinned_sessions=None,
+                            enabled_providers=None, exclude_cwds=None: (rows, False))
+        body = client.get("/api/acp/sessions", params={"mode": "recent"}).json()
+        assert all("resume_locked" not in s for s in body["sessions"])
+        assert rail["asked"] == []
+
+    def test_the_row_builders_run_off_the_event_loop(self, client, rail, monkeypatch):
+        """The probe takes a machine-wide lock and sleeps on contention: never on the loop."""
+        from power_atlas import data_codex
+        seen = []
+
+        def probe(sid):
+            try:
+                asyncio.get_running_loop()
+                seen.append("on the loop")
+            except RuntimeError:
+                seen.append("off the loop")
+            return False
+
+        monkeypatch.setattr(data_codex, "session_writer_locked", probe)
+        rail["add"]("codex", ["c1"])
+        client.get("/api/dashboard/sessions", params={"cwd": "C:\\dev\\ws"})
+        assert seen == ["off the loop"]
+
+    def test_the_classifier_resolves_a_codex_rollout_and_reads_no_status_from_it(self, isolated_config):
+        from power_atlas import status_classifier
+        now = time.time()
+        path = self._rollout(isolated_config, self._SID, now - 10, now - 10)
+        assert status_classifier._resolve_jsonl_path(self._SID, "codex", "") == path
+        assert status_classifier._resolve_jsonl_path("not-an-id", "codex", "") is None
+        # Both entry points swallow exceptions, so the read is counted, not raised.
+        reads = []
+        with patch.object(status_classifier, "_read_tail_lines", lambda *a, **k: reads.append(a) or []):
+            assert status_classifier.get_semantic_status(self._SID, "codex", "") is None
+            assert status_classifier.classify_session(self._SID, "codex", "") is None
+        assert reads == [], "a Codex rollout must not be read by this plain-open reader"

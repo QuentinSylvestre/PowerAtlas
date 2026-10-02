@@ -3,6 +3,8 @@
 import ast
 import builtins
 import contextlib
+import errno
+import importlib.util
 import io
 import itertools
 import json
@@ -3499,3 +3501,850 @@ class TestCodexSurvivingMutations:
             fh.write(_cx_line(_cx_user("the real prompt")))
         (session,), _ = data_codex.load_sessions(cwd)
         assert session.first_prompt == "the real prompt"
+
+
+# --- Codex live dot and Resume lock state (presence.py, data_codex.py) ---
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+#
+# Argv shapes are copied from the process table measured in Phase 0 (plan section 9,
+# item 5), with placeholders for every id, URL and path. Lock files are real files in
+# tmp_path; the holder and acquirer are real subprocesses that lock them the way
+# Codex's writer_lock.rs does (whole file), so the probe is tested against the actual
+# OS locking, not a mock of it.
+
+# The D15 deny-list, written out independently of the code under test.
+_CX_D15 = ["app-server", "exec-server", "exec", "e", "mcp", "mcp-server", "plugin", "login",
+           "logout", "review", "remote-control", "app", "completion", "update", "doctor",
+           "sandbox", "debug", "apply", "a", "queue", "archive", "delete", "unarchive",
+           "migrate-rollouts", "cloud", "features", "agents", "help", "daemon"]
+
+_CX_CWD = "C:\\Work\\Proj"
+
+
+def _cx_basename(argv0: str) -> str:
+    return argv0.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+class TestCodexPresence:
+    def _scan(self, *procs):
+        return _scan_with(list(procs))
+
+    @staticmethod
+    def _proc(argv, cwd=_CX_CWD, name=None):
+        return _FakeProc(name or _cx_basename(argv[0]), argv, cwd=cwd)
+
+    def test_the_deny_list_is_exactly_d15_and_leaves_fork_alone(self):
+        from power_atlas import presence
+        assert presence._CODEX_HELPER_SUBCOMMANDS == frozenset(_CX_D15)
+        assert len(_CX_D15) == 29 and "fork" not in presence._CODEX_HELPER_SUBCOMMANDS
+        assert "resume" not in presence._CODEX_HELPER_SUBCOMMANDS
+
+    @pytest.mark.parametrize("token", _CX_D15)
+    def test_every_helper_subcommand_is_not_a_match_in_any_position(self, token):
+        from power_atlas import presence
+        for argv in (["codex.exe", token],
+                     ["codex.exe", "-c", "features.x=true", token, "--flag"],
+                     ["C:\\bin\\codex.exe", "--remote", "ws://h:1", token]):
+            assert presence._match_provider("codex.exe", argv) is None, argv
+
+    @pytest.mark.parametrize("argv", [
+        ["codex.exe"],
+        ["codex.exe", "fix the failing test"],
+        ["codex.exe", "resume", _cx_id(7)],
+        ["codex.exe", "-c", "k=v", "--enable", "feature"],
+        ["codex.exe", "--remote", "ws://127.0.0.1:9"],
+        ["codex.exe", "fork", _cx_id(7)],
+        ["codex.cmd", "resume", _cx_id(7)],
+        ["C:\\Users\\u\\bin\\codex.exe", "resume", _cx_id(7)],
+    ])
+    def test_a_terminal_session_is_a_match(self, argv):
+        from power_atlas import presence
+        assert presence._match_provider(_cx_basename(argv[0]), argv) == "codex"
+
+    @pytest.mark.parametrize("name,argv", [
+        ("ChatGPT.exe", ["ChatGPT.exe"]),
+        ("ChatGPT.exe", ["ChatGPT.exe", "--type=renderer", "--annotation=prod=Codex"]),
+        ("codex-code-mode-host.exe", ["codex-code-mode-host.exe"]),
+        ("codex-computer-use-swift.exe", ["codex-computer-use-swift.exe", "--parent-pid", "1"]),
+        ("codex-windows-sandbox-service.exe", ["codex-windows-sandbox-service.exe"]),
+        ("node.exe", ["node", "C:\\npm\\@openai\\codex\\bin\\codex.js", "resume", _cx_id(7)]),
+        ("codex.exe", ["codex.exe", "--type=utility"]),
+    ])
+    def test_other_processes_that_merely_mention_codex_are_not_a_match(self, name, argv):
+        from power_atlas import presence
+        assert presence._match_provider(name, argv) is None
+
+    def test_a_resume_uuid_marks_that_thread_live_in_its_workspace(self):
+        from power_atlas.data import _normalize_path
+        sid = _cx_id(7)
+        snap = self._scan(self._proc(["codex.exe", "resume", sid]))
+        assert snap.is_live("codex", _CX_CWD, sid) is True
+        assert snap.is_live("codex", _CX_CWD, _cx_id(8)) is False
+        assert _normalize_path(_CX_CWD) in snap.live_cwds({"codex"})
+        assert [(p, s) for p, s, _c in snap.live_sids()] == [("codex", sid)]
+
+    def test_an_upper_case_resume_uuid_marks_the_lower_case_session_live(self):
+        sid = _cx_id(0xABC)
+        assert sid != sid.upper()
+        snap = self._scan(self._proc(["codex.exe", "resume", sid.upper()]))
+        assert snap.is_live("codex", _CX_CWD, sid) is True
+
+    @pytest.mark.parametrize("argv", [
+        ["codex.exe", "resume", "--last"],
+        ["codex.exe", "resume", "fix the failing build"],
+        ["codex.exe", "resume", "my-session-name"],
+        ["codex.exe", "resume", _cx_id(7) + "\n"],
+        ["codex.exe", "resume", _cx_id(7)[:-1]],
+        ["codex.exe", "resume", "sess_" + _cx_id(7)],
+        ["codex.exe", "resume", _cx_id(7) + "x"],
+        ["codex.exe", "resume"],
+        ["codex.exe", "resume=not-a-uuid"],
+    ])
+    def test_anything_after_resume_that_is_not_a_uuid_leaves_the_process_live_by_workspace_only(self, argv):
+        from power_atlas.data import _normalize_path
+        snap = self._scan(self._proc(argv))
+        assert snap.live_sids() == []
+        assert _normalize_path(_CX_CWD) in snap.live_cwds({"codex"})
+
+    def test_fork_marks_the_workspace_live_but_never_the_source_thread(self):
+        from power_atlas.data import _normalize_path
+        sid = _cx_id(7)
+        snap = self._scan(self._proc(["codex.exe", "fork", sid]))
+        assert snap.is_live("codex", _CX_CWD, sid) is False
+        assert snap.live_sids() == []
+        assert _normalize_path(_CX_CWD) in snap.live_cwds({"codex"})
+
+    def test_a_bare_tui_and_a_tui_with_a_prompt_are_live_by_workspace(self):
+        from power_atlas.data import _normalize_path
+        for argv in (["codex.exe"], ["codex.exe", "write a haiku"]):
+            snap = self._scan(self._proc(argv))
+            assert snap.live_sids() == []
+            assert snap.live_cwds({"codex"}) == {_normalize_path(_CX_CWD)}
+
+    def test_the_machines_daemons_in_a_workspace_light_nothing_up(self):
+        """The measured table: a desktop app-server, an exec-server, a managed daemon and
+        its pid-update loop, plus the desktop app itself. None is a session."""
+        snap = self._scan(
+            self._proc(["codex.exe", "-c", "features.code_mode_host=true", "app-server",
+                        "--analytics-default-enabled", "-c", "k=v"]),
+            self._proc(["codex.exe", "exec-server", "--remote", "wss://h.invalid/x",
+                        "--environment-id", "env-1"]),
+            self._proc(["codex.exe", "app-server", "--listen", "unix://", "--managed-daemon"]),
+            self._proc(["codex.exe", "app-server", "daemon", "pid-update-loop"]),
+            self._proc(["ChatGPT.exe"]),
+            self._proc(["codex.exe", "exec", "summarise the repo"]),
+        )
+        assert snap.live_cwds() == set()
+        assert snap.live_sids() == []
+
+    def test_a_tui_beside_daemons_is_the_only_live_workspace(self):
+        from power_atlas.data import _normalize_path
+        other = "C:\\Work\\Other"
+        snap = self._scan(
+            self._proc(["codex.exe", "app-server", "daemon", "pid-update-loop"], cwd=_CX_CWD),
+            self._proc(["codex.exe"], cwd=other),
+        )
+        assert snap.live_cwds({"codex"}) == {_normalize_path(other)}
+
+    def test_codex_never_marks_another_providers_session_live(self):
+        sid = _cx_id(7)
+        snap = self._scan(self._proc(["codex.exe", "resume", sid]))
+        assert snap.is_live("claude-code", _CX_CWD, sid) is False
+        assert snap.is_live("kiro-cli-v3", _CX_CWD, sid) is False
+
+    def test_a_claude_resume_id_is_not_validated_as_a_uuid(self):
+        """The UUID rule is Codex's: Claude Code's and kiro-cli's id handling is unchanged."""
+        snap = self._scan(_FakeProc("claude", ["claude", "--resume", "abc123"], cwd="/w"))
+        assert snap.is_live("claude-code", "/w", "abc123") is True
+
+    def test_an_unknown_helper_subcommand_is_documented_as_matching(self):
+        """CANARY, not a requirement. The deny-list ages: a Codex release that adds a
+        helper subcommand not in D15 makes that helper read as a terminal session (a false
+        dot in the folder it runs in, bounded by the 300 s rollout recency). This test
+        pins today's behaviour so the day it is fixed is a decision. Reopen trigger: a
+        reported false dot, or a new subcommand in `codex --help` after a Codex upgrade;
+        then add it to presence._CODEX_HELPER_SUBCOMMANDS and to _CX_D15 above."""
+        from power_atlas import presence
+        assert presence._match_provider("codex.exe", ["codex.exe", "frobnicate-server"]) == "codex"
+
+
+def _cx_iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class TestCodexActivityEpoch:
+    """D16: the later of the rollout mtime and, only when the mtime is older than the
+    300 s window, the last complete record's timestamp; a stamp from the future is
+    dropped, never clamped to now (a clamp would read as age 0, which is live)."""
+
+    SID, CWD = _cx_id(21), "C:\\W"
+
+    def _rollout(self, home, last_ts, mtime, extra_tail=b""):
+        return _cx_write(home, self.SID, self.CWD,
+                         [_cx_user("go", ts=_cx_iso(last_ts - 5)), _cx_agent("done", ts=_cx_iso(last_ts))],
+                         tail=extra_tail, mtime=mtime)
+
+    @staticmethod
+    def _activity(path):
+        return data_codex.activity_epoch(path, os.stat(path))
+
+    def test_a_frozen_mtime_with_a_recent_last_record_is_recent_activity(self, codex_home):
+        now = time.time()
+        path = self._rollout(codex_home, now - 40, now - 5000)
+        got = self._activity(path)
+        assert got == pytest.approx(now - 40, abs=1.0)
+        assert now - got <= data_codex.ACTIVITY_WINDOW
+
+    def test_both_old_is_old_and_the_later_of_the_two_wins(self, codex_home):
+        now = time.time()
+        path = self._rollout(codex_home, now - 2000, now - 5000)
+        assert self._activity(path) == pytest.approx(now - 2000, abs=1.0)
+        # an mtime newer than the last record, itself outside the window: the mtime wins
+        path = self._rollout(codex_home, now - 7000, now - 3000)
+        assert self._activity(path) == pytest.approx(now - 3000, abs=1.0)
+        assert now - self._activity(path) > data_codex.ACTIVITY_WINDOW
+
+    def test_the_last_record_is_read_only_when_the_mtime_is_outside_the_window(self, codex_home, counted_reads):
+        now = time.time()
+        inside = self._rollout(codex_home, now - 5000, now - 290)   # the record would say old
+        assert self._activity(inside) == pytest.approx(now - 290, abs=1.0)
+        assert counted_reads[0] == 0, "a warm active file must cost one stat, not a read"
+        outside = self._rollout(codex_home, now - 100, now - 310)
+        assert self._activity(outside) == pytest.approx(now - 100, abs=1.0)
+        assert counted_reads[0] > 0
+
+    def test_a_future_record_timestamp_is_no_activity_at_all(self, codex_home):
+        now = time.time()
+        path = self._rollout(codex_home, now + 3600, now - 5000)
+        got = self._activity(path)
+        assert got == pytest.approx(now - 5000, abs=1.0)
+        assert got <= time.time()
+        assert time.time() - got > data_codex.ACTIVITY_WINDOW   # not live: nothing was clamped to now
+
+    def test_a_stamp_a_second_ahead_is_clock_jitter_and_counts_no_later_than_now(self, codex_home):
+        now = time.time()
+        path = self._rollout(codex_home, now + 1.5, now - 5000)
+        assert self._activity(path) <= time.time()
+        assert time.time() - self._activity(path) < 5
+
+    def test_a_future_mtime_is_not_trusted_either(self, codex_home):
+        now = time.time()
+        path = self._rollout(codex_home, now - 30, now + 3600)
+        assert self._activity(path) == pytest.approx(now - 30, abs=1.0)
+        old = self._rollout(codex_home, now - 9000, now + 3601)   # another mtime: another cache key
+        assert self._activity(old) == pytest.approx(now - 9000, abs=1.0)
+
+    def test_a_torn_last_line_is_skipped_for_the_last_complete_record(self, codex_home):
+        now = time.time()
+        path = self._rollout(codex_home, now - 60, now - 5000,
+                             extra_tail=b'{"timestamp":"2099-01-01T00:00:00Z","type":"event_ms')
+        assert self._activity(path) == pytest.approx(now - 60, abs=1.0)
+        assert data_codex.last_event_epoch(path) == pytest.approx(now - 60, abs=1.0)
+
+    def test_last_event_epoch_is_the_exact_instant_of_the_last_record(self, codex_home):
+        stamp = datetime(2026, 9, 1, 10, 0, 7, 250000, tzinfo=timezone.utc)
+        path = _cx_write(codex_home, self.SID, self.CWD,
+                         [_cx_agent("a", ts="2026-09-01T09:00:00Z"), _cx_agent("b", ts=stamp.isoformat())])
+        assert data_codex.last_event_epoch(path) == stamp.timestamp()
+
+    def test_last_event_epoch_is_none_for_no_timestamp_or_no_file(self, codex_home, tmp_path):
+        path = _cx_write(codex_home, self.SID, self.CWD, [], first=b'{"type":"session_meta"}\n{"x":1}\n')
+        assert data_codex.last_event_epoch(path) is None
+        assert data_codex.last_event_epoch(tmp_path / "absent.jsonl") is None
+
+    def test_the_answer_is_cached_by_mtime_ns_and_size(self, codex_home, counted_reads):
+        now = time.time()
+        old = now - 5000
+        path = self._rollout(codex_home, now - 100, old)
+        first = self._activity(path)
+        reads = counted_reads[0]
+        assert reads > 0 and self._activity(path) == first
+        assert counted_reads[0] == reads, "same (mtime_ns, size): no second read"
+        # Same mtime, the file grew: a frozen-mtime file that Codex is still writing.
+        with open(path, "ab") as fh:
+            fh.write(_cx_line(_cx_agent("more", ts=_cx_iso(now - 50))))
+        os.utime(path, (old, old))
+        assert self._activity(path) == pytest.approx(now - 50, abs=1.0)
+        assert counted_reads[0] > reads
+        # Same size, another mtime_ns: also a new key.
+        reads = counted_reads[0]
+        os.utime(path, (old - 1, old - 1))
+        self._activity(path)
+        assert counted_reads[0] > reads
+
+    def test_it_never_raises(self, codex_home, tmp_path):
+        missing = tmp_path / "gone.jsonl"
+        st = os.stat_result((0o100644, 0, 0, 1, 0, 0, 0, 0, 1.0, 0))
+        assert data_codex.activity_epoch(missing, st) == 1.0   # unreadable tail: the mtime stands
+        assert data_codex.activity_epoch(missing, object()) == 0.0
+
+
+# A portable stand-in for Codex's writer lock. `hold` takes a whole-file lock on a file
+# and keeps it; `acquirer` replays WriterLockCoordinator::acquire and the guard's drop in
+# a loop (coordination lock, blocking; then a fail-fast lock on <id>.lock; removal of the
+# lock file under the coordination lock) and reports how often acquisition failed. Whole
+# file on both platforms, as Rust std's File::lock does (LockFileEx / flock).
+_CX_LOCK_HELPER = r'''
+import json, os, sys, time
+if sys.platform == "win32":
+    import ctypes, ctypes.wintypes as wt, msvcrt
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    class _OV(ctypes.Structure):
+        _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
+                    ("Offset", wt.DWORD), ("OffsetHigh", wt.DWORD), ("hEvent", wt.HANDLE)]
+    _k32.LockFileEx.argtypes = [wt.HANDLE, wt.DWORD, wt.DWORD, wt.DWORD, wt.DWORD, ctypes.POINTER(_OV)]
+    _k32.LockFileEx.restype = wt.BOOL
+    _k32.UnlockFileEx.argtypes = [wt.HANDLE, wt.DWORD, wt.DWORD, wt.DWORD, ctypes.POINTER(_OV)]
+    _k32.UnlockFileEx.restype = wt.BOOL
+    def lock(f, nonblock):
+        return bool(_k32.LockFileEx(msvcrt.get_osfhandle(f.fileno()), 2 | (1 if nonblock else 0),
+                                    0, 0xFFFFFFFF, 0xFFFFFFFF, ctypes.byref(_OV())))
+    def unlock(f):
+        _k32.UnlockFileEx(msvcrt.get_osfhandle(f.fileno()), 0, 0xFFFFFFFF, 0xFFFFFFFF, ctypes.byref(_OV()))
+else:
+    import fcntl
+    def lock(f, nonblock):
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblock else 0))
+            return True
+        except OSError:
+            return False
+    def unlock(f):
+        fcntl.flock(f, fcntl.LOCK_UN)
+
+role = sys.argv[1]
+if role == "hold":
+    f = open(sys.argv[2], "a+b")
+    if not lock(f, True):
+        print("busy", flush=True)
+        sys.exit(3)
+    print("ready", flush=True)
+    sys.stdin.read()
+elif role == "acquirer":
+    d, tid, n, pause = sys.argv[2], sys.argv[3], int(sys.argv[4]), float(sys.argv[5])
+    coord_path = os.path.join(d, ".coordination.lock")
+    thread_path = os.path.join(d, tid + ".lock")
+    fails = remove_fails = 0
+    for _ in range(n):
+        coord = open(coord_path, "a+b")
+        lock(coord, False)
+        try:
+            f = open(thread_path, "a+b")
+            time.sleep(pause)          # real I/O is not instant: the window a probe can land in
+            ok = lock(f, True)
+        finally:
+            unlock(coord)
+            coord.close()
+        if not ok:
+            fails += 1
+            f.close()
+            continue
+        coord = open(coord_path, "a+b")
+        lock(coord, False)
+        f.close()
+        try:
+            os.remove(thread_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            remove_fails += 1
+        unlock(coord)
+        coord.close()
+    print(json.dumps({"failures": fails, "remove_failures": remove_fails}))
+'''
+
+_CX_ACQUIRE_CYCLES = 500
+_CX_CAN_LOCK = sys.platform == "win32" or importlib.util.find_spec("fcntl") is not None
+_needs_os_locks = pytest.mark.skipif(not _CX_CAN_LOCK, reason="no whole-file lock primitive here")
+
+
+@contextlib.contextmanager
+def _cx_hold(path):
+    """A separate process holding a whole-file lock on `path` until the block ends."""
+    proc = subprocess.Popen([sys.executable, "-c", _CX_LOCK_HELPER, "hold", str(path)],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "ready"
+        yield proc
+    finally:
+        proc.kill()                      # a killed holder: its lock goes, its file stays
+        proc.wait(timeout=30)
+        proc.stdout.close()
+        proc.stdin.close()
+
+
+class _Tracked:
+    """A lock-file handle that records its own close and carries its file name."""
+
+    def __init__(self, fh, name, events):
+        self._fh, self._name, self._events = fh, name, events
+
+    def close(self):
+        self._events.append(("close", self._name))
+        self._fh.close()
+
+    def __getattr__(self, attr):
+        return getattr(self._fh, attr)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class _LocksDir:
+    """The redirected thread-writer-locks folder plus the recorded lock events."""
+
+    def __init__(self, path, events):
+        self.path, self.events = path, events
+
+    def __truediv__(self, name):
+        return self.path / name
+
+    def __str__(self):
+        return str(self.path)
+
+
+@pytest.fixture
+def locks(codex_home, monkeypatch):
+    """The redirected thread-writer-locks folder with its coordination file, and a
+    recorder of every open, lock, unlock and close the probe makes on a lock file.
+    The 5 s answer cache is off; tests that exercise it turn it back on."""
+    folder = codex_home / "thread-writer-locks"
+    folder.mkdir(parents=True)
+    (folder / ".coordination.lock").write_bytes(b"")
+    monkeypatch.setattr(data_codex, "_LOCK_TTL", 0.0)
+    events = []
+    real_open, real_lock, real_unlock = data_codex.open_shared, data_codex._lock_byte, data_codex._unlock_byte
+
+    def tracked_open(path, mode="rb"):
+        name = os.path.basename(os.fspath(path))
+        fh = real_open(path, mode)
+        if not name.endswith(".lock"):
+            return fh
+        events.append(("open", name))
+        return _Tracked(fh, name, events)
+
+    def tracked_lock(fh):
+        events.append(("lock", fh._name))
+        return real_lock(fh)
+
+    def tracked_unlock(fh):
+        events.append(("unlock", fh._name))
+        return real_unlock(fh)
+
+    monkeypatch.setattr(data_codex, "open_shared", tracked_open)
+    monkeypatch.setattr(data_codex, "_lock_byte", tracked_lock)
+    monkeypatch.setattr(data_codex, "_unlock_byte", tracked_unlock)
+    return _LocksDir(folder, events)
+
+
+def _cx_lockfile(folder, sid):
+    path = folder / f"{sid}.lock"
+    path.write_bytes(b"")
+    return path
+
+
+class TestCodexWriterLock:
+    SID = _cx_id(31)
+
+    def test_an_absent_lock_file_is_false_and_nothing_is_opened(self, locks):
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert locks.events == []
+
+    @pytest.mark.parametrize("bad", [
+        "", "abc", "../" + _cx_id(31), _cx_id(31) + "\n", _cx_id(31) + ".lock",
+        _cx_id(31)[:-1], "g" + _cx_id(31)[1:], None, 7, b"x"])
+    def test_an_invalid_id_is_false_without_touching_a_file(self, locks, bad):
+        for name in ("abc", _cx_id(31)[:-1]):
+            (locks / f"{name}.lock").write_bytes(b"")
+        assert data_codex.session_writer_locked(bad) is False
+        assert locks.events == []
+
+    def test_a_present_unlocked_file_is_false_and_the_locks_nest_correctly(self, locks):
+        _cx_lockfile(locks, self.SID)
+        thread = f"{self.SID}.lock"
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert locks.events == [
+            ("open", ".coordination.lock"), ("lock", ".coordination.lock"),
+            ("open", thread), ("lock", thread), ("unlock", thread), ("close", thread),
+            ("unlock", ".coordination.lock"), ("close", ".coordination.lock")]
+        assert (locks / thread).exists() and (locks / ".coordination.lock").exists()
+
+    @_needs_os_locks
+    def test_the_probe_leaves_both_files_lockable_by_another_process(self, locks):
+        path = _cx_lockfile(locks, self.SID)
+        assert data_codex.session_writer_locked(self.SID) is False
+        with _cx_hold(locks / ".coordination.lock"), _cx_hold(path):
+            pass
+
+    @_needs_os_locks
+    def test_held_by_another_process_is_true_and_false_once_it_is_gone(self, locks):
+        path = _cx_lockfile(locks, self.SID)
+        with _cx_hold(path):
+            assert data_codex.session_writer_locked(self.SID) is True
+        assert path.exists(), "a killed holder leaves its file behind"
+        # The OS releases a dead process's locks a moment after it exits (Phase 0 waited
+        # 0.3 s), so allow for that, then the stale file must read as not held.
+        deadline = time.monotonic() + 10
+        while data_codex.session_writer_locked(self.SID) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert data_codex.session_writer_locked(self.SID) is False, "a stale file is not a held lock"
+
+    @_needs_os_locks
+    def test_only_the_held_thread_reads_locked(self, locks):
+        mine, other = _cx_id(41), _cx_id(42)
+        a, b = _cx_lockfile(locks, mine), _cx_lockfile(locks, other)
+        with _cx_hold(a):
+            assert data_codex.session_writer_locked(mine) is True
+            assert data_codex.session_writer_locked(other) is False
+        with _cx_hold(b):
+            assert data_codex.session_writer_locked(mine) is False
+            assert data_codex.session_writer_locked(other) is True
+
+    def test_an_upper_case_id_is_not_a_session_id_here(self, locks):
+        """Session rows carry the lower-case id (data.SESSION_ID_RE is lower-case only)."""
+        _cx_lockfile(locks, self.SID)
+        assert data_codex.session_writer_locked(self.SID.upper()) is False
+        assert locks.events == []
+
+    def test_a_missing_coordination_file_is_false_and_is_not_created(self, locks):
+        (locks / ".coordination.lock").unlink()
+        _cx_lockfile(locks, self.SID)
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert not (locks / ".coordination.lock").exists()
+        assert ("open", f"{self.SID}.lock") not in locks.events
+
+    def test_a_lock_file_that_vanishes_between_the_stat_and_the_open_is_false(self, locks, monkeypatch):
+        path = _cx_lockfile(locks, self.SID)
+        real = data_codex.open_shared
+
+        def vanishing(p, mode="rb"):
+            if os.path.basename(os.fspath(p)) == path.name:
+                os.remove(path)
+            return real(p, mode)
+
+        monkeypatch.setattr(data_codex, "open_shared", vanishing)
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert locks.events[-2:] == [("unlock", ".coordination.lock"), ("close", ".coordination.lock")]
+
+    @pytest.mark.parametrize("which", ["coordination", "thread"])
+    def test_an_oserror_on_open_is_false_and_the_coordination_lock_is_released(self, locks, monkeypatch, which, caplog):
+        _cx_lockfile(locks, self.SID)
+        real = data_codex.open_shared
+        target = ".coordination.lock" if which == "coordination" else f"{self.SID}.lock"
+
+        def failing(p, mode="rb"):
+            if os.path.basename(os.fspath(p)) == target:
+                raise PermissionError(errno.EACCES, "denied", os.fspath(p))
+            return real(p, mode)
+
+        monkeypatch.setattr(data_codex, "open_shared", failing)
+        with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
+            assert data_codex.session_writer_locked(self.SID) is False
+        assert any("session_writer_locked" in r.getMessage() for r in caplog.records)
+        if which == "thread":
+            assert locks.events[-2:] == [("unlock", ".coordination.lock"), ("close", ".coordination.lock")]
+
+    def test_repeated_calls_within_five_seconds_probe_once(self, locks, monkeypatch):
+        monkeypatch.setattr(data_codex, "_LOCK_TTL", 5.0)
+        _cx_lockfile(locks, self.SID)
+        results = [data_codex.session_writer_locked(self.SID) for _ in range(4)]
+        assert results == [False] * 4
+        assert locks.events.count(("open", f"{self.SID}.lock")) == 1
+
+    def test_the_answer_is_probed_again_once_it_is_older_than_five_seconds(self, locks, monkeypatch):
+        monkeypatch.setattr(data_codex, "_LOCK_TTL", 5.0)
+        _cx_lockfile(locks, self.SID)
+        data_codex._lock_cache.put(self.SID, (time.monotonic() - 5.5, True))
+        assert data_codex.session_writer_locked(self.SID) is False, "an expired answer is not served"
+        assert locks.events.count(("open", f"{self.SID}.lock")) == 1
+        data_codex._lock_cache.put(self.SID, (time.monotonic() - 4.0, True))
+        assert data_codex.session_writer_locked(self.SID) is True, "a fresh answer is served as it was"
+        assert locks.events.count(("open", f"{self.SID}.lock")) == 1
+
+    def test_a_deleted_lock_file_is_false_at_once_whatever_the_cache_says(self, locks, monkeypatch):
+        monkeypatch.setattr(data_codex, "_LOCK_TTL", 5.0)
+        data_codex._lock_cache.put(self.SID, (time.monotonic(), True))
+        assert data_codex.session_writer_locked(self.SID) is False
+
+    @_needs_os_locks
+    def test_a_busy_coordination_lock_retries_three_times_and_never_opens_the_thread_file(self, locks):
+        _cx_lockfile(locks, self.SID)
+        sleeps = []
+        with _cx_hold(locks / ".coordination.lock"):
+            started = time.monotonic()
+            with patch.object(data_codex.time, "sleep", lambda s: sleeps.append(s)):
+                assert data_codex.session_writer_locked(self.SID) is False
+            assert time.monotonic() - started < 5, "a busy coordination lock must not block the caller"
+        assert sleeps == [0.005] * 3
+        assert locks.events.count(("open", ".coordination.lock")) == 4, "one try and three retries"
+        assert not [e for e in locks.events if e[1] == f"{self.SID}.lock"], (
+            "the thread file must never be opened without the coordination lock: "
+            "that is the plain try-lock that made Codex's own acquire fail")
+        assert ("close", ".coordination.lock") in locks.events
+
+    @_needs_os_locks
+    def test_a_busy_coordination_lock_returns_the_last_cached_answer_even_expired(self, locks, monkeypatch):
+        monkeypatch.setattr(data_codex, "_LOCK_TTL", 5.0)
+        _cx_lockfile(locks, self.SID)
+        data_codex._lock_cache.put(self.SID, (time.monotonic() - 600, True))
+        with _cx_hold(locks / ".coordination.lock"), patch.object(data_codex.time, "sleep", lambda s: None):
+            assert data_codex.session_writer_locked(self.SID) is True
+        assert not [e for e in locks.events if e[1] == f"{self.SID}.lock"]
+
+    @_needs_os_locks
+    def test_two_threads_with_a_busy_coordination_file_each_stay_inside_one_retry_budget(self, locks):
+        ids = (_cx_id(51), _cx_id(52))
+        for sid in ids:
+            _cx_lockfile(locks, sid)
+        sleeps, violations, results = [], [], {}
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if data_codex._probe_lock.locked():
+                violations.append("slept while holding the process-wide probe lock")
+
+        def run(sid):
+            results[sid] = data_codex.session_writer_locked(sid)
+
+        with _cx_hold(locks / ".coordination.lock"), patch.object(data_codex.time, "sleep", fake_sleep):
+            threads = [threading.Thread(target=run, args=(s,)) for s in ids]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+            assert not any(t.is_alive() for t in threads)
+        assert results == {ids[0]: False, ids[1]: False}
+        assert sleeps == [0.005] * 6 and violations == []
+
+    def test_a_second_probe_waits_for_the_first_in_this_process(self, locks, monkeypatch):
+        """Two handles of one process contend for the same file, so the probe is
+        serialised process-wide: a thread starting while another probes must not open
+        the coordination file until that probe is done."""
+        ids = (_cx_id(61), _cx_id(62))
+        for sid in ids:
+            _cx_lockfile(locks, sid)
+        real = data_codex.open_shared
+        opened = []
+        gate = threading.Event()
+
+        def gated(p, mode="rb"):
+            if os.path.basename(os.fspath(p)) == ".coordination.lock":
+                opened.append(threading.current_thread().name)
+                if len(opened) == 1:
+                    assert gate.wait(30)
+            return real(p, mode)
+
+        monkeypatch.setattr(data_codex, "open_shared", gated)
+        first = threading.Thread(target=data_codex.session_writer_locked, args=(ids[0],), name="first")
+        second = threading.Thread(target=data_codex.session_writer_locked, args=(ids[1],), name="second")
+        first.start()
+        deadline = time.monotonic() + 10
+        while not opened and time.monotonic() < deadline:
+            time.sleep(0.01)
+        second.start()
+        time.sleep(0.3)
+        assert opened == ["first"], "the second probe started while the first was still running"
+        gate.set()
+        first.join(timeout=30)
+        second.join(timeout=30)
+        assert opened == ["first", "second"]
+
+    def test_two_threads_on_one_id_never_report_a_phantom_lock(self, locks):
+        _cx_lockfile(locks, self.SID)
+        seen = []
+        barrier = threading.Barrier(2)
+
+        def run():
+            barrier.wait(10)
+            seen.extend(data_codex.session_writer_locked(self.SID) for _ in range(150))
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert len(seen) == 300 and set(seen) == {False}
+
+    @_needs_os_locks
+    def test_two_threads_on_one_held_id_both_read_locked(self, locks):
+        path = _cx_lockfile(locks, self.SID)
+        seen = []
+        barrier = threading.Barrier(2)
+
+        def run():
+            barrier.wait(10)
+            seen.extend(data_codex.session_writer_locked(self.SID) for _ in range(60))
+
+        with _cx_hold(path):
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+        assert len(seen) == 120 and set(seen) == {True}
+
+    def test_an_exception_while_probing_releases_both_locks_and_closes_both_handles(self, locks, monkeypatch):
+        _cx_lockfile(locks, self.SID)
+        real = data_codex._lock_byte
+
+        def boom_on_the_thread_file(fh):
+            if fh._name == f"{self.SID}.lock":
+                raise RuntimeError("not an OSError")
+            return real(fh)
+
+        monkeypatch.setattr(data_codex, "_lock_byte", boom_on_the_thread_file)
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert locks.events[-3:] == [("close", f"{self.SID}.lock"),
+                                     ("unlock", ".coordination.lock"), ("close", ".coordination.lock")]
+        assert not data_codex._probe_lock.locked()
+        monkeypatch.setattr(data_codex, "_lock_byte", real)
+        assert data_codex.session_writer_locked(self.SID) is False, "the next probe works"
+
+    @_needs_os_locks
+    def test_after_an_exception_the_next_probe_still_sees_a_held_lock(self, locks, monkeypatch):
+        path = _cx_lockfile(locks, self.SID)
+        real = data_codex._lock_byte
+
+        def boom_on_the_thread_file(fh):
+            if fh._name != ".coordination.lock":
+                raise RuntimeError("not an OSError")
+            return real(fh)
+
+        monkeypatch.setattr(data_codex, "_lock_byte", boom_on_the_thread_file)
+        assert data_codex.session_writer_locked(self.SID) is False
+        monkeypatch.setattr(data_codex, "_lock_byte", real)
+        with _cx_hold(path):
+            assert data_codex.session_writer_locked(self.SID) is True
+        with _cx_hold(locks / ".coordination.lock"):
+            pass
+
+    def test_no_handle_is_left_on_either_lock_file(self, locks):
+        thread_lock = _cx_lockfile(locks, self.SID)
+        coord = locks / ".coordination.lock"
+        assert data_codex.session_writer_locked(self.SID) is False
+        for target in (thread_lock, coord):
+            other = locks / "replacement.tmp"
+            other.write_bytes(b"x")
+            os.replace(other, target)           # fails on Windows while any handle on `target` is open
+        opened = {e[1] for e in locks.events if e[0] == "open"}
+        assert opened == {".coordination.lock", f"{self.SID}.lock"}
+        assert {e for e in locks.events if e[0] == "close"} == {("close", n) for n in opened}
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="msvcrt.locking")
+    def test_windows_lock_errors_are_classified(self, locks, monkeypatch, caplog):
+        import msvcrt
+        _cx_lockfile(locks, self.SID)
+        real = msvcrt.locking
+
+        def scripted(code):
+            state = {"n": 0}
+
+            def locking(fd, mode, nbytes):
+                if mode == msvcrt.LK_NBLCK:
+                    state["n"] += 1
+                    if state["n"] == 2:                 # the second try-lock is the thread file's
+                        raise OSError(code, "scripted")
+                return real(fd, mode, nbytes)
+            return locking
+
+        for code, expected in ((errno.EACCES, True), (errno.EDEADLOCK, True), (errno.EBADF, False),
+                               (errno.EINVAL, False)):
+            monkeypatch.setattr(msvcrt, "locking", scripted(code))
+            with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
+                assert data_codex.session_writer_locked(self.SID) is expected, errno.errorcode[code]
+        assert len([r for r in caplog.records if "writer_lock.lock" in r.getMessage()]) == 1, "logged once"
+
+    @_needs_os_locks
+    def test_an_acquirer_replaying_codexs_acquire_never_fails_against_a_probing_thread(self, locks):
+        """The property D17 exists for: the probe never makes Codex's own acquisition (or
+        its removal of the lock file) fail. A plain try-lock on the thread file, with no
+        coordination lock, made this exact loop fail in 2.4-4.1 % of cycles in Phase 0."""
+        probes = [0]
+        real = data_codex._probe_writer_lock
+
+        def counting(lock_path, coord_path):
+            probes[0] += 1
+            return real(lock_path, coord_path)
+
+        proc = subprocess.Popen([sys.executable, "-c", _CX_LOCK_HELPER, "acquirer", str(locks), self.SID, str(_CX_ACQUIRE_CYCLES), "0.001"],
+                                stdout=subprocess.PIPE, text=True)
+        try:
+            with patch.object(data_codex, "_probe_writer_lock", counting):
+                deadline = time.monotonic() + 240
+                while proc.poll() is None and time.monotonic() < deadline:
+                    data_codex.session_writer_locked(self.SID)
+            out = proc.communicate(timeout=60)[0]
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        report = json.loads(out.strip().splitlines()[-1])
+        assert report == {"failures": 0, "remove_failures": 0}
+        assert probes[0] >= 50, f"too few probes found a lock file to probe, to mean anything: {probes[0]}"
+
+    def test_the_posix_branch_orders_its_locks_and_maps_contention(self, locks, monkeypatch):
+        """The fcntl branch, driven through a fake module on any platform."""
+        script = []            # one outcome (None or an exception) per flock call, in order
+        calls = []
+
+        class FakeFcntl:
+            LOCK_EX, LOCK_NB, LOCK_UN = 2, 4, 8
+
+            @staticmethod
+            def flock(fd, op):
+                calls.append(op)
+                outcome = script.pop(0)
+                if outcome is not None:
+                    raise outcome
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setitem(sys.modules, "fcntl", FakeFcntl)
+        _cx_lockfile(locks, self.SID)
+        ex_nb, un = FakeFcntl.LOCK_EX | FakeFcntl.LOCK_NB, FakeFcntl.LOCK_UN
+
+        # free: coordination, thread (acquired), unlock thread, unlock coordination
+        script[:] = [None, None, None, None]
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert calls == [ex_nb, ex_nb, un, un]
+        # contention on the thread file: BlockingIOError, or EAGAIN / EACCES
+        for contention in (BlockingIOError(errno.EAGAIN, "x"), OSError(errno.EAGAIN, "x"), OSError(errno.EACCES, "x")):
+            calls.clear()
+            script[:] = [None, contention, None]
+            assert data_codex.session_writer_locked(self.SID) is True
+            assert calls == [ex_nb, ex_nb, un], "no unlock for a lock never taken; then the coordination lock"
+        # any other error is not contention
+        for other in (OSError(errno.EBADF, "x"), OSError(errno.ENOTSUP, "x"), OSError(errno.EINVAL, "x")):
+            script[:] = [None, other, None]
+            assert data_codex.session_writer_locked(self.SID) is False
+        # a busy coordination file is retried, and the thread file is never locked
+        calls.clear()
+        locks.events.clear()
+        script[:] = [BlockingIOError(errno.EAGAIN, "x")] * 4
+        with patch.object(data_codex.time, "sleep", lambda s: None):
+            assert data_codex.session_writer_locked(self.SID) is False
+        assert calls == [ex_nb] * 4
+        assert not [e for e in locks.events if e[1] == f"{self.SID}.lock"]
+
+    def test_no_platform_lock_module_is_imported_until_a_probe_needs_one(self):
+        """D23: a top-level `import msvcrt` or `import fcntl` would break import on the
+        other OS. Importing must work with both blocked, and so must a call that never
+        reaches a lock."""
+        src = Path(data_codex.__file__).resolve().parents[1]
+        code = ("import sys, subprocess\n"   # the stdlib's own platform imports come first
+                "sys.modules['msvcrt'] = None\n"
+                "sys.modules['fcntl'] = None\n"
+                "import power_atlas.data_codex as d\n"
+                "assert d.session_writer_locked('00000000-1111-4222-8333-000000000000') is False\n"
+                "print('ok')\n")
+        env = dict(os.environ, PYTHONPATH=str(src), CODEX_HOME=tempfile.mkdtemp())
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
+        assert out.stdout.strip() == "ok", out.stderr[-2000:]
+
+    def test_a_platform_lock_module_that_cannot_be_imported_is_false_not_an_error(self, locks, monkeypatch):
+        _cx_lockfile(locks, self.SID)
+        monkeypatch.setitem(sys.modules, "msvcrt", None)
+        monkeypatch.setitem(sys.modules, "fcntl", None)
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert locks.events[-1] == ("close", ".coordination.lock")

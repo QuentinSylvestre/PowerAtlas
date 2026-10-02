@@ -45,7 +45,7 @@ from .config import (load_config, save_config, ConfigUnreadableError,
                      ensure_local_secret, hold_local_secret_in_memory,
                      local_secret_status, rotate_local_secret,
                      ACP_PERMISSION_MODES)
-from . import agent_profile, autostart, data, icons, launcher, notifications, presence
+from . import agent_profile, autostart, data, data_codex, icons, launcher, notifications, presence
 from . import overview
 from . import permission_rows
 from .status_classifier import get_semantic_status, SemanticStatus
@@ -283,9 +283,30 @@ def _session_is_live(snapshot, session, provider: str) -> bool:
     if jsonl_path is None:
         return False
     try:
+        if provider == "codex":
+            # Windows freezes the mtime of a rollout Codex holds open, so recency is
+            # the later of the mtime and the last record's timestamp (D16), and a
+            # timestamp from the future never counts.
+            # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+            return (_time.time() - data_codex.activity_epoch(jsonl_path, os.stat(jsonl_path))) <= 300
         return (_time.time() - os.path.getmtime(jsonl_path)) <= 300
     except OSError:
         return False
+
+
+def _mark_resume_locked(row: dict, session, provider: str) -> None:
+    """Add ``resume_locked: true`` to a Codex row whose thread's writer lock is held.
+
+    The key is omitted otherwise, and never set for another provider. It is a field of
+    its own, never ``availability``: ``locked`` there disables the whole row, blocks its
+    transcript and moves it to the "Locked elsewhere" bucket, but a held Codex thread
+    can still be read. Only the Resume button reads it (Codex itself refuses to resume
+    a thread with an active writer). Both row builders run under ``asyncio.to_thread``,
+    so the probe never runs on the event loop.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+    """
+    if provider == "codex" and data_codex.session_writer_locked(session.session_id):
+        row["resume_locked"] = True
 
 
 def _resolved_session_status(snapshot, provider: str, session_id: str,
@@ -3027,6 +3048,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             # binary alive/dead signal, just not the richer classified
             # verdict `status` carries for held rows.
             d["live"] = _session_is_live(snapshot, s, prov_name)
+            _mark_resume_locked(d, s, prov_name)
         return d
 
     groups = []
@@ -3190,6 +3212,7 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
             d["created_at"] = s.created_at  # see _acp_listing's _row_dict
             # See _acp_listing's identical field for what this is and why.
             d["live"] = _session_is_live(snapshot, s, prov_name)
+            _mark_resume_locked(d, s, prov_name)
         return d
 
     return {

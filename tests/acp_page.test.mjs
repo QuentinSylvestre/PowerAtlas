@@ -18955,6 +18955,100 @@ check("dashboard rail: a Codex row has a Resume button, kiro-ide keeps its own t
   }
 });
 
+// 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3: a Codex row
+// whose thread's writer lock is held (`resume_locked`) loses its Resume button and
+// nothing else.
+check("dashboard rail: a Codex row with resume_locked has no Resume button but stays an enabled, clickable row", () => {
+  const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
+  const resumeBtns = (row) => row.descendants()
+    .filter((n) => String(n.className).split(/\s+/).includes("acp-rail-ghost-primary"));
+  const id = "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40";
+  const opened = [];
+  const resumed = [];
+  const { box } = runDashSentinel(slice, true, {
+    openSessionTranscript: (row, session) => opened.push(session.id),
+    resumeSession: (b) => resumed.push(b),
+  });
+  const held = box.dashRailRowNode({ id, provider: "codex", availability: "available", resume_locked: true }, true, null);
+  const free = box.dashRailRowNode({ id, provider: "codex", availability: "available" }, true, null);
+  assertEqual(resumeBtns(held).length, 0, "a lock-held Codex row must not offer Resume");
+  assertEqual(resumeBtns(free).length, 1, "a Codex row without the field keeps its Resume button");
+  const rowOf = (wrap) => wrap.querySelector(".acp-rail-row");
+  assertEqual(rowOf(held).disabled, rowOf(free).disabled, "the held row's disabled state is the free row's");
+  assert(!rowOf(held).disabled, "the held row stays enabled");
+  assertEqual(rowOf(held).className, rowOf(free).className, "no state class change for a lock-held row");
+  assert(String(rowOf(held).className).includes("acp-rail-row-available"), "it is still an available row");
+  assertEqual(rowOf(held).title, rowOf(free).title, "the row's own hover text is unchanged");
+  rowOf(held).dispatch("click");
+  assertEqual(opened.length, 1, "clicking the held row still opens its transcript");
+  assertEqual(resumed.length, 0, "and never resumes");
+  // The pin button and the row menu are untouched.
+  assertEqual(held.descendants().filter((n) => String(n.className).includes("acp-rail-pin-btn")).length, 1);
+  assertEqual(hasText(held, "Copy session id"), true, "the row menu is intact");
+});
+
+check("dashboard rail: resume_locked changes no status bucket and no other provider's Resume button", () => {
+  const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
+  const resumeCount = (row) => row.descendants()
+    .filter((n) => String(n.className).split(/\s+/).includes("acp-rail-ghost-primary")).length;
+  const { box } = runDashSentinel(slice, true);
+  // Another provider never receives the field from the server, but a stray one is read the same way.
+  for (const provider of ["claude-code", "kiro-cli-v3", "kiro-ide", "codex"]) {
+    const row = box.dashRailRowNode({ id: "s1", provider, availability: "available", resume_locked: true }, true, null);
+    assertEqual(resumeCount(row), 0, `${provider} with resume_locked loses only its Resume button`);
+  }
+  // `false` and `undefined` (the field is omitted when the lock is free) both keep the button.
+  for (const resume_locked of [false, undefined, 0, null]) {
+    const row = box.dashRailRowNode({ id: "s1", provider: "codex", availability: "available", resume_locked }, true, null);
+    assertEqual(resumeCount(row), 1, `resume_locked=${String(resume_locked)} keeps Resume`);
+  }
+  // The status bucket is a function of availability and status alone: build the real
+  // dashStatusBucketKey from index.html and compare rows with and without the field.
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const from = src.indexOf("var DASH_RAIL_AVAILABILITY = Object.create(null);");
+  const to = src.indexOf("// ---- fetch + status line", from);
+  assert(from >= 0 && to > from, "the bucket helpers moved in index.html");
+  const bucket = vm.runInNewContext(src.slice(from, to) + "\ndashStatusBucketKey;", {});
+  for (const availability of ["available", "held", "locked", undefined]) {
+    for (const status of ["", "thinking", "waiting", "errored"]) {
+      const without = bucket({ provider: "codex", availability, status });
+      const withField = bucket({ provider: "codex", availability, status, resume_locked: true });
+      assertEqual(withField, without, `bucket for ${availability}/${status}`);
+    }
+  }
+  assertEqual(bucket({ provider: "codex", availability: "available", resume_locked: true }), "available");
+  // The server never sends availability "locked" for a held Codex thread (it sends the field
+  // instead); a source check that dashRailRowNode reads the field only in the Resume condition.
+  const rowFn = src.slice(src.indexOf("function dashRailRowNode"), src.indexOf("// ---- group/day/status headers"));
+  assertEqual((rowFn.match(/resume_locked/g) || []).length, 2, "resume_locked is read in one place (plus its comment)");
+  assert(/!session\.resume_locked\s*&&/.test(rowFn), "the Resume condition gates on !session.resume_locked");
+  assert(!/disabled\s*=\s*[^;]*resume_locked|resume_locked[^;\n]*disabled/.test(rowFn), "resume_locked must not disable the row");
+});
+
+check("dashboard rail: the 60 s refresh picks up a changed resume_locked, in both directions, and nothing else changes", () => {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const from = src.indexOf("function dashRailIndex(){");
+  const to = src.indexOf("function dashRailRefresh(){", from);
+  assert(from >= 0 && to > from, "the refresh helpers moved in index.html");
+  const stale = { id: "c1", provider: "codex", availability: "available", status: "", live: false, title: "t" };
+  const box = {
+    dashRailGroups: [{ sessions: [stale] }], dashRailFlat: [], dashRailPinned: [],
+    dashRailAvailability: (v) => v || "available",
+    dashRailRowStatus: (v) => v || "working",
+    dashRailTitleText: (s) => s.title,
+  };
+  vm.createContext(box);
+  vm.runInContext(src.slice(from, to), box);
+  const fresh = (extra) => ({ sessions: [{ id: "c1", provider: "codex", availability: "available", status: "", live: false, title: "t", ...extra }] });
+  assertEqual(box.dashRailRefreshStates(fresh({})), false, "an identical row is no change");
+  assertEqual(box.dashRailRefreshStates(fresh({ resume_locked: true })), true, "a lock taken is a change");
+  assertEqual(stale.resume_locked, true, "and the stored row follows it");
+  assertEqual(box.dashRailRefreshStates(fresh({ resume_locked: true })), false, "the same lock again is no change");
+  assertEqual(box.dashRailRefreshStates(fresh({})), true, "a lock released (the field omitted) is a change");
+  assertEqual(!!stale.resume_locked, false, "and the stored row follows it back");
+  assertEqual(box.dashRailRefreshStates(fresh({ resume_locked: false })), false, "false and omitted are the same state");
+});
+
 check("dashboard: the provider maps behind the launcher settings and the New menu list Codex as a terminal provider", () => {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
   const display = src.match(/var _providerBinaryDisplay=\{([^}]*)\};/);
