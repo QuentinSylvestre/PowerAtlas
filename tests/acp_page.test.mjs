@@ -7319,11 +7319,12 @@ check("the group tally counts `finished` apart from completed and failed", async
   assert(headers[1].endsWith(" · completed, failed"), "unchanged tally wording: " + headers[1]);
 });
 
-check("style.css gives `finished` a dim rule that is neither green nor red (no CSS engine here: the browser check owns the rendered colour)", () => {
+check("style.css gives `finished` a muted rule that is neither green nor red (no CSS engine here: the browser check owns the rendered colour)", () => {
   const css = fs.readFileSync(STYLESHEET, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const rule = css.match(/\.acp-tool-status\[data-status="finished"\]\s*\{([^}]*)\}/);
   assert(rule, "no `.acp-tool-status[data-status=\"finished\"]` rule in style.css");
-  assert(/color:\s*var\(--text-dim\)/.test(rule[1]), "finished should use the dim neutral: " + rule[1]);
+  // The `finished` badge uses the muted colour (user decision of 2026-10-01 in the 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2 review): --text-dim is about 2.7:1 on --surface.
+  assert(/color:\s*var\(--text-muted\)/.test(rule[1]), "finished should use the muted neutral: " + rule[1]);
   assert(!/--success|74,\s*222,\s*128|#4ade80|#ef4444|239,\s*68,\s*68/i.test(rule[1]),
     "finished must not borrow the success green or the failed red: " + rule[1]);
 });

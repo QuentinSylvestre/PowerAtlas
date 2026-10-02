@@ -1667,8 +1667,8 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .acp-tool-status[data-status="in_progress"] { color: #3b82f6; border-color: rgba(59, 130, 246, 0.45); animation: status-pulse 2s ease-in-out infinite; }
 .acp-tool-status[data-status="completed"] { color: var(--success); border-color: rgba(74, 222, 128, 0.4); }
 .acp-tool-status[data-status="failed"] { color: #ef4444; border-color: rgba(239, 68, 68, 0.45); }
-/* 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: `finished` is the Codex result with no recorded outcome (see TOOL_STATUS_LABEL in transcript-renderer.js). Dim neutral like `pending`, and never green: it must not read as a success claim. */
-.acp-tool-status[data-status="finished"] { color: var(--text-dim); }
+/* 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: `finished` is the Codex result with no recorded outcome (see TOOL_STATUS_LABEL in transcript-renderer.js). Muted neutral, the base badge colour (not the dimmer `pending` grey, which is too faint for a result), and never green: it must not read as a success claim. */
+.acp-tool-status[data-status="finished"] { color: var(--text-muted); }
 @media (prefers-reduced-motion: reduce) { .acp-tool-status[data-status="in_progress"] { animation: none; } }
 .acp-tool-toggle {
   background: none;
