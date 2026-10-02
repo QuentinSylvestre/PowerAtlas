@@ -17926,8 +17926,8 @@ check("dashboard overview usage: week, daily bars, tools, context, models and to
 });
 
 // 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4: Codex in the usage section.
-const OV_CODEX_TOKENS = { input: 2166246, output: 216916, cache_read: 38767744, cache_creation: 0,
-                          cache_hit_ratio: 0.9471 };
+const OV_CODEX_TOKENS = { input: 2200000, output: 210000, cache_read: 38000000, cache_creation: 0,
+                          cache_hit_ratio: 0.9453 };
 
 function ovCodexUsage(over = {}) {
   return ovUsage(Object.assign({
@@ -17979,7 +17979,7 @@ check("dashboard overview usage: the Tokens area shows a Claude Code block and a
   assert(labels.indexOf("TokensClaude Code only") < labels.indexOf("TokensCodex"), "Claude first, then Codex");
   const lines = b.querySelectorAll(".dash-ov-usage-line").map((l) => l.textContent);
   assertEqual(lines[1], "Input 1.5k · Output 2.0M · Cache read 9.0M · Cache write 500.0k · Cache hit 85%");
-  assertEqual(lines[2], "Input 2.2M · Output 216.9k · Cache read 38.8M · Cache hit 95%");
+  assertEqual(lines[2], "Input 2.2M · Output 210.0k · Cache read 38.0M · Cache hit 95%");
   assert(!lines[2].includes("Cache write"), "Codex records no cache write");
   // Both Codex clauses, and the Claude clause, are in the one note.
   const note = b.querySelector(".dash-ov-usage-note").textContent;
