@@ -122,3 +122,15 @@ re-litigate a settled word. General programming vocabulary does not belong here.
   file-tool writes always ask even when writing files is allowed, and each of which can be switched
   to block outright (`protected_block`). **Not "guarded" or "sensitive paths"**; and not the same as
   Always blocked, which applies in every mode and never asks.
+- **lock owner** — the Codex terminal process that holds a thread's writer lock, found by listing the
+  processes that have the lock file open (Windows Restart Manager) and classifying each against the
+  presence snapshot. **Not "lock holder"**: the holders are the raw list, which also names helper and
+  refused `codex resume` processes; the owner is the verdict derived from it (`terminal`, `other` or
+  `unknown`). Settled 2026-10-02, `plans/261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB.md`.
+- **state database** — Codex's `state_<N>.sqlite` in the Codex home, read only through
+  `data_codex_state` and only as optional enrichment; the rollout scan stays authoritative. **Not
+  "catalogue" or "index"**: the older `data_codex.py` docstring calls it the SQLite catalogue.
+- **sub-agent thread** — a Codex thread whose `source` starts `{"subagent"`; its kinds are
+  `thread_spawn` (spawned by another thread) and `guardian` (a review thread). **Not "child session"**.
+  Counted by lifetime total per thread, as an upper bound that includes context inherited at spawn.
+- **guardian review thread** — a sub-agent thread of kind `guardian`. **Not "reviewer session"**.
