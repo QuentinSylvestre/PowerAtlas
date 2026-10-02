@@ -5278,7 +5278,7 @@ class TestAcpSessionIdValidation:
         assert not acp_mod._valid_session_id(sid)
 
     @pytest.mark.parametrize("sid", [
-        "001b4195-ee19-4633-b1b2-488574cad044",
+        "11111111-2222-4333-8444-555555555555",
         "sess_phase4",
         "x" * 128,
     ])
