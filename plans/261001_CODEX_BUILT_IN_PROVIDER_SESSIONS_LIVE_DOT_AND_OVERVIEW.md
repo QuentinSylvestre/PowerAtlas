@@ -941,6 +941,12 @@ Documentation sub-agent. No source, test or template file was touched; the docum
 
 **Bare phase-comment check.** `git diff 8abd4a3..HEAD -U0 -- src tests`, added lines only: 104 added lines mention `Phase [0-5]` (case-insensitive: the same 104), and all 104 carry `261001_CODEX` on the same line. No bare `Phase [0-5]` comment: 0 hits. A line that cites a decision id without the slug is not counted.
 
+**Cleanup ledger results (2026-10-02, after the user's approval of the general cleanup).**
+- Item 2 (stale lock files): none existed. `thread-writer-locks/` holds only Codex's own `.coordination.lock`, which is kept.
+- Item 3 (QA throwaway sessions): none other than item 1; all live QA appended turns to that one session.
+- Item 4 (scratch folders, scripts, evidence): the session scratchpad was emptied (37 folders, about 2.8 GB, including both scratch working folders and the QA screenshots); no junction or symlink was in it. No `codex.exe` or headless browser from QA was left running.
+- Item 1 (the exploration-time probe session: one rollout, 1.8 MB, one `session_index.jsonl` line, no other file named for it): not removed yet. It deletes from the user's own `~/.codex`, so it waits for the user's explicit yes. It is still the only artifact left.
+
 ## Follow-up Work (Deferred)
 
 1. **Lock-owner lookup for a sharper live dot.** Identify which process holds a thread's writer lock and call only terminal owners live; deferred because the Claude rule was chosen (D5). Reopen if idle-session or desktop-held-thread noise is reported, or if desktop-held sessions need a dot.
