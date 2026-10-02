@@ -96,9 +96,9 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 
 ### JS-side display maps must mirror Python-side dicts for provider metadata
 
-**Why**: The Python `_PROVIDER_BINARY_DISPLAY` dict had the correct `kiro-ide: "kiro"` entry, but the JS `_providerBinaryDisplay` object in `index.html` was not updated — causing the provider settings modal to show `"kiro-ide"` as the command. Similarly, `_providerTerminal` was missing, showing "Open in terminal: yes" for a non-terminal provider.
-**How to apply**: When adding a new provider, update both the Python dicts in `web.py`/`launcher.py` AND the JS objects in `index.html` (`_providerBinaryDisplay`, `_providerTerminal`). These are duplicated because the modal JS runs client-side.
-**Source**: `plans/done/260706-1653_KIRO_IDE_PROVIDER.md` — post-implementation UI fixes | **Verified**: 2026-07-06
+**Why**: Provider metadata is duplicated across Python dicts and client-side JS, and adding Codex (2026-10) showed a provider id is spelled out in about 35 places, so a missed site (the kiro-ide modal that showed the wrong command) goes unnoticed.
+**How to apply**: When adding a provider, grep the string ids of an existing provider (`kiro-cli-v3`, `claude-code`) across `src/` to list every site, then update both the Python dicts (`web.py`, `launcher.py`) and the JS objects in `index.html` (`_providerBinaryDisplay`, `_providerTerminal`).
+**Source**: `plans/done/260706-1653_KIRO_IDE_PROVIDER.md` — post-implementation UI fixes + `plans/done/261002-1113_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW.md` § Follow-up Work (Deferred), item 16 | **Verified**: 2026-07-06
 
 
 ### Workspace grouping must deduplicate providers and sort deterministically
@@ -255,6 +255,12 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: Edit `src/power_atlas/templates/*.html`, `static/*.css` and `web.py` with the Edit tool. If a scripted edit is unavoidable, check the file's line endings first and grep the result for NUL/control bytes afterwards.
 **Source**: claude-code sessions 47de9653-a4aa-4b70-96fa-f791927ffe5c L905-L983 and e3292686-7c13-4ec6-973e-356f71d24205 L475, L585 | **Verified**: 2026-09-28 (human:quentin)
 **Evidence-quote**: "`web.py` uses Windows line endings, so my script's text didn't match. Switching to the Edit tool."
+
+### This repository is public — plans, docs, tests and commit messages carry no real session ids, home paths or user names
+
+**Why**: A real Codex session id and lock-file names sat in a committed plan during the Codex work, were caught only by a security review (a Medium finding), and the commit was already on the public remote.
+**How to apply**: Build fixtures from key-path skeletons with synthetic values, and name a real artifact by how to find it (a cwd marker or folder suffix), never by id, path or user name; a memory entry's `Source` anchor is the one sanctioned place for a session id.
+**Source**: `plans/done/261002-1113_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW.md` § Review Log, Plan Review, row 19 | **Verified**: 2026-10-02 (session, anchor-reopen)
 
 ## Feedback
 
