@@ -438,6 +438,17 @@ _TOOL_ARG_MAX = 80
 _TAIL_MEMO_MAX = 4 * LIVE_MAX_TILES
 _tail_memo: OrderedDict[str, tuple[int, int, list]] = OrderedDict()
 _tail_memo_lock = threading.Lock()
+# A transcript whose tail could not be read (a share-none hold by antivirus or a backup tool on
+# a Codex rollout, say) is remembered per path as `(mtime_ns, size, tried_at, warned_at)`, in the
+# same bounded least-recently-used form and under the same lock. The unchanged file is not read
+# again for `_TAIL_RETRY_SECONDS` (a hold usually lets go without touching the file, so it is
+# retried, but not on every 2 s poll), and the warning is logged once per path per that time
+# however often the file changes: 1,000 polls gave 1,000 lines before. Path only, never content.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+_TAIL_RETRY_SECONDS = 60.0
+_tail_failures: OrderedDict[str, tuple[int, int, float, float]] = OrderedDict()
+# The clock the retry and the warning throttle read, a seam so a test can move time.
+_tail_clock = time.monotonic
 
 
 class LiveDeps(NamedTuple):
@@ -578,7 +589,14 @@ def _codex_events(obj: dict) -> list[dict]:
     tool's input); the matching `*_output` gives a result event whose `ok` is
     the tool's own exit code, and none when it records no exit code (an
     outcome is never guessed). Every other record gives `[]`.
-    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+
+    Deliberately narrower than the other two readers of this record format
+    (usage's `_parse_codex_usage`, the transcript's `data_codex._transcript_events`):
+    this reader is stateless, one record at a time, so it cannot know that an
+    output belongs to a call named `exec` and ignores the `exec` outcome markers
+    that they read. A tile therefore shows no result for a finished `exec` call.
+    `test_the_tile_usage_and_transcript_readers_agree_on_one_record_shape`
+    pins the difference. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
     """
     from . import data_codex
 
@@ -698,8 +716,11 @@ def tail_events(path, provider: str, n: int = TAIL_EVENTS, st=None) -> list[dict
     memo of at most `_TAIL_MEMO_MAX` paths. `st`, when given, is a `stat` of
     `path` the caller already took this poll, reused instead of a second one.
     A missing or unreadable file gives `[]`; a failure is logged with the path
-    only, never content. A line that cannot be read as an event is skipped and
-    the result is still memoised (`_line_events`).
+    only, never content, at most once per path per `_TAIL_RETRY_SECONDS`, and
+    the unchanged file is not read again within that time (`_tail_failures`).
+    A line that cannot be read as an event is skipped and the result is still
+    memoised (`_line_events`).
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
     """
     path = Path(path)
     key = str(path)
@@ -714,12 +735,27 @@ def tail_events(path, provider: str, n: int = TAIL_EVENTS, st=None) -> list[dict
             _tail_memo.move_to_end(key)
     if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
         return list(hit[2])
+    with _tail_memo_lock:
+        failed = _tail_failures.get(key)
+    if (failed is not None and failed[0] == st.st_mtime_ns and failed[1] == st.st_size
+            and 0 <= _tail_clock() - failed[2] < _TAIL_RETRY_SECONDS):
+        return []
     try:
         events = _parse_tail(path, st.st_size, provider, n)
     except (OSError, ValueError):
-        log.warning("Overview: could not read transcript tail %s", key)
+        now = _tail_clock()
+        with _tail_memo_lock:
+            previous = _tail_failures.get(key)
+            warn = previous is None or not 0 <= now - previous[3] < _TAIL_RETRY_SECONDS
+            _tail_failures[key] = (st.st_mtime_ns, st.st_size, now, now if warn else previous[3])
+            _tail_failures.move_to_end(key)
+            while len(_tail_failures) > _TAIL_MEMO_MAX:
+                _tail_failures.popitem(last=False)
+        if warn:
+            log.warning("Overview: could not read transcript tail %s", key)
         return []
     with _tail_memo_lock:
+        _tail_failures.pop(key, None)
         _tail_memo[key] = (st.st_mtime_ns, st.st_size, events)
         _tail_memo.move_to_end(key)
         while len(_tail_memo) > _TAIL_MEMO_MAX:
@@ -1146,6 +1182,13 @@ CODEX_DURATION_CAP_SECONDS = 24 * 3600
 # store has no delta that differs from the event's own last except in the one
 # rollout that interleaves two cumulative series.
 _CODEX_RECENT_EVENTS = 8
+# A Codex tool name, a `turn_context` model and a `session_meta` cwd reach the page through the
+# usage summary, from a file an agent writes: each is cut to this many characters when the file
+# is parsed (a name or model the way a tile's tool name is, `_clip`; a cwd by `_trim`, which keeps
+# its whitespace, so a workspace the rail hides still matches). 260 is a Windows MAX_PATH.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+_CODEX_NAME_MAX = 80
+_CODEX_CWD_MAX = 260
 USAGE_REUSE_SECONDS = 30.0
 CONTEXT_PRESSURE_PERCENT = 80.0
 _USAGE_TOP_WORKSPACES = 8
@@ -1214,6 +1257,15 @@ _usage_bg_lock = threading.Lock()
 _USAGE_WORKER = True
 # The running worker's process, if any (tests poll it).
 _usage_worker_proc: list = [None]
+# A child that sends no record for this long is stuck (a rollout that will not open, a file of
+# many gigabytes): `_UsageWorker.wait_stage` kills it and the pass ends `error`, so the page's
+# 60 s retry applies. Before it, a stuck child held the state at `warming` for every provider and
+# `usage_payload` never started another pass. The longest single file measured was 361 MB at
+# 2.7 s, so 120 s is 44 times that. A seam, so a test can shorten it.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+CHILD_STALL_SECONDS = 120.0
+# The clock that watchdog reads, a seam so a test can move time.
+_stall_clock = time.monotonic
 # The file summary's format, sent to the worker and echoed back by it: bump it
 # whenever a parser's output changes shape, so a child running newer code from
 # disk than this server loaded is ignored rather than mixed into the memo.
@@ -1223,14 +1275,20 @@ _usage_worker_proc: list = [None]
 # exact Codex duration above 24 h falls back to the timestamps.
 # 4: Codex tokens are each event's own `last_token_usage` (rule L,
 # `_CodexTokenCounter`), replacing the growth-versus-baseline stream rule of 3.
+# 5: a Codex tool name, model and cwd are cut to `_CODEX_NAME_MAX` / `_CODEX_CWD_MAX`.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
-_USAGE_SCHEMA = 4
+_USAGE_SCHEMA = 5
 # The keys `usage_summary` reads from a file summary.
 _SUMMARY_KEYS = frozenset({"provider", "session_id", "cwd", "model", "subagent", "days"})
 
 
 class _UsageStopped(Exception):
     """A request's refresh stopped at shutdown; nothing is cached."""
+
+
+class _UsageWorkerStalled(Exception):
+    """The worker child sent nothing for `CHILD_STALL_SECONDS` and was killed; the warm pass
+    ends `error`. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4"""
 
 
 def _usage_roots() -> tuple[Path, Path, Path]:
@@ -1703,13 +1761,15 @@ def _parse_codex_usage(path: Path) -> dict:
                 if otype == "turn_context":
                     model = payload.get("model")
                     if isinstance(model, str) and model and not model.startswith("<"):
+                        model = _clip(model, _CODEX_NAME_MAX)
                         models[model] = models.get(model, 0) + 1
                 elif otype == "response_item":
                     if ptype in ("function_call", "custom_tool_call"):
                         day = day_of(epoch)
                         day["active"] = True
                         name = payload.get("name")
-                        if isinstance(name, str) and name:
+                        name = _clip(name, _CODEX_NAME_MAX) if isinstance(name, str) else ""
+                        if name:
                             _tool_slot(day, name)["calls"] += 1
                             call_id = payload.get("call_id")
                             if isinstance(call_id, str) and call_id:
@@ -1747,7 +1807,7 @@ def _parse_codex_usage(path: Path) -> dict:
                 continue
     model = max(sorted(models), key=lambda m: models[m]) if models else None
     return {"provider": _CODEX, "session_id": sid if isinstance(sid, str) and sid else stem,
-            "cwd": cwd if isinstance(cwd, str) else "", "model": model,
+            "cwd": _trim(cwd, _CODEX_CWD_MAX) if isinstance(cwd, str) else "", "model": model,
             "subagent": False, "days": days}
 
 
@@ -1836,21 +1896,29 @@ def _window(now: float) -> tuple[list[str], float]:
     return days, start
 
 
-def _usage_files(since: float, subagents: bool = True) -> list[tuple[Path, str, object]]:
+def _usage_files(since: float, subagents: bool = True,
+                 stop_event=None) -> list[tuple[Path, str, object]]:
     """`(path, provider, stat)` for each transcript modified at or after
     `since`: kiro-cli v3 `<root>/<hash>/sess_*/messages.jsonl`, Claude Code
     `<root>/<project>/<uuid>.jsonl`, and, unless `subagents` is False, Claude
     Code sub-agent transcripts `<root>/<project>/<uuid>/subagents/*.jsonl`
     (tagged `_CLAUDE_SUB`).
 
-    Codex rollouts `<root>/YYYY/MM/DD/rollout-*.jsonl` follow, in a `try` of
-    their own so a Codex failure cannot fail the other providers' pass. A
-    sub-agent rollout is dropped (D7), by the first-line verdict that
-    discovery caches. A rollout is in the window when its mtime is, or else
-    when the timestamp of its last record is (Windows freezes the mtime of a
-    rollout Codex holds open); that tail read happens only for a top-level
-    file whose mtime is outside the window, and is cached by `(mtime_ns,
-    size)`. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4"""
+    Codex rollouts follow, in a `try` of their own so a Codex failure cannot
+    fail the other providers' pass. They are `data_codex.canonical_rollouts()`,
+    the very set the session listing shows (one file per thread id, name and
+    `session_meta` agreeing, no symlink, no sub-agent rollout: D7), never a
+    glob of `rollout-*.jsonl`, which counts a stray copy, a duplicate-id file
+    or a symlink as a session of its own. The adapter's store index sizes its
+    own caches. A rollout is in the window when its mtime is, or else when
+    the timestamp of its last record is (Windows freezes the mtime of a
+    rollout Codex holds open); that tail read happens only for a file whose
+    mtime is outside the window, and is cached by `(mtime_ns, size)`. The
+    window rule reads a fresh `stat` of the path, never the index's, which
+    can be 5 s old. `stop_event`, when set, ends the Codex scan at once with
+    what it has found (a store of thousands of rollouts would otherwise
+    delay shutdown); the caller treats that pass as incomplete.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4"""
     from . import data_claude, data_codex
 
     v3_root, claude_root, _ide_root = _usage_roots()
@@ -1872,25 +1940,15 @@ def _usage_files(since: float, subagents: bool = True) -> list[tuple[Path, str, 
                 continue
             if st.st_mtime >= since:
                 found.append((path, provider, st))
-    codex_root = _codex_usage_root()
-    rollouts: list[Path] = []
-    try:
-        for path in codex_root.glob("*/*/*/rollout-*.jsonl"):
-            rollouts.append(path)       # a listing that fails halfway keeps what it found
-    except OSError:
-        log.warning("Overview: could not list the Codex rollouts under %s", codex_root)
-    # The adapter's caches are sized at its own store build; without one (this pass may
-    # run alone in the worker) a store above their size would thrash
-    # (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4).
-    data_codex.fit_caches(len(rollouts))
     now = time.time()
     try:
-        for path in rollouts:
+        for canonical in data_codex.canonical_rollouts():
+            if stop_event is not None and stop_event.is_set():
+                break
+            path = Path(canonical.path)
             try:
                 st = path.stat()
             except OSError:
-                continue
-            if data_codex.is_subagent_rollout(path, st):
                 continue
             if st.st_mtime >= since:
                 found.append((path, _CODEX, st))
@@ -1899,7 +1957,7 @@ def _usage_files(since: float, subagents: bool = True) -> list[tuple[Path, str, 
             if since <= stamp <= now + data_codex.FUTURE_SKEW:   # a stamp from the future is a clock error (D16)
                 found.append((path, _CODEX, st))
     except OSError:
-        log.warning("Overview: could not list the Codex rollouts under %s", codex_root)
+        log.warning("Overview: could not list the Codex rollouts under %s", _codex_usage_root())
     return found
 
 
@@ -1915,7 +1973,11 @@ def _refresh(now: float, stop_event=None, subagents: bool = True) -> tuple[list[
     reparsed = 0
     keep: set[str] = set()
     complete = True
-    for path, provider, st in _usage_files(since, subagents):
+    files = _usage_files(since, subagents, stop_event)
+    if stop_event is not None and stop_event.is_set():
+        # The Codex scan may have stopped early: nothing is parsed, nothing evicted.
+        return summaries, reparsed, False
+    for path, provider, st in files:
         if stop_event is not None and stop_event.is_set():
             complete = False
             break
@@ -2306,7 +2368,15 @@ class _UsageWorker:
         stage `index`. False when `stop_event` is set first, or the child's
         output ended without reaching it; once it has ended, every later call
         returns False at once. A child that reports another `_USAGE_SCHEMA`
-        is treated as ended."""
+        is treated as ended.
+
+        Raises `_UsageWorkerStalled`, after killing the child, when no record
+        (of any kind) has arrived for `CHILD_STALL_SECONDS`; the clock starts
+        at each call, so time the pass spent parsing in-thread between two
+        stages is not held against the child. The summaries stored before
+        that stay in the memo.
+        261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4"""
+        last_record = _stall_clock()
         while True:
             if self._ended:
                 return False
@@ -2315,7 +2385,15 @@ class _UsageWorker:
             try:
                 line = self._lines.get(timeout=self.POLL_SECONDS)
             except self._queue_empty:
+                if _stall_clock() - last_record >= CHILD_STALL_SECONDS:
+                    self._ended = True
+                    try:
+                        self._proc.kill()
+                    except OSError:
+                        pass
+                    raise _UsageWorkerStalled()
                 continue
+            last_record = _stall_clock()
             if line is None:
                 self._ended = True
                 code, stderr = self._exit_details()
@@ -2384,7 +2462,7 @@ def _start_usage_worker(now: float):
     try:
         _days, since = _window(now)
         stages: list[list[tuple[str, str]]] = [[], []]
-        for path, provider, st in _usage_files(since):
+        for path, provider, st in _usage_files(since, stop_event=_usage_stop):
             key = str(path)
             with _usage_memo_lock:
                 hit = _usage_memo.get(key)
@@ -2425,7 +2503,11 @@ def warm_usage(stop_event) -> None:
     file that fails is skipped (`_refresh`); a failure of the pass as a whole
     sets `error`. A child whose output ends early (it crashed, was killed, or
     could not start its interpreter) is not waited for again: the pass parses
-    the rest in-thread and still ends `ready`.
+    the rest in-thread and still ends `ready`. A child that is alive but sends
+    nothing for `CHILD_STALL_SECONDS` is killed and the pass ends `error` (an
+    in-thread parse would meet the same stuck file); what the child delivered
+    stays in the memo, and the page's next 60 s poll starts a new pass.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
 
     Each pass logs one INFO line: its final state, how long each stage took
     and how many files the child and this thread parsed.
@@ -2452,6 +2534,9 @@ def warm_usage(stop_event) -> None:
             if complete:
                 stage2_s = time.monotonic() - started - stage1_s
         state = "ready" if complete else "cold"
+    except _UsageWorkerStalled:
+        log.warning("Overview: the usage worker sent nothing for %s s and was killed; "
+                    "the pass ends in error and is retried", CHILD_STALL_SECONDS)
     except Exception:
         log.exception("Overview: the usage warm pass failed")
     finally:

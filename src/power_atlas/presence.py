@@ -1,12 +1,15 @@
 """Detect which discovered sessions are currently live in a running process.
 
-A session is "live" when a provider CLI process (Claude Code / Kiro CLI) is
-running that resumed it (its session id appears in the process command line).
-This is a best-effort, read-only scan of the process table via ``psutil``.
+A session is "live" when a provider CLI process (Claude Code / Kiro CLI /
+Codex) is running that resumed it (its session id appears in the process
+command line). This is a best-effort, read-only scan of the process table via
+``psutil``.
 
 Correlation is intentionally **session-id based**: a session gets marked live
 only when its exact id is found in a running command line (e.g.
-``claude --resume <id>`` / ``kiro-cli chat --resume-id <id>``). This avoids
+``claude --resume <id>`` / ``kiro-cli chat --resume-id <id>`` /
+``codex resume <id>``; only ``resume`` carries a Codex thread id, see
+``_PROVIDER_SPECS``). This avoids
 false positives where one live agent in a folder would otherwise light up every
 historical session in that folder. The trade-off is that a *freshly started*
 session (no ``--resume`` on argv, so no id) is not detected at the row level —

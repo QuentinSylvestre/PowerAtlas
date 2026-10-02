@@ -3236,8 +3236,13 @@ class TestCodexCacheSizing:
     """F9 and F10."""
 
     def test_the_caches_grow_with_the_store_so_a_second_pass_does_not_thrash(self, codex_home, monkeypatch):
+        # The floor is patched down to 64 (the real one is 4096): 70 files cross it as 4,100 did, in
+        # a fraction of the time. The property is "above the floor", not the floor's value.
+        # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, final review B9
+        monkeypatch.setattr(data_codex, "_CACHE_MIN", 64)
+        data_codex._clear_caches()
         cwd = "C:\\Big"
-        count = 4100  # above the 4096 floor
+        count = 70  # above the 64 floor
         for n in range(count):
             _cx_write(codex_home, _cx_id(n + 1), cwd,
                       first=_cx_line(_cx_meta(_cx_id(n + 1), cwd, base_chars=0)))
@@ -4220,7 +4225,11 @@ class TestCodexActivityEpoch:
         """Review fix P9: like the parse and verdict caches (D10), the last-record cache is
         sized from the store. A fixed 4096 below a 4100-file store re-read every tail on every
         pass (a sequential pass over an LRU smaller than the set misses every time)."""
-        cwd, count = "C:\\Big", 4100  # above the 4096 floor
+        # The floor is patched down to 64 (the real one is 4096): 70 files cross it as 4,100 did.
+        # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, final review B9
+        monkeypatch.setattr(data_codex, "_CACHE_MIN", 64)
+        data_codex._clear_caches()
+        cwd, count = "C:\\Big", 70  # above the 64 floor
         paths = [_cx_write(codex_home, _cx_id(n + 1), cwd,
                            [_cx_agent("x", ts=_cx_iso(_CX_OLD + 5))],
                            first=_cx_line(_cx_meta(_cx_id(n + 1), cwd, base_chars=0)), mtime=_CX_OLD)
@@ -5222,7 +5231,10 @@ class TestCodexWriterLockStuckProbe:
             assert data_codex.session_writer_locked(self.SID) is False
             assert len(counted.timed_waits()) == 1, "an expired marker waits once more"
             renewed = data_codex._probe_stuck_until - time.monotonic()
-            assert 1.0 < renewed <= _CX_LOCK_STUCK_TTL, "and the timeout sets a new marker"
+            # A new marker is about one TTL ahead: far above the old one's -0.001 (not renewed), and
+            # far enough from both bounds that a 1.5 s stall under load cannot fail it.
+            # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, final review B9
+            assert _CX_LOCK_STUCK_TTL / 4 < renewed <= _CX_LOCK_STUCK_TTL, "and the timeout sets a new marker"
 
     def test_a_successful_acquire_clears_the_marker_and_a_failed_try_does_not_extend_it(
             self, locks, counted, monkeypatch):
@@ -5249,7 +5261,12 @@ class TestCodexWriterLockStuckProbe:
         with _cx_hung_holder(counted):
             assert data_codex.session_writer_locked(first) is False
             assert data_codex._probe_stuck_until > time.monotonic()
-        time.sleep(0.35)                                     # past the deadline, holder gone
+        # Past the marker's own deadline with a 0.2 s margin (it was 0.05 s over a constant), holder
+        # gone; the marker itself must be no longer than its TTL.
+        # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, final review B9
+        deadline = data_codex._probe_stuck_until
+        assert deadline - time.monotonic() <= 0.3, "the marker is one TTL long, never longer"
+        time.sleep(max(0.0, deadline - time.monotonic()) + 0.2)
         assert data_codex.session_writer_locked(second) is False
         assert ("open", f"{second}.lock") in locks.events, "the other id was probed, not starved"
 

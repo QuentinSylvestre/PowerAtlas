@@ -13,11 +13,32 @@ frame-type/tool-status vocabularies below are copied from `acp.py`'s
 """
 
 import json
+import time
 
 from .data import TranscriptEvent
 
 # The subset of acp.py's SERVER_TYPES this module ever emits.
 _FRAME_TYPES = frozenset({"chunk", "rendered", "tool_call", "tool_update"})
+
+# Bounds on the markdown work one `translate_transcript` call does. mistune's
+# inline parser is quadratic on a hostile paragraph (`"[a](" * n`: 8 KiB took 1.0 s,
+# 16 KiB 4.1 s, 32 KiB 15.9 s, 256 KiB about 20 minutes, in a worker thread that
+# shares the server's GIL), and a hostile `[` run makes an AST 30 times its text.
+# Every limit degrades to the `chunk` frame alone (or, for one paragraph, a plain
+# text token), which the renderer already shows for any message with no `rendered`
+# frame; none of them changes what a normal message renders. Measured 2026-10-02
+# on the development machine (the `[a](` worst case): 8 KiB paragraph 1.0 s,
+# so a call is bounded by MD_BUDGET_SECONDS plus about one such paragraph.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+MD_MAX_MESSAGE_CHARS = 64 * 1024      # a longer message gets no `rendered` frame
+MD_MAX_INLINE_CHARS = 8 * 1024        # a longer paragraph, heading or table cell stays plain text
+MD_BUDGET_SECONDS = 5.0               # markdown time for the whole call; after it, plain text only
+# JSON size of all `rendered` frames together. Tokens run up to about 11 times a message's
+# text on dense markup (measured), so this still renders about 1.5 MB of such text; a
+# hostile table reaches 45 times (65 KiB gave 3.0 MB), which is what it bounds.
+MD_MAX_RENDERED_BYTES = 16 * 1024 * 1024
+# The clock the budget reads, a seam so a test can move time.
+_clock = time.monotonic
 
 # Same known ACP tool "kind" vocabulary as acp.html's TOOL_KIND_ICON, so the
 # shared renderer's icon lookup resolves for a translated call the same way
@@ -107,6 +128,27 @@ def _get_markdown_parser():
         return None
 
 
+class _BoundedInline:
+    """The markdown instance's inline parser with `MD_MAX_INLINE_CHARS` and a
+    deadline on it. The inline parser is called once per paragraph, heading and
+    table cell, so a hostile paragraph is never parsed past the size limit and
+    a long run of them stops costing time once the deadline has passed: the
+    block is returned as one plain `text` token, which the renderer shows as it
+    shows any text. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4"""
+
+    def __init__(self, inner, deadline: float):
+        self._inner = inner
+        self._deadline = deadline
+
+    def __call__(self, text, env):
+        if len(text) > MD_MAX_INLINE_CHARS or _clock() >= self._deadline:
+            return [{"type": "text", "raw": text}]
+        return self._inner(text, env)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def translate_transcript(events: list[TranscriptEvent], session_id: str) -> list[dict]:
     """Turn a provider's full transcript into a list of ACP wire frames.
 
@@ -130,6 +172,11 @@ def translate_transcript(events: list[TranscriptEvent], session_id: str) -> list
     frames: list[dict] = []
     open_tool_calls: set[str] = set()
     md = _get_markdown_parser()
+    deadline = _clock() + MD_BUDGET_SECONDS
+    rendered_bytes = 0
+    rendered_full = False
+    if md is not None and callable(getattr(md, "inline", None)):
+        md.inline = _BoundedInline(md.inline, deadline)
 
     for event in events:
         if event.kind in ("user", "assistant"):
@@ -137,13 +184,21 @@ def translate_transcript(events: list[TranscriptEvent], session_id: str) -> list
                 continue
             role = "user" if event.kind == "user" else "agent"
             frames.append(_envelope("chunk", {"role": role, "text": event.text}, session_id))
-            if md is not None:
+            if (md is not None and len(event.text) <= MD_MAX_MESSAGE_CHARS
+                    and _clock() < deadline and not rendered_full):
                 try:
                     tokens = md(event.text)
                 except Exception:
                     tokens = None
                 if isinstance(tokens, list) and tokens:
-                    frames.append(_envelope("rendered", {"tokens": tokens}, session_id))
+                    # The JSON size of this frame, so the total the response carries in
+                    # markup holds the limit (a frame that would pass it is not sent).
+                    size = len(json.dumps(tokens))
+                    if rendered_bytes + size <= MD_MAX_RENDERED_BYTES:
+                        rendered_bytes += size
+                        frames.append(_envelope("rendered", {"tokens": tokens}, session_id))
+                    else:
+                        rendered_full = True    # no later message is parsed either
         elif event.kind == "tool_call":
             if not event.tool_call_id:
                 continue

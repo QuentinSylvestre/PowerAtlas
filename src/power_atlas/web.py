@@ -812,10 +812,13 @@ async def lifespan(app_instance):
     # first Usage request finds it filled. A task of its own, so the 30 s
     # refresh above is unchanged. `usage_stop` is overview's module-level
     # shutdown event, checked between files by this pass and by any pass a
-    # request starts, so a shutdown mid-pass waits for one file at most. The
+    # request starts, so a shutdown mid-pass waits for one file at most (the
+    # Codex scan checks it per rollout; the one thing it cannot interrupt is
+    # the adapter's store index build that opens that scan). The
     # state is `warming` before the task is created: a request that arrived
     # before the thread's first statement would otherwise see `cold` and start
     # a second pass. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
+    # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
     usage_stop = overview.usage_stop_event()
     usage_stop.clear()
     overview._set_usage_state("warming")

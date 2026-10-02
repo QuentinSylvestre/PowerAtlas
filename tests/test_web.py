@@ -31006,10 +31006,12 @@ class TestOverviewLive:
     def _fresh(self):
         from power_atlas import overview, web as web_mod
         overview._tail_memo.clear()
+        overview._tail_failures.clear()
         overview._cwdless_memo.clear()
         web_mod._overview_filters_cache[:] = [0.0, None]
         yield
         overview._tail_memo.clear()
+        overview._tail_failures.clear()
         overview._cwdless_memo.clear()
         web_mod._overview_filters_cache[:] = [0.0, None]
 
@@ -31463,6 +31465,65 @@ class TestOverviewLive:
         after = path.stat()
         assert after.st_mtime_ns == before.st_mtime_ns and after.st_size > before.st_size
         assert [e["text"] for e in overview.tail_events(path, "codex")] == ["one", "two"]
+
+    def test_an_unreadable_rollout_is_warned_once_a_minute_and_not_retried_every_poll(
+            self, monkeypatch, caplog):
+        """Final review finding B4 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW):
+        a rollout held share-none by antivirus gave one WARNING per 2 s poll per tile (1,000 polls,
+        1,000 lines) and a fresh open attempt each time. Now one attempt and one line per path
+        per minute; a changed file is tried at once but does not add a line inside the minute."""
+        from power_atlas import data_codex, overview
+        clock = [1000.0]
+        monkeypatch.setattr(overview, "_tail_clock", lambda: clock[0])
+        now = time.time()
+        path = _ovx_rollout(data_codex.CODEX_SESSIONS_DIR, 1, [_ovx_user(now - 90, "one")])
+        held = [True]
+        opens = []
+        real_open = data_codex.open_shared
+
+        def open_shared(target, *args, **kwargs):
+            if held[0] and os.fspath(target) == str(path):
+                opens.append(clock[0])
+                raise PermissionError(13, "held by a scanner: SECRET-DETAIL", os.fspath(target))
+            return real_open(target, *args, **kwargs)
+        monkeypatch.setattr(data_codex, "open_shared", open_shared)
+
+        def warnings():
+            return [r.getMessage() for r in caplog.records
+                    if "could not read transcript tail" in r.getMessage()]
+        with caplog.at_level("WARNING"):
+            for _ in range(1000):                       # a poll every 2 s: 2,000 s
+                clock[0] += 2.0
+                assert overview.tail_events(path, "codex") == []
+        # Attempts at 1002, 1062, ... up to 3000: floor(1998 / 60) + 1 = 34, one line for each.
+        assert len(opens) == 34 and len(warnings()) == 34, (len(opens), len(warnings()))
+        assert all(opens[i + 1] - opens[i] == 60.0 for i in range(33))
+        assert all(str(path) in w and "SECRET-DETAIL" not in w for w in warnings())
+        # The file grows (a new key): it is tried at once, and the line is still held back, the
+        # last one being 18 s old.
+        _ov_jsonl(path, [_ovx_agent(now - 5, "two")])
+        with caplog.at_level("WARNING"):
+            assert overview.tail_events(path, "codex") == []
+        assert len(opens) == 35 and len(warnings()) == 34
+        # Growing again at 3030 (48 s after the last line): tried, still no line. At 3045 (63 s
+        # after it): tried, and the line is due.
+        clock[0] = 3030.0
+        _ov_jsonl(path, [_ovx_user(now - 4, "three")])
+        with caplog.at_level("WARNING"):
+            assert overview.tail_events(path, "codex") == []
+        assert len(opens) == 36 and len(warnings()) == 34
+        clock[0] = 3045.0
+        _ov_jsonl(path, [_ovx_agent(now - 3, "four")])
+        with caplog.at_level("WARNING"):
+            assert overview.tail_events(path, "codex") == []
+        assert len(opens) == 37 and len(warnings()) == 35
+        # The hold lets go without touching the file: not retried inside the minute, retried after.
+        held[0] = False
+        assert overview.tail_events(path, "codex") == []
+        clock[0] += 60.0
+        assert [e["text"] for e in overview.tail_events(path, "codex")] == ["one", "two", "three", "four"]
+        assert str(path) not in overview._tail_failures, "a read that works forgets the failure"
+        assert len(opens) == 37
 
     def test_every_codex_read_of_a_tile_goes_through_open_shared(self, tmp_path, monkeypatch):
         """D10: a plain `open()` of a rollout blocks Codex's own rename and delete on
@@ -32882,6 +32943,113 @@ class TestOverviewUsage:
         assert overview._usage_memo == {"C:/ok.jsonl": (1, 1, good)}
         assert same.delivered == 1
 
+    # -- the worker watchdog (final review finding B3,
+    #    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4) --
+
+    def scripted_worker(self, monkeypatch, steps):
+        """A worker over a scripted line queue and a fake clock: `steps` holds a record's bytes
+        (delivered at once) or an int (that many one-second polls that find nothing). The clock
+        moves only when a poll finds nothing, so no test sleeps and none can flake under load."""
+        import queue
+        from power_atlas import overview
+        now = [0.0]
+        monkeypatch.setattr(overview, "_stall_clock", lambda: now[0])
+        monkeypatch.setattr(overview, "CHILD_STALL_SECONDS", 5.0)
+        script = list(steps)
+        killed = []
+
+        class Lines:
+            def get(self, timeout=None):
+                if script and isinstance(script[0], bytes):
+                    return script.pop(0)
+                if script and script[0] > 1:
+                    script[0] -= 1
+                elif script:
+                    script.pop(0)
+                now[0] += timeout
+                raise queue.Empty
+        worker = self.fake_worker()
+        worker.POLL_SECONDS = 1.0
+        worker._lines = Lines()
+        worker.clock = now
+        worker._proc = types.SimpleNamespace(poll=lambda: None, wait=lambda timeout=None: 0,
+                                             kill=lambda: killed.append(1))
+        return worker, killed
+
+    @staticmethod
+    def worker_record(*record):
+        return json.dumps(list(record)).encode("utf-8") + b"\n"
+
+    def test_a_child_that_goes_quiet_is_killed_and_its_earlier_results_are_kept(self, monkeypatch):
+        from power_atlas import overview
+        good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
+                "subagent": False, "days": {}}
+        record = self.worker_record
+        worker, killed = self.scripted_worker(monkeypatch, [
+            record("schema", overview._USAGE_SCHEMA), record("C:/early.jsonl", 1, 1, good), 10_000])
+        with pytest.raises(overview._UsageWorkerStalled):
+            worker.wait_stage(0, None)
+        assert killed == [1], "the stuck child is killed"
+        assert overview._usage_memo == {"C:/early.jsonl": (1, 1, good)}, "what arrived is kept"
+        assert worker.delivered == 1
+        assert worker.wait_stage(1, None) is False, "a killed child is not waited for again"
+
+    def test_the_watchdog_fires_at_exactly_the_stall_time_and_any_record_restarts_it(self, monkeypatch):
+        from power_atlas import overview
+        record = self.worker_record
+        header, stage0 = record("schema", overview._USAGE_SCHEMA), record("stage", 0)
+        # Four quiet seconds with a limit of five: not stuck.
+        worker, killed = self.scripted_worker(monkeypatch, [header, 4, stage0])
+        assert worker.wait_stage(0, None) is True and killed == []
+        # Five quiet seconds: stuck.
+        worker, killed = self.scripted_worker(monkeypatch, [header, 5, stage0])
+        with pytest.raises(overview._UsageWorkerStalled):
+            worker.wait_stage(0, None)
+        assert killed == [1]
+        # Ten gaps of four seconds, a record after each: 40 s in all, never five without one.
+        good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
+                "subagent": False, "days": {}}
+        steps = [header]
+        for i in range(10):
+            steps += [4, record(f"C:/f{i}.jsonl", 1, 1, good)]
+        worker, killed = self.scripted_worker(monkeypatch, steps + [4, stage0])
+        assert worker.wait_stage(0, None) is True and killed == [] and worker.delivered == 10
+        # The clock restarts at each call: a pass that parsed in-thread for an hour between two
+        # stages does not count that hour against the child.
+        worker, killed = self.scripted_worker(monkeypatch, [header, stage0, 4, record("stage", 1)])
+        assert worker.wait_stage(0, None) is True
+        worker.clock[0] += 3600.0
+        assert worker.wait_stage(1, None) is True and killed == []
+
+    def test_a_stuck_child_ends_the_warm_pass_in_error_and_clears_the_stage_flag(self, monkeypatch):
+        from power_atlas import overview
+        self.two_stage_stores()
+        overview._usage_memo["C:/kept.jsonl"] = (1, 1, {"days": {}})
+
+        for stalls_at in (0, 1):
+            closed = []
+
+            class Worker:
+                delivered = 0
+
+                def wait_stage(self, index, stop_event):
+                    if index == stalls_at:
+                        raise overview._UsageWorkerStalled()
+                    return True
+
+                def close(self):
+                    closed.append(1)
+            monkeypatch.setattr(overview, "_start_usage_worker", lambda now: Worker())
+            overview.warm_usage(threading.Event())
+            assert overview.usage_state() == "error", stalls_at
+            assert overview._usage_stage1[0] is False, "no partial aggregate is served for an error"
+            assert closed == [1], "the child is reaped"
+            assert "C:/kept.jsonl" in overview._usage_memo, "nothing delivered is thrown away"
+        # `error` is the state the page's next poll retries from: a pass starts, `error` is reported.
+        started = []
+        monkeypatch.setattr(overview, "_start_background_pass", lambda: started.append(1) or True)
+        assert overview.usage_payload(lambda: (frozenset(), None)) == (None, "error") and started == [1]
+
     def test_the_final_state_is_published_before_the_worker_is_reaped(self, monkeypatch):
         """Reaping the child can take a while (a kill, then a wait); the page
         must not see `warming` for that long."""
@@ -32928,17 +33096,18 @@ class TestOverviewUsage:
     def cx_total(days, key):
         return sum(d["tokens"][key] for d in days.values())
 
-    def test_the_schema_is_4_and_an_older_worker_is_ignored(self):
+    def test_the_schema_is_5_and_an_older_worker_is_ignored(self):
         """`_parse_usage_file` gained a `codex` provider and lost its Claude fall-through
         (schema 2); the Codex stream rule, exec failures and the duration cap changed what it
         returns for an existing file (schema 3); counting each event's own last_token_usage
-        changed it again (schema 4). A child on any older format must not mix its summaries
-        into the memo."""
+        changed it again (schema 4); cutting a Codex tool name, model and cwd to 80, 80 and 260
+        characters changed what it returns for a file with a longer one (schema 5, final review
+        finding B6). A child on any older format must not mix its summaries into the memo."""
         from power_atlas import overview
-        assert overview._USAGE_SCHEMA == 4
+        assert overview._USAGE_SCHEMA == 5
         good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
                 "subagent": False, "days": {}}
-        for older in (1, 2, 3):
+        for older in (1, 2, 3, 4):
             old = self.fake_worker()
             for record in (["schema", older], ["C:/x.jsonl", 1, 1, good], ["stage", 0]):
                 old._lines.put(json.dumps(record).encode() + b"\n")
@@ -33649,6 +33818,168 @@ class TestOverviewUsage:
         usage = self.summary()
         assert all(not d["sessions"] for d in usage["daily"]) and parses == []
 
+    # Tool name, call kind, output, then what each reader must say: the tile (a result event's
+    # `ok`, or None for no event), usage (failed calls out of 1), and the transcript (the
+    # `tool_result` event's `(success, outcome_unknown)`, or None for no event). The documented
+    # rule (plan D13 as amended): a tile reads exit codes only, because it is stateless and
+    # cannot know a call is `exec`; usage and the transcript read the `exec` markers
+    # (`Script failed`, `Script completed`, `aborted by user`) for a call named exactly `exec`,
+    # and neither takes `Script running with cell` for a final outcome.
+    PARITY_CASES = [
+        ("shell_command", False, "Exit code: 1\nx", False, 1, (False, False)),
+        ("shell_command", False, "Exit code: 0\nx", True, 0, (True, False)),
+        ("shell_command", False, '{"output": "x", "metadata": {"exit_code": 2}}', False, 1, (False, False)),
+        ("exec", False, "Script failed\nboom", None, 1, (False, False)),
+        ("exec", False, "Script completed\nok", None, 0, (True, False)),
+        ("exec", False, "Script running with cell 7", None, 0, None),
+        ("exec", True, "Script failed\nboom", None, 1, (False, False)),
+        ("shell_command", False, "Script failed\nboom", None, 0, (None, True)),
+        ("apply_patch", True, "Script completed\nok", None, 0, (None, True)),
+        ("apply_patch", True, "Exit code: 0\nPatch applied", True, 0, (True, False)),
+        ("exec", False, "plain words", None, 0, (None, True)),
+    ]
+
+    @pytest.mark.parametrize("name,custom,output,tile,failed,transcript", PARITY_CASES)
+    def test_the_tile_usage_and_transcript_readers_agree_on_one_record_shape(
+            self, name, custom, output, tile, failed, transcript):
+        """Final review finding B8 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW):
+        three readers parse one record format. The one intended difference (the tile ignores
+        `exec` markers) is pinned here, so a reader that drifts shows."""
+        from power_atlas import data_codex, overview
+        t = self.now - 7200
+        call = _ovx_custom(t, name, "c1") if custom else _ovx_call(t, name, "c1")
+        out = _ovx_output(t + 1, "c1", output, custom=custom)
+        # Tile.
+        events = [e for rec in (call, out) for e in overview._line_events(json.dumps(rec).encode(), "codex")]
+        assert [e for e in events if e["kind"] == "result"] == (
+            [] if tile is None else [{"kind": "result", "ok": tile}]), "tile"
+        # Usage.
+        path = self.codex(1, [call, out])
+        [day] = overview._parse_codex_usage(path)["days"].values()
+        assert day["tools"] == {name: {"calls": 1, "failed": failed}}, "usage"
+        # Transcript.
+        results = [e for e in data_codex.get_full_transcript(_ovx_id(1), "") if e.kind == "tool_result"]
+        assert [(e.success, e.outcome_unknown) for e in results] == (
+            [] if transcript is None else [transcript]), "transcript"
+
+    def test_codex_strings_that_reach_the_page_are_cut_to_their_limits(self):
+        """Final review finding B6 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW):
+        a tool name, a `turn_context` model and a `session_meta` cwd came from the file with no
+        limit and went to the page whole. A name or model is cut to 80 characters, a cwd to 260;
+        one at the limit is untouched, and a failed call still lands on its cut name's row."""
+        from power_atlas import overview
+        ellipsis = "\u2026"
+        t = self.now - 7200
+        exact = "n" * 80                                  # the longest name that is not cut
+        long_name = "tool" + " " * 3 + "x" * 600           # whitespace runs collapse, as a tile's do
+        records = [_ovx_context(t, "m" * 80), _ovx_context(t + 1, "m" * 81),
+                   _ovx_context(t + 2, "m" * 81),
+                   _ovx_call(t + 3, exact, "c1"), _ovx_call(t + 4, long_name, "c2"),
+                   _ovx_output(t + 5, "c2", "Exit code: 1\nx"), _ovx_call(t + 6, "n" * 81, "c3"),
+                   _ovx_started(t + 7), _ovx_complete(t + 8, duration_ms=60_000)]
+        prefix = "C:\\ws\\"
+        path = self.codex(1, records, cwd=prefix + "d" * 600)
+        summary = overview._parse_usage_file(path, "codex")
+        assert len(summary["cwd"]) == 260 and summary["cwd"].startswith(prefix + "d" * 200)
+        assert summary["cwd"].endswith(ellipsis)
+        assert summary["model"] == "m" * 79 + ellipsis, "the most frequent model, cut"
+        [day] = summary["days"].values()
+        cut_long = "tool x" + "x" * 73 + ellipsis
+        assert len(cut_long) == 80
+        assert day["tools"] == {exact: {"calls": 1, "failed": 0},
+                                cut_long: {"calls": 1, "failed": 1},
+                                "n" * 79 + ellipsis: {"calls": 1, "failed": 0}}
+        usage = self.summary()
+        assert {r["name"] for r in usage["tools"]["top"]} == set(day["tools"])
+        assert [m["model"] for m in usage["models"]] == ["m" * 79 + ellipsis]
+        assert usage["by_workspace"] and all(
+            len(r["cwd"]) <= 260 and len(r["name"]) <= 260 for r in usage["by_workspace"])
+        # A cwd inside the limit is kept exactly, whitespace and all (the rail's hidden match is exact).
+        kept = self.codex(2, [_ovx_user(t, "x")], cwd=prefix + "two  spaces")
+        assert overview._parse_usage_file(kept, "codex")["cwd"] == prefix + "two  spaces"
+
+    def test_a_set_stop_event_ends_the_codex_scan_at_once_with_what_it_has(self, monkeypatch):
+        """Final review finding B5 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW):
+        the scan never looked at the stop event, so a shutdown waited for the whole store (0.59 s
+        at 800 rollouts, about 4 s at 5,000, measured)."""
+        from power_atlas import data_codex, overview
+        real_now = time.time()
+        t = min(self.now, real_now) - 3600
+        for n in (1, 2, 3):          # frozen mtimes: each one costs a tail read in the window rule
+            self.codex(n, [_ovx_user(t, "go")], mtime=real_now - 20 * self.DAY)
+        v3 = self.v3("sess_a", [(t, {"type": "user", "content": "hi"})])
+        reads = []
+        real_read = data_codex.last_event_epoch
+        stop = threading.Event()
+        monkeypatch.setattr(data_codex, "last_event_epoch",
+                            lambda path: reads.append(path) or real_read(path))
+        _days, since = overview._window(self.now)
+        found = overview._usage_files(since)
+        assert [prov for _p, prov, _st in found].count("codex") == 3 and len(reads) == 3, "control"
+        reads.clear()
+        stop.set()
+        found = overview._usage_files(since, stop_event=stop)
+        assert reads == [] and [(p, prov) for p, prov, _st in found] == [(v3, "kiro-cli-v3")]
+        # Set between two rollouts: the scan ends there, after exactly one tail read.
+        stop.clear()
+        monkeypatch.setattr(data_codex, "last_event_epoch",
+                            lambda path: reads.append(path) or stop.set() or real_read(path))
+        found = overview._usage_files(since, stop_event=stop)
+        assert len(reads) == 1 and [prov for _p, prov, _st in found].count("codex") == 1
+        # `_refresh` reports such a pass as incomplete and evicts nothing.
+        overview._usage_memo["C:\\gone\\messages.jsonl"] = (0, 0, {})
+        stop.clear()
+        _summaries, _reparsed, complete = overview._refresh(self.now, stop)
+        assert complete is False and "C:\\gone\\messages.jsonl" in overview._usage_memo
+        # A scan cut short with nothing found is still incomplete: an empty list must not read as
+        # "every file left the window" and evict the memo.
+        stop.clear()
+        monkeypatch.setattr(overview, "_usage_files",
+                            lambda since, subagents=True, stop_event=None: stop.set() or [])
+        assert overview._refresh(self.now, stop) == ([], 0, False)
+        assert "C:\\gone\\messages.jsonl" in overview._usage_memo
+
+    def test_usage_counts_one_session_per_thread_id_exactly_as_discovery_lists_them(self):
+        """Final review finding B1 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW):
+        usage globbed every `rollout-*.jsonl`, so a stray copy, a duplicate-id file in another
+        date folder, a file whose name and `session_meta` disagree and a symlink each counted as
+        a session (reviewer experiment: 1 listed session, 3 counted, 3,000 input tokens for
+        1,000). The Codex source is the adapter's canonical set now. Claude Code and kiro-cli
+        counts are untouched."""
+        from power_atlas import data_codex
+        t = self.now - 7200
+        records = [_ovx_user(t, "go"), _ovx_tokens(t + 1, 1000, 0, 50)]
+        real = self.codex(1, records)
+        data = real.read_bytes()
+        stray = real.with_name(real.stem + "-backup.jsonl")
+        stray.write_bytes(data)
+        older = real.parents[2] / "09" / "30"
+        older.mkdir(parents=True)
+        dup = older / real.name
+        dup.write_bytes(data)
+        os.utime(dup, (time.time() - 100, time.time() - 100))
+        self.codex(2, records, first=_ovx_meta(t, _ovx_id(3), "C:\\ws\\gamma"))   # name says 2, meta says 3
+        target = _ovx_rollout(self.roots.codex.parent / "elsewhere", 7, records)
+        link = real.parents[2] / "10" / "02" / target.name
+        link.parent.mkdir(parents=True)
+        linked = True
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            linked = False          # no symlink right here: the other four cases still run
+        self.claude("55555555-5555-5555-5555-555555555555", [
+            self.c_user(t, "hi"), self.c_asst(t + 30, [{"type": "text", "text": "x"}], mid="m1",
+                                              usage={"input_tokens": 10, "output_tokens": 5})])
+        self.v3("sess_a", [(t, {"type": "user", "content": "hi"})])
+        assert [os.path.basename(c.path) for c in data_codex.canonical_rollouts()] == [real.name], \
+            "fixture: discovery lists the one file"
+        usage = self.summary()
+        day = self.daily(usage, _ov_day(t))
+        assert day["sessions"] == {"codex": 1, "claude-code": 1, "kiro-cli-v3": 1}, linked
+        assert usage["codex_tokens"] == {"input": 1000, "output": 50, "cache_read": 0,
+                                         "cache_creation": 0, "cache_hit_ratio": 0.0}
+        assert usage["claude_tokens"]["input"] == 10 and usage["claude_tokens"]["output"] == 5
+
     # -- the 60 s limit on re-parsing a changed Codex rollout (D19) --
 
     @pytest.fixture
@@ -33836,36 +34167,35 @@ class TestOverviewUsage:
 
     def test_a_codex_listing_failure_does_not_cost_the_other_providers_their_pass(
             self, caplog, monkeypatch):
-        from power_atlas import overview
+        from power_atlas import data_codex, overview
         t = self.now - 3600
         v3 = self.v3("sess_a", [(t, {"type": "user", "content": "hi"})])
         claude = self.claude("88888888-8888-8888-8888-888888888888", [self.c_user(t, "hi")])
         codex = self.codex(1, [_ovx_user(t, "go")])
         _days, since = overview._window(self.now)
 
-        class Denied:
-            def glob(self, pattern):
-                raise OSError("access is denied: SECRET-DETAIL")
+        canonical = data_codex.CanonicalRollout(str(codex), 1, 1)
 
-            def __str__(self):
-                return "C:/the-codex-root"
+        def denied():
+            raise OSError("access is denied: SECRET-DETAIL")
 
-        class DiesHalfway(Denied):
-            def glob(self, pattern):
-                yield codex
-                raise OSError("device removed: SECRET-DETAIL")
+        def dies_halfway():
+            yield canonical
+            raise OSError("device removed: SECRET-DETAIL")
 
-        real_root = overview._codex_usage_root
-        for root, kept in ((Denied(), set()), (DiesHalfway(), {(codex, "codex")})):
-            monkeypatch.setattr(overview, "_codex_usage_root", lambda root=root: root)
+        # B1 (final review, 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4): the listing is
+        # `data_codex.canonical_rollouts()`, not a glob of the root, so that is the call made to fail.
+        real_list = data_codex.canonical_rollouts
+        for listing, kept in ((denied, set()), (dies_halfway, {(codex, "codex")})):
+            monkeypatch.setattr(data_codex, "canonical_rollouts", listing)
             caplog.clear()
             with caplog.at_level("WARNING"):
                 found = {(p, prov) for p, prov, _st in overview._usage_files(since)}
             assert found == {(v3, "kiro-cli-v3"), (claude, "claude-code")} | kept
             assert "SECRET-DETAIL" not in caplog.text, "the log names the folder, not the error"
-            assert "could not list the Codex rollouts under C:/the-codex-root" in caplog.text
-        # The whole pass still ends ready for the others, and Codex is back with its root.
-        monkeypatch.setattr(overview, "_codex_usage_root", real_root)
+            assert f"could not list the Codex rollouts under {self.roots.codex}" in caplog.text
+        # The whole pass still ends ready for the others, and Codex is back with its listing.
+        monkeypatch.setattr(data_codex, "canonical_rollouts", real_list)
         assert [prov for _p, prov, _st in overview._usage_files(since)].count("codex") == 1
 
     # -- the aggregate --
@@ -34201,3 +34531,104 @@ class TestCodexLiveDotAndResumeLock:
             assert status_classifier.get_semantic_status(self._SID, "codex", "") is None
             assert status_classifier.classify_session(self._SID, "codex", "") is None
         assert reads == [], "a Codex rollout must not be read by this plain-open reader"
+
+
+class TestCodexAdapterThroughTheDashboardListing:
+    """Final review finding B7 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW
+    Phase 3): no committed test crossed the real adapter, `/api/dashboard/sessions`, `live` and
+    `resume_locked` together. These write synthetic rollouts into the redirected Codex store and
+    read them back through the real `data_codex` and the real route. Only the other provider's
+    store, the process snapshot and the lock probe are faked."""
+
+    _CWD = "C:\\Work\\Proj"
+    _PATH = "/api/dashboard/sessions"
+
+    @pytest.fixture
+    def seam(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import data as data_mod
+        from power_atlas import data_codex, presence
+        from power_atlas.data import _normalize_path
+        real_discover, real_get = data_mod.discover_workspaces_with_counts, data_mod.get_sessions
+        cc_row = _acp_row("cc1", cwd=self._CWD)
+        state = {"locked": set(), "asked": [], "snap": presence.Snapshot(
+            set(), {("codex", _normalize_path(self._CWD))})}
+
+        def discover(provider=None):
+            rows = real_discover("codex") if provider in (None, "codex") else []
+            if provider in (None, "claude-code"):
+                rows.append((self._CWD, 1, "2026-09-01T00:00:00Z", "claude-code"))
+            return rows
+
+        def get_sessions(cwd, provider="kiro-cli"):
+            return [cc_row] if provider == "claude-code" else real_get(cwd, provider)
+
+        def probe(sid):
+            state["asked"].append(sid)
+            return sid in state["locked"]
+        monkeypatch.setattr(data_mod, "discover_workspaces_with_counts", discover)
+        monkeypatch.setattr(data_mod, "get_sessions", get_sessions)
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["codex", "claude-code"])
+        monkeypatch.setattr(data_codex, "session_writer_locked", probe)
+        monkeypatch.setattr(presence, "get_snapshot", lambda: state["snap"])
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda sid, wh=None: None)
+        monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
+        return state
+
+    def store(self):
+        """Thread 1 under an upper-case drive letter (old mtime, last record 40 s old: live), thread
+        2 under the same folder spelled with a lower-case drive (both old: not live)."""
+        from power_atlas import data_codex
+        root, now = data_codex.CODEX_SESSIONS_DIR, time.time()
+        _ovx_rollout(root, 1, [_ovx_agent(now - 40)], cwd="C:\\Work\\Proj", mtime=now - 5000)
+        _ovx_rollout(root, 2, [_ovx_agent(now - 2000)], cwd="c:\\Work\\Proj", mtime=now - 5000)
+        return _ovx_id(1), _ovx_id(2)
+
+    @staticmethod
+    def rows(body):
+        return {s["id"]: s for g in body["groups"] for s in g["sessions"]}
+
+    def test_two_drive_letter_spellings_are_one_workspace_with_the_right_live_dots(self, client, seam):
+        live, idle = self.store()
+        grouped = client.get(self._PATH).json()
+        assert len(grouped["groups"]) == 1, "one folder, spelled two ways, is one workspace"
+        assert grouped["groups"][0]["total"] == 3, "two Codex threads and the other provider's one"
+        rows = self.rows(client.get(self._PATH, params={"cwd": self._CWD}).json())
+        assert {i for i, r in rows.items() if r["provider"] == "codex"} == {live, idle}
+        assert rows[live]["live"] is True, "an old mtime with a recent last record is live"
+        assert rows[idle]["live"] is False, "both old is not"
+        assert rows["cc1"]["live"] is False
+        # The flat listing carries the same values for the same rows.
+        flat = {s["id"]: s for s in client.get(self._PATH, params={"mode": "recent"}).json()["sessions"]}
+        assert flat[live]["live"] is True and flat[idle]["live"] is False
+        assert flat[live]["provider"] == "codex"
+
+    def test_resume_locked_rides_a_held_codex_row_only_and_only_codex_is_probed(self, client, seam):
+        live, idle = self.store()
+        seam["locked"].update({live, "cc1"})           # a probe that says yes to the other provider too
+        rows = self.rows(client.get(self._PATH, params={"cwd": self._CWD}).json())
+        assert rows[live]["resume_locked"] is True
+        assert "resume_locked" not in rows[idle] and "resume_locked" not in rows["cc1"]
+        assert "cc1" not in seam["asked"] and {live, idle} <= set(seam["asked"])
+        flat = {s["id"]: s for s in client.get(self._PATH, params={"mode": "recent"}).json()["sessions"]}
+        assert flat[live]["resume_locked"] is True and "resume_locked" not in flat[idle]
+
+    def test_a_pinned_codex_session_a_hidden_workspace_and_a_tag_behave_as_for_other_providers(
+            self, client, seam, monkeypatch):
+        import power_atlas.web as web_mod
+        from power_atlas.config import Config
+        live, idle = self.store()
+        # A pinned session is listed in `pinned`, with its provider and its own live dot.
+        monkeypatch.setattr(web_mod, "load_config", lambda: Config(pinned_sessions=[live]))
+        pinned = client.get(self._PATH).json()["pinned"]
+        assert [(p["id"], p["provider"], p["live"]) for p in pinned] == [(live, "codex", True)]
+        # A `hidden` workspace leaves the default listing and is the `tag=hidden` listing.
+        settings = {self._CWD: {"tags": ["hidden", "work"], "color": ""}}
+        monkeypatch.setattr(web_mod, "load_config", lambda: Config(workspace_settings=settings))
+        assert client.get(self._PATH).json()["groups"] == []
+        assert len(client.get(self._PATH, params={"tag": "hidden"}).json()["groups"]) == 1
+        # A tag selects the workspace (the settings key in yet another case) and another tag does not.
+        settings = {"c:\\work\\proj": {"tags": ["work"], "color": ""}}
+        monkeypatch.setattr(web_mod, "load_config", lambda: Config(workspace_settings=settings))
+        assert len(client.get(self._PATH, params={"tag": "work"}).json()["groups"]) == 1
+        assert client.get(self._PATH, params={"tag": "other"}).json()["groups"] == []
