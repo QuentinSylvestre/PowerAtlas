@@ -2604,18 +2604,6 @@ class TestCodexTranscript:
         assert args["a6"]["items"] == list(range(50)) + ["(+450 more)"]
         assert set(args) == {"a1", "a2", "a3", "a4", "a5", "a6"}  # a call without an id is dropped
 
-    def test_a_result_whose_call_is_before_the_window_keeps_no_flag(self, codex_home, monkeypatch):
-        """The call (and so its name) was left out by the window: no guess."""
-        sid, cwd = _cx_id(1), "C:\\W"
-        records = [_cx_custom_call("exec", "x", "e1")] + _cx_filler(40) + [
-            _cx_output("e1", "Script completed", custom=True)]
-        _cx_write(codex_home, sid, cwd, records)
-        monkeypatch.setattr(data_codex, "_TRANSCRIPT_WINDOW", 8 * 1024)
-        events = data_codex.get_full_transcript(sid, cwd)
-        results = [e for e in events if e.kind == "tool_result"]
-        assert [(e.tool_call_id, e.outcome_unknown) for e in results] == [("e1", False)]
-        assert not [e for e in events if e.kind == "tool_call"]
-
 
 class TestCodexFailureIsolation:
     def test_every_public_function_contains_a_raising_helper(self, codex_home, monkeypatch):
@@ -2767,6 +2755,93 @@ class TestCodexExecOutcome:
             ("tool_call", "e1", "started"), ("tool_update", "e1", "failed"),
             ("tool_call", "e2", "started"),
             ("tool_call", "w1", "started"), ("tool_update", "w1", "finished")]
+
+
+class TestCodexExecToolName:
+    """261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, finding 22.
+
+    An exec marker maps an outcome only for a result whose call is the `exec`
+    tool (D13): another tool's output that merely starts with the same words, and
+    a result whose call the window left out, follow the generic rule.
+    """
+
+    _TEXTS = ["Script completed\nWall time 0.0 seconds", "Script failed\nWall time 1.0 seconds",
+              "aborted by user after 3.2s.", "Script running with cell ID 3"]
+
+    def _results(self, codex_home, records):
+        sid, cwd = _cx_id(1), "C:\\W"
+        _cx_write(codex_home, sid, cwd, records)
+        return {e.tool_call_id: (e.success, e.outcome_unknown)
+                for e in data_codex.get_full_transcript(sid, cwd) if e.kind == "tool_result"}
+
+    def test_the_same_text_maps_for_exec_and_not_for_another_tool(self, codex_home):
+        records = []
+        for n, text in enumerate(self._TEXTS):
+            records += [_cx_custom_call("exec", "x", f"e{n}"), _cx_output(f"e{n}", text, custom=True),
+                        _cx_call("wait_agent", "{}", f"w{n}"), _cx_output(f"w{n}", text),
+                        _cx_call("shell_command", '{"command":"x"}', f"s{n}"), _cx_output(f"s{n}", text)]
+        results = self._results(codex_home, records)
+        assert [results[f"e{n}"] for n in range(3)] == [(True, False), (False, False), (False, False)]
+        assert "e3" not in results      # exec "running": no result, the call stays started
+        for n in range(4):
+            # Not exec: no marker mapping, and a "running" text is an ordinary result.
+            assert results[f"w{n}"] == (None, True), n
+            assert results[f"s{n}"] == (None, True), n
+
+    def test_a_function_call_named_exec_and_a_custom_tool_call_named_exec_are_both_exec(
+            self, codex_home):
+        results = self._results(codex_home, [
+            _cx_call("exec", '{"code":"x"}', "f1"), _cx_output("f1", "Script completed"),
+            _cx_custom_call("exec", "x", "c1"), _cx_output("c1", "Script completed", custom=True),
+            _cx_call("exec", '{"code":"x"}', "f2"), _cx_output("f2", "Script failed"),
+        ])
+        assert results == {"f1": (True, False), "c1": (True, False), "f2": (False, False)}
+
+    def test_only_the_exact_tool_name_exec_counts(self, codex_home):
+        results = self._results(codex_home, [
+            _cx_custom_call("exec_command", "x", "a1"), _cx_output("a1", "Script completed", custom=True),
+            _cx_custom_call("Exec", "x", "a2"), _cx_output("a2", "Script completed", custom=True),
+            _cx_custom_call("exec ", "x", "a3"), _cx_output("a3", "Script completed", custom=True),
+            _cx_call("", "{}", "a4"), _cx_output("a4", "Script completed"),
+            _cx_call("exec_command", "{}", "a5"), _cx_output("a5", "Script completed"),
+            _cx_call("Exec", "{}", "a6"), _cx_output("a6", "Script completed"),
+        ])
+        assert results == {k: (None, True) for k in ("a1", "a2", "a3", "a4", "a5", "a6")}
+
+    def test_the_exec_name_belongs_to_its_call_id_not_to_the_neighbouring_call(self, codex_home):
+        results = self._results(codex_home, [
+            _cx_custom_call("exec", "x", "e1"), _cx_call("wait_agent", "{}", "w1"),
+            _cx_output("w1", "Script completed"), _cx_output("e1", "Script completed", custom=True),
+            _cx_output("orphan", "Script completed"),
+        ])
+        assert results["w1"] == (None, True)
+        assert results["e1"] == (True, False)
+        assert results["orphan"] == (None, True)
+
+    def test_a_result_whose_exec_call_the_window_left_out_is_not_mapped_from_its_text(
+            self, codex_home, monkeypatch):
+        """The call (and so its tool name) is outside the window: no guess from the text."""
+        sid, cwd = _cx_id(1), "C:\\W"
+        records = [_cx_custom_call("exec", "x", "e1")] + _cx_filler(40) + [
+            _cx_output("e1", "Script completed", custom=True)]
+        _cx_write(codex_home, sid, cwd, records)
+        monkeypatch.setattr(data_codex, "_TRANSCRIPT_WINDOW", 8 * 1024)
+        events = data_codex.get_full_transcript(sid, cwd)
+        assert [(e.tool_call_id, e.success, e.outcome_unknown)
+                for e in events if e.kind == "tool_result"] == [("e1", None, True)]
+        assert not [e for e in events if e.kind == "tool_call"]
+
+    def test_the_translator_shows_a_foreign_marker_text_as_finished_not_completed(self, codex_home):
+        from power_atlas.transcript_translator import translate_transcript
+        sid, cwd = _cx_id(1), "C:\\W"
+        _cx_write(codex_home, sid, cwd, [
+            _cx_call("wait_agent", "{}", "w1"), _cx_output("w1", "Script completed"),
+            _cx_call("wait_agent", "{}", "w2"), _cx_output("w2", "Script failed"),
+            _cx_custom_call("exec", "x", "e1"), _cx_output("e1", "Script completed", custom=True)])
+        frames = translate_transcript(data_codex.get_full_transcript(sid, cwd), sid)
+        assert [(f["payload"]["toolCallId"], f["payload"]["status"])
+                for f in frames if f["type"] == "tool_update"] == [
+            ("w1", "finished"), ("w2", "finished"), ("e1", "completed")]
 
 
 class TestCodexExitCodeRobustness:
@@ -2962,6 +3037,175 @@ class TestCodexRefreshAfterFailure:
         sessions, stats = data_codex.load_sessions(cwd)
         assert sessions == []
         assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is False
+
+
+class TestCodexParseRetry:
+    """261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, finding 21.
+
+    A rollout whose parse fails with an OSError (a sharing violation on an idle
+    file) is retried by later refresh polls without any change to the file: at
+    most 3 retries, at least _RETRY_SPACING apart. Any other failure is
+    deterministic and is not retried (finding 16). The recorded `file_stats` stay
+    the file's real stat in every case.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fast_retry(self, monkeypatch):
+        self.default_spacing = data_codex._RETRY_SPACING
+        monkeypatch.setattr(data_codex, "_RETRY_SPACING", 0.0)
+
+    @staticmethod
+    def _flaky(monkeypatch, bad, failures, exc=PermissionError):
+        """`_parse_rollout` raises `exc` for `bad` on its first `failures` calls
+        (None: on every call). Returns the call counter."""
+        real = data_codex._parse_rollout
+        calls = {"n": 0}
+
+        def parse(path):
+            if path == str(bad):
+                calls["n"] += 1
+                if failures is None or calls["n"] <= failures:
+                    raise exc("sharing violation")
+            return real(path)
+        monkeypatch.setattr(data_codex, "_parse_rollout", parse)
+        return calls
+
+    @staticmethod
+    def _poll(cwd, stats):
+        """One refresh poll as `data.refresh_stale_entries` runs it: reload when stale.
+        Returns (reloaded, sessions, stats)."""
+        norm = data_mod._normalize_path(cwd)
+        if not data_codex.refresh_stale_entries_for_cwd(norm, stats):
+            return False, None, stats
+        sessions, stats = data_codex.load_sessions(cwd)
+        return True, sessions, stats
+
+    def test_the_default_spacing_is_at_least_five_seconds(self):
+        assert self.default_spacing >= 5.0
+
+    def test_a_transient_open_failure_recovers_without_any_change_to_the_file(
+            self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        _cx_write(codex_home, _cx_id(1), cwd, [_cx_user("fine")])
+        bad = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("flaky")])
+        calls = self._flaky(monkeypatch, bad, failures=1)
+        monkeypatch.setattr(data_mod, "PROVIDERS", {"codex": data_codex})
+        data_mod.session_cache.clear()
+        try:
+            assert [s.session_id for s in data_mod.get_sessions(cwd, "codex")] == [_cx_id(1)]
+            before = os.stat(bad)
+            data_mod.refresh_stale_entries()          # the next poll, the file untouched
+            assert sorted(s.session_id for s in data_mod.get_sessions(cwd, "codex")) == [
+                _cx_id(1), _cx_id(2)]
+            after = os.stat(bad)
+            assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+            assert calls["n"] == 2
+            norm = data_mod._normalize_path(cwd)
+            stats = data_mod.session_cache.get_file_stats(cwd, "codex")
+            assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is False   # stable again
+        finally:
+            data_mod.session_cache.clear()
+
+    def test_the_recorded_stat_is_the_files_real_stat_while_a_retry_is_pending(
+            self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        bad = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("flaky")])
+        self._flaky(monkeypatch, bad, failures=None)
+        sessions, stats = data_codex.load_sessions(cwd)
+        st = os.stat(bad)
+        assert sessions == []
+        assert stats[str(bad)] == data_mod._FileInfo(mtime=st.st_mtime, size=st.st_size)
+
+    def test_a_permanent_oserror_stops_after_exactly_three_retries(self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        _cx_write(codex_home, _cx_id(1), cwd, [_cx_user("fine")])
+        bad = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("broken")])
+        calls = self._flaky(monkeypatch, bad, failures=None)
+        sessions, stats = data_codex.load_sessions(cwd)
+        assert calls["n"] == 1 and [s.session_id for s in sessions] == [_cx_id(1)]
+        outcomes = []
+        for _ in range(8):
+            reloaded, _s, stats = self._poll(cwd, stats)
+            outcomes.append(reloaded)
+        assert outcomes == [True, True, True] + [False] * 5
+        assert calls["n"] == 4            # the first load plus exactly 3 retries, never a 5th
+
+    def test_a_success_on_the_second_attempt_is_final_and_resets_the_budget(
+            self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        bad = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("slow to open")])
+        self._flaky(monkeypatch, bad, failures=2)
+        sessions, stats = data_codex.load_sessions(cwd)                # attempt 1: fails
+        assert sessions == []
+        reloaded, sessions, stats = self._poll(cwd, stats)             # attempt 2: fails again
+        assert reloaded is True and sessions == []
+        reloaded, sessions, stats = self._poll(cwd, stats)             # attempt 3: succeeds
+        assert reloaded is True and [s.session_id for s in sessions] == [_cx_id(2)]
+        assert [self._poll(cwd, stats)[0] for _ in range(4)] == [False] * 4
+        # The budget starts over: a later failure of the same, unchanged file gets 3 retries again.
+        data_codex._parse_cache.clear()
+        calls = self._flaky(monkeypatch, bad, failures=None)
+        sessions, stats = data_codex.load_sessions(cwd)
+        assert sessions == [] and calls["n"] == 1
+        assert [self._poll(cwd, stats)[0] for _ in range(5)] == [True, True, True, False, False]
+
+    def test_a_non_oserror_is_never_retried(self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        bad = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("poisoned")])
+        calls = self._flaky(monkeypatch, bad, failures=None, exc=ValueError)
+        _sessions, stats = data_codex.load_sessions(cwd)
+        assert [self._poll(cwd, stats)[0] for _ in range(4)] == [False] * 4
+        assert calls["n"] == 1
+
+    def test_retries_are_spaced(self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        bad = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("broken")])
+        self._flaky(monkeypatch, bad, failures=None)
+        _sessions, stats = data_codex.load_sessions(cwd)
+        norm = data_mod._normalize_path(cwd)
+        monkeypatch.setattr(data_codex, "_RETRY_SPACING", 3600.0)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is False
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is False
+        monkeypatch.setattr(data_codex, "_RETRY_SPACING", 0.0)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is True
+
+    def test_a_changed_file_is_noticed_and_gets_a_fresh_budget(self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        norm = data_mod._normalize_path(cwd)
+        bad = _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("broken")])
+        calls = self._flaky(monkeypatch, bad, failures=None)
+        _sessions, stats = data_codex.load_sessions(cwd)
+        for _ in range(3):                                             # drain the budget
+            _reloaded, _s, stats = self._poll(cwd, stats)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is False
+        # The file changes, and not by growing: shorter, with an older mtime.
+        _cx_write(codex_home, _cx_id(2), cwd, [], mtime=_CX_OLD)
+        assert data_codex.refresh_stale_entries_for_cwd(norm, stats) is True
+        sessions, stats = data_codex.load_sessions(cwd)       # fails again: a new stat, a new budget
+        assert sessions == []
+        calls["n"] = 0
+        assert [self._poll(cwd, stats)[0] for _ in range(5)] == [True, True, True, False, False]
+        assert calls["n"] == 3
+
+    def test_the_failure_memo_is_bounded_and_dropped_with_the_caches(self, codex_home, monkeypatch):
+        cwd = "C:\\W"
+        count = 520                    # more rollouts than the memo can hold
+        bad = set()
+        for n in range(1, count + 1):
+            sid = _cx_id(n)
+            bad.add(str(_cx_write(codex_home, sid, cwd, [], first=_cx_line(_cx_meta(sid, cwd, base_chars=10)))))
+        real = data_codex._parse_rollout
+
+        def parse(path):
+            if path in bad:
+                raise PermissionError("sharing violation")
+            return real(path)
+        monkeypatch.setattr(data_codex, "_parse_rollout", parse)
+        sessions, _stats = data_codex.load_sessions(cwd)
+        assert sessions == []
+        assert 0 < len(data_codex._parse_failed) < count
+        data_codex._clear_caches()
+        assert len(data_codex._parse_failed) == 0
 
 
 class TestCodexWorkspaceRecency:

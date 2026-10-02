@@ -99,6 +99,13 @@ _EXIT_CODE_RE = re.compile(r"Exit code: (-?\d{1,9})(?!\d)")
 _EXEC_RUNNING = "Script running with cell"
 _EXEC_MARKERS = (("Script completed", True), ("Script failed", False), ("aborted by user", False))
 
+# A rollout whose parse fails with an OSError (a sharing violation on an idle file)
+# is retried by later refresh polls, at most _RETRY_MAX times and no closer together
+# than _RETRY_SPACING seconds (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW
+# Phase 1, finding 21).
+_RETRY_MAX = 3
+_RETRY_SPACING = 5.0
+
 
 # --- Failure isolation (D27) ----------------------------------------------------
 
@@ -736,6 +743,43 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
     return results
 
 
+# path -> (attempts, monotonic time of the last attempt, mtime, size): the parse
+# failures of rollouts that stayed out of a listing. `attempts` counts failed loads
+# of that exact (mtime, size); 0 means recovered. A deterministic failure (anything
+# but an OSError) is stored as already exhausted. Bounded, so a store full of
+# unreadable files cannot grow it; a path evicted from it simply starts a new budget.
+_parse_failed = BoundedCache(512)
+
+
+def _note_parse_outcome(path: str, st: os.stat_result, exc: BaseException | None) -> None:
+    """Record how one rollout's load ended: `exc` is the failure, None a load that
+    got past the parse (a session, or a file that is not one). Called with every
+    outcome so that a recovery or a non-session ends the retries."""
+    prior = _parse_failed.get(path)
+    if exc is None:
+        if prior is not None and prior[0]:
+            _parse_failed.put(path, (0, 0.0, st.st_mtime, st.st_size))
+        return
+    # Equality, not ordering: a file that was rewritten shorter or older is a new
+    # file here, whatever its size or mtime did.
+    same = prior is not None and prior[2:] == (st.st_mtime, st.st_size)
+    attempts = prior[0] + 1 if same else 1
+    if not isinstance(exc, OSError):
+        attempts = _RETRY_MAX + 1
+    _parse_failed.put(path, (attempts, time.monotonic(), st.st_mtime, st.st_size))
+
+
+def _retry_due(path: str) -> bool:
+    """True when this rollout's last load failed with an OSError, retries are left,
+    and the last attempt is at least _RETRY_SPACING seconds old. The caller has
+    already compared the file's stat with the recorded one, so the entry (which
+    every load of the file rewrites) describes the file as it is now."""
+    entry = _parse_failed.get(path)
+    if entry is None or not 1 <= entry[0] <= _RETRY_MAX:
+        return False
+    return time.monotonic() - entry[1] >= _RETRY_SPACING
+
+
 def _updated_at(mtime_ns: int, parsed: "_Parsed", now: datetime) -> datetime:
     """The later of the file mtime and the last record's stamp; a future stamp cannot pin a row."""
     updated = _ns_dt(mtime_ns)
@@ -762,15 +806,20 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
     now = datetime.now(timezone.utc)
     for rollout, _listed in _store_index().by_cwd.get(norm, []):
         # Per-file isolation: one bad file never blanks the workspace.
+        st = None
         try:
             st = os.stat(rollout.path)  # fresh: the index memo can be 5 s old
             # Recorded before anything below can skip or fail, so a listed file that
-            # is not a session does not make every refresh report a change.
+            # is not a session does not make every refresh report a change. It is the
+            # real stat even for a failed parse: the retry of a transient failure is
+            # `_parse_failed`'s job (refresh_stale_entries_for_cwd), not a fake stat.
             file_stats[rollout.path] = _FileInfo(mtime=st.st_mtime, size=st.st_size)
             verdict = _verdict_for(rollout.path, st.st_mtime_ns, st.st_size, rollout.file_uuid)
             if verdict.kind != "top" or verdict.norm_cwd != norm:
+                _note_parse_outcome(rollout.path, st, None)
                 continue
             parsed = _parsed_for(rollout.path, st.st_mtime_ns, st.st_size)
+            _note_parse_outcome(rollout.path, st, None)
             updated = _updated_at(st.st_mtime_ns, parsed, now)
             title = names.get(verdict.session_id) or parsed.first_prompt[:80] or verdict.session_id
             sessions.append(Session(
@@ -785,6 +834,8 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
             ))
         except Exception as exc:
             _warn("load_sessions.file", exc, rollout.path)
+            if st is not None:
+                _note_parse_outcome(rollout.path, st, exc)
     sessions.sort(key=lambda s: s.updated_at, reverse=True)
     return sessions, file_stats
 
@@ -792,7 +843,8 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
 @_safe("refresh_stale_entries_for_cwd", lambda: False)
 def refresh_stale_entries_for_cwd(norm_cwd: str, old_stats: dict[str, _FileInfo]) -> bool:
     """True when a tracked rollout changed or vanished, a top-level rollout for this
-    workspace appeared (in any date folder), or the session index changed (D12)."""
+    workspace appeared (in any date folder), the session index changed (D12), or a
+    rollout whose parse failed with an OSError is due a retry."""
     if not old_stats:
         return False
     index_key = str(CODEX_SESSION_INDEX)
@@ -806,6 +858,8 @@ def refresh_stale_entries_for_cwd(norm_cwd: str, old_stats: dict[str, _FileInfo]
         except OSError:
             return True
         if st.st_mtime != info.mtime or st.st_size != info.size:
+            return True
+        if _retry_due(path_str):
             return True
     return any(rollout.path not in old_stats
                for rollout, _verdict in _store_index().by_cwd.get(norm_cwd, []))
@@ -1002,8 +1056,14 @@ def _exec_outcome(text: str) -> bool | None:
     return None
 
 
-def _transcript_events(obj) -> list[TranscriptEvent]:
-    """The TranscriptEvents one rollout record yields (D13)."""
+def _transcript_events(obj, exec_calls: set[str]) -> list[TranscriptEvent]:
+    """The TranscriptEvents one rollout record yields (D13).
+
+    `exec_calls` holds the call ids of the `exec` calls seen so far in this
+    transcript (this function adds to it): an exec marker maps an outcome only
+    for a result of one of those calls (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW
+    Phase 1, finding 22).
+    """
     if not isinstance(obj, dict):
         return []
     stamp = obj.get("timestamp")
@@ -1029,19 +1089,24 @@ def _transcript_events(obj) -> list[TranscriptEvent]:
         return []
     name = payload.get("name") if isinstance(payload.get("name"), str) else ""
     if ptype == "function_call":
+        if name == "exec":
+            exec_calls.add(call_id)
         return [TranscriptEvent(kind="tool_call", tool_call_id=call_id, tool_name=name,
                                 tool_args=_call_args(payload.get("arguments")), timestamp=stamp)]
     if ptype == "custom_tool_call":
+        if name == "exec":
+            exec_calls.add(call_id)
         content = payload.get("input")
         return [TranscriptEvent(kind="tool_call", tool_call_id=call_id, tool_name=name,
                                 tool_args={"content": content[:_ARG_CHARS] if isinstance(content, str) else ""},
                                 timestamp=stamp)]
     if ptype in ("function_call_output", "custom_tool_call_output"):
         text = _output_text(payload.get("output"))
-        if text.startswith(_EXEC_RUNNING):
+        is_exec = call_id in exec_calls
+        if is_exec and text.startswith(_EXEC_RUNNING):
             return []  # not a final outcome: the call stays "started" (D13)
         success = _exit_success(text)
-        if success is None:
+        if success is None and is_exec:
             success = _exec_outcome(text)
         # No exit code and no marker: the call finished and its outcome is unknown.
         # Never a success claim: the flag makes the translator show a neutral
@@ -1066,6 +1131,7 @@ def get_full_transcript(session_id: str, cwd: str) -> list[TranscriptEvent]:
     events: deque = deque(maxlen=_TRANSCRIPT_MAX_EVENTS)
     total = 0
     notices = 0
+    exec_calls: set[str] = set()  # bounded by the transcript window
 
     def add(event: TranscriptEvent) -> None:
         nonlocal total
@@ -1096,7 +1162,7 @@ def get_full_transcript(session_id: str, cwd: str) -> list[TranscriptEvent]:
             if not any(k in line for k in _TRANSCRIPT_KEYS):
                 continue
             try:
-                found = _transcript_events(_loads(line))
+                found = _transcript_events(_loads(line), exec_calls)
             except Exception as exc:  # one bad record is one skipped record, not an empty transcript
                 log.debug("codex transcript: skipped a record (%s)", type(exc).__name__)
                 continue
@@ -1126,5 +1192,6 @@ def _clear_caches() -> None:
     _verdict_cache = BoundedCache(_cache_cap)
     _parse_cache = BoundedCache(_cache_cap)
     _missing.clear()
+    _parse_failed.clear()
     with _warn_lock:
         _warned.clear()
