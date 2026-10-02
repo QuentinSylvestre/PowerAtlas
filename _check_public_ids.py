@@ -19,9 +19,11 @@ What it scans, by default (pre-commit, on the staged change):
   an unrelated commit;
 - the **paths** of added and renamed files (an id in a file name). A deleted file
   is not a violation;
-- staged files that git treats as binary but that start with a UTF-16 byte-order
-  mark (FF FE or FE FF): they are decoded and their lines scanned (for a modified
-  file, only the lines absent from the committed version).
+- staged files that git treats as binary but that start with a UTF-16 or UTF-32
+  byte-order mark (UTF-16: FF FE or FE FF; UTF-32: FF FE 00 00 or 00 00 FE FF):
+  they are decoded and their lines scanned (for a modified file, only the lines
+  absent from the committed version). Only the first 4 bytes of each binary blob
+  are read to test the mark; the whole blob is read only when a mark matched.
 
 `--message <file>` scans a commit message file instead (the `commit-msg` hook,
 `_commit_msg_hook.sh`). Everything before git's scissors line is scanned,
@@ -33,7 +35,14 @@ Limits, stated so nobody trusts it for more than it does:
   another machine;
 - an id that exists only in the Codex state database (`state_*.sqlite`), which is
   not a store this check walks;
-- other binary files (images, archives) and UTF-16 files without a byte-order mark;
+- other binary files (images, archives); UTF-16 and UTF-32 files without a
+  byte-order mark; and text files that contain a NUL byte or that .gitattributes
+  marks binary or `-diff` (git treats them as binary, and without a UTF byte-order
+  mark they are not decoded);
+- an id directly followed by a hex letter (`<id>end`, `<id>bak`): the pattern must
+  not match inside a longer hex run, so such an id is missed;
+- `git commit --no-verify`, which skips both hooks; tag and branch names and
+  annotated-tag messages, which no hook here sees; and `git commit-tree`;
 - home paths and user names, which are not ids;
 - a `**Source**` line of `memory/MEMORY.md` is skipped whole, not only its id.
   That is the one sanctioned place: the memory format records `session-id +
@@ -63,6 +72,7 @@ _MEMORY_FILE = "memory/MEMORY.md"
 _ANCHOR_MARK = "**Source**"
 _SCISSORS = "# ------------------------ >8 ------------------------"
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
+_UTF32_BOMS = (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")
 
 Candidate = tuple[str, int, str]  # (path, line number or 0 for the path itself, text)
 
@@ -103,7 +113,11 @@ def added_lines(diff: str) -> list[Candidate]:
     """(path, new line number, text) for each added line of a `-U0` diff."""
     out: list[Candidate] = []
     path, lineno, in_header = "", 0, False
-    for line in diff.splitlines():
+    # Split on LF only. str.splitlines() also splits on CR, FF, U+2028, U+0085 and
+    # others, so an added line `progress<CR>id <id>` would lose the leading "+" on
+    # its second fragment and escape. Git ends every diff line with LF; a trailing
+    # CR of a CRLF file stays in the text, which is harmless.
+    for line in diff.split("\n"):
         if line.startswith("diff --git "):
             in_header = True
         elif in_header and line.startswith("+++ "):
@@ -132,14 +146,65 @@ def _git(args: list[str]) -> bytes:
     run = subprocess.run(["git", "-c", "core.quotepath=off", *args], capture_output=True)
     if run.returncode != 0:
         first = run.stderr.decode("utf-8", errors="replace").strip().splitlines()[:1]
-        raise _GitError(_redact(first[0][:200]) if first else f"exit {run.returncode}")
+        # Redact first, then truncate: cutting at 200 characters first could leave
+        # a prefix of an id that the pattern no longer recognises.
+        raise _GitError(_redact(first[0])[:200] if first else f"exit {run.returncode}")
     return run.stdout
 
 
-def _decode_utf16(blob: bytes) -> list[str] | None:
-    if not blob.startswith(_UTF16_BOMS):
+def _bom_codec(head: bytes) -> str | None:
+    """The codec for a UTF-16 or UTF-32 byte-order mark at the start of `head`."""
+    # UTF-32 first: the UTF-32LE mark (FF FE 00 00) starts with the UTF-16LE mark.
+    if head.startswith(_UTF32_BOMS):
+        return "utf-32"
+    if head.startswith(_UTF16_BOMS):
+        return "utf-16"
+    return None
+
+
+def _decode_wide(blob: bytes) -> list[str] | None:
+    """Lines of a blob that starts with a UTF-16/UTF-32 mark, else None."""
+    codec = _bom_codec(blob[:4])
+    if codec is None:
         return None
-    return blob.decode("utf-16", errors="replace").splitlines()
+    # splitlines() is safe here, unlike in added_lines: every fragment is scanned
+    # on its own, and an id contains no line separator, so a split cannot hide one.
+    return blob.decode(codec, errors="replace").splitlines()
+
+
+def _blob_lines(spec: str) -> list[str] | None:
+    """Lines of the blob `spec` (e.g. `:path`) when it starts with a wide mark.
+
+    Reads through `git cat-file blob` (no textconv, no filters) and takes only 4
+    bytes unless a mark matched. None means no mark. Raises _GitError when the
+    blob cannot be read.
+    """
+    try:
+        proc = subprocess.Popen(["git", "-c", "core.quotepath=off", "cat-file", "blob", spec],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise _GitError(type(exc).__name__) from None
+    assert proc.stdout is not None
+    try:
+        head = proc.stdout.read(4)
+        codec = _bom_codec(head)
+        blob = head + proc.stdout.read() if codec else b""
+    except OSError as exc:
+        proc.kill()
+        proc.wait()
+        raise _GitError(type(exc).__name__) from None
+    finally:
+        proc.stdout.close()  # without a mark, git sees a closed pipe and stops
+    proc.wait()
+    # A closed pipe makes git exit non-zero after it wrote something; a real
+    # failure (missing blob) wrote nothing.
+    if proc.returncode != 0 and not head:
+        raise _GitError(f"exit {proc.returncode}")
+    if codec is None:
+        return None
+    if proc.returncode != 0:
+        raise _GitError(f"exit {proc.returncode}")
+    return _decode_wide(blob)
 
 
 def _name_status(raw: bytes) -> list[tuple[str, str, str]]:
@@ -191,15 +256,19 @@ def staged_candidates() -> list[Candidate]:
         if new not in binary:
             continue
         try:
-            lines = _decode_utf16(_git(["show", f":{new}"]))
+            lines = _blob_lines(f":{new}")
         except _GitError:
+            # Names are decoded with errors="replace", so a non-UTF-8 name may not
+            # round-trip to the real path; either way the file is not scanned.
+            print(f"_check_public_ids: could not read {_redact(new)} from the index; "
+                  f"it was not scanned", file=sys.stderr)
             continue
         if lines is None:
             continue
         before: set[str] = set()
         if status in "MR":
             try:
-                before = set(_decode_utf16(_git(["show", f"HEAD:{old}"])) or [])
+                before = set(_blob_lines(f"HEAD:{old}") or [])
             except _GitError:
                 pass  # no HEAD yet, or no old blob: every line counts as added
         candidates += [(new, n, text) for n, text in enumerate(lines, 1)
@@ -221,9 +290,12 @@ def check_message(path: str) -> int:
         print(f"_check_public_ids: cannot read the commit message file ({type(exc).__name__})",
               file=sys.stderr)
         return 2
-    lines = _decode_utf16(blob)
+    lines = _decode_wide(blob)
     if lines is None:
-        lines = blob.decode("utf-8", errors="replace").splitlines()
+        # Split on LF only, as git does: splitlines() would also split on FF,
+        # U+2028 and U+0085, so a message could fake a scissors line git does not
+        # see and stop the scan before its real text.
+        lines = blob.decode("utf-8", errors="replace").split("\n")
     kept: list[Candidate] = []
     for n, text in enumerate(lines, 1):
         if text.startswith(_SCISSORS):
