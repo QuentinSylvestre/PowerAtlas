@@ -6419,7 +6419,7 @@ function loadFlatPage(page, silent){
   dashRailFetch({
     mode: 'recent', page: page, size: DASH_RAIL_FLAT_SIZE,
     provider: window._activeProvider === 'all' ? '' : window._activeProvider,
-    tag: window._activeTag,
+    tag: window._activeTag, time_filter: window._activeTimeFilter,
   }).then(function(data){
     dashRailBusy = false;
     var seen = Object.create(null);
@@ -6495,7 +6495,10 @@ function loadGroupSessions(group){
   // every call after that is already size-10-aligned.
   var size = DASH_RAIL_PROJECT_PAGE_SIZE;
   var next = Math.floor((group.sessions.length || 0) / size) + 1;
-  dashRailFetch({cwd: group.cwd, session_page: next, session_size: size})
+  // The filter rides along: "More in ..." would otherwise page in the sessions
+  // the filter was set to leave out.
+  dashRailFetch({cwd: group.cwd, session_page: next, session_size: size,
+    time_filter: window._activeTimeFilter})
     .then(function(data){
       dashRailBusy = false;
       var incoming = (data.groups || [])[0];

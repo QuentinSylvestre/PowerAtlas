@@ -15930,26 +15930,83 @@ class TestDashboardListingEndpoint:
         body = client.get(self._PATH, params={"tag": "frontend"}).json()
         assert [g["cwd"] for g in body["groups"]] == [r"C:\dev\frontend"]
 
-    def test_time_filter_narrows_grouped_mode_before_pagination(
+    @staticmethod
+    def _now():
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def test_time_filter_drops_a_workspace_with_nothing_in_the_bucket(
             self, client, grouped_multi_store):
-        grouped_multi_store["add"](r"C:\dev\new", "kiro-cli-v3", [_acp_row("s1")],
-                                   updated="2026-08-03T10:00:00Z")
-        grouped_multi_store["add"](r"C:\dev\old", "kiro-cli-v3", [_acp_row("s2")],
+        grouped_multi_store["add"](r"C:\dev\new", "kiro-cli-v3",
+                                   [_acp_row("s1", updated=self._now())],
+                                   updated=self._now())
+        grouped_multi_store["add"](r"C:\dev\old", "kiro-cli-v3",
+                                   [_acp_row("s2", updated="2020-01-01T10:00:00Z")],
                                    updated="2020-01-01T10:00:00Z")
         body = client.get(self._PATH, params={"time_filter": "today"}).json()
-        # Whatever "today" resolves to on this machine, the far-past workspace
-        # must never match it -- this proves the filter actually excludes
-        # rather than being silently ignored.
-        assert r"C:\dev\old" not in [g["cwd"] for g in body["groups"]]
+        assert [g["cwd"] for g in body["groups"]] == [r"C:\dev\new"]
 
-    def test_time_filter_is_not_accepted_in_flat_mode(
+    def test_time_filter_keeps_only_the_sessions_in_the_bucket(
             self, client, grouped_multi_store):
-        """Documented scope cut: Date mode already buckets by day, so
-        `_acp_flat_listing` takes no `time_filter` -- passing one must not
-        error, only be ignored."""
-        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [_acp_row("s1")])
-        resp = client.get(self._PATH, params={"mode": "recent", "time_filter": "today"})
-        assert resp.status_code == 200
+        """The bug this pins: a workspace active today still listed its older
+        sessions, because the filter only looked at the workspace's newest one."""
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [
+            _acp_row("today", updated=self._now()),
+            _acp_row("old1", updated="2020-01-01T10:00:00Z"),
+            _acp_row("old2", updated="2020-01-02T10:00:00Z")], updated=self._now())
+        group = client.get(self._PATH, params={"time_filter": "today"}).json()["groups"][0]
+        assert [s["id"] for s in group["sessions"]] == ["today"]
+        assert group["total"] == 1, "the count describes what is shown"
+        # An unpinned workspace is normally listed without reading its sessions;
+        # with a filter active it has to be read to know whether it matches.
+        assert group["session_page"] == 1
+
+    def test_time_filter_reaches_the_more_in_workspace_request(
+            self, client, grouped_multi_store):
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [
+            _acp_row("today", updated=self._now()),
+            _acp_row("old", updated="2020-01-01T10:00:00Z")], updated=self._now())
+        body = client.get(self._PATH, params={"cwd": r"C:\dev\ws",
+                                              "time_filter": "today"}).json()
+        assert [s["id"] for s in body["groups"][0]["sessions"]] == ["today"]
+        unfiltered = client.get(self._PATH, params={"cwd": r"C:\dev\ws"}).json()
+        assert len(unfiltered["groups"][0]["sessions"]) == 2
+
+    def test_time_filter_older_keeps_a_workspace_active_today(
+            self, client, grouped_multi_store):
+        """A workspace whose newest session is today can still hold older ones,
+        so the workspace cut must not drop it for the "Older" bucket."""
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [
+            _acp_row("today", updated=self._now()),
+            _acp_row("old", updated="2020-01-01T10:00:00Z")], updated=self._now())
+        group = client.get(self._PATH, params={"time_filter": "before"}).json()["groups"][0]
+        assert [s["id"] for s in group["sessions"]] == ["old"]
+
+    def test_time_filter_in_flat_mode_reaches_the_collector_as_a_predicate(
+            self, client, monkeypatch):
+        from power_atlas import data as data_mod
+        asked = {}
+
+        def _paginated(page=1, page_size=20, provider=None, pinned_sessions=None,
+                       enabled_providers=None, exclude_cwds=None, **kw):
+            asked.update(kw)
+            rows = [(_acp_row("today", updated=self._now(), cwd=r"C:\ws\a"), "kiro-cli-v3"),
+                    (_acp_row("old", updated="2020-01-01T10:00:00Z", cwd=r"C:\ws\a"),
+                     "kiro-cli-v3")]
+            pred = kw.get("status_predicate")
+            return [r for r in rows if pred is None or pred(*r)], False
+
+        monkeypatch.setattr(data_mod, "get_all_sessions_paginated", _paginated)
+        monkeypatch.setattr(data_mod, "discover_workspaces_with_counts",
+                            lambda provider=None: [])
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        plain = client.get(self._PATH, params={"mode": "recent"}).json()
+        assert [s["id"] for s in plain["sessions"]] == ["today", "old"]
+        assert asked == {}, "no filter, no extra argument: the call is the one it always was"
+        body = client.get(self._PATH, params={"mode": "recent",
+                                              "time_filter": "today"}).json()
+        assert [s["id"] for s in body["sessions"]] == ["today"]
+        assert "status_predicate" in asked
 
 
 class TestAcpDeleteEndpoint:

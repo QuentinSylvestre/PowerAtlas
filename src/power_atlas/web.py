@@ -230,6 +230,18 @@ def _time_bucket(iso_str: str) -> str:
     return "before"
 
 
+_TIME_BUCKET_ORDER = ("today", "yesterday", "this_week", "before")
+
+
+def _time_bucket_rank(bucket: str) -> int:
+    """Newest bucket is 0. An unknown name ranks -1: older than nothing, so a
+    comparison against it keeps nothing, as an unmatched filter always did."""
+    try:
+        return _TIME_BUCKET_ORDER.index(bucket)
+    except ValueError:
+        return -1
+
+
 def _map_reported_status(reported: str) -> str:
     """Map a provider's self-reported live state onto the semantic vocabulary.
 
@@ -2828,7 +2840,13 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         ]
 
     if time_filter:
-        workspaces = [w for w in workspaces if _time_bucket(w[2]) == time_filter]
+        # Cheap pre-cut on the workspace's newest activity: a workspace whose
+        # newest session is older than the bucket cannot hold a match. One
+        # whose newest is *newer* can (a workspace active today may also hold
+        # yesterday's sessions), so the cut is "at least as recent", and the
+        # sessions themselves are filtered below.
+        want = _time_bucket_rank(time_filter)
+        workspaces = [w for w in workspaces if _time_bucket_rank(_time_bucket(w[2])) <= want]
 
     # Project-mode ordering (dashboard/ACP-merge QA follow-up): recent-first
     # or alphabetical per `sort`, with active workspaces surfaced ahead of
@@ -2896,9 +2914,15 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     # `find_session_workspace` is the same cheap per-session directory probe
     # `data.warmup_all` already runs at startup for this exact purpose — a
     # stat per workspace per pinned id, not a full session load per workspace.
-    lazy_mode = include_provider and not cwd
+    #
+    # A time filter turns the lazy skip off: whether a workspace has any
+    # session in the bucket is only known by reading its sessions. The pinned
+    # session probe below still runs (`dashboard_page`), so a matching pinned
+    # session in a workspace off this page still reaches the Pinned section.
+    dashboard_page = include_provider and not cwd
+    lazy_mode = dashboard_page and not time_filter
     force_cwds: frozenset[str] = frozenset()
-    if lazy_mode and pinned_set:
+    if dashboard_page and pinned_set:
         found_cwds = set()
         for sid in pinned_set:
             found = data._find_pinned_session_workspace(sid)
@@ -2948,6 +2972,8 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             except Exception:
                 log.exception("ACP listing: could not read %s sessions for %s",
                               prov_name, ws_cwd)
+        if time_filter:
+            tagged = [t for t in tagged if _time_bucket(t[0].updated_at) == time_filter]
         if len(ws_provs) > 1:
             # Same cross-provider interleave the dashboard has always used.
             tagged.sort(key=lambda x: (x[0].updated_at or "").replace("Z", "+00:00"),
@@ -3002,7 +3028,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     # disappears from the "Pinned sessions" section. This block fetches the
     # missing workspaces separately so every pinned session always appears,
     # regardless of which page its workspace would normally land on.
-    if lazy_mode and force_cwds:
+    if dashboard_page and force_cwds:
         page_group_norms = frozenset(_normalize_path(w[0]) for w in page_groups)
         off_page_cwds = force_cwds - page_group_norms
         if off_page_cwds:
@@ -3026,6 +3052,8 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                         )
                 ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
                 for s, prov_name in off_tagged:
+                    if time_filter and _time_bucket(s.updated_at) != time_filter:
+                        continue
                     if s.session_id in pinned_set:
                         pinned_sessions_found.append((ws_cwd, ws_name, s, prov_name))
                         if ws_hash:
@@ -3086,7 +3114,8 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
 
 def _acp_flat_listing(page: int, size: int, held, capacity: dict,
                        providers: frozenset[str] = frozenset({_ACP_V3_LISTING_PROVIDER}),
-                       include_provider: bool = False, tag: str = "") -> dict:
+                       include_provider: bool = False, tag: str = "",
+                       time_filter: str = "") -> dict:
     """Build the recency-ordered listing payload. Blocking; runs off the loop.
 
     The listing's second shape: every session this ACP can resume, newest
@@ -3131,9 +3160,17 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
     always does.
 
     `tag` (dashboard/ACP-merge Phase 4): same three-way rule as
-    `_acp_listing`'s own `tag` parameter — see that docstring. No
-    `time_filter` here; see `_acp_listing` for why grouped mode alone
-    carries it.
+    `_acp_listing`'s own `tag` parameter — see that docstring.
+
+    `time_filter`: keeps only sessions whose own `updated_at` falls in that
+    bucket (`_time_bucket`'s names). It was grouped-mode-only at first on the
+    reasoning that Date grouping already buckets by day, but a filter that does
+    nothing in the modes without a Date level reads as broken, so it applies
+    here too. Pushed into the collector as its `status_predicate` — before
+    pagination, like `exclude_cwds` — so `page_size` and `has_more` still
+    describe what is shown. Pinned sessions are filtered by the same rule: a
+    filter on "today" that leaves older sessions in view is the bug this
+    parameter exists to fix.
     """
     from .config import get_workspace_settings
 
@@ -3162,13 +3199,18 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
         return tag in tags
 
     hidden = {w[0] for w in workspaces_list if not _tag_keep(w[0])}
+    # Only passed when asked for, so a call with no filter is the exact call
+    # it always was.
+    extra = ({"status_predicate": lambda s, _prov: _time_bucket(s.updated_at) == time_filter}
+             if time_filter else {})
     try:
         rows, has_more = data.get_all_sessions_paginated(
             page=page, page_size=size,
             provider=next(iter(enabled)) if len(enabled) == 1 else None,
             enabled_providers=enabled,
             exclude_cwds=hidden,
-            pinned_sessions=config.pinned_sessions if pinned_set else None)
+            pinned_sessions=config.pinned_sessions if pinned_set else None,
+            **extra)
     except Exception:
         log.exception("ACP flat listing: could not collect sessions")
         rows, has_more = [], False
@@ -3191,8 +3233,10 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
                     continue
                 for s in ws_sessions:
                     if s.session_id in remaining:
-                        pinned_raw.append((s, ws_prov))
                         remaining.discard(s.session_id)
+                        if time_filter and _time_bucket(s.updated_at) != time_filter:
+                            continue
+                        pinned_raw.append((s, ws_prov))
 
     sessions = [s for s, _prov in flat_rows]
     pinned_sessions_list = [s for s, _prov in pinned_raw]
@@ -3373,7 +3417,7 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
             max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity,
-            providers, True, tag)
+            providers, True, tag, time_filter)
     return await asyncio.to_thread(
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
