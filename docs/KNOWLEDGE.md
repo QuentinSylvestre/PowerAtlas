@@ -136,7 +136,17 @@ kiro-cli v2 stored sessions as flat files under `~/.kiro/sessions/cli/`:
 
 The SQLite DB at `%LOCALAPPDATA%\Kiro-Cli\data.sqlite3` (`conversations_v2` table) held a small number of "classic" sessions not otherwise stored on disk.
 
-PowerAtlas removed v2 support in this plan. The `~/.kiro/sessions/cli/` directory is not cleaned; the files remain on disk but PowerAtlas no longer reads them.
+PowerAtlas removed v2 support in this plan. The `~/.kiro/sessions/cli/` directory is not cleaned; the files remain on disk but PowerAtlas no longer reads them. `kiro-cli chat --list-sessions` still does, so a workspace move rewrites them anyway (agent playbook, `providers/kiro/reference/kiro-cli-v2-local-data.md § Moving a workspace`).
+
+## Workspace moves — what PowerAtlas keys by path (measured 2026-10-02)
+
+> Measured while moving the Perso tree out of OneDrive with the agent playbook's `qmigrate-workspace` skill. The provider stores themselves are cross-project facts and are documented in the playbook (`providers/claude/reference/claude-code-local-data.md`, `providers/codex/reference/codex-local-data.md`, `providers/kiro/reference/kiro-cli-v3-internals.md`, `providers/kiro/reference/kiro-ide-local-data.md`); this section keeps only PowerAtlas's own state.
+
+- **`config.toml`** (`%LOCALAPPDATA%\power-atlas\`): `pinned_folders` is a list of paths and the keys of `workspace_settings` are paths (matched through `_normalize_path`, so case and separators do not matter); both must be rewritten for favorites and per-workspace settings to follow a move. `pinned_sessions` holds session ids only. A legacy `[workspace_icons]` table had a key with the separators stripped (`c:usersqsylvestre.polestar...`), which no path rewrite can match; nothing under `src/` references `workspace_icons`, so it was left as is.
+- **Launch shortcut**: the Startup `PowerAtlas.lnk` names the venv's `pythonw.exe` and an icon inside the repo. Retargeting it through `WScript.Shell` reset its working directory to `C:\` until `WorkingDirectory` was read before `TargetPath` was assigned.
+- **The venv cannot move**: `.venv-PowerAtlas` holds an editable install whose finder names the old checkout. It was rebuilt in place from `pip freeze` with `-e` pointing at the new checkout; `power_atlas` then imported from the new `src/`.
+- **Kiro v3 `.index/`**: after the move, kiro-cli built a fresh `.index/` in each new workspace-hash folder; the old folders' `.index/` caches were orphaned only once no `sess_*` remained, consistent with the rule in `data_kiro_v3` that `.index/` is shared per-workspace state.
+- **Sessions follow the stores**: once the providers' stores were rewritten, every session listed under its new workspace path with no PowerAtlas change; a session-level check found 0 records still locating a session under the old path.
 
 ## Transcript usage records — kiro-cli v3 and Claude Code (measured 2026-09-25)
 
