@@ -24,7 +24,7 @@ import stat as stat_mod
 import subprocess
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -1105,14 +1105,17 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
 #   `task_complete`, capped at `CODEX_TURN_CAP_SECONDS` (an estimate), and a
 #   `turn_aborted` closes its turn the same way; either is counted on the day
 #   of the record that ends the turn, and a turn that never ends counts
-#   nothing. Tokens are the growth of the cumulative `total_token_usage`
-#   between `token_count` events, on the day of the later event, so a repeated
-#   event counts once. A rollout can hold more than one cumulative series, so
-#   a decrease is a restart (and counts its new value) only when the new total
-#   equals the event's own `last_token_usage` total, and growth above
-#   `_CODEX_GAP_FACTOR` times that last total is another series (nothing
-#   counts; see `_codex_token_growth`). `cached_input_tokens` are part of
-#   `input_tokens`, so `input` is the growth of the one minus the growth of
+#   nothing. Tokens are what each `token_count` event reports of its
+#   own, its `last_token_usage`, counted once per distinct cumulative
+#   `total_token_usage` among the last `_CODEX_RECENT_EVENTS` events (a repeat
+#   counts nothing), so a restart, a lost event or a rollout that holds more
+#   than one cumulative series never skips anything (`_CodexTokenCounter`). An
+#   event without a usable `last_token_usage` counts the growth of its
+#   cumulative total over the previous one (a field that went down is a reset
+#   and counts its new value), and so does the first event of a file when its
+#   cumulative is larger than its last (a rollout whose early events were
+#   lost). `cached_input_tokens` are part of
+#   `input_tokens`, so `input` is the count of the one minus the count of
 #   the other. A tool call fails when its output records a non-zero exit code
 #   or, for a call named `exec`, a `Script failed` or aborted-by-user marker
 #   (`Script running with cell` is not final). A changed rollout is re-parsed at
@@ -1136,15 +1139,13 @@ _CODEX_TOKEN_MAX = 10 ** 15
 # An exact `duration_ms` above this is not a turn (tokens are bounded above; a
 # duration needs a bound too): the timestamps, themselves capped, time it instead.
 CODEX_DURATION_CAP_SECONDS = 24 * 3600
-# Token stream rule (D19 as amended after review, 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4):
-# a growth of the cumulative total up to this many times the event's own
-# `last_token_usage` is this stream's growth (more than one when events went
-# missing); a larger one is another stream's value and counts nothing.
-_CODEX_GAP_FACTOR = 4
-# A decrease is a restart when the new total equals the event's own last total
-# within 1/_CODEX_RESTART_TOLERANCE of it (a restart reports its first event as
-# both the cumulative and the last value).
-_CODEX_RESTART_TOLERANCE = 20
+# Token rule L (D19 as amended after review, 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4):
+# an event whose cumulative total equals one seen in this many of the events
+# before it is a repeat and counts nothing; any other event counts its own
+# `last_token_usage`. No distance, ratio or tolerance is tuned: the 93-rollout
+# store has no delta that differs from the event's own last except in the one
+# rollout that interleaves two cumulative series.
+_CODEX_RECENT_EVENTS = 8
 USAGE_REUSE_SECONDS = 30.0
 CONTEXT_PRESSURE_PERCENT = 80.0
 _USAGE_TOP_WORKSPACES = 8
@@ -1218,12 +1219,12 @@ _usage_worker_proc: list = [None]
 # disk than this server loaded is ignored rather than mixed into the memo.
 # 2: a `codex` provider (Codex rollouts parse by `_parse_codex_usage`, and an
 # unknown provider no longer parses as Claude Code).
-# 3: Codex tokens follow the stream rule (`_codex_token_growth`: a decrease is a
-# restart only when it equals the event's own `last_token_usage`, a jump far above
-# it is another stream and counts nothing), Codex `exec` failures count, and an
+# 3: Codex tokens follow a stream rule, Codex `exec` failures count, and an
 # exact Codex duration above 24 h falls back to the timestamps.
+# 4: Codex tokens are each event's own `last_token_usage` (rule L,
+# `_CodexTokenCounter`), replacing the growth-versus-baseline stream rule of 3.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
-_USAGE_SCHEMA = 3
+_USAGE_SCHEMA = 4
 # The keys `usage_summary` reads from a file summary.
 _SUMMARY_KEYS = frozenset({"provider", "session_id", "cwd", "model", "subagent", "days"})
 
@@ -1523,60 +1524,83 @@ def _codex_duration_s(value) -> float | None:
 def _codex_stream_total(usage) -> int | None:
     """`input_tokens + output_tokens` of a token-usage block (the total, because
     `cached_input_tokens` is a subset of the input), or None when either is
-    missing or not a token count."""
+    missing or not a token count. The duplicate key of `_CodexTokenCounter`."""
     if not isinstance(usage, dict):
         return None
     inp, out = _codex_count(usage.get("input_tokens")), _codex_count(usage.get("output_tokens"))
     return None if inp is None or out is None else inp + out
 
 
-def _codex_token_growth(previous: dict[str, int], total, last) -> dict[str, int]:
-    """What one `token_count` event adds, per token field, and the new baseline.
+def _codex_fields(usage) -> dict[str, int]:
+    """The token counters of a usage block that are token counts."""
+    if not isinstance(usage, dict):
+        return {}
+    found = {}
+    for field in _CODEX_TOKEN_FIELDS:
+        value = _codex_count(usage.get(field))
+        if value is not None:      # absent or hostile: counts nothing
+            found[field] = value
+    return found
 
-    `previous` is the baseline (the last value counted per field) and is updated
-    in place; `total` is the event's cumulative `total_token_usage`, `last` its
-    `last_token_usage`. A Codex rollout can hold more than one cumulative series
-    (a store of 93 top-level rollouts had one that alternated between two, and
-    one real restart), so a decrease is not always a reset:
 
-    - the total grew by at most `_CODEX_GAP_FACTOR` times the event's own last
-      total (or did not move): this stream's growth, counted per field (a field
-      that went down alone counts its new value);
-    - the total went down and the new total equals the event's own last total:
-      a restart, every field counts its new value and the baseline starts again;
-    - anything else (a decrease that is not a restart, a jump far above the
-      event's own last): another stream's value, nothing counts and the baseline
-      stays where this stream left it.
+class _CodexTokenCounter:
+    """What each `token_count` event of one rollout adds, per token field (rule L).
 
-    The first event, and any event whose totals or last are missing or hostile,
-    follow the original rule (growth per field, a field that went down is reset
-    and counts its new value): there is nothing to tell the streams apart by.
-    `_USAGE_SCHEMA` 3.
+    `add(total, last)` takes the event's cumulative `total_token_usage` and its
+    `last_token_usage` and returns the growth to count, keyed by
+    `_CODEX_TOKEN_FIELDS`. A Codex rollout can hold more than one cumulative
+    series (one of 93 real top-level rollouts alternated between two, one had a
+    real restart), so no baseline is trusted: an event counts what it reports of
+    its own turn, and that cannot ratchet or skip.
+
+    1. The event has a usable `last_token_usage` (a dict with at least one token
+       count among input, cached and output) and a cumulative total
+       (`_codex_stream_total`): it counts its own last, unless its cumulative
+       total equals one of the previous `_CODEX_RECENT_EVENTS` events' (a repeat,
+       also a non-adjacent one: counts nothing).
+    2. The first event of a file (no earlier event with a cumulative total) whose
+       cumulative total is larger than its last total counts its whole cumulative
+       counters instead, so a rollout whose early events were lost keeps its
+       history; normally the first event equals its last.
+    3. An event without a usable last, or without a cumulative total, counts the
+       growth of its cumulative counters over the previous event's, per field (a
+       counter that went down is a reset and counts its new value; the first
+       such event counts its whole cumulative): D19's original rule, which needs
+       no last.
+
+    The window counts every event that has a cumulative total, repeats included,
+    so it spans `_CODEX_RECENT_EVENTS` events and not that many distinct totals.
+    The baseline of rule 3 follows every event with a usable counter.
+    `_USAGE_SCHEMA` 4.
     261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
     """
-    values = {}
-    for field in _CODEX_TOKEN_FIELDS:
-        value = _codex_count(total.get(field))
-        if value is not None:      # absent or hostile: counts nothing, keeps the last good one
-            values[field] = value
-    new_total, last_total = _codex_stream_total(total), _codex_stream_total(last)
-    if (new_total is not None and last_total is not None
-            and "input_tokens" in previous and "output_tokens" in previous):
-        delta = new_total - (previous["input_tokens"] + previous["output_tokens"])
-        if delta > _CODEX_GAP_FACTOR * last_total:
-            return {}
-        if delta < 0:
-            if abs(new_total - last_total) * _CODEX_RESTART_TOLERANCE > last_total:
-                return {}
-            previous.clear()
-            previous.update(values)
-            return dict(values)
-    grown = {}
-    for field, value in values.items():
-        delta = value - previous.get(field, 0)
-        grown[field] = value if delta < 0 else delta
-        previous[field] = value
-    return grown
+
+    __slots__ = ("baseline", "recent")
+
+    def __init__(self) -> None:
+        self.baseline: dict[str, int] = {}          # the last cumulative value seen per field
+        self.recent: deque[int] = deque(maxlen=_CODEX_RECENT_EVENTS)
+
+    def add(self, total, last) -> dict[str, int]:
+        values = _codex_fields(total)
+        key = _codex_stream_total(total)
+        own = _codex_fields(last)
+        usable_last = any(f in own for f in _CODEX_TOKEN_FIELDS[:3])
+        if key is None or not usable_last:
+            grown = {}
+            for field, value in values.items():
+                delta = value - self.baseline.get(field, 0)
+                grown[field] = value if delta < 0 else delta   # a counter that went down was reset
+        elif key in self.recent:
+            grown = {}
+        elif not self.recent and key > own.get("input_tokens", 0) + own.get("output_tokens", 0):
+            grown = dict(values)
+        else:
+            grown = own
+        self.baseline.update(values)
+        if key is not None:
+            self.recent.append(key)
+        return grown
 
 
 def _empty_summary(provider: str, session_id: str = "") -> dict:
@@ -1602,7 +1626,7 @@ def _parse_codex_usage(path: Path) -> dict:
     days: dict[str, dict] = {}
     calls: dict[str, tuple[str, str]] = {}   # call_id -> (tool name, day)
     models: dict[str, int] = {}
-    previous: dict[str, int] = {}            # the last cumulative value seen per token field
+    counter = _CodexTokenCounter()
     open_start: float | None = None          # the open turn's `task_started` epoch
 
     def day_of(epoch: float) -> dict:
@@ -1696,7 +1720,7 @@ def _parse_codex_usage(path: Path) -> dict:
                         total = info.get("total_token_usage") if isinstance(info, dict) else None
                         if not isinstance(total, dict):
                             continue
-                        grown = _codex_token_growth(previous, total, info.get("last_token_usage"))
+                        grown = counter.add(total, info.get("last_token_usage"))
                         cached = grown.get("cached_input_tokens", 0)
                         tokens = day_of(epoch)["tokens"]
                         tokens["input"] += max(0, grown.get("input_tokens", 0) - cached)

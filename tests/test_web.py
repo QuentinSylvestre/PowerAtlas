@@ -30912,12 +30912,21 @@ def _ovx_agent(at, text="done") -> dict:
 
 
 def _ovx_tokens(at, input_=0, cached=0, output=0, write=None) -> dict:
+    """A `token_count` that carries only a cumulative `total_token_usage` (no
+    `last_token_usage`), so it follows the cumulative-growth rule of the Codex token counter
+    (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4, rule L step 3)."""
     usage = {"input_tokens": input_, "cached_input_tokens": cached, "output_tokens": output,
              "reasoning_output_tokens": 0, "total_tokens": input_ + output}
     if write is not None:
         usage["cache_write_input_tokens"] = write
     return _ovx_event(at, "token_count", rate_limits=None,
-                      info={"total_token_usage": usage, "last_token_usage": usage,
+                      info={"total_token_usage": usage, "model_context_window": 258400})
+
+
+def _ovx_pair(at, total, last) -> dict:
+    """A `token_count` with both blocks given as dicts, so a test can omit or corrupt a field."""
+    return _ovx_event(at, "token_count", rate_limits=None,
+                      info={"total_token_usage": total, "last_token_usage": last,
                             "model_context_window": 258400})
 
 
@@ -32919,16 +32928,17 @@ class TestOverviewUsage:
     def cx_total(days, key):
         return sum(d["tokens"][key] for d in days.values())
 
-    def test_the_schema_is_3_and_an_older_worker_is_ignored(self):
+    def test_the_schema_is_4_and_an_older_worker_is_ignored(self):
         """`_parse_usage_file` gained a `codex` provider and lost its Claude fall-through
-        (schema 2); the Codex token stream rule, exec failures and the duration cap changed
-        what it returns for an existing file (schema 3). A child on either older format must
-        not mix its summaries into the memo."""
+        (schema 2); the Codex stream rule, exec failures and the duration cap changed what it
+        returns for an existing file (schema 3); counting each event's own last_token_usage
+        changed it again (schema 4). A child on any older format must not mix its summaries
+        into the memo."""
         from power_atlas import overview
-        assert overview._USAGE_SCHEMA == 3
+        assert overview._USAGE_SCHEMA == 4
         good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
                 "subagent": False, "days": {}}
-        for older in (1, 2):
+        for older in (1, 2, 3):
             old = self.fake_worker()
             for record in (["schema", older], ["C:/x.jsonl", 1, 1, good], ["stage", 0]):
                 old._lines.put(json.dumps(record).encode() + b"\n")
@@ -32983,10 +32993,9 @@ class TestOverviewUsage:
         assert self.cx_total(days, "cache_creation") == 0
 
     def test_a_counter_that_goes_down_alone_is_a_reset_of_that_counter_only(self):
-        """The total still grows (1500 to 1790), so this is one stream's growth and the
-        stream rule leaves it alone; only the output counter went down and counts its new
-        value. (The earlier fixture, 1300/800/90, lowered the total as well: with the event's
-        last equal to its total that is a restart, see the stream tests below.)"""
+        """An event with no `last_token_usage` counts the growth of its cumulative counters
+        (rule L step 3, D19's original rule): only the output counter went down here and
+        counts its new value."""
         t = self.now - 7200
         days = self.cx_days(self.codex(1, [
             _ovx_tokens(t, 1000, 600, 500),
@@ -32996,7 +33005,9 @@ class TestOverviewUsage:
         assert self.cx_total(days, "input") == (1000 - 600) + (700 - 200)
         assert self.cx_total(days, "cache_read") == 600 + 200
 
-    # --- Codex token stream rule (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4 review fix) ---
+    # --- Codex token rule L (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4 review fix) ---
+    # Expected values come from the rule (an event counts its own last_token_usage, a repeat
+    # of one of the 8 previous events' cumulative total counts nothing) and from the series values.
 
     @staticmethod
     def cx_sum(days):
@@ -33008,63 +33019,164 @@ class TestOverviewUsage:
         return self.cx_sum(self.cx_days(self.codex(n, [
             _ovx_stream(t + i, total, last) for i, (total, last) in enumerate(events)])))
 
-    def test_two_interleaved_cumulative_series_count_the_main_series_growth_only(self):
-        """A rollout whose events alternate between two cumulative series (a real one did, and the
-        first rule counted several times its final total). Expected values are the main
-        series' own growth, from the series values."""
-        # Series A: 1000 .. 4000, series B far above it. B's jump is 49,000 against its own
-        # last of 1,000, so it is another stream and counts nothing.
-        up = [(1000, 1000), (50000, 1000), (2000, 1000), (51000, 1000), (3000, 1000),
-              (52000, 1000), (3000, 1000), (4000, 1000)]
-        assert self.stream(1, up) == 4000
-        # Series B below A: every B event is a decrease that is no restart (60,000 against
-        # its own last of 1,000), and A resumes from where it was.
-        down = [(100000, 100000), (60000, 1000), (101000, 1000), (61000, 1000),
-                (102000, 1000), (102000, 1000)]
-        assert self.stream(2, down) == 102000
-        # Never more than the file's own growth: the file's largest cumulative value.
-        assert self.stream(3, up) <= max(total for total, _ in up)
+    def test_interleaved_series_count_the_sum_of_every_events_own_last(self):
+        """Two cumulative series alternate (a real rollout did), each event carrying its own
+        last: every event counts exactly that last, wherever the other series stands."""
+        both = [(1000, 1000), (50000, 1000), (2000, 1000), (51000, 1000), (3000, 1000),
+                (52000, 1000)]
+        assert self.stream(1, both) == 6 * 1000
+        # The other series below the first one; its first event is the file's first.
+        below = [(100000, 100000), (60000, 1000), (101000, 1000), (61000, 1000), (102000, 1000)]
+        assert self.stream(2, below) == 100000 + 4 * 1000
 
-    def test_a_restart_counts_its_new_value_and_the_baseline_starts_again(self):
-        # 59,000 then 60,000; a restart to 1,000 (it is its own last), then 2,000, then a
-        # stray event of the old series (60,000 against a last of 1,000: another stream).
+    def test_a_repeat_of_an_earlier_cumulative_counts_nothing_adjacent_or_not(self):
+        assert self.stream(1, [(1000, 1000), (1000, 1000), (2000, 1000)]) == 2000
+        # Not adjacent: a rule that compares with the previous event only counts the third.
+        assert self.stream(2, [(1000, 1000), (2000, 1000), (1000, 1000)]) == 2000
+        # Both series repeated while alternating: only the two first sightings and the new one count.
+        assert self.stream(3, [(1000, 1000), (50000, 1000), (1000, 1000), (50000, 1000),
+                               (2000, 1000)]) == 3000
+        # The key is input + output: an equal input alone, or an equal output alone, is no repeat.
+        t = self.now - 7200
+
+        def block(i, o):
+            return {"input_tokens": i, "cached_input_tokens": 0, "output_tokens": o}
+        days = self.cx_days(self.codex(4, [
+            _ovx_pair(t, block(1000, 500), block(1000, 500)),
+            _ovx_pair(t + 1, block(1000, 900), block(0, 400)),     # same input, new total
+            _ovx_pair(t + 2, block(1600, 900), block(600, 0))]))   # same output, new total
+        assert self.cx_sum(days) == 1500 + 400 + 600
+
+    def test_a_lost_event_does_not_make_any_later_event_skip(self):
+        """The case that failed before: a baseline left behind by a lost event of 100,000.
+        Every later event is still counted at its own last."""
+        gap = [(1000, 1000), (102000, 1000), (103000, 1000), (104000, 1000), (105000, 1000)]
+        assert self.stream(1, gap) == 5 * 1000
+        big = [(100000, 100000), (300000, 1000), (301000, 1000), (302000, 1000)]
+        assert self.stream(2, big) == 100000 + 3 * 1000
+
+    def test_a_permanent_switch_to_a_lower_or_a_higher_series_counts_every_event(self):
+        lower = [(100000, 100000), (1000, 1000), (2000, 1000), (3000, 1000), (4000, 1000)]
+        assert self.stream(1, lower) == 100000 + 4 * 1000
+        higher = [(1000, 1000), (500000, 1000), (501000, 1000), (502000, 1000)]
+        assert self.stream(2, higher) == 4 * 1000
+
+    def test_a_restart_counts_its_own_last_not_its_cumulative(self):
+        # 59,000 then 60,000; the counter restarts at its first turn (1000), grows, and a stray
+        # event of the old series (60,000 again) is a repeat.
         events = [(59000, 59000), (60000, 1000), (1000, 1000), (2000, 1000), (60000, 1000)]
-        assert self.stream(1, events) == 60000 + 1000 + 1000
+        assert self.stream(1, events) == 59000 + 1000 + 1000 + 1000 + 0
+        # A restart whose cumulative is above its last (earlier events of the new series lost)
+        # still counts the last alone.
+        assert self.stream(2, [(59000, 59000), (60000, 1000), (5000, 1000), (6000, 1000)]) == 62000
 
-    def test_the_restart_tolerance_is_five_percent_of_the_events_own_last(self):
-        """Both sides of the edge, below and above the last: a decrease counts its new value
-        when it is within 5 % of the event's last total, else nothing."""
-        for n, (new, last, counts) in enumerate([
-                (10000, 10000, True), (10500, 10000, True), (10501, 10000, False),
-                (9500, 10000, True), (9499, 10000, False)], start=1):
-            assert self.stream(n, [(100000, 100000), (new, last)]) == 100000 + (new if counts else 0), (new, last)
+    def test_an_event_whose_own_last_is_zero_counts_nothing_and_blocks_nothing(self):
+        assert self.stream(1, [(1000, 1000), (5000, 0), (6000, 1000), (7000, 1000)]) == 3000
+        assert self.stream(2, [(0, 0), (1000, 1000)]) == 1000
 
-    def test_growth_up_to_four_times_the_events_last_counts_and_more_is_another_stream(self):
-        """Events can go missing (one `token_count` lost makes the growth two or three
-        times the next event's last): that growth counts. The edge is 4 times, inclusive."""
-        for n, (new, counts) in enumerate([(103000, 3000), (104000, 4000), (104001, 0)], start=1):
-            assert self.stream(n, [(100000, 100000), (new, 1000)]) == 100000 + counts, new
-
-    def test_the_first_event_counts_its_whole_cumulative_total(self):
-        """The first event has no baseline to compare with, so (as before) it counts in
-        full; a single-stream rollout then counts exactly its final cumulative total."""
+    def test_the_first_event_counts_its_cumulative_when_that_is_above_its_last(self):
+        """A rollout whose early events were lost (or a resumed one) must not lose its history:
+        the first event counts its whole cumulative. A single-stream rollout then counts
+        exactly its final cumulative total."""
         assert self.stream(1, [(500000, 1000), (501000, 1000)]) == 501000
+        assert self.stream(2, [(1000, 1000), (2000, 1000)]) == 2000
+        # A first event whose cumulative is below its last counts the last.
+        assert self.stream(3, [(1000, 2000)]) == 2000
+        # Per field: the cumulative's own split counts (input net of cached), not the last's.
+        t = self.now - 7200
+        days = self.cx_days(self.codex(4, [
+            _ovx_pair(t, {"input_tokens": 1000, "cached_input_tokens": 600, "output_tokens": 100},
+                      {"input_tokens": 200, "cached_input_tokens": 100, "output_tokens": 50}),
+            _ovx_pair(t + 1, {"input_tokens": 1200, "cached_input_tokens": 700, "output_tokens": 150},
+                      {"input_tokens": 200, "cached_input_tokens": 100, "output_tokens": 50})]))
+        assert self.cx_total(days, "input") == (1000 - 600) + (200 - 100)
+        assert self.cx_total(days, "cache_read") == 600 + 100
+        assert self.cx_total(days, "output") == 100 + 50
+        # A first event whose cumulative total equals its last counts the last, field by field.
+        days = self.cx_days(self.codex(5, [
+            _ovx_pair(t, {"input_tokens": 1000, "cached_input_tokens": 0, "output_tokens": 0},
+                      {"input_tokens": 900, "cached_input_tokens": 0, "output_tokens": 100})]))
+        assert self.cx_total(days, "input") == 900 and self.cx_total(days, "output") == 100
 
-    def test_without_a_usable_last_token_usage_a_decrease_is_a_reset_as_before(self):
-        """The original rule stands for an event the stream rule cannot judge: no
-        `last_token_usage`, or one that is not a token block."""
+    def test_a_repeat_is_recognised_up_to_8_events_back_and_not_beyond(self):
+        """The window is the 8 previous events, repeats included. A repeat exactly 8 events back
+        counts nothing, 9 back counts again; and repeats occupy window slots (8 repeats of B
+        push A out)."""
+        def others(k):
+            return [(2000 + 1000 * i, 1000) for i in range(k)]
+        a = (1000, 1000)
+        assert self.stream(1, [a] + others(7) + [a]) == 1000 + 7 * 1000 + 0
+        assert self.stream(2, [a] + others(8) + [a]) == 1000 + 8 * 1000 + 1000
+        assert self.stream(3, [a] + [(2000, 1000)] * 8 + [a]) == 1000 + 1000 + 1000
+
+    def test_events_without_a_usable_last_use_the_cumulative_growth_rule(self):
+        """Growth, a repeat and a decrease (a reset that counts its new value), for an event
+        with no `last_token_usage` or one that is not a token block."""
         t = self.now - 7200
 
         def usage(n):
             return {"input_tokens": n, "cached_input_tokens": 0, "output_tokens": 0}
-        for n, last in enumerate([None, "x", {"input_tokens": "9"}, {}], start=1):
+        lasts = [None, "x", {"input_tokens": "9"}, {}, {"cache_write_input_tokens": 5},
+                 {"input_tokens": -1}, {"output_tokens": True}, {"input_tokens": 10 ** 18}]
+        for n, last in enumerate(lasts, start=1):
             def event(at, total):
                 info = {"total_token_usage": usage(total)}
                 if last is not None:
                     info["last_token_usage"] = last
                 return _ovx_event(at, "token_count", rate_limits=None, info=info)
-            days = self.cx_days(self.codex(n, [event(t, 1000), event(t + 1, 1500), event(t + 2, 200)]))
-            assert self.cx_sum(days) == 1000 + 500 + 200, last
+            days = self.cx_days(self.codex(n, [event(t, 1000), event(t + 1, 1500),
+                                               event(t + 2, 1500), event(t + 3, 200)]))
+            assert self.cx_sum(days) == 1000 + 500 + 0 + 200, last
+
+    def test_the_fallback_baseline_follows_the_events_that_have_a_last(self):
+        """An event with a last moves the baseline too: the no-last event after it counts the
+        growth over that event, not its whole cumulative."""
+        t = self.now - 7200
+        block = {"input_tokens": 1000, "cached_input_tokens": 0, "output_tokens": 0}
+        days = self.cx_days(self.codex(1, [_ovx_pair(t, block, block), _ovx_tokens(t + 1, 1500, 0, 0)]))
+        assert self.cx_total(days, "input") == 1000 + 500
+
+    def test_hostile_last_values_count_zero_and_an_unusable_last_falls_back(self):
+        t = self.now - 7200
+
+        def block(i, o):
+            return {"input_tokens": i, "cached_input_tokens": 0, "output_tokens": o}
+        days = self.cx_days(self.codex(1, [
+            _ovx_pair(t, block(100, 10), block(100, 10)),
+            # Usable through its output; the hostile input, the negative cache and the bool write count 0.
+            _ovx_pair(t + 1, block(200, 20), {"input_tokens": "x", "cached_input_tokens": -5,
+                                              "output_tokens": 10, "cache_write_input_tokens": True}),
+            # No token count at all (above the bound, a float): the cumulative growth, 100 and 10.
+            _ovx_pair(t + 2, block(300, 30), {"input_tokens": 10 ** 18, "output_tokens": 1.5})]))
+        assert self.cx_total(days, "input") == 100 + 0 + 100
+        assert self.cx_total(days, "output") == 10 + 10 + 10
+        assert self.cx_total(days, "cache_read") == 0 and self.cx_total(days, "cache_creation") == 0
+        # A cumulative that is not a token count (a string output) has no duplicate key: the
+        # event counts the growth of its good fields only, never the last as well.
+        days = self.cx_days(self.codex(2, [
+            _ovx_pair(t, block(100, 10), block(100, 10)),
+            _ovx_pair(t + 1, {"input_tokens": 200, "output_tokens": "20"}, block(100, 10))]))
+        assert self.cx_total(days, "input") == 100 + 100
+        assert self.cx_total(days, "output") == 10
+
+    def test_cache_and_cache_write_follow_the_events_own_fields_and_a_restart_may_lack_one(self):
+        t = self.now - 7200
+        days = self.cx_days(self.codex(1, [
+            _ovx_pair(t, {"input_tokens": 1000, "cached_input_tokens": 600, "output_tokens": 100},
+                      {"input_tokens": 1000, "cached_input_tokens": 600, "output_tokens": 100}),
+            _ovx_pair(t + 1, {"input_tokens": 2000, "cached_input_tokens": 1100, "output_tokens": 300},
+                      {"input_tokens": 1000, "cached_input_tokens": 500, "output_tokens": 200,
+                       "cache_write_input_tokens": 7}),
+            # A restart (the cumulative falls) whose last lacks the cached field.
+            _ovx_pair(t + 2, {"input_tokens": 300, "cached_input_tokens": 100, "output_tokens": 50},
+                      {"input_tokens": 300, "output_tokens": 50}),
+            # More cached than input in one event: the input clamps at 0, the cache still counts.
+            _ovx_pair(t + 3, {"input_tokens": 2500, "cached_input_tokens": 1500, "output_tokens": 400},
+                      {"input_tokens": 200, "cached_input_tokens": 500, "output_tokens": 10})]))
+        assert self.cx_total(days, "input") == (1000 - 600) + (1000 - 500) + 300 + 0
+        assert self.cx_total(days, "cache_read") == 600 + 500 + 0 + 500
+        assert self.cx_total(days, "output") == 100 + 200 + 50 + 10
+        assert self.cx_total(days, "cache_creation") == 7
 
     def test_the_input_is_never_negative_and_cache_write_is_its_own_counter(self):
         t = self.now - 7200
@@ -33129,11 +33241,68 @@ class TestOverviewUsage:
         assert day["agent_seconds"] == 45.5 + 90 + 1800 + 120 + 1800 + 30 + 70 + 55 + 62 + 2
         assert day["active"] is True
 
+    @staticmethod
+    def private_data_codex_uses(source):
+        """Every way `source` reaches a `data_codex` name that starts with an underscore: an
+        attribute of the module (however it was imported or aliased), a name imported from it,
+        or a `getattr` on it (a computed name is reported as `<dynamic getattr>`)."""
+        import ast
+        tree = ast.parse(source)
+        modules = set()                     # local names bound to the data_codex module
+
+        def is_module(node):
+            return ((isinstance(node, ast.Name) and node.id in modules)
+                    or (isinstance(node, ast.Attribute) and node.attr == "data_codex"))
+        found = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[-1] == "data_codex" and alias.asname:
+                        modules.add(alias.asname)
+            elif isinstance(node, ast.ImportFrom):
+                if (node.module or "").split(".")[-1] == "data_codex":
+                    found += [a.name for a in node.names if a.name.startswith("_")]
+                else:
+                    for alias in node.names:
+                        if alias.name == "data_codex":
+                            modules.add(alias.asname or alias.name)
+        for _ in range(3):                  # an alias of an alias, in any source order
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Assign) and is_module(node.value)):
+                    modules.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and is_module(node.value) and node.attr.startswith("_"):
+                found.append(node.attr)
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id == "getattr" and len(node.args) >= 2 and is_module(node.args[0])):
+                name = node.args[1]
+                if not isinstance(name, ast.Constant):
+                    found.append("<dynamic getattr>")
+                elif isinstance(name.value, str) and name.value.startswith("_"):
+                    found.append(name.value)
+        return found
+
     def test_the_overview_reaches_the_codex_adapter_by_public_names_only(self):
+        """An AST check, not a text search: it sees an aliased module, a name imported from it
+        and `getattr`, which a regex over the source does not. The check is itself pinned on
+        samples first."""
         import inspect
 
         from power_atlas import overview
-        assert re.findall(r"data_codex\._\w+", inspect.getsource(overview)) == []
+        uses = self.private_data_codex_uses
+        for source, expected in [
+                ("from . import data_codex\nx = data_codex._cache", ["_cache"]),
+                ("from . import data_codex as dc\ndc._x()", ["_x"]),
+                ("from power_atlas.data_codex import _y as z", ["_y"]),
+                ("import power_atlas.data_codex as d\nd._z", ["_z"]),
+                ("import power_atlas.data_codex\npower_atlas.data_codex._w", ["_w"]),
+                ("from . import data_codex as dc\ngetattr(dc, '_q')", ["_q"]),
+                ("from . import data_codex as dc\nk = '_q'\ngetattr(dc, k)", ["<dynamic getattr>"]),
+                ("from . import data_codex as dc\nalias = dc\nalias._r", ["_r"]),
+                ("from . import data_codex\ndata_codex.loads(1)\nother._x\n"
+                 "getattr(data_codex, 'loads')\ngetattr(other, '_x')", [])]:
+            assert uses(source) == expected, source
+        assert uses(inspect.getsource(overview)) == []
 
     def test_an_exact_codex_duration_above_24_hours_falls_back_to_the_timestamps(self):
         """Both sides of the 24 h edge. A turn whose timestamps span 120 s counts those 120
