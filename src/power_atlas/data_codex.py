@@ -36,9 +36,10 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from .data import (
-    SESSION_ID_RE, BoundedCache, Session, TranscriptEvent, _FileInfo, _cap_text,
+    SESSION_ID_RE, UUID_RE, BoundedCache, Session, TranscriptEvent, _FileInfo, _cap_text,
     _normalize_path,
 )
 
@@ -89,9 +90,9 @@ _AVAILABLE_TTL = 5.0
 _MISSING_TTL = 60.0
 _WARN_INTERVAL = 60.0
 
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
-_ROLLOUT_RE = re.compile(
-    r"rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl", re.I)
+_ROLLOUT_RE = re.compile(r"rollout-.+-(" + UUID_RE.pattern + r")\.jsonl", re.I)
+_NAME_CAP = 200                   # a thread name from session_index.jsonl, as the first-prompt cut
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003   # an NTFS junction (or a volume mount point)
 # Bounded: a 4300-digit number makes int() raise, and a number that long is not an
 # exit code. `(?!\d)` makes an over-long number no match at all (unknown), instead of
 # its first nine digits.
@@ -192,27 +193,27 @@ def open_shared(path, mode: str = "rb"):
     paths. Never creates a file. Handles must be short-lived and never cached:
     a replace over an open target still fails even with DELETE sharing.
 
-    ``mode`` is ``"rb"`` or ``"r+b"``. Raises OSError, like ``open``.
+    ``mode`` is ``"rb"`` only: nothing writes a Codex file, and the lock files are
+    locked through a read-only handle too. Raises OSError, like ``open``, and
+    ValueError for any other mode.
     """
-    if mode not in ("rb", "r+b"):
+    if mode != "rb":
         raise ValueError(f"unsupported mode {mode!r}")
-    rw = mode == "r+b"
     target = os.fspath(path)
     if sys.platform == "win32":
         ctypes, msvcrt, k32, invalid = _win32()
-        access = 0x80000000 | (0x40000000 if rw else 0)    # GENERIC_READ [| GENERIC_WRITE]
-        handle = k32.CreateFileW(target, access, 0x7, None, 3, 0x80, None)  # share R|W|D, OPEN_EXISTING
+        handle = k32.CreateFileW(target, 0x80000000, 0x7, None, 3, 0x80, None)  # GENERIC_READ, share R|W|D, OPEN_EXISTING
         if handle is None or handle == invalid:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
-            fd = msvcrt.open_osfhandle(handle, (os.O_RDWR if rw else os.O_RDONLY) | os.O_BINARY)
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
         except BaseException:
             k32.CloseHandle(handle)
             raise
     else:
-        fd = os.open(target, os.O_RDWR if rw else os.O_RDONLY)
+        fd = os.open(target, os.O_RDONLY)
     try:
-        return os.fdopen(fd, mode)
+        return os.fdopen(fd, "rb")
     except BaseException:
         os.close(fd)
         raise
@@ -222,9 +223,11 @@ def open_shared(path, mode: str = "rb"):
 
 
 def _loads(raw: bytes):
-    """Parse one line. None for anything unparseable, deeply nested JSON included."""
+    """Parse one line. None for anything unparseable, deeply nested JSON included.
+    A leading UTF-8 byte-order mark is dropped (``utf-8-sig``): a first line that starts
+    with one is still a ``session_meta`` or an index entry, not a vanished session."""
     try:
-        return json.loads(raw.decode("utf-8", errors="replace"))
+        return json.loads(raw.decode("utf-8-sig", errors="replace"))
     except Exception:
         return None
 
@@ -426,15 +429,36 @@ _parse_cache = BoundedCache(_cache_cap)
 # (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3 review fix): a fixed
 # size below the file count makes every sequential pass over a large store re-read each tail.
 _last_event_cache = BoundedCache(_cache_cap)
+# Guards the three rebinds above. Not `_store_lock`: `_build_store` calls `_fit_caches` with
+# that lock held, and `overview._usage_files` calls it with none, so two growths at once
+# would each publish new empty caches and drop the other's warm entries.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
+_caches_lock = threading.Lock()
 
 
 def _fit_caches(rollouts: int) -> None:
     global _cache_cap, _verdict_cache, _parse_cache, _last_event_cache
-    if _cache_cap < 2 * rollouts:
-        _cache_cap = max(_CACHE_MIN, 4 * rollouts)
-        _verdict_cache = BoundedCache(_cache_cap)
-        _parse_cache = BoundedCache(_cache_cap)
-        _last_event_cache = BoundedCache(_cache_cap)
+    with _caches_lock:
+        if _cache_cap < 2 * rollouts:      # re-checked under the lock: a racing growth already fit
+            _cache_cap = max(_CACHE_MIN, 4 * rollouts)
+            _verdict_cache = BoundedCache(_cache_cap)
+            _parse_cache = BoundedCache(_cache_cap)
+            _last_event_cache = BoundedCache(_cache_cap)
+
+
+def _norm_cwd(cwd: str) -> str:
+    """The workspace key of a cwd: ``data._normalize_path``, except that on Windows a
+    network or device path (one that starts with two slashes of either kind) is only
+    slash-normalised and case-folded. ``_normalize_path`` expands 8.3 short names with
+    ``GetLongPathNameW`` whenever the path holds a ``~``, which for a UNC path is SMB
+    traffic (an NTLM handshake, or a hang on an offline server) for every rollout, under
+    the store lock. A cwd read out of a rollout is untrusted input.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1"""
+    if sys.platform == "win32":
+        flat = cwd.replace("/", "\\")
+        if flat.startswith("\\\\"):
+            return flat.rstrip("\\").casefold()
+    return _normalize_path(cwd)
 
 
 def _file_uuid(path) -> str:
@@ -473,11 +497,11 @@ def _compute_verdict(path: str, mtime_ns: int, file_uuid: str) -> _Verdict:
         cwd, sid = payload.get("cwd"), payload.get("id")
         if not isinstance(cwd, str) or not cwd.strip():
             return _Verdict("skip", "cwd")
-        if (not isinstance(sid, str) or not _UUID_RE.fullmatch(sid)
+        if (not isinstance(sid, str) or not UUID_RE.fullmatch(sid.lower())
                 or not file_uuid or sid.lower() != file_uuid):
             return _Verdict("skip", "id")
         created = _parse_iso(payload.get("timestamp")) or _ns_dt(mtime_ns)
-        return _Verdict("top", "", sid.lower(), cwd, _normalize_path(cwd), _iso(created))
+        return _Verdict("top", "", sid.lower(), cwd, _norm_cwd(cwd), _iso(created))
     except Exception as exc:
         _warn("verdict", exc, path)
         return _Verdict("skip", "error")
@@ -567,10 +591,22 @@ _store_lock = threading.Lock()
 _store_memo: _Store | None = None
 
 
+def _is_junction(entry) -> bool:
+    """True for an NTFS junction (a directory reparse point of the mount-point kind).
+    ``is_dir(follow_symlinks=False)`` is True for it, so it needs its own test; the tag
+    comes from the directory listing, with no extra system call. Always False off Windows."""
+    return getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0) == _IO_REPARSE_TAG_MOUNT_POINT
+
+
 def _walk_rollouts(root: str):
     """Yield (path, lower-case thread uuid) for every rollout file under `root`.
 
-    ``archived_sessions/`` is a sibling folder and is never visited (D24).
+    ``archived_sessions/`` is a sibling folder and is never visited (D24). A symlink
+    and an NTFS junction are never followed (a link could lead the walk out of the
+    store, or into a loop); a symlinked file is refused by ``is_file(follow_symlinks=False)``.
+    An unreadable root other than a missing one is logged once a minute, path only: it
+    would otherwise read as "no Codex".
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
     """
     stack = [(root, 0)]
     while stack:
@@ -580,7 +616,7 @@ def _walk_rollouts(root: str):
                 for entry in entries:
                     try:
                         if entry.is_dir(follow_symlinks=False):
-                            if depth < 5:
+                            if depth < 5 and not _is_junction(entry):
                                 stack.append((entry.path, depth + 1))
                         else:
                             m = _ROLLOUT_RE.fullmatch(entry.name)
@@ -588,7 +624,9 @@ def _walk_rollouts(root: str):
                                 yield entry.path, m.group(1).lower()
                     except OSError:
                         continue
-        except OSError:
+        except OSError as exc:
+            if depth == 0 and not isinstance(exc, FileNotFoundError):
+                _warn("sessions_root", exc, directory)
             continue
 
 
@@ -634,6 +672,28 @@ def _store_index() -> _Store:
         store.built = time.monotonic()
         _store_memo = store
         return store
+
+
+class CanonicalRollout(NamedTuple):
+    """One canonical rollout: its path and the (mtime_ns, size) the store index recorded."""
+    path: str
+    mtime_ns: int
+    size: int
+
+
+@_safe("canonical_rollouts", list)
+def canonical_rollouts() -> list[CanonicalRollout]:
+    """The rollouts that count as sessions: the same set discovery lists, from the same
+    store index, so a usage pass and a workspace listing cannot disagree on what a Codex
+    session file is. One per thread id (the newest top-level file), only a file named
+    ``rollout-*-<uuid>.jsonl`` that is not a symlink or a file under a link, with a
+    readable ``session_meta`` that names a cwd and the same id as the filename. A
+    sub-agent rollout, a file that could not be examined and a duplicate-id copy are
+    left out. Sorted by path. The stat is the index's, at most _STORE_TTL old: a caller
+    that needs a fresh one stats the path itself.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1"""
+    return sorted((CanonicalRollout(r.path, r.mtime_ns, r.size) for r, _v in _store_index().top.values()),
+                  key=lambda c: c.path)
 
 
 # --- Session index (titles, D9) --------------------------------------------------
@@ -685,7 +745,7 @@ def _thread_names(state: tuple[float, int, int]) -> dict[str, str]:
                     continue
                 thread_id, name = obj.get("id"), obj.get("thread_name")
                 if isinstance(thread_id, str) and isinstance(name, str) and name.strip():
-                    names[thread_id.lower()] = name.strip()
+                    names[thread_id.lower()] = name.strip()[:_NAME_CAP]
     except Exception as exc:
         _warn("session_index", exc, path)
         return {}
@@ -719,6 +779,27 @@ def is_available() -> bool:
 # --- Discovery and listing --------------------------------------------------------
 
 
+def _parsed_for_listing(rollout: "_Rollout") -> tuple["_Parsed", int]:
+    """(parse, mtime_ns) of a rollout for a workspace listing.
+
+    `_parse_cache` holds one slot per path, keyed by the (mtime_ns, size) that
+    `load_sessions` takes from a fresh stat, while the store index's own stat can be
+    _STORE_TTL old. Keying a listing on the index stat alone made the two keys alternate
+    on a growing file and re-parsed it on every call. A miss on the index stat is
+    therefore retried with a fresh stat: a warm file costs no extra stat, and a changed
+    file is parsed once per change, whoever asks first. If the stat fails the index
+    values are used.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1"""
+    cached = _parse_cache.get(rollout.path)
+    if cached is not None and cached[0] == rollout.mtime_ns and cached[1] == rollout.size:
+        return cached[2], rollout.mtime_ns
+    try:
+        st = os.stat(rollout.path)
+    except OSError:
+        return _parsed_for(rollout.path, rollout.mtime_ns, rollout.size), rollout.mtime_ns
+    return _parsed_for(rollout.path, st.st_mtime_ns, st.st_size), st.st_mtime_ns
+
+
 @_safe("discover_workspaces", list)
 def discover_workspaces() -> list[tuple[str, int, str]]:
     """(display cwd, top-level session count, updated_at ISO) per workspace, newest first.
@@ -736,8 +817,8 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
             # rollout Codex holds open, so the last record's stamp counts too. The
             # parse is cached by (mtime_ns, size), so a warm pass costs no read.
             try:
-                updated = _updated_at(rollout.mtime_ns,
-                                      _parsed_for(rollout.path, rollout.mtime_ns, rollout.size), now)
+                parsed, mtime_ns = _parsed_for_listing(rollout)
+                updated = _updated_at(mtime_ns, parsed, now)
             except Exception as exc:
                 _warn("discover_workspaces.file", exc, rollout.path)
                 updated = _ns_dt(rollout.mtime_ns)
@@ -804,7 +885,7 @@ def _failed_listing():
 @_safe("load_sessions", _failed_listing)
 def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
     """Top-level sessions for one workspace, plus the file stats that guard the cache."""
-    norm = _normalize_path(cwd)
+    norm = _norm_cwd(cwd)
     state = _index_state()  # one stat, taken before the names are read
     names = _thread_names(state)
     file_stats: dict[str, _FileInfo] = {str(CODEX_SESSION_INDEX): _FileInfo(mtime=state[0], size=state[2])}
@@ -919,7 +1000,7 @@ def read_meta(path) -> dict | None:
     return _read_meta_payload(os.fspath(path)) or None
 
 
-@_safe("is_subagent_rollout", lambda: False, path_arg=True)
+@_safe("is_subagent_rollout", lambda: True, path_arg=True)
 def is_subagent_rollout(path, st=None) -> bool:
     """True when the rollout's first line marks it as a sub-agent thread.
 
@@ -927,7 +1008,8 @@ def is_subagent_rollout(path, st=None) -> bool:
     cannot be summed). A legacy, torn or invalid file is a known non-sub-agent:
     False. A file that could not be examined at all (a failed read) is unknown
     and excluded too: True, because counting a possible sub-agent is the silent
-    multiply the exclusion exists to prevent (D7).
+    multiply the exclusion exists to prevent (D7). That includes a failure that
+    escapes this function (a stat of a vanished file): the neutral value is True.
     """
     target = os.fspath(path)
     st = st or os.stat(target)
@@ -1318,21 +1400,21 @@ _COORDINATION = ".coordination.lock"
 _BUSY_WIN = {errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
 _BUSY_POSIX = {errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK}
 
-# Review fixes, 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3:
-# both lock files are opened read-only (locking needs no write access, and a read-only
-# attribute or ACL made `r+b` fail so a held thread read as free); a busy probe's fallback
-# answer is cached for _LOCK_BUSY_TTL, so a listing pays the retry budget once per id per
-# second; the wait for the process-wide lock is bounded; and no logging runs while the
-# machine-wide coordination lock is held (D17: only open, try-lock, unlock, close).
-
-# Review fixes 3, 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3:
-# a timed-out wait for _probe_lock sets a process-wide marker for _LOCK_STUCK_TTL, during which
-# a caller only tries the lock without waiting and otherwise takes the fallback at once, so a
-# listing of N uncached ids behind a hung holder costs one wait, not N; any successful acquire
-# clears the marker. The fallback re-reads the answer cache, a busy coordination lock that
-# outlasts the retry budget is logged (writer_lock.busy), a failure to open <id>.lock is
-# queued like the others and the False it gives is cached, and no deferred log can change the
-# probe's result.
+# Rules the probe keeps, beyond the order above:
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+# - Both lock files are opened read-only: locking needs no write access, and a read-only
+#   attribute or ACL made a read-write open fail, so a held thread read as free.
+# - A busy probe's fallback answer is cached for _LOCK_BUSY_TTL, so a listing pays the retry
+#   budget once per id per second; the fallback re-reads the answer cache, because another
+#   thread may have refreshed it.
+# - The wait for the process-wide lock is bounded. A timed-out wait sets a marker for
+#   _LOCK_STUCK_TTL, during which a caller only tries the lock without waiting and otherwise
+#   takes the fallback at once, so N uncached ids behind a hung holder cost one wait, not N.
+#   Any successful acquire clears the marker.
+# - No logging runs while the machine-wide coordination lock is held (only open, try-lock,
+#   unlock, close): failures are queued, including a failure to open <id>.lock (whose False is
+#   cached), and logged after it is released. A queued log can never change the probe's result.
+# - A coordination lock that stays busy through the retry budget is logged (writer_lock.busy).
 
 
 def _lock_byte(fh) -> bool:
@@ -1530,10 +1612,11 @@ def _clear_caches() -> None:
         _store_memo = None
     _available_memo = None
     _names_memo = None
-    _cache_cap = _CACHE_MIN
-    _verdict_cache = BoundedCache(_cache_cap)
-    _parse_cache = BoundedCache(_cache_cap)
-    _last_event_cache = BoundedCache(_cache_cap)
+    with _caches_lock:
+        _cache_cap = _CACHE_MIN
+        _verdict_cache = BoundedCache(_cache_cap)
+        _parse_cache = BoundedCache(_cache_cap)
+        _last_event_cache = BoundedCache(_cache_cap)
     _missing.clear()
     _parse_failed.clear()
     _lock_cache.clear()

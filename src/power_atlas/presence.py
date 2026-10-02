@@ -22,13 +22,12 @@ even when the exact session id could not be matched.
 import json
 import logging
 import os
-import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from .data import _normalize_path
+from .data import UUID_RE, _normalize_path
 
 log = logging.getLogger("power_atlas.presence")
 
@@ -91,9 +90,8 @@ _CODEX_HELPER_SUBCOMMANDS: frozenset[str] = frozenset({
 
 # A Codex thread id is a UUID. The token after `resume` can also be `--last` or a
 # prompt or a session name, none of which names a thread: those leave the process
-# live by workspace only. Lower-cased: a session row carries the lower-case id.
-_CODEX_UUID_RE = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+# live by workspace only. Lower-cased before the match (`data.UUID_RE` is lower-case
+# only), because a session row carries the lower-case id.
 
 # kiro-cli-v3 is the only remaining kiro provider. _KIRO_PROVIDERS exists as a
 # family set so the D32 guard (below) can check membership without naming the
@@ -613,7 +611,7 @@ def _scan() -> Snapshot:
             sid = _extract_session_id(cmdline, flag)
             if provider == "codex":
                 # Anything but a UUID (`--last`, a prompt, `<uuid>` plus a newline) is no thread id.
-                sid = sid.lower() if sid and _CODEX_UUID_RE.fullmatch(sid) else None
+                sid = sid.lower() if sid and UUID_RE.fullmatch(sid.lower()) else None
             if pid is not None:
                 try:
                     provider_pids[pid] = (provider, proc.create_time())

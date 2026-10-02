@@ -14,22 +14,44 @@ from functools import lru_cache
 from pathlib import Path
 
 
+# The one UUID shape (8-4-4-4-12): lower-case ASCII hex only, so a caller that must
+# accept upper case lower-cases the text first. Built for `fullmatch` (a `$` anchor
+# would pass a trailing newline). `launcher.py` and `data_claude.py` keep their own
+# copies on purpose.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
 # A session id as the dashboard's routes accept it: kiro-cli-v3 ids carry a
 # `sess_` prefix, Claude Code ids are bare UUIDs. Checked before any path is
 # built from an id taken from a request or a process command line (the
 # Overview's live tiles, `/api/session-transcript`, `/api/session-availability`).
 # Here, below both `web` and `overview`, so each imports it from one place.
 # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
-SESSION_ID_RE = re.compile(
-    r"(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+SESSION_ID_RE = re.compile(r"(?:sess_)?" + UUID_RE.pattern)
 
 
 # Simple TTL cache to avoid re-reading hundreds of files on every request
 _cache: dict[str, tuple[float, object]] = {}
 _CACHE_TTL = 30  # seconds
 
-# Serialize concurrent discover_workspaces_with_counts calls to prevent pile-up
-_discover_lock = threading.Lock()
+# Serialize concurrent discover_workspaces_with_counts calls to prevent pile-up. Two
+# kinds of lock, taken in this order and never held across a provider that is not the
+# one being discovered: one per cache key (a pile-up of identical requests computes
+# once, via the double check) and one per provider (a provider's discover_workspaces
+# never runs twice at once, as before). A cold Codex store build (seconds on a large
+# store) therefore no longer delays another provider's discovery.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
+_discover_locks: dict[str, threading.Lock] = {}
+_discover_locks_guard = threading.Lock()
+
+
+def _discover_lock_for(name: str) -> threading.Lock:
+    """The lock called `name` ("key:<cache key>" or "provider:<name>"), created on first use."""
+    with _discover_locks_guard:
+        lock = _discover_locks.get(name)
+        if lock is None:
+            lock = _discover_locks[name] = threading.Lock()
+        return lock
 
 # Signals that warmup_all() has finished populating caches
 warmup_done = threading.Event()
@@ -311,7 +333,7 @@ def discover_workspaces_with_counts(provider: str | None = None) -> list[tuple[s
             return list(result)
 
     # Slow path: serialize discovery to prevent pile-up
-    with _discover_lock:
+    with _discover_lock_for(f"key:{cache_key}"):
         # Double-check after acquiring lock
         entry = _cache.get(cache_key)
         if entry is not None:
@@ -327,14 +349,15 @@ def discover_workspaces_with_counts(provider: str | None = None) -> list[tuple[s
         )
 
         for prov_name, mod in providers_to_query.items():
-            if not mod.is_available():
-                continue
-            try:
-                workspace_data = mod.discover_workspaces()
-                for cwd, count, updated_at in workspace_data:
-                    results.append((cwd, count, updated_at, prov_name))
-            except Exception:
-                continue
+            with _discover_lock_for(f"provider:{prov_name}"):
+                if not mod.is_available():
+                    continue
+                try:
+                    workspace_data = mod.discover_workspaces()
+                    for cwd, count, updated_at in workspace_data:
+                        results.append((cwd, count, updated_at, prov_name))
+                except Exception:
+                    continue
 
         results.sort(key=lambda x: x[2], reverse=True)
         _cache[cache_key] = (time.time(), results)

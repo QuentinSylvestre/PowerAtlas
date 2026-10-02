@@ -257,6 +257,12 @@ def _map_reported_status(reported: str) -> str:
     return ""
 
 
+# Seconds a non-Codex session file may be idle and still count as live; Codex has its own
+# window, `data_codex.ACTIVITY_WINDOW`, applied to its activity time.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
+_LIVE_MTIME_WINDOW = 300.0
+
+
 def _session_is_live(snapshot, session, provider: str) -> bool:
     """Cheap liveness gate: is a process for this exact session running.
 
@@ -290,7 +296,7 @@ def _session_is_live(snapshot, session, provider: str) -> bool:
             # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
             return ((_time.time() - data_codex.activity_epoch(jsonl_path, os.stat(jsonl_path)))
                     <= data_codex.ACTIVITY_WINDOW)
-        return (_time.time() - os.path.getmtime(jsonl_path)) <= 300
+        return (_time.time() - os.path.getmtime(jsonl_path)) <= _LIVE_MTIME_WINDOW
     except OSError:
         return False
 

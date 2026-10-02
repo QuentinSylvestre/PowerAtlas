@@ -1888,11 +1888,17 @@ class TestCodexGuards:
         with data_codex.open_shared(p) as fh:
             assert fh.read() == b"abc"
 
-    def test_open_shared_never_creates_and_rejects_text_modes(self, tmp_path):
+    def test_open_shared_never_creates_and_rejects_every_mode_but_rb(self, tmp_path):
+        """Read-only is the only mode (final review finding A9): nothing writes a Codex file."""
         with pytest.raises(FileNotFoundError):
-            data_codex.open_shared(tmp_path / "absent.lock", "r+b")
-        with pytest.raises(ValueError):
-            data_codex.open_shared(tmp_path / "x", "r")
+            data_codex.open_shared(tmp_path / "absent.lock", "rb")
+        assert not (tmp_path / "absent.lock").exists()
+        target = tmp_path / "x"
+        target.write_bytes(b"data")
+        for mode in ("r", "r+b", "wb", "ab", "rb+"):
+            with pytest.raises(ValueError):
+                data_codex.open_shared(target, mode)
+        assert target.read_bytes() == b"data"
 
 
 class TestCodexSharedDelete:
@@ -1923,17 +1929,6 @@ class TestCodexSharedDelete:
         shared = attempt(data_codex.open_shared)
         assert shared.returncode == 0, shared.stderr
         assert "renamed-and-removed" in shared.stdout
-        assert not target.exists()
-
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows file-sharing semantics")
-    def test_read_write_handle_does_not_block_removal_either(self, tmp_path):
-        """The two lock files of 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
-        are opened `r+b`; Codex removes them."""
-        target = tmp_path / "x.lock"
-        target.write_bytes(b"")
-        with data_codex.open_shared(target, "r+b") as fh:
-            fh.seek(0)
-            os.remove(target)  # same process: needs FILE_SHARE_DELETE on the handle
         assert not target.exists()
 
     def test_no_public_function_reads_a_rollout_through_builtins_open(
@@ -2522,7 +2517,7 @@ class TestCodexLookups:
         bad = _cx_write(codex_home, _cx_id(2), "C:\\W", first=b"[1]\n")
         assert data_codex.read_meta(bad) is None
         assert data_codex.read_meta(codex_home / "missing.jsonl") is None
-        assert data_codex.is_subagent_rollout(codex_home / "missing.jsonl") is False
+        assert data_codex.is_subagent_rollout(codex_home / "missing.jsonl") is True  # unexaminable: final review A8
         legacy = _cx_write(codex_home, _cx_id(3), "C:\\W", first=_cx_line({"id": _cx_id(3)}))
         assert data_codex.is_subagent_rollout(legacy) is False  # legacy is skipped, not a child
 
@@ -3452,6 +3447,366 @@ class TestCodexFailureLogPaths:
         with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
             assert data_codex.get_full_transcript(sid, cwd) == []
         assert any(f"path={path}" in r.getMessage() for r in caplog.records)
+
+
+class TestCodexFinalReviewAdapter:
+    """Final review, adapter side (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW).
+    Findings A1 to A8, A11, A12 and A14 of the final review; the plan's Review Log names them."""
+
+    @staticmethod
+    def _link_or_skip(link, target):
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"cannot create a symlink here: {exc}")
+
+    @staticmethod
+    def _junction_or_skip(link, target):
+        if sys.platform != "win32":
+            pytest.skip("NTFS junctions are Windows-only")
+        done = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                              capture_output=True, text=True, timeout=60)
+        if done.returncode != 0:
+            pytest.skip(f"cannot create a junction here: {done.stdout} {done.stderr}")
+
+    # --- A1: one definition of "a Codex session file" -------------------------------
+
+    def test_canonical_rollouts_is_exactly_the_set_of_files_discovery_lists(self, codex_home, monkeypatch):
+        cwd = "C:\\Work\\Proj"
+        # Thread 1: a resumed copy in an older date folder next to the newer one.
+        older = _cx_write(codex_home, _cx_id(1), cwd, day="2026/08/30", mtime=_CX_OLD)
+        newer = _cx_write(codex_home, _cx_id(1), cwd, day="2026/09/01", mtime=_CX_OLD + 1000)
+        plain = _cx_write(codex_home, _cx_id(3), cwd)
+        child = _cx_write(codex_home, _cx_id(2), cwd, source={"subagent": {"other": "guardian"}})
+        # A well-formed file whose NAME does not carry the thread id: not a rollout.
+        stray = _cx_write(codex_home, _cx_id(4), cwd, name="notes-2026-09-01.jsonl")
+        lookalike = _cx_write(codex_home, _cx_id(5), cwd, name=f"copy-of-rollout-x-{_cx_id(5)}.jsonl")
+        # A file that cannot be opened is unexaminable.
+        broken = _cx_write(codex_home, _cx_id(6), cwd)
+        real_open = data_codex.open_shared
+
+        def deny_broken(path, mode="rb"):
+            if os.fspath(path) == str(broken):
+                raise PermissionError("denied")
+            return real_open(path, mode)
+        monkeypatch.setattr(data_codex, "open_shared", deny_broken)
+
+        found = data_codex.canonical_rollouts()
+        assert [c.path for c in found] == sorted([str(newer), str(plain)])
+        for c in found:
+            st = os.stat(c.path)
+            assert (c.mtime_ns, c.size) == (st.st_mtime_ns, st.st_size)
+        # The property the finding is about: what discovery lists is what usage may count.
+        sessions, _ = data_codex.load_sessions(cwd)
+        assert {str(data_codex.rollout_path(s.session_id)) for s in sessions} == {c.path for c in found}
+        assert [n for _c, n, _u in data_codex.discover_workspaces()] == [len(found)]
+        for excluded in (older, child, stray, lookalike, broken):
+            assert str(excluded) not in {c.path for c in found}
+
+    def test_canonical_rollouts_is_empty_without_a_store_and_never_raises(self, codex_home, monkeypatch):
+        assert data_codex.canonical_rollouts() == []
+        monkeypatch.setattr(data_codex, "_store_index", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert data_codex.canonical_rollouts() == []
+
+    def test_a_symlinked_rollout_is_neither_discovered_nor_canonical(self, codex_home, tmp_path):
+        cwd = "C:\\W"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / f"rollout-2026-09-01T10-00-00-{_cx_id(7)}.jsonl"
+        target.write_bytes(_cx_line(_cx_meta(_cx_id(7), cwd)))
+        folder = codex_home / "sessions" / "2026" / "09" / "01"
+        folder.mkdir(parents=True)
+        self._link_or_skip(folder / target.name, target)
+        _cx_write(codex_home, _cx_id(8), cwd)           # a real one, so the walk is not vacuous
+        assert data_codex.is_available() is True
+        assert [n for _c, n, _u in data_codex.discover_workspaces()] == [1]
+        assert [os.path.basename(c.path) for c in data_codex.canonical_rollouts()] == [
+            f"rollout-2026-09-01T10-00-00-{_cx_id(8)}.jsonl"]
+        assert data_codex.rollout_path(_cx_id(7)) is None
+
+    # --- A2: junctions are never followed ---------------------------------------------
+
+    def test_a_directory_junction_is_not_followed(self, codex_home, tmp_path):
+        cwd = "C:\\W"
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / f"rollout-2026-09-01T10-00-00-{_cx_id(9)}.jsonl").write_bytes(
+            _cx_line(_cx_meta(_cx_id(9), cwd)))
+        month = codex_home / "sessions" / "2026" / "09"
+        month.mkdir(parents=True)
+        link = month / "02"
+        self._junction_or_skip(link, elsewhere)
+        try:
+            assert (link / f"rollout-2026-09-01T10-00-00-{_cx_id(9)}.jsonl").exists()   # reachable through it
+            assert data_codex.is_available() is False
+            assert data_codex.discover_workspaces() == []
+            assert data_codex.canonical_rollouts() == []
+            assert data_codex.rollout_path(_cx_id(9)) is None
+            _cx_write(codex_home, _cx_id(10), cwd, day="2026/09/03")   # a real folder beside it
+            data_codex._clear_caches()
+            assert [n for _c, n, _u in data_codex.discover_workspaces()] == [1]
+        finally:
+            os.rmdir(link)       # a junction is removed with rmdir, never by deleting its target's files
+
+    # --- A3: a UNC cwd never reaches GetLongPathNameW ----------------------------------
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="8.3 short names are Windows-only")
+    def test_a_network_or_device_cwd_never_expands_short_names_but_a_local_one_does(self, codex_home, monkeypatch):
+        import ctypes
+        calls = []
+
+        def get_long_path(path, buf, size):
+            calls.append(path)
+            return 0                       # "no such path": the expansion falls back to the text
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetLongPathNameW", get_long_path)
+        data_mod._expand_short_path.cache_clear()
+        unc = ["\\\\host\\share\\proj~1", "//host/share/proj~2", "\\\\?\\UNC\\host\\share\\p~3",
+               "\\\\?\\C:\\Users\\X~1\\p4", "\\\\.\\pipe\\p~5"]
+        for n, cwd in enumerate(unc, start=1):
+            _cx_write(codex_home, _cx_id(n), cwd)
+        sessions = {cwd: data_codex.load_sessions(cwd)[0] for cwd in unc}
+        assert all(len(found) == 1 for found in sessions.values())
+        assert len(data_codex.discover_workspaces()) == len(unc)
+        assert len(data_codex.canonical_rollouts()) == len(unc)
+        assert calls == [], calls
+        # The same folder in another case, and with a trailing separator, is one workspace.
+        assert len(data_codex.load_sessions("\\\\HOST\\Share\\Proj~1\\")[0]) == 1
+        assert data_codex.load_sessions("//host/share/proj~2/")[0][0].session_id == _cx_id(2)
+        assert calls == []
+        # Control: a local path with a "~" still expands, so the guard is not a blanket skip.
+        local = "C:\\Users\\X~1\\proj"
+        _cx_write(codex_home, _cx_id(20), local)
+        data_codex._clear_caches()
+        assert len(data_codex.load_sessions(local)[0]) == 1
+        assert calls, "a local cwd with a ~ is expanded as before"
+
+    def test_a_posix_style_cwd_keeps_its_own_normalisation(self, codex_home):
+        cwd = "/home/dev/proj/"
+        _cx_write(codex_home, _cx_id(1), cwd)
+        assert data_codex.load_sessions("/home/dev/proj")[0][0].session_id == _cx_id(1)
+
+    # --- A4: a byte-order mark ---------------------------------------------------------
+
+    def test_a_bom_on_the_first_line_does_not_hide_the_session(self, codex_home):
+        cwd = "C:\\W"
+        sid = _cx_id(1)
+        _cx_write(codex_home, sid, cwd, [_cx_user("hello")], first=b"\xef\xbb\xbf" + _cx_line(_cx_meta(sid, cwd)))
+        (session,), _ = data_codex.load_sessions(cwd)
+        assert session.session_id == sid and session.first_prompt == "hello"
+        assert data_codex.read_meta(data_codex.rollout_path(sid))["id"] == sid
+        assert data_codex.loads(b"\xef\xbb\xbf{\"a\": 1}") == {"a": 1}
+        assert data_codex.loads(b"\xef\xbb\xbf{") is None
+
+    def test_a_bom_on_the_first_line_of_the_session_index_keeps_the_first_name(self, codex_home):
+        cwd = "C:\\W"
+        _cx_write(codex_home, _cx_id(1), cwd, [_cx_user("prompt one")])
+        _cx_write(codex_home, _cx_id(2), cwd, [_cx_user("prompt two")])
+        path = codex_home / "session_index.jsonl"
+        path.write_bytes(b"\xef\xbb\xbf" + _cx_line({"id": _cx_id(1), "thread_name": "First name"})
+                         + _cx_line({"id": _cx_id(2), "thread_name": "Second name"}))
+        _bump_mtime(path)
+        assert {s.session_id: s.title for s in data_codex.load_sessions(cwd)[0]} == {
+            _cx_id(1): "First name", _cx_id(2): "Second name"}
+
+    # --- A5: an unreadable sessions folder is logged ------------------------------------
+
+    def test_an_unreadable_sessions_root_is_logged_once_with_its_path_only(self, codex_home, monkeypatch, caplog):
+        _cx_write(codex_home, _cx_id(1), "C:\\W")
+        root = str(data_codex.CODEX_SESSIONS_DIR)
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if os.fspath(path) == root:
+                raise PermissionError(errno.EACCES, "denied", root)
+            return real_scandir(path)
+        monkeypatch.setattr(os, "scandir", scandir)
+        data_codex._clear_caches()
+        with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
+            assert data_codex.is_available() is False
+            assert data_codex.discover_workspaces() == []
+            assert data_codex.canonical_rollouts() == []
+        warnings = [r.getMessage() for r in caplog.records if "sessions_root" in r.getMessage()]
+        assert len(warnings) == 1, warnings            # throttled: one per minute, not per call
+        assert f"path={root}" in warnings[0] and "PermissionError" in warnings[0]
+
+    def test_a_missing_sessions_root_is_silent_and_a_subfolder_failure_is_not_a_root_warning(
+            self, codex_home, monkeypatch, caplog):
+        with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
+            assert data_codex.is_available() is False      # no ~/.codex/sessions at all: not an error
+        assert caplog.records == []
+        _cx_write(codex_home, _cx_id(1), "C:\\W")
+        deep = str(codex_home / "sessions" / "2026" / "09" / "01")
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if os.fspath(path) == deep:
+                raise PermissionError(errno.EACCES, "denied", deep)
+            return real_scandir(path)
+        monkeypatch.setattr(os, "scandir", scandir)
+        data_codex._clear_caches()
+        with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
+            assert data_codex.discover_workspaces() == []
+        assert not [r for r in caplog.records if "sessions_root" in r.getMessage()]
+
+    # --- A6: one parse per change, whoever asks first ----------------------------------
+
+    def test_a_growing_file_is_parsed_once_per_change_across_alternating_calls(self, codex_home, monkeypatch):
+        cwd, sid = "C:\\W", _cx_id(1)
+        path = _cx_write(codex_home, sid, cwd, [_cx_user("first")])
+        monkeypatch.setattr(data_codex, "_STORE_TTL", 5.0)        # the store index goes stale
+        parses = []
+        real = data_codex._parse_rollout
+        monkeypatch.setattr(data_codex, "_parse_rollout", lambda p: parses.append(p) or real(p))
+        data_codex.load_sessions(cwd)
+        assert len(parses) == 1
+        with open(path, "ab") as fh:                              # the file grows; the index does not see it
+            fh.write(_cx_line(_cx_user("second")))
+        _bump_mtime(path)
+        for _ in range(3):
+            assert data_codex.load_sessions(cwd)[0][0].last_prompt == "second"
+            data_codex.discover_workspaces()
+        assert len(parses) == 2, "one parse for the initial state and one for the change"
+        ((_, _, updated),) = data_codex.discover_workspaces()
+        assert updated >= data_codex._iso(data_codex._ns_dt(os.stat(path).st_mtime_ns))
+
+    # --- A7: growing the caches is atomic ----------------------------------------------
+
+    def test_concurrent_cache_growth_publishes_one_set_of_caches(self, monkeypatch):
+        built = []
+        real_cache = data_codex.BoundedCache
+
+        class SlowCache(real_cache):
+            def __init__(self, maxsize):
+                time.sleep(0.02)                    # a window wide enough for every thread to enter
+                built.append(maxsize)
+                super().__init__(maxsize)
+        monkeypatch.setattr(data_codex, "BoundedCache", SlowCache)
+
+        def slow_max(*args):
+            time.sleep(0.02)                        # between the size check and the cap assignment
+            return max(*args)
+        monkeypatch.setattr(data_codex, "max", slow_max, raising=False)
+        barrier = threading.Barrier(8)
+
+        def grow():
+            barrier.wait()
+            data_codex.fit_caches(5000)
+        threads = [threading.Thread(target=grow) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert len(built) == 3, built                # verdict, parse and last-record caches, once
+        assert data_codex._parse_cache._maxsize == data_codex._cache_cap >= 2 * 5000
+        data_codex.fit_caches(5000)
+        assert len(built) == 3                       # already large enough: no rebuild
+
+    # --- A8: what cannot be examined is a sub-agent -------------------------------------
+
+    def test_a_rollout_that_cannot_be_examined_reads_as_a_subagent(self, codex_home):
+        assert data_codex.is_subagent_rollout(codex_home / "missing.jsonl") is True     # the stat fails
+        assert data_codex.is_subagent_rollout(12345) is True                            # not a path at all
+        ok = _cx_write(codex_home, _cx_id(1), "C:\\W")
+        assert data_codex.is_subagent_rollout(ok) is False                              # a known non-sub-agent
+        legacy = _cx_write(codex_home, _cx_id(2), "C:\\W", first=_cx_line({"id": _cx_id(2)}))
+        assert data_codex.is_subagent_rollout(legacy) is False
+
+    # --- A11: titles from the session index are capped ----------------------------------
+
+    def test_a_thread_name_is_capped_after_it_is_stripped(self, codex_home):
+        cwd = "C:\\W"
+        for n in (1, 2, 3):
+            _cx_write(codex_home, _cx_id(n), cwd, [_cx_user("p")])
+        _cx_index(codex_home, [(_cx_id(1), " " * 5 + "n" * 5000), (_cx_id(2), "short name"),
+                               (_cx_id(3), "e" * 200)])
+        titles = {s.session_id: s.title for s in data_codex.load_sessions(cwd)[0]}
+        assert titles == {_cx_id(1): "n" * 200, _cx_id(2): "short name", _cx_id(3): "e" * 200}
+
+    # --- A12: one UUID pattern ------------------------------------------------------------
+
+    def test_the_uuid_pattern_is_lower_case_ascii_and_the_others_are_built_from_it(self):
+        good = "0123abcd-1111-4222-8333-0123456789ab"
+        assert data_mod.UUID_RE.fullmatch(good)
+        for bad in (good.upper(), good + "\n", good[:-1], good + "0", "g" + good[1:],
+                    good.replace("0", "\uff10", 1)):
+            assert data_mod.UUID_RE.fullmatch(bad) is None, bad
+        assert data_mod.SESSION_ID_RE.fullmatch(good) and data_mod.SESSION_ID_RE.fullmatch("sess_" + good)
+        assert data_mod.SESSION_ID_RE.fullmatch("sess_" + good.upper()) is None
+        assert data_mod.UUID_RE.pattern in data_mod.SESSION_ID_RE.pattern
+        assert data_mod.UUID_RE.pattern in data_codex._ROLLOUT_RE.pattern
+        # Upper case stays accepted in a rollout's name and id, as before (lower-cased first).
+        assert data_codex._ROLLOUT_RE.fullmatch(f"rollout-2026-09-01T10-00-00-{good.upper()}.jsonl")
+        assert data_codex._file_uuid(f"x/rollout-t-{good.upper()}.jsonl") == good
+
+    # --- A14: a slow provider does not hold up another -----------------------------------
+
+    @staticmethod
+    def _fake_provider(name, delay=0.0, started=None, active=None):
+        class Fake:
+            calls = 0
+            peak = 0
+            now = 0
+
+            @staticmethod
+            def is_available():
+                return True
+
+            @classmethod
+            def discover_workspaces(cls):
+                cls.calls += 1
+                cls.now += 1
+                cls.peak = max(cls.peak, cls.now)
+                if started is not None:
+                    started.set()
+                time.sleep(delay)
+                cls.now -= 1
+                return [(f"C:\\{name}", 1, "2026-09-01T10:00:00.000000+00:00")]
+        return Fake
+
+    def test_a_slow_provider_does_not_delay_another_providers_discovery(self, monkeypatch):
+        started = threading.Event()
+        slow = self._fake_provider("codex", delay=1.5, started=started)
+        fast = self._fake_provider("claude")
+        monkeypatch.setattr(data_mod, "PROVIDERS", {"claude-code": fast, "codex": slow})
+        monkeypatch.setattr(data_mod, "_cache", {})
+        everything = []
+        worker = threading.Thread(target=lambda: everything.append(data_mod.discover_workspaces_with_counts()))
+        worker.start()
+        try:
+            assert started.wait(10)
+            t0 = time.monotonic()
+            only_claude = data_mod.discover_workspaces_with_counts("claude-code")
+            assert time.monotonic() - t0 < 0.75, "waited behind the other provider's discovery"
+            assert only_claude == [("C:\\claude", 1, "2026-09-01T10:00:00.000000+00:00", "claude-code")]
+        finally:
+            worker.join(timeout=30)
+        assert sorted(r[3] for r in everything[0]) == ["claude-code", "codex"]
+
+    def test_identical_concurrent_requests_still_compute_once(self, monkeypatch):
+        started = threading.Event()
+        slow = self._fake_provider("codex", delay=0.4, started=started)
+        monkeypatch.setattr(data_mod, "PROVIDERS", {"codex": slow})
+        monkeypatch.setattr(data_mod, "_cache", {})
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(data_mod.discover_workspaces_with_counts("codex")))
+                   for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert slow.calls == 1 and len(results) == 4 and all(r == results[0] for r in results)
+
+    def test_one_provider_never_runs_two_discoveries_at_once(self, monkeypatch):
+        slow = self._fake_provider("codex", delay=0.3)
+        monkeypatch.setattr(data_mod, "PROVIDERS", {"codex": slow})
+        monkeypatch.setattr(data_mod, "_cache", {})
+        threads = [threading.Thread(target=lambda: data_mod.discover_workspaces_with_counts("codex")),
+                   threading.Thread(target=lambda: data_mod.discover_workspaces_with_counts())]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert slow.calls == 2 and slow.peak == 1
 
 
 class TestCodexSurvivingMutations:
