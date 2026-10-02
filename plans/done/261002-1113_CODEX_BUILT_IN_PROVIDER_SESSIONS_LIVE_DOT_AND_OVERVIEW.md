@@ -1,10 +1,45 @@
 # Codex as a Built-in Provider: Sessions, Live Dot and Overview
 
 > **Date**: 2026-10-01
-> **Status**: In Progress — Phases 0-4 complete; Phase 5 documentation done, probe cleanup awaiting the user's approval  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-10-02 11:15
 > **Scope**: Add OpenAI Codex as a built-in provider at parity with Claude Code and kiro-cli: launch, discovery and transcripts, live dot and Resume state, Overview tiles and usage, plus measured Codex knowledge in `docs/KNOWLEDGE.md`.
 > **Estimated effort**: 4-5 days (pre-flight 0.75, adapter 1.25, launch and UI 0.5, live state 1, Overview 1, docs and cleanup 0.5)
+
+## Completion Summary
+
+Codex is a built-in provider at parity with Claude Code and kiro-cli for sessions and transcripts, the live dot and Resume state, the Overview tiles and usage, and launching, with a measured Codex section in `docs/KNOWLEDGE.md`. Driving Codex from `/acp` stayed out of scope. All six phases are done, the cleanup ledger is closed, and all 27 final-review rows are answered. Last verification: 3721 passed and 2 skipped, 909 of 909 node checks, `_check_test_names.py` clean, no new ruff findings. Code commits `e56f6fa` and `73957a3` close the work; nothing was pushed from this plan.
+
+### Acknowledged at archival
+
+**Divergences (section 9), accepted by the user on 2026-10-02, one decision per phase list; none was individually verified in a Review Log entry.**
+- Accepted: Phase 1 divergences (7 items).
+- Accepted: Phase 2 divergences (5 items).
+- Accepted: Phase 3 divergences (6 items).
+- Accepted: Phase 4 divergences (11 items). Known limits among them are in Follow-up Work 10, 14 and 15.
+
+**Review rows accepted by the user.** Rows 20, 21, 22, 25, 26 and 27 of the final review, rows 8, 10, 12, 14, 17 and 21 of the Phase 3 and 4 reviews, and the earlier rows that begin "User: accepted", are accepted by the user and recorded in the Review Log. They are listed there with dates.
+
+**Pass 4 (documentation ripple).** No stale identifier was found. Two additions were proposed and the user applied both: `README.md` (the `codex:<name>` tool names in the Usage bullet, and the `#rgb` / `#rrggbb` colour comment). They ship in the archive commit.
+
+**Harness opportunities (15).**
+- Promoted: items 4, 7 and 13 (one edit): a claim from a sample states its sample, and a rule over a store is run over the whole store before it enters a decision row (config repo commit `c34043a`: `qexplore` Probe validity, `qplan` pre-flight paragraph).
+- Promoted: item 1 (config repo commit `c34043a`): `qexplore` skips the store prompt when `plans/` holds files that match the governance template, and asks otherwise. The user refined the rule.
+- Skipped (harness opportunity): item 10, premise incorrect, harness has browser tools (the Playwright MCP in kiro-cli, the Chrome tools in Claude Code); this repository's `AGENTS.md` "Driving the pages" was corrected in the archive commit.
+- Accepted (harness opportunity): item 2, probes that start a live external CLI process.
+- Accepted (harness opportunity): item 3, cross-check a derived count against a second source.
+- Accepted (harness opportunity): item 5, list every UI consumer of a reused state value.
+- Accepted (harness opportunity): item 6, give reviewers a sanitised measurement script.
+- Accepted (harness opportunity): item 8, name the expected HEAD for a worktree-isolated reviewer.
+- Accepted (harness opportunity): item 9, state a numeric threshold as its own design decision.
+- Accepted (harness opportunity): item 11, batch a phase's Escalated findings into one question.
+- Accepted (harness opportunity): item 12, check for a locked desktop before driving a TUI.
+- Accepted (harness opportunity): item 14, write reviewer reports to scratch as they return.
+- Accepted (harness opportunity): item 15, a fix brief that adds a cap states the size distribution it must not break.
+
+**Durable guidelines added to this repository's `AGENTS.md` with the user's approval:** the Codex root redirect in tests, the locked-screen QA recipe for Codex, and the corrected browser-tool guidance.
+
+**Open follow-ups.** Follow-up Work items 1 to 18 stay in this file. Items 16 (provider hooks), 17 (the shared `data._normalize_path` UNC gap) and 18 (one shared record reader) came from the final review.
 
 ---
 

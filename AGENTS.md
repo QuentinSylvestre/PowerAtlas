@@ -31,12 +31,17 @@
 Recipe for live QA of /acp and the dashboard against the running instance. It worked on
 2026-09-24 (kiro-cli 2.24.0). Sign in first with the `pa_local` cookie bullet above.
 
-- **Driving the pages.** No Playwright MCP server is configured. Use standalone Playwright
-  from the venv: `.venv-PowerAtlas/Scripts/python script.py`. Chromium is already installed
+- **Driving the pages.** Use the harness's own browser tool when it has one and a browser is
+  connected: the Playwright MCP server in kiro-cli, or the Chrome tools
+  (`mcp__claude-in-chrome__*`) in Claude Code. Sign in with the `/local-auth?code=<code>` form
+  from the cookie bullet above. Use standalone Playwright from the venv when the harness has no
+  browser tool, no browser is connected, or the desktop is locked or unattended:
+  `.venv-PowerAtlas/Scripts/python script.py`. Chromium is already installed
   under `%LOCALAPPDATA%\ms-playwright`. Add the cookie with
   `ctx.add_cookies([{"name": "pa_local", "value": cookie, "url": "http://127.0.0.1:4915"}])`.
   A fresh browser context never serves a stale `style.css`/`composer-chrome.js`, so it
-  replaces the hard reload.
+  replaces the hard reload. The Chrome-tools route has not been exercised against PowerAtlas
+  yet. Do that once and replace this sentence with the result.
 - **Getting a session that receives MCP status.** On /acp, click `#acpNew`, then a row in
   `#acpPickerList` (or `#acpPickerNeutral`), then
   `wait_for_function("() => !document.getElementById('acpMcpIndicator').hidden")`. Allow up

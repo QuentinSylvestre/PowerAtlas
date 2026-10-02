@@ -132,7 +132,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     sub-agent transcripts are still being counted. Claude Code agent time is estimated from message
     timestamps. Codex agent time is exact from Codex 0.139 and estimated before; Codex sub-agent threads
     are not counted, so Codex totals leave them out, and a running Codex session's usage can lag by
-    about two minutes. Context pressure is kiro-cli only. Token totals cover Claude Code and Codex only,
+    about two minutes. Codex tools are listed as `codex:<name>`, so they stay apart from kiro-cli tools of the same name. Context pressure is kiro-cli only. Token totals cover Claude Code and Codex only,
     with no cost estimate.
   - *Return paths*: the Home button in the panel header, Escape, clicking the open session's row
     again, or closing or deleting the open session. Escape does nothing while focus is in the
@@ -233,6 +233,7 @@ acp_permission_base_agent = "kiro_default"  # the kiro-cli agent PowerAtlas's ow
 # what it changed. An older config's `acp_permissions_enabled = true` becomes "manual", `false`
 # becomes "yolo".
 
+# Colors saved from the UI must be #rgb or #rrggbb. A launcher tile with any other stored value draws no color stripe.
 [provider_settings.claude-code]
 default_args = ""
 color = ""
