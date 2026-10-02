@@ -70,9 +70,9 @@ class TranscriptEvent:
     success: whether the tool succeeded -- "tool_result" only (None if unknown).
     timestamp: ISO-ish on-disk timestamp when the provider's format has one, else "".
     outcome_unknown: "tool_result" only: the call finished but the file records no
-        outcome for it (success stays None). Only the Codex adapter sets it, so a
-        result with an unknown outcome from any other provider is unchanged
-        (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, D13).
+        outcome for it (success stays None) and the translator shows it as
+        "finished". Only the Codex adapter sets it, so a result with an unknown
+        outcome from any other provider is unchanged (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, D13).
     """
     kind: str
     text: str = ""

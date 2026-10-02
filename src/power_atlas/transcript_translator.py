@@ -122,8 +122,10 @@ def translate_transcript(events: list[TranscriptEvent], session_id: str) -> list
     at -- the call simply stays at "started", the same as a live call this
     client never saw resolve. One exception: a result flagged `outcome_unknown`
     (set only by the Codex adapter, for a call that finished but whose file
-    records no exit code) is shown as "completed" rather than left at "started"
-    (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, D13).
+    records neither an exit code nor an outcome marker) is shown as "finished"
+    rather than left at "started": a neutral status that claims neither success
+    nor failure (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1, D13 as amended
+    2026-10-01).
     """
     frames: list[dict] = []
     open_tool_calls: set[str] = set()
@@ -159,7 +161,7 @@ def translate_transcript(events: list[TranscriptEvent], session_id: str) -> list
             elif event.success is False:
                 status = "failed"
             elif event.outcome_unknown:
-                status = "completed"
+                status = "finished"
             else:
                 continue
             frames.append(_envelope("tool_update", {

@@ -187,7 +187,8 @@ class TestCodexToolNames:
 
 class TestOutcomeUnknownResults:
     """A result flagged `outcome_unknown` (only the Codex adapter sets it) is shown
-    as completed; every other unknown result behaves exactly as before."""
+    as finished, a neutral status that claims neither success nor failure (plan D13
+    as amended 2026-10-01); every other unknown result behaves exactly as before."""
 
     @staticmethod
     def _frames(result):
@@ -195,11 +196,11 @@ class TestOutcomeUnknownResults:
             TranscriptEvent(kind="tool_call", tool_call_id="c1", tool_name="exec", tool_args={}),
             result], "s")
 
-    def test_flagged_unknown_outcome_is_completed(self):
+    def test_flagged_unknown_outcome_is_finished_never_completed(self):
         frames = self._frames(TranscriptEvent(
             kind="tool_result", tool_call_id="c1", success=None, outcome_unknown=True))
         assert [f["type"] for f in frames] == ["tool_call", "tool_update"]
-        assert frames[1]["payload"] == {"toolCallId": "c1", "status": "completed"}
+        assert frames[1]["payload"] == {"toolCallId": "c1", "status": "finished"}
 
     def test_unflagged_unknown_outcome_stays_started(self):
         frames = self._frames(TranscriptEvent(kind="tool_result", tool_call_id="c1", success=None))

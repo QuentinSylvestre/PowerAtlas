@@ -2,10 +2,10 @@
 
 Codex keeps one thread per file under ``~/.codex/sessions/YYYY/MM/DD/``
 (``rollout-<local timestamp>-<uuid>.jsonl``). This adapter reads those rollout
-files directly (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW
-Phase 1, decisions D4 and D6): the rollout is the canonical record, and the
-SQLite catalogue next to it is a private, versioned projection that is not
-read.
+files directly (decisions D4 and D6 of
+261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1): the rollout
+is the canonical record, and the SQLite catalogue next to it is a private,
+versioned projection that is not read.
 
 OpenAI publishes no stability guarantee for the rollout format, and the files
 are rewritten in place (compaction), can be torn mid-write, and reach tens of
@@ -46,8 +46,9 @@ log = logging.getLogger(__name__)
 
 # --- Roots (D26) ---------------------------------------------------------------
 # Derived once at import from CODEX_HOME (Codex's own relocation variable, read
-# from its source in Phase 0) else ~/.codex, into three module-level constants
-# that tests redirect. Every function reads them at call time.
+# from its source in 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 0)
+# else ~/.codex, into three module-level constants that tests redirect. Every
+# function reads them at call time.
 
 def _codex_home() -> Path:
     env = os.environ.get("CODEX_HOME", "")
@@ -59,8 +60,8 @@ def _codex_home() -> Path:
 _CODEX_HOME = _codex_home()
 CODEX_SESSIONS_DIR = _CODEX_HOME / "sessions"
 CODEX_SESSION_INDEX = _CODEX_HOME / "session_index.jsonl"
-# Read by the writer-lock probe of 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW
-# Phase 3; declared here so the test fixtures already redirect it.
+# Read by the writer-lock probe of 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3;
+# declared here so the test fixtures already redirect it.
 CODEX_LOCKS_DIR = _CODEX_HOME / "thread-writer-locks"
 
 
@@ -73,10 +74,14 @@ _TAIL_START = 256 * 1024          # first tail window ...
 _TAIL_MAX = 2 * 1024 * 1024       # ... widening up to this much
 _TRANSCRIPT_WINDOW = 8 * 1024 * 1024
 _TRANSCRIPT_MAX_EVENTS = 3000
+_TRANSCRIPT_KEYS = (b"item_completed", b"function_call", b"custom_tool_call")
 _ARG_CHARS = 2000                 # per string in a tool call's arguments
 _ARG_ITEMS = 50                   # per list or dict in a tool call's arguments
 _INDEX_CAP = 8 * 1024 * 1024      # session_index.jsonl
 _CHUNK = 64 * 1024
+_OVERSIZE_HEAD = 2048             # bytes of a skipped oversize line shown to a notice hook
+_OVERSIZE_NOTICES = 5             # per transcript
+_CACHE_MIN = 4096
 
 _STORE_TTL = 5.0                  # seconds the store index is reused (D11)
 _AVAILABLE_TTL = 5.0
@@ -86,7 +91,13 @@ _WARN_INTERVAL = 60.0
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 _ROLLOUT_RE = re.compile(
     r"rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl", re.I)
-_EXIT_CODE_RE = re.compile(r"Exit code: (-?\d+)")
+# Bounded: a 4300-digit number makes int() raise, and a number that long is not an
+# exit code. `(?!\d)` makes an over-long number no match at all (unknown), instead of
+# its first nine digits.
+_EXIT_CODE_RE = re.compile(r"Exit code: (-?\d{1,9})(?!\d)")
+# Leading markers of an `exec` tool output (plan D13 as amended 2026-10-01).
+_EXEC_RUNNING = "Script running with cell"
+_EXEC_MARKERS = (("Script completed", True), ("Script failed", False), ("aborted by user", False))
 
 
 # --- Failure isolation (D27) ----------------------------------------------------
@@ -95,27 +106,42 @@ _warn_lock = threading.Lock()
 _warned: dict[str, float] = {}
 
 
-def _warn(kind: str, exc: BaseException, path: str = "") -> None:
-    """One path-only warning per kind per minute. Never logs message content."""
+def _warn(kind: str, exc: BaseException | None = None, path: str = "", note: str = "") -> None:
+    """One warning per kind per minute: the exception type, the path when known
+    (an OSError carries its own), and never message content."""
     now = time.monotonic()
     with _warn_lock:
         last = _warned.get(kind)
         if last is not None and now - last < _WARN_INTERVAL:
             return
         _warned[kind] = now
-    log.warning("codex adapter: %s failed (%s)%s", kind, type(exc).__name__,
-                f" path={path}" if path else "")
+    if not path and exc is not None:
+        filename = getattr(exc, "filename", None)
+        if isinstance(filename, (str, bytes, os.PathLike)):
+            path = os.fsdecode(filename)
+    what = f"failed ({type(exc).__name__})" if exc is not None else note
+    log.warning("codex adapter: %s %s%s", kind, what, f" path={path}" if path else "")
 
 
-def _safe(kind: str, neutral):
-    """Make a public function total: any Exception is logged and `neutral()` returned."""
+def _safe(kind: str, neutral, path_arg: bool = False):
+    """Make a public function total: any Exception is logged and `neutral()` returned.
+
+    `path_arg` marks a function whose first argument is a rollout path, which the
+    warning then names.
+    """
     def decorate(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             try:
                 return fn(*args, **kwargs)
             except Exception as exc:  # RecursionError included
-                _warn(kind, exc)
+                path = ""
+                if path_arg and args:
+                    try:
+                        path = os.fspath(args[0])
+                    except TypeError:
+                        pass
+                _warn(kind, exc, path)
                 return neutral()
         return wrapper
     return decorate
@@ -150,7 +176,8 @@ def open_shared(path, mode: str = "rb"):
 
     CPython's ``open()`` on Windows omits ``FILE_SHARE_DELETE``, so a plain
     reader blocks Codex's own ``remove_file`` of a rollout and of a lock file
-    for as long as the handle lives (Phase 0, measured on a scratch copy). On
+    for as long as the handle lives (measured on a scratch copy in
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 0). On
     Windows this calls ``CreateFileW`` with READ|WRITE|DELETE sharing and wraps
     the handle; elsewhere it is ``os.open``. Both go through ``os.fdopen``,
     never ``builtins.open``, so a test can forbid ``builtins.open`` for Codex
@@ -194,15 +221,18 @@ def _loads(raw: bytes):
         return None
 
 
-def _iter_lines(fh, budget: int, skip_partial: bool = False):
+def _iter_lines(fh, budget: int, skip_partial: bool = False, eof_at_budget: bool = False,
+                on_oversize=None):
     """Yield complete lines forward from the current position, newest bytes last.
 
     Reads at most `budget` bytes in chunks. A line over _LINE_CAP is skipped
-    without being yielded, and reading resumes at the next newline. With
+    without being yielded, and reading resumes at the next newline;
+    `on_oversize(head)` is called with its first _OVERSIZE_HEAD bytes. With
     `skip_partial` the bytes up to the first newline are dropped (a window that
-    starts mid-line). A line cut off by the end of the budget is dropped; one cut
-    off by the end of the file (no trailing newline) is yielded, and the parser
-    decides whether it is complete.
+    starts mid-line). A line cut off by the end of the budget is dropped, unless
+    the caller says the budget ends at the end of the file (`eof_at_budget`): then,
+    like a line cut off by a real end of file (no trailing newline), it is yielded
+    and the parser decides whether it is complete.
     """
     carry = b""
     skipping = skip_partial
@@ -223,12 +253,18 @@ def _iter_lines(fh, budget: int, skip_partial: bool = False):
         parts = (carry + chunk).split(b"\n")
         carry = parts.pop()
         for part in parts:
-            if part and len(part) <= _LINE_CAP:
+            if not part:
+                continue
+            if len(part) <= _LINE_CAP:
                 yield part
+            elif on_oversize is not None:
+                on_oversize(part[:_OVERSIZE_HEAD])
         if len(carry) > _LINE_CAP:
+            if on_oversize is not None:
+                on_oversize(carry[:_OVERSIZE_HEAD])
             carry = b""
             skipping = True
-    if at_eof and not skipping and carry:
+    if (at_eof or eof_at_budget) and not skipping and carry:
         yield carry
 
 
@@ -371,11 +407,21 @@ class _Parsed:
     last_record: datetime | None
 
 
-# Both caches are sized above twice the store (never below its file count): a
-# cache smaller than a sequential scan thrashes on every pass (D10).
-_verdict_cache = BoundedCache(4096)
-_parse_cache = BoundedCache(4096)
-_SKIP = _Verdict("skip")
+# Both caches hold at least twice the store's rollout count (D10: never smaller
+# than the file count; a cache smaller than a sequential scan thrashes on every
+# pass). _fit_caches grows them at store rebuild, with headroom, so the resize
+# happens when the store doubles rather than on every new file.
+_cache_cap = _CACHE_MIN
+_verdict_cache = BoundedCache(_cache_cap)
+_parse_cache = BoundedCache(_cache_cap)
+
+
+def _fit_caches(rollouts: int) -> None:
+    global _cache_cap, _verdict_cache, _parse_cache
+    if _cache_cap < 2 * rollouts:
+        _cache_cap = max(_CACHE_MIN, 4 * rollouts)
+        _verdict_cache = BoundedCache(_cache_cap)
+        _parse_cache = BoundedCache(_cache_cap)
 
 
 def _file_uuid(path) -> str:
@@ -429,7 +475,10 @@ def _verdict_for(path: str, mtime_ns: int, size: int, file_uuid: str) -> _Verdic
     if cached is not None and cached[0] == mtime_ns and cached[1] == size:
         return cached[2]
     verdict = _compute_verdict(path, mtime_ns, file_uuid)
-    _verdict_cache.put(path, (mtime_ns, size, verdict))
+    # An error is a failure to look, not a verdict about the file (a transient
+    # open failure): never remembered, so the next pass looks again.
+    if verdict.reason != "error":
+        _verdict_cache.put(path, (mtime_ns, size, verdict))
     return verdict
 
 
@@ -469,8 +518,9 @@ def _parse_rollout(path: str) -> _Parsed:
 def _parsed_for(path: str, mtime_ns: int, size: int) -> _Parsed:
     cached = _parse_cache.get(path)
     # The size is part of the key: Windows freezes the mtime of a file Codex has
-    # open while it keeps growing (Phase 0, measured), and compaction can rewrite
-    # a file in place.
+    # open while it keeps growing (measured in
+    # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 0), and
+    # compaction can rewrite a file in place.
     if cached is not None and cached[0] == mtime_ns and cached[1] == size:
         return cached[2]
     parsed = _parse_rollout(path)
@@ -531,23 +581,27 @@ def _walk_rollouts(root: str):
 
 def _build_store(root: str) -> _Store:
     store = _Store(root)
+    files: dict[str, list[_Rollout]] = {}
     for path, file_uuid in _walk_rollouts(root):
         try:
             st = os.stat(path)  # not DirEntry.stat(), which can be stale for open files on Windows
         except OSError:
             continue
-        rollout = _Rollout(path, file_uuid, st.st_mtime_ns, st.st_size)
-        current = store.rollouts.get(file_uuid)
-        # Two files for one thread id (resume, unarchive): the newest wins.
-        if current is None or (rollout.mtime_ns, rollout.path) > (current.mtime_ns, current.path):
-            store.rollouts[file_uuid] = rollout
+        files.setdefault(file_uuid, []).append(_Rollout(path, file_uuid, st.st_mtime_ns, st.st_size))
+    _fit_caches(sum(len(group) for group in files.values()))
     counts: Counter = Counter()
-    for file_uuid, rollout in store.rollouts.items():
-        verdict = _verdict_for(rollout.path, rollout.mtime_ns, rollout.size, file_uuid)
+    for file_uuid, group in files.items():
+        # Two files for one thread id (resume, unarchive): the newest top-level one
+        # wins, so a torn newer file cannot hide a valid older session. With no
+        # top-level file at all, the newest file is the lookup target.
+        group.sort(key=lambda r: (r.mtime_ns, r.path), reverse=True)
+        judged = [(r, _verdict_for(r.path, r.mtime_ns, r.size, file_uuid)) for r in group]
+        chosen, verdict = next(((r, v) for r, v in judged if v.kind == "top"), judged[0])
+        store.rollouts[file_uuid] = chosen
         counts[verdict.kind if verdict.kind != "skip" else f"skip:{verdict.reason}"] += 1
         if verdict.kind == "top":
-            store.top[file_uuid] = (rollout, verdict)
-            store.by_cwd.setdefault(verdict.norm_cwd, []).append((rollout, verdict))
+            store.top[file_uuid] = (chosen, verdict)
+            store.by_cwd.setdefault(verdict.norm_cwd, []).append((chosen, verdict))
     log.debug("codex store: %s", dict(counts))
     return store
 
@@ -574,32 +628,42 @@ def _store_index() -> _Store:
 _names_memo: tuple[tuple, dict[str, str]] | None = None
 
 
-def _index_sig() -> tuple[float, int]:
-    """(mtime, size) of session_index.jsonl; (0.0, -1) when it is absent."""
+def _index_state() -> tuple[float, int, int]:
+    """(mtime, mtime_ns, size) of session_index.jsonl from ONE stat; (0.0, 0, -1)
+    when it is absent."""
     try:
         st = os.stat(CODEX_SESSION_INDEX)
     except OSError:
-        return (0.0, -1)
-    return (st.st_mtime, st.st_size)
+        return (0.0, 0, -1)
+    return (st.st_mtime, st.st_mtime_ns, st.st_size)
 
 
-def _thread_names() -> dict[str, str]:
+def _index_sig() -> tuple[float, int]:
+    """(mtime, size) of session_index.jsonl; (0.0, -1) when it is absent."""
+    state = _index_state()
+    return (state[0], state[2])
+
+
+def _thread_names(state: tuple[float, int, int]) -> dict[str, str]:
     """thread id -> user-given name from session_index.jsonl, the last entry winning.
 
-    Cached by the index file's own (mtime_ns, size), outside the rollout-keyed
+    `state` is the index's `_index_state()`, taken BEFORE this read: a rename that
+    lands in between is then seen as a change by the next refresh, never recorded
+    as already seen. Cached by that (mtime_ns, size), outside the rollout-keyed
     parse cache, so a rename shows without the rollout changing.
     """
     global _names_memo
     path = str(CODEX_SESSION_INDEX)
-    try:
-        st = os.stat(path)
-    except OSError:
+    if state[2] < 0:
         return {}
-    key = (path, st.st_mtime_ns, st.st_size)
+    key = (path, state[1], state[2])
     memo = _names_memo
     if memo is not None and memo[0] == key:
         return memo[1]
     names: dict[str, str] = {}
+    if state[2] > _INDEX_CAP:
+        _warn("session_index_cap", path=path,
+              note=f"session index is over {_INDEX_CAP} bytes; entries past that are ignored")
     try:
         with open_shared(path) as fh:
             for line in _iter_lines(fh, _INDEX_CAP):
@@ -651,35 +715,64 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
     spelling is the one the most recently modified session used.
     """
     results: list[tuple[str, int, str]] = []
+    now = datetime.now(timezone.utc)
     for items in _store_index().by_cwd.values():
-        newest, verdict = max(items, key=lambda rv: (rv[0].mtime_ns, rv[0].path))
-        results.append((verdict.cwd, len(items), _iso(_ns_dt(newest.mtime_ns))))
+        best = None
+        for rollout, verdict in items:
+            # The same recency a session row shows: Windows freezes the mtime of a
+            # rollout Codex holds open, so the last record's stamp counts too. The
+            # parse is cached by (mtime_ns, size), so a warm pass costs no read.
+            try:
+                updated = _updated_at(rollout.mtime_ns,
+                                      _parsed_for(rollout.path, rollout.mtime_ns, rollout.size), now)
+            except Exception as exc:
+                _warn("discover_workspaces.file", exc, rollout.path)
+                updated = _ns_dt(rollout.mtime_ns)
+            key = (updated, rollout.path)
+            if best is None or key > best[0]:
+                best = (key, verdict.cwd)
+        results.append((best[1], len(items), _iso(best[0][0])))
     results.sort(key=lambda x: x[2], reverse=True)
     return results
 
 
-@_safe("load_sessions", lambda: ([], {}))
+def _updated_at(mtime_ns: int, parsed: "_Parsed", now: datetime) -> datetime:
+    """The later of the file mtime and the last record's stamp; a future stamp cannot pin a row."""
+    updated = _ns_dt(mtime_ns)
+    if parsed.last_record is not None:
+        updated = max(updated, min(parsed.last_record, now))
+    return updated
+
+
+def _failed_listing():
+    """The neutral value of a failed `load_sessions`: no sessions, and a tombstone on
+    the index key that no real index state equals, so the next refresh sees a change
+    and reloads instead of keeping an empty workspace until restart."""
+    return [], {str(CODEX_SESSION_INDEX): _FileInfo(-1.0, -2)}
+
+
+@_safe("load_sessions", _failed_listing)
 def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
     """Top-level sessions for one workspace, plus the file stats that guard the cache."""
     norm = _normalize_path(cwd)
-    names = _thread_names()
-    sig = _index_sig()
-    file_stats: dict[str, _FileInfo] = {str(CODEX_SESSION_INDEX): _FileInfo(mtime=sig[0], size=sig[1])}
+    state = _index_state()  # one stat, taken before the names are read
+    names = _thread_names(state)
+    file_stats: dict[str, _FileInfo] = {str(CODEX_SESSION_INDEX): _FileInfo(mtime=state[0], size=state[2])}
     sessions: list[Session] = []
     now = datetime.now(timezone.utc)
     for rollout, _listed in _store_index().by_cwd.get(norm, []):
         # Per-file isolation: one bad file never blanks the workspace.
         try:
             st = os.stat(rollout.path)  # fresh: the index memo can be 5 s old
+            # Recorded before anything below can skip or fail, so a listed file that
+            # is not a session does not make every refresh report a change.
+            file_stats[rollout.path] = _FileInfo(mtime=st.st_mtime, size=st.st_size)
             verdict = _verdict_for(rollout.path, st.st_mtime_ns, st.st_size, rollout.file_uuid)
             if verdict.kind != "top" or verdict.norm_cwd != norm:
                 continue
             parsed = _parsed_for(rollout.path, st.st_mtime_ns, st.st_size)
-            updated = _ns_dt(st.st_mtime_ns)
-            if parsed.last_record is not None:
-                updated = max(updated, min(parsed.last_record, now))  # a future stamp cannot pin a row
+            updated = _updated_at(st.st_mtime_ns, parsed, now)
             title = names.get(verdict.session_id) or parsed.first_prompt[:80] or verdict.session_id
-            file_stats[rollout.path] = _FileInfo(mtime=st.st_mtime, size=st.st_size)
             sessions.append(Session(
                 session_id=verdict.session_id,
                 title=title,
@@ -728,7 +821,12 @@ def find_session_workspace(session_id: str) -> str | None:
 
 # --- Rollout lookup ---------------------------------------------------------------
 
-_missing = BoundedCache(512)  # id -> (store generation, time): ids the store does not hold
+# id -> (store generation, time): ids the store does not hold. An entry is valid only
+# while the store it was recorded against is still the current one, so it lives at most
+# one store rebuild (_STORE_TTL), whatever _MISSING_TTL says: a rollout that appears is
+# found at the next rebuild. _MISSING_TTL is an upper bound that only matters if
+# _STORE_TTL is ever raised above it.
+_missing = BoundedCache(512)
 
 
 @_safe("rollout_path", lambda: None)
@@ -736,7 +834,8 @@ def rollout_path(session_id: str) -> Path | None:
     """The rollout file of a thread id (the newest, when two files carry one id), or None.
 
     The id is validated before any lookup. Sub-agent rollouts are found too;
-    only discovery excludes them.
+    only discovery excludes them. Of several files for one id, the newest
+    top-level one (else the newest file) is returned.
     """
     if not SESSION_ID_RE.fullmatch(session_id):
         return None
@@ -752,7 +851,7 @@ def rollout_path(session_id: str) -> Path | None:
     return Path(rollout.path)
 
 
-@_safe("read_meta", lambda: None)
+@_safe("read_meta", lambda: None, path_arg=True)
 def read_meta(path) -> dict | None:
     """The ``session_meta`` payload of a rollout's first line (without
     ``base_instructions``), or None when the first line is not one. The one reader
@@ -760,16 +859,20 @@ def read_meta(path) -> dict | None:
     return _read_meta_payload(os.fspath(path)) or None
 
 
-@_safe("is_subagent_rollout", lambda: False)
+@_safe("is_subagent_rollout", lambda: False, path_arg=True)
 def is_subagent_rollout(path, st=None) -> bool:
     """True when the rollout's first line marks it as a sub-agent thread.
 
     Used to exclude such files (their histories embed the parent's, so they
-    cannot be summed). A legacy, torn or invalid file is not a sub-agent: False.
+    cannot be summed). A legacy, torn or invalid file is a known non-sub-agent:
+    False. A file that could not be examined at all (a failed read) is unknown
+    and excluded too: True, because counting a possible sub-agent is the silent
+    multiply the exclusion exists to prevent (D7).
     """
     target = os.fspath(path)
     st = st or os.stat(target)
-    return _verdict_for(target, st.st_mtime_ns, st.st_size, _file_uuid(target)).kind == "subagent"
+    verdict = _verdict_for(target, st.st_mtime_ns, st.st_size, _file_uuid(target))
+    return verdict.kind == "subagent" or (verdict.kind == "skip" and verdict.reason == "error")
 
 
 # --- Tails and transcripts ----------------------------------------------------------
@@ -787,7 +890,11 @@ def get_session_tail(session_id: str, cwd: str, max_lines: int = 15) -> list[str
         for line in _iter_lines_reverse(fh, size):
             if b'"AgentMessage"' not in line:
                 continue
-            text = _message_text(_loads(line), "AgentMessage")
+            try:
+                text = _message_text(_loads(line), "AgentMessage")
+            except Exception as exc:  # one bad record is one skipped record
+                log.debug("codex tail: skipped a record (%s)", type(exc).__name__)
+                continue
             if text:
                 messages.append(_cap_text(text))
                 if len(messages) >= max_lines:
@@ -807,22 +914,36 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
         for line in _iter_lines(fh, max(0, _HEAD_CAP - first_end)):
             if b'"UserMessage"' not in line:
                 continue
-            text = _message_text(_loads(line), "UserMessage")
+            try:
+                text = _message_text(_loads(line), "UserMessage")
+            except Exception as exc:  # one bad record is one skipped record
+                log.debug("codex first prompt: skipped a record (%s)", type(exc).__name__)
+                continue
             if text:
                 return _cap_text(text)
     return ""
 
 
 def _cap_value(value, depth: int = 0):
-    """Bound a tool argument for display: strings to _ARG_CHARS, lists and dicts to _ARG_ITEMS."""
+    """Bound a tool argument for display: strings to _ARG_CHARS, lists and dicts to
+    _ARG_ITEMS (a final "(+N more)" element or key counts what was dropped), and
+    nesting to four levels, below which a container becomes text. Scalars keep
+    their type at every depth."""
     if isinstance(value, str):
         return value[:_ARG_CHARS]
-    if depth >= 4:
-        return str(value)[:_ARG_CHARS]
-    if isinstance(value, list):
-        return [_cap_value(v, depth + 1) for v in value[:_ARG_ITEMS]]
-    if isinstance(value, dict):
-        return {str(k)[:_ARG_CHARS]: _cap_value(v, depth + 1) for k, v in list(value.items())[:_ARG_ITEMS]}
+    if isinstance(value, (list, dict)):
+        if depth >= 4:
+            return str(value)[:_ARG_CHARS]
+        dropped = len(value) - _ARG_ITEMS
+        if isinstance(value, list):
+            out_list = [_cap_value(v, depth + 1) for v in value[:_ARG_ITEMS]]
+            if dropped > 0:
+                out_list.append(f"(+{dropped} more)")
+            return out_list
+        out = {str(k)[:_ARG_CHARS]: _cap_value(v, depth + 1) for k, v in list(value.items())[:_ARG_ITEMS]}
+        if dropped > 0:
+            out[f"(+{dropped} more)"] = ""
+        return out
     return value
 
 
@@ -873,7 +994,15 @@ def _exit_success(text: str) -> bool | None:
     return None
 
 
-def _transcript_events(obj, exec_calls: set[str]) -> list[TranscriptEvent]:
+def _exec_outcome(text: str) -> bool | None:
+    """True/False from an `exec` output's leading marker, else None (plan D13)."""
+    for marker, success in _EXEC_MARKERS:
+        if text.startswith(marker):
+            return success
+    return None
+
+
+def _transcript_events(obj) -> list[TranscriptEvent]:
     """The TranscriptEvents one rollout record yields (D13)."""
     if not isinstance(obj, dict):
         return []
@@ -900,24 +1029,25 @@ def _transcript_events(obj, exec_calls: set[str]) -> list[TranscriptEvent]:
         return []
     name = payload.get("name") if isinstance(payload.get("name"), str) else ""
     if ptype == "function_call":
-        if name == "exec":
-            exec_calls.add(call_id)
         return [TranscriptEvent(kind="tool_call", tool_call_id=call_id, tool_name=name,
                                 tool_args=_call_args(payload.get("arguments")), timestamp=stamp)]
     if ptype == "custom_tool_call":
-        if name == "exec":
-            exec_calls.add(call_id)
         content = payload.get("input")
         return [TranscriptEvent(kind="tool_call", tool_call_id=call_id, tool_name=name,
                                 tool_args={"content": content[:_ARG_CHARS] if isinstance(content, str) else ""},
                                 timestamp=stamp)]
     if ptype in ("function_call_output", "custom_tool_call_output"):
-        success = _exit_success(_output_text(payload.get("output")))
-        # An `exec` output records no exit code: the call finished, its outcome
-        # is unknown (D13). Only this adapter ever sets the flag.
+        text = _output_text(payload.get("output"))
+        if text.startswith(_EXEC_RUNNING):
+            return []  # not a final outcome: the call stays "started" (D13)
+        success = _exit_success(text)
+        if success is None:
+            success = _exec_outcome(text)
+        # No exit code and no marker: the call finished and its outcome is unknown.
+        # Never a success claim: the flag makes the translator show a neutral
+        # status (D13). Only this adapter ever sets it.
         return [TranscriptEvent(kind="tool_result", tool_call_id=call_id, success=success,
-                                outcome_unknown=success is None and call_id in exec_calls,
-                                timestamp=stamp)]
+                                outcome_unknown=success is None, timestamp=stamp)]
     return []
 
 
@@ -935,7 +1065,23 @@ def get_full_transcript(session_id: str, cwd: str) -> list[TranscriptEvent]:
         return []
     events: deque = deque(maxlen=_TRANSCRIPT_MAX_EVENTS)
     total = 0
-    exec_calls: set[str] = set()
+    notices = 0
+
+    def add(event: TranscriptEvent) -> None:
+        nonlocal total
+        total += 1
+        events.append(event)
+
+    def oversized(head: bytes) -> None:
+        # A record over the line cap is skipped (D13), but a reader should not see
+        # a silent gap: a notice in its place, only for a record that would have
+        # been an event, and at most _OVERSIZE_NOTICES per transcript.
+        nonlocal notices
+        if notices >= _OVERSIZE_NOTICES or not any(k in head for k in _TRANSCRIPT_KEYS):
+            return
+        notices += 1
+        add(TranscriptEvent(kind="assistant", text="(An oversized record was omitted.)"))
+
     with open_shared(path) as fh:
         size = fh.seek(0, 2)
         start = max(0, size - _TRANSCRIPT_WINDOW)
@@ -943,13 +1089,19 @@ def get_full_transcript(session_id: str, cwd: str) -> list[TranscriptEvent]:
         # skipped "partial line" is just the previous newline.
         fh.seek(max(0, start - 1))
         budget = size - max(0, start - 1)
-        for line in _iter_lines(fh, budget, skip_partial=start > 0):
-            if (b"item_completed" not in line and b"function_call" not in line
-                    and b"custom_tool_call" not in line):
+        # The budget runs to the end of the file, so a last line without a trailing
+        # newline is a line (eof_at_budget).
+        for line in _iter_lines(fh, budget, skip_partial=start > 0, eof_at_budget=True,
+                                on_oversize=oversized):
+            if not any(k in line for k in _TRANSCRIPT_KEYS):
                 continue
-            for event in _transcript_events(_loads(line), exec_calls):
-                total += 1
-                events.append(event)
+            try:
+                found = _transcript_events(_loads(line))
+            except Exception as exc:  # one bad record is one skipped record, not an empty transcript
+                log.debug("codex transcript: skipped a record (%s)", type(exc).__name__)
+                continue
+            for event in found:
+                add(event)
     result = list(events)
     if start > 0:
         notice = f"(Earlier events omitted: showing the last {len(result)} events.)"
@@ -965,13 +1117,14 @@ def get_full_transcript(session_id: str, cwd: str) -> list[TranscriptEvent]:
 
 def _clear_caches() -> None:
     """Drop every cache and memo. Tests call it after each store mutation."""
-    global _store_memo, _available_memo, _names_memo
+    global _store_memo, _available_memo, _names_memo, _cache_cap, _verdict_cache, _parse_cache
     with _store_lock:
         _store_memo = None
     _available_memo = None
     _names_memo = None
-    _verdict_cache.clear()
-    _parse_cache.clear()
+    _cache_cap = _CACHE_MIN
+    _verdict_cache = BoundedCache(_cache_cap)
+    _parse_cache = BoundedCache(_cache_cap)
     _missing.clear()
     with _warn_lock:
         _warned.clear()

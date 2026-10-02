@@ -5725,6 +5725,7 @@ async def api_session_transcript(sid: str = "", provider: str = "kiro-cli-v3", c
     try:
         frames = await asyncio.to_thread(_read_and_translate)
     except OSError:
+        log.debug("session transcript read failed with OSError for provider %r", provider)
         frames = []
     return {"events": frames}
 

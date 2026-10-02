@@ -795,11 +795,16 @@ class TestCodexProviderSurface:
         assert resp.status_code == 200
         assert seen == ["off the loop"]
 
-    def test_a_rollout_that_vanishes_mid_read_is_an_empty_transcript(self, client):
-        with patch("power_atlas.web.data.get_full_transcript", side_effect=FileNotFoundError("gone")):
+    def test_a_rollout_that_vanishes_mid_read_is_an_empty_transcript(self, client, caplog):
+        with caplog.at_level("DEBUG", logger="power_atlas.web"),                 patch("power_atlas.web.data.get_full_transcript", side_effect=FileNotFoundError("gone")):
             resp = client.get(f"/api/session-transcript?sid={self._SID}&provider=codex")
         assert resp.status_code == 200
         assert resp.json() == {"events": []}
+        # The swallowed error leaves a debug line naming the provider, never an id or a path.
+        messages = [r.getMessage() for r in caplog.records if r.name == "power_atlas.web"
+                    and "session transcript read failed" in r.getMessage()]
+        assert len(messages) == 1 and "codex" in messages[0]
+        assert self._SID not in messages[0] and "gone" not in messages[0]
 
 
 class TestSessionAvailabilityAPI:
