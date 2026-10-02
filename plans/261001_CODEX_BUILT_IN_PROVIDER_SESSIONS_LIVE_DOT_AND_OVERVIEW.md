@@ -453,7 +453,7 @@ Verify afterwards that `~/.codex/sessions` has no rollout whose cwd ends with `c
 - [x] `docs/KNOWLEDGE.md` has the Codex section with the content listed above, each measured claim carrying a date, the Codex version and how to re-run it.
 - [x] `README.md` lists Codex in the opening description, Features (providers, discovery sources, the Overview usage bullet with "Token totals are Claude Code only" and "Claude Code agent time is estimated" updated, the live-status bullet with the Codex live rule and the statement that desktop-held and VS Code-held threads show no dot, the Resume sentence reworded provider-neutral), the Configuration example (`[provider_settings.codex]`) and the launcher sentences; no sentence still says there are three providers.
 - [x] `plans/ROADMAP.md`'s "three providers" text and the Timed-prompts provider list are updated, and `plans/tests/HARNESS.md` says four providers.
-- [ ] Every cleanup ledger item is shown to the user and either removed or recorded as kept with the user's decision; the verification check above passes.
+- [x] Every cleanup ledger item is shown to the user and either removed or recorded as kept with the user's decision; the verification check above passes.
 - [x] `pytest tests --timeout=300`, `node tests/acp_page.test.mjs`, `_check_test_names.py` and `ruff check` on the changed files pass.
 - [x] `grep` for `PROVIDER_COLORS`, `DASH_OV_USAGE_PROVIDERS`, `_PROVIDER_SPECS`, "three providers" and "Claude Code only" finds no documentation statement that contradicts the final behaviour outside `plans/done/` and the dated `plans/tests/260701_POWERATLAS.md` snapshot.
 - [x] The lines this plan added to `src/` and `tests/` (`git diff` of the plan's commits) contain no bare `Phase [0-5]` comment; each names the plan slug.
@@ -945,7 +945,7 @@ Documentation sub-agent. No source, test or template file was touched; the docum
 - Item 2 (stale lock files): none existed. `thread-writer-locks/` holds only Codex's own `.coordination.lock`, which is kept.
 - Item 3 (QA throwaway sessions): none other than item 1; all live QA appended turns to that one session.
 - Item 4 (scratch folders, scripts, evidence): the session scratchpad was emptied (37 folders, about 2.8 GB, including both scratch working folders and the QA screenshots); no junction or symlink was in it. No `codex.exe` or headless browser from QA was left running.
-- Item 1 (the exploration-time probe session: one rollout, 1.8 MB, one `session_index.jsonl` line, no other file named for it): not removed yet. It deletes from the user's own `~/.codex`, so it waits for the user's explicit yes. It is still the only artifact left.
+- Item 1 (the exploration-time probe session: one rollout, 1.8 MB, one `session_index.jsonl` line, no other file named for it): removed with the user's explicit yes, by `codex delete --force <id>` (without `--force` the command refuses to run without an interactive terminal). Verified afterwards: no rollout whose cwd ends with `codexprobe_work`, no `session_index.jsonl` line and no lock file for it. Two other per-thread lock files exist, created later by the user's own live Codex processes; they are not artifacts of this work.
 
 ## Follow-up Work (Deferred)
 
