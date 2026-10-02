@@ -1363,6 +1363,8 @@ def session_writer_locked(session_id: str) -> bool:
     except OSError:
         return False
     stale = _lock_cache.get(key)
+    if stale is not None and time.monotonic() - stale[0] < _LOCK_TTL:
+        return stale[1]  # a fresh answer needs no lock at all
     for attempt in range(_LOCK_RETRIES + 1):
         with _probe_lock:
             fresh = _lock_cache.get(key)  # another thread may have just probed this id

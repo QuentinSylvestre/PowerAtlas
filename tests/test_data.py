@@ -4064,6 +4064,20 @@ class TestCodexWriterLock:
         assert data_codex.session_writer_locked(self.SID) is True, "a fresh answer is served as it was"
         assert locks.events.count(("open", f"{self.SID}.lock")) == 1
 
+    def test_a_fresh_answer_is_served_without_taking_the_process_wide_lock(self, locks, monkeypatch):
+        """Rows of a listing ask for their thread's lock one after another: a cache hit must
+        not queue behind a probe that is in flight for another thread."""
+        monkeypatch.setattr(data_codex, "_LOCK_TTL", 5.0)
+        _cx_lockfile(locks, self.SID)
+        data_codex._lock_cache.put(self.SID, (time.monotonic(), True))
+        got = []
+        with data_codex._probe_lock:        # another thread is mid-probe
+            worker = threading.Thread(target=lambda: got.append(data_codex.session_writer_locked(self.SID)))
+            worker.start()
+            worker.join(timeout=10)
+            assert not worker.is_alive(), "a fresh cached answer waited for the probe lock"
+        assert got == [True] and locks.events == []
+
     def test_a_deleted_lock_file_is_false_at_once_whatever_the_cache_says(self, locks, monkeypatch):
         monkeypatch.setattr(data_codex, "_LOCK_TTL", 5.0)
         data_codex._lock_cache.put(self.SID, (time.monotonic(), True))
