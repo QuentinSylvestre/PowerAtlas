@@ -3274,6 +3274,37 @@ class TestCodexCacheSizing:
         assert len(data_codex._missing) <= 512
 
 
+class TestCodexPublicNames:
+    """The record readers overview.py uses are public names that add no behaviour
+    (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4 review fix)."""
+
+    PAIRS = [("loads", "_loads"), ("read_first_line", "_read_first_line"), ("item_of", "_item_of"),
+             ("item_text", "_item_text"), ("output_text", "_output_text"),
+             ("exit_success", "_exit_success"), ("exec_outcome", "_exec_outcome"),
+             ("fit_caches", "_fit_caches")]
+
+    @pytest.mark.parametrize("public,private", PAIRS)
+    def test_a_public_name_calls_the_private_function_with_its_arguments(self, public, private, monkeypatch):
+        calls = []
+        monkeypatch.setattr(data_codex, private, lambda *args: calls.append(args) or ("called", args))
+        result = getattr(data_codex, public)("x")
+        assert calls == [("x",)]
+        assert result == (None if public == "fit_caches" else ("called", ("x",)))
+
+    def test_the_public_names_give_the_private_answers(self):
+        item = {"type": "event_msg", "payload": {"type": "item_completed",
+                                                 "item": {"type": "UserMessage", "content": [{"type": "text", "text": "hi"}]}}}
+        found = data_codex.item_of(item)
+        assert found is not None and found[0] == "UserMessage" and data_codex.item_text(found[1]) == "hi"
+        assert data_codex.output_text([{"text": "a"}, {"text": "b"}]) == "a\nb"
+        assert data_codex.exit_success("Exit code: 0\n") is True and data_codex.exit_success("Exit code: 2") is False
+        assert data_codex.exec_outcome("Script failed") is False and data_codex.exec_outcome("Script completed") is True
+        assert data_codex.exec_outcome("something else") is None
+        assert data_codex.loads(b'{"a": 1}') == {"a": 1} and data_codex.loads(b"{") is None
+        assert data_codex.read_first_line(io.BytesIO(b"first\nsecond\n")) == b"first"
+        assert data_codex.EXEC_RUNNING == "Script running with cell" and data_codex.FUTURE_SKEW == 5.0
+
+
 class TestCodexSessionIndexReads:
     """F13: one stat of the index per listing; a capped index says so."""
 

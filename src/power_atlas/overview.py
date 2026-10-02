@@ -584,11 +584,11 @@ def _codex_events(obj: dict) -> list[dict]:
 
     otype = obj.get("type")
     if otype == "event_msg":
-        found = data_codex._item_of(obj)
+        found = data_codex.item_of(obj)
         if found is None or found[0] not in ("UserMessage", "AgentMessage"):
             return []
         ev = _text_event("user" if found[0] == "UserMessage" else "assistant",
-                         data_codex._item_text(found[1]))
+                         data_codex.item_text(found[1]))
         return [ev] if ev else []
     if otype != "response_item":
         return []
@@ -608,7 +608,7 @@ def _codex_events(obj: dict) -> list[dict]:
     if ptype == "custom_tool_call":
         return [_tool_event(payload.get("name"), payload.get("input"))]
     if ptype in ("function_call_output", "custom_tool_call_output"):
-        ok = data_codex._exit_success(data_codex._output_text(payload.get("output")))
+        ok = data_codex.exit_success(data_codex.output_text(payload.get("output")))
         return [{"kind": "result", "ok": ok}] if ok is not None else []
     return []
 
@@ -1100,16 +1100,22 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
 #   or its last record's timestamp is (Windows freezes the mtime of a file
 #   Codex holds open). A day is active when it holds a user or agent message,
 #   a `task_started` or a tool call. Agent time is `task_complete.duration_ms`
-#   (exact, Codex 0.139 and later) else the span from `task_started` to
+#   (exact, Codex 0.139 and later, and at most `CODEX_DURATION_CAP_SECONDS`)
+#   else the span from `task_started` to
 #   `task_complete`, capped at `CODEX_TURN_CAP_SECONDS` (an estimate), and a
 #   `turn_aborted` closes its turn the same way; either is counted on the day
 #   of the record that ends the turn, and a turn that never ends counts
 #   nothing. Tokens are the growth of the cumulative `total_token_usage`
 #   between `token_count` events, on the day of the later event, so a repeated
-#   event counts once and a counter that goes down (a reset) counts its new
-#   value; `cached_input_tokens` are part of `input_tokens`, so `input` is the
-#   growth of the one minus the growth of the other. A tool call fails when
-#   its output records a non-zero exit code. A changed rollout is re-parsed at
+#   event counts once. A rollout can hold more than one cumulative series, so
+#   a decrease is a restart (and counts its new value) only when the new total
+#   equals the event's own `last_token_usage` total, and growth above
+#   `_CODEX_GAP_FACTOR` times that last total is another series (nothing
+#   counts; see `_codex_token_growth`). `cached_input_tokens` are part of
+#   `input_tokens`, so `input` is the growth of the one minus the growth of
+#   the other. A tool call fails when its output records a non-zero exit code
+#   or, for a call named `exec`, a `Script failed` or aborted-by-user marker
+#   (`Script running with cell` is not final). A changed rollout is re-parsed at
 #   most once per `CODEX_REPARSE_SECONDS`: the previous summary stays until
 #   then. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
 
@@ -1127,6 +1133,18 @@ _CODEX_OUTPUT_PARSE_MAX = 64 * 1024
 # A cumulative token counter above this is not a token count (a hostile value
 # would otherwise reach the page as a number a double cannot hold).
 _CODEX_TOKEN_MAX = 10 ** 15
+# An exact `duration_ms` above this is not a turn (tokens are bounded above; a
+# duration needs a bound too): the timestamps, themselves capped, time it instead.
+CODEX_DURATION_CAP_SECONDS = 24 * 3600
+# Token stream rule (D19 as amended after review, 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4):
+# a growth of the cumulative total up to this many times the event's own
+# `last_token_usage` is this stream's growth (more than one when events went
+# missing); a larger one is another stream's value and counts nothing.
+_CODEX_GAP_FACTOR = 4
+# A decrease is a restart when the new total equals the event's own last total
+# within 1/_CODEX_RESTART_TOLERANCE of it (a restart reports its first event as
+# both the cumulative and the last value).
+_CODEX_RESTART_TOLERANCE = 20
 USAGE_REUSE_SECONDS = 30.0
 CONTEXT_PRESSURE_PERCENT = 80.0
 _USAGE_TOP_WORKSPACES = 8
@@ -1200,8 +1218,12 @@ _usage_worker_proc: list = [None]
 # disk than this server loaded is ignored rather than mixed into the memo.
 # 2: a `codex` provider (Codex rollouts parse by `_parse_codex_usage`, and an
 # unknown provider no longer parses as Claude Code).
+# 3: Codex tokens follow the stream rule (`_codex_token_growth`: a decrease is a
+# restart only when it equals the event's own `last_token_usage`, a jump far above
+# it is another stream and counts nothing), Codex `exec` failures count, and an
+# exact Codex duration above 24 h falls back to the timestamps.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
-_USAGE_SCHEMA = 2
+_USAGE_SCHEMA = 3
 # The keys `usage_summary` reads from a file summary.
 _SUMMARY_KEYS = frozenset({"provider", "session_id", "cwd", "model", "subagent", "days"})
 
@@ -1473,6 +1495,8 @@ _CODEX_HEAD_BYTES = 2048
 _CODEX_CALL_ID_RE = re.compile(rb'"call_id"\s*:\s*"([^"\\]{1,256})"')
 # Only a string that starts `Exit code: <n>` (shell_command); the older JSON
 # form keeps its code at the end of a long string and is read on short lines only.
+_CODEX_HEAD_OUTPUT_RE = re.compile(
+    rb'"output"\s*:\s*(?:\[\s*\{\s*"type"\s*:\s*"[^"\\]{1,32}"\s*,\s*"text"\s*:\s*)?"([^"\\]{0,48})')
 _CODEX_HEAD_EXIT_RE = re.compile(rb'"output"\s*:\s*"Exit code: (-?[0-9]{1,9})(?![0-9])')
 _CODEX_TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens",
                        "cache_write_input_tokens")
@@ -1488,12 +1512,71 @@ def _codex_count(value) -> int | None:
 
 def _codex_duration_s(value) -> float | None:
     """`task_complete.duration_ms` in seconds, or None when it is not a finite
-    non-negative number."""
+    non-negative number of at most `CODEX_DURATION_CAP_SECONDS`."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not (0 <= value < float("inf")):
+    if not (0 <= value <= CODEX_DURATION_CAP_SECONDS * 1000):
         return None
     return value / 1000.0
+
+
+def _codex_stream_total(usage) -> int | None:
+    """`input_tokens + output_tokens` of a token-usage block (the total, because
+    `cached_input_tokens` is a subset of the input), or None when either is
+    missing or not a token count."""
+    if not isinstance(usage, dict):
+        return None
+    inp, out = _codex_count(usage.get("input_tokens")), _codex_count(usage.get("output_tokens"))
+    return None if inp is None or out is None else inp + out
+
+
+def _codex_token_growth(previous: dict[str, int], total, last) -> dict[str, int]:
+    """What one `token_count` event adds, per token field, and the new baseline.
+
+    `previous` is the baseline (the last value counted per field) and is updated
+    in place; `total` is the event's cumulative `total_token_usage`, `last` its
+    `last_token_usage`. A Codex rollout can hold more than one cumulative series
+    (a store of 93 top-level rollouts had one that alternated between two, and
+    one real restart), so a decrease is not always a reset:
+
+    - the total grew by at most `_CODEX_GAP_FACTOR` times the event's own last
+      total (or did not move): this stream's growth, counted per field (a field
+      that went down alone counts its new value);
+    - the total went down and the new total equals the event's own last total:
+      a restart, every field counts its new value and the baseline starts again;
+    - anything else (a decrease that is not a restart, a jump far above the
+      event's own last): another stream's value, nothing counts and the baseline
+      stays where this stream left it.
+
+    The first event, and any event whose totals or last are missing or hostile,
+    follow the original rule (growth per field, a field that went down is reset
+    and counts its new value): there is nothing to tell the streams apart by.
+    `_USAGE_SCHEMA` 3.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+    """
+    values = {}
+    for field in _CODEX_TOKEN_FIELDS:
+        value = _codex_count(total.get(field))
+        if value is not None:      # absent or hostile: counts nothing, keeps the last good one
+            values[field] = value
+    new_total, last_total = _codex_stream_total(total), _codex_stream_total(last)
+    if (new_total is not None and last_total is not None
+            and "input_tokens" in previous and "output_tokens" in previous):
+        delta = new_total - (previous["input_tokens"] + previous["output_tokens"])
+        if delta > _CODEX_GAP_FACTOR * last_total:
+            return {}
+        if delta < 0:
+            if abs(new_total - last_total) * _CODEX_RESTART_TOLERANCE > last_total:
+                return {}
+            previous.clear()
+            previous.update(values)
+            return dict(values)
+    grown = {}
+    for field, value in values.items():
+        delta = value - previous.get(field, 0)
+        grown[field] = value if delta < 0 else delta
+        previous[field] = value
+    return grown
 
 
 def _empty_summary(provider: str, session_id: str = "") -> dict:
@@ -1534,8 +1617,8 @@ def _parse_codex_usage(path: Path) -> dict:
         # The first line is read here, not through `read_meta`, which cannot
         # tell a file that failed to open (an error: nothing is memoised and
         # the next pass retries) from one that is no session (an empty summary).
-        first = data_codex._read_first_line(fh)
-        head_obj = data_codex._loads(first) if first else None
+        first = data_codex.read_first_line(fh)
+        head_obj = data_codex.loads(first) if first else None
         meta = head_obj.get("payload") if (isinstance(head_obj, dict)
                                            and head_obj.get("type") == "session_meta") else None
         source = meta.get("source") if isinstance(meta, dict) else None
@@ -1556,7 +1639,14 @@ def _parse_codex_usage(path: Path) -> dict:
                         code = _CODEX_HEAD_EXIT_RE.search(head)
                         if call:
                             call_id = call.group(1).decode("ascii", "replace")
-                            if code and int(code.group(1)) != 0:
+                            failed = bool(code and int(code.group(1)) != 0)
+                            if not code and calls.get(call_id, ("",))[0] == "exec":
+                                lead = _CODEX_HEAD_OUTPUT_RE.search(head)
+                                text = lead.group(1).decode("utf-8", "replace") if lead else ""
+                                if text.startswith(data_codex.EXEC_RUNNING):
+                                    continue   # not a final outcome: counts neither way
+                                failed = data_codex.exec_outcome(text) is False
+                            if failed:
                                 fail(call_id)
                             else:
                                 calls.pop(call_id, None)
@@ -1572,8 +1662,13 @@ def _parse_codex_usage(path: Path) -> dict:
                                                           "custom_tool_call_output"):
                     call_id = payload.get("call_id")
                     if isinstance(call_id, str):
-                        text = data_codex._output_text(payload.get("output"))
-                        if data_codex._exit_success(text) is False:
+                        text = data_codex.output_text(payload.get("output"))
+                        outcome = data_codex.exit_success(text)
+                        if outcome is None and calls.get(call_id, ("",))[0] == "exec":
+                            if text.startswith(data_codex.EXEC_RUNNING):
+                                continue   # not a final outcome: counts neither way
+                            outcome = data_codex.exec_outcome(text)
+                        if outcome is False:
                             fail(call_id)
                         else:
                             calls.pop(call_id, None)
@@ -1601,14 +1696,7 @@ def _parse_codex_usage(path: Path) -> dict:
                         total = info.get("total_token_usage") if isinstance(info, dict) else None
                         if not isinstance(total, dict):
                             continue
-                        grown: dict[str, int] = {}
-                        for field in _CODEX_TOKEN_FIELDS:
-                            value = _codex_count(total.get(field))
-                            if value is None:
-                                continue   # absent or hostile: counts nothing, keeps the last good one
-                            delta = value - previous.get(field, 0)
-                            grown[field] = value if delta < 0 else delta   # a counter that went down was reset
-                            previous[field] = value
+                        grown = _codex_token_growth(previous, total, info.get("last_token_usage"))
                         cached = grown.get("cached_input_tokens", 0)
                         tokens = day_of(epoch)["tokens"]
                         tokens["input"] += max(0, grown.get("input_tokens", 0) - cached)
@@ -1761,15 +1849,30 @@ def _usage_files(since: float, subagents: bool = True) -> list[tuple[Path, str, 
             if st.st_mtime >= since:
                 found.append((path, provider, st))
     codex_root = _codex_usage_root()
+    rollouts: list[Path] = []
     try:
         for path in codex_root.glob("*/*/*/rollout-*.jsonl"):
+            rollouts.append(path)       # a listing that fails halfway keeps what it found
+    except OSError:
+        log.warning("Overview: could not list the Codex rollouts under %s", codex_root)
+    # The adapter's caches are sized at its own store build; without one (this pass may
+    # run alone in the worker) a store above their size would thrash
+    # (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4).
+    data_codex.fit_caches(len(rollouts))
+    now = time.time()
+    try:
+        for path in rollouts:
             try:
                 st = path.stat()
             except OSError:
                 continue
             if data_codex.is_subagent_rollout(path, st):
                 continue
-            if st.st_mtime >= since or (data_codex.last_event_epoch(path) or 0.0) >= since:
+            if st.st_mtime >= since:
+                found.append((path, _CODEX, st))
+                continue
+            stamp = data_codex.last_event_epoch(path) or 0.0
+            if since <= stamp <= now + data_codex.FUTURE_SKEW:   # a stamp from the future is a clock error (D16)
                 found.append((path, _CODEX, st))
     except OSError:
         log.warning("Overview: could not list the Codex rollouts under %s", codex_root)

@@ -1062,6 +1062,45 @@ def _exec_outcome(text: str) -> bool | None:
     return None
 
 
+# Public names for overview.py (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+# review fix): thin wrappers, so the usage parser and the tile reader use this adapter's record
+# readers without reaching into its private names. They add no behaviour, and each one calls the
+# private function at call time, so a patch of the private name still takes effect.
+EXEC_RUNNING = _EXEC_RUNNING
+
+
+def loads(raw: bytes):
+    return _loads(raw)
+
+
+def read_first_line(fh) -> bytes | None:
+    return _read_first_line(fh)
+
+
+def item_of(obj) -> tuple[str, dict] | None:
+    return _item_of(obj)
+
+
+def item_text(item: dict) -> str:
+    return _item_text(item)
+
+
+def output_text(output) -> str:
+    return _output_text(output)
+
+
+def exit_success(text: str) -> bool | None:
+    return _exit_success(text)
+
+
+def exec_outcome(text: str) -> bool | None:
+    return _exec_outcome(text)
+
+
+def fit_caches(rollouts: int) -> None:
+    _fit_caches(rollouts)
+
+
 def _transcript_events(obj, exec_calls: set[str]) -> list[TranscriptEvent]:
     """The TranscriptEvents one rollout record yields (D13).
 
@@ -1189,6 +1228,7 @@ def get_full_transcript(session_id: str, cwd: str) -> list[TranscriptEvent]:
 
 ACTIVITY_WINDOW = 300.0     # seconds: the live rule's recency window (web._session_is_live)
 _FUTURE_SKEW = 5.0          # a stamp this far past now is a clock error, not activity
+FUTURE_SKEW = _FUTURE_SKEW   # public name for overview.py's window rule (D16, D19)
 
 # path -> (mtime_ns, size, epoch of the last complete record or None). Keyed by
 # (mtime_ns, size) because Windows freezes the mtime of a file Codex holds open while

@@ -30921,6 +30921,18 @@ def _ovx_tokens(at, input_=0, cached=0, output=0, write=None) -> dict:
                             "model_context_window": 258400})
 
 
+def _ovx_stream(at, total, last) -> dict:
+    """A `token_count` whose cumulative total is `total` and whose own last-turn total is
+    `last`: each splits 9 to 1 into input and output, none cached, so input + output is the
+    number given (a multiple of 10)."""
+    def usage(n):
+        return {"input_tokens": n * 9 // 10, "cached_input_tokens": 0, "output_tokens": n - n * 9 // 10,
+                "reasoning_output_tokens": 0, "total_tokens": n}
+    return _ovx_event(at, "token_count", rate_limits=None,
+                      info={"total_token_usage": usage(total), "last_token_usage": usage(last),
+                            "model_context_window": 258400})
+
+
 def _ovx_started(at, turn="u1") -> dict:
     return _ovx_event(at, "task_started", turn_id=turn, collaboration_mode_kind="default",
                       model_context_window=258400)
@@ -31428,6 +31440,20 @@ class TestOverviewLive:
             {"kind": "result", "ok": False},
             {"kind": "text", "role": "assistant", "text": "all green"},
         ]
+
+    def test_a_growing_codex_file_with_a_restored_mtime_refreshes_its_tile_events(self):
+        """Windows freezes a held-open rollout's mtime while it grows (D16), so the tile
+        memo's key is (mtime_ns, size): the mtime alone would serve stale events."""
+        from power_atlas import data_codex, overview
+        now = time.time()
+        path = _ovx_rollout(data_codex.CODEX_SESSIONS_DIR, 1, [_ovx_user(now - 90, "one")])
+        before = path.stat()
+        assert [e["text"] for e in overview.tail_events(path, "codex")] == ["one"]
+        _ov_jsonl(path, [_ovx_agent(now - 5, "two")])
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        assert after.st_mtime_ns == before.st_mtime_ns and after.st_size > before.st_size
+        assert [e["text"] for e in overview.tail_events(path, "codex")] == ["one", "two"]
 
     def test_every_codex_read_of_a_tile_goes_through_open_shared(self, tmp_path, monkeypatch):
         """D10: a plain `open()` of a rollout blocks Codex's own rename and delete on
@@ -32893,18 +32919,21 @@ class TestOverviewUsage:
     def cx_total(days, key):
         return sum(d["tokens"][key] for d in days.values())
 
-    def test_the_schema_is_2_and_an_older_worker_is_ignored(self):
-        """`_parse_usage_file` gained a `codex` provider and lost its Claude fall-through:
-        a child on the old format must not mix its summaries into the memo."""
+    def test_the_schema_is_3_and_an_older_worker_is_ignored(self):
+        """`_parse_usage_file` gained a `codex` provider and lost its Claude fall-through
+        (schema 2); the Codex token stream rule, exec failures and the duration cap changed
+        what it returns for an existing file (schema 3). A child on either older format must
+        not mix its summaries into the memo."""
         from power_atlas import overview
-        assert overview._USAGE_SCHEMA == 2
-        old = self.fake_worker()
+        assert overview._USAGE_SCHEMA == 3
         good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
                 "subagent": False, "days": {}}
-        for record in (["schema", 1], ["C:/x.jsonl", 1, 1, good], ["stage", 0]):
-            old._lines.put(json.dumps(record).encode() + b"\n")
-        assert old.wait_stage(0, None) is False
-        assert overview._usage_memo == {}
+        for older in (1, 2):
+            old = self.fake_worker()
+            for record in (["schema", older], ["C:/x.jsonl", 1, 1, good], ["stage", 0]):
+                old._lines.put(json.dumps(record).encode() + b"\n")
+            assert old.wait_stage(0, None) is False, older
+            assert overview._usage_memo == {}
 
     def test_codex_usage_roots_stay_a_triple_and_the_codex_root_has_its_own_seam(self):
         from power_atlas import data_codex, overview
@@ -32954,14 +32983,88 @@ class TestOverviewUsage:
         assert self.cx_total(days, "cache_creation") == 0
 
     def test_a_counter_that_goes_down_alone_is_a_reset_of_that_counter_only(self):
+        """The total still grows (1500 to 1790), so this is one stream's growth and the
+        stream rule leaves it alone; only the output counter went down and counts its new
+        value. (The earlier fixture, 1300/800/90, lowered the total as well: with the event's
+        last equal to its total that is a restart, see the stream tests below.)"""
         t = self.now - 7200
         days = self.cx_days(self.codex(1, [
             _ovx_tokens(t, 1000, 600, 500),
-            _ovx_tokens(t + 1, 1300, 800, 90),                     # output went down: reset to 90
+            _ovx_tokens(t + 1, 1700, 800, 90),                     # output went down: reset to 90
         ]))
         assert self.cx_total(days, "output") == 500 + 90
-        assert self.cx_total(days, "input") == (1000 - 600) + (300 - 200)
+        assert self.cx_total(days, "input") == (1000 - 600) + (700 - 200)
         assert self.cx_total(days, "cache_read") == 600 + 200
+
+    # --- Codex token stream rule (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4 review fix) ---
+
+    @staticmethod
+    def cx_sum(days):
+        return sum(sum(d["tokens"].values()) for d in days.values())
+
+    def stream(self, n, events):
+        """A rollout of `(total, last)` events one second apart; its counted tokens."""
+        t = self.now - 7200
+        return self.cx_sum(self.cx_days(self.codex(n, [
+            _ovx_stream(t + i, total, last) for i, (total, last) in enumerate(events)])))
+
+    def test_two_interleaved_cumulative_series_count_the_main_series_growth_only(self):
+        """A rollout whose events alternate between two cumulative series (a real one did, and the
+        first rule counted several times its final total). Expected values are the main
+        series' own growth, from the series values."""
+        # Series A: 1000 .. 4000, series B far above it. B's jump is 49,000 against its own
+        # last of 1,000, so it is another stream and counts nothing.
+        up = [(1000, 1000), (50000, 1000), (2000, 1000), (51000, 1000), (3000, 1000),
+              (52000, 1000), (3000, 1000), (4000, 1000)]
+        assert self.stream(1, up) == 4000
+        # Series B below A: every B event is a decrease that is no restart (60,000 against
+        # its own last of 1,000), and A resumes from where it was.
+        down = [(100000, 100000), (60000, 1000), (101000, 1000), (61000, 1000),
+                (102000, 1000), (102000, 1000)]
+        assert self.stream(2, down) == 102000
+        # Never more than the file's own growth: the file's largest cumulative value.
+        assert self.stream(3, up) <= max(total for total, _ in up)
+
+    def test_a_restart_counts_its_new_value_and_the_baseline_starts_again(self):
+        # 59,000 then 60,000; a restart to 1,000 (it is its own last), then 2,000, then a
+        # stray event of the old series (60,000 against a last of 1,000: another stream).
+        events = [(59000, 59000), (60000, 1000), (1000, 1000), (2000, 1000), (60000, 1000)]
+        assert self.stream(1, events) == 60000 + 1000 + 1000
+
+    def test_the_restart_tolerance_is_five_percent_of_the_events_own_last(self):
+        """Both sides of the edge, below and above the last: a decrease counts its new value
+        when it is within 5 % of the event's last total, else nothing."""
+        for n, (new, last, counts) in enumerate([
+                (10000, 10000, True), (10500, 10000, True), (10501, 10000, False),
+                (9500, 10000, True), (9499, 10000, False)], start=1):
+            assert self.stream(n, [(100000, 100000), (new, last)]) == 100000 + (new if counts else 0), (new, last)
+
+    def test_growth_up_to_four_times_the_events_last_counts_and_more_is_another_stream(self):
+        """Events can go missing (one `token_count` lost makes the growth two or three
+        times the next event's last): that growth counts. The edge is 4 times, inclusive."""
+        for n, (new, counts) in enumerate([(103000, 3000), (104000, 4000), (104001, 0)], start=1):
+            assert self.stream(n, [(100000, 100000), (new, 1000)]) == 100000 + counts, new
+
+    def test_the_first_event_counts_its_whole_cumulative_total(self):
+        """The first event has no baseline to compare with, so (as before) it counts in
+        full; a single-stream rollout then counts exactly its final cumulative total."""
+        assert self.stream(1, [(500000, 1000), (501000, 1000)]) == 501000
+
+    def test_without_a_usable_last_token_usage_a_decrease_is_a_reset_as_before(self):
+        """The original rule stands for an event the stream rule cannot judge: no
+        `last_token_usage`, or one that is not a token block."""
+        t = self.now - 7200
+
+        def usage(n):
+            return {"input_tokens": n, "cached_input_tokens": 0, "output_tokens": 0}
+        for n, last in enumerate([None, "x", {"input_tokens": "9"}, {}], start=1):
+            def event(at, total):
+                info = {"total_token_usage": usage(total)}
+                if last is not None:
+                    info["last_token_usage"] = last
+                return _ovx_event(at, "token_count", rate_limits=None, info=info)
+            days = self.cx_days(self.codex(n, [event(t, 1000), event(t + 1, 1500), event(t + 2, 200)]))
+            assert self.cx_sum(days) == 1000 + 500 + 200, last
 
     def test_the_input_is_never_negative_and_cache_write_is_its_own_counter(self):
         t = self.now - 7200
@@ -33026,6 +33129,26 @@ class TestOverviewUsage:
         assert day["agent_seconds"] == 45.5 + 90 + 1800 + 120 + 1800 + 30 + 70 + 55 + 62 + 2
         assert day["active"] is True
 
+    def test_the_overview_reaches_the_codex_adapter_by_public_names_only(self):
+        import inspect
+
+        from power_atlas import overview
+        assert re.findall(r"data_codex\._\w+", inspect.getsource(overview)) == []
+
+    def test_an_exact_codex_duration_above_24_hours_falls_back_to_the_timestamps(self):
+        """Both sides of the 24 h edge. A turn whose timestamps span 120 s counts those 120
+        seconds (itself capped at 30 minutes) when its exact duration is not credible."""
+        t0 = self.now - 6 * 3600
+        for n, (duration_ms, expected) in enumerate([
+                (86_400_000, 86400.0),          # exactly 24 h: exact
+                (86_399_999, 86399.999),
+                (86_400_001, 120.0),            # a millisecond over: the timestamps
+                (86_400_000.5, 120.0),
+                (10 ** 15, 120.0)], start=1):
+            days = self.cx_days(self.codex(n, [_ovx_started(t0), _ovx_complete(t0 + 120, duration_ms=duration_ms)]))
+            [day] = days.values()
+            assert day["agent_seconds"] == expected, duration_ms
+
     def test_a_codex_day_is_active_for_a_message_a_turn_or_a_tool_call_only(self):
         t = self.now - 2 * self.DAY
         quiet = self.cx_days(self.codex(1, [
@@ -33063,6 +33186,45 @@ class TestOverviewUsage:
                                 "shell": {"calls": 1, "failed": 1},
                                 "apply_patch": {"calls": 1, "failed": 0}}
 
+    # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4 review fixes: exec failures, duration cap, window, bounds
+    def test_codex_exec_calls_fail_on_a_failed_or_aborted_marker(self):
+        """D13's marker rule, for usage: only a call named exactly `exec` is read by its
+        leading marker; `Script running with cell` is not final and counts neither way."""
+        t = self.now - 7200
+        big = "x" * 100_000
+        days = self.cx_days(self.codex(1, [
+            _ovx_call(t, "exec", "e1"), _ovx_output(t + 1, "e1", "Script failed\nWall time: 1s"),
+            _ovx_call(t + 2, "exec", "e2"),
+            _ovx_output(t + 3, "e2", [{"type": "input_text", "text": "Script failed\nWall time: 2s"}]),
+            _ovx_call(t + 4, "exec", "e3"), _ovx_output(t + 5, "e3", "aborted by user after 3.2s."),
+            _ovx_call(t + 6, "exec", "e4"), _ovx_output(t + 7, "e4", "Script completed\nWall time: 1s"),
+            _ovx_call(t + 8, "exec", "e5"), _ovx_output(t + 9, "e5", "Script running with cell ID 3"),
+            _ovx_output(t + 10, "e5", "Script failed\nthe final outcome"),   # counts once
+            _ovx_call(t + 11, "shell_command", "s1"),
+            _ovx_output(t + 12, "s1", "Script failed\nWall time: 1s"),      # not exec: not a failure
+            _ovx_call(t + 13, "exec", "e6"), _ovx_output(t + 14, "e6", "something unrecognised"),
+            _ovx_custom(t + 15, "exec", "e7"), _ovx_output(t + 16, "e7", "Script failed", custom=True),
+            _ovx_call(t + 17, "exec", "e8"), _ovx_output(t + 18, "e8", "Exit code: 2\nWall time: 1s"),
+            _ovx_call(t + 19, "exec", "e9"), _ovx_output(t + 20, "e9", "Script running with cell ID 4"),
+        ]))
+        [day] = days.values()
+        assert day["tools"] == {"exec": {"calls": 9, "failed": 6},
+                                "shell_command": {"calls": 1, "failed": 0}}
+        # The same rule on lines too long to parse (read by their head), in both shapes.
+        days = self.cx_days(self.codex(2, [
+            _ovx_call(t, "exec", "b1"), _ovx_output(t + 1, "b1", "Script failed\n" + big),
+            _ovx_call(t + 2, "exec", "b2"),
+            _ovx_output(t + 3, "b2", [{"type": "input_text", "text": "Script failed\n" + big}]),
+            _ovx_call(t + 4, "exec", "b3"), _ovx_output(t + 5, "b3", "Script completed\n" + big),
+            _ovx_call(t + 6, "exec", "b4"), _ovx_output(t + 7, "b4", "Script running with cell ID 3\n" + big),
+            _ovx_output(t + 8, "b4", "Script failed\nlater"),
+            _ovx_call(t + 9, "shell_command", "b5"), _ovx_output(t + 10, "b5", "Script failed\n" + big),
+            _ovx_call(t + 11, "exec", "b6"), _ovx_output(t + 12, "b6", "aborted by user\n" + big),
+        ]))
+        [day] = days.values()
+        assert day["tools"] == {"exec": {"calls": 5, "failed": 4},
+                                "shell_command": {"calls": 1, "failed": 0}}
+
     def test_a_large_codex_output_line_is_read_by_its_head_and_never_parsed_whole(self, monkeypatch):
         """D19: a long tool output is tested for `Exit code:` by slicing its head, not by
         `json.loads` of the whole line. A line that holds none of the record words is not
@@ -33081,6 +33243,90 @@ class TestOverviewUsage:
         [day] = overview._parse_usage_file(path, "codex")["days"].values()
         assert day["tools"] == {"shell_command": {"calls": 2, "failed": 1}}
         assert max(parsed) < 64 * 1024, f"a long line was parsed whole: {sorted(parsed)[-3:]}"
+
+    def test_a_codex_line_above_the_8_mib_cap_is_skipped_unparsed_and_one_at_the_cap_is_read(self, monkeypatch):
+        """Both sides of `USAGE_MAX_LINE_BYTES` (the newline counts toward a line). The
+        line carries a `task_complete` with an exact duration, so a parse shows as seconds."""
+        from power_atlas import overview
+        t = self.now - 7200
+        cap = overview.USAGE_MAX_LINE_BYTES
+
+        def padded(duration_ms, line_bytes):
+            record = _ovx_complete(t, duration_ms=duration_ms, pad="")
+            base = len(json.dumps(record).encode("utf-8")) + 1      # + the newline
+            record["payload"]["pad"] = "x" * (line_bytes - base)
+            line = json.dumps(record)
+            assert len(line.encode("utf-8")) + 1 == line_bytes
+            return line
+        path = self.codex(1, [padded(100_000, cap),                 # exactly the cap: read
+                              padded(500_000, cap + 1),             # one byte over: skipped
+                              _ovx_complete(t + 5, duration_ms=7000)])
+        parsed = []
+        real = json.loads
+        monkeypatch.setattr(json, "loads", lambda raw, *a, **k: parsed.append(len(raw)) or real(raw, *a, **k))
+        [day] = overview._parse_usage_file(path, "codex")["days"].values()
+        assert day["agent_seconds"] == 100.0 + 7.0
+        assert max(parsed) <= cap, "the oversize line was parsed"
+
+    def test_a_codex_rollout_is_read_one_line_at_a_time_never_whole(self, monkeypatch):
+        from power_atlas import data_codex, overview
+        t = self.now - 7200
+        path = self.codex(1, [_ovx_started(t), _ovx_complete(t + 60, duration_ms=60_000)])
+        real_open = data_codex.open_shared
+        lines = []
+
+        class LineOnly:
+            def __init__(self, fh):
+                self._fh = fh
+
+            def __enter__(self):
+                self._fh.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._fh.__exit__(*exc)
+
+            def readline(self, *args):
+                lines.append(1)
+                return self._fh.readline(*args)
+
+            def read(self, *args):
+                raise AssertionError("a whole-file read")
+
+            def readlines(self, *args):
+                raise AssertionError("a whole-file read")
+
+            def __iter__(self):
+                raise AssertionError("a whole-file read")
+        monkeypatch.setattr(data_codex, "open_shared", lambda p, *a, **k: LineOnly(real_open(p, *a, **k)))
+        [day] = overview._parse_usage_file(path, "codex")["days"].values()
+        assert day["agent_seconds"] == 60.0 and len(lines) >= 3
+
+    def test_a_long_codex_output_line_is_matched_on_its_head_bytes_only(self, monkeypatch):
+        """The head slice: every pattern run on a line over 64 KiB sees at most
+        `_CODEX_HEAD_BYTES`, not the line."""
+        from power_atlas import overview
+        t = self.now - 7200
+        big = "x" * 200_000
+        path = self.codex(1, [
+            _ovx_call(t, "shell_command", "c1"), _ovx_output(t + 1, "c1", "Exit code: 5\n" + big),
+            _ovx_call(t + 2, "exec", "c2"), _ovx_output(t + 3, "c2", "Script failed\n" + big),
+            _ovx_call(t + 4, "exec", "c3"),
+            _ovx_output(t + 5, "c3", [{"type": "input_text", "text": "Script failed\n" + big}])])
+        seen = []
+
+        class Spy:
+            def __init__(self, real):
+                self._real = real
+
+            def search(self, data, *args):
+                seen.append(len(data))
+                return self._real.search(data, *args)
+        for name in ("_CODEX_CALL_ID_RE", "_CODEX_HEAD_EXIT_RE", "_CODEX_HEAD_OUTPUT_RE"):
+            monkeypatch.setattr(overview, name, Spy(getattr(overview, name)))
+        [day] = overview._parse_usage_file(path, "codex")["days"].values()
+        assert day["tools"] == {"shell_command": {"calls": 1, "failed": 1}, "exec": {"calls": 2, "failed": 2}}
+        assert seen and max(seen) <= overview._CODEX_HEAD_BYTES, sorted(seen)[-3:]
 
     def test_a_codex_output_is_only_matched_to_its_own_call(self):
         """A second output for the same call id, or an output that arrives before its call,
@@ -33156,8 +33402,10 @@ class TestOverviewUsage:
         """Windows freezes the mtime of a rollout Codex holds open (D16, D19). Tail reads
         happen only for a top-level file whose mtime is outside the window, once."""
         from power_atlas import data_codex, overview
-        t = self.now - 3600
         real_now = time.time()
+        # Not after the clock: a record stamped more than 5 s ahead is dropped by the window
+        # rule, and `self.now` (local noon) is ahead of the clock before noon.
+        t = min(self.now, real_now) - 3600
         frozen = self.codex(1, [_ovx_user(t, "still going"), _ovx_tokens(t + 1, 70, 20, 5)],
                             mtime=real_now - 20 * self.DAY)
         old = self.codex(2, [_ovx_user(self.now - 20 * self.DAY, "ancient")],
@@ -33182,6 +33430,49 @@ class TestOverviewUsage:
         os.utime(frozen, (real_now - 20 * self.DAY, real_now - 20 * self.DAY))
         overview._usage_files(since)
         assert len(reads) == 3
+
+    def test_a_frozen_rollout_whose_last_record_is_stamped_in_the_future_is_not_in_the_window(self):
+        """D16 through D19: a stamp more than 5 s ahead of now is a clock error, dropped
+        (never clamped); one within the skew still counts."""
+        from power_atlas import overview
+        real_now = time.time()
+        old = real_now - 20 * self.DAY
+        within = self.codex(1, [_ovx_user(real_now + 2, "a clock a little ahead")], mtime=old)
+        ahead = self.codex(2, [_ovx_user(real_now + 30, "a clock far ahead")], mtime=old)
+        recent = self.codex(3, [_ovx_user(real_now - 3600, "an hour ago")], mtime=old)
+        _days, since = overview._window(self.now)
+        listed = {p.name for p, prov, _st in overview._usage_files(since) if prov == "codex"}
+        assert listed == {within.name, recent.name} and ahead.name not in listed
+
+    def test_a_store_above_the_cache_size_is_read_once_not_every_pass(self, monkeypatch):
+        """The adapter's caches are sized at its own store build; a usage pass that runs
+        alone must size them from the files it lists, or a store above the minimum size
+        re-reads every first line and tail on every pass (measured 3x slower)."""
+        from power_atlas import data_codex, overview
+        small = data_codex._CACHE_MIN
+        monkeypatch.setattr(data_codex, "_cache_cap", small)
+        for name in ("_verdict_cache", "_parse_cache", "_last_event_cache"):
+            monkeypatch.setattr(data_codex, name, data_codex.BoundedCache(small))
+        old = time.time() - 40 * self.DAY
+        folder = self.roots.codex / "2026" / "08" / "01"
+        folder.mkdir(parents=True)
+        head = json.dumps(_ovx_meta(old, _ovx_id(1), "C:\\ws\\gamma")).encode() + b"\n"
+        tail = json.dumps(_ovx_user(old, "x")).encode() + b"\n"
+        count = small + 100
+        for i in range(count):
+            path = folder / f"rollout-2026-08-01T10-00-00-{_ovx_id(i)}.jsonl"
+            path.write_bytes(head + tail)
+            os.utime(path, (old, old))
+        opened = []
+        real_open = data_codex.open_shared
+        monkeypatch.setattr(data_codex, "open_shared",
+                            lambda path, *a, **k: opened.append(1) or real_open(path, *a, **k))
+        _days, since = overview._window(self.now)
+        assert overview._usage_files(since) == []
+        first = len(opened)
+        assert first >= count, "the first pass reads each file's tail"
+        assert overview._usage_files(since) == []
+        assert len(opened) == first, "the second pass re-read files: the caches thrash"
 
     def test_a_codex_rollout_older_than_the_window_in_both_ways_is_not_listed(self, parses):
         real_now = time.time()
