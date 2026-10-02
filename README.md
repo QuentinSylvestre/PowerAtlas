@@ -1,6 +1,6 @@
 # PowerAtlas
 
-Desktop launcher and dashboard for kiro-cli, Claude Code, and Kiro IDE sessions. System tray icon with a web UI for discovering, resuming, batch-launching, and reading the full transcript of any session's conversation — plus, for kiro-cli, a built-in agent surface that creates and drives sessions over ACP without a terminal, optionally reachable from your phone over a NetBird network. See the *Agent sessions* and *Remote access* sections below.
+Desktop launcher and dashboard for kiro-cli, Claude Code, Codex, and Kiro IDE sessions. System tray icon with a web UI for discovering, resuming, batch-launching, and reading the full transcript of any session's conversation — plus, for kiro-cli, a built-in agent surface that creates and drives sessions over ACP without a terminal, optionally reachable from your phone over a NetBird network. See the *Agent sessions* and *Remote access* sections below.
 
 Supports **Windows** and **Linux**.
 
@@ -92,13 +92,14 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 
 ### Features
 
-- Auto-discovers workspaces from kiro-cli, Claude Code, and Kiro IDE session data
+- Auto-discovers workspaces from kiro-cli, Claude Code, Codex, and Kiro IDE session data
   - Kiro IDE sessions: `%APPDATA%\Kiro\User\globalStorage\...` (Windows) / `~/.config/Kiro/User/globalStorage/...` (Linux)
   - kiro-cli v3 sessions: `~/.kiro/sessions/<workspace-hash>/sess_*/`
-- Unified provider-launcher system with extracted icons and configurable colors
+  - Codex sessions: `~/.codex/sessions/` (`$CODEX_HOME/sessions` when `CODEX_HOME` is set). Sessions started from the Codex CLI, the VS Code extension and the desktop app are listed; sub-agent threads and archived sessions are not
+- Unified provider-launcher system with extracted icons and configurable colors. A provider whose binary has no embedded icon (Codex, kiro-cli) gets a terminal glyph drawn in its color; Codex's default color is white
 - Inline provider filter next to the workspaces rail
 - Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — grouped by project, date (Today/Yesterday/This week/Older), or status
-- Resume sessions with one click (opens terminal with `--resume-id`)
+- Resume sessions with one click (opens a terminal and runs the provider's own resume command). New and Resume sessions of Codex run plain `codex` and `codex resume <id>` with no flags added; put any flags in the provider's default args
 - Click any session in the dashboard's workspaces rail to open its full transcript in a persistent
   panel next to the rail — works for every provider, reading straight from disk. For a kiro-cli v3
   session that is already running live elsewhere, the panel auto-attaches and streams further output;
@@ -126,10 +127,13 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     counts from the file's modification time. Click a row with a tracker to expand it.
   - *Usage* covers the last 14 days: agent time per workspace this week against the week before,
     daily agent time and session counts by provider, tool reliability, context pressure, model mix,
-    and Claude Code token totals with the cache-hit ratio. It is computed in memory in the background
-    after startup. It shows a loading state first, then a partial view while Claude Code sub-agent
-    transcripts are still being counted. Claude Code agent time is estimated from message timestamps.
-    Context pressure is kiro-cli only. Token totals are Claude Code only, with no cost estimate.
+    and Claude Code and Codex token totals, each with the cache-hit ratio. It is computed in memory in
+    the background after startup. It shows a loading state first, then a partial view while Claude Code
+    sub-agent transcripts are still being counted. Claude Code agent time is estimated from message
+    timestamps. Codex agent time is exact from Codex 0.139 and estimated before; Codex sub-agent threads
+    are not counted, so Codex totals leave them out, and a running Codex session's usage can lag by
+    about two minutes. Context pressure is kiro-cli only. Token totals cover Claude Code and Codex only,
+    with no cost estimate.
   - *Return paths*: the Home button in the panel header, Escape, clicking the open session's row
     again, or closing or deleting the open session. Escape does nothing while focus is in the
     composer, the search field or a dialog, or while a menu, the new-session picker or the MCP panel
@@ -144,7 +148,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 - Optional remote access over NetBird — off by default. When enabled, `/acp` and its listing endpoint
   are reachable from your own devices behind a device secret, while the dashboard, launchers and
   settings stay loopback-only. See *Remote access* below
-- Live session status — sessions currently running in a terminal show a 🟢 Working (agent executing) or 🟡 Waiting (agent finished, your turn) or 🔴 Errored dot; workspace groups show the highest-priority status dot. A "Group by Status" mode in the workspaces rail's settings popover buckets sessions by status instead of by project or date. Detected by matching the working directory of running `claude` / `kiro-cli` processes to session workspaces; also supports v3 kiro-cli sessions (`messages.jsonl` format). Opt-in toast notifications fire when a session transitions from Working to Waiting or Errored (Windows toast via WinRT, Linux via notify-send)
+- Live session status — sessions currently running in a terminal show a 🟢 Working (agent executing) or 🟡 Waiting (agent finished, your turn) or 🔴 Errored dot; workspace groups show the highest-priority status dot. A "Group by Status" mode in the workspaces rail's settings popover buckets sessions by status instead of by project or date. Detected by matching the working directory of running `claude` / `kiro-cli` / `codex` processes to session workspaces; also supports v3 kiro-cli sessions (`messages.jsonl` format). A terminal Codex session is live when its `codex` process has `resume <id>` on its command line, or when a `codex` process runs in the session's workspace and the session has a record newer than 5 minutes; Codex's background helper processes (such as `app-server`) never count. A Codex thread held open by the desktop app or the VS Code extension has no terminal process and shows no dot. Codex rows get the live dot but no Working, Waiting or Errored status, so they never trigger a notification. While another Codex process holds a thread open for writing, that row's Resume button is hidden; the row and its transcript stay available. Opt-in toast notifications fire when a session transitions from Working to Waiting or Errored (Windows toast via WinRT, Linux via notify-send)
 - Multi-select workspaces and batch-launch a provider or custom launcher across all of them at once
 - Per-provider settings with default args (e.g. trust-all-tools)
 - Pin folders and sessions for quick access — a pinned row shows a small pin glyph in place of its `⋯`
@@ -238,6 +242,12 @@ default_directory = ""
 [provider_settings.kiro-ide]
 default_args = ""
 color = ""
+enabled = true
+default_directory = ""
+
+[provider_settings.codex]
+default_args = ""  # appended after the provider's own arguments, e.g. after `codex resume <id>`
+color = ""  # empty = white
 enabled = true
 default_directory = ""
 

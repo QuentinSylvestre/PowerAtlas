@@ -50,7 +50,7 @@
 > measurements that decided them and the condition that would reopen each one. Read it before
 > proposing `kiro-cli serve`, `_kiro.dev/session/list`, or kiro-cli remote control again.
 >
-> **Provider measurements live in `docs/KNOWLEDGE.md`** — how kiro-cli and Claude Code actually
+> **Provider measurements live in `docs/KNOWLEDGE.md`** — how kiro-cli, Claude Code and Codex actually
 > behave, including findings taken while building things that shipped. Those used to sit here and
 > made this file read as a work list with a research appendix stapled to it. The split, in one
 > line each: this file is *what to build*, `CLOSED_INVESTIGATIONS.md` is *what not to build again*,
@@ -83,7 +83,7 @@
 > integrations and an app SDK on top. The parallel-agent desktop tools (Conductor, Crystal, Vibe Kanban,
 > Claude Squad) converge on worktree isolation per agent, a diff view, and an at-a-glance
 > blocked/active/ready board. PowerAtlas is neither: its value is machine-wide visibility over sessions
-> it did not start, across three providers. What it should take from them is narrow — Crew's
+> it did not start, across four providers (kiro-cli, Claude Code, Kiro IDE and Codex). What it should take from them is narrow — Crew's
 > execution-boundary permission model, Crew's single "needs you" view, and the tools' worktree per
 > session. Memory, lessons, apps and chat integrations stay out.
 >
@@ -167,7 +167,7 @@ condition).
   - *Process cost* — measured 2026-07-26 on kiro-cli v2: each kiro-cli ACP session costs ~161 MB RSS and 3 processes. On **v3**, all sessions share ONE process tree (kiro-cli.exe → bun.exe → node.exe); no per-session processes exist. Close is local only: `session/delete` deletes the session from disk, so it is not used as a close (measured 2026-09-24, see `docs/KNOWLEDGE.md`); idle-TTL releases PowerAtlas's own state for unattended sessions, and an agent with no session for 15 min is stopped, which is what releases kiro-cli's copies.
   - *Auto-permissions gate* — a scheduled task has no human watching, and as configured today nothing prompts, so it runs its tools unsupervised rather than stalling. *Decide permission requests by rule for unattended sessions* under `## Session Control & Integration` is the gate. Its mechanism is measured working (agent-profile `ask` rules, shipped for interactive sessions 2026-09-23 in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`), so this is waiting on that item shipping rather than on an unknown.
 
-- **Timed prompts** — schedule a one-shot prompt for a specific wall-clock time; e.g. "at 11:50am, resume session X with prompt P"; cross-provider (kiro-cli ACP, Claude Code, kiro-cli terminal); complements *Scheduled tasks* (recurring launches) but distinct: one-shot, prompt-delivery-focused, and works for sessions PowerAtlas does not own.
+- **Timed prompts** — schedule a one-shot prompt for a specific wall-clock time; e.g. "at 11:50am, resume session X with prompt P"; cross-provider (kiro-cli ACP, Claude Code, kiro-cli terminal, Codex terminal); complements *Scheduled tasks* (recurring launches) but distinct: one-shot, prompt-delivery-focused, and works for sessions PowerAtlas does not own.
   - *Quota-limit auto-schedule* — detect session-limit messages in the transcript ("You've hit your session limit · resets 11:50am (America/Chicago)") and surface a one-click "Resume at reset time" action; parse the reset time from the message, convert from named timezone to local, and pre-populate a timed-prompt for the interrupted session with the last user prompt as the default payload. Works for any provider that embeds a reset timestamp in the limit message.
 
 - **Chained launches** — when a session finishes, automatically start the next one; works for sessions PowerAtlas drives, not for terminal sessions.
@@ -185,7 +185,7 @@ condition).
   - *Notifications for terminal-hosted sessions* — the ACP half shipped; this half did not, and cannot take the same route. PowerAtlas does not host a terminal session, so there is no frame to fire from: the only signal is the `messages.jsonl` tail the status poll already reads, which makes a poll-side hook the sole option. Nothing reads it today.
   - *Fresh terminal sessions* — sessions started in a terminal after PowerAtlas was launched are picked up on the next `refresh_stale_entries` tick (15–30 s). No gap for ACP sessions (PowerAtlas creates them). Terminal-session detection latency is bounded by the refresh interval, not by process monitoring.
 
-- **Plan progress overlay** and **kiro-cli usage stats** — shipped in `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE` as the dashboard Overview's *Active plans* and *Usage* sections, not as an overlay on rail rows. Active plans shows each In Progress or not-yet-archived Complete plan with its tracker progress; Usage covers 14 days of sessions, agent time, tool reliability, context pressure (kiro-cli only), model mix and Claude Code tokens.
+- **Plan progress overlay** and **kiro-cli usage stats** — shipped in `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE` as the dashboard Overview's *Active plans* and *Usage* sections, not as an overlay on rail rows. Active plans shows each In Progress or not-yet-archived Complete plan with its tracker progress; Usage covers 14 days of sessions, agent time, tool reliability, context pressure (kiro-cli only), model mix and Claude Code tokens (Codex tokens followed in `261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW`).
 
 - **LLM-generated session name alias** — when kiro-cli has not set a session title, call `claude-haiku-4-6` with the first user message to generate a short, task-oriented label; shown in the rail and transcript panel without a user action. Keeps the existing kiro-cli-written title where one exists; only fills the gap where the title is absent or equals the session id.
 

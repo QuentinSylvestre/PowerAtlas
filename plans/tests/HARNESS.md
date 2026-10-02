@@ -28,7 +28,7 @@ last_run: 2026-07-01
 
 - **Platform**: this machine is Windows 11. Linux code paths (5 Linux terminals, `.desktop` autostart,
   X11/Wayland display probe, `/proc` PID fallback, flock) are code-inspection-only.
-- **Providers**: three — claude-code, kiro-ide, and kiro-cli-v3. All have real data on disk. Test cross-provider behavior
+- **Providers**: four — claude-code, kiro-ide, kiro-cli-v3, and codex (its data lives under `~/.codex`). All have real data on disk. Test cross-provider behavior
   (discovery merge, tab filtering, cache asymmetry) explicitly, not just one provider.
 - **Parallelism**: Data, Config, Launcher, Icons, Autostart are independent (isolate + snapshot/restore).
   Web depends on Data + Config (shared server + browser). Lifecycle is process-level (isolate).
