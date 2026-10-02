@@ -21,6 +21,8 @@
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext; serving them was fixed, storing them safely is not yet
 - **Parked items** — creating a session in a workspace with no prior sessions · two SECURITY items
 - **Separate the ACP half into its own module** — the atlas side imports `agent_profile` and `acp` directly today, so retiring or replacing the ACP half would be surgery rather than a delete
+- **Adapter hooks for provider enumeration** — a provider id is spelled out in about 35 places, so each new provider repeats a hand sweep
+- **Shared `_normalize_path` UNC gap** — the shared helper can block on an unreachable network share; the Codex adapter already avoids it
 - **`launch_custom` env scrub excluded (follow-up)**: CLAUDE_CODE_* markers are not scrubbed from `launch_custom`-launched sessions — user-defined scripts may rely on inherited environment. See `plans/done/260818_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` Follow-up #2.
 - **`launch_terminal` env scrub excluded (follow-up)**: `launch_terminal` (~`launcher.py:595`) opens a bare shell without env scrubbing — the user manually starts a process inside it. Follow-up #5 of the same plan.
 
@@ -41,6 +43,14 @@
 - **[SECURITY] `/partials/launchers` leaks custom-launcher `env`** — any signed-in local caller's GET returns the credentials `_launchers_without_env` exists to strip, because the tile partial renders them after all (the loopback gate shipped in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL` removed anonymous access, not the leak)
 - **Claude Code sidecar fields inventory** — full table of every field PowerAtlas reads (or could read) from `~/.claude/sessions/<pid>.json`
 
+
+- **Adapter hooks for provider enumeration** — a provider id is spelled out in about 35 places (launcher tables, web tables, presence specs, overview dispatch, JS maps, CSS and templates), so every new provider repeats the sweep the Codex plan did by hand. Found when the Codex provider was added (`plans/done/261002-1113_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW.md`, Follow-up Work 16). Worth doing before a fifth provider is planned.
+  - *Shape* — optional hooks on the adapter module (display name, default colour, helper subcommands, usage parser) so that a registration replaces most of the sites. Which sites can really move is not measured: start from a grep of an existing provider's id.
+  - *Done when* — a new provider needs one adapter module and one registration, and a test fails when a site is missed.
+
+- **Shared `data._normalize_path` UNC gap** — the shared helper expands 8.3 short names through `GetLongPathNameW`, which can block on an unreachable network share. Found in the Codex final review and **not reproduced**. The Codex adapter already avoids it by keying a network or device cwd (UNC, `\?\`, `//`) by case-fold only; the Claude Code and kiro-cli paths still call the helper (Follow-up Work 17 of the same plan).
+  - *Shape* — the same guard inside the shared helper, so the adapter-side special case can go.
+  - *Done when* — a cwd on an unreachable share does not stall discovery for any provider, shown by a test with a stubbed slow resolver.
 ---
 
 > Non-executed ideas and future features, organized by theme. Shipped items are removed rather than
