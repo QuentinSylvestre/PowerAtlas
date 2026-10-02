@@ -1,7 +1,12 @@
 #!/bin/sh
-# Refuse a commit that would introduce a duplicate definition in a test module.
+# Two checks on what is staged:
 #
-# See _check_test_names.py for what this catches and why a conftest.py would
+#   1. _check_public_ids.py, on every commit: refuse an added line that holds a
+#      session id found in a local session store (this repository is public).
+#   2. _check_test_names.py, only when a tests/*.py file is staged: refuse a
+#      duplicate definition in a test module.
+#
+# See _check_test_names.py for what the second catches and why a conftest.py would
 # not. Roughly 270 ms over the whole tests/ tree, so it runs unconditionally
 # rather than trying to be clever about when it is worth it.
 #
@@ -19,9 +24,6 @@
 # it. Reinstallation instructions are in AGENTS.md, next to the checker.
 set -e
 
-files=$(git diff --cached --name-only --diff-filter=ACMR -- 'tests/*.py')
-[ -z "$files" ] && exit 0
-
 if [ -x .venv-PowerAtlas/Scripts/python.exe ]; then
     PY=.venv-PowerAtlas/Scripts/python.exe
 elif [ -x .venv-PowerAtlas/bin/python ]; then
@@ -29,6 +31,16 @@ elif [ -x .venv-PowerAtlas/bin/python ]; then
 else
     PY=python
 fi
+
+if ! "$PY" _check_public_ids.py; then
+    echo "" >&2
+    echo "pre-commit: blocked. Replace the id with a synthetic one (see" >&2
+    echo "_check_public_ids.py), then re-stage." >&2
+    exit 1
+fi
+
+files=$(git diff --cached --name-only --diff-filter=ACMR -- 'tests/*.py')
+[ -z "$files" ] && exit 0
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
