@@ -19,9 +19,17 @@ else
     PY=python
 fi
 
-if ! "$PY" _check_public_ids.py --message "$1"; then
+rc=0
+"$PY" _check_public_ids.py --message "$1" || rc=$?
+if [ "$rc" -ne 0 ]; then
     echo "" >&2
-    echo "commit-msg: blocked. Replace the id in the message with a synthetic one" >&2
-    echo "(see _check_public_ids.py), then commit again." >&2
+    if [ "$rc" -eq 1 ]; then
+        echo "commit-msg: blocked. Replace the id in the message with a synthetic one" >&2
+        echo "(see _check_public_ids.py), then commit again." >&2
+    else
+        # Any other status means the check itself failed, not that an id was found.
+        echo "commit-msg: the id check could not run (exit $rc); see the message above." >&2
+        echo "The commit is blocked." >&2
+    fi
     exit 1
 fi
