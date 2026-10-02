@@ -422,14 +422,19 @@ class _Parsed:
 _cache_cap = _CACHE_MIN
 _verdict_cache = BoundedCache(_cache_cap)
 _parse_cache = BoundedCache(_cache_cap)
+# The last-record cache of D16 is sized with the store like the two above
+# (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3 review fix): a fixed
+# size below the file count makes every sequential pass over a large store re-read each tail.
+_last_event_cache = BoundedCache(_cache_cap)
 
 
 def _fit_caches(rollouts: int) -> None:
-    global _cache_cap, _verdict_cache, _parse_cache
+    global _cache_cap, _verdict_cache, _parse_cache, _last_event_cache
     if _cache_cap < 2 * rollouts:
         _cache_cap = max(_CACHE_MIN, 4 * rollouts)
         _verdict_cache = BoundedCache(_cache_cap)
         _parse_cache = BoundedCache(_cache_cap)
+        _last_event_cache = BoundedCache(_cache_cap)
 
 
 def _file_uuid(path) -> str:
@@ -1188,7 +1193,7 @@ _FUTURE_SKEW = 5.0          # a stamp this far past now is a clock error, not ac
 # path -> (mtime_ns, size, epoch of the last complete record or None). Keyed by
 # (mtime_ns, size) because Windows freezes the mtime of a file Codex holds open while
 # the size grows. Separate from _parse_cache so a read here is its own, countable event.
-_last_event_cache = BoundedCache(_CACHE_MIN)
+# (The cache itself is defined with the other two, above, so _fit_caches sizes it.)
 
 
 def _read_last_event(path: str) -> float | None:
@@ -1233,6 +1238,10 @@ def activity_epoch(path, st) -> float:
     except Exception:
         return 0.0
     try:
+        target = os.fsdecode(path)  # once, so the handler below never raises on a hostile argument
+    except Exception:
+        target = ""
+    try:
         now = time.time()
         trusted = mtime if mtime <= now + _FUTURE_SKEW else 0.0
         if trusted and now - trusted <= ACTIVITY_WINDOW:
@@ -1242,7 +1251,7 @@ def activity_epoch(path, st) -> float:
             trusted = max(trusted, stamp)
         return min(trusted, now)
     except Exception as exc:
-        _warn("activity_epoch", exc, os.fspath(path))
+        _warn("activity_epoch", exc, target)
         return mtime if mtime <= time.time() + _FUTURE_SKEW else 0.0
 
 
@@ -1256,13 +1265,23 @@ def activity_epoch(path, st) -> float:
 # lock first.
 
 _LOCK_TTL = 5.0             # seconds a per-id answer is reused
+_LOCK_BUSY_TTL = 1.0        # seconds the fallback answer of a busy probe is reused
 _LOCK_RETRIES = 3           # coordination busy: retries per call ...
 _LOCK_RETRY_SLEEP = 0.005   # ... this far apart (one budget per call)
+_LOCK_PROBE_WAIT = 0.5      # seconds a caller waits for the process-wide probe lock
 _lock_cache = BoundedCache(512)     # id -> (monotonic time, bool); an expired entry is the stale fallback
+_busy_cache = BoundedCache(512)     # id -> (monotonic time, bool): the fallback served while a probe cannot run
 _probe_lock = threading.Lock()      # one probe at a time in this process; held only around the probe
 _COORDINATION = ".coordination.lock"
 _BUSY_WIN = {errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
 _BUSY_POSIX = {errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK}
+
+# Review fixes, 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3:
+# both lock files are opened read-only (locking needs no write access, and a read-only
+# attribute or ACL made `r+b` fail so a held thread read as free); a busy probe's fallback
+# answer is cached for _LOCK_BUSY_TTL, so a listing pays the retry budget once per id per
+# second; the wait for the process-wide lock is bounded; and no logging runs while the
+# machine-wide coordination lock is held (D17: only open, try-lock, unlock, close).
 
 
 def _lock_byte(fh) -> bool:
@@ -1290,8 +1309,10 @@ def _lock_byte(fh) -> bool:
         raise
 
 
-def _unlock_byte(fh) -> None:
-    """Release a lock taken by _lock_byte. Best effort: closing the handle releases it too."""
+def _unlock_byte(fh) -> OSError | None:
+    """Release a lock taken by _lock_byte. Best effort: closing the handle releases it too.
+    Returns the OSError that stopped it, or None; it never logs, because it runs under the
+    coordination lock (the caller logs after the lock is released)."""
     try:
         if sys.platform == "win32":
             import msvcrt
@@ -1301,46 +1322,73 @@ def _unlock_byte(fh) -> None:
             import fcntl
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
     except OSError as exc:
-        _warn("writer_lock.unlock", exc)
+        return exc
+    return None
 
 
-def _thread_lock_held(path: str) -> bool:
-    """True when another process holds <id>.lock. Runs under the coordination lock: only
-    open, try-lock, unlock and close happen here. A vanished file is False."""
+def _release(fh, deferred: list, path: str = "") -> None:
+    """Unlock `fh`; a failure of any kind is queued in `deferred`, never raised, so the
+    probe's own answer survives it."""
     try:
-        fh = open_shared(path, "r+b")
+        failure = _unlock_byte(fh)
+    except Exception as exc:
+        failure = exc
+    if failure is not None:
+        deferred.append(("writer_lock.unlock", failure, path))
+
+
+def _thread_lock_held(path: str, deferred: list) -> bool:
+    """True when another process holds <id>.lock. Runs under the coordination lock: only
+    open, try-lock, unlock and close happen here, so a failure is queued in `deferred`
+    and logged by the caller once the coordination lock is gone. A vanished file is False."""
+    try:
+        fh = open_shared(path, "rb")
     except FileNotFoundError:
         return False
     try:
         try:
             got = _lock_byte(fh)
         except OSError as exc:  # EBADF, ENOTSUP, EINVAL...: not contention, fail open
-            _warn("writer_lock.lock", exc, path)
+            deferred.append(("writer_lock.lock", exc, path))
             return False
         if got:
-            _unlock_byte(fh)
+            _release(fh, deferred, path)
             return False
         return True
     finally:
         fh.close()  # first: a Python handle on a lock file blocks Codex's removal of it
 
 
-def _probe_writer_lock(lock_path: str, coord_path: str) -> bool | None:
-    """True / False for the thread lock, None when the coordination lock is busy
-    (Codex is mid acquire, cleanup or publication)."""
+def _probe_under_coordination(lock_path: str, coord_path: str, deferred: list) -> bool | None:
     try:
-        coord = open_shared(coord_path, "r+b")  # never created: without it, not held
+        coord = open_shared(coord_path, "rb")  # never created: without it, not held
     except FileNotFoundError:
         return False
     try:
         if not _lock_byte(coord):
             return None
         try:
-            return _thread_lock_held(lock_path)
+            return _thread_lock_held(lock_path, deferred)
         finally:
-            _unlock_byte(coord)  # last: Codex's blocking lock() has no timeout
+            _release(coord, deferred)  # last: Codex's blocking lock() has no timeout
     finally:
         coord.close()
+
+
+def _probe_writer_lock(lock_path: str, coord_path: str) -> bool | None:
+    """True / False for the thread lock, None when the coordination lock is busy
+    (Codex is mid acquire, cleanup or publication). Failures noticed while the
+    coordination lock was held are logged here, after it was released and closed."""
+    deferred: list = []
+    try:
+        return _probe_under_coordination(lock_path, coord_path, deferred)
+    finally:
+        for kind, exc, path in deferred:
+            _warn(kind, exc, path)
+
+
+def _fresh(entry, ttl: float) -> bool:
+    return entry is not None and time.monotonic() - entry[0] < ttl
 
 
 @_safe("session_writer_locked", lambda: False)
@@ -1349,9 +1397,11 @@ def session_writer_locked(session_id: str) -> bool:
     would refuse it). Fails open: any error is False.
 
     Order: validate the id; stat <id>.lock (missing is False, one stat); the 5 s per-id
-    cache; then, one probe at a time in this process, the probe under Codex's
-    .coordination.lock. A busy coordination lock is retried 3 times at 5 ms (sleeping
-    outside the process lock), then the last cached value, even an expired one, else False.
+    cache; the 1 s cache of a busy fallback; then, one probe at a time in this process
+    (a wait of at most _LOCK_PROBE_WAIT), the probe under Codex's .coordination.lock. A
+    busy coordination lock is retried 3 times at 5 ms (sleeping outside the process
+    lock), then the last cached value, even an expired one, else False; that fallback is
+    itself reused for 1 s. A process lock not obtained in time takes the same fallback.
     """
     if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
         return False
@@ -1363,20 +1413,35 @@ def session_writer_locked(session_id: str) -> bool:
     except OSError:
         return False
     stale = _lock_cache.get(key)
-    if stale is not None and time.monotonic() - stale[0] < _LOCK_TTL:
+    if _fresh(stale, _LOCK_TTL):
         return stale[1]  # a fresh answer needs no lock at all
+    busy = _busy_cache.get(key)
+    if _fresh(busy, _LOCK_BUSY_TTL):
+        return busy[1]
+
+    def fallback(why: str) -> bool:
+        answer = stale[1] if stale is not None else False
+        _busy_cache.put(key, (time.monotonic(), answer))
+        if why:
+            _warn("writer_lock.wait", note=why)
+        return answer
+
     for attempt in range(_LOCK_RETRIES + 1):
-        with _probe_lock:
+        if not _probe_lock.acquire(timeout=_LOCK_PROBE_WAIT):
+            return fallback("the probe lock was not free in time (an open or a lock call is stuck)")
+        try:
             fresh = _lock_cache.get(key)  # another thread may have just probed this id
-            if fresh is not None and time.monotonic() - fresh[0] < _LOCK_TTL:
+            if _fresh(fresh, _LOCK_TTL):
                 return fresh[1]
             held = _probe_writer_lock(lock_path, coord_path)
             if held is not None:
                 _lock_cache.put(key, (time.monotonic(), held))
                 return held
+        finally:
+            _probe_lock.release()
         if attempt < _LOCK_RETRIES:
             time.sleep(_LOCK_RETRY_SLEEP)
-    return stale[1] if stale is not None else False
+    return fallback("")
 
 
 # --- Test seam ---------------------------------------------------------------------
@@ -1385,6 +1450,7 @@ def session_writer_locked(session_id: str) -> bool:
 def _clear_caches() -> None:
     """Drop every cache and memo. Tests call it after each store mutation."""
     global _store_memo, _available_memo, _names_memo, _cache_cap, _verdict_cache, _parse_cache
+    global _last_event_cache
     with _store_lock:
         _store_memo = None
     _available_memo = None
@@ -1392,9 +1458,10 @@ def _clear_caches() -> None:
     _cache_cap = _CACHE_MIN
     _verdict_cache = BoundedCache(_cache_cap)
     _parse_cache = BoundedCache(_cache_cap)
+    _last_event_cache = BoundedCache(_cache_cap)
     _missing.clear()
     _parse_failed.clear()
-    _last_event_cache.clear()
     _lock_cache.clear()
+    _busy_cache.clear()
     with _warn_lock:
         _warned.clear()

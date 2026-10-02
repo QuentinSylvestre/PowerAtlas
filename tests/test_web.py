@@ -32631,6 +32631,29 @@ class TestCodexLiveDotAndResumeLock:
         self._rollout(isolated_config, self._SID, now - 9000, now - 320)
         assert self._live() is False
 
+    def test_the_codex_window_is_the_adapters_constant_and_no_other_providers(self, isolated_config, monkeypatch):
+        """Review fix P12: web.py used to repeat the literal 300; it reads the adapter's own
+        ACTIVITY_WINDOW, so one edit moves both. Another provider's window stays 300."""
+        from power_atlas import data_codex, presence
+        from power_atlas.data import _normalize_path
+        from power_atlas.web import _session_is_live
+        now = time.time()
+        self._rollout(isolated_config, self._SID, now - 9000, now - 150)
+        monkeypatch.setattr(data_codex, "ACTIVITY_WINDOW", 100.0)
+        assert self._live() is False, "150 s old is outside a 100 s window"
+        monkeypatch.setattr(data_codex, "ACTIVITY_WINDOW", 1000.0)
+        self._rollout(isolated_config, self._SID, now - 9000, now - 600)
+        assert self._live() is True, "600 s old is inside a 1000 s window"
+        # a Claude Code rollout 600 s old is outside its own, unchanged, 300 s
+        jsonl = isolated_config / "claude.jsonl"
+        jsonl.write_text("{}\n")
+        os.utime(jsonl, (now - 600, now - 600))
+        snap = presence.Snapshot(set(), {("claude-code", _normalize_path(self._CWD))})
+        session = Session(session_id="s1", title="t", cwd=self._CWD, created_at="", updated_at="",
+                          first_prompt="", last_prompt="", last_reply_tail="")
+        with patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=jsonl):
+            assert _session_is_live(snap, session, "claude-code") is False
+
     def test_recent_activity_needs_a_codex_process_in_the_workspace(self, isolated_config):
         now = time.time()
         self._rollout(isolated_config, self._SID, now - 10, now - 10)

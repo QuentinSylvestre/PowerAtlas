@@ -84,6 +84,9 @@ _CODEX_HELPER_SUBCOMMANDS: frozenset[str] = frozenset({
     "logout", "review", "remote-control", "app", "completion", "update", "doctor",
     "sandbox", "debug", "apply", "a", "queue", "archive", "delete", "unarchive",
     "migrate-rollouts", "cloud", "features", "agents", "help", "daemon",
+    # Hidden helpers and an alias, absent from `codex --help` in codex-cli 0.159.2
+    # (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3 review fix).
+    "responses-api-proxy", "stdio-to-uds", "execpolicy", "tcp-tunnel", "cloud-tasks",
 })
 
 # A Codex thread id is a UUID. The token after `resume` can also be `--last` or a
