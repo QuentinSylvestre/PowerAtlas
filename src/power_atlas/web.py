@@ -97,6 +97,20 @@ PROVIDER_COLORS = {
     "kiro-cli-v3": "#7138cc",
     "codex": "#ffffff",  # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
 }
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: a provider or launcher colour is written into the tile as `style="--stripe: <colour>"`, where autoescape stops an attribute breakout but not a second CSS declaration. The colour pickers only ever send "" or #rrggbb; #rgb is allowed too. Used with fullmatch, never match, so a trailing newline fails.
+_TILE_COLOR_RE = re.compile(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})")
+
+
+def _valid_tile_color(value) -> bool:
+    """Whether a stored colour is safe to store and to render: "" or #rgb / #rrggbb."""
+    return isinstance(value, str) and (value == "" or _TILE_COLOR_RE.fullmatch(value) is not None)
+
+
+def _safe_tile_color(value) -> str:
+    """The colour itself when it is safe to render, else "" (no stripe)."""
+    return value if isinstance(value, str) and _TILE_COLOR_RE.fullmatch(value) else ""
+
+
 PROVIDER_DISPLAY_NAMES = {
     "claude-code": "Claude Code",
     "kiro-ide": "Kiro IDE",
@@ -903,6 +917,8 @@ templates = Jinja2Templates(
 # PowerAtlas, so a value fixed for the process lifetime is exactly as fresh
 # as the file it points at.
 templates.env.globals["static_version"] = str(int((_STATIC_DIR / "style.css").stat().st_mtime))
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: partials/launcher_tile.html renders a colour only through this filter.
+templates.env.filters["tile_color"] = _safe_tile_color
 
 
 @app.exception_handler(ConfigUnreadableError)
@@ -5053,10 +5069,16 @@ async def save_provider_settings(request: Request):
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": "Working directory contains invalid control characters", "level": "error",
         })
+    # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: the colour reaches the launcher tile's style attribute.
+    color = body.get("color", "")
+    if not _valid_tile_color(color):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Invalid color (use a #rgb or #rrggbb value)", "level": "error",
+        })
     config = load_config()
     config.provider_settings[provider] = {
         "default_args": default_args,
-        "color": body.get("color", ""),
+        "color": color,
         "enabled": body.get("enabled", True),
         "default_directory": default_directory,
         "show_in_workspace_hover": body.get("show_in_workspace_hover", True),
@@ -5905,7 +5927,8 @@ async def partials_launchers(request: Request):
             "name": PROVIDER_DISPLAY_NAMES.get(p, p),
             "command": _PROVIDER_BINARY_DISPLAY.get(p, p),
             "custom_args": settings.get("default_args", ""),
-            "color": settings.get("color", "") or PROVIDER_COLORS.get(p, ""),
+            # A hostile stored colour falls back to the provider's own default (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2).
+            "color": _safe_tile_color(settings.get("color", "")) or PROVIDER_COLORS.get(p, ""),
             "terminal": True,
             "use_selected_workspaces": True,
             "is_provider": True,
@@ -5970,6 +5993,11 @@ async def api_launcher_env(request: Request):
 @app.post("/api/launcher/create", response_class=HTMLResponse)
 async def launcher_create(request: Request):
     body = await request.json()
+    # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: the colour reaches the launcher tile's style attribute.
+    if not _valid_tile_color(body.get("color", "")):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Invalid color (use a #rgb or #rrggbb value)", "level": "error",
+        })
     config = load_config()
     entry = {
         "id": str(uuid.uuid4()),
@@ -5993,6 +6021,11 @@ async def launcher_create(request: Request):
 async def launcher_update(request: Request):
     body = await request.json()
     lid = body.get("id")
+    # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: checked before any field is applied, so a refused colour changes nothing.
+    if "color" in body and not _valid_tile_color(body["color"]):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Invalid color (use a #rgb or #rrggbb value)", "level": "error",
+        })
     config = load_config()
     for entry in config.custom_launchers:
         if entry["id"] == lid:

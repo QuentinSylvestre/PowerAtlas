@@ -22,9 +22,10 @@ class LaunchResult:
     used_fallback: bool = False
 
 
-_SESSION_ID_RE = re.compile(r"^[\w\-]+$")
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: ASCII letters, digits, "_" and "-", first character alphanumeric so no id reads as an option. Callers use fullmatch (a "$" anchor would pass a trailing newline) and re.ASCII keeps \w from admitting fullwidth digits. Real ids are UUIDs or `sess_<uuid>`.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][\w-]*", re.ASCII)
 
-# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: Codex thread ids are UUIDs; _SESSION_ID_RE above accepts a leading "-", so `codex resume --flag` needs this stricter check.
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: Codex thread ids are UUIDs, so the Codex branch checks the exact shape rather than the generic rule above.
 _CODEX_SESSION_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 
 # Keys stripped from the child env to prevent marker leakage from the PowerAtlas
@@ -207,7 +208,7 @@ def launch_session(
         if not cwd_exists:
             return LaunchResult(False, session_id, cwd, error=f"Folder not found: {cwd}")
 
-    if session_id and (len(session_id) > 128 or not _SESSION_ID_RE.match(session_id)):
+    if session_id and (len(session_id) > 128 or not _SESSION_ID_RE.fullmatch(session_id)):
         return LaunchResult(False, session_id, cwd, error="Invalid session ID format")
 
     # Parse default_args once (before both terminal and non-terminal branches)

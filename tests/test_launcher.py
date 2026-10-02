@@ -531,13 +531,15 @@ class TestCodexLaunch:
         assert cmd[sep:] == ["--", "C:\\pwsh.exe", "-NoExit", "-Command",
                              "& 'codex' 'resume' '" + self._SID + "' '--model' 'gpt-x'"]
 
-    @pytest.mark.parametrize("bad", ["--flag", "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40\n"])
+    @pytest.mark.parametrize("bad", ["abc123", "sess_0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40"])
     @patch("power_atlas.launcher.subprocess.Popen")
     @patch("power_atlas.launcher.shutil.which")
     def test_launch_session_refuses_a_non_uuid_codex_id_without_launching(
             self, mock_which, mock_popen, bad, tmp_path):
-        """Both ids pass the generic launcher id check (leading "-" and a trailing
-        newline are accepted by it); the Codex branch is what stops them."""
+        """Both ids pass the generic launcher id check (it takes any alphanumeric-led
+        id); the Codex branch is what stops them. The ids the generic check used to let
+        through ("--flag", a trailing newline) are now stopped by it first, and are
+        covered in TestSessionIdShape (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2)."""
         mock_which.side_effect = lambda n: {"codex": "C:\\codex.exe", "wt": "C:\\wt.exe"}.get(n)
         result = launch_session(str(tmp_path), session_id=bad, provider="codex",
                                 launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
@@ -1501,6 +1503,111 @@ class TestSessionIdLengthBound:
         ok_id = "a" * 128
         result = launch_session(cwd, session_id=ok_id, launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
         assert result.success is True
+
+
+class TestSessionIdShape:
+    """261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: the generic
+    launch id rule. An id reaches `claude --resume <id>` / `kiro-cli ... --resume-id <id>`,
+    so a value that starts with "-" is read as an option, "$" lets a trailing newline
+    through, and Unicode `\\w` lets fullwidth digits through."""
+
+    _UUID = "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40"
+
+    # Every id shape the adapters produce on a real machine (measured through the data
+    # layer: claude-code, kiro-ide and codex are lower-case UUIDs; kiro-cli-v3 is
+    # `sess_<uuid>` or a bare UUID), plus the upper-case and short forms older tests use.
+    _REAL_SHAPES = [
+        _UUID,
+        _UUID.upper(),
+        "sess_" + _UUID,
+        "sess_1abc",
+        "abc123",
+        "A1",
+        "a" * 128,
+    ]
+
+    _BAD_IDS = [
+        "--flag",
+        "-h",
+        "-",
+        "--",
+        "-" + _UUID,
+        "_" + _UUID,                          # leading underscore: not a real id start
+        _UUID + "\n",                         # "$" matches before a final newline
+        "\n" + _UUID,
+        " " + _UUID,
+        _UUID + " ",
+        _UUID + " --flag",
+        _UUID + "\r",
+        _UUID + "\t",
+        chr(0xFF11) + chr(0xFF12) + chr(0xFF13),            # fullwidth digits, leading
+        "abc" + chr(0xFF11),                                # fullwidth digit, not leading
+        "abc" + chr(0x00E9),                                # accented letter
+        "abc" + chr(0x212A),                                # Kelvin sign
+        "abc" + chr(0),                                     # NUL
+        "ab..cd",
+        "a/b",
+        "a\\b",
+        "a;b",
+        "a b",
+        "a|b",
+        "a&b",
+        "a$(x)",
+        "a" * 200,
+        "a" * 129,
+    ]
+
+    @staticmethod
+    def _which(name):
+        return "C:\\" + name + ".exe"
+
+    @pytest.mark.parametrize("provider", ["claude-code", "kiro-cli-v3", "kiro-ide", "codex"])
+    @pytest.mark.parametrize("bad", _BAD_IDS, ids=repr)
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_a_malformed_id_is_refused_before_any_process_is_started(
+            self, mock_which, mock_popen, bad, provider, tmp_path):
+        mock_which.side_effect = self._which
+        result = launch_session(str(tmp_path), session_id=bad, provider=provider,
+                                launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is False
+        assert "Invalid session ID format" in result.error
+        mock_popen.assert_not_called()
+
+    @pytest.mark.parametrize("sid", _REAL_SHAPES)
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_every_real_id_shape_still_launches_for_claude_and_kiro_cli(
+            self, mock_which, mock_popen, sid, tmp_path):
+        mock_which.side_effect = self._which
+        for provider, flag in (("claude-code", "--resume"), ("kiro-cli-v3", "--resume-id")):
+            mock_popen.reset_mock()
+            result = launch_session(str(tmp_path), session_id=sid, provider=provider,
+                                    launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+            assert result.success is True, (provider, sid)
+            cmd = " ".join(str(a) for a in mock_popen.call_args[0][0])
+            # The pwsh script quotes each argument: `'--resume' '<id>'`.
+            assert "'" + flag + "' '" + sid + "'" in cmd
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_no_id_is_a_new_session_and_is_not_validated(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = self._which
+        for empty in ("", None):
+            mock_popen.reset_mock()
+            result = launch_session(str(tmp_path), session_id=empty, provider="claude-code",
+                                    launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+            assert result.success is True
+            assert "--resume" not in " ".join(str(a) for a in mock_popen.call_args[0][0])
+
+    def test_the_rule_accepts_what_the_dashboard_routes_accept(self):
+        # data.SESSION_ID_RE is the shape the dashboard and Overview routes accept
+        # (`sess_`-prefixed or bare UUIDs). Anything they accept must be launchable.
+        from power_atlas import data
+        from power_atlas.launcher import _SESSION_ID_RE
+        for sid in (self._UUID, "sess_" + self._UUID):
+            assert data.SESSION_ID_RE.fullmatch(sid)
+            assert _SESSION_ID_RE.fullmatch(sid)
 
 
 class TestSanitizeTitleExtended:

@@ -1384,6 +1384,169 @@ class TestCodexLauncherSurfaces:
         assert ws.count('class="color-swatch') == 13 and "#ffffff" not in ws
 
 
+# 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2: a stored provider or
+# launcher colour is written into the launcher tile as `style="--stripe: <colour>"`. Autoescape
+# stops a breakout from the attribute but not a second CSS declaration inside it, so the colour
+# is validated on save AND at render (an already-stored hostile value is neutralised too).
+_HOSTILE_TILE_COLOURS = [
+    "red; background:url(x)",
+    "#fff;}",
+    "#fff; background:url(//evil/x)",
+    "javascript:alert(1)",
+    '#fff" onmouseover="x',
+    "#fff'",
+    "#fff\n",
+    "\n#fff",
+    "#fff\r",
+    "#fff)",
+    "#" + "a" * 299,
+    "#ggg",
+    "#12",
+    "#1234",
+    "#12345",
+    "#1234567",
+    "#11223344",
+    "#",
+    "fff",
+    "rgb(1,2,3)",
+    "red",
+    "var(--x)",
+    "#fff/**/",
+    " #fff",
+    "#fff ",
+    "#" + chr(0xFF11) * 3,
+    "#fff" + chr(0),
+    "-->",
+    "<script>",
+    None,
+    123,
+    ["#fff"],
+    {"a": 1},
+]
+_VALID_TILE_COLOURS = ["", "#fff", "#FFF", "#aBc123", "#ef4444", "#ffffff", "#6b7280", "#000000"]
+
+
+def _template_swatch_colours():
+    """Every data-color value in the launcher modal and the workspace modal."""
+    from power_atlas.web import _TEMPLATES_DIR
+    found = []
+    for name in ("launcher_modal.html", "workspace_settings_modal.html"):
+        text = (_TEMPLATES_DIR / "partials" / name).read_text(encoding="utf-8")
+        found += re.findall(r'data-color="([^"]*)"', text)
+    return found
+
+
+class TestTileColourValidation:
+    """261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2."""
+
+    _TOAST_ERROR = "toast-error"
+
+    def test_the_swatch_palettes_and_built_in_colours_are_all_valid(self):
+        from power_atlas import web as web_mod
+        swatches = _template_swatch_colours()
+        # 14 launcher swatches (the first is "No color") + 13 workspace swatches (same).
+        assert len(swatches) == 27 and swatches.count("") == 2
+        for colour in swatches + list(web_mod.PROVIDER_COLORS.values()) + ["#6b7280"]:
+            assert web_mod._valid_tile_color(colour), colour
+            assert web_mod._safe_tile_color(colour) == colour
+
+    @pytest.mark.parametrize("colour", _HOSTILE_TILE_COLOURS, ids=repr)
+    def test_the_validator_refuses_every_hostile_value(self, colour):
+        from power_atlas import web as web_mod
+        assert not web_mod._valid_tile_color(colour)
+        assert web_mod._safe_tile_color(colour) == ""
+
+    def test_provider_save_refuses_a_hostile_colour_and_changes_nothing(self, client):
+        client.post("/api/provider/save", json={
+            "provider": "codex", "default_args": "--search", "color": "#14b8a6", "enabled": True})
+        for colour in _HOSTILE_TILE_COLOURS:
+            resp = client.post("/api/provider/save", json={
+                "provider": "codex", "default_args": "--other", "color": colour, "enabled": False})
+            assert resp.status_code == 200
+            assert self._TOAST_ERROR in resp.text and "olor" in resp.text, repr(colour)
+            body = client.get("/api/provider/codex").json()
+            assert (body["color"], body["default_args"], body["enabled"]) == (
+                "#14b8a6", "--search", True), repr(colour)
+
+    def test_provider_save_stores_every_valid_colour_unchanged(self, client):
+        for colour in _VALID_TILE_COLOURS + _template_swatch_colours():
+            resp = client.post("/api/provider/save", json={
+                "provider": "codex", "default_args": "", "color": colour, "enabled": True})
+            assert self._TOAST_ERROR not in resp.text, repr(colour)
+            assert client.get("/api/provider/codex").json()["color"] == colour
+
+    def test_provider_save_without_a_colour_key_still_saves_an_empty_colour(self, client):
+        resp = client.post("/api/provider/save", json={"provider": "codex", "default_args": "x"})
+        assert self._TOAST_ERROR not in resp.text
+        assert client.get("/api/provider/codex").json()["color"] == ""
+
+    @patch("power_atlas.web.icons.extract_icon")
+    def test_launcher_create_refuses_a_hostile_colour_and_stores_nothing(self, _extract, client):
+        for colour in _HOSTILE_TILE_COLOURS:
+            resp = client.post("/api/launcher/create", json={"name": "L", "command": "npm", "color": colour})
+            assert self._TOAST_ERROR in resp.text and "olor" in resp.text, repr(colour)
+        assert client.get("/api/launchers").json() == []
+
+    @patch("power_atlas.web.icons.extract_icon")
+    def test_launcher_update_refuses_a_hostile_colour_and_applies_none_of_the_edit(self, _extract, client):
+        client.post("/api/launcher/create", json={"name": "Old", "command": "npm", "color": "#ef4444"})
+        lid = client.get("/api/launchers").json()[0]["id"]
+        for colour in _HOSTILE_TILE_COLOURS:
+            resp = client.post("/api/launcher/update", json={"id": lid, "name": "New", "color": colour})
+            assert self._TOAST_ERROR in resp.text and "olor" in resp.text, repr(colour)
+            stored = client.get("/api/launchers").json()[0]
+            assert (stored["name"], stored["color"]) == ("Old", "#ef4444"), repr(colour)
+
+    @patch("power_atlas.web.icons.extract_icon")
+    def test_launcher_create_and_update_store_every_valid_colour_unchanged(self, _extract, client):
+        for colour in _VALID_TILE_COLOURS + _template_swatch_colours():
+            client.post("/api/launcher/create", json={"name": "L", "command": "npm", "color": colour})
+            stored = client.get("/api/launchers").json()[-1]
+            assert stored["color"] == colour, repr(colour)
+            client.post("/api/launcher/update", json={"id": stored["id"], "color": "#ef4444"})
+            assert client.get("/api/launchers").json()[-1]["color"] == "#ef4444"
+            client.post("/api/launcher/update", json={"id": stored["id"], "color": colour})
+            assert client.get("/api/launchers").json()[-1]["color"] == colour, repr(colour)
+
+    @patch("power_atlas.web.icons.extract_icon")
+    def test_launcher_update_without_a_colour_key_leaves_the_colour_alone(self, _extract, client):
+        client.post("/api/launcher/create", json={"name": "Old", "command": "npm", "color": "#ef4444"})
+        lid = client.get("/api/launchers").json()[0]["id"]
+        resp = client.post("/api/launcher/update", json={"id": lid, "name": "New"})
+        assert self._TOAST_ERROR not in resp.text
+        stored = client.get("/api/launchers").json()[0]
+        assert (stored["name"], stored["color"]) == ("New", "#ef4444")
+
+    @patch("power_atlas.web.data.available_providers")
+    @patch("power_atlas.web.load_config")
+    def test_the_tile_never_emits_a_hostile_colour_already_in_the_stored_config(
+            self, mock_load, mock_providers, client):
+        from power_atlas.config import Config
+        mock_providers.return_value = ["codex", "kiro-cli-v3"]
+
+        def _launcher(lid, colour):
+            return {"id": lid, "name": lid, "command": "x", "custom_args": "", "cwd": "",
+                    "env": {}, "color": colour, "terminal": True,
+                    "use_selected_workspaces": False, "show_in_workspace_hover": False}
+
+        for colour in _HOSTILE_TILE_COLOURS:
+            mock_load.return_value = Config(
+                provider_settings={"codex": {"default_args": "", "color": colour, "enabled": True},
+                                   "kiro-cli-v3": {"default_args": "", "color": "#112233", "enabled": True}},
+                custom_launchers=[_launcher("evil", colour), _launcher("fine", "#22c55e")])
+            text = client.get("/partials/launchers").text
+            styles = re.findall(r'\sstyle="([^"]*)"', text)
+            assert styles, "the valid tiles still carry a stripe"
+            for style in styles:
+                assert re.fullmatch(r"--stripe: #[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?", style), (colour, style)
+            tile = {m.group(1): m.group(0) for m in re.finditer(r'data-id="([^"]*)"[^>]*>', text)}
+            # The hostile provider colour falls back to the provider's own default, not to nothing.
+            assert "--stripe: #ffffff" in tile["provider--codex"], repr(colour)
+            # The hostile custom colour draws no stripe; its neighbours keep theirs.
+            assert "--stripe" not in tile["evil"], repr(colour)
+            assert "--stripe: #22c55e" in tile["fine"] and "--stripe: #112233" in tile["provider--kiro-cli-v3"]
+
+
 @patch("power_atlas.web.launcher.launch_custom_batch")
 @patch("power_atlas.web.load_config")
 def test_launcher_run_batch_passes_workspace_arg_for_non_terminal(mock_load, mock_batch, client):
