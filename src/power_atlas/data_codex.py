@@ -113,6 +113,22 @@ _RETRY_SPACING = 5.0
 
 _warn_lock = threading.Lock()
 _warned: dict[str, float] = {}
+_UUID_ANY_RE = re.compile(UUID_RE.pattern, re.I)
+
+
+def redact_path(path: str) -> str:
+    """`path` with the thread id of its file name hidden, for a log line: the
+    folder and the timestamp in a rollout name still say which file it is."""
+    path = os.fspath(path)
+    name = os.path.basename(path)
+    return path[:len(path) - len(name)] + _UUID_ANY_RE.sub("<id>", name)
+
+
+def log_path(path: str) -> str:
+    """`redact_path` for a rollout (`rollout-*`) name, `path` unchanged for any other.
+    Overview log lines name files of every provider; only Codex's are redacted."""
+    path = os.fspath(path)
+    return redact_path(path) if os.path.basename(path).startswith("rollout-") else path
 
 
 def _warn(kind: str, exc: BaseException | None = None, path: str = "", note: str = "") -> None:
@@ -129,7 +145,7 @@ def _warn(kind: str, exc: BaseException | None = None, path: str = "", note: str
         if isinstance(filename, (str, bytes, os.PathLike)):
             path = os.fsdecode(filename)
     what = f"failed ({type(exc).__name__})" if exc is not None else note
-    log.warning("codex adapter: %s %s%s", kind, what, f" path={path}" if path else "")
+    log.warning("codex adapter: %s %s%s", kind, what, f" path={redact_path(path)}" if path else "")
 
 
 def _safe(kind: str, neutral, path_arg: bool = False):

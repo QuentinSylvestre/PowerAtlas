@@ -31498,7 +31498,8 @@ class TestOverviewLive:
         # Attempts at 1002, 1062, ... up to 3000: floor(1998 / 60) + 1 = 34, one line for each.
         assert len(opens) == 34 and len(warnings()) == 34, (len(opens), len(warnings()))
         assert all(opens[i + 1] - opens[i] == 60.0 for i in range(33))
-        assert all(str(path) in w and "SECRET-DETAIL" not in w for w in warnings())
+        assert all(data_codex.log_path(str(path)) in w and str(path) not in w and "SECRET-DETAIL" not in w
+                   for w in warnings())
         # The file grows (a new key): it is tried at once, and the line is still held back, the
         # last one being 18 s old.
         _ov_jsonl(path, [_ovx_agent(now - 5, "two")])
@@ -33096,18 +33097,19 @@ class TestOverviewUsage:
     def cx_total(days, key):
         return sum(d["tokens"][key] for d in days.values())
 
-    def test_the_schema_is_5_and_an_older_worker_is_ignored(self):
+    def test_the_schema_is_6_and_an_older_worker_is_ignored(self):
         """`_parse_usage_file` gained a `codex` provider and lost its Claude fall-through
         (schema 2); the Codex stream rule, exec failures and the duration cap changed what it
         returns for an existing file (schema 3); counting each event's own last_token_usage
         changed it again (schema 4); cutting a Codex tool name, model and cwd to 80, 80 and 260
         characters changed what it returns for a file with a longer one (schema 5, final review
-        finding B6). A child on any older format must not mix its summaries into the memo."""
+        finding B6); the `codex:` prefix on a Codex tool name changed it once more (schema 6,
+        final review finding on the shared `shell` name). A child on any older format must not mix its summaries into the memo."""
         from power_atlas import overview
-        assert overview._USAGE_SCHEMA == 5
+        assert overview._USAGE_SCHEMA == 6
         good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
                 "subagent": False, "days": {}}
-        for older in (1, 2, 3, 4):
+        for older in (1, 2, 3, 4, 5):
             old = self.fake_worker()
             for record in (["schema", older], ["C:/x.jsonl", 1, 1, good], ["stage", 0]):
                 old._lines.put(json.dumps(record).encode() + b"\n")
@@ -33520,9 +33522,9 @@ class TestOverviewUsage:
             _ovx_call(t + 15, None, "c8"), _ovx_call(t + 16, "", "c9"),    # unnamed: not counted
         ]))
         [day] = days.values()
-        assert day["tools"] == {"shell_command": {"calls": 5, "failed": 3},
-                                "shell": {"calls": 1, "failed": 1},
-                                "apply_patch": {"calls": 1, "failed": 0}}
+        assert day["tools"] == {"codex:shell_command": {"calls": 5, "failed": 3},
+                                "codex:shell": {"calls": 1, "failed": 1},
+                                "codex:apply_patch": {"calls": 1, "failed": 0}}
 
     # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4 review fixes: exec failures, duration cap, window, bounds
     def test_codex_exec_calls_fail_on_a_failed_or_aborted_marker(self):
@@ -33546,8 +33548,8 @@ class TestOverviewUsage:
             _ovx_call(t + 19, "exec", "e9"), _ovx_output(t + 20, "e9", "Script running with cell ID 4"),
         ]))
         [day] = days.values()
-        assert day["tools"] == {"exec": {"calls": 9, "failed": 6},
-                                "shell_command": {"calls": 1, "failed": 0}}
+        assert day["tools"] == {"codex:exec": {"calls": 9, "failed": 6},
+                                "codex:shell_command": {"calls": 1, "failed": 0}}
         # The same rule on lines too long to parse (read by their head), in both shapes.
         days = self.cx_days(self.codex(2, [
             _ovx_call(t, "exec", "b1"), _ovx_output(t + 1, "b1", "Script failed\n" + big),
@@ -33560,8 +33562,8 @@ class TestOverviewUsage:
             _ovx_call(t + 11, "exec", "b6"), _ovx_output(t + 12, "b6", "aborted by user\n" + big),
         ]))
         [day] = days.values()
-        assert day["tools"] == {"exec": {"calls": 5, "failed": 4},
-                                "shell_command": {"calls": 1, "failed": 0}}
+        assert day["tools"] == {"codex:exec": {"calls": 5, "failed": 4},
+                                "codex:shell_command": {"calls": 1, "failed": 0}}
 
     def test_a_large_codex_output_line_is_read_by_its_head_and_never_parsed_whole(self, monkeypatch):
         """D19: a long tool output is tested for `Exit code:` by slicing its head, not by
@@ -33579,7 +33581,7 @@ class TestOverviewUsage:
         real = json.loads
         monkeypatch.setattr(json, "loads", lambda raw, *a, **k: parsed.append(len(raw)) or real(raw, *a, **k))
         [day] = overview._parse_usage_file(path, "codex")["days"].values()
-        assert day["tools"] == {"shell_command": {"calls": 2, "failed": 1}}
+        assert day["tools"] == {"codex:shell_command": {"calls": 2, "failed": 1}}
         assert max(parsed) < 64 * 1024, f"a long line was parsed whole: {sorted(parsed)[-3:]}"
 
     def test_a_codex_line_above_the_8_mib_cap_is_skipped_unparsed_and_one_at_the_cap_is_read(self, monkeypatch):
@@ -33663,7 +33665,8 @@ class TestOverviewUsage:
         for name in ("_CODEX_CALL_ID_RE", "_CODEX_HEAD_EXIT_RE", "_CODEX_HEAD_OUTPUT_RE"):
             monkeypatch.setattr(overview, name, Spy(getattr(overview, name)))
         [day] = overview._parse_usage_file(path, "codex")["days"].values()
-        assert day["tools"] == {"shell_command": {"calls": 1, "failed": 1}, "exec": {"calls": 2, "failed": 2}}
+        assert day["tools"] == {"codex:shell_command": {"calls": 1, "failed": 1},
+                                "codex:exec": {"calls": 2, "failed": 2}}
         assert seen and max(seen) <= overview._CODEX_HEAD_BYTES, sorted(seen)[-3:]
 
     def test_a_codex_output_is_only_matched_to_its_own_call(self):
@@ -33675,7 +33678,7 @@ class TestOverviewUsage:
             _ovx_call(t + 1, "shell_command", "c1"), _ovx_output(t + 2, "c1", "Exit code: 0\nx"),
             _ovx_output(t + 3, "c1", "Exit code: 1\nx"),
         ]))
-        assert days[next(iter(days))]["tools"] == {"shell_command": {"calls": 1, "failed": 0}}
+        assert days[next(iter(days))]["tools"] == {"codex:shell_command": {"calls": 1, "failed": 0}}
 
     def test_a_codex_summary_has_the_models_the_session_and_the_workspace(self):
         t = self.now - 7200
@@ -33856,7 +33859,7 @@ class TestOverviewUsage:
         # Usage.
         path = self.codex(1, [call, out])
         [day] = overview._parse_codex_usage(path)["days"].values()
-        assert day["tools"] == {name: {"calls": 1, "failed": failed}}, "usage"
+        assert day["tools"] == {"codex:" + name: {"calls": 1, "failed": failed}}, "usage"
         # Transcript.
         results = [e for e in data_codex.get_full_transcript(_ovx_id(1), "") if e.kind == "tool_result"]
         assert [(e.success, e.outcome_unknown) for e in results] == (
@@ -33886,9 +33889,9 @@ class TestOverviewUsage:
         [day] = summary["days"].values()
         cut_long = "tool x" + "x" * 73 + ellipsis
         assert len(cut_long) == 80
-        assert day["tools"] == {exact: {"calls": 1, "failed": 0},
-                                cut_long: {"calls": 1, "failed": 1},
-                                "n" * 79 + ellipsis: {"calls": 1, "failed": 0}}
+        assert day["tools"] == {"codex:" + exact: {"calls": 1, "failed": 0},
+                                "codex:" + cut_long: {"calls": 1, "failed": 1},
+                                "codex:" + "n" * 79 + ellipsis: {"calls": 1, "failed": 0}}
         usage = self.summary()
         assert {r["name"] for r in usage["tools"]["top"]} == set(day["tools"])
         assert [m["model"] for m in usage["models"]] == ["m" * 79 + ellipsis]
@@ -34218,6 +34221,23 @@ class TestOverviewUsage:
             self.c_user(t, "hi"), self.c_asst(t + 30, [{"type": "text", "text": "x"}], mid="m1", usage=u1)])
         return t
 
+    def test_a_codex_tool_and_a_kiro_tool_of_the_same_name_stay_two_rows(self):
+        """The Tools lists merge by name across providers. Codex's `shell` (older rollouts) and
+        kiro-cli's `shell` are different tools with different failure rules, so a Codex name
+        carries the `codex:` prefix and the two never share a row (final review row 23)."""
+        now, t = self.now, self.now - 7200
+        records = []
+        for i in range(4):
+            records.append((now, {"type": "tool_call", "toolCallId": f"c{i}", "toolName": "shell"}))
+            records.append((now, {"type": "tool_result", "toolCallId": f"c{i}", "success": i != 0}))
+        self.v3("sess_a", records)
+        self.codex(1, [
+            _ovx_call(t, "shell", "c1"), _ovx_output(t + 1, "c1", "Exit code: 1\nx"),
+            _ovx_call(t + 2, "shell", "c2"), _ovx_output(t + 3, "c2", "Exit code: 0\nx"),
+        ])
+        top = {r["name"]: (r["calls"], r["fail_rate"]) for r in self.summary()["tools"]["top"]}
+        assert top == {"shell": (4, 0.25), "codex:shell": (2, 0.5)}
+
     def test_usage_summary_carries_codex_beside_the_other_providers(self):
         t = self.codex_store()
         usage = self.summary()
@@ -34230,7 +34250,7 @@ class TestOverviewUsage:
         assert {r["name"]: r["this_week_s"] for r in usage["by_workspace"]} == {
             "gamma": 75.0, "delta": 60.0, "beta": 30.0}
         assert usage["models"] == [{"model": "gpt-x", "sessions": 2}, {"model": "claude-opus-5-5", "sessions": 1}]
-        assert usage["tools"]["top"] == [{"name": "shell_command", "calls": 2, "fail_rate": 0.5}]
+        assert usage["tools"]["top"] == [{"name": "codex:shell_command", "calls": 2, "fail_rate": 0.5}]
         assert usage["claude_tokens"]["input"] == 10 and usage["claude_tokens"]["cache_read"] == 70
 
     def test_codex_follows_the_providers_and_the_hidden_workspaces_of_the_rail(self):

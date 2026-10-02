@@ -752,7 +752,8 @@ def tail_events(path, provider: str, n: int = TAIL_EVENTS, st=None) -> list[dict
             while len(_tail_failures) > _TAIL_MEMO_MAX:
                 _tail_failures.popitem(last=False)
         if warn:
-            log.warning("Overview: could not read transcript tail %s", key)
+            from . import data_codex
+            log.warning("Overview: could not read transcript tail %s", data_codex.log_path(key))
         return []
     with _tail_memo_lock:
         _tail_failures.pop(key, None)
@@ -1188,6 +1189,9 @@ _CODEX_RECENT_EVENTS = 8
 # its whitespace, so a workspace the rail hides still matches). 260 is a Windows MAX_PATH.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
 _CODEX_NAME_MAX = 80
+# Prefix of a Codex tool name in the usage summary, so Codex's `shell` and kiro-cli's
+# `shell` stay two rows in the Tools lists (the lists merge by name across providers).
+_CODEX_TOOL_PREFIX = "codex:"
 _CODEX_CWD_MAX = 260
 USAGE_REUSE_SECONDS = 30.0
 CONTEXT_PRESSURE_PERCENT = 80.0
@@ -1276,8 +1280,9 @@ _stall_clock = time.monotonic
 # 4: Codex tokens are each event's own `last_token_usage` (rule L,
 # `_CodexTokenCounter`), replacing the growth-versus-baseline stream rule of 3.
 # 5: a Codex tool name, model and cwd are cut to `_CODEX_NAME_MAX` / `_CODEX_CWD_MAX`.
+# 6: a Codex tool name carries the `_CODEX_TOOL_PREFIX` prefix.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
-_USAGE_SCHEMA = 5
+_USAGE_SCHEMA = 6
 # The keys `usage_summary` reads from a file summary.
 _SUMMARY_KEYS = frozenset({"provider", "session_id", "cwd", "model", "subagent", "days"})
 
@@ -1358,6 +1363,10 @@ def _local_day(epoch: float) -> str:
 def _new_day() -> dict:
     return {"active": False, "agent_seconds": 0.0, "tools": {}, "context_peak": None,
             "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}}
+
+
+def _codex_tool_slot(day: dict, name: str) -> dict:
+    return _tool_slot(day, _CODEX_TOOL_PREFIX + name)
 
 
 def _tool_slot(day: dict, name: str) -> dict:
@@ -1693,7 +1702,7 @@ def _parse_codex_usage(path: Path) -> dict:
     def fail(call_id: str) -> None:
         hit = calls.pop(call_id, None)
         if hit is not None:
-            _tool_slot(days[hit[1]], hit[0])["failed"] += 1
+            _codex_tool_slot(days[hit[1]], hit[0])["failed"] += 1
 
     with data_codex.open_shared(path) as fh:
         # The first line is read here, not through `read_meta`, which cannot
@@ -1770,7 +1779,7 @@ def _parse_codex_usage(path: Path) -> dict:
                         name = payload.get("name")
                         name = _clip(name, _CODEX_NAME_MAX) if isinstance(name, str) else ""
                         if name:
-                            _tool_slot(day, name)["calls"] += 1
+                            _codex_tool_slot(day, name)["calls"] += 1
                             call_id = payload.get("call_id")
                             if isinstance(call_id, str) and call_id:
                                 calls[call_id] = (name, _local_day(epoch))
@@ -1985,7 +1994,8 @@ def _refresh(now: float, stop_event=None, subagents: bool = True) -> tuple[list[
         try:
             summary, parsed = _summarize(path, provider, st)
         except Exception:
-            log.warning("Overview: could not summarise transcript %s", path)
+            from . import data_codex
+            log.warning("Overview: could not summarise transcript %s", data_codex.log_path(str(path)))
             continue
         reparsed += parsed
         summaries.append(summary)

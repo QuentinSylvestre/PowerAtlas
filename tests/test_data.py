@@ -3419,14 +3419,31 @@ class TestCodexToolArgumentCaps:
 class TestCodexFailureLogPaths:
     """F11: a failure names the rollout path, never content."""
 
+    def test_redact_path_hides_only_the_thread_id_of_the_file_name(self):
+        sid = _cx_id(1)
+        rollout = f"C:\\codex\\sessions\\2026\\09\\01\\rollout-2026-09-01T10-00-00-{sid}.jsonl"
+        assert data_codex.redact_path(rollout) == (
+            "C:\\codex\\sessions\\2026\\09\\01\\rollout-2026-09-01T10-00-00-<id>.jsonl")
+        assert data_codex.redact_path(f"/locks/{sid.upper()}.lock") == "/locks/<id>.lock"
+        assert data_codex.redact_path("C:\\codex\\sessions") == "C:\\codex\\sessions"
+        assert data_codex.redact_path("") == ""
+
+    def test_log_path_redacts_rollouts_only(self):
+        sid = _cx_id(1)
+        claude = f"C:\\p\\{sid}.jsonl"
+        assert data_codex.log_path(claude) == claude, "another provider's file name is left alone"
+        assert "<id>" in data_codex.log_path(f"C:\\p\\rollout-2026-09-01T10-00-00-{sid}.jsonl")
+
     def test_the_warning_names_the_path_given_to_a_path_function(self, codex_home, monkeypatch, caplog):
-        path = _cx_write(codex_home, _cx_id(1), "C:\\W", [_cx_user("SECRET-PROMPT-TEXT")])
+        sid_text = _cx_id(1)
+        path = _cx_write(codex_home, sid_text, "C:\\W", [_cx_user("SECRET-PROMPT-TEXT")])
         monkeypatch.setattr(data_codex, "_read_meta_payload",
                             lambda p: (_ for _ in ()).throw(RuntimeError("SECRET-PROMPT-TEXT")))
         with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
             data_codex.read_meta(path)
         (message,) = [r.getMessage() for r in caplog.records]
-        assert f"path={path}" in message and "SECRET-PROMPT-TEXT" not in message
+        assert f"path={data_codex.redact_path(path)}" in message and "SECRET-PROMPT-TEXT" not in message
+        assert sid_text not in message, "the thread id is hidden in the log line"
 
     def test_the_warning_names_the_path_an_os_error_carries(self, codex_home, monkeypatch, caplog):
         sid, cwd = _cx_id(1), "C:\\W"
@@ -3438,7 +3455,8 @@ class TestCodexFailureLogPaths:
         monkeypatch.setattr(data_codex, "open_shared", broken)
         with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
             assert data_codex.get_full_transcript(sid, cwd) == []
-        assert any(f"path={path}" in r.getMessage() for r in caplog.records)
+        assert any(f"path={data_codex.redact_path(path)}" in r.getMessage() and sid not in r.getMessage()
+                   for r in caplog.records)
 
 
 class TestCodexFinalReviewAdapter:
