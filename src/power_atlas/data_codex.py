@@ -1272,6 +1272,8 @@ _LOCK_PROBE_WAIT = 0.5      # seconds a caller waits for the process-wide probe 
 _lock_cache = BoundedCache(512)     # id -> (monotonic time, bool); an expired entry is the stale fallback
 _busy_cache = BoundedCache(512)     # id -> (monotonic time, bool): the fallback served while a probe cannot run
 _probe_lock = threading.Lock()      # one probe at a time in this process; held only around the probe
+_LOCK_STUCK_TTL = 2.0               # seconds a timed-out probe lock keeps callers off the wait
+_probe_stuck_until = 0.0            # monotonic deadline of that marker; 0.0 = not stuck
 _COORDINATION = ".coordination.lock"
 _BUSY_WIN = {errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
 _BUSY_POSIX = {errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK}
@@ -1282,6 +1284,15 @@ _BUSY_POSIX = {errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK}
 # answer is cached for _LOCK_BUSY_TTL, so a listing pays the retry budget once per id per
 # second; the wait for the process-wide lock is bounded; and no logging runs while the
 # machine-wide coordination lock is held (D17: only open, try-lock, unlock, close).
+
+# Review fixes 3, 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3:
+# a timed-out wait for _probe_lock sets a process-wide marker for _LOCK_STUCK_TTL, during which
+# a caller only tries the lock without waiting and otherwise takes the fallback at once, so a
+# listing of N uncached ids behind a hung holder costs one wait, not N; any successful acquire
+# clears the marker. The fallback re-reads the answer cache, a busy coordination lock that
+# outlasts the retry budget is logged (writer_lock.busy), a failure to open <id>.lock is
+# queued like the others and the False it gives is cached, and no deferred log can change the
+# probe's result.
 
 
 def _lock_byte(fh) -> bool:
@@ -1342,8 +1353,12 @@ def _thread_lock_held(path: str, deferred: list) -> bool:
     open, try-lock, unlock and close happen here, so a failure is queued in `deferred`
     and logged by the caller once the coordination lock is gone. A vanished file is False."""
     try:
+        # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3: flock on an "rb" descriptor is unverified on POSIX/NFS (EBADF risk); a failure fails open, so Resume stays visible.
         fh = open_shared(path, "rb")
     except FileNotFoundError:
+        return False
+    except OSError as exc:  # PermissionError, a directory at the path: not contention, fail open
+        deferred.append(("writer_lock.open", exc, path))
         return False
     try:
         try:
@@ -1384,11 +1399,30 @@ def _probe_writer_lock(lock_path: str, coord_path: str) -> bool | None:
         return _probe_under_coordination(lock_path, coord_path, deferred)
     finally:
         for kind, exc, path in deferred:
-            _warn(kind, exc, path)
+            try:
+                _warn(kind, exc, path)
+            except Exception:  # a failing log must neither replace the probe's result nor skip the rest
+                pass
 
 
 def _fresh(entry, ttl: float) -> bool:
     return entry is not None and time.monotonic() - entry[0] < ttl
+
+
+def _acquire_probe_lock() -> bool:
+    """Take _probe_lock, waiting at most _LOCK_PROBE_WAIT, unless a wait timed out less than
+    _LOCK_STUCK_TTL ago: then it only tries, without waiting. A failed timed wait sets the
+    marker; any successful acquire clears it. A failed try leaves the marker alone, so it
+    expires on its own deadline and the next caller after it waits once more.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3"""
+    global _probe_stuck_until
+    stuck = time.monotonic() < _probe_stuck_until
+    if _probe_lock.acquire(blocking=False) if stuck else _probe_lock.acquire(timeout=_LOCK_PROBE_WAIT):
+        _probe_stuck_until = 0.0
+        return True
+    if not stuck:
+        _probe_stuck_until = time.monotonic() + _LOCK_STUCK_TTL
+    return False
 
 
 @_safe("session_writer_locked", lambda: False)
@@ -1401,7 +1435,8 @@ def session_writer_locked(session_id: str) -> bool:
     (a wait of at most _LOCK_PROBE_WAIT), the probe under Codex's .coordination.lock. A
     busy coordination lock is retried 3 times at 5 ms (sleeping outside the process
     lock), then the last cached value, even an expired one, else False; that fallback is
-    itself reused for 1 s. A process lock not obtained in time takes the same fallback.
+    itself reused for 1 s. A process lock not obtained in time takes the same fallback;
+    after such a timeout, callers for _LOCK_STUCK_TTL seconds do not wait for it at all.
     """
     if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
         return False
@@ -1419,16 +1454,16 @@ def session_writer_locked(session_id: str) -> bool:
     if _fresh(busy, _LOCK_BUSY_TTL):
         return busy[1]
 
-    def fallback(why: str) -> bool:
-        answer = stale[1] if stale is not None else False
+    def fallback(kind: str, why: str) -> bool:
+        current = _lock_cache.get(key)  # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3: not `stale`, which another thread may have refreshed since
+        answer = current[1] if current is not None else False
         _busy_cache.put(key, (time.monotonic(), answer))
-        if why:
-            _warn("writer_lock.wait", note=why)
+        _warn(kind, note=why)
         return answer
 
     for attempt in range(_LOCK_RETRIES + 1):
-        if not _probe_lock.acquire(timeout=_LOCK_PROBE_WAIT):
-            return fallback("the probe lock was not free in time (an open or a lock call is stuck)")
+        if not _acquire_probe_lock():
+            return fallback("writer_lock.wait", "the probe lock was not free in time (an open or a lock call is stuck)")
         try:
             fresh = _lock_cache.get(key)  # another thread may have just probed this id
             if _fresh(fresh, _LOCK_TTL):
@@ -1441,7 +1476,7 @@ def session_writer_locked(session_id: str) -> bool:
             _probe_lock.release()
         if attempt < _LOCK_RETRIES:
             time.sleep(_LOCK_RETRY_SLEEP)
-    return fallback("")
+    return fallback("writer_lock.busy", "the coordination lock stayed busy through the retry budget")
 
 
 # --- Test seam ---------------------------------------------------------------------
@@ -1450,7 +1485,7 @@ def session_writer_locked(session_id: str) -> bool:
 def _clear_caches() -> None:
     """Drop every cache and memo. Tests call it after each store mutation."""
     global _store_memo, _available_memo, _names_memo, _cache_cap, _verdict_cache, _parse_cache
-    global _last_event_cache
+    global _last_event_cache, _probe_stuck_until
     with _store_lock:
         _store_memo = None
     _available_memo = None
@@ -1463,5 +1498,6 @@ def _clear_caches() -> None:
     _parse_failed.clear()
     _lock_cache.clear()
     _busy_cache.clear()
+    _probe_stuck_until = 0.0
     with _warn_lock:
         _warned.clear()

@@ -4008,13 +4008,17 @@ class _LocksDir:
 def locks(codex_home, monkeypatch):
     """The redirected thread-writer-locks folder with its coordination file, and a
     recorder of every open, lock, unlock and close the probe makes on a lock file.
-    The 5 s answer cache and the 1 s busy-fallback cache are off; tests that exercise them
-    turn them back on."""
+    The 5 s answer cache, the 1 s busy-fallback cache and the 2 s stuck-probe-lock marker are
+    off (the marker's TTL is zero, as the two cache TTLs are, so no earlier test sees it);
+    tests that exercise them turn them back on.
+    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3"""
     folder = codex_home / "thread-writer-locks"
     folder.mkdir(parents=True)
     (folder / ".coordination.lock").write_bytes(b"")
     monkeypatch.setattr(data_codex, "_LOCK_TTL", 0.0)
     monkeypatch.setattr(data_codex, "_LOCK_BUSY_TTL", 0.0)
+    monkeypatch.setattr(data_codex, "_LOCK_STUCK_TTL", 0.0)
+    monkeypatch.setattr(data_codex, "_probe_stuck_until", 0.0)
     events = []
     real_open, real_lock, real_unlock = data_codex.open_shared, data_codex._lock_byte, data_codex._unlock_byte
 
@@ -4050,6 +4054,7 @@ def _cx_lockfile(folder, sid):
 _CX_LOCK_TTL = data_codex._LOCK_TTL
 _CX_LOCK_BUSY_TTL = data_codex._LOCK_BUSY_TTL
 _CX_LOCK_PROBE_WAIT = data_codex._LOCK_PROBE_WAIT
+_CX_LOCK_STUCK_TTL = data_codex._LOCK_STUCK_TTL
 
 
 def _cx_fake_posix(monkeypatch, script, calls):
@@ -4152,8 +4157,11 @@ class TestCodexWriterLock:
         assert data_codex.session_writer_locked(self.SID) is False
         assert locks.events[-2:] == [("unlock", ".coordination.lock"), ("close", ".coordination.lock")]
 
-    @pytest.mark.parametrize("which", ["coordination", "thread"])
-    def test_an_oserror_on_open_is_false_and_the_coordination_lock_is_released(self, locks, monkeypatch, which, caplog):
+    @pytest.mark.parametrize("which,kind", [("coordination", "session_writer_locked"), ("thread", "writer_lock.open")])
+    def test_an_oserror_on_open_is_false_and_the_coordination_lock_is_released(
+            self, locks, monkeypatch, which, kind, caplog):
+        """Review fix R3 (re-review of 56b44f0): a failed open of <id>.lock is queued and logged
+        as writer_lock.open, no longer as an escaped exception, so its False is cached."""
         _cx_lockfile(locks, self.SID)
         real = data_codex.open_shared
         target = ".coordination.lock" if which == "coordination" else f"{self.SID}.lock"
@@ -4166,7 +4174,7 @@ class TestCodexWriterLock:
         monkeypatch.setattr(data_codex, "open_shared", failing)
         with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
             assert data_codex.session_writer_locked(self.SID) is False
-        assert any("session_writer_locked" in r.getMessage() for r in caplog.records)
+        assert any(kind in r.getMessage() for r in caplog.records)
         if which == "thread":
             assert locks.events[-2:] == [("unlock", ".coordination.lock"), ("close", ".coordination.lock")]
 
@@ -4744,3 +4752,291 @@ class TestCodexWriterLock:
         monkeypatch.setattr(data_codex, "open_shared", lambda p, mode="rb": modes.append(mode) or real(p, mode))
         assert data_codex.session_writer_locked(self.SID) is False
         assert modes == ["rb", "rb"]
+
+
+class _CountingLock:
+    """Stands in for data_codex._probe_lock: records every acquire as (blocking, timeout) and
+    delegates to a real lock, which a test holds from another thread to play a hung probe.
+    `on_timed` runs when a timed wait begins (another thread acting during the wait)."""
+
+    def __init__(self, on_timed=None):
+        self.inner = threading.Lock()
+        self.calls = []
+        self.on_timed = on_timed
+
+    def acquire(self, blocking=True, timeout=-1):
+        self.calls.append((blocking, timeout))
+        if blocking and timeout > 0 and self.on_timed is not None:
+            self.on_timed()
+        return self.inner.acquire(blocking, timeout)
+
+    def release(self):
+        self.inner.release()
+
+    def locked(self):
+        return self.inner.locked()
+
+    def timed_waits(self):
+        return [c for c in self.calls if c[0] and c[1] > 0]
+
+
+@contextlib.contextmanager
+def _cx_hung_holder(lock):
+    """Another thread holding `lock.inner` (a probe stuck in an open or a lock call)."""
+    held, release = threading.Event(), threading.Event()
+
+    def run():
+        with lock.inner:
+            held.set()
+            release.wait(60)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert held.wait(10)
+    try:
+        yield
+    finally:
+        release.set()
+        worker.join(timeout=10)
+
+
+class TestCodexWriterLockStuckProbe:
+    """Re-review fixes R1-R6 of 56b44f0, 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3."""
+    SID = _cx_id(71)
+
+    @pytest.fixture
+    def counted(self, locks, monkeypatch):
+        lock = _CountingLock()
+        monkeypatch.setattr(data_codex, "_probe_lock", lock)
+        return lock
+
+    def _ids(self, locks, n):
+        ids = [_cx_id(0x3000 + k) for k in range(n)]
+        for sid in ids:
+            _cx_lockfile(locks, sid)
+        return ids
+
+    # R1 ---------------------------------------------------------------------------
+
+    def test_a_listing_behind_a_hung_probe_lock_waits_once_not_once_per_id(self, locks, counted, monkeypatch):
+        """R1: measured on 56b44f0, six uncached ids took 3.0 s and an immediate second pass 3.0 s,
+        because the 1 s busy cache is shorter than a listing pass. The property: one timed wait."""
+        assert _CX_LOCK_STUCK_TTL == 2.0
+        monkeypatch.setattr(data_codex, "_LOCK_STUCK_TTL", _CX_LOCK_STUCK_TTL)
+        monkeypatch.setattr(data_codex, "_LOCK_PROBE_WAIT", 0.2)
+        ids = self._ids(locks, 6)
+        data_codex._lock_cache.put(ids[0], (time.monotonic() - 600, True))   # an expired answer: the fallback
+        with _cx_hung_holder(counted):
+            for _ in range(2):
+                started = time.monotonic()
+                got = [data_codex.session_writer_locked(sid) for sid in ids]
+                assert got == [True] + [False] * 5, "the last cached value, else False"
+                assert time.monotonic() - started < 0.6, "six waits would take 1.2 s"
+        assert len(counted.timed_waits()) == 1, counted.calls
+        assert not [e for e in locks.events if e[0] == "open"], "nothing was probed"
+
+    def test_the_stuck_marker_ends_at_its_deadline(self, locks, counted, monkeypatch):
+        monkeypatch.setattr(data_codex, "_LOCK_STUCK_TTL", _CX_LOCK_STUCK_TTL)
+        monkeypatch.setattr(data_codex, "_LOCK_PROBE_WAIT", 0.1)
+        _cx_lockfile(locks, self.SID)
+        with _cx_hung_holder(counted):
+            monkeypatch.setattr(data_codex, "_probe_stuck_until", time.monotonic() + 1.0)
+            assert data_codex.session_writer_locked(self.SID) is False
+            assert counted.timed_waits() == [], "inside the marker nobody waits"
+            assert counted.calls == [(False, -1)], "it only tries"
+            monkeypatch.setattr(data_codex, "_probe_stuck_until", time.monotonic() - 0.001)
+            data_codex._busy_cache.clear()
+            assert data_codex.session_writer_locked(self.SID) is False
+            assert len(counted.timed_waits()) == 1, "an expired marker waits once more"
+            renewed = data_codex._probe_stuck_until - time.monotonic()
+            assert 1.0 < renewed <= _CX_LOCK_STUCK_TTL, "and the timeout sets a new marker"
+
+    def test_a_successful_acquire_clears_the_marker_and_a_failed_try_does_not_extend_it(
+            self, locks, counted, monkeypatch):
+        monkeypatch.setattr(data_codex, "_LOCK_STUCK_TTL", _CX_LOCK_STUCK_TTL)
+        _cx_lockfile(locks, self.SID)
+        data_codex._lock_cache.put(self.SID, (time.monotonic() - 600, True))
+        deadline = time.monotonic() + 1.5
+        monkeypatch.setattr(data_codex, "_probe_stuck_until", deadline)
+        with _cx_hung_holder(counted):
+            assert data_codex.session_writer_locked(self.SID) is True, "the stale answer while stuck"
+            assert data_codex._probe_stuck_until == deadline, "a failed try must not push the deadline"
+        # the holder is gone, the marker still has 1.5 s to run: the next call must not starve behind it
+        data_codex._busy_cache.clear()
+        assert data_codex.session_writer_locked(self.SID) is False, "the real probe, not the stale True"
+        assert ("open", f"{self.SID}.lock") in locks.events
+        assert data_codex._probe_stuck_until == 0.0, "a successful acquire clears the marker"
+
+    def test_the_marker_set_by_one_id_does_not_starve_another_once_it_ends(self, locks, counted, monkeypatch):
+        """A timeout met by one id's call must not keep every other id on the fallback past
+        the deadline: after it, the first caller waits again and the probe runs when it can."""
+        monkeypatch.setattr(data_codex, "_LOCK_STUCK_TTL", 0.3)
+        monkeypatch.setattr(data_codex, "_LOCK_PROBE_WAIT", 0.05)
+        first, second = self._ids(locks, 2)
+        with _cx_hung_holder(counted):
+            assert data_codex.session_writer_locked(first) is False
+            assert data_codex._probe_stuck_until > time.monotonic()
+        time.sleep(0.35)                                     # past the deadline, holder gone
+        assert data_codex.session_writer_locked(second) is False
+        assert ("open", f"{second}.lock") in locks.events, "the other id was probed, not starved"
+
+    # R2 ---------------------------------------------------------------------------
+
+    @pytest.mark.parametrize("script,expected,raising,attempted", [
+        # held thread: only the coordination unlock fails; its log raises, the answer must stay True
+        ([None, BlockingIOError(errno.EAGAIN, "x"), OSError(errno.EIO, "x")], True,
+         "writer_lock.unlock", ["writer_lock.unlock"]),
+        # two queued items, the first log raises: the second is still attempted, in order
+        ([None, OSError(errno.ENOTSUP, "x"), OSError(errno.EIO, "x")], False,
+         "writer_lock.lock", ["writer_lock.lock", "writer_lock.unlock"]),
+        # the same two, the second raises: the first was logged, the result is unchanged
+        ([None, OSError(errno.ENOTSUP, "x"), OSError(errno.EIO, "x")], False,
+         "writer_lock.unlock", ["writer_lock.lock", "writer_lock.unlock"]),
+    ])
+    def test_a_raising_log_neither_changes_the_probe_result_nor_drops_the_other_items(
+            self, locks, monkeypatch, script, expected, raising, attempted):
+        _cx_lockfile(locks, self.SID)
+        _cx_fake_posix(monkeypatch, list(script), [])
+        seen = []
+
+        def warn(kind, exc=None, path="", note=""):
+            seen.append(kind)
+            if kind == raising:
+                raise RuntimeError("the log itself failed")
+
+        monkeypatch.setattr(data_codex, "_warn", warn)
+        assert data_codex.session_writer_locked(self.SID) is expected
+        assert seen == attempted, "every queued item is attempted, and nothing escapes to the caller's wrapper"
+
+    # R3 ---------------------------------------------------------------------------
+
+    def test_a_failed_open_of_the_thread_file_is_cached_and_logged_once_across_ids(
+            self, locks, monkeypatch, caplog):
+        monkeypatch.setattr(data_codex, "_LOCK_TTL", 5.0)
+        first, second = self._ids(locks, 2)
+        real = data_codex.open_shared
+
+        def failing(p, mode="rb"):
+            if os.path.basename(os.fspath(p)).endswith(".lock") and not os.fspath(p).endswith(".coordination.lock"):
+                raise PermissionError(errno.EACCES, "denied", os.fspath(p))
+            return real(p, mode)
+
+        monkeypatch.setattr(data_codex, "open_shared", failing)
+        coord = ("open", ".coordination.lock")
+        with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
+            assert data_codex.session_writer_locked(first) is False
+            assert locks.events.count(coord) == 1
+            assert data_codex.session_writer_locked(first) is False
+            assert locks.events.count(coord) == 1, "the False was cached: no second trip through the coordination lock"
+            assert data_codex.session_writer_locked(second) is False
+            assert locks.events.count(coord) == 2, "another id has its own answer"
+        opens = [r for r in caplog.records if "writer_lock.open" in r.getMessage()]
+        assert len(opens) == 1, "throttled to one per minute"
+        assert "path=" in opens[0].getMessage()
+        assert not [r for r in caplog.records if "session_writer_locked" in r.getMessage()]
+
+    def test_a_directory_at_the_lock_path_is_false_and_not_probed_again_within_five_seconds(self, locks, monkeypatch):
+        monkeypatch.setattr(data_codex, "_LOCK_TTL", 5.0)
+        (locks / f"{self.SID}.lock").mkdir()
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert locks.events.count(("open", ".coordination.lock")) == 1
+
+    # R4 ---------------------------------------------------------------------------
+
+    @pytest.mark.parametrize("old,newer", [(False, True), (True, False)])
+    def test_the_fallback_serves_an_answer_another_thread_stored_while_it_waited(
+            self, locks, monkeypatch, old, newer):
+        _cx_lockfile(locks, self.SID)
+        data_codex._lock_cache.put(self.SID, (time.monotonic() - 600, old))
+
+        def other_thread_stores_a_fresh_answer():
+            data_codex._lock_cache.put(self.SID, (time.monotonic(), newer))
+
+        lock = _CountingLock(on_timed=other_thread_stores_a_fresh_answer)
+        monkeypatch.setattr(data_codex, "_probe_lock", lock)
+        monkeypatch.setattr(data_codex, "_LOCK_PROBE_WAIT", 0.05)
+        with _cx_hung_holder(lock):
+            assert data_codex.session_writer_locked(self.SID) is newer
+        assert data_codex._busy_cache.get(self.SID)[1] is newer, "the busy cache must not re-cache the old value"
+
+    # R5 ---------------------------------------------------------------------------
+
+    @pytest.mark.parametrize("answer_age,answer,busy_age,busy,expected", [
+        (1.0, False, 0.1, True, False),     # a fresh real answer beats a newer busy entry (M14)
+        (1.0, True, 0.1, False, True),      # ... both ways round
+        (6.0, True, 0.1, False, False),     # an expired answer: the fresh busy entry is served
+    ])
+    def test_a_fresh_answer_wins_over_a_busy_fallback_entry(
+            self, locks, monkeypatch, answer_age, answer, busy_age, busy, expected):
+        monkeypatch.setattr(data_codex, "_LOCK_TTL", _CX_LOCK_TTL)
+        monkeypatch.setattr(data_codex, "_LOCK_BUSY_TTL", _CX_LOCK_BUSY_TTL)
+        _cx_lockfile(locks, self.SID)
+        now = time.monotonic()
+        data_codex._lock_cache.put(self.SID, (now - answer_age, answer))
+        data_codex._busy_cache.put(self.SID, (now - busy_age, busy))
+        assert data_codex.session_writer_locked(self.SID) is expected
+        assert locks.events == [], "no probe either way"
+
+    def test_failures_queued_before_an_exception_are_still_logged(self, locks, monkeypatch):
+        """M15: the queue is drained in a `finally`, so an exception that follows a queued
+        failure (here: after the thread unlock failed) does not lose it."""
+        _cx_lockfile(locks, self.SID)
+        thread = f"{self.SID}.lock"
+        tracked_unlock, real_release = data_codex._unlock_byte, data_codex._release
+        monkeypatch.setattr(data_codex, "_unlock_byte",
+                            lambda fh: OSError(errno.EIO, "x") if fh._name == thread else tracked_unlock(fh))
+
+        def release_then_boom(fh, deferred, path=""):
+            real_release(fh, deferred, path)
+            if fh._name == thread:
+                raise RuntimeError("after the failure was queued")
+
+        monkeypatch.setattr(data_codex, "_release", release_then_boom)
+        seen = []
+        monkeypatch.setattr(data_codex, "_warn", lambda k, exc=None, path="", note="": seen.append(k))
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert seen == ["writer_lock.unlock", "session_writer_locked"]
+
+    @pytest.mark.parametrize("script", [
+        [None, None, OSError(errno.EIO, "x"), None],        # the thread unlock fails (M25)
+        [None, OSError(errno.ENOTSUP, "x"), None],          # the thread lock fails
+    ])
+    def test_a_queued_thread_file_failure_logs_the_path_of_the_thread_file(self, locks, monkeypatch, script):
+        _cx_lockfile(locks, self.SID)
+        _cx_fake_posix(monkeypatch, list(script), [])
+        seen = []
+        monkeypatch.setattr(data_codex, "_warn", lambda k, exc=None, path="", note="": seen.append((k, path)))
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert len(seen) == 1 and Path(seen[0][1]) == locks / f"{self.SID}.lock", seen
+
+    # R6 ---------------------------------------------------------------------------
+
+    def test_a_coordination_lock_busy_through_the_retry_budget_is_logged_once_a_minute_without_an_id(
+            self, locks, monkeypatch, caplog):
+        _cx_fake_posix(monkeypatch, [BlockingIOError(errno.EAGAIN, "x")] * 16, [])
+        first, second, third = self._ids(locks, 3)
+
+        def busy_logs():
+            return [r for r in caplog.records if "writer_lock.busy" in r.getMessage()]
+
+        with caplog.at_level("WARNING", logger="power_atlas.data_codex"), \
+                patch.object(data_codex.time, "sleep", lambda s: None):
+            assert data_codex.session_writer_locked(first) is False
+            assert data_codex.session_writer_locked(second) is False
+            assert len(busy_logs()) == 1, "throttled: two ids, one line"
+            message = busy_logs()[0].getMessage()
+            assert "path=" not in message and first not in message and "writer_lock.wait" not in message
+            data_codex._warned["writer_lock.busy"] = time.monotonic() - 59
+            assert data_codex.session_writer_locked(third) is False
+            assert len(busy_logs()) == 1, "59 s later: still throttled"
+            data_codex._warned["writer_lock.busy"] = time.monotonic() - 61
+            data_codex._busy_cache.clear()
+            assert data_codex.session_writer_locked(third) is False
+            assert len(busy_logs()) == 2, "61 s later: logged again"
+
+    def test_a_probe_that_gets_through_logs_nothing(self, locks, caplog):
+        _cx_lockfile(locks, self.SID)
+        with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
+            assert data_codex.session_writer_locked(self.SID) is False
+        assert not [r for r in caplog.records if "writer_lock" in r.getMessage()]
