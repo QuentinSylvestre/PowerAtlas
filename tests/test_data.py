@@ -2855,13 +2855,13 @@ class TestCodexExitCodeRobustness:
         ("Output:\nExit code: 0", None),           # `match`, not `search`: mid-text is not a result
     ])
     def test_exit_code_digit_bounds(self, text, expected):
-        assert data_codex._exit_success(text) is expected
+        assert data_codex.exit_success(text) is expected
 
     def test_a_bool_exit_code_in_json_is_not_a_number(self):
-        assert data_codex._exit_success('{"metadata":{"exit_code":true}}') is None
-        assert data_codex._exit_success('{"metadata":{"exit_code":false}}') is None
-        assert data_codex._exit_success('{"metadata":{"exit_code":0}}') is True
-        assert data_codex._exit_success('{"metadata":{"exit_code":3}}') is False
+        assert data_codex.exit_success('{"metadata":{"exit_code":true}}') is None
+        assert data_codex.exit_success('{"metadata":{"exit_code":false}}') is None
+        assert data_codex.exit_success('{"metadata":{"exit_code":0}}') is True
+        assert data_codex.exit_success('{"metadata":{"exit_code":3}}') is False
 
     def test_a_5000_digit_exit_code_keeps_the_other_events(self, codex_home):
         sid, cwd = _cx_id(1), "C:\\W"
@@ -2878,13 +2878,13 @@ class TestCodexExitCodeRobustness:
         _cx_write(codex_home, sid, cwd, [
             _cx_user("before"), _cx_call("shell_command", "{}", "c1"), _cx_output("c1", "BOOM"),
             _cx_agent("after")])
-        real = data_codex._exit_success
+        real = data_codex.exit_success
 
         def exit_success(text):
             if text == "BOOM":
                 raise RuntimeError("boom")
             return real(text)
-        monkeypatch.setattr(data_codex, "_exit_success", exit_success)
+        monkeypatch.setattr(data_codex, "exit_success", exit_success)
         assert [e.kind for e in data_codex.get_full_transcript(sid, cwd)] == ["user", "tool_call", "assistant"]
 
     def test_one_record_that_raises_does_not_lose_the_tail_or_the_first_prompt(self, codex_home, monkeypatch):
@@ -3270,23 +3270,10 @@ class TestCodexCacheSizing:
 
 
 class TestCodexPublicNames:
-    """The record readers overview.py uses are public names that add no behaviour
-    (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4 review fix)."""
+    """The record readers overview.py uses are the adapter's own public functions, not
+    wrappers around private ones (final review finding A10)."""
 
-    PAIRS = [("loads", "_loads"), ("read_first_line", "_read_first_line"), ("item_of", "_item_of"),
-             ("item_text", "_item_text"), ("output_text", "_output_text"),
-             ("exit_success", "_exit_success"), ("exec_outcome", "_exec_outcome"),
-             ("fit_caches", "_fit_caches")]
-
-    @pytest.mark.parametrize("public,private", PAIRS)
-    def test_a_public_name_calls_the_private_function_with_its_arguments(self, public, private, monkeypatch):
-        calls = []
-        monkeypatch.setattr(data_codex, private, lambda *args: calls.append(args) or ("called", args))
-        result = getattr(data_codex, public)("x")
-        assert calls == [("x",)]
-        assert result == (None if public == "fit_caches" else ("called", ("x",)))
-
-    def test_the_public_names_give_the_private_answers(self):
+    def test_the_record_readers_answer_as_documented(self):
         item = {"type": "event_msg", "payload": {"type": "item_completed",
                                                  "item": {"type": "UserMessage", "content": [{"type": "text", "text": "hi"}]}}}
         found = data_codex.item_of(item)
@@ -3870,7 +3857,7 @@ class TestCodexSurvivingMutations:
     def test_a_deeply_nested_line_that_reaches_the_parser_is_skipped(self, codex_home):
         sid, cwd = _cx_id(1), "C:\\W"
         bomb = b'{"payload":{"type":"item_completed"},"x":' + b"[" * 5000 + b"]" * 5000 + b"}"
-        assert data_codex._loads(bomb) is None          # a RecursionError is not a ValueError
+        assert data_codex.loads(bomb) is None          # a RecursionError is not a ValueError
         path = _cx_write(codex_home, sid, cwd, [_cx_agent("one")])
         with open(path, "ab") as fh:
             fh.write(bomb + b"\n")

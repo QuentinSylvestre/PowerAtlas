@@ -98,7 +98,7 @@ _IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003   # an NTFS junction (or a volume mount
 # its first nine digits.
 _EXIT_CODE_RE = re.compile(r"Exit code: (-?\d{1,9})(?!\d)")
 # Leading markers of an `exec` tool output (plan D13 as amended 2026-10-01).
-_EXEC_RUNNING = "Script running with cell"
+EXEC_RUNNING = "Script running with cell"
 _EXEC_MARKERS = (("Script completed", True), ("Script failed", False), ("aborted by user", False))
 
 # A rollout whose parse fails with an OSError (a sharing violation on an idle file)
@@ -220,9 +220,10 @@ def open_shared(path, mode: str = "rb"):
 
 
 # --- Line readers ---------------------------------------------------------------
+# Public on purpose, because overview.py uses them: loads, read_first_line, item_of, item_text, output_text, exit_success, exec_outcome, fit_caches, EXEC_RUNNING and FUTURE_SKEW. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
 
 
-def _loads(raw: bytes):
+def loads(raw: bytes):
     """Parse one line. None for anything unparseable, deeply nested JSON included.
     A leading UTF-8 byte-order mark is dropped (``utf-8-sig``): a first line that starts
     with one is still a ``session_meta`` or an index entry, not a vanished session."""
@@ -315,7 +316,7 @@ def _iter_lines_reverse(fh, size: int):
                 yield line
 
 
-def _read_first_line(fh) -> bytes | None:
+def read_first_line(fh) -> bytes | None:
     """The first line, or None when it is empty or longer than _META_CAP."""
     raw = fh.readline(_META_CAP + 1)
     if not raw or (len(raw) > _META_CAP and not raw.endswith(b"\n")):
@@ -357,7 +358,7 @@ def _record_time(obj) -> datetime | None:
     return None
 
 
-def _item_of(obj) -> tuple[str, dict] | None:
+def item_of(obj) -> tuple[str, dict] | None:
     """(item type, item) of an ``event_msg`` ``item_completed`` record, else None."""
     if not isinstance(obj, dict) or obj.get("type") != "event_msg":
         return None
@@ -371,7 +372,7 @@ def _item_of(obj) -> tuple[str, dict] | None:
     return (item_type, item) if isinstance(item_type, str) else None
 
 
-def _item_text(item: dict) -> str:
+def item_text(item: dict) -> str:
     """The text of a UserMessage / AgentMessage item (element type ``text`` or ``Text``)."""
     content = item.get("content")
     if not isinstance(content, list):
@@ -391,10 +392,10 @@ def _message_text(obj, item_type: str) -> str:
     ``response_item`` messages carry injected context (an AGENTS.md block of
     about 44 KB) and are never read as prompts.
     """
-    found = _item_of(obj)
+    found = item_of(obj)
     if found is None or found[0] != item_type:
         return ""
-    return _item_text(found[1])
+    return item_text(found[1])
 
 
 # --- Per-file verdict and parse (cached by (mtime_ns, size)) --------------------
@@ -420,7 +421,7 @@ class _Parsed:
 
 # Both caches hold at least twice the store's rollout count (D10: never smaller
 # than the file count; a cache smaller than a sequential scan thrashes on every
-# pass). _fit_caches grows them at store rebuild, with headroom, so the resize
+# pass). fit_caches grows them at store rebuild, with headroom, so the resize
 # happens when the store doubles rather than on every new file.
 _cache_cap = _CACHE_MIN
 _verdict_cache = BoundedCache(_cache_cap)
@@ -429,14 +430,14 @@ _parse_cache = BoundedCache(_cache_cap)
 # (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3 review fix): a fixed
 # size below the file count makes every sequential pass over a large store re-read each tail.
 _last_event_cache = BoundedCache(_cache_cap)
-# Guards the three rebinds above. Not `_store_lock`: `_build_store` calls `_fit_caches` with
+# Guards the three rebinds above. Not `_store_lock`: `_build_store` calls `fit_caches` with
 # that lock held, and `overview._usage_files` calls it with none, so two growths at once
 # would each publish new empty caches and drop the other's warm entries.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 1
 _caches_lock = threading.Lock()
 
 
-def _fit_caches(rollouts: int) -> None:
+def fit_caches(rollouts: int) -> None:
     global _cache_cap, _verdict_cache, _parse_cache, _last_event_cache
     with _caches_lock:
         if _cache_cap < 2 * rollouts:      # re-checked under the lock: a racing growth already fit
@@ -473,10 +474,10 @@ def _read_meta_payload(path: str) -> dict:
     ``session_meta`` object with a ``payload`` dict (legacy, torn, oversize).
     """
     with open_shared(path) as fh:
-        raw = _read_first_line(fh)
+        raw = read_first_line(fh)
     if raw is None:
         return {}
-    obj = _loads(raw)
+    obj = loads(raw)
     if not isinstance(obj, dict) or obj.get("type") != "session_meta":
         return {}
     payload = obj.get("payload")
@@ -531,7 +532,7 @@ def _parse_rollout(path: str) -> _Parsed:
         for line in _iter_lines(fh, max(0, _HEAD_CAP - first_end)):
             if b'"UserMessage"' not in line:
                 continue
-            first_prompt = _message_text(_loads(line), "UserMessage")
+            first_prompt = _message_text(loads(line), "UserMessage")
             if first_prompt:
                 break
         size = fh.seek(0, 2)
@@ -539,7 +540,7 @@ def _parse_rollout(path: str) -> _Parsed:
             want_user = not last_user and b'"UserMessage"' in line
             want_agent = not last_agent and b'"AgentMessage"' in line
             if last_record is None or want_user or want_agent:
-                obj = _loads(line)
+                obj = loads(line)
                 if last_record is None:
                     last_record = _record_time(obj)
                 if want_user:
@@ -639,7 +640,7 @@ def _build_store(root: str) -> _Store:
         except OSError:
             continue
         files.setdefault(file_uuid, []).append(_Rollout(path, file_uuid, st.st_mtime_ns, st.st_size))
-    _fit_caches(sum(len(group) for group in files.values()))
+    fit_caches(sum(len(group) for group in files.values()))
     counts: Counter = Counter()
     for file_uuid, group in files.items():
         # Two files for one thread id (resume, unarchive): the newest top-level one
@@ -740,7 +741,7 @@ def _thread_names(state: tuple[float, int, int]) -> dict[str, str]:
     try:
         with open_shared(path) as fh:
             for line in _iter_lines(fh, _INDEX_CAP):
-                obj = _loads(line)
+                obj = loads(line)
                 if not isinstance(obj, dict):
                     continue
                 thread_id, name = obj.get("id"), obj.get("thread_name")
@@ -1033,7 +1034,7 @@ def get_session_tail(session_id: str, cwd: str, max_lines: int = 15) -> list[str
             if b'"AgentMessage"' not in line:
                 continue
             try:
-                text = _message_text(_loads(line), "AgentMessage")
+                text = _message_text(loads(line), "AgentMessage")
             except Exception as exc:  # one bad record is one skipped record
                 log.debug("codex tail: skipped a record (%s)", type(exc).__name__)
                 continue
@@ -1057,7 +1058,7 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
             if b'"UserMessage"' not in line:
                 continue
             try:
-                text = _message_text(_loads(line), "UserMessage")
+                text = _message_text(loads(line), "UserMessage")
             except Exception as exc:  # one bad record is one skipped record
                 log.debug("codex first prompt: skipped a record (%s)", type(exc).__name__)
                 continue
@@ -1104,7 +1105,7 @@ def _call_args(arguments) -> dict:
     return {"raw": arguments[:_ARG_CHARS]}
 
 
-def _output_text(output) -> str:
+def output_text(output) -> str:
     """A tool output as text: a string as is, a list's text elements joined."""
     if isinstance(output, str):
         return output
@@ -1114,7 +1115,7 @@ def _output_text(output) -> str:
     return ""
 
 
-def _exit_success(text: str) -> bool | None:
+def exit_success(text: str) -> bool | None:
     """True/False from the tool's own exit code, None when it records none.
 
     A string starting ``Exit code: <n>`` (shell_command), or JSON with
@@ -1136,51 +1137,12 @@ def _exit_success(text: str) -> bool | None:
     return None
 
 
-def _exec_outcome(text: str) -> bool | None:
+def exec_outcome(text: str) -> bool | None:
     """True/False from an `exec` output's leading marker, else None (plan D13)."""
     for marker, success in _EXEC_MARKERS:
         if text.startswith(marker):
             return success
     return None
-
-
-# Public names for overview.py (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
-# review fix): thin wrappers, so the usage parser and the tile reader use this adapter's record
-# readers without reaching into its private names. They add no behaviour, and each one calls the
-# private function at call time, so a patch of the private name still takes effect.
-EXEC_RUNNING = _EXEC_RUNNING
-
-
-def loads(raw: bytes):
-    return _loads(raw)
-
-
-def read_first_line(fh) -> bytes | None:
-    return _read_first_line(fh)
-
-
-def item_of(obj) -> tuple[str, dict] | None:
-    return _item_of(obj)
-
-
-def item_text(item: dict) -> str:
-    return _item_text(item)
-
-
-def output_text(output) -> str:
-    return _output_text(output)
-
-
-def exit_success(text: str) -> bool | None:
-    return _exit_success(text)
-
-
-def exec_outcome(text: str) -> bool | None:
-    return _exec_outcome(text)
-
-
-def fit_caches(rollouts: int) -> None:
-    _fit_caches(rollouts)
 
 
 def _transcript_events(obj, exec_calls: set[str]) -> list[TranscriptEvent]:
@@ -1197,10 +1159,10 @@ def _transcript_events(obj, exec_calls: set[str]) -> list[TranscriptEvent]:
     stamp = stamp if isinstance(stamp, str) else ""
     rtype = obj.get("type")
     if rtype == "event_msg":
-        found = _item_of(obj)
+        found = item_of(obj)
         if found is None or found[0] not in ("UserMessage", "AgentMessage"):
             return []
-        text = _item_text(found[1])
+        text = item_text(found[1])
         if not text:
             return []
         return [TranscriptEvent(kind="user" if found[0] == "UserMessage" else "assistant",
@@ -1228,13 +1190,13 @@ def _transcript_events(obj, exec_calls: set[str]) -> list[TranscriptEvent]:
                                 tool_args={"content": content[:_ARG_CHARS] if isinstance(content, str) else ""},
                                 timestamp=stamp)]
     if ptype in ("function_call_output", "custom_tool_call_output"):
-        text = _output_text(payload.get("output"))
+        text = output_text(payload.get("output"))
         is_exec = call_id in exec_calls
-        if is_exec and text.startswith(_EXEC_RUNNING):
+        if is_exec and text.startswith(EXEC_RUNNING):
             return []  # not a final outcome: the call stays "started" (D13)
-        success = _exit_success(text)
+        success = exit_success(text)
         if success is None and is_exec:
-            success = _exec_outcome(text)
+            success = exec_outcome(text)
         # No exit code and no marker: the call finished and its outcome is unknown.
         # Never a success claim: the flag makes the translator show a neutral
         # status (D13). Only this adapter ever sets it.
@@ -1289,7 +1251,7 @@ def get_full_transcript(session_id: str, cwd: str) -> list[TranscriptEvent]:
             if not any(k in line for k in _TRANSCRIPT_KEYS):
                 continue
             try:
-                found = _transcript_events(_loads(line), exec_calls)
+                found = _transcript_events(loads(line), exec_calls)
             except Exception as exc:  # one bad record is one skipped record, not an empty transcript
                 log.debug("codex transcript: skipped a record (%s)", type(exc).__name__)
                 continue
@@ -1309,20 +1271,19 @@ def get_full_transcript(session_id: str, cwd: str) -> list[TranscriptEvent]:
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
 
 ACTIVITY_WINDOW = 300.0     # seconds: the live rule's recency window (web._session_is_live)
-_FUTURE_SKEW = 5.0          # a stamp this far past now is a clock error, not activity
-FUTURE_SKEW = _FUTURE_SKEW   # public name for overview.py's window rule (D16, D19)
+FUTURE_SKEW = 5.0           # a stamp this far past now is a clock error, not activity (overview.py's window rule, D16, D19)
 
 # path -> (mtime_ns, size, epoch of the last complete record or None). Keyed by
 # (mtime_ns, size) because Windows freezes the mtime of a file Codex holds open while
 # the size grows. Separate from _parse_cache so a read here is its own, countable event.
-# (The cache itself is defined with the other two, above, so _fit_caches sizes it.)
+# (The cache itself is defined with the other two, above, so fit_caches sizes it.)
 
 
 def _read_last_event(path: str) -> float | None:
     with open_shared(path) as fh:
         size = fh.seek(0, 2)
         for line in _iter_lines_reverse(fh, size):
-            when = _record_time(_loads(line))
+            when = _record_time(loads(line))
             if when is not None:
                 return when.timestamp()
     return None
@@ -1352,7 +1313,7 @@ def activity_epoch(path, st) -> float:
     Windows freezes the mtime of a rollout Codex holds open, so the mtime alone would
     switch the live dot off during an active turn. A warm active file costs one stat:
     the tail is read only when the mtime check fails. A timestamp (or mtime) more than
-    _FUTURE_SKEW past now is not trusted and is dropped, never clamped to now, so it
+    FUTURE_SKEW past now is not trusted and is dropped, never clamped to now, so it
     cannot keep a session live. Total: any failure returns the mtime.
     """
     try:
@@ -1365,16 +1326,16 @@ def activity_epoch(path, st) -> float:
         target = ""
     try:
         now = time.time()
-        trusted = mtime if mtime <= now + _FUTURE_SKEW else 0.0
+        trusted = mtime if mtime <= now + FUTURE_SKEW else 0.0
         if trusted and now - trusted <= ACTIVITY_WINDOW:
             return min(trusted, now)
         stamp = _last_event(os.fspath(path), st)
-        if stamp is not None and stamp <= now + _FUTURE_SKEW:
+        if stamp is not None and stamp <= now + FUTURE_SKEW:
             trusted = max(trusted, stamp)
         return min(trusted, now)
     except Exception as exc:
         _warn("activity_epoch", exc, target)
-        return mtime if mtime <= time.time() + _FUTURE_SKEW else 0.0
+        return mtime if mtime <= time.time() + FUTURE_SKEW else 0.0
 
 
 # --- Writer lock (D17) ---------------------------------------------------------------------
