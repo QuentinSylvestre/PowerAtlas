@@ -37,6 +37,7 @@
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely
 - **Reconsider the Yolo default** — in Yolo, Protected emits no rules, so the default posture is Always blocked plus allow-all, weaker than the Manual design suggests
 - **Crew verification spikes** — five one-off checks, run in a throwaway VM or Windows profile, each a trigger for reopening the 2026-09-28 keep-and-borrow decision
+- **Expose the effort level** — every ACP session now starts at `max`; the agent offers low, medium, high and max, but `/acp` has no control to change it
 - **[P2b] Session stores PowerAtlas cannot see** — closed; sqlite `conversations_v2` sessions permanently inaccessible post-v2-removal (2026-09-17); v3 covered
 
 ### Misc
@@ -249,6 +250,11 @@ condition).
   - *Why it is open* — `plans/CLOSED_INVESTIGATIONS.md` closes *taking over* a Claude Code session already live in someone's terminal (the `messagingSocketPath` and remote-control entries). Starting a **new** Claude Code session over ACP from PowerAtlas is a different question, and one nobody has asked of the code. It is no longer a differentiator: Kiro Crew already drives Claude Code through `@agentclientprotocol/claude-agent-acp` (corrected 2026-09-28; this line used to say Crew was kiro-only by design). That package is the adapter to spike against. Crew's source shows how it launches it, with `CLAUDE_CODE_EXECUTABLE` pointing the adapter at the `claude` binary (`src/kiro_crew/acp/client.py` L365-376, L2138-2156).
   - *A security gap to close before shipping* — the Always blocked and Protected rules are compiled into kiro-cli's derived agent (`compile_block` in `agent_profile.py`), so a Claude Code session would not see them. Extend Always blocked to the second driver before it drives anything.
   - *What it would cost* — the supervisor is kiro-specific in more than its binary: `_build_kas_session_params`, the `_kiro/*` extension methods, the token fulfilment, the session-store paths for `_lock_holder_v3`. A second provider means a driver abstraction, not a config change. Spike first: confirm an adapter exists for the installed Claude Code, that it answers `initialize`/`session/new`/`session/prompt` over stdio, and what its permission and session-persistence story is. Budget a week; exit with a go/no-go, not a feature.
+
+- **Expose the effort level** — let the user pick an ACP session's effort instead of the fixed default of `max`.
+  - *What exists* — `DEFAULT_EFFORT_LEVEL` in `acp.py` is `"max"`, applied through the agent's `effortLevel` config option on `session/new`, and on `session/load` when the session has no stored level (`4a6902b`). kiro-cli's own default is `high`, and `kiro-cli acp` does not read the `chat.modelDefaults` effort the terminal UI uses, so before this an ACP session ran one level below the same terminal session (measured 2026-10-05, kiro-cli 2.27.1).
+  - *What is missing* — a control. A fresh session advertises `effortLevel` as a select with low, medium, high and max, and `session/set_config_option` accepts it, but neither `/acp` nor the dashboard composer offers it, so `max` cannot be lowered for a cheap task. The constant also ignores the user's `cli.json`, which the tool-search forwarding does read.
+  - *To decide* — a per-session picker in the composer chrome, a global setting, or mirroring `cli.json`. Higher effort costs more tokens and time per turn, so the picker is the shape that makes `max` safe as the default.
 
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely.
 
