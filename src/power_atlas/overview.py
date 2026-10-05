@@ -1646,7 +1646,9 @@ def _codex_context_pct(info) -> float | None:
             return None
     if not 1 <= window <= _CODEX_WINDOW_MAX or used < 0:
         return None
-    return max(0.0, min(100.0, 100.0 * used / window))
+    if used >= window:
+        return 100.0  # also keeps an absurdly large integer out of the float multiplication
+    return 100.0 * used / window
 
 
 def _parse_codex_usage(path: Path) -> dict:
@@ -1759,7 +1761,9 @@ def _parse_usage_file(path: Path, provider: str) -> dict:
     "cache_creation"}, "context_peak"}`.
     `model` is the v3 `modelId`, the most frequent Claude `message.model` or
     the most frequent Codex `turn_context` model; `context_peak` the v3
-    maximum `usagePercentage` (0-100) recorded that day, else None.
+    maximum `usagePercentage` (0-100) recorded that day, or for Codex the
+    estimate of `_codex_context_pct` (peak of last input tokens over the
+    model's window), else None.
     `subagent` is True for a Claude Code sub-agent transcript (`provider`
     `_CLAUDE_SUB`), whose `session_id` is its parent session's. Lines over
     `USAGE_MAX_LINE_BYTES` are skipped, and one unreadable line skips that

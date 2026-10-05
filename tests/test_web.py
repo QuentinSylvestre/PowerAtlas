@@ -32245,6 +32245,9 @@ class TestOverviewUsage:
         assert peak == pytest.approx(80.0), "the peak is the largest reading, a later drop (compaction) keeps it"
         over = self.codex(2, [_ovx_user(t, "go"), self.cx_ctx(t + 1, 100, 150)])
         assert self.cx_days(over)[_ov_day(t)]["context_peak"] == 100.0, "a ratio above 1 is clipped"
+        huge = self.codex(4, [_ovx_user(t, "go"), self.cx_ctx(t + 1, 100, 10 ** 310, total_input=700)])
+        [day] = self.cx_days(huge).values()
+        assert day["context_peak"] == 100.0, "an absurdly large input is clipped, not an overflow"
         edge = self.codex(3, [_ovx_user(t, "go"), self.cx_ctx(t + 1, 10 ** 9, 10 ** 8), self.cx_ctx(t + 2, 1, 0)])
         assert self.cx_days(edge)[_ov_day(t)]["context_peak"] == pytest.approx(10.0), \
             "a window of 1 and of 10**9 are accepted"
@@ -32266,6 +32269,10 @@ class TestOverviewUsage:
             {"last_token_usage": {"input_tokens": "5"}, "model_context_window": 100},
             {"last_token_usage": {"input_tokens": 5.0}, "model_context_window": 100},
             {"last_token_usage": {"output_tokens": 5}, "model_context_window": 100},
+            {"last_token_usage": {"input_tokens": float("nan")}, "model_context_window": 100},
+            {"last_token_usage": {"input_tokens": float("inf")}, "model_context_window": 100},
+            {"last_token_usage": last, "model_context_window": float("inf")},
+            {"last_token_usage": last, "model_context_window": float("nan")},
             {"last_token_usage": "x", "model_context_window": 100},
             "not a dict", None, [],
         ]
@@ -32298,6 +32305,16 @@ class TestOverviewUsage:
         hidden = self.summary(hidden=lambda cwd: cwd == "C:\\ws\\secret")["codex_context_pressure"]
         assert (hidden["sessions_over_80"], hidden["sessions_total"]) == (2, 4)
         assert "secret" not in json.dumps(hidden), "a hidden workspace's name never reaches the block"
+
+    def test_a_codex_session_peak_is_its_largest_day_and_ignores_days_outside_the_window(self):
+        t = self.now - 7200
+        self.codex(1, [
+            _ovx_user(self.now - 20 * self.DAY, "old"), self.cx_ctx(self.now - 20 * self.DAY + 1, 100, 100),
+            _ovx_user(self.now - 2 * self.DAY, "mid"), self.cx_ctx(self.now - 2 * self.DAY + 1, 100, 90),
+            _ovx_user(t, "go"), self.cx_ctx(t + 1, 100, 50)])
+        cp = self.summary()["codex_context_pressure"]
+        assert (cp["sessions_over_80"], cp["sessions_total"]) == (1, 1)
+        assert [r["peak"] for r in cp["top"]] == [90.0], "yesterday's 90 beats today's 50; the 20-day-old 100 is outside"
 
     def test_the_codex_row_ranks_ties_by_session_id_and_keeps_only_five(self):
         t = self.now - 7200

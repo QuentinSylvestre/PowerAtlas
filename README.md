@@ -141,7 +141,8 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     `error`) says which. A running Codex session's usage can lag by about two minutes.
     Context pressure shows kiro-cli's own numbers and, in a separate row, an estimate for Codex
     (the last request's input tokens over the model's context window, so a guess at how full the
-    window is). Token totals cover Claude Code and Codex only, with no cost estimate.
+    window is; sub-agent threads are left out and the row is absent when no Codex session was
+    active in the window). Token totals cover Claude Code and Codex only, with no cost estimate.
   - *Return paths*: the Home button in the panel header, Escape, clicking the open session's row
     again, or closing or deleting the open session. Escape does nothing while focus is in the
     composer, the search field or a dialog, or while a menu, the new-session picker or the MCP panel

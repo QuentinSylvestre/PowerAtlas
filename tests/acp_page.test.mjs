@@ -18067,6 +18067,14 @@ check("dashboard overview usage: a Codex context row labelled as an estimate, un
   assert(!labels.some((l) => l.includes("kiro-cli only")), `${labels}`);
 });
 
+check("dashboard overview usage: the highest Codex peak shown is the first of the ranked list", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_context_pressure: { sessions_over_80: 1, sessions_total: 3, estimate: true,
+    top: [{ name: "first", peak: 90 }, { name: "second", peak: 50 }, { name: "last", peak: 10 }] } }), "ready");
+  assert(ovUsageBody(p).querySelector(".dash-ov-usage-codex-context").textContent.endsWith("highest 90% (first)"),
+    ovUsageBody(p).querySelector(".dash-ov-usage-codex-context").textContent);
+});
+
 check("dashboard overview usage: no Codex context row without Codex sessions", () => {
   for (const codex of [undefined, null, {}, { sessions_total: 0, sessions_over_80: 0, top: [] }, [OV_CODEX_CONTEXT]]) {
     const p = loadDashPicker();
