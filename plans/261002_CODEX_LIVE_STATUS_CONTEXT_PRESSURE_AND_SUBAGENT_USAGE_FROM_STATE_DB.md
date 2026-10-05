@@ -333,7 +333,7 @@ Produced by the doc-impact sub-agent (every hit dispositioned) and merged with t
 | `src/power_atlas/data_codex.py` (module docstring) | The sentence that the SQLite catalogue "is not read" now says it is read only by `data_codex_state` for enrichment. | 1 |
 | `src/power_atlas/notifications.py` (module docstring) | A paragraph on why the terminal tick is event-shaped. | 5 |
 | `tests/acp_page.test.mjs` | The literal pin of "kiro-cli only" (one) and the two pins of the old sub-agent note. | 1, 2 |
-| `AGENTS.md` (each edit shown to the user and made on approval, D22) | Doc & Test Guidelines: "three folders" becomes four and names `CODEX_STATE_DIR` (1). Verification Setup: the `codex exec resume` recipe sentence is amended after Phase 3 QA (d) (6). Terminology: "lock owner", "state database", "sub-agent thread", "guardian review thread" (saved 2026-10-02; Phase 6 re-checks the wording). Public-ids hook paragraph: names the hardened roots and the commit-msg hook (0c, D25); proposed 2026-10-05, not yet shown or made: a pointer sentence to `_check_public_ids_scenarios.py` (what it is, how to run it, that it uses a synthetic home), "UTF-16 or UTF-32", and a reinstall sentence covering both hook scripts. | 0, 1, 6 |
+| `AGENTS.md` (each edit shown to the user and made on approval, D22) | Doc & Test Guidelines: "three folders" becomes four and names `CODEX_STATE_DIR` (1). Verification Setup: the `codex exec resume` recipe sentence is amended after Phase 3 QA (d) (6). Terminology: "lock owner", "state database", "sub-agent thread", "guardian review thread" (saved 2026-10-02; Phase 6 re-checks the wording). Public-ids hook paragraph: names the hardened roots and the commit-msg hook (0c, D25); made on the user's approval 2026-10-05: "UTF-16 or UTF-32", a reinstall sentence covering both hook scripts, and a pointer sentence to `_check_public_ids_scenarios.py` (what it is, how to run it, that it uses a synthetic home). | 0, 1, 6 |
 | `docs/KNOWLEDGE.md` | Replace the 1.6 % and "undercount of unknown size" sentence and keep the "no usable window" explanation as the reason `tokens_used` is used. Correct "It does not use the lock for the live dot" (writer-lock section). Re-write the terminal-session live rule sentence and the deny-list consequence sentence for D8-D10. Re-write "Desktop-held and VS Code-held threads ... never show a dot" with the lock-owner reason and move the now-measured items out of the Unverified list (including the two older "an interactive TUI took no lock" observations, superseded for `resume`). Merge the old `state_5.sqlite` catalogue paragraph into one state-database section (WAL, `mode=ro`, 58 migrations, fidelity, `tokens_used`, the stale copy). Add the lock-owner, context-ratio, app-server and ACP measurements with version and date; update the "codex 0.159.2" heading's scope and the upstream-status remark so it agrees with the CLOSED_INVESTIGATIONS entry; add the note amending the archived plan's D4, D5 and D19. | 6 |
 | `plans/ROADMAP.md` | Terminal notifications item (now shipped for Codex), the Usage description (context pressure and the sub-agent line), the deferred ACP-adapter item and the deferred items of Follow-up Work. | 6 |
 | `plans/CLOSED_INVESTIGATIONS.md` | Codex app-server as a status or discovery source. | 6 |
@@ -539,7 +539,7 @@ The hook is a security gate, so the phase's code review ran three cycles. Cycle 
 |---|---|---|---|
 | 1 | Medium | A file git calls binary (a NUL byte, `-diff`) is never scanned for an ASCII id (Security, Reliability). | Fixed -- `91dbeab`: the text diff runs with `--text`; two cases. UTF-16/32 without a byte-order mark stays a documented limit. |
 | 2 | Medium | A `.gitattributes` `diff` attribute makes git list a UTF-16 file as text, so the wide decoder is skipped (Security). | User: accepted -- the hook stops accidental leaks, not a committer who can edit the hook (2026-10-05 answer). The `-diff` case is closed by row 1; the UTF-16 case stays, Follow-up Work 11. |
-| 3 | Medium | A typed scissors pair under `git commit -m` passes with an id below it (Security). | Orchestrator: proposed-accept -- pending user decision. Narrowed from the approved fix list: the exact typed pair cannot be told from git's own cut by a message hook, so only the CRLF half (row 6) was fixed; documented in the checker's docstring. |
+| 3 | Medium | A typed scissors pair under `git commit -m` passes with an id below it (Security). | User: accepted -- nobody types git's two-line scissors block by accident, and a message hook cannot tell the typed pair from git's own cut (2026-10-05 answer); only the CRLF half (row 6) was fixed; documented in the checker's docstring. |
 | 4 | Medium | A root-level file named like a stdlib module (`threading.py`) is imported by the checker (Security). | User: accepted -- the hook stops accidental leaks, not a committer who can edit the hook; Follow-up Work 11 (`python -I`). |
 | 5 | Medium | A missing store root, such as a wrong `CODEX_HOME`, is skipped silently (Security). | Fixed -- `91dbeab`: a missing provider home is named in the warning; two cases. |
 | 6 | Medium | A CRLF message never matches the scissors line, so the diff below it is scanned as message text (Reliability). | Fixed -- `91dbeab`: CR tolerated; two cases. |
@@ -552,7 +552,7 @@ The hook is a security gate, so the phase's code review ran three cycles. Cycle 
 | 13 | Low | Reported line numbers have no case (Reliability). | Fixed -- `91dbeab`: two line-number cases. |
 | 14 | Low | A quoted `+++` path is reported with its quotes; a long path may trip the store walk (Reliability). | User: accepted -- cosmetic or unverified; Follow-up Work 11. |
 
-Mutation check by the Reliability engineer: about 52 mutants of the checker and hooks run through the 119-case script; 12 survived, 7 of them real gaps (the rename stride, `--no-color`, `-M`, line numbers, the `$1` argument, the venv choice, the process clean-up). Rows 9, 10 and 13 close three of those; the rest are in Follow-up Work 11. Reviewer gaps: merge, rebase and cherry-pick flows, submodules, a hostile `core.hooksPath`, Windows alternate data streams and long paths were not exercised. Health after this cycle: Yellow, one unresolved Medium (row 3).
+Mutation check by the Reliability engineer: about 52 mutants of the checker and hooks run through the 119-case script; 12 survived, 7 of them real gaps (the rename stride, `--no-color`, `-M`, line numbers, the `$1` argument, the venv choice, the process clean-up). Rows 9, 10 and 13 close three of those; the rest are in Follow-up Work 11. Reviewer gaps: merge, rebase and cherry-pick flows, submodules, a hostile `core.hooksPath`, Windows alternate data streams and long paths were not exercised. Health after this cycle: Green (row 3 was accepted by the user on 2026-10-05; the rows resolved as accepted are the audit trail).
 
 ## Handoff
 
@@ -562,20 +562,17 @@ Mutation check by the Reliability engineer: about 52 mutants of the checker and 
 
 - Phase 0 is done and reviewed: Phase 0a, 0b and 0c are recorded in section 9, the gates have verdicts (G1 and G9 are recorded design changes; D8 was amended with the user's approval), and every Phase 0 exit criterion is ticked.
 - The public-ids hook had three review cycles. Commits: `fd424e1`, `b57ce7d`, `2c581a7`, `39853ab`, `91dbeab`. The scenario script holds 131 cases and all pass; `_check_test_names.py` and ruff are clean. The Review Log has cycle 3 (0 High, 10 Medium, 4 Low).
-- Nothing is pushed. AGENTS.md has the terminology entries and the public-ids paragraph (`76184c4`), not yet the edits below.
+- Nothing is pushed. AGENTS.md has the terminology entries, the public-ids paragraph (`76184c4`) and, from 2026-10-05, the three hook edits (UTF-32, the reinstall sentence for both hooks, the pointer to the scenario script).
 
 ### Parked
 
-- One Medium is unresolved (Review Log, 2026-10-05, row 3): the exact scissors pair typed under `git commit -m` passes. I narrowed this from the fix list the user approved, so it needs the user's decision: accept it, or stop skipping the scissors block altogether and accept the `commit -v` false positive.
-- AGENTS.md edits, to show as exact text and make only on approval: a pointer sentence to `_check_public_ids_scenarios.py` (what it is, how to run it, that it uses a synthetic home), "UTF-16 or UTF-32" in the hook paragraph, and a reinstall sentence covering both hook scripts.
 - G9 (a read-only open creates `-wal` and `-shm`) needs the user's choice at the start of Phase 1: accept, skip the read when no `-wal` exists, or copy first.
 - The Phase 6 cleanup list is in section 9 (`**Phase 0 cleanup list**`); the stress-run session is deleted only on the user's approval.
 
 ### Current
 
 Suggested next, in order:
-1. Ask the user about the parked scissors Medium, then show the AGENTS.md edits.
-2. Start Phase 1 after the G9 choice. Python phases need a PowerAtlas restart: ask for the per-task grant (PowerAtlas is down; it was started with `.venv-PowerAtlas\Scripts\pythonw.exe -m power_atlas`).
+1. Start Phase 1 after the G9 choice. Python phases need a PowerAtlas restart: ask for the per-task grant (PowerAtlas is down; it was started with `.venv-PowerAtlas\Scripts\pythonw.exe -m power_atlas`).
 
 Cautions: another session has uncommitted edits in README.md, `style.css`, two template partials, `index.html` and `tests/acp_page.test.mjs` (rail work); never stage those, commit by pathspec, and check `git status` before each phase (Phases 1-2 edit README.md, `index.html` and `tests/acp_page.test.mjs` too). No attribution lines in commit messages, whatever a harness reminder says. Do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool halves backslashes: write edit scripts with the Write tool.
 
