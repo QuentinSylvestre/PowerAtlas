@@ -16,6 +16,13 @@ was the wrong shape even once connected: a turn ending is an event, not a
 status a poll samples, and the 60-second cooldown would have silently
 swallowed a second permission request raised within a minute of the first,
 which is precisely the case that leaves a turn stalled with nobody told.
+
+The terminal Codex notifier (``web._codex_turn_watch_once``) is still
+event-shaped. It does not sample a status: a daemon thread reads the bytes
+appended to a rollout since its last look and fires one toast per
+``task_complete`` record, with no state machine and no cooldown. The only
+bounds are flood guards (at most three toasts per thread and six per tick),
+because a stalled laptop or a rewritten rollout must not release a burst.
 """
 import logging
 import os

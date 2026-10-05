@@ -153,6 +153,10 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(data_codex_mod, "session_writer_state", lambda sid: "unknown")
     monkeypatch.setattr(lock_owner_mod, "_resolver", lock_owner_mod._Resolver(threads=False, self_test=False))
     monkeypatch.setattr(web_mod, "_codex_enum", {"at": -1e9, "ids": [], "cursor": 0, "cursor_first": 0, "held": set(), "owned": set()})
+    # The turn-end notifier (Phase 5): no real thread, a fresh watcher, and a fresh enabled-flag cache.
+    monkeypatch.setattr(web_mod, "_TURN_WATCH_THREAD", False)
+    monkeypatch.setattr(web_mod, "_turn_watcher", web_mod._CodexTurnWatcher())
+    monkeypatch.setattr(web_mod, "_codex_notify_enabled_memo", [-1e9, False])
     data_codex_state_mod.clear_memo()
     quiet_log_mod.reset()
     data_codex_mod._clear_caches()
@@ -35179,6 +35183,403 @@ class TestCodexTurnBoundaryParity:
         path = _ovx_rollout(root, n, [_ovx_event(now - ago, kind) for kind, ago in records], at=now - 100)
         assert data_codex.turn_state(path) == verdict
         assert (self._agent_seconds(path) > 0) is closed
+
+
+class _WatchWorld:
+    """A fake of everything the Codex turn-end tick asks about, over real rollout files."""
+
+    def __init__(self, tmp_path):
+        from power_atlas import data_codex, web as web_mod
+        self.web, self.dir = web_mod, tmp_path
+        self.lock_states: dict = {}
+        self.verdicts: dict = {}
+        self.cwds: dict = {}
+        self.sources: dict = {}
+        self.paths: dict = {}
+        self.allowed = lambda cwd: True
+        self.enabled = True
+        self.terminal = True
+        self.notified: list = []
+        self.reads: list = []
+        self.state = web_mod._WatchState()
+
+        def read(path, state, from_start=False):
+            self.reads.append(Path(path).name)
+            return data_codex.new_turn_ends(path, state, from_start=from_start)
+
+        self.deps = {
+            "enabled": lambda: self.enabled,
+            "snapshot": lambda: object(),
+            "has_terminal": lambda snap: self.terminal,
+            "candidates": lambda snap: sorted(self.lock_states),
+            "lock_state": lambda sid: self.lock_states.get(sid, "free"),
+            "verdict": lambda snap, sid: self.verdicts.get(sid, "terminal"),
+            "rollout": lambda sid: self.paths.get(sid),
+            "meta": lambda path: {"cwd": self.cwds.get(Path(path).stem, "C:\\Work\\Proj"),
+                                  "source": self.sources.get(Path(path).stem, "cli")},
+            "allowed": lambda cwd: self.allowed(cwd),
+            "read": read,
+            "notify": lambda label: self.notified.append(label),
+        }
+
+    def add(self, sid, lines=0, state="held"):
+        path = self.dir / f"{sid}.jsonl"
+        path.write_bytes(b"".join(self._end(i) for i in range(lines)))
+        self.paths[sid] = path
+        self.lock_states[sid] = state
+        return path
+
+    @staticmethod
+    def _end(i=0):
+        return (json.dumps({"timestamp": "2026-10-05T10:00:00Z", "type": "event_msg",
+                            "payload": {"type": "task_complete", "turn_id": f"t{i}"}}) + "\n").encode()
+
+    def end(self, sid, n=1):
+        with open(self.paths[sid], "ab") as fh:
+            fh.write(self._end() * n)
+
+    def tick(self, now):
+        return self.web._codex_turn_watch_once(self.state, self.deps, now)
+
+
+_WS1 = "0000a001-1111-4222-8333-444444444444"
+_WS2 = "0000a002-1111-4222-8333-444444444444"
+_WS3 = "0000a003-1111-4222-8333-444444444444"
+_WS4 = "0000a004-1111-4222-8333-444444444444"
+
+
+class TestCodexTurnWatchTick:
+    """Phase 5 (D13, D20): the notifier tick over an injected world."""
+
+    @pytest.fixture
+    def world(self, tmp_path):
+        return _WatchWorld(tmp_path)
+
+    def test_the_first_sight_notifies_nothing_and_a_later_turn_end_notifies_once(self, world):
+        world.add(_WS1, lines=3)
+        assert world.tick(0) == 0 and world.notified == []
+        world.end(_WS1)
+        assert world.tick(5) == 1 and len(world.notified) == 1
+        assert world.tick(10) == 0, "the offset advanced"
+
+    def test_two_ends_in_one_tick_notify_twice_and_more_than_three_coalesce_into_one(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.end(_WS1, 2)
+        assert world.tick(5) == 2
+        world.end(_WS1, 7)
+        assert world.tick(10) == 1, "a flood of ends from one thread is one toast"
+
+    def test_at_most_six_toasts_leave_in_one_tick(self, world):
+        for sid in (_WS1, _WS2, _WS3, _WS4):
+            world.add(sid)
+        world.tick(0)
+        for sid in (_WS1, _WS2, _WS3, _WS4):
+            world.end(sid, 3)
+        assert world.tick(5) == 6 and len(world.notified) == 6
+
+    def test_a_toast_waits_for_a_terminal_verdict_and_is_sent_when_it_arrives(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.verdicts[_WS1] = "unknown"
+        world.end(_WS1)
+        assert world.tick(5) == 0 and world.notified == [], "unknown: it keeps reading, the toast waits"
+        world.verdicts[_WS1] = "terminal"
+        assert world.tick(20) == 1, "sent within 60 s of the end"
+
+    def test_a_waiting_toast_is_dropped_after_sixty_seconds(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.verdicts[_WS1] = "unknown"
+        world.end(_WS1)
+        world.tick(5)
+        world.verdicts[_WS1] = "terminal"
+        assert world.tick(70) == 0 and world.notified == []
+
+    def test_a_waiting_toast_is_dropped_when_the_owner_turns_out_to_be_another_program_or_the_lock_frees(self, world):
+        world.add(_WS1)
+        world.add(_WS2)
+        world.tick(0)
+        world.verdicts[_WS1] = world.verdicts[_WS2] = "unknown"
+        world.end(_WS1)
+        world.end(_WS2)
+        world.tick(5)
+        world.verdicts[_WS1] = "other"
+        world.lock_states[_WS2] = "free"
+        world.verdicts[_WS2] = "terminal"
+        assert world.tick(10) == 0 and world.notified == []
+        assert _WS1 not in world.state.ids and _WS2 not in world.state.ids
+
+    def test_an_id_with_no_verdict_for_ten_minutes_is_forgotten_and_a_return_is_a_first_sight(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.verdicts[_WS1] = "unknown"
+        world.tick(300)
+        assert _WS1 in world.state.ids
+        world.tick(601)
+        assert _WS1 not in world.state.ids
+        world.end(_WS1, 2)
+        world.verdicts[_WS1] = "terminal"
+        assert world.tick(700) == 0, "a returning id is a first sight: the ends in between are not announced"
+
+    def test_toasts_that_wait_for_a_verdict_are_capped_at_six(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.verdicts[_WS1] = "unknown"
+        for step in range(1, 5):
+            world.end(_WS1, 2)
+            world.tick(step * 5)
+        world.verdicts[_WS1] = "terminal"
+        assert world.tick(25) == 6, "eight ends waited; six are kept"
+
+    def test_the_notification_setting_is_read_through_a_thirty_second_cache(self, monkeypatch):
+        from power_atlas import web as web_mod
+        reads = []
+        monkeypatch.setattr(web_mod, "_notifications_enabled", lambda: reads.append(1) or True)
+        monkeypatch.setattr(web_mod, "_codex_notify_enabled_memo", [-1e9, False])
+        clock = [1000.0]
+        monkeypatch.setattr(web_mod.time, "monotonic", lambda: clock[0])
+        assert web_mod._codex_notify_enabled() is True and web_mod._codex_notify_enabled() is True
+        assert len(reads) == 1
+        clock[0] += 31
+        web_mod._codex_notify_enabled()
+        assert len(reads) == 2
+
+    def test_a_setting_that_cannot_be_read_counts_as_off(self, monkeypatch):
+        from power_atlas import web as web_mod
+
+        def boom():
+            raise OSError("config unreadable")
+        monkeypatch.setattr(web_mod, "_notifications_enabled", boom)
+        monkeypatch.setattr(web_mod, "_codex_notify_enabled_memo", [-1e9, True])
+        assert web_mod._codex_notify_enabled() is False
+
+    def test_sixty_seconds_of_unknown_does_not_forget_an_id(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.verdicts[_WS1] = "unknown"
+        world.tick(65)
+        assert _WS1 in world.state.ids
+
+    def test_a_lock_seen_free_or_with_no_codex_terminal_forgets_everything(self, world):
+        world.add(_WS1)
+        world.add(_WS2)
+        world.tick(0)
+        world.lock_states[_WS1] = "free"
+        world.tick(5)
+        assert _WS1 not in world.state.ids and _WS2 in world.state.ids
+        world.terminal = False
+        world.tick(10)
+        assert world.state.ids == {}
+
+    def test_a_rollout_that_does_not_exist_yet_is_not_remembered_and_its_first_turn_counts_once(self, world):
+        world.add(_WS1)                       # a known thread, so the first tick has happened
+        world.tick(0)
+        world.lock_states[_WS2] = "held"      # a new terminal's lock appears; no rollout yet
+        assert world.tick(5) == 0 and _WS2 not in world.state.ids
+        world.add(_WS2, lines=1)              # the rollout appears with its first turn already done
+        assert world.tick(10) == 1, "the first sight of a new file starts at offset 0"
+        assert world.tick(15) == 0, "and it is counted once"
+
+    def test_a_thread_seen_in_the_first_tick_starts_at_the_end_of_its_last_line(self, world):
+        world.add(_WS1, lines=4)
+        assert world.tick(0) == 0
+
+    def test_disabled_does_no_probe_and_no_read_and_enabling_later_is_a_first_sight(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.enabled = False
+        world.end(_WS1, 2)
+        real = dict(world.deps)
+        for key in ("snapshot", "candidates", "lock_state", "verdict", "read"):
+            world.deps[key] = lambda *a, **k: pytest.fail("a probe or a read while notifications are off")
+        assert world.tick(5) == 0 and world.state.ids == {}
+        world.deps = real
+        world.enabled = True
+        assert world.tick(10) == 0, "enabling is a first sight: no burst of old ends"
+        world.end(_WS1)
+        assert world.tick(15) == 1
+
+    def test_a_sub_agent_rollout_a_hidden_workspace_and_a_network_cwd_send_nothing_and_are_not_read(self, world):
+        for sid in (_WS1, _WS2, _WS3):
+            world.add(sid)
+        world.sources[_WS1] = {"subagent": {"thread_spawn": {}}}
+        world.allowed = lambda cwd: cwd == "C:\\Work\\Proj"
+        world.cwds[_WS2] = "C:\\Hidden"
+        world.cwds[_WS3] = "\\\\server\\share"
+        world.tick(0)
+        for sid in (_WS1, _WS2, _WS3):
+            world.end(sid)
+        assert world.tick(5) == 0 and world.notified == []
+        assert world.reads == [], "nothing out of scope is read"
+
+    def test_an_out_of_scope_id_is_looked_at_again_after_a_minute(self, world):
+        world.add(_WS1)
+        world.allowed = lambda cwd: False
+        world.tick(0)
+        world.allowed = lambda cwd: True
+        world.tick(30)
+        assert _WS1 not in world.state.ids
+        world.tick(61)
+        assert _WS1 in world.state.ids
+
+    def test_the_label_is_the_folder_name_only_and_is_cut_to_sixty_characters(self, world):
+        world.cwds[_WS1] = "C:\\Users\\someone\\" + "x" * 90
+        world.add(_WS1)
+        world.tick(0)
+        world.end(_WS1)
+        world.tick(5)
+        assert world.notified == ["x" * 60]
+        assert "someone" not in world.notified[0]
+
+    def test_a_failing_id_does_not_stop_the_others_and_the_tick_never_raises(self, world):
+        world.add(_WS1)
+        world.add(_WS2)
+        world.tick(0)
+        world.end(_WS1)
+        world.end(_WS2)
+        real = world.deps["verdict"]
+
+        def verdict(snap, sid):
+            if sid == _WS1:
+                raise RuntimeError("boom")
+            return real(snap, sid)
+        world.deps["verdict"] = verdict
+        assert world.tick(5) == 1
+        world.deps["snapshot"] = lambda: (_ for _ in ()).throw(OSError("scan failed"))
+        assert world.tick(10) == 0
+
+    def test_a_toast_is_never_sent_for_a_thread_another_program_holds(self, world):
+        world.add(_WS1)
+        world.verdicts[_WS1] = "other"
+        world.tick(0)
+        world.end(_WS1)
+        assert world.tick(5) == 0 and _WS1 not in world.state.ids
+
+
+class TestCodexTurnWatcherThread:
+    """Phase 5 (D13, D23): the daemon thread, its heartbeat, its restart and its status."""
+
+    @pytest.fixture
+    def web_mod(self, monkeypatch):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_codex_notify_enabled", lambda: True)
+        return web_mod
+
+    def test_the_thread_is_a_daemon_ticks_and_stops_on_its_event(self, web_mod):
+        ticks = []
+        watcher = web_mod._CodexTurnWatcher(tick=lambda: ticks.append(1), interval=0.01)
+        watcher.start()
+        try:
+            assert watcher._thread.daemon is True and watcher._thread.name == "codex-turn-watch"
+            deadline = time.monotonic() + 5
+            while len(ticks) < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert len(ticks) >= 3
+        finally:
+            watcher.stop(join_seconds=1.0)
+        assert not watcher._thread.is_alive()
+
+    def test_a_tick_that_raises_does_not_end_the_thread(self, web_mod):
+        calls = []
+
+        def tick():
+            calls.append(1)
+            raise RuntimeError("x")
+        watcher = web_mod._CodexTurnWatcher(tick=tick, interval=0.01)
+        watcher.start()
+        try:
+            deadline = time.monotonic() + 5
+            while len(calls) < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert len(calls) >= 3 and watcher._thread.is_alive()
+        finally:
+            watcher.stop(join_seconds=1.0)
+
+    def test_a_stalled_tick_does_not_start_a_second_one_and_shows_stalled(self, web_mod):
+        gate = threading.Event()
+        running, clock = [], [1000.0]
+
+        def tick():
+            running.append(1)
+            gate.wait(10)
+        watcher = web_mod._CodexTurnWatcher(tick=tick, interval=0.01, clock=lambda: clock[0])
+        watcher.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not running and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.2)
+            assert len(running) == 1, "one tick at a time"
+            assert watcher.status() == "ok"
+            clock[0] += 61
+            assert watcher.status() == "stalled"
+        finally:
+            gate.set()
+            watcher.stop(join_seconds=1.0)
+
+    def test_status_is_off_without_a_thread_or_with_notifications_off(self, web_mod, monkeypatch):
+        watcher = web_mod._CodexTurnWatcher(tick=lambda: None, interval=0.01)
+        assert watcher.status() == "off"
+        watcher.start()
+        try:
+            assert watcher.status() == "ok"
+            monkeypatch.setattr(web_mod, "_codex_notify_enabled", lambda: False)
+            assert watcher.status() == "off"
+        finally:
+            watcher.stop(join_seconds=1.0)
+
+    def test_a_dead_thread_is_restarted_at_most_once_a_minute_and_never_after_a_stop(self, web_mod):
+        clock = [1000.0]
+        watcher = web_mod._CodexTurnWatcher(tick=lambda: None, interval=0.01, clock=lambda: clock[0])
+        watcher.start()
+        first = watcher._thread
+        watcher._stop.set()
+        first.join(2)
+        watcher._stop.clear()                       # died, not stopped
+        watcher.ensure_running()
+        assert watcher._thread is first, "less than a minute since the last start"
+        clock[0] += 61
+        watcher.ensure_running()
+        try:
+            assert watcher._thread is not first and watcher._thread.is_alive()
+        finally:
+            watcher.stop(join_seconds=1.0)
+        later = watcher._thread
+        clock[0] += 120
+        watcher.ensure_running()
+        assert watcher._thread is later, "a stopped watcher stays stopped"
+
+    def test_the_lifespan_starts_the_thread_and_stops_it_first_on_windows_only(self, web_mod, monkeypatch):
+        order = []
+        fake = type("W", (), {"start": lambda self: order.append("start"),
+                              "stop": lambda self, join_seconds=0.0: order.append(("stop", join_seconds)),
+                              "ensure_running": lambda self: None,
+                              "status": lambda self: "off"})()
+        monkeypatch.setattr(web_mod, "_turn_watcher", fake)
+        monkeypatch.setattr(web_mod, "_TURN_WATCH_THREAD", True)
+        monkeypatch.setattr(web_mod, "_startup_sync_derived_agent", lambda: _noop_async())
+        monkeypatch.setattr(web_mod, "_startup_load_local_secret", lambda: _noop_async())
+        monkeypatch.setattr(web_mod.overview, "warm_usage", lambda stop: None)
+
+        async def run():
+            async with web_mod.lifespan(web_mod.app):
+                pass
+        monkeypatch.setattr(sys, "platform", "win32")
+        asyncio.run(run())
+        assert order[0] == "start" and order[1] == ("stop", 0.0) and order[-1] == ("stop", 1.0)
+        order.clear()
+        monkeypatch.setattr(sys, "platform", "linux")
+        asyncio.run(run())
+        assert "start" not in order
+
+    def test_the_diagnostics_show_the_watcher_status(self, web_mod, monkeypatch):
+        monkeypatch.setattr(web_mod, "_turn_watcher", type("W", (), {"status": lambda self: "stalled"})())
+        assert web_mod._codex_diagnostics()["turn_watch"] == "stalled"
+
+
+async def _noop_async():
+    return None
 
 
 class TestCodexOwnerVerdictNeverRaises:

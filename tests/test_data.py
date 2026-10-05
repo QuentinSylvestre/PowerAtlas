@@ -4348,6 +4348,161 @@ class TestCodexTurnState:
         assert data_codex.turn_state(codex_home / "sessions" / "nope.jsonl") is None
 
 
+class TestCodexNewTurnEnds:
+    """Phase 5 (D13): `new_turn_ends` counts `task_complete` records appended since a state."""
+
+    SID, CWD = _cx_id(41), "C:\\W"
+
+    @staticmethod
+    def _done(i=0):
+        return _cx_rec("event_msg", {"type": "task_complete", "turn_id": f"t{i}"}, _CX_TS)
+
+    @staticmethod
+    def _append(path, extra):
+        with open(path, "ab") as fh:
+            fh.write(extra)
+
+    def _first(self, home, records=()):
+        path = _cx_write(home, self.SID, self.CWD, list(records))
+        count, state = data_codex.new_turn_ends(path, None)
+        assert count == 0 and state is not None
+        return path, state
+
+    def test_first_sight_counts_nothing_even_when_the_file_holds_turn_ends(self, codex_home):
+        path, state = self._first(codex_home, [self._done(1), self._done(2)])
+        assert data_codex.new_turn_ends(path, state) == (0, state)
+
+    def test_an_appended_turn_end_is_counted_once(self, codex_home):
+        path, state = self._first(codex_home, [self._done(1)])
+        self._append(path, _cx_line(self._done(2)))
+        count, state = data_codex.new_turn_ends(path, state)
+        assert count == 1
+        assert data_codex.new_turn_ends(path, state)[0] == 0, "the offset advanced"
+
+    def test_two_turn_ends_in_one_read_count_twice(self, codex_home):
+        path, state = self._first(codex_home)
+        self._append(path, _cx_line(self._done(1)) + _cx_line(self._done(2)))
+        assert data_codex.new_turn_ends(path, state)[0] == 2
+
+    def test_a_torn_last_line_waits_for_its_newline(self, codex_home):
+        path, state = self._first(codex_home)
+        whole = _cx_line(self._done(1))
+        self._append(path, whole[:-9])
+        count, state = data_codex.new_turn_ends(path, state)
+        assert count == 0
+        self._append(path, whole[-9:])
+        assert data_codex.new_turn_ends(path, state)[0] == 1
+
+    def test_a_first_sight_in_the_middle_of_a_line_starts_after_the_last_complete_line(self, codex_home):
+        whole = _cx_line(self._done(2))
+        path = _cx_write(codex_home, self.SID, self.CWD, [self._done(1)], tail=whole[:-9])
+        count, state = data_codex.new_turn_ends(path, None)
+        assert count == 0
+        self._append(path, whole[-9:])
+        assert data_codex.new_turn_ends(path, state)[0] == 1, "the line that was being written is not lost"
+
+    def test_a_first_sight_from_the_start_counts_the_first_turn(self, codex_home):
+        path = _cx_write(codex_home, self.SID, self.CWD, [self._done(1)])
+        count, state = data_codex.new_turn_ends(path, None, from_start=True)
+        assert count == 1 and state is not None
+
+    def test_a_tool_output_or_message_that_quotes_the_words_is_not_counted(self, codex_home):
+        path, state = self._first(codex_home)
+        quoted = _cx_output("c1", 'saw {"type":"event_msg","payload":{"type":"task_complete"}}', ts=_CX_TS)
+        said = _cx_rec("event_msg", {"type": "item_completed", "item": {"type": "AgentMessage", "content": [
+            {"type": "Text", "text": '{"type":"event_msg","payload":{"type":"task_complete"}}'}]}}, _CX_TS)
+        other = _cx_rec("response_item", {"type": "task_complete"}, _CX_TS)
+        self._append(path, _cx_line(quoted) + _cx_line(said) + _cx_line(other))
+        assert data_codex.new_turn_ends(path, state)[0] == 0
+
+    def test_an_unparseable_line_and_a_line_over_the_cap_are_skipped_and_the_offset_passes_them(self, codex_home):
+        path, state = self._first(codex_home)
+        huge = _cx_line(_cx_rec("event_msg", {"type": "task_complete", "pad": "p" * (data_codex._LINE_CAP + 10)}))
+        self._append(path, b"{not json\n" + huge + _cx_line(self._done(1)))
+        count, state = data_codex.new_turn_ends(path, state)
+        assert count == 1
+        assert data_codex.new_turn_ends(path, state)[0] == 0
+
+    def test_a_deeply_nested_line_is_skipped_not_fatal(self, codex_home):
+        path, state = self._first(codex_home)
+        self._append(path, b"[" * 5000 + b"]" * 5000 + b"\n" + _cx_line(self._done(1)))
+        assert data_codex.new_turn_ends(path, state)[0] == 1
+
+    def test_an_append_over_the_read_size_is_taken_in_steps(self, codex_home, monkeypatch):
+        monkeypatch.setattr(data_codex, "TURN_READ_BYTES", 4096)
+        path, state = self._first(codex_home)
+        self._append(path, b"".join(_cx_line(self._done(i)) for i in range(60)))
+        total, calls = 0, 0
+        while True:
+            count, state = data_codex.new_turn_ends(path, state)
+            calls += 1
+            total += count
+            if count == 0 or calls > 60:
+                break
+        assert total == 60 and calls > 2, "no record is lost or counted twice across the steps"
+
+    def test_a_shrunk_file_resets_without_a_count(self, codex_home):
+        path, state = self._first(codex_home, [self._done(1)] * 5)
+        path.write_bytes(path.read_bytes()[:200])
+        assert data_codex.new_turn_ends(path, state) == (0, None)
+
+    def test_a_rewritten_larger_file_with_the_same_head_resets_without_a_count(self, codex_home):
+        path, state = self._first(codex_home, [_cx_user("a" * 300)])
+        head = path.read_bytes()[:data_codex._HEAD_HASH_BYTES]
+        body = path.read_bytes()[data_codex._HEAD_HASH_BYTES:]
+        rewritten = head + body.replace(b"aaa", b"bbb") + _cx_line(self._done(1)) * 3
+        path.write_bytes(rewritten)
+        assert len(rewritten) > state.offset
+        assert data_codex.new_turn_ends(path, state) == (0, None), "the bytes before the offset changed"
+
+    def test_a_changed_head_resets_without_a_count(self, codex_home):
+        path, state = self._first(codex_home, [self._done(1)])
+        raw = bytearray(path.read_bytes())
+        raw[20] ^= 1
+        path.write_bytes(bytes(raw) + _cx_line(self._done(2)))
+        assert data_codex.new_turn_ends(path, state) == (0, None)
+
+    def test_an_offset_that_is_not_a_line_start_resets_without_a_count(self, codex_home):
+        path, state = self._first(codex_home, [self._done(1)])
+        self._append(path, _cx_line(self._done(2)))
+        raw = path.read_bytes()
+        forged = state._replace(offset=state.offset - 5, tail_len=min(state.offset - 5, 64))
+        assert raw[forged.offset - 1:forged.offset] != b"\n"
+        assert data_codex.new_turn_ends(path, forged) == (0, None)
+
+    def test_a_state_with_matching_hashes_at_a_mid_line_offset_resets_without_a_count(self, codex_home):
+        path, state = self._first(codex_home, [self._done(1)])
+        self._append(path, _cx_line(self._done(2)))
+        mid = state.offset + 7
+        with data_codex.open_shared(path) as fh:
+            forged = data_codex._watch_state(fh, mid, state.head_len, state.head_hash)
+        assert path.read_bytes()[mid - 1:mid] != b"\n"
+        assert data_codex.new_turn_ends(path, forged) == (0, None), "only the newline check can tell"
+
+    def test_one_line_longer_than_a_read_starts_over_instead_of_stalling(self, codex_home, monkeypatch):
+        monkeypatch.setattr(data_codex, "TURN_READ_BYTES", 4096)
+        path, state = self._first(codex_home)
+        self._append(path, b"x" * 10000)
+        assert data_codex.new_turn_ends(path, state) == (0, None)
+
+    def test_a_reset_state_makes_the_next_call_a_first_sight(self, codex_home):
+        path, state = self._first(codex_home, [self._done(1)] * 3)
+        path.write_bytes(path.read_bytes()[:100])
+        count, state = data_codex.new_turn_ends(path, state)
+        assert (count, state) == (0, None)
+        self._append(path, b"\n" + _cx_line(self._done(9)))
+        count, state = data_codex.new_turn_ends(path, state)
+        assert count == 0 and state is not None, "the earlier records are not announced"
+
+    def test_a_missing_file_gives_a_reset_and_never_raises(self, codex_home):
+        assert data_codex.new_turn_ends(codex_home / "sessions" / "nope.jsonl", None) == (0, None)
+
+    def test_the_state_holds_hashes_never_content(self, codex_home):
+        path, state = self._first(codex_home, [_cx_user("secret words")])
+        assert b"secret" not in repr(state).encode()
+        assert len(state.head_hash) == 40 and len(state.tail_hash) == 40
+
+
 class TestCodexActivityEpoch:
     """D16: the later of the rollout mtime and, only when the mtime is older than the
     300 s window, the last complete record's timestamp; a stamp from the future is

@@ -45,7 +45,7 @@ from .config import (load_config, save_config, ConfigUnreadableError,
                      ensure_local_secret, hold_local_secret_in_memory,
                      local_secret_status, rotate_local_secret,
                      ACP_PERMISSION_MODES)
-from . import agent_profile, autostart, data, data_codex, icons, launcher, lock_owner, notifications, presence
+from . import agent_profile, autostart, data, data_codex, data_codex_state, icons, launcher, lock_owner, notifications, presence
 from . import overview
 from . import quiet_log
 from . import permission_rows
@@ -366,9 +366,9 @@ def _codex_diagnostics() -> dict:
     """Two short status strings for the dashboard, never a pid, path or id (D23).
 
     `owner_lookup` is `ok`, `backing-off` or `disabled` (always `disabled` off Windows);
-    `turn_watch` is `off` until the turn-end notifier exists."""
+    `turn_watch` is `off` (notifications off, or no thread), `ok` or `stalled` (no heartbeat for 60 s)."""
     return {"owner_lookup": lock_owner.status() if sys.platform == "win32" else "disabled",
-            "turn_watch": "off"}
+            "turn_watch": _turn_watcher.status()}
 
 
 # One shared enumerator of the thread locks a terminal holds, for the Overview tiles (and,
@@ -433,6 +433,244 @@ def _codex_terminal_threads(snapshot) -> list[str]:
     with _codex_enum_lock:
         _codex_enum["at"], _codex_enum["ids"], _codex_enum["owned"] = _codex_clock(), list(ids), owned_now
     return ids
+
+
+# --- Turn-end notifier for terminal Codex threads (D13) --------------------------------------
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 5
+#
+# One daemon thread ticks every 5 s while `notifications.enabled` is on. For each Codex thread whose
+# writer lock is held (and a Codex terminal process exists) it reads the rollout's appended bytes and
+# fires one toast per `task_complete` record. It never uses the shared executor, so a blocked read
+# stalls only this thread, and only one tick runs at a time. A turn that ends before the watcher
+# first sees the lock (about one tick) can be missed.
+
+_TURN_WATCH_TICK = 5.0            # seconds between ticks
+_TURN_WATCH_STALLED = 60.0        # a heartbeat older than this is `stalled`
+_TURN_WATCH_RESTART_GAP = 60.0    # a dead thread is restarted at most this often
+_TURN_WATCH_FORGET = 600.0        # an id with no `terminal` verdict for this long is forgotten
+_TURN_WATCH_WAIT = 60.0           # a toast waits this long for a `terminal` verdict
+_TURN_WATCH_SKIP = 60.0           # an id found out of scope is looked at again after this long
+_TURN_WATCH_ENABLED_REUSE = 30.0  # `_notifications_enabled` parses the config file; reuse its answer
+_TURN_TOASTS_PER_ID = 3           # more than this many ends in one tick coalesce into one toast
+_TURN_TOASTS_PER_TICK = 6
+_TURN_LABEL_CHARS = 60
+_TURN_WATCH_THREAD = True         # a test sets False so no real thread starts
+
+
+class _Tracked:
+    """What the watcher keeps per thread: where it stopped reading and the toasts that wait."""
+    __slots__ = ("path", "label", "turn", "from_start", "last_ok", "waiting")
+
+    def __init__(self, path, label, from_start, now):
+        self.path, self.label, self.turn, self.from_start = path, label, None, from_start
+        self.last_ok = now
+        self.waiting: list[float] = []
+
+
+class _WatchState:
+    __slots__ = ("ids", "skipped", "no_rollout", "first_tick_done")
+
+    def __init__(self):
+        self.ids: dict[str, _Tracked] = {}
+        self.skipped: dict[str, float] = {}
+        self.no_rollout: set[str] = set()
+        self.first_tick_done = False
+
+    def drop_all(self):
+        self.ids.clear()
+        self.skipped.clear()
+        self.no_rollout.clear()
+        self.first_tick_done = False
+
+
+def _turn_label(cwd: str) -> str:
+    """The workspace folder name only, never the full path, cut to 60 characters."""
+    return (Path(cwd).name or cwd)[:_TURN_LABEL_CHARS]
+
+
+def _codex_turn_watch_once(state: _WatchState, deps: dict, now: float) -> int:
+    """One tick. `deps` holds the injected `enabled`, `snapshot`, `has_terminal`, `candidates`
+    (held thread ids), `lock_state`, `verdict`, `rollout`, `meta`, `allowed`, `read` and `notify`.
+    Returns the number of toasts sent. Never raises: a failing id does not stop the others."""
+    try:
+        if not deps["enabled"]():
+            state.drop_all()  # enabling later is a first sight: no burst of old turn ends
+            return 0
+        snapshot = deps["snapshot"]()
+        if not deps["has_terminal"](snapshot):
+            state.ids.clear()
+            state.no_rollout.clear()
+            state.first_tick_done = True
+            return 0
+        candidates = list(deps["candidates"](snapshot))
+    except Exception as exc:
+        quiet_log.warn(log, "codex turn watch: tick setup failed", exc)
+        return 0
+    sent = 0
+    for sid in dict.fromkeys([*state.ids, *candidates]):  # tracked ids first
+        try:
+            sent += _codex_turn_watch_id(state, deps, snapshot, sid, now, _TURN_TOASTS_PER_TICK - sent)
+        except Exception as exc:
+            quiet_log.warn(log, "codex turn watch: an id failed", exc)
+    state.first_tick_done = True
+    return sent
+
+
+def _codex_turn_watch_id(state: _WatchState, deps: dict, snapshot, sid: str, now: float, budget: int) -> int:
+    tracked = state.ids.get(sid)
+    if deps["lock_state"](sid) != "held":
+        state.ids.pop(sid, None)
+        state.no_rollout.discard(sid)
+        return 0
+    verdict = deps["verdict"](snapshot, sid)
+    if verdict == "other":
+        state.ids.pop(sid, None)
+        return 0
+    if tracked is None:
+        if now - state.skipped.get(sid, -1e9) < _TURN_WATCH_SKIP:
+            return 0
+        path = deps["rollout"](sid)
+        if path is None:
+            if state.first_tick_done:
+                state.no_rollout.add(sid)  # a rollout that shows up later is a new file of this terminal
+            return 0
+        meta = deps["meta"](path)
+        source = meta.get("source") if isinstance(meta, dict) else None
+        cwd = meta.get("cwd") if isinstance(meta, dict) else None
+        if (not isinstance(meta, dict) or (isinstance(source, dict) and "subagent" in source)
+                or not deps["allowed"](cwd)):
+            state.skipped[sid] = now
+            return 0
+        tracked = state.ids[sid] = _Tracked(path, _turn_label(cwd), sid in state.no_rollout, now)
+        state.no_rollout.discard(sid)
+    if verdict == "terminal":
+        tracked.last_ok = now
+    elif now - tracked.last_ok > _TURN_WATCH_FORGET:
+        state.ids.pop(sid, None)  # no verdict for 10 minutes: forget it; a return is a first sight
+        return 0
+    count, tracked.turn = deps["read"](tracked.path, tracked.turn, from_start=tracked.from_start)
+    tracked.from_start = False
+    if count:
+        tracked.waiting += [now] * (1 if count > _TURN_TOASTS_PER_ID else count)
+        del tracked.waiting[_TURN_TOASTS_PER_TICK:]
+    tracked.waiting[:] = [t for t in tracked.waiting if now - t <= _TURN_WATCH_WAIT]
+    if verdict != "terminal" or not tracked.waiting:
+        return 0
+    sent = 0
+    for _ in tracked.waiting[:max(budget, 0)]:
+        deps["notify"](tracked.label)
+        sent += 1
+    tracked.waiting.clear()  # the ones over this tick's budget are dropped, not saved for a flood later
+    return sent
+
+
+_codex_notify_enabled_memo: list = [-1e9, False]
+
+
+def _codex_notify_enabled() -> bool:
+    """`_notifications_enabled()` through a 30 s cache (it parses the config file)."""
+    now = time.monotonic()
+    if now - _codex_notify_enabled_memo[0] >= _TURN_WATCH_ENABLED_REUSE:
+        try:
+            enabled = bool(_notifications_enabled())
+        except Exception as exc:
+            quiet_log.warn(log, "codex turn watch: could not read the notification setting", exc)
+            enabled = False
+        _codex_notify_enabled_memo[:] = [now, enabled]
+    return _codex_notify_enabled_memo[1]
+
+
+def _codex_watch_allowed(cwd) -> bool:
+    """A local drive-letter workspace that is not hidden, with the Codex provider enabled."""
+    if data_codex_state.cwd_class(cwd) != "local" or not data_codex_state.is_local_drive(cwd):
+        return False
+    providers, hidden = _overview_filters_cached()
+    return "codex" in providers and not hidden(cwd)
+
+
+def _codex_watch_candidates(snapshot) -> list[str]:
+    _codex_terminal_threads(snapshot)  # refreshes the shared enumerator (3 s reuse)
+    with _codex_enum_lock:
+        return sorted(_codex_enum["held"] | _codex_enum["owned"])
+
+
+def _codex_watch_deps() -> dict:
+    return {
+        "enabled": _codex_notify_enabled,
+        "snapshot": presence.get_snapshot,
+        "has_terminal": lambda snap: snap.has_codex_terminal(),
+        "candidates": _codex_watch_candidates,
+        "lock_state": data_codex.session_writer_state,
+        "verdict": _codex_owner_verdict,
+        "rollout": data_codex.rollout_path,
+        "meta": data_codex.read_meta,
+        "allowed": _codex_watch_allowed,
+        "read": data_codex.new_turn_ends,
+        "notify": lambda label: notifications.notify_turn_end(label, "end_turn"),
+    }
+
+
+class _CodexTurnWatcher:
+    """The daemon thread of D13: one tick every 5 s, one at a time, a heartbeat after each."""
+
+    def __init__(self, tick=None, interval: float = _TURN_WATCH_TICK, clock=time.monotonic):
+        self._state = _WatchState()
+        self._tick = tick or (lambda: _codex_turn_watch_once(self._state, _codex_watch_deps(), time.monotonic()))
+        self._interval = interval
+        self._clock = clock
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._heartbeat = 0.0
+        self._last_start = -1e9
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._last_start = self._clock()
+        self._heartbeat = self._clock()
+        self._thread = threading.Thread(target=self._run, name="codex-turn-watch", daemon=True)
+        try:
+            self._thread.start()
+        except RuntimeError as exc:
+            self._thread = None
+            quiet_log.warn(log, "codex turn watch: the thread could not be started", exc)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._tick()
+            except Exception as exc:  # a tick never raises; this is the last line of defence
+                quiet_log.warn(log, "codex turn watch: tick failed", exc)
+            self._heartbeat = self._clock()
+
+    def stop(self, join_seconds: float = 0.0) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and join_seconds > 0 and thread is not threading.current_thread():
+            thread.join(join_seconds)
+
+    def ensure_running(self) -> None:
+        """Restart a thread that died, at most once a minute. Called by the dashboard sessions request."""
+        if self._stop.is_set() or (self._thread is not None and self._thread.is_alive()):
+            return
+        if self._clock() - self._last_start >= _TURN_WATCH_RESTART_GAP:
+            self.start()
+
+    def status(self) -> str:
+        """`off` (not running or notifications off), `ok` or `stalled` (no heartbeat for 60 s)."""
+        if self._thread is None or not self._thread.is_alive() or not _codex_notify_enabled():
+            return "off"
+        return "stalled" if self._clock() - self._heartbeat > _TURN_WATCH_STALLED else "ok"
+
+
+def _ensure_turn_watch() -> None:
+    """A dashboard sessions request restarts a notifier thread that died (at most once a minute)."""
+    if _TURN_WATCH_THREAD and sys.platform == "win32":
+        _turn_watcher.ensure_running()
+
+
+_turn_watcher = _CodexTurnWatcher()
 
 
 def _session_is_live(snapshot, session, provider: str) -> bool:
@@ -1045,9 +1283,15 @@ async def lifespan(app_instance):
         acp.set_mode_gate_hook(_derived_agent_in_effect)
     sweeper =acp.start_sweeper() if acp is not None else None
     watchdog = acp.start_watchdog() if acp is not None else None
+    # The Codex turn-end notifier (D13): a daemon thread of its own, idle while notifications
+    # are off. Windows only, like the lock owner rule it depends on.
+    # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 5
+    if _TURN_WATCH_THREAD and sys.platform == "win32":
+        _turn_watcher.start()
     try:
         yield
     finally:
+        _turn_watcher.stop()  # first: it is a daemon thread, so exit never waits on it
         task.cancel()
         usage_stop.set()
         usage_task.cancel()
@@ -1100,6 +1344,7 @@ async def lifespan(app_instance):
                 _flush_gate_refusal_warnings()
             except Exception:
                 log.exception("gate-refusal log flush failed")
+            _turn_watcher.stop(join_seconds=1.0)  # after the rest of the teardown, bounded
 
 
 async def _background_refresh():
@@ -3284,6 +3529,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         "capacity": capacity,
     }
     if include_provider and "codex" in enabled:
+        _ensure_turn_watch()
         out["codex_diagnostics"] = _codex_diagnostics()
     return out
 
@@ -3455,6 +3701,7 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
         "capacity": capacity,
     }
     if include_provider and "codex" in enabled:
+        _ensure_turn_watch()
         payload["codex_diagnostics"] = _codex_diagnostics()
     if include_provider:
         # Dashboard-only. A flat row names its folder but not whether that
