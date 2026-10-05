@@ -32892,7 +32892,7 @@ class TestOverviewUsage:
         ])
         assert self.daily(self.summary(), _ov_day(t))["agent_s"] == {"claude-code": 100.0}
 
-    def test_sub_agent_transcripts_add_tokens_and_tools_only(self, parses):
+    def test_sub_agent_transcripts_add_tokens_only(self, parses):
         now = self.now
         sid = "88888888-8888-8888-8888-888888888888"
         u = {"input_tokens": 5, "output_tokens": 1, "cache_read_input_tokens": 100,
@@ -34277,20 +34277,15 @@ class TestOverviewUsage:
 
     def test_codex_strings_that_reach_the_page_are_cut_to_their_limits(self):
         """Final review finding B6 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW):
-        a tool name, a `turn_context` model and a `session_meta` cwd came from the file with no
-        limit and went to the page whole. A name or model is cut to 80 characters; a cwd is never
-        cut (a cut path would not match a hidden workspace): one over 4096 characters leaves the file
-        out of the summary. One at the limit is untouched, and a failed call still lands on its cut
-        name's row."""
+        a `turn_context` model and a `session_meta` cwd came from the file with no limit and went
+        to the page whole. A model is cut to 80 characters; a cwd is never cut (a cut path would
+        not match a hidden workspace): one over 4096 characters leaves the file out of the
+        summary. One at the limit is untouched."""
         from power_atlas import overview
         ellipsis = "\u2026"
         t = self.now - 7200
-        exact = "n" * 80                                  # the longest name that is not cut
-        long_name = "tool" + " " * 3 + "x" * 600           # whitespace runs collapse, as a tile's do
         records = [_ovx_context(t, "m" * 80), _ovx_context(t + 1, "m" * 81),
                    _ovx_context(t + 2, "m" * 81),
-                   _ovx_call(t + 3, exact, "c1"), _ovx_call(t + 4, long_name, "c2"),
-                   _ovx_output(t + 5, "c2", "Exit code: 1\nx"), _ovx_call(t + 6, "n" * 81, "c3"),
                    _ovx_started(t + 7), _ovx_complete(t + 8, duration_ms=60_000)]
         prefix = "C:\\ws\\"
         path = self.codex(1, records, cwd=prefix + "d" * 600)
