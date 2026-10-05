@@ -3003,6 +3003,42 @@ def _stored_session_agent_mode_v3(session_id: str) -> str | None:
     return None
 
 
+# The effort level every ACP session runs at unless one was chosen for it.
+# kiro-cli's own default is `high`, and `kiro-cli acp` does not read the
+# `chat.modelDefaults` effort in ~/.kiro/settings/cli.json that the terminal UI
+# applies, so a PowerAtlas session ran a level below the same session in the
+# terminal (measured 2026-10-05: `effortLevel` advertised at `high`, the
+# terminal's session stored `max`). Applied through the agent's own
+# `effortLevel` config option, so it takes effect on the next turn. Exposing the
+# choice in the UI is a roadmap item.
+DEFAULT_EFFORT_LEVEL: Final[str] = "max"
+
+
+def _stored_session_effort_v3(session_id: str) -> str | None:
+    """The ``effortLevel`` a v3 session persisted, or ``None`` if it has none.
+
+    ``None`` covers no ``session.json``, no ``effortLevel`` key, and anything
+    unreadable. It means "nobody chose a level for this session", which is when
+    `load_session` applies `DEFAULT_EFFORT_LEVEL`: a session whose level was
+    chosen (the terminal stores one) is left as it was.
+    """
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return None
+    sessions_root = Path.home() / ".kiro" / "sessions"
+    try:
+        for hash_dir in sessions_root.iterdir():
+            if not hash_dir.is_dir() or hash_dir.name == "cli":
+                continue
+            candidate = hash_dir / session_id / "session.json"
+            if candidate.is_file():
+                meta = json.loads(candidate.read_text(encoding="utf-8"))
+                level = meta.get("effortLevel") if isinstance(meta, dict) else None
+                return level if isinstance(level, str) and level else None
+    except Exception:
+        return None
+    return None
+
+
 # v3 has no lock file with a pid the way v2 does (Current State: concurrent
 # `session/load` still succeeds despite v3 now writing `.lock` files, so
 # lock-file-based checking is the wrong signal regardless). `_lock_holder_v3`
@@ -5553,6 +5589,35 @@ class _Supervisor:
             # Do not leave KAS waiting on an unanswered request.
             self._discard("Token delivery failed: could not write auth response")
 
+    async def _apply_default_effort(self, session_id: str, result: Any) -> None:
+        """Set `DEFAULT_EFFORT_LEVEL` on a session, if the agent offers it.
+
+        ``result`` is the ``session/new`` or ``session/load`` response, whose
+        ``configOptions`` advertise ``effortLevel`` with its levels and current
+        value. Nothing is sent when the option is absent (a model with no
+        effort levels, or an agent build without the option), when ``max`` is
+        not among its levels, or when it is already set. A failure is logged and
+        never raised: a session that runs one level lower is better than one
+        that does not open.
+        """
+        options = result.get("configOptions") if isinstance(result, dict) else None
+        option = next((o for o in options or ()
+                       if isinstance(o, dict) and o.get("id") == "effortLevel"), None)
+        if option is None or option.get("currentValue") == DEFAULT_EFFORT_LEVEL:
+            return
+        levels = {o.get("value") for o in option.get("options") or ()
+                  if isinstance(o, dict)}
+        if DEFAULT_EFFORT_LEVEL not in levels:
+            return
+        try:
+            await self._request(
+                "session/set_config_option",
+                {"sessionId": session_id, "configId": "effortLevel",
+                 "value": DEFAULT_EFFORT_LEVEL})
+        except Exception as exc:
+            log.warning("ACP: could not set effort %r on %s: %s",
+                        DEFAULT_EFFORT_LEVEL, session_id, exc)
+
     async def new_session(self, cwd: str, mode: str | None = None) -> dict:
         """Create one session.
 
@@ -5617,6 +5682,7 @@ class _Supervisor:
                 except Exception:
                     log.warning("ACP: replay of buffered frame failed for "
                                 "%s, skipping", session_id, exc_info=True)
+            await self._apply_default_effort(session_id, result)
         finally:
             self._reserved -= 1
             if self._pending_commands is not None:
@@ -5732,10 +5798,16 @@ class _Supervisor:
                 record = self.sessions.get(session_id)
                 if record is not None:
                     record["mode"] = load_mode if persisted is None else persisted
-                await self._request(
+                # A session nobody chose a level for runs at the default; one
+                # whose level is stored (the terminal records its own) keeps it.
+                chosen_effort = await asyncio.to_thread(
+                    _stored_session_effort_v3, session_id)
+                loaded = await self._request(
                     "session/load",
                     {"sessionId": session_id, "cwd": cwd, "mcpServers": [],
                      **_build_kas_session_params(mode_id=load_mode)})
+                if chosen_effort is None:
+                    await self._apply_default_effort(session_id, loaded)
             except BaseException:
                 self.sessions.pop(session_id, None)
                 self._publish_live()
