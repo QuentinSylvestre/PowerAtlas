@@ -1,7 +1,7 @@
 # Codex Live Status, Context Pressure and Sub-agent Usage from the State Database
 
 > **Date**: 2026-10-02
-> **Status**: In Progress — Phase 1 part 1 (the reader) done; the wiring waits on files another session is editing  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0 and 1 done and reviewed; Phase 2 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Follow-ups deferred by the archived Codex provider plan: a lock-owner live dot, a Working/Idle verdict and turn-end notifications for terminal Codex sessions, Codex context pressure, sub-agent token usage, and an optional state-database layer that feeds them. Driving Codex from `/acp` and app-server integration are out of scope.
 > **Estimated effort**: 5-6 days (pre-flight 0.5, database and sub-agent usage 1, context pressure 0.5, lock owner and live dot 1.25, verdict 1, notifier 0.75, documentation, cleanup and QA 0.75)
@@ -177,12 +177,12 @@ All measurements print counts, shapes and timings only: no ids, no paths, no mes
 **QA**: against the live database, read the Usage page and compare the new line with a direct read-only query of the same rows, **using a kind-agnostic oracle (the sum of `tokens_used` over `source LIKE '{"subagent"%'` with `archived = 0` and the same window)**; the totals must match. Fail-open: point `CODEX_STATE_DIR` at an empty folder in a script and confirm the page's note reverts.
 
 **Exit criteria**:
-- [ ] `data_codex_state.py` and `quiet_log.py` exist with the contracts above and the header stating "never `immutable=1`, never writes to the database, never raises".
-- [ ] All Phase 1 tests above pass; `pytest tests --timeout=300`, `node tests/acp_page.test.mjs` and `_check_test_names.py` pass; `ruff` counts equal `HEAD`.
-- [ ] Mutation checks, each applied once and restored byte for byte, fail the tests: kind parsed with `json.loads`; URI without `mode=ro`; `immutable=1` added; an exception allowed to escape; `substr` on `source` removed; `substr` on `cwd` removed; `LIMIT` removed or a partial sum returned; the `length(cwd)` exclusion removed; `cwd_class` reduced to a plain `\\` prefix test; the `updated_at_ms` column requirement removed; the kind precedence reversed; `trusted_schema` removed; the progress handler removed; the connect timeout removed; the window rule on `updated_at_ms`; archived rows included; the prefix strip removed; the network-shaped exclusion removed; the hidden-workspace filter removed; the freshness guard removed; the highest-number rule replaced by the first match; the memo keyed on filtered rows; a failure not memoised; the total folded into `codex_tokens`.
-- [ ] Live QA: the line's total equals the kind-agnostic direct query; with the database absent the page shows today's note and no line.
-- [ ] README's Usage bullet replaces the sentence that Codex sub-agent threads are not counted and describes the sub-agent line, its source and the `codex_state_db_status` hint (documentation wiring, section 8).
-- [ ] The `AGENTS.md` sentence on the Codex test redirects names four folders, including `CODEX_STATE_DIR`, and was shown to the user and approved; the fixtures and both guard tests include it.
+- [x] `data_codex_state.py` and `quiet_log.py` exist with the contracts above and the header stating "never `immutable=1`, never writes to the database, never raises". Code commits `fcf6497`, `3516570`, `89ff735`.
+- [x] All Phase 1 tests above pass; `pytest tests --timeout=300`, `node tests/acp_page.test.mjs` and `_check_test_names.py` pass; `ruff` counts equal `HEAD`. Final run on the committed `HEAD` in a clean worktree: the full suite passes; `node tests/acp_page.test.mjs` passes 943 of 943 in the working tree (a clean checkout of `ba65f9e` fails 341 page checks for reasons outside this plan: another session's uncommitted page work); `ruff` counts for the edited files equal `HEAD`.
+- [x] Mutation checks, each applied once and restored byte for byte, fail the tests: kind parsed with `json.loads`; URI without `mode=ro`; `immutable=1` added; an exception allowed to escape; `substr` on `source` removed; `substr` on `cwd` removed; `LIMIT` removed or a partial sum returned; the `length(cwd)` exclusion removed; `cwd_class` reduced to a plain `\\` prefix test; the `updated_at_ms` column requirement removed; the kind precedence reversed; `trusted_schema` removed; the progress handler removed; the connect timeout removed; the window rule on `updated_at_ms`; archived rows included; the prefix strip removed; the network-shaped exclusion removed; the hidden-workspace filter removed; the freshness guard removed; the highest-number rule replaced by the first match; the memo keyed on filtered rows; a failure not memoised; the total folded into `codex_tokens`. 31 mutants of the reader, 7 of the wiring and 6 of the page code were each applied once and restored byte for byte: all fail a case. Not applicable: the `length(cwd)` check (the column was dropped) and the memo keyed on filtered rows (the memo holds raw rows by construction).
+- [x] Live QA: the line's total equals the kind-agnostic direct query; with the database absent the page shows today's note and no line. Done on 2026-10-05 against a copy of the live database (Codex was closed, so the copy got an empty `-wal` and `-shm` stub): 25 sub-agent rows, 24,166,053 tokens, equal to the kind-agnostic direct query (18.8 M `thread_spawn`, 5.4 M `guardian`); an empty folder gives no line and status `absent`; the real folder gives `idle` and no file appeared in the Codex home. The page was not opened in a browser (with Codex closed the live page shows no line); the rendering is covered by the node cases.
+- [x] README's Usage bullet replaces the sentence that Codex sub-agent threads are not counted and describes the sub-agent line, its source and the `codex_state_db_status` hint (documentation wiring, section 8).
+- [x] The `AGENTS.md` sentence on the Codex test redirects names four folders, including `CODEX_STATE_DIR`, and was shown to the user and approved; the fixtures and both guard tests include it. Shown to the user as exact text and approved 2026-10-05; commit `ab46f3b`.
 
 ### Phase 2: Codex context pressure [QA]
 **Covers**: SC-4
@@ -404,7 +404,7 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 - `cwd_key` is not added to `data_codex.py` in this part: nothing consumes it before Phase 3 and an unused public function would be dead code. Phase 3 adds it with its first consumer.
 - The mutation "memo keyed on filtered rows" does not apply: the memo holds raw rows by construction (a test pins that a hidden tag applies at once).
 - The measured source shapes (a copy of the live database, counts only): 543 sub-agent rows, 297 with the quoted `"thread_spawn"`, 246 with the quoted `"guardian"`, none with both.
-Still to do in Phase 1: the `overview.usage_summary` wiring, the `index.html` line and note, the node tests, `tests/test_web.py` cases, the README bullet and the `AGENTS.md` sentence, then QA, the mutation list for the wiring, and the phase review. These edit files another session has uncommitted changes in (`overview.py`, `index.html`, `README.md`, `tests/acp_page.test.mjs`, `tests/test_web.py`), so they wait for that work to be committed or for the user's go-ahead.
+**Phase 1 (code commits `fcf6497`, `3516570`, `6ce89d3`, `89ff735`).** The wiring, the page line and note, the README bullet and the `AGENTS.md` sentence are done on top of part 1. Divergences added by the review: a read needs both the `-wal` and the `-shm` file (a `-wal` alone let the read-only open create `-shm` in Codex's folder; a process that exits between the check and the open can still do that, stated in the module header); one undecodable value no longer fails the whole read (`text_factory` replaces it and `cwd_class` then leaves that row out); a directory or link holding the highest state number gives None instead of falling back to a lower file; the usage summary's hidden-workspace failure log names the exception class only (it used to log the path and a traceback, for every provider); the page note adds "so they are an upper bound" (D6). The state-database statuses are `ok`, `absent`, `idle`, `stale` and `error`; D23's list lacks `idle`. Commit `3516570` was built from a stale copy of `tests/test_web.py` and removed three lines another change had just added (the `NO_COLOR` assertions); `6ce89d3` restores them byte for byte. Lesson: stage your own hunks from a patch of your own diff (`git apply --cached`), never a whole file rebuilt from an earlier `HEAD`.
 
 ## Follow-up Work (Deferred)
 
@@ -425,6 +425,7 @@ Still to do in Phase 1: the `overview.usage_summary` wiring, the `index.html` li
 15. **A re-diff of the helper deny-list when the Codex version changes.** `_CODEX_HELPER_SUBCOMMANDS` is a deny-list that ages (Risk Assessment). Needs a source for the installed Codex version.
 16. **Two terminals in one repository give identical toasts.** D13's label is the folder name only; the existing ACP label adds a session-id fragment. Reopen if it confuses.
 17. **Merge the two writer-state caches.** `session_writer_state` has its own cache beside `_lock_cache` and `_busy_cache` so that the Resume gate and its many tests stay untouched (Phase 3); one probe serving both would halve the probe load. Reopen when those tests are next reworked.
+18. **State-database reader leftovers (Phase 1 review, Low).** One huge TEXT value inside a single SQLite step is not interrupted by the 1.5 s progress handler (a hostile or very large database only); `_tally` checks no `stop_event` inside its loop and calls the hidden-workspace filter once per distinct local cwd, which for a path holding `~` expands 8.3 names with `GetLongPathNameW` (network traffic on a mapped drive; `cwd_class` rejects only UNC and device shapes); the plan's test list names a hostile non-integer `archived`, an 8.3 spelling of a hidden folder and a patched `GetLongPathNameW` that must not be called for the UNC form, which no test drives (the injected filter is checked instead, and the SQL `archived = 0` makes the first safe). Reopen if a mapped-drive workspace or a very large database shows up.
 
 ## Review Log
 
@@ -564,33 +565,52 @@ The hook is a security gate, so the phase's code review ran three cycles. Cycle 
 
 Mutation check by the Reliability engineer: about 52 mutants of the checker and hooks run through the 119-case script; 12 survived, 7 of them real gaps (the rename stride, `--no-color`, `-M`, line numbers, the `$1` argument, the venv choice, the process clean-up). Rows 9, 10 and 13 close three of those; the rest are in Follow-up Work 11. Reviewer gaps: merge, rebase and cherry-pick flows, submodules, a hostile `core.hooksPath`, Windows alternate data streams and long paths were not exercised. Health after this cycle: Green (row 3 was accepted by the user on 2026-10-05; the rows resolved as accepted are the audit trail).
 
+### 2026-10-05 -- Phase 1 code review (via /qdev)
+
+Standard effort, two personas in fresh context on `fcf6497` and `3516570`: a Security auditor (untrusted database values, the read-only guarantee, denial of service, logs, page markup) and a Senior engineer (plan compliance, completeness, test adequacy by mutation). About 15 raw findings merged to the 14 below (1 High, 6 Medium, 7 Low). The orchestrator confirmed the High by reading the commit's diff. The Senior engineer ran 20 mutants of the reader, the wiring and the `NO_COLOR` scrub: 17 detected, 3 survived (the stopped-read memo, the pre-call stop check, the `NO_COLOR` scrub). Both reviewers ran only in throwaway worktrees; the Senior engineer left one stray `git stash` entry in the shared repository (empty; the orchestrator dropped it).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Commit `3516570` removed three lines another change (`7bde528`, the `NO_COLOR` scrub test) had just added to `tests/test_web.py`: the file was rebuilt from an older `HEAD` (Senior). | Fixed -- `6ce89d3` restores them byte for byte; the lesson is in section 9 and the Harness Improvement list. |
+| 2 | Medium | A `-wal` file without a `-shm` file passed the gate, so the read-only open created `-shm` in Codex's folder (Security). | Fixed -- `89ff735`: both files are required; a test for a `-wal` alone. |
+| 3 | Medium | No test pinned that a read leaves the folder and the database unchanged (Security). | Fixed -- `89ff735`: a size-and-hash snapshot test. |
+| 4 | Medium | The usage summary's hidden-workspace failure log wrote a database-derived path and a traceback, against D20 (Security, Senior). | Fixed -- `89ff735`: the class only; a test with a raising filter. |
+| 5 | Medium | A refresh stopped during the read was not pinned (the test set the event first) (Senior). | Fixed -- `89ff735`: a stop set inside the read, and a second read proves nothing was memoised. |
+| 6 | Medium | The stop check before the database call was not pinned (the test set the event inside the fake) (Senior). | Fixed -- `89ff735`: the event is set after the transcript pass; the database must not be read. |
+| 7 | Medium | The four page checks could not be run in a clean checkout, so the reviewer could not verify them (Senior). | Fixed -- verified in the working tree (943 of 943) and by 6 page mutants; the clean-checkout failures (341 at `ba65f9e`) come from another session's uncommitted page work and are outside this plan. |
+| 8 | Low | The README sentence was glued to an existing long line (Senior). | Fixed -- `89ff735`. |
+| 9 | Low | The page note did not say the total is an upper bound (D6) (Senior). | Fixed -- `89ff735`; the node cases pin the text. |
+| 10 | Low | One undecodable value failed the whole read (Security). | Fixed -- `89ff735`: replacement characters; a test. |
+| 11 | Low | A directory or link with the highest number made the reader fall back to a lower file (Security). | Fixed -- `89ff735`: None; a test. |
+| 12 | Low | The 1.5 s progress handler cannot interrupt one huge value (Security). | Orchestrator: proposed-accept -- pending user decision; Follow-up Work 18. |
+| 13 | Low | `_tally` has no stop check and `~` paths on a mapped drive reach `GetLongPathNameW` (Security). | Orchestrator: proposed-accept -- pending user decision; Follow-up Work 18. |
+| 14 | Low | Plan-listed tests with no case: hostile `archived`, an 8.3 spelling, a patched `GetLongPathNameW` for the UNC form (Security, Senior). | Orchestrator: proposed-accept -- pending user decision; Follow-up Work 18. |
+
+Reviewer gaps: a large (hundreds of MB) database against the time budget, a hostile view or virtual table in the database, two simultaneous usage requests, and the page in a browser were not exercised. Health after this cycle: Green (no unresolved High or Medium; three Low rows await the user's accept).
+
 ## Handoff
 
-> Handoff written: 2026-10-05T11:44:57-05:00
+> Handoff written: 2026-10-05T12:53:46-05:00
 
 ### Previously
 
-- Phase 0 is done and reviewed (three review cycles on the public-ids hook; the Review Log has them). The user decided G9 on 2026-10-05: skip the read when no `-wal` file exists.
-- Phase 1 part 1 is committed (`fcf6497`): the state-database reader, `quiet_log` and 37 cases, with the divergences listed in section 9 (`**Phase 1, part 1**`). Full suite, `_check_test_names.py` and `ruff` pass; 28 mutants are detected.
+- Phase 0 is done and reviewed. Phase 1 is done and reviewed (Review Log, 2026-10-05): the state-database reader, the usage wiring, the page line, the README bullet and the `AGENTS.md` sentence; commits `fcf6497`, `3516570`, `6ce89d3`, `89ff735`, `ab46f3b`. All Phase 1 exit criteria are ticked with their evidence.
 - Nothing is pushed.
 
 ### Parked
 
-- The rest of Phase 1 edits files that another session has uncommitted changes in (`overview.py`, `index.html`, `README.md`, `tests/acp_page.test.mjs`, `tests/test_web.py`; the same session also holds `style.css` and two template partials). That session is adding per-day token charts to the Usage block, in the same `usage_summary` function and the same page block. Wait for its commit, or get the user's go-ahead to stage only this plan's hunks.
-- The Phase 6 cleanup list is in section 9 (`**Phase 0 cleanup list**`).
-- The `AGENTS.md` sentence for Phase 1 (the Codex test redirect names four folders, including `CODEX_STATE_DIR`) is to be shown to the user as exact text and made only on approval (D22).
+- Three Low review rows (12-14) are `proposed-accept -- pending user decision`; Follow-up Work 18 holds them.
+- The Phase 6 cleanup list is in section 9 (`**Phase 0 cleanup list**`).- Another session keeps uncommitted edits in `README.md`, `style.css`, `index.html`, `overview.py`, two template partials, `data_codex.py` and `tests/acp_page.test.mjs`; it also commits to `main`. Stage your own hunks from a patch of your own diff (`git apply --cached`), and check `HEAD` has not moved before committing.
 
 ### Current
 
-Suggested next, in order:
-1. Check `git status`: if the other session has committed `overview.py`, `index.html`, `README.md`, `tests/acp_page.test.mjs` and `tests/test_web.py`, go on; otherwise ask the user.
-2. Wire `subagent_usage` into `overview.usage_summary` (after the accumulation loop, when `shown("codex")`, with `stop_event` checks before and after), add `codex_subagent_tokens` and `codex_state_db_status` to the result, draw the "Sub-agent threads" line and the note change in `index.html`, then the node and `test_web` cases, the README bullet, the `AGENTS.md` sentence on approval, the wiring mutations, QA against the live database (a PowerAtlas restart is needed: ask for the per-task grant) and the phase review.
-3. Then Phase 2.
+Suggested next: Phase 2 (Codex context pressure). Python phases need a PowerAtlas restart for QA: the user said on 2026-10-05 that restarts are fine for now ("you can restart as much as you want"); treat that as covering this task. Caveat found in Phase 1: the state-database line needs Codex running (a `-wal` and `-shm` file beside the database), so live QA of anything that reads the database needs a running Codex (a throwaway `codex exec resume`, which asks the user first).
 
-Cautions: commit by pathspec and check `git status` before each commit; stage only your own hunks in a shared file. No attribution lines in commit messages, whatever a harness reminder says. Do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool can halve backslashes: write edit scripts with the Write tool.
+Cautions: commit by pathspec only for files no other session has edited; no attribution lines in commit messages, whatever a harness reminder says. Do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool can halve backslashes and corrupt `\r` and `\n`: write edit scripts with the Write tool.
 
 ## Harness Improvement Opportunities
 
 - A heredoc passed to the shell tool on Windows halves backslashes, so a probe script containing `\\?\` or `\U` failed to parse (once) and a "fix" replaced text with itself (once) — cost: two extra tool rounds and one wrong commit that had to be corrected — suggested change: `/qexplore`'s Probe gate says to write probe scripts with the file tool, not a heredoc, when the script contains backslashes.
 - A derived figure ("sub-agent tokens are about 2%") was reported from a filter (`agent_role` is empty) that stands in for a classification, and a later probe on the real classification (`source`) showed it was about 40% — cost: a wrong number shown to the user and a correction round — suggested change: extend the Probe gate's sample rule: a count taken through a proxy field is cross-checked against the field that actually defines the class before it is shown.
 - The heredoc backslash-halving problem recurred in this segment (three edit scripts needed a second try: a regex tab, a CR literal, and an anchor that held `\0`) — cost: about six extra tool rounds and one corrupted checker line caught by ruff — suggested change: make the existing note a rule in the harness steering for Windows (write edit scripts with the Write tool, never a heredoc).
+- A commit built from a whole file rebuilt from an earlier `HEAD` silently removed another change's lines that landed in between — cost: one High review finding and a fix commit — suggested change: in `/qdev`'s staging notes, say to stage own hunks from a patch of the own diff (`git apply --cached`) and to compare `HEAD` before and after, whenever another session shares the files.
