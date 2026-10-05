@@ -34903,6 +34903,18 @@ class TestCodexLockEnumeratorAndTiles:
         assert all(call == set(held) for call in calls[25:]), "once seen, every held thread is reported on every call, not only the eight probed"
         assert probed == set(ids), "and the rotation still reaches every other lock file"
 
+    def test_a_terminal_that_closes_is_dropped_even_among_more_than_the_probe_budget(self, locks_dir, world):
+        ids = self.make_locks(locks_dir, 40)
+        world.held = {sid: ((10, 100.0),) for sid in ids[:12]}
+        for _ in range(40):
+            self.threads()
+            world.now[0] += 4
+        world.held = {}
+        for _ in range(40):
+            last = set(self.threads())
+            world.now[0] += 4
+        assert last == set(), "every closed terminal is re-probed and dropped, not kept from the earlier answer"
+
     def test_a_lock_seen_free_drops_its_owner_entry(self, locks_dir, world, monkeypatch):
         from power_atlas import web as web_mod
         a, = self.make_locks(locks_dir, 1)
