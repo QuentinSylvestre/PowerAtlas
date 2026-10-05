@@ -672,19 +672,6 @@
      ever gaining a nonce-based CSP. -->
 <script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %} src="/static/composer-chrome.js"></script>
 
-<!-- Workspace-only selection now (dashboard/ACP-merge Phase 4): the rail has
-     no session-row selection, matching /acp's own rail, which has none
-     either -- session-level "Launch selected" is dropped with it. Workspace
-     selection survives because launcher tiles marked "use selected
-     workspaces" (updateLauncherBadges/runLauncherById) and bulk workspace
-     settings (openWorkspaceSettings) both still read it; this bar is only
-     the visible count + a way to clear it, the actual "action" happens by
-     clicking a launcher tile or the settings gear elsewhere. -->
-<div class="action-bar" id="actionBar">
-  <span class="selection-info"><strong id="selCount">0</strong> workspaces selected</span>
-  <div class="topbar-spacer"></div>
-  <button class="action-btn secondary" onclick="dashRailClearSelection()">Clear</button>
-</div>
 <script>
 function markPortDirty() {
   var btn = document.getElementById('portSave');
@@ -749,14 +736,6 @@ window._activeTimeFilter='';
 // to anything after Phase 2 removed the sessions-panel status <select>, so
 // window._activeStatus is dropped rather than carried forward unused.
 function _buildWorkspaceQs(){var qs='provider='+encodeURIComponent(window._activeProvider||'all');if(window._activeTag)qs+='&tag='+encodeURIComponent(window._activeTag);if(window._activeTimeFilter)qs+='&time_filter='+encodeURIComponent(window._activeTimeFilter);return qs}
-// Workspace-level multi-select only (dashboard/ACP-merge Phase 4) -- the
-// rail has no session-row selection, matching /acp's own rail, which has
-// none either. Reused by launcher tiles marked "use selected workspaces"
-// (updateLauncherBadges/runLauncherById) and bulk workspace settings
-// (openWorkspaceSettings), both otherwise unchanged.
-var _lastClicked=new WeakMap();
-function handleItemClick(item,event,selector){var container=item.parentElement;if(!container)return;if(event.shiftKey){var last=_lastClicked.get(container);if(last&&last!==item&&container.contains(last)){var items=Array.from(container.querySelectorAll(selector));var idxA=items.indexOf(last);var idxB=items.indexOf(item);if(idxA!==-1&&idxB!==-1){var start=Math.min(idxA,idxB);var end=Math.max(idxA,idxB);for(var i=start;i<=end;i++){items[i].classList.add('selected')}}updateActionBar();return}}_lastClicked.set(container,item);item.classList.toggle('selected');updateActionBar()}
-function updateActionBar(){var workspaceCount=getSelectedWorkspaceCwds().length;document.getElementById('selCount').textContent=workspaceCount;document.getElementById('actionBar').classList.toggle('visible',workspaceCount>0);var railGroups=document.getElementById('dashRailGroups');if(railGroups)railGroups.classList.toggle('has-selection',workspaceCount>0);updateLauncherBadges()}
 
 // ---- panel widths (Launchers | Workspaces | Sessions, panel resize) -----
 //
@@ -1807,6 +1786,27 @@ function dashOvUsageWeek(rows){
     } else {
       var up = now >= before;
       delta = dashOvText('span', 'dash-ov-usage-delta ' + (up ? 'is-up' : 'is-down'),
+        (up ? '▲ ' : '▼ ') + dashOvDuration(Math.abs(now - before)));
+    }
+    delta.title = 'Last week: ' + dashOvDuration(before);
+    li.appendChild(delta);
+    list.appendChild(li);
+  });
+  block.appendChild(list);
+  return block;
+}
+// The day's session counts for a bar's tooltip: the total, then each
+// provider that had any, e.g. "4 sessions (Claude Code 2, kiro-cli 1, Kiro IDE 1)".
+function dashOvUsageSessionText(sessions){
+  var m = dashOvObj(sessions), total = 0, parts = [];
+  DASH_OV_USAGE_PROVIDERS.forEach(function(p){
+    var n = dashOvCount(dashOvOwn(m, p[0]));
+    total += n;
+    if (n) parts.push(p[2] + ' ' + n);
+  });
+  return total + (total === 1 ? ' session' : ' sessions') +
+    (parts.length ? ' (' + parts.join(', ') + ')' : '');
+}
 // One chart column, shared by the agent-time and the token charts: a stack
 // `pct` percent tall (dashOvPct's clamped number is the only style written)
 // with one segment per [class, value] of `segs`, each as tall as its share of
@@ -1841,27 +1841,6 @@ function dashOvBarsAxis(days){
   return axis;
 }
 function dashOvDayLabel(d){ return d.date == null ? '' : String(d.date); }
-        (up ? '▲ ' : '▼ ') + dashOvDuration(Math.abs(now - before)));
-    }
-    delta.title = 'Last week: ' + dashOvDuration(before);
-    li.appendChild(delta);
-    list.appendChild(li);
-  });
-  block.appendChild(list);
-  return block;
-}
-// The day's session counts for a bar's tooltip: the total, then each
-// provider that had any, e.g. "4 sessions (Claude Code 2, kiro-cli 1, Kiro IDE 1)".
-function dashOvUsageSessionText(sessions){
-  var m = dashOvObj(sessions), total = 0, parts = [];
-  DASH_OV_USAGE_PROVIDERS.forEach(function(p){
-    var n = dashOvCount(dashOvOwn(m, p[0]));
-    total += n;
-    if (n) parts.push(p[2] + ' ' + n);
-  });
-  return total + (total === 1 ? ' session' : ' sessions') +
-    (parts.length ? ' (' + parts.join(', ') + ')' : '');
-}
 // 14 stacked bars of agent time per day, one segment per provider. Heights
 // are percentages of the tallest day, clamped by dashOvPct. Session counts
 // are in each bar's tooltip rather than a second chart.
@@ -1964,7 +1943,6 @@ function dashOvUsageModels(models){
   chips.className = 'dash-ov-chips';
   models.forEach(function(m){
     var chip = document.createElement('span');
-  block.appendChild(dashOvUsageTokenChart(days, provider, omitCacheWrite));
     chip.className = 'dash-ov-chip';
     chip.appendChild(dashOvText('span', 'dash-ov-chip-name', m.model));
     chip.appendChild(dashOvText('span', 'dash-ov-chip-n', dashOvCount(m.sessions)));
@@ -1986,6 +1964,7 @@ function dashOvUsageTokens(t, label, days, provider, omitCacheWrite){
     ' · Cache read ' + dashOvCompact(t.cache_read) +
     (omitCacheWrite ? '' : ' · Cache write ' + dashOvCompact(t.cache_creation)) +
     ' · Cache hit ' + dashOvRatio(t.cache_hit_ratio)));
+  block.appendChild(dashOvUsageTokenChart(days, provider, omitCacheWrite));
   return block;
 }
 // The Codex block's "Sub-agent threads" line: a lifetime total per thread from
@@ -5875,7 +5854,7 @@ function openTerminal(btn){var group=btn.closest('[data-cwd]');fetch('/api/launc
 // The workspace row's per-provider quick launch (rail QA follow-up): the
 // same one-click "start fresh here" /api/new-session already used by the
 // launcher tiles, just aimed at a specific workspace + provider instead of
-// whatever tiles + selected-workspace state the left panel is carrying.
+// whatever tiles the left panel is carrying.
 function newSessionInWorkspace(btn,provider){var group=btn.closest('[data-cwd]');fetch('/api/new-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:group.dataset.cwd,provider:provider})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Failed to launch session<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 // Desktop notifications. The click is what makes this function necessary
 // rather than an inline `fetch` like the autostart row above: browsers only
@@ -7080,25 +7059,15 @@ function dashRailGroupNode(group){
   return wrap;
 }
 
-// The workspace header's controls: the selection checkbox before the toggle
-// and, after it, the folder / terminal / app / new-session / pin / more
-// buttons, whose dropdown menus go on `wrap` (see the aiMenu comment below).
+// The workspace header's controls: the folder / terminal / app / new-session
+// / pin / more buttons after the toggle, whose dropdown menus go on `wrap`
+// (see the aiMenu comment below).
 // Shared by a workspace group (Project outermost) and a workspace bucket
 // nested under Date or Status -- both are `.acp-rail-group[data-cwd]`, which
 // is what every handler here (`closest('[data-cwd]')`) resolves to.
 function dashRailGroupActions(wrap, head, group){
-  // Selection checkbox + row actions live beside the toggle, as siblings --
-  // the toggle above is itself a <button>, so these cannot nest inside it.
-  var check = document.createElement('span');
-  check.className = 'card-check';
-  check.setAttribute('role', 'checkbox');
-  check.setAttribute('tabindex', '0');
-  check.setAttribute('aria-label', 'Select ' + (group.name || group.cwd));
-  if (dashRailSelected.has(group.cwd)) wrap.classList.add('selected');
-  check.addEventListener('click', function(e){ e.stopPropagation(); handleItemClick(wrap, e, '.acp-rail-group'); dashRailMirrorSelection(wrap); dashRailSyncSelection(); });
-  check.addEventListener('keydown', function(e){ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); check.click(); } });
-  head.insertBefore(check, head.firstChild);
-
+  // Row actions live beside the toggle, as siblings -- the toggle above is
+  // itself a <button>, so these cannot nest inside it.
   var actions = document.createElement('div');
   actions.className = 'acp-rail-group-actions';
   var folderBtn = document.createElement('button');
@@ -7615,7 +7584,6 @@ function dashRailWorkspaceHead(wrap, key, bucket){
   wrap.dataset.cwd = group.cwd;
   if (group.exists === false) wrap.classList.add('acp-rail-group-gone');
   if (group.color) wrap.style.borderLeftColor = group.color;
-  if (dashRailSelected.has(group.cwd)) wrap.classList.add('selected');
   var badge = null;
   if (group.exists === false) {
     badge = document.createElement('span');
@@ -7787,10 +7755,6 @@ function dashRenderRail(){
     dashRailMoreEl.textContent = 'Load more sessions';
   }
   dashRailObserveEnd();
-  // A render drops every .selected group, so resync the action bar and the
-  // list's has-selection class rather than leave both describing rows that
-  // are gone (auto-load made renders routine during plain scrolling).
-  updateActionBar();
   dashRailRestoreFocus();
 }
 
@@ -7805,40 +7769,6 @@ function dashRenderRail(){
 // it sits outside the scroll box, so it can never be the observed element.
 // Flat modes with a filter are excluded: that filter is client-side, so a
 // narrow query would otherwise pull every page just to find matches.
-// ---- bulk selection that survives re-renders ----------------------------
-//
-// Every render rebuilds the group nodes, and `.selected` lived only on those
-// nodes, so any refresh -- routine now that scrolling auto-loads -- dropped
-// the user's ticks. The Set is the durable copy, keyed by cwd; each group
-// node re-applies it as it is built. Ticks on groups the current render did
-// not draw (hidden by a search, say) stay in the Set and come back with them,
-// but only drawn rows count as selected: getSelectedWorkspaceCwds and the
-// action bar both read the DOM, so nothing off-screen is ever acted on.
-var dashRailSelected = new Set();
-// The same workspace can be drawn more than once (a bucket per day under
-// Date, then Project). One tick selects the workspace, not one copy of it:
-// every copy follows the one just clicked, so the Set below and the action
-// bar's count stay consistent.
-function dashRailMirrorSelection(wrap){
-  var on = wrap.classList.contains('selected');
-  document.querySelectorAll('#dashRailGroups .acp-rail-group').forEach(function(g){
-    if (g !== wrap && g.dataset.cwd === wrap.dataset.cwd) g.classList.toggle('selected', on);
-  });
-}
-function dashRailSyncSelection(){
-  document.querySelectorAll('#dashRailGroups .acp-rail-group').forEach(function(g){
-    // Date/Status/Project buckets and the top sections are groups too, but
-    // only a workspace group (data-cwd) is ever selectable.
-    if (!g.dataset.cwd) return;
-    if (g.classList.contains('selected')) dashRailSelected.add(g.dataset.cwd);
-    else dashRailSelected.delete(g.dataset.cwd);
-  });
-}
-function dashRailClearSelection(){
-  dashRailSelected.clear();
-  document.querySelectorAll('.acp-rail-group.selected').forEach(function(r){ r.classList.remove('selected'); });
-  updateActionBar();
-}
 var dashRailEndObserver = null;
 function dashRailAutoLoad(){
   if (dashRailBusy) return;
@@ -8437,8 +8367,6 @@ var _providerTerminal={'kiro-cli':true,'claude-code':true,'kiro-ide':false,'kiro
 </script>
 <script>
 var _launchers={{launchers|tojson}};
-function getSelectedWorkspaceCwds(){var seen={};var cwds=[];document.querySelectorAll('.acp-rail-group.selected').forEach(function(c){var key=c.dataset.cwd.toLowerCase();if(!seen[key]){seen[key]=1;cwds.push(c.dataset.cwd)}});return cwds}
-function updateLauncherBadges(){var count=getSelectedWorkspaceCwds().length;_launchers.forEach(function(l){if(!l.use_selected_workspaces)return;var badge=document.getElementById('badge-'+l.id);if(!badge)return;if(count>0){badge.textContent=count;badge.classList.add('visible')}else{badge.textContent='';badge.classList.remove('visible')}});document.querySelectorAll('.provider-tile .launcher-badge').forEach(function(badge){if(count>0){badge.textContent=count;badge.classList.add('visible')}else{badge.textContent='';badge.classList.remove('visible')}})}
 // The tooltip is `position: fixed` (see .launcher-tooltip in style.css for
 // why) and so has no tile-relative anchor of its own the way the old
 // `position: absolute` one did -- this computes one on every hover, since
@@ -8469,7 +8397,24 @@ document.getElementById('launcher-tiles').addEventListener('mouseover', function
   var tile = e.target.closest('.launcher-tile');
   if (tile) positionLauncherTooltip(tile);
 });
-function runLauncherById(id){if(id==='builtin--terminal'){var selected=getSelectedWorkspaceCwds();if(selected.length>0){selected.forEach(function(w){fetch('/api/launch-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:w})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Terminal launch failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})});}else{fetch('/api/launch-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:''})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Terminal launch failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')});}return;}if(id.startsWith('provider--')){var key=id.slice('provider--'.length);var selected=getSelectedWorkspaceCwds();if(selected.length>0){var sessions=selected.map(function(w){return{workspace:w,provider:key}});fetch('/api/launch-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:sessions})}).then(function(r){return r.text()}).then(showToast)}else{var provDir=(_providerSettings[key]||{}).default_directory||'';var globalDir=_globalDefaultDirectory||'';var fallbackDir=provDir||globalDir||'';fetch('/api/launch-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:[{workspace:fallbackDir,provider:key}]})}).then(function(r){return r.text()}).then(showToast)}return}var l=_launchers.find(function(x){return x.id===id});if(!l)return;if(l.use_selected_workspaces){var selected=getSelectedWorkspaceCwds();if(selected.length>0){fetch('/api/launcher/run-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:l.id,workspaces:selected})}).then(function(r){return r.text()}).then(showToast);return}}var cwd=l.cwd||'';fetch('/api/launcher/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:l.id,command:l.command,custom_args:l.custom_args||'',cwd:cwd,name:l.name,terminal:l.terminal})}).then(function(r){return r.text()}).then(showToast)}
+function runLauncherById(id){
+  function failed(what){ showToast('<div class="toast toast-error">'+what+'<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>'); }
+  function post(url, body){ return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.text()}); }
+  if(id==='builtin--terminal'){
+    post('/api/launch-terminal',{workspace:''}).then(showToast).catch(function(){failed('Terminal launch failed')});
+    return;
+  }
+  if(id.startsWith('provider--')){
+    var key=id.slice('provider--'.length);
+    var provDir=(_providerSettings[key]||{}).default_directory||'';
+    var globalDir=_globalDefaultDirectory||'';
+    post('/api/launch-batch',{sessions:[{workspace:provDir||globalDir||'',provider:key}]}).then(showToast);
+    return;
+  }
+  var l=_launchers.find(function(x){return x.id===id});
+  if(!l)return;
+  post('/api/launcher/run',{id:l.id,command:l.command,custom_args:l.custom_args||'',cwd:l.cwd||'',name:l.name,terminal:l.terminal}).then(showToast);
+}
 // `env` is deliberately absent from every launcher payload this page is served -- it holds
 // credentials, so /api/launchers, /api/settings and the |tojson bootstrap all strip it (see
 // _launchers_without_env in web.py). The edit modal is the only consumer, so it asks for one
@@ -8635,7 +8580,7 @@ function _launcherModalOpen(o){
     _lm('launcherCwdHint').textContent = 'Used when launched without a workspace. Empty falls back to the default shown.';
   } else {
     _lm('launcherCwd').placeholder = 'Optional';
-    _lm('launcherCwdHint').textContent = 'Used when launched without a selected workspace. Empty runs it in PowerAtlas’s own folder.';
+    _lm('launcherCwdHint').textContent = 'Where it runs when launched from its tile. Empty runs it in PowerAtlas’s own folder.';
   }
   _lm('launcherEnvRows').innerHTML = '';
   Object.keys(o.env || {}).forEach(function(k){ launcherEnvAddRow(k, o.env[k], false); });
@@ -8870,21 +8815,12 @@ function deleteProfile(){var id=document.getElementById('profileId').value;if(!i
 </script>
 <script>
 // ---- workspace settings modal (partials/workspace_settings_modal.html) ----
-// One dialog for a single workspace or a bulk selection (Settings opened on a
-// row while two or more are selected). Built like the launcher modal: a
+// One dialog for a single workspace. Built like the launcher modal: a
 // snapshot taken at open enables Save only on a change and makes Escape,
 // Cancel and a backdrop click ask before discarding one; refusals show inline.
 var _wsAllTags=[];
 var _wsTags=[];
 var _wsAcIndex=-1;
-var _wsBulkMode=false;
-var _wsBulkCwds=[];
-var _wsTagsToAdd=[];
-var _wsTagsToRemove=[];
-var _wsTagsFull=[];
-var _wsTagsPartial=[];
-var _wsColorChanged=false;
-var _wsColorMixed=false;
 var _wsSnapshot='';
 var _wsBusy=false;
 var _wsDownOnBackdrop=false;
@@ -8892,40 +8828,20 @@ var WS_TAG_LIMIT=10;
 function _ws(id){ return document.getElementById(id); }
 function _wsBase(cwd){ return cwd.split(/[\\/]/).filter(Boolean).pop() || cwd; }
 
-function openWorkspaceSettings(btn){var card=btn.closest('[data-cwd]');var cwd=card.dataset.cwd;var selectedCwds=getSelectedWorkspaceCwds();if(selectedCwds.length>0&&selectedCwds.indexOf(cwd)<0){selectedCwds.push(cwd)}if(selectedCwds.length>1){openBulkWorkspaceSettings(selectedCwds)}else{openSingleWorkspaceSettings(cwd)}}
+function openWorkspaceSettings(btn){var card=btn.closest('[data-cwd]');openSingleWorkspaceSettings(card.dataset.cwd)}
 
 function openSingleWorkspaceSettings(cwd){
   fetch('/api/workspace-settings?cwd='+encodeURIComponent(cwd)).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).then(function(d){
-    _wsBulkMode=false;
     _ws('wsSettingsCwd').value=cwd;
     _wsAllTags=d.all_tags||[];
     _wsTags=(d.settings.tags||[]).slice();
-    _wsColorChanged=false;
-    _wsColorMixed=false;
     _wsOpen('Settings — '+_wsBase(cwd), cwd, cwd, d.settings.color||'');
   }).catch(function(){showToast('<div class="toast toast-error">Failed to load settings<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>')});
 }
-function openBulkWorkspaceSettings(cwds){
-  fetch('/api/workspace-settings-bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cwds:cwds})}).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }).then(function(d){
-    _wsBulkMode=true;_wsBulkCwds=cwds;_wsTagsToAdd=[];_wsTagsToRemove=[];_wsColorChanged=false;_wsAllTags=d.all_tags||[];
-    var tagCounts={};
-    cwds.forEach(function(c){var ws=d.workspaces[c];if(ws&&ws.tags){ws.tags.forEach(function(t){tagCounts[t]=(tagCounts[t]||0)+1})}});
-    _wsTagsFull=[];_wsTagsPartial=[];
-    Object.keys(tagCounts).forEach(function(t){if(tagCounts[t]===cwds.length){_wsTagsFull.push(t)}else{_wsTagsPartial.push({tag:t,count:tagCounts[t]})}});
-    var colors=cwds.map(function(c){return(d.workspaces[c]&&d.workspaces[c].color)||''});
-    var allSame=colors.every(function(c){return c===colors[0]});
-    // Mixed colors select no swatch, which would read as "No color"; the
-    // section heading says so instead, and Save sends no color until one
-    // is picked (_wsColorChanged), as before.
-    _wsColorMixed=!allSame;
-    _wsOpen('Settings — '+cwds.length+' workspaces', cwds.map(_wsBase).join(', '), cwds.join('\n'), allSame?colors[0]:'');
-  }).catch(function(){showToast('<div class="toast toast-error">Failed to load bulk settings<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>')});
-}
 function _wsOpen(title, pathText, pathTitle, color){
   _ws('wsSettingsTitle').textContent=title;
-  var single=!_wsBulkMode;
-  _ws('wsSettingsPath').textContent=single?'‎'+pathText+'‎':pathText;
-  _ws('wsSettingsPath').classList.toggle('from-start',single);
+  _ws('wsSettingsPath').textContent='‎'+pathText+'‎';
+  _ws('wsSettingsPath').classList.add('from-start');
   _ws('wsSettingsPath').title=pathTitle;
   // Text left in the box from the last open would otherwise land on this one.
   _ws('wsTagsInput').value='';
@@ -8935,7 +8851,7 @@ function _wsOpen(title, pathText, pathTitle, color){
   _wsConfirmHide();
   _wsBusy=false;
   _ws('wsSaveBtn').textContent='Save';
-  if(_wsBulkMode) renderBulkWsTags(); else renderWsTags();
+  renderWsTags();
   _wsSetColor(color);
   _wsSnapshot=_wsState();
   _wsUpdate();
@@ -8944,27 +8860,21 @@ function _wsOpen(title, pathText, pathTitle, color){
   _ws('wsTagsInput').focus();
 }
 
-// The "a swatch was clicked" flag is a change only while the colors are
-// mixed, where it decides whether a color is sent at all; elsewhere the
-// value alone says whether the color changed.
 function _wsState(){
-  return JSON.stringify([_wsTags,_wsTagsToAdd,_wsTagsToRemove,_ws('wsSettingsColor').value,_wsColorMixed&&_wsColorChanged,_ws('wsTagsInput').value.trim()]);
+  return JSON.stringify([_wsTags,_ws('wsSettingsColor').value,_ws('wsTagsInput').value.trim()]);
 }
 function _wsIsDirty(){ return _wsState()!==_wsSnapshot; }
 function _wsUpdate(){
   var color=_ws('wsSettingsColor').value;
   _ws('workspaceSettingsModal').style.setProperty('--stripe', color||'transparent');
-  _ws('wsColorMixed').hidden=!(_wsColorMixed&&!_wsColorChanged);
   var count=_ws('wsTagsCount');
-  if(_wsBulkMode){ count.hidden=true; }
-  else { count.hidden=false; count.textContent=_wsTags.length+' / '+WS_TAG_LIMIT; count.classList.toggle('at-limit',_wsTags.length>=WS_TAG_LIMIT); }
+  count.hidden=false; count.textContent=_wsTags.length+' / '+WS_TAG_LIMIT; count.classList.toggle('at-limit',_wsTags.length>=WS_TAG_LIMIT);
   _ws('wsSaveBtn').disabled=_wsBusy||!_wsIsDirty();
 }
 function _wsSetColor(color){
   _ws('wsSettingsColor').value=color||'';
-  var none=_wsColorMixed&&!_wsColorChanged;
   _ws('wsColorPicker').querySelectorAll('.color-swatch').forEach(function(s){
-    var on=!none&&s.dataset.color===(color||'');
+    var on=s.dataset.color===(color||'');
     s.classList.toggle('selected',on);
     s.setAttribute('aria-pressed',on?'true':'false');
   });
@@ -8979,16 +8889,13 @@ function _wsTagColor(tag){
   var t=(window._tagColorData||[]).find(function(x){return x.name===tag});
   return t&&t.color||'';
 }
-// One chip: the tag's own color dot, its name, an optional "2/3" badge and
-// a remove button.
-function _wsChip(tag, cls, onRemove, removeLabel, badge, title){
+// One chip: the tag's own color dot, its name and a remove button.
+function _wsChip(tag, cls, onRemove, removeLabel){
   var chip=document.createElement('span');
   chip.className='ws-tag-chip'+(cls?' '+cls:'');
   var color=_wsTagColor(tag);
   if(color){ var dot=document.createElement('span'); dot.className='ws-tag-dot'; dot.style.background=color; dot.setAttribute('aria-hidden','true'); chip.appendChild(dot); }
   chip.appendChild(document.createTextNode(tag));
-  if(badge){ var b=document.createElement('span'); b.className='ws-tag-count-badge'; b.textContent=badge; chip.appendChild(b); }
-  if(title){ chip.title=title; chip.setAttribute('aria-label',tag+' — '+title); }
   var x=document.createElement('button');
   x.type='button';x.className='ws-tag-remove';x.textContent='×';x.setAttribute('aria-label',removeLabel);
   x.onclick=function(){ onRemove(); _wsTagError(''); _ws('wsTagsInput').focus(); };
@@ -8997,28 +8904,8 @@ function _wsChip(tag, cls, onRemove, removeLabel, badge, title){
 }
 function renderWsTags(){
   var chips=_ws('wsTagsChips');chips.innerHTML='';
-  _ws('wsTagsInfo').hidden=true;
   _wsTags.forEach(function(tag,i){
     chips.appendChild(_wsChip(tag,'',function(){_wsTags.splice(i,1);renderWsTags()},'Remove tag '+tag));
-  });
-  _wsUpdate();
-}
-function renderBulkWsTags(){
-  var chips=_ws('wsTagsChips');chips.innerHTML='';
-  var n=_wsBulkCwds.length;
-  var info=_ws('wsTagsInfo');
-  info.hidden=false;
-  info.textContent='Changes apply to all '+n+' workspaces. A dimmed tag is on some of them only.';
-  _wsTagsFull.forEach(function(tag){
-    if(_wsTagsToRemove.indexOf(tag)>=0)return;
-    chips.appendChild(_wsChip(tag,'ws-tag-full',function(){_wsTagsToRemove.push(tag);renderBulkWsTags()},'Remove tag '+tag+' from all workspaces'));
-  });
-  _wsTagsPartial.forEach(function(item){
-    if(_wsTagsToRemove.indexOf(item.tag)>=0)return;
-    chips.appendChild(_wsChip(item.tag,'ws-tag-partial',function(){_wsTagsToRemove.push(item.tag);renderBulkWsTags()},'Remove tag '+item.tag+' from all workspaces',item.count+'/'+n,'on '+item.count+' of '+n+' workspaces'));
-  });
-  _wsTagsToAdd.forEach(function(tag,i){
-    chips.appendChild(_wsChip(tag,'ws-tag-new',function(){_wsTagsToAdd.splice(i,1);renderBulkWsTags()},'Remove tag '+tag+' from all workspaces'));
   });
   _wsUpdate();
 }
@@ -9030,12 +8917,6 @@ function addWsTag(tag){
   if(!tag){ input.value=''; return true; }
   if(tag.length>64){ _wsTagError('Tags are at most 64 characters.'); return false; }
   _wsTagError('');
-  if(_wsBulkMode){
-    var present=_wsTagsToAdd.indexOf(tag)>=0||_wsTagsFull.indexOf(tag)>=0||_wsTagsPartial.some(function(p){return p.tag===tag});
-    var rmIdx=_wsTagsToRemove.indexOf(tag);
-    if(rmIdx>=0){_wsTagsToRemove.splice(rmIdx,1)}else if(!present){_wsTagsToAdd.push(tag)}
-    input.value='';hideWsAutocomplete();renderBulkWsTags();return true;
-  }
   if(_wsTags.indexOf(tag)>=0){ input.value=''; hideWsAutocomplete(); _wsUpdate(); return true; }
   if(_wsTags.length>=WS_TAG_LIMIT){ _wsTagError('A workspace can have at most '+WS_TAG_LIMIT+' tags. Remove one first.'); return false; }
   _wsTags.push(tag);input.value='';hideWsAutocomplete();renderWsTags();return true;
@@ -9043,9 +8924,7 @@ function addWsTag(tag){
 function showWsAutocomplete(all){
   var input=_ws('wsTagsInput');var val=input.value.trim().toLowerCase();var ac=_ws('wsTagsAutocomplete');
   if(!val&&!all){ hideWsAutocomplete(); return; }
-  var exclude;
-  if(_wsBulkMode){var partialTags=_wsTagsPartial.map(function(p){return p.tag});exclude=_wsTagsFull.concat(partialTags).concat(_wsTagsToAdd);exclude=exclude.filter(function(t){return _wsTagsToRemove.indexOf(t)<0})}else{exclude=_wsTags}
-  var matches=_wsAllTags.filter(function(t){return exclude.indexOf(t)<0&&(val===''||t.toLowerCase().indexOf(val)>=0)});
+  var matches=_wsAllTags.filter(function(t){return _wsTags.indexOf(t)<0&&(val===''||t.toLowerCase().indexOf(val)>=0)});
   if(!matches.length){hideWsAutocomplete();return}
   ac.innerHTML='';
   matches.forEach(function(t,i){
@@ -9081,15 +8960,8 @@ function saveWorkspaceSettings(e){
   if(_wsBusy||!_ws('wsConfirm').hidden) return;
   // A tag typed but not yet entered is part of what the user means to save.
   if(_ws('wsTagsInput').value.trim()&&!addWsTag(_ws('wsTagsInput').value)){ _ws('wsTagsInput').focus(); return; }
-  var url, payload;
-  if(_wsBulkMode){
-    url='/api/workspace-settings/save-bulk';
-    payload={cwds:_wsBulkCwds,tags_add:_wsTagsToAdd,tags_remove:_wsTagsToRemove};
-    if(_wsColorChanged){payload.color=_ws('wsSettingsColor').value}
-  } else {
-    url='/api/workspace-settings/save';
-    payload={cwd:_ws('wsSettingsCwd').value,tags:_wsTags,color:_ws('wsSettingsColor').value};
-  }
+  var url='/api/workspace-settings/save';
+  var payload={cwd:_ws('wsSettingsCwd').value,tags:_wsTags,color:_ws('wsSettingsColor').value};
   _wsBusy=true;_ws('wsSaveBtn').textContent='Saving…';_wsFormError('');_wsUpdate();
   fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
     .then(function(r){return r.text().then(function(t){return{status:r.status,ok:r.ok,text:t}})})
@@ -9104,7 +8976,7 @@ function saveWorkspaceSettings(e){
       _ws('workspaceSettingsModal').close();
       dashRailReload();initWorkspaceFilters();
     })
-    .catch(function(){_wsBusy=false;_ws('wsSaveBtn').textContent='Save';_wsFormError(_wsBulkMode?'Bulk save failed — try again':'Save failed — try again');_wsUpdate()});
+    .catch(function(){_wsBusy=false;_ws('wsSaveBtn').textContent='Save';_wsFormError('Save failed — try again');_wsUpdate()});
 }
 
 (function(){
@@ -9123,7 +8995,7 @@ function saveWorkspaceSettings(e){
       if(_wsAcIndex>=0){var items=_ws('wsTagsAutocomplete').querySelectorAll('.ws-ac-item');if(items[_wsAcIndex])addWsTag(items[_wsAcIndex].dataset.tag)}else{addWsTag(input.value)}
     }else if(e.key==='Tab'&&open&&_wsAcIndex>=0&&!e.shiftKey){
       e.preventDefault();var it=_ws('wsTagsAutocomplete').querySelectorAll('.ws-ac-item')[_wsAcIndex];if(it)addWsTag(it.dataset.tag);
-    }else if(e.key==='Backspace'&&!input.value&&!_wsBulkMode&&_wsTags.length){
+    }else if(e.key==='Backspace'&&!input.value&&_wsTags.length){
       _wsTags.pop();_wsTagError('');renderWsTags();
     }else if(e.key==='ArrowDown'){
       e.preventDefault();if(!open)showWsAutocomplete(true);if(_wsAcOpen())navigateWsAutocomplete(1);
@@ -9137,7 +9009,7 @@ function saveWorkspaceSettings(e){
   });
   _ws('wsColorPicker').addEventListener('click',function(e){
     var btn=e.target.closest('.color-swatch');if(!btn)return;
-    _wsColorChanged=true;_wsSetColor(btn.dataset.color);_wsUpdate();
+    _wsSetColor(btn.dataset.color);_wsUpdate();
   });
   _ws('wsConfirmNo').addEventListener('click',_wsConfirmHide);
   _ws('wsConfirmYes').addEventListener('click',function(){_ws('wsConfirm').hidden=true;_ws('wsActions').hidden=false;m.close()});
@@ -9151,7 +9023,7 @@ function saveWorkspaceSettings(e){
   function outside(e){var r=m.getBoundingClientRect();return e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom}
   m.addEventListener('mousedown',function(e){_wsDownOnBackdrop=e.target===m&&outside(e)});
   m.addEventListener('click',function(e){if(_wsDownOnBackdrop&&e.target===m&&outside(e))wsSettingsRequestClose();_wsDownOnBackdrop=false});
-  m.addEventListener('close',function(){_wsBulkMode=false;_wsBulkCwds=[];_wsTagsToAdd=[];_wsTagsToRemove=[];_wsTagsFull=[];_wsTagsPartial=[];_wsColorChanged=false;_wsColorMixed=false;hideWsAutocomplete();_ws('wsConfirm').hidden=true;_ws('wsActions').hidden=false});
+  m.addEventListener('close',function(){hideWsAutocomplete();_ws('wsConfirm').hidden=true;_ws('wsActions').hidden=false});
 })();
 
 // ---- Remote access panel (D22, D24) --------------------------------------

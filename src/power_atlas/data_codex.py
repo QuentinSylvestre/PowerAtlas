@@ -238,7 +238,7 @@ def open_shared(path, mode: str = "rb"):
 
 
 # --- Line readers ---------------------------------------------------------------
-# Public on purpose, because overview.py uses them: loads, read_first_line, item_of, item_text, output_text, exit_success, exec_outcome, fit_caches, EXEC_RUNNING and FUTURE_SKEW. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+# Public on purpose, because overview.py uses them: loads, read_first_line, item_of, item_text, output_text, exit_success, fit_caches and FUTURE_SKEW. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
 
 
 def loads(raw: bytes):

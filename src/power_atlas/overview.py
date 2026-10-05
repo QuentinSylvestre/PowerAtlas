@@ -1093,7 +1093,7 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
 # the main transcripts (kiro-cli v3 and Claude Code sessions); once it is done
 # the summary route returns an aggregate marked `partial`, computed from the
 # memo without the Claude Code sub-agent transcripts. Stage 2 then parses the
-# sub-agent transcripts, which only add Claude tokens and tool calls, and the
+# sub-agent transcripts, which only add Claude tokens, and the
 # route returns the complete aggregate. Measured 2026-09-28 out of process:
 # the sub-agent files were 548 of the 682 in-window files and about half of a
 # cold pass. A pass that starts with the memo filled finds stage 1 all hits.
@@ -1114,24 +1114,24 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
 #   Code writes after compacting, which continues a turn rather than starting
 #   one) and whose content is a non-empty string, or a list with no
 #   `tool_result` block.
-# - Tool calls, failures, Claude tokens and the kiro-cli context peak are
-#   counted on the local day of their own record, so a long session modified
-#   inside the window contributes only its in-window days.
+# - Tokens and the kiro-cli context peak are counted on the local day of their
+#   own record, so a long session modified inside the window contributes only
+#   its in-window days.
 # - Claude tokens are counted once per `message.id`: Claude Code writes one
 #   record per content block and repeats the message's `usage` on each
 #   (measured 2026-09-25: 975 of 1,848 assistant records in one file were such
 #   repeats, none with a different `usage`).
 # - Claude Code sub-agent transcripts,
 #   `<project>/<session-uuid>/subagents/agent-<hex>.jsonl`, add their tokens
-#   and tool calls to the totals; they are not sessions of their own and add
-#   no agent time, model or workspace row (their time is inside the parent
-#   turn that waited for them). Measured 2026-09-25: 574 in-window files,
-#   holding about 3.09 B cache-read tokens and 22,345 tool calls that the
-#   session files alone missed (see docs/KNOWLEDGE.md).
+#   to the totals; they are not sessions of their own and add no agent time,
+#   model or workspace row (their time is inside the parent turn that waited
+#   for them). Measured 2026-09-25: 574 in-window files, holding about 3.09 B
+#   cache-read tokens that the session files alone missed (see
+#   docs/KNOWLEDGE.md).
 # - Kiro IDE contributes sessions per day only, from `dateCreated` in its
-#   `sessions.json` files (D25); it records no durations and no tools.
+#   `sessions.json` files (D25); it records no durations and no tokens.
 # - Codex: one rollout is one top-level session. Every sub-agent rollout is
-#   excluded, tokens and tool calls included: it embeds its parent's history
+#   excluded, tokens included: it embeds its parent's history
 #   with no usable window (measured on a full scan of 509 of them), so a sum
 #   would count that history again. A rollout is in the window when its mtime
 #   or its last record's timestamp is (Windows freezes the mtime of a file
@@ -1153,11 +1153,9 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
 #   cumulative is larger than its last (a rollout whose early events were
 #   lost). `cached_input_tokens` are part of
 #   `input_tokens`, so `input` is the count of the one minus the count of
-#   the other. A tool call fails when its output records a non-zero exit code
-#   or, for a call named `exec`, a `Script failed` or aborted-by-user marker
-#   (`Script running with cell` is not final). A changed rollout is re-parsed at
-#   most once per `CODEX_REPARSE_SECONDS`: the previous summary stays until
-#   then. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+#   the other. A changed rollout is re-parsed at most once per
+#   `CODEX_REPARSE_SECONDS`: the previous summary stays until then.
+#   261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
 
 USAGE_WINDOW_DAYS = 14
 USAGE_MAX_LINE_BYTES = 8 * 1024 * 1024
@@ -1167,9 +1165,6 @@ CODEX_TURN_CAP_SECONDS = 30 * 60
 # A changed Codex rollout is re-parsed at most this often (D19): an active
 # session grows on every event, and a parse of a large one costs about 0.34 s.
 CODEX_REPARSE_SECONDS = 60.0
-# A Codex tool output on a line longer than this is not parsed as JSON: its
-# `Exit code:` is read from the head of the line instead.
-_CODEX_OUTPUT_PARSE_MAX = 64 * 1024
 # A cumulative token counter above this is not a token count (a hostile value
 # would otherwise reach the page as a number a double cannot hold).
 _CODEX_TOKEN_MAX = 10 ** 15
@@ -1183,22 +1178,16 @@ CODEX_DURATION_CAP_SECONDS = 24 * 3600
 # store has no delta that differs from the event's own last except in the one
 # rollout that interleaves two cumulative series.
 _CODEX_RECENT_EVENTS = 8
-# A Codex tool name, a `turn_context` model and a `session_meta` cwd reach the page through the
-# usage summary, from a file an agent writes: each is cut to this many characters when the file
-# is parsed (a name or model the way a tile's tool name is, `_clip`; a cwd by `_trim`, which keeps
-# its whitespace, so a workspace the rail hides still matches). 260 is a Windows MAX_PATH.
+# A `turn_context` model and a `session_meta` cwd reach the page through the usage summary, from
+# a file an agent writes: each is cut to this many characters when the file is parsed (a model
+# the way a tile's tool name is, `_clip`; a cwd by `_trim`, which keeps its whitespace, so a
+# workspace the rail hides still matches). 260 is a Windows MAX_PATH.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
 _CODEX_NAME_MAX = 80
-# Prefix of a Codex tool name in the usage summary, so Codex's `shell` and kiro-cli's
-# `shell` stay two rows in the Tools lists (the lists merge by name across providers).
-_CODEX_TOOL_PREFIX = "codex:"
 _CODEX_CWD_MAX = 260
 USAGE_REUSE_SECONDS = 30.0
 CONTEXT_PRESSURE_PERCENT = 80.0
 _USAGE_TOP_WORKSPACES = 8
-_USAGE_TOP_TOOLS = 8
-_USAGE_TOP_FAILING = 5
-_USAGE_FAILING_MIN_CALLS = 3
 _USAGE_TOP_CONTEXT = 5
 _USAGE_TOP_MODELS = 8
 # A kiro-cli `session.json` or a Kiro IDE `sessions.json` larger than this is
@@ -1281,8 +1270,9 @@ _stall_clock = time.monotonic
 # `_CodexTokenCounter`), replacing the growth-versus-baseline stream rule of 3.
 # 5: a Codex tool name, model and cwd are cut to `_CODEX_NAME_MAX` / `_CODEX_CWD_MAX`.
 # 6: a Codex tool name carries the `_CODEX_TOOL_PREFIX` prefix.
+# 7: a day holds no per-tool call and failure counts: `tools` is gone.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
-_USAGE_SCHEMA = 6
+_USAGE_SCHEMA = 7
 # The keys `usage_summary` reads from a file summary.
 _SUMMARY_KEYS = frozenset({"provider", "session_id", "cwd", "model", "subagent", "days"})
 
@@ -1361,16 +1351,8 @@ def _local_day(epoch: float) -> str:
 
 
 def _new_day() -> dict:
-    return {"active": False, "agent_seconds": 0.0, "tools": {}, "context_peak": None,
+    return {"active": False, "agent_seconds": 0.0, "context_peak": None,
             "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}}
-
-
-def _codex_tool_slot(day: dict, name: str) -> dict:
-    return _tool_slot(day, _CODEX_TOOL_PREFIX + name)
-
-
-def _tool_slot(day: dict, name: str) -> dict:
-    return day["tools"].setdefault(name, {"calls": 0, "failed": 0})
 
 
 def _read_small_json(path: Path):
@@ -1388,7 +1370,6 @@ def _read_small_json(path: Path):
 
 def _parse_v3_usage(path: Path) -> dict:
     days: dict[str, dict] = {}
-    calls: dict[str, tuple[str, str]] = {}   # toolCallId -> (tool name, day)
     with path.open("rb") as fh:
         for line in _iter_lines(fh, USAGE_MAX_LINE_BYTES):
             try:
@@ -1417,25 +1398,12 @@ def _parse_v3_usage(path: Path) -> dict:
                 epoch = _epoch(obj.get("timestamp"))
                 if epoch is None:
                     continue
-                day_key = _local_day(epoch)
-                day = days.setdefault(day_key, _new_day())
+                day = days.setdefault(_local_day(epoch), _new_day())
                 day["active"] = True
                 if ptype == "usage_summary":
                     ms = payload.get("elapsedTime")
                     if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms > 0:
                         day["agent_seconds"] += ms / 1000.0
-                elif ptype == "tool_call":
-                    name = payload.get("toolName")
-                    if isinstance(name, str) and name:
-                        _tool_slot(day, name)["calls"] += 1
-                        tcid = payload.get("toolCallId")
-                        if isinstance(tcid, str) and tcid:
-                            calls[tcid] = (name, day_key)
-                elif ptype == "tool_result":
-                    tcid = payload.get("toolCallId")
-                    hit = calls.pop(tcid, None) if isinstance(tcid, str) else None
-                    if hit is not None and payload.get("success") is False:
-                        _tool_slot(days[hit[1]], hit[0])["failed"] += 1
             except Exception:
                 # One odd line costs that line only (the tail reader's rule).
                 continue
@@ -1463,7 +1431,6 @@ def _claude_is_prompt(content) -> bool:
 
 def _parse_claude_usage(path: Path, subagent: bool = False) -> dict:
     days: dict[str, dict] = {}
-    calls: dict[str, tuple[str, str]] = {}   # tool_use id -> (tool name, day)
     models: dict[str, int] = {}
     seen_messages: set[str] = set()
     cwd = ""
@@ -1502,13 +1469,6 @@ def _parse_claude_usage(path: Path, subagent: bool = False) -> dict:
                 day_key = _local_day(epoch)
                 content = msg.get("content")
                 if otype == "user":
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "tool_result":
-                                tid = block.get("tool_use_id")
-                                hit = calls.pop(tid, None) if isinstance(tid, str) else None
-                                if hit is not None and block.get("is_error") is True:
-                                    _tool_slot(days[hit[1]], hit[0])["failed"] += 1
                     if (obj.get("isMeta") or obj.get("isCompactSummary")
                             or not _claude_is_prompt(content)):
                         continue
@@ -1532,14 +1492,6 @@ def _parse_claude_usage(path: Path, subagent: bool = False) -> dict:
                         n = usage.get(src)
                         if isinstance(n, int) and not isinstance(n, bool) and n > 0:
                             day["tokens"][key] += n
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            name = block.get("name")
-                            if isinstance(name, str) and name:
-                                _tool_slot(day, name)["calls"] += 1
-                                if isinstance(block.get("id"), str):
-                                    calls[block["id"]] = (name, day_key)
             except Exception:
                 continue
     close_turn()
@@ -1552,20 +1504,13 @@ def _parse_claude_usage(path: Path, subagent: bool = False) -> dict:
 
 # A line is parsed only when it holds one of these (a substring test is far
 # cheaper than `json.loads`, and most bytes of a rollout are tool output and
-# injected context). The last two end without a closing quote so they also
-# match the `*_output` records. A false positive costs one parse; a false
-# negative would lose a record, so every record kind the parser reads is here.
+# injected context). Each ends with its closing quote, so a `*_output` record
+# (the largest lines of a rollout, and read for nothing) never matches. A false
+# positive costs one parse; a false negative would lose a record, so every
+# record kind the parser reads is here.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
 _CODEX_KEYS = (b'"token_count"', b'"task_started"', b'"task_complete"', b'"turn_aborted"',
-               b'"turn_context"', b'"item_completed"', b'"function_call', b'"custom_tool_call')
-_CODEX_OUTPUT_TYPES = (b'"function_call_output"', b'"custom_tool_call_output"')
-_CODEX_HEAD_BYTES = 2048
-_CODEX_CALL_ID_RE = re.compile(rb'"call_id"\s*:\s*"([^"\\]{1,256})"')
-# Only a string that starts `Exit code: <n>` (shell_command); the older JSON
-# form keeps its code at the end of a long string and is read on short lines only.
-_CODEX_HEAD_OUTPUT_RE = re.compile(
-    rb'"output"\s*:\s*(?:\[\s*\{\s*"type"\s*:\s*"[^"\\]{1,32}"\s*,\s*"text"\s*:\s*)?"([^"\\]{0,48})')
-_CODEX_HEAD_EXIT_RE = re.compile(rb'"output"\s*:\s*"Exit code: (-?[0-9]{1,9})(?![0-9])')
+               b'"turn_context"', b'"item_completed"', b'"function_call"', b'"custom_tool_call"')
 _CODEX_TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens",
                        "cache_write_input_tokens")
 
@@ -1691,18 +1636,12 @@ def _parse_codex_usage(path: Path) -> dict:
 
     stem = path.stem
     days: dict[str, dict] = {}
-    calls: dict[str, tuple[str, str]] = {}   # call_id -> (tool name, day)
     models: dict[str, int] = {}
     counter = _CodexTokenCounter()
     open_start: float | None = None          # the open turn's `task_started` epoch
 
     def day_of(epoch: float) -> dict:
         return days.setdefault(_local_day(epoch), _new_day())
-
-    def fail(call_id: str) -> None:
-        hit = calls.pop(call_id, None)
-        if hit is not None:
-            _codex_tool_slot(days[hit[1]], hit[0])["failed"] += 1
 
     with data_codex.open_shared(path) as fh:
         # The first line is read here, not through `read_meta`, which cannot
@@ -1721,27 +1660,6 @@ def _parse_codex_usage(path: Path) -> dict:
             if not any(key in line for key in _CODEX_KEYS):
                 continue
             try:
-                if len(line) > _CODEX_OUTPUT_PARSE_MAX:
-                    head = line[:_CODEX_HEAD_BYTES]
-                    if any(t in head for t in _CODEX_OUTPUT_TYPES):
-                        # A large tool output: its call id and exit code are read
-                        # from the head, never by parsing the whole line.
-                        call = _CODEX_CALL_ID_RE.search(head)
-                        code = _CODEX_HEAD_EXIT_RE.search(head)
-                        if call:
-                            call_id = call.group(1).decode("ascii", "replace")
-                            failed = bool(code and int(code.group(1)) != 0)
-                            if not code and calls.get(call_id, ("",))[0] == "exec":
-                                lead = _CODEX_HEAD_OUTPUT_RE.search(head)
-                                text = lead.group(1).decode("utf-8", "replace") if lead else ""
-                                if text.startswith(data_codex.EXEC_RUNNING):
-                                    continue   # not a final outcome: counts neither way
-                                failed = data_codex.exec_outcome(text) is False
-                            if failed:
-                                fail(call_id)
-                            else:
-                                calls.pop(call_id, None)
-                        continue
                 obj = json.loads(line)
                 if not isinstance(obj, dict):
                     continue
@@ -1749,21 +1667,6 @@ def _parse_codex_usage(path: Path) -> dict:
                 if not isinstance(payload, dict):
                     continue
                 otype, ptype = obj.get("type"), payload.get("type")
-                if otype == "response_item" and ptype in ("function_call_output",
-                                                          "custom_tool_call_output"):
-                    call_id = payload.get("call_id")
-                    if isinstance(call_id, str):
-                        text = data_codex.output_text(payload.get("output"))
-                        outcome = data_codex.exit_success(text)
-                        if outcome is None and calls.get(call_id, ("",))[0] == "exec":
-                            if text.startswith(data_codex.EXEC_RUNNING):
-                                continue   # not a final outcome: counts neither way
-                            outcome = data_codex.exec_outcome(text)
-                        if outcome is False:
-                            fail(call_id)
-                        else:
-                            calls.pop(call_id, None)
-                    continue
                 epoch = _epoch(obj.get("timestamp"))
                 if epoch is None:
                     continue
@@ -1774,15 +1677,7 @@ def _parse_codex_usage(path: Path) -> dict:
                         models[model] = models.get(model, 0) + 1
                 elif otype == "response_item":
                     if ptype in ("function_call", "custom_tool_call"):
-                        day = day_of(epoch)
-                        day["active"] = True
-                        name = payload.get("name")
-                        name = _clip(name, _CODEX_NAME_MAX) if isinstance(name, str) else ""
-                        if name:
-                            _codex_tool_slot(day, name)["calls"] += 1
-                            call_id = payload.get("call_id")
-                            if isinstance(call_id, str) and call_id:
-                                calls[call_id] = (name, _local_day(epoch))
+                        day_of(epoch)["active"] = True
                 elif otype == "event_msg":
                     if ptype == "token_count":
                         info = payload.get("info")
@@ -1827,8 +1722,8 @@ def _parse_usage_file(path: Path, provider: str) -> dict:
 
     `{"provider", "session_id", "cwd", "model", "subagent", "days"}`
     (`_SUMMARY_KEYS`), where `days` maps a local `YYYY-MM-DD` to `{"active",
-    "agent_seconds", "tools": {name: {"calls", "failed"}}, "tokens":
-    {"input", "output", "cache_read", "cache_creation"}, "context_peak"}`.
+    "agent_seconds", "tokens": {"input", "output", "cache_read",
+    "cache_creation"}, "context_peak"}`.
     `model` is the v3 `modelId`, the most frequent Claude `message.model` or
     the most frequent Codex `turn_context` model; `context_peak` the v3
     maximum `usagePercentage` (0-100) recorded that day, else None.
@@ -2053,9 +1948,8 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     Keys: `by_workspace` (top 8 by this week's agent seconds), `daily` (14
     days, oldest first, sessions and agent seconds per provider, and `tokens`:
     the four counters per provider that records them, only on a day it has
-    any, summing to `claude_tokens` and `codex_tokens`), `tools`
-    (`top` by calls over the window with `fail_rate`, `failing` this week with
-    at least 3 calls), `context_pressure` (kiro-cli v3 only: `sessions_total`
+    any, summing to `claude_tokens` and `codex_tokens`),
+    `context_pressure` (kiro-cli v3 only: `sessions_total`
     is every in-window kiro-cli session, `sessions_over_80` those whose
     in-window peak `usagePercentage` reached 80), `models` (sessions per
     model), `claude_tokens` and `codex_tokens` (each with `cache_hit_ratio` =
@@ -2063,16 +1957,16 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     Codex `input` excludes its cached tokens and `cache_creation` is the
     growth of `cache_write_input_tokens`, 0 when a rollout has none), `reparsed`
     (files parsed for this call rather than taken from the memo),
-    `aggregate_age_s` and `partial`. Codex enters `daily`, `by_workspace`,
-    `tools` and `models` like the other providers; its sub-agent rollouts are
+    `aggregate_age_s` and `partial`. Codex enters `daily`, `by_workspace`
+    and `models` like the other providers; its sub-agent rollouts are
     not read at all. The lifetime token total of its sub-agent threads comes
     from the state database as `codex_subagent_tokens` (None without a usable
     database, else `threads`, `total`, `thread_spawn` and `guardian`, an upper
     bound that includes context inherited at spawn) with the reason in
     `codex_state_db_status`; neither touches `codex_tokens`. Claude Code
-    sub-agent transcripts count in `tools` and
-    `claude_tokens` only; with `partial` True they are left out (neither listed
-    nor parsed, nothing is evicted) and the result says `partial: True`.
+    sub-agent transcripts count in `claude_tokens` only; with `partial` True
+    they are left out (neither listed nor parsed, nothing is evicted) and the
+    result says `partial: True`.
     261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
     """
     from . import data, data_codex_state
@@ -2114,8 +2008,6 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
                   if s["provider"] == _CLAUDE and not s["subagent"] and s["cwd"]}
     daily = {d: {"sessions": {}, "agent_s": {}, "tokens": {}} for d in day_list}
     workspaces: dict[str, dict] = {}
-    tools: dict[str, list[int]] = {}
-    tools_week: dict[str, list[int]] = {}
     models: dict[str, int] = {}
     # One token accumulator per provider that records tokens: Claude Code
     # (sub-agent transcripts included) and Codex.
@@ -2134,11 +2026,6 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
         for day_key, day in s["days"].items():
             if day_key not in day_set:
                 continue
-            for name, t in day["tools"].items():
-                for bucket in ((tools, tools_week) if day_key in this_week else (tools,)):
-                    slot = bucket.setdefault(name, [0, 0])
-                    slot[0] += t["calls"]
-                    slot[1] += t["failed"]
             if provider in tokens:
                 acc = tokens[provider]
                 # The same counts again per day, for the Tokens charts. Added
@@ -2188,10 +2075,6 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     for r in ws_rows:
         r["this_week_s"] = round(r["this_week_s"], 1)
         r["last_week_s"] = round(r["last_week_s"], 1)
-    top_tools = sorted(tools.items(), key=lambda kv: (-kv[1][0], kv[0]))[:_USAGE_TOP_TOOLS]
-    failing = [(n, c, f) for n, (c, f) in tools_week.items()
-               if c >= _USAGE_FAILING_MIN_CALLS and f > 0]
-    failing.sort(key=lambda t: (-t[2], -t[2] / t[1], t[0]))
     # Compared and sorted on the raw peak; rounded for display only.
     over_80 = sum(1 for p in pressure if p["peak"] >= CONTEXT_PRESSURE_PERCENT)
     pressure.sort(key=lambda p: (-p["peak"], p["session_id"]))
@@ -2217,12 +2100,6 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
                    "agent_s": {p: round(v, 1) for p, v in daily[d]["agent_s"].items()},
                    "tokens": daily[d]["tokens"]}
                   for d in day_list],
-        "tools": {
-            "top": [{"name": n, "calls": c, "fail_rate": round(f / c, 4) if c else 0.0}
-                    for n, (c, f) in top_tools],
-            "failing": [{"name": n, "failed": f, "calls": c}
-                        for n, c, f in failing[:_USAGE_TOP_FAILING]],
-        },
         "context_pressure": {
             "sessions_over_80": over_80,
             "sessions_total": v3_sessions,

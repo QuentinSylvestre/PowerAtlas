@@ -19052,8 +19052,6 @@ function runDashSentinel(slice, acpAvailable, extra = {}) {
     dashRailTitleText: (s) => String(s.id),
     dashRailSetHighlighted: (el, text) => { el.textContent = text; },
     dashSessionMetaRender: () => {},
-    dashRailSelected: new Set(),
-    dashRailSyncSelection: () => {},
     dashRailWhenShort: () => "",
     dashRailProviderIcon: () => new El("img"),
     dashRailHeadNode: () => new El("div"),
@@ -20604,9 +20602,9 @@ function wsModalBox(over = {}) {
   };
   const sent = [], errors = [];
   const box = {
-    _ws: (id) => els[id], _wsBusy: false, _wsBulkMode: false, _wsTags: [], WS_TAG_LIMIT: 10,
+    _ws: (id) => els[id], _wsBusy: false, _wsTags: [], WS_TAG_LIMIT: 10,
     _wsTagError: (m) => { if (m) errors.push(m); }, _wsFormError: () => {}, _wsUpdate: () => {},
-    hideWsAutocomplete: () => {}, renderWsTags: () => {}, renderBulkWsTags: () => {},
+    hideWsAutocomplete: () => {}, renderWsTags: () => {},
     fetch: (u, o) => { sent.push({ url: u, body: JSON.parse(o.body) }); return new Promise(() => {}); },
     JSON, ...over,
   };
@@ -20874,7 +20872,6 @@ function dashGroupingBox(store = {}, extra = {}) {
     dashRailRevealed: Object.create(null),
     dashRailCollapsed: Object.create(null),
     dashRailWorkspaces: Object.create(null),
-    dashRailSelected: new Set(),
     // Records what a workspace bucket hands the shared header controls.
     dashRailGroupActions: (wrap, head, group) => { box.actionCalls.push({ wrap, head, group }); },
     actionCalls: [],
@@ -21031,7 +21028,6 @@ check("dashboard rail: levels nest in the user's order, each bucket keyed by its
 check("dashboard rail: a nested workspace bucket gets the workspace controls, with its pin, colour and liveness", () => {
   const { box } = dashGroupingBox({}, {});
   box.dashRailWorkspaces["/w/a"] = { pinned: true, color: "#112233" };
-  box.dashRailSelected.add("/w/b");
   const parent = renderLevels(box, [
     bucketRow("1", { cwd: "/w/a", name: "a", live: true }),
     bucketRow("2", { cwd: "/w/b", name: "b", exists: false }),
@@ -21045,27 +21041,11 @@ check("dashboard rail: a nested workspace bucket gets the workspace controls, wi
   assertEqual(a.total, 1); assertEqual(a.sessions.length, 1);
   assertEqual(b.pinned, false, "a folder the map does not know is unpinned"); assertEqual(b.exists, false);
   assertEqual(inner[0].style.borderLeftColor, "#112233", "the workspace colour bar");
-  assert(inner[1].className.includes("acp-rail-group-gone") && inner[1].className.includes("selected"), "missing and selected state");
+  assert(inner[1].className.includes("acp-rail-group-gone"), "a missing folder is marked");
   assertEqual(inner[1].childNodes[0].dataset.badge, "MISSING");
   const plain = parent.childNodes[0].childNodes.filter((c) => c.dataset.level)[2];
   assertEqual(plain.dataset.cwd, undefined, "a folderless bucket has no data-cwd");
   assertEqual(box.actionCalls[0].wrap, inner[0]);
-});
-
-check("dashboard rail: ticking one copy of a workspace ticks every copy of it", () => {
-  const src = dashRailCut("function dashRailMirrorSelection(wrap){", "function dashRailSyncSelection(){");
-  const mk = (cwd, on) => { const g = new El("div"); g.className = "acp-rail-group" + (on ? " selected" : ""); g.dataset.cwd = cwd; return g; };
-  const [a1, a2, b1, day] = [mk("/w/a", true), mk("/w/a", false), mk("/w/b", false), mk(undefined, false)];
-  day.dataset = {};
-  const box = { document: { querySelectorAll: () => [a1, a2, b1, day] } };
-  vm.createContext(box);
-  vm.runInContext(src, box);
-  box.dashRailMirrorSelection(a1);
-  assert(a2.classList.contains("selected"), "the other copy follows");
-  assert(!b1.classList.contains("selected") && !day.classList.contains("selected"), "other workspaces and buckets are left alone");
-  a1.classList.remove("selected");
-  box.dashRailMirrorSelection(a1);
-  assert(!a2.classList.contains("selected"), "unticking clears the other copy too");
 });
 
 check("dashboard rail: a collapsed bucket draws no children, and a leaf bucket reveals past its cap on request", () => {
@@ -21160,6 +21140,61 @@ check("dashboard rail: Sort by shows only while Project is the outermost level",
   const flat = dashSettingsBox(["date", "project"]);
   flat.box.dashRailSettingsRender();
   assertEqual(sortHeads(flat.menu), 0, "no workspace list left to reorder");
+});
+
+// ---- no workspace multi-select -------------------------------------------
+//
+// The workspace tick boxes, their action bar, the bulk settings dialog and the
+// launcher tiles' "open on every ticked workspace" path are gone. These checks
+// pin the visible half of that: nothing in the rail can be ticked, and the
+// controls that used to read the ticks now act on one thing.
+
+check("dashboard rail: a workspace header has no selection checkbox", () => {
+  const slice = dashSentinelSlice("function dashRailGroupNode", "// ---- custom-launcher quick launch");
+  const { box } = runDashSentinel(slice, true, { dashRailHeadNode: () => new El("div") });
+  const group = box.dashRailGroupNode({ cwd: "/ws", name: "ws", sessions: [], total: 0, pinned: true });
+  assertEqual(group.querySelectorAll(".card-check").length, 0, "no tick box in the header");
+  assertEqual(group.dataset.cwd, "/ws", "the header still carries its workspace for the other controls");
+});
+
+check("dashboard page: no selection action bar, and nothing left reading selected workspaces", () => {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  for (const gone of ['id="actionBar"', 'id="selCount"', "getSelectedWorkspaceCwds", "updateActionBar",
+                      "updateLauncherBadges", "dashRailClearSelection", "openBulkWorkspaceSettings", "_wsBulkMode"]) {
+    assert(!src.includes(gone), `index.html still mentions ${gone}`);
+  }
+});
+
+check("dashboard: Settings on a workspace always opens that one workspace's settings", () => {
+  const slice = dashRailCut("function openWorkspaceSettings(btn){", "function openSingleWorkspaceSettings(cwd){");
+  const opened = [];
+  const box = { openSingleWorkspaceSettings: (cwd) => opened.push(cwd) };
+  vm.createContext(box);
+  vm.runInContext(slice, box);
+  box.openWorkspaceSettings({ closest: () => ({ dataset: { cwd: "/w/a" } }) });
+  assertEqual(opened.join(), "/w/a");
+});
+
+check("dashboard: a launcher tile launches without a workspace, whatever the launcher's old selection setting", () => {
+  const slice = dashRailCut("function runLauncherById(id){", "// `env` is deliberately absent from every launcher payload");
+  const posted = [];
+  const box = {
+    fetch: (url, o) => { posted.push({ url, body: JSON.parse(o.body) }); return Promise.resolve({ text: () => Promise.resolve("") }); },
+    JSON, showToast: () => {},
+    _providerSettings: { codex: { default_directory: "/d/codex" } }, _globalDefaultDirectory: "/d/global",
+    _launchers: [{ id: "x", command: "code", custom_args: "-n", cwd: "/w/x", name: "X", terminal: false, use_selected_workspaces: true }],
+  };
+  vm.createContext(box);
+  vm.runInContext(slice, box);
+  box.runLauncherById("builtin--terminal");
+  box.runLauncherById("provider--codex");
+  box.runLauncherById("provider--claude-code");
+  box.runLauncherById("x");
+  assertEqual(posted.map((c) => c.url).join(), "/api/launch-terminal,/api/launch-batch,/api/launch-batch,/api/launcher/run");
+  assertEqual(posted[0].body.workspace, "", "the terminal tile opens at its default");
+  assertEqual(posted[1].body.sessions[0].workspace, "/d/codex", "a provider tile uses its own default directory");
+  assertEqual(posted[2].body.sessions[0].workspace, "/d/global", "then the global default");
+  assertEqual(posted[3].body.cwd, "/w/x", "a custom launcher runs in its own folder");
 });
 
 let failed = 0;

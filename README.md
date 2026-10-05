@@ -98,7 +98,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   - Codex sessions: `~/.codex/sessions/` (`$CODEX_HOME/sessions` when `CODEX_HOME` is set). Sessions started from the Codex CLI, the VS Code extension and the desktop app are listed; sub-agent threads and archived sessions are not
 - Unified provider-launcher system with extracted icons and configurable colors. A provider whose binary has no embedded icon (Codex, kiro-cli) gets a terminal glyph drawn in its color; Codex's default color is white
 - Inline provider filter next to the workspaces rail
-- Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — grouped by project, date (Today/Yesterday/This week/Older), or status
+- Workspace tags with configurable colors, unified tag management (add/delete from popover), tag/time filtering, and hidden workspaces — grouped by project, date (Today/Yesterday/This week/Older), or status
 - Resume sessions with one click (opens a terminal and runs the provider's own resume command). New and Resume sessions of Codex run plain `codex` and `codex resume <id>` with no flags added; put any flags in the provider's default args
 - Click any session in the dashboard's workspaces rail to open its full transcript in a persistent
   panel next to the rail — works for every provider, reading straight from disk. For a kiro-cli v3
@@ -156,7 +156,6 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   are reachable from your own devices behind a device secret, while the dashboard, launchers and
   settings stay loopback-only. See *Remote access* below
 - Live session status — sessions currently running in a terminal show a 🟢 Working (agent executing) or 🟡 Waiting (agent finished, your turn) or 🔴 Errored dot; workspace groups show the highest-priority status dot. The workspaces rail's settings popover groups sessions by Date, Project and Status, and the choices nest: pick several and each level goes inside the one before it, in the order picked (numbered 1, 2, 3 in the popover; for example Date, then Project). Sessions this PowerAtlas holds open also appear in an "ACP sessions" section directly below "Pinned sessions", and both sections show each row as "workspace - title" with its last-activity time. Detected by matching the working directory of running `claude` / `kiro-cli` / `codex` processes to session workspaces; also supports v3 kiro-cli sessions (`messages.jsonl` format). A terminal Codex session is live when its `codex` process has `resume <id>` on its command line, or when a `codex` process runs in the session's workspace and the session has a record newer than 5 minutes; Codex's background helper processes (such as `app-server`) never count. A Codex thread held open by the desktop app or the VS Code extension has no terminal process and shows no dot. Codex rows get the live dot but no Working, Waiting or Errored status, so they never trigger a notification. While another Codex process holds a thread open for writing, that row's Resume button is hidden; the row and its transcript stay available. Opt-in toast notifications fire when a session transitions from Working to Waiting or Errored (Windows toast via WinRT, Linux via notify-send)
-- Multi-select workspaces and batch-launch a provider or custom launcher across all of them at once
 - Per-provider settings with default args (e.g. trust-all-tools)
 - Pin folders and sessions for quick access — a pinned row shows a small pin glyph in place of its `⋯`
   trigger while nothing is hovered; hovering swaps it back for the row's real actions, `⋯` included.
@@ -168,7 +167,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   v3 session row's own `⋯` menu can permanently delete just that session, and the workspace row's `⋯`
   menu can delete every kiro-cli session in that workspace at once (optionally the folder too, typed-name
   confirmation required) — the same store and endpoint `/acp`'s own per-session delete uses
-- Built-in terminal launcher tile opens a shell at selected workspaces or default directory
+- Built-in terminal launcher tile opens a shell at the default directory
 - A filter box narrows the workspaces rail to matching names/titles as you type (client-side, over whatever pages are currently loaded — paginate or clear the filter to reach the rest)
 - Custom launchers with inline args editing and one-click execution
 - Global launch profiles with configurable Windows Terminal profile and terminal command
