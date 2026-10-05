@@ -1,7 +1,7 @@
 # Codex Live Status, Context Pressure and Sub-agent Usage from the State Database
 
 > **Date**: 2026-10-02
-> **Status**: In Progress — Phases 0 to 2 done and reviewed; Phase 3 coded, reviewed and fixed, with two exit criteria open (the mutation list, live QA b/e/f); Phase 4 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0 to 2 done and reviewed; Phase 3 coded, reviewed and fixed, with two exit criteria open (the mutation list, live QA b/e/f); Phase 4 coded and reviewed, live QA open; Phase 5 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Follow-ups deferred by the archived Codex provider plan: a lock-owner live dot, a Working/Idle verdict and turn-end notifications for terminal Codex sessions, Codex context pressure, sub-agent token usage, and an optional state-database layer that feeds them. Driving Codex from `/acp` and app-server integration are out of scope.
 > **Estimated effort**: 5-6 days (pre-flight 0.5, database and sub-agent usage 1, context pressure 0.5, lock owner and live dot 1.25, verdict 1, notifier 0.75, documentation, cleanup and QA 0.75)
@@ -232,11 +232,11 @@ All measurements print counts, shapes and timings only: no ids, no paths, no mes
 **QA**: in the live TUI, send a prompt that runs a command for **at least 90 seconds**: the tile shows Working within a few seconds and Idle after, and the rail dot follows within about a minute without a page reload (the rail refresh is about 60 s, D12); quit the TUI and the dot disappears.
 
 **Exit criteria**:
-- [ ] `turn_state`, the row and tile wiring, the dot mapping and the poll refresh exist as above; `status_classifier.py` is unchanged (diff shows no edit).
-- [ ] All Phase 4 tests pass and the full suites, node tests, `_check_test_names.py` and `ruff` counts are green.
-- [ ] Mutation checks fail the tests: the cache keyed on mtime alone; `turn_aborted` read as working; the verdict set for a non-terminal holder; a substring match in place of the key-path match; the stale-turn cap removed; `status` set in the shared row builder; `dashRailRefreshStates` left unchanged; the refresh comparing through `dashRailRowStatus`; the oracle rows altered.
-- [ ] Live QA shows Working then Idle on the tile and the rail follows within the stated lag.
-- [ ] README states the Working/Idle verdict, the rail's lag, and that "Working" can include a session waiting for approval (section 8).
+- [x] `turn_state`, the row and tile wiring, the dot mapping and the poll refresh exist as above; `status_classifier.py` is unchanged (diff shows no edit). Code commits `42733c7`, review fixes `b05e7fa`.
+- [x] All Phase 4 tests pass and the full suites, node tests, `_check_test_names.py` and `ruff` counts are green. On `main` at `b05e7fa`: pytest 4009 passed and 3 skipped, `node tests/acp_page.test.mjs` 952 of 952, `_check_test_names.py` clean, `ruff` counts for the edited files equal `HEAD` before the phase (web.py 13, tests/test_web.py 84, tests/test_data.py 13).
+- [x] Mutation checks fail the tests (all 22 mutants run were detected after two tests were added for the two survivors; see section 9): the cache keyed on mtime alone; `turn_aborted` read as working; the verdict set for a non-terminal holder; a substring match in place of the key-path match; the stale-turn cap removed; `status` set in the shared row builder; `dashRailRefreshStates` left unchanged; the refresh comparing through `dashRailRowStatus`; the oracle rows altered.
+- [ ] Live QA shows Working then Idle on the tile and the rail follows within the stated lag. NOT done: it needs PowerAtlas restarted from `main` and a real Codex terminal turn of at least 90 seconds.
+- [x] README states the Working/Idle verdict, the rail's lag, and that "Working" can include a session waiting for approval (section 8). Commits `42733c7`, `b05e7fa`.
 
 ### Phase 5: Turn-end notifications for terminal Codex sessions [QA]
 **Covers**: SC-3
@@ -422,6 +422,12 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 - The mutation list of the exit criteria was covered by the review rounds' mutation runs, not re-run as one list; the criterion stays open.
 
 **Phase 3 live QA (2026-10-05, a throwaway Codex session, deleted afterwards).** (a) an idle terminal resolved as `terminal` and stayed live for 5.5 minutes. (c) closing the terminal made the row not live at once. (d) `codex exec resume` on a thread: the holder reads as `other`, so no owner dot (the AGENTS.md recipe that says the live dot can be checked this way needs the Phase 6 amendment). (b), (e) and (f) were not exercised. The throwaway session, its ledger and its working folder were removed after its working-folder marker was checked.
+**Phase 4 (code commits `42733c7`, review fixes `b05e7fa`).** `data_codex.turn_state` (cache `_turn_cache`, 256 entries, rebound in `_clear_caches`), `web._codex_turn_status` (the rows, inside the `include_provider` branch of both builders), `overview._codex_tile_status` (tiles, for the ids in the enumerator's set), the page script (`dashRailDotClass`, `dashRailRefreshStates`; the metadata strip follows `dashRailDotClass`, so it needed no edit) and two `style.css` comments. Divergences from the plan text:
+- A working turn stamped in the future (past `FUTURE_SKEW`) or with no timestamp at all gets no verdict, like a stuck one; the plan only said "older than 30 minutes".
+- The "byte-identical against an oracle" test of the kiro-cli and Claude Code rows is the existing suite plus the include-provider-off row test; no separate oracle fixture was added. Both reviewers found no change for those providers.
+- The "tile reader agrees on turn boundaries" parity case compares `turn_state` with the usage parser's agent-time pairing (five record sets); `tail_events` is not part of it.
+- Mutation run (22 mutants of `turn_state`, the row wiring, the tile wiring and the page script): two survived at first (a substring match inside an `event_msg` message, and an unknown age trusted); two tests were added and both are detected.
+- Not done: Phase 4 live QA (needs the restart and a real 90-second turn); a node test for the tile dot path (the tile uses the same `dashRailDotClass`).
 
 ## Follow-up Work (Deferred)
 
@@ -449,6 +455,10 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 22. **`forget` with a lookup in flight (Phase 3 review, Low).** A lookup that finishes after `forget` re-adds the entry until its next re-resolve.
 23. **Exit code 259 (STILL_ACTIVE) from `GetExitCodeProcess` (Phase 3 review, Low).** A process that exited with code 259 reads as alive in the liveness check. Reopen on a report.
 24. **A redundant candidate id check in the tile source (Phase 3 review, Low).** `_codex_terminal_candidate` re-checks an id the enumerator already validated. Harmless; remove with the next edit there.
+25. **A long turn loses its verdict (Phase 4 review, Medium; extends item 14).** `turn_state` reads the last 2 MiB; a turn that wrote more than that since its `task_started` (token records, large tool output) returns None and the dot reverts to the neutral live dot until the turn ends. D11 allows it and the README says so. Keeping the last verdict and scanning only the appended bytes would fix this and the per-poll re-read cost (a changing file re-parses up to 2 MiB per call per active tile). Reopen on a report.
+26. **A `task_complete` record over 256 KiB is not read (Phase 4 review, Low).** Lines over `_LINE_CAP` are skipped, so such a record cannot end a turn; the row reads working until 30 minutes pass without a record. Unlikely; reopen on a report.
+27. **A Codex row with a verdict stays in the Available bucket in Status grouping (Phase 4 review, Low; D12).** The buckets mean "held by this PowerAtlas" by decision.
+28. **The positive row tests need `sys.platform == "win32"` (Phase 4 review, Low).** Like the lock-owner live rule tests. No CI exists; patch the platform if one is added.
 
 ## Review Log
 
@@ -631,28 +641,46 @@ Live QA was done by the orchestrator, not a reviewer (section 9, the exit criter
 ### 2026-10-05 -- Phase 3 code review (via /qdev, three rounds)
 
 Three review rounds on the Phase 3 diff (Security auditor, Reliability engineer, Senior engineer across the rounds). Result: 0 High findings; the Medium and Low findings are listed in section 9 under Phase 3 and are all `Fixed -- 75a0e00` (tests in the same commit), except the Lows recorded as Follow-up Work 19 to 24, which are `User: accepted` by the user's instruction to record them and go on. The mutation runs after the fixes: every mutant of the fixes is detected except the equivalent `cursor_first` one (section 9). Reviewer gaps: Windows-only code paths were exercised against a Restart Manager fake and one live QA session; QA (b), (e) and (f) are open. Health after this cycle: Green for the findings; the exit criteria on the mutation list and live QA stay unticked.
+### 2026-10-05 -- Phase 4 code review (via /qdev)
+
+Two reviewers on commit `42733c7`: a Senior engineer (acceptance criteria, correctness, regressions) and a Reliability engineer (failure modes, cost, test quality, with a mutation of the cache reset run in a scratch copy). Both found 0 High. Findings and resolutions:
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | The verdict disappears once a turn writes more than 2 MiB (both reviewers). | Orchestrator: proposed-accept -- pending user decision. D11 allows None past the window and the README now says so; Follow-up Work 25. |
+| 2 | Medium | Each poll of a growing file re-parses up to 2 MiB (both reviewers). | Orchestrator: proposed-accept -- pending user decision. The plan already accepts the cost (D11, Follow-up Work 14); Follow-up Work 25 extends it. |
+| 3 | Low | A future-stamped newest record kept a stale working turn alive (both). | Fixed -- `b05e7fa`: `FUTURE_SKEW`; a test pins it. |
+| 4 | Low | A record over 256 KiB cannot end a turn (Senior). | Follow-up Work 26. |
+| 5 | Low | The fixed cache size appeared twice (Reliability). | Fixed -- `b05e7fa`: one constant. |
+| 6 | Low | The Status grouping ignores the verdict (Reliability). | Accepted by D12; Follow-up Work 27. |
+| 7 | Low | No test pinned that `_clear_caches` resets the turn cache (Reliability, shown by a mutant). | Fixed -- `b05e7fa`. |
+| 8 | Low | A test named for pinned rows only reads groups; a field-leak test was nearly vacuous (both). | Fixed -- `b05e7fa`: renamed; the row's exact field set is asserted. |
+| 9 | Low | Both tile tests patched `turn_state` (Reliability). | Fixed -- `b05e7fa`: a tile test reads a real rollout. |
+| 10 | Low | The positive row tests need Windows (Reliability). | Follow-up Work 28. |
+| 11 | Low | A quoted-form sniff mutant survives (Reliability, test-strength note; such a sniff has no false positive). | Skipped: no behavioural consequence. |
+
+Reviewer gaps: neither measured the per-call cost of a 2 MiB scan; neither read the real Codex store (not allowed), so the event names rest on the Phase 0 evidence; the live UI was not exercised. Health after this cycle: Yellow until the user accepts rows 1 and 2 (Orchestrator: proposed-accept -- pending user decision).
 
 ## Handoff
 
-> Handoff written: 2026-10-05 (end of the Phase 3 session)
+> Handoff written: 2026-10-05 (end of the Phase 4 coding session)
 
 ### Previously
 
-- Phases 0 to 2 are done and reviewed. Phase 3 (lock-owner lookup and the live dot) is coded, reviewed in three rounds and fixed on `main`: `7e55dc9`, `a0417ef`, `7272dd1`, `1b49547`, `63f5c53`, fixes `75a0e00`, tests `cd448aa` and `317cf40`. Everything is pushed to `origin/main` up to `4cd9770`; the two commits after it are local until the next push.
-- Full suites at `75a0e00`: pytest 3974 passed, node 947 of 947, name check clean, `ruff` counts unchanged.
-- Another session's change (`4a6902b`, default effort `max` in `acp.py`) was committed at the user's request.
-- The throwaway Codex session of the QA was deleted; its ledger and working folder are gone.
+- Phases 0 to 2 are done. Phase 3 (lock-owner lookup) and Phase 4 (Working/Idle verdict) are coded, reviewed and fixed on `main`. Phase 4: `42733c7`, review fixes `b05e7fa`; full suites at `b05e7fa`: pytest 4009 passed, node 952 of 952, name check clean, `ruff` counts unchanged. Everything up to `d99ac75` is pushed; the Phase 4 commits and this note are local until the next push.
+- Two Phase 3 exit criteria and Phase 4's live QA criterion are open (see Parked). Review rows 1 and 2 of the Phase 4 review await the user's accept.
 
 ### Parked
 
-- Phase 3 exit criteria still open: the long mutation list (the review runs covered it piecemeal) and live QA (b), (e), (f). PowerAtlas was not restarted, so it still runs the code from before Phase 3; restart it from `main` (the user's earlier grant for this task may have lapsed: ask), then run (b), (e), (f).
+- PowerAtlas still runs code from before Phase 3. Restart it from `main` (the user's earlier restart grant may have lapsed: ask), then run Phase 3 QA (b), (e), (f) and Phase 4 QA: in a real Codex terminal, send a prompt that runs a command for at least 90 seconds; the tile shows Working within seconds and Idle after, the rail dot follows within about a minute; quitting the terminal removes the dot. Throwaway Codex sessions need a ledger and cleanup (never print ids).
+- The Phase 3 mutation list criterion (covered piecemeal by the review runs).
 - The Phase 6 cleanup list is in section 9; check `git worktree list` for strays. Do not run `git worktree prune`.
 
 ### Current
 
-Next: decide with the user whether to close Phase 3 with the two open criteria recorded as accepted, or to restart PowerAtlas and run the QA first. Then Phase 4 (Working/Idle verdict), Phase 5 (turn-end notifications), Phase 6 (docs, cleanup, final QA; it amends the AGENTS.md `codex exec resume` recipe with the (d) result, needing approved exact text).
+Next: Phase 5 (turn-end notifications for terminal Codex sessions: `new_turn_ends`, a tick function and a daemon thread; see the plan's Phase 5 section and D13). It needs `data_codex.turn_state` and the shared enumerator `web._codex_terminal_threads`, both now in place. Then Phase 6 (docs, cleanup, final QA; it amends the AGENTS.md `codex exec resume` recipe with the Phase 3 (d) result, needing approved exact text).
 
-Cautions: never print ids, paths or message text from the real Codex, Claude or Kiro stores. Commit by pathspec and check `git status` first; stage hunks from a patch of your own diff when a file is shared. Write edit scripts with the Write tool (a shell heredoc halves backslashes). Push only when the user asks.
+Cautions: never print ids, paths or message text from the real Codex, Claude or Kiro stores. Commit by pathspec and check `git status` first. Write edit scripts with the Write tool, never a shell heredoc (it halves backslashes: this corrupted `\n` in a test edit again this phase). A test that lists sessions must clear `data.session_cache` and the Codex caches after writing its rollouts, and again at teardown. Push only when the user asks.
 
 ## Harness Improvement Opportunities
 
@@ -660,3 +688,5 @@ Cautions: never print ids, paths or message text from the real Codex, Claude or 
 - A derived figure ("sub-agent tokens are about 2%") was reported from a filter (`agent_role` is empty) that stands in for a classification, and a later probe on the real classification (`source`) showed it was about 40% — cost: a wrong number shown to the user and a correction round — suggested change: extend the Probe gate's sample rule: a count taken through a proxy field is cross-checked against the field that actually defines the class before it is shown.
 - The heredoc backslash-halving problem recurred in this segment (three edit scripts needed a second try: a regex tab, a CR literal, and an anchor that held `\0`) — cost: about six extra tool rounds and one corrupted checker line caught by ruff — suggested change: make the existing note a rule in the harness steering for Windows (write edit scripts with the Write tool, never a heredoc).
 - A commit built from a whole file rebuilt from an earlier `HEAD` silently removed another change's lines that landed in between — cost: one High review finding and a fix commit — suggested change: in `/qdev`'s staging notes, say to stage own hunks from a patch of the own diff (`git apply --cached`) and to compare `HEAD` before and after, whenever another session shares the files.
+- A shell heredoc halved backslashes in a Python edit script a fourth time (a `\n` in a test string became a real newline and broke the file's syntax) — cost: two extra tool rounds — suggested change: the existing rule in Harness Improvement Opportunities, unchanged; make it a hard rule in the Windows steering.
+- Process-wide session caches (`data.session_cache`) leaked sessions between tests that list sessions, failing an unrelated test later in the run — cost: four debugging rounds — suggested change: AGENTS.md's Codex test note names `data.session_cache.clear()` beside the Codex redirects.
