@@ -45,7 +45,7 @@ from .config import (load_config, save_config, ConfigUnreadableError,
                      ensure_local_secret, hold_local_secret_in_memory,
                      local_secret_status, rotate_local_secret,
                      ACP_PERMISSION_MODES)
-from . import agent_profile, autostart, data, data_codex, icons, launcher, notifications, presence
+from . import agent_profile, autostart, data, data_codex, icons, launcher, lock_owner, notifications, presence
 from . import overview
 from . import permission_rows
 from .status_classifier import get_semantic_status, SemanticStatus
@@ -275,6 +275,130 @@ def _map_reported_status(reported: str) -> str:
 _LIVE_MTIME_WINDOW = 300.0
 
 
+# --- Who owns a Codex thread's lock (D8, D10, D13, D19, D21) -----------------------------------------
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3
+#
+# A Codex terminal holds its thread's writer lock for as long as it runs the thread, so on
+# Windows the lock state and the process that holds it say whether a terminal has the
+# thread open: free is not live, held by a terminal is live, held by anything else is not.
+# Everything the lookup cannot tell falls back to the older rule (a process in the folder
+# and recent activity), so a failed lookup never makes a dot worse than it was.
+
+_CODEX_START_TOLERANCE = 2.0
+
+
+def _codex_holder_verdict(holders, snapshot) -> str:
+    """`terminal`, `other` or `unknown` for the processes that have a thread's lock file open.
+
+    PowerAtlas's own pid and every pid that is not a Codex process in the snapshot are
+    dropped. A holder whose start time differs from the snapshot's by more than 2 s is a
+    recycled pid, so the answer is unknown. A `terminal` or `daemon` holder is a terminal
+    (a default-mode terminal's lock is held by the shared managed daemon, which outlives the
+    terminal); a `helper` whose live parent is a Codex terminal is a terminal, one whose
+    live parent is any other program (the desktop app, VS Code) is other, and one with a gone
+    or unreadable parent is unknown. Holders that are all terminal give `terminal`, all
+    other give `other`, anything else (a mix, none left, an empty list) gives `unknown`.
+    """
+    procs = snapshot.codex_procs()
+    own = os.getpid()
+    verdicts: list[str] = []
+    for pid, start in holders or ():
+        if pid == own or pid not in procs:
+            continue
+        created, kind, parent = procs[pid]
+        if abs(created - start) > _CODEX_START_TOLERANCE:
+            return "unknown"
+        if kind in ("terminal", "daemon"):
+            verdicts.append("terminal")
+        elif parent is None:
+            verdicts.append("unknown")
+        elif parent not in procs:
+            verdicts.append("other")
+        else:
+            verdicts.append("terminal" if procs[parent][1] == "terminal" else "unknown")
+    if not verdicts or "unknown" in verdicts:
+        return "unknown"
+    if all(v == "terminal" for v in verdicts):
+        return "terminal"
+    return "other" if all(v == "other" for v in verdicts) else "unknown"
+
+
+def _codex_lock_path(session_id: str) -> str:
+    return str(Path(data_codex.CODEX_LOCKS_DIR) / f"{session_id}.lock")
+
+
+def _codex_owner_verdict(snapshot, session_id: str) -> str:
+    """The verdict for a held thread's lock, from the owner cache: `terminal`, `other` or
+    `unknown` (also while the first lookup is still pending)."""
+    got = lock_owner.holders(_codex_lock_path(session_id))
+    if got is None or got is lock_owner.PENDING:
+        return "unknown"
+    return _codex_holder_verdict(got, snapshot)
+
+
+def _codex_terminal_owned(snapshot, session_id: str) -> bool:
+    """Whether the thread's lock is held and a Codex terminal holds it: the one predicate
+    the rows and the Overview tiles share."""
+    return (data_codex.session_writer_state(session_id) == "held"
+            and _codex_owner_verdict(snapshot, session_id) == "terminal")
+
+
+def _codex_diagnostics() -> dict:
+    """Two short status strings for the dashboard, never a pid, path or id (D23).
+
+    `owner_lookup` is `ok`, `backing-off` or `disabled` (always `disabled` off Windows);
+    `turn_watch` is `off` until the turn-end notifier exists."""
+    return {"owner_lookup": lock_owner.status() if sys.platform == "win32" else "disabled",
+            "turn_watch": "off"}
+
+
+# One shared enumerator of the thread locks a terminal holds, for the Overview tiles (and,
+# later, the turn-end notifier): the lock directory is listed, at most 8 ids are probed per
+# call (ids already seen held and ids a `resume <uuid>` command line names first, then a
+# rotating cursor), and the answer is reused for 3 s.
+_CODEX_ENUM_PROBES = 8
+_CODEX_ENUM_REUSE = 3.0
+_codex_enum_lock = threading.Lock()
+_codex_clock = time.monotonic  # a seam, so a test can move time
+_codex_enum: dict = {"at": -1e9, "ids": [], "cursor": 0, "held": set()}
+
+
+def _codex_terminal_threads(snapshot) -> list[str]:
+    """Ids of the threads whose lock a Codex terminal holds right now. Blocking: it probes locks."""
+    now = _codex_clock()
+    with _codex_enum_lock:
+        if now - _codex_enum["at"] < _CODEX_ENUM_REUSE:
+            return list(_codex_enum["ids"])
+    ids: list[str] = []
+    if sys.platform == "win32" and snapshot.has_codex_terminal():
+        try:
+            names = os.listdir(data_codex.CODEX_LOCKS_DIR)
+        except OSError:
+            names = []
+        every = sorted(n[:-5] for n in names if n.endswith(".lock") and data.UUID_RE.fullmatch(n[:-5]))
+        if every:
+            with _codex_enum_lock:
+                held_before, cursor = set(_codex_enum["held"]), _codex_enum["cursor"]
+            resumed = {sid for prov, sid, _cwd in snapshot.live_sids() if prov == "codex"}
+            first = [sid for sid in every if sid in held_before or sid in resumed]
+            rest = [sid for sid in every if sid not in set(first)]
+            start = cursor % len(rest) if rest else 0
+            rotated = rest[start:] + rest[:start]
+            probe = (first + rotated)[:_CODEX_ENUM_PROBES]
+            held_now: set[str] = set()
+            for sid in probe:
+                if _codex_terminal_owned(snapshot, sid):
+                    ids.append(sid)
+                if data_codex.session_writer_state(sid) == "held":
+                    held_now.add(sid)
+            with _codex_enum_lock:
+                _codex_enum["held"] = (held_before - set(probe)) | held_now
+                _codex_enum["cursor"] = cursor + max(0, len(probe) - len(first))
+    with _codex_enum_lock:
+        _codex_enum["at"], _codex_enum["ids"] = _codex_clock(), list(ids)
+    return ids
+
+
 def _session_is_live(snapshot, session, provider: str) -> bool:
     """Cheap liveness gate: is a process for this exact session running.
 
@@ -291,6 +415,17 @@ def _session_is_live(snapshot, session, provider: str) -> bool:
     """
     if snapshot.is_live(provider, session.cwd, session.session_id):
         return True
+    if provider == "codex" and sys.platform == "win32":
+        # D10: the thread's lock state decides when it is known; only what the lookup cannot
+        # tell (an unknown state, an unknown or pending owner) uses the folder rule below.
+        state = data_codex.session_writer_state(session.session_id)
+        if state == "free":
+            lock_owner.forget(_codex_lock_path(session.session_id))
+            return False
+        if state == "held":
+            verdict = _codex_owner_verdict(snapshot, session.session_id)
+            if verdict != "unknown":
+                return verdict == "terminal"
     from .data import _normalize_path
     norm_cwd = _normalize_path(session.cwd)
     if norm_cwd not in snapshot.live_cwds({provider}):
@@ -3102,7 +3237,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         for cwd, name, s, prov_name in pinned_sessions_found
     ]
 
-    return {
+    out = {
         "groups": groups,
         "group_page": group_page,
         "group_total": group_total,
@@ -3110,6 +3245,9 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         "pinned": pinned,
         "capacity": capacity,
     }
+    if include_provider and "codex" in enabled:
+        out["codex_diagnostics"] = _codex_diagnostics()
+    return out
 
 
 def _acp_flat_listing(page: int, size: int, held, capacity: dict,
@@ -3276,6 +3414,8 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
         "has_more": has_more,
         "capacity": capacity,
     }
+    if include_provider and "codex" in enabled:
+        payload["codex_diagnostics"] = _codex_diagnostics()
     if include_provider:
         # Dashboard-only. A flat row names its folder but not whether that
         # folder is pinned or coloured; the rail needs both to draw a
@@ -3600,6 +3740,7 @@ def _overview_live(held: dict[str, str], filter_: str) -> dict:
         row_title=_acp_row_title,
         hidden=hidden,
         provider_shown=lambda prov: prov in providers,
+        codex_terminal_threads=_codex_terminal_threads,
     )
     tiles = overview.live_sessions(held, snapshot, filter_, deps, originals)
     return {"filter": filter_, "tiles": tiles}

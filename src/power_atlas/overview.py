@@ -467,6 +467,11 @@ class LiveDeps(NamedTuple):
     row_title: Callable
     hidden: Callable
     provider_shown: Callable
+    # `codex_terminal_threads(snapshot) -> [session id]`: the Codex threads whose writer lock a
+    # terminal holds (the lock owner rule), so a terminal-held thread gets a tile even when
+    # its process runs in another folder. Defaulted, so a `LiveDeps` built without it works.
+    # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3 (D21)
+    codex_terminal_threads: Callable | None = None
 
 
 def _read_tail(path: Path, start: int, length: int, shared: bool = False) -> bytes:
@@ -877,6 +882,29 @@ def _cwdless_candidate(provider: str, sid: str, originals: dict[str, str],
     return (data.Session(sid, _CWDLESS_TITLE, cwd, "", "", "", "", ""), cwd, False, True, path)
 
 
+def _codex_terminal_candidate(sid: str, originals: dict[str, str], shown: Callable,
+                              sessions_in: Callable):
+    """A `live_sessions` candidate for a Codex thread whose lock a terminal holds, or None.
+
+    Strict, and fail closed: the thread needs a store record in a shown workspace, so a
+    helper thread's lock, a sub-agent rollout (it has no store record) and an absent
+    rollout produce no tile; a cwd that `cwd_class` rejects (network, relative, empty,
+    over 260 characters) is dropped before the hidden-workspace filter can expand its 8.3
+    name. Unlike `_cwdless_candidate` it never returns a minimal tile.
+    261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3 (D21)
+    """
+    from . import data, data_codex, data_codex_state
+
+    cwd = data_codex.find_session_workspace(sid)
+    if not isinstance(cwd, str) or data_codex_state.cwd_class(cwd) != "local":
+        return None
+    original = originals.get(data._normalize_path(cwd))
+    if not original or not shown(_CODEX, original):
+        return None
+    session = next((s for s in sessions_in(_CODEX, original) if s.session_id == sid), None)
+    return (session, original, False, True, None) if session is not None else None
+
+
 def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
                   originals: dict[str, str]) -> list[dict]:
     """The Live now tiles. Blocking; runs in a worker thread.
@@ -985,6 +1013,19 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
                 key = (provider, session.session_id)
                 if key not in cands and is_live(session, provider):
                     cands[key] = (session, original, False, True, None)
+        # (d) Codex threads a terminal holds the lock of, wherever the process runs.
+        if deps.codex_terminal_threads is not None:
+            try:
+                owned = list(deps.codex_terminal_threads(snapshot))
+            except Exception:
+                log.exception("Overview: could not list the Codex threads a terminal holds")
+                owned = []
+            for sid in owned:
+                if (_CODEX, sid) in cands or not data.SESSION_ID_RE.fullmatch(sid or ""):
+                    continue
+                cand = _codex_terminal_candidate(sid, originals, shown, sessions_in)
+                if cand is not None:
+                    cands[(_CODEX, sid)] = cand
 
     now = time.time()
     rows = []

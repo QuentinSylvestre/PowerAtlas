@@ -146,8 +146,13 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(data_codex_mod, "_AVAILABLE_TTL", 0.0)
     # The state database folder moves too, and its memo and log throttle start empty
     # (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1).
-    from power_atlas import data_codex_state as data_codex_state_mod, quiet_log as quiet_log_mod
+    from power_atlas import data_codex_state as data_codex_state_mod, lock_owner as lock_owner_mod, quiet_log as quiet_log_mod
     monkeypatch.setattr(data_codex_state_mod, "CODEX_STATE_DIR", tmp_path / "codex-home")
+    # Phase 3 (D15): the writer state reads `unknown`, so the folder rule still decides every row;
+    # the owner lookup has no thread and an empty cache; the tile enumerator starts with no memo.
+    monkeypatch.setattr(data_codex_mod, "session_writer_state", lambda sid: "unknown")
+    monkeypatch.setattr(lock_owner_mod, "_resolver", lock_owner_mod._Resolver(threads=False, self_test=False))
+    monkeypatch.setattr(web_mod, "_codex_enum", {"at": -1e9, "ids": [], "cursor": 0, "held": set()})
     data_codex_state_mod.clear_memo()
     quiet_log_mod.reset()
     data_codex_mod._clear_caches()
@@ -31272,6 +31277,32 @@ class TestOverviewLive:
             "an id without a cwd is listed with an empty one"
         assert sorted(snap.live_cwd_pairs()) == [("claude-code", "c:\\w"), ("kiro-cli-v3", "c:\\k")]
 
+
+    # --- Codex terminal-held threads (Phase 3, D21) ---
+
+    def test_live_sessions_adds_the_terminal_held_thread_whose_process_runs_in_another_folder(
+            self, monkeypatch, store):
+        from power_atlas import data_codex
+        cwd = "C:\\ws\\proj"
+        store.add("codex", cwd, _LK_TILE_SID)
+        store.add("codex", cwd, "not-a-uuid")                # a store record whose id is no session id
+        monkeypatch.setattr(data_codex, "find_session_workspace", lambda s: cwd)
+        deps = self._deps()._replace(codex_terminal_threads=lambda snap: [_LK_TILE_SID, "not-a-uuid"])
+        tiles = self._live({}, self._snap(), deps, self._originals(cwd))
+        assert [t["id"] for t in tiles] == [_LK_TILE_SID]
+
+    def test_live_sessions_without_the_new_field_or_with_a_raising_source_is_unchanged(self, monkeypatch, store):
+        cwd = "C:\\ws\\proj"
+        store.add("codex", cwd, _LK_TILE_SID)
+        base = self._deps()
+        assert base.codex_terminal_threads is None
+        assert self._live({}, self._snap(), base, self._originals(cwd)) == []
+
+        def boom(snap):
+            raise RuntimeError("x")
+        deps = base._replace(codex_terminal_threads=boom)
+        assert self._live({}, self._snap(), deps, self._originals(cwd)) == []
+
     # --- the rail's rule, by expected-set equality --------------------------
 
     def test_the_rail_rule(self, store, tmp_path):
@@ -34529,6 +34560,375 @@ class TestOverviewUsage:
         assert usage["codex_tokens"]["input"] == 400, "the readers still work with plain open forbidden"
         assert self.daily(usage, _ov_day(t))["sessions"]["codex"] == 2
 
+
+
+# --- Codex lock owner: the verdict, the live rule, the tile source, diagnostics (Phase 3 of
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB; D8, D10, D13, D19, D21, D23) ---
+
+_LK_HOST = (500, "ChatGPT.exe")
+
+
+def _lk_snap(procs=(), cwds=(), sids=()):
+    """A snapshot with Codex processes `pid: (create_time, kind, parent_pid)`."""
+    from power_atlas import presence
+    from power_atlas.data import _normalize_path
+    return presence.Snapshot({("codex", s) for s in sids}, {("codex", _normalize_path(c)) for c in cwds},
+                             codex_procs=dict(procs))
+
+
+_LK_TILE_SID = "0000000d-1111-4222-8333-00000000000d"
+
+
+class TestCodexHolderVerdict:
+    TERMINAL = {10: (100.0, "terminal", None)}
+
+    @staticmethod
+    def verdict(holders, procs):
+        from power_atlas import web as web_mod
+        return web_mod._codex_holder_verdict(holders, _lk_snap(procs))
+
+    def test_a_no_daemon_terminal_holder_is_a_terminal(self):
+        assert self.verdict(((10, 100.0),), self.TERMINAL) == "terminal"
+
+    def test_a_managed_daemon_holder_is_a_terminal_even_with_a_dead_parent(self):
+        assert self.verdict(((20, 100.0),), {20: (100.0, "daemon", None)}) == "terminal"
+
+    def test_a_helper_whose_parent_is_a_terminal_is_a_terminal(self):
+        procs = {10: (100.0, "terminal", None), 11: (100.0, "helper", 10)}
+        assert self.verdict(((11, 100.0),), procs) == "terminal"
+
+    @pytest.mark.parametrize("host", ["ChatGPT.exe", "Code.exe", "anything.exe"])
+    def test_a_helper_whose_parent_is_another_program_is_other(self, host):
+        procs = {11: (100.0, "helper", 500)}                  # 500 is alive but is not a Codex process
+        assert self.verdict(((11, 100.0),), procs) == "other"
+
+    def test_a_helper_with_a_gone_or_unreadable_parent_is_unknown(self):
+        assert self.verdict(((11, 100.0),), {11: (100.0, "helper", None)}) == "unknown"
+
+    def test_a_helper_whose_parent_is_a_codex_process_that_is_not_a_terminal_is_unknown(self):
+        procs = {12: (100.0, "helper", 13), 13: (100.0, "helper", 500)}
+        assert self.verdict(((12, 100.0),), procs) == "unknown"
+
+    def test_the_own_pid_and_a_non_codex_pid_are_dropped(self):
+        own = os.getpid()
+        procs = {11: (100.0, "helper", 500), own: (100.0, "terminal", None)}
+        assert self.verdict(((own, 100.0), (11, 100.0)), procs) == "other", "own pid dropped, the helper decides"
+        assert self.verdict(((own, 100.0), (999, 5.0), (10, 100.0)), {**self.TERMINAL, own: (100.0, "terminal", None)}) == "terminal"
+        assert self.verdict(((999, 5.0),), self.TERMINAL) == "unknown", "a non-Codex pid leaves nothing"
+
+    def test_a_terminal_beside_a_host_parented_helper_is_unknown(self):
+        procs = {10: (100.0, "terminal", None), 11: (100.0, "helper", 500)}
+        assert self.verdict(((10, 100.0), (11, 100.0)), procs) == "unknown"
+
+    def test_an_empty_list_none_left_and_a_start_time_mismatch_are_unknown(self):
+        assert self.verdict((), self.TERMINAL) == "unknown"
+        assert self.verdict(None, self.TERMINAL) == "unknown"
+        assert self.verdict(((10, 160.0),), self.TERMINAL) == "unknown", "the same pid with another start time"
+        assert self.verdict(((10, 101.5),), self.TERMINAL) == "terminal", "within 2 s is the same process"
+
+    def test_every_holder_other_is_other_and_a_mix_is_unknown(self):
+        procs = {11: (100.0, "helper", 500), 12: (100.0, "helper", 501), 10: (100.0, "terminal", None)}
+        assert self.verdict(((11, 100.0), (12, 100.0)), procs) == "other"
+        assert self.verdict(((11, 100.0), (10, 100.0)), procs) == "unknown"
+
+
+class TestCodexLockOwnerLiveRule:
+    """`_session_is_live` for Codex on Windows: free is not live, held by a terminal is, held by
+    anything else is not, and whatever the lookup cannot tell uses today's rule."""
+    _CWD = "C:\\Work\\Proj"
+    _SID = "0000000c-1111-4222-8333-00000000000c"
+    TERMINAL = {10: (100.0, "terminal", None)}
+    OTHER = {11: (100.0, "helper", 500)}
+
+    @pytest.fixture
+    def fresh_rollout(self, isolated_config):
+        now = time.time()
+        folder = isolated_config / "codex-home" / "sessions" / "2026" / "09" / "01"
+        folder.mkdir(parents=True, exist_ok=True)
+        meta = {"ordinal": 0, "timestamp": "2026-09-01T10:00:00Z", "type": "session_meta", "payload": {
+            "id": self._SID, "cwd": self._CWD, "source": "cli", "timestamp": "2026-09-01T10:00:00Z"}}
+        path = folder / f"rollout-2026-09-01T10-00-00-{self._SID}.jsonl"
+        path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+        os.utime(path, (now - 5, now - 5))
+        return path
+
+    def live(self, monkeypatch, state, holders, procs, folder=True, resume=False, platform=None):
+        from power_atlas import data_codex, web as web_mod
+        data_codex._clear_caches()
+        monkeypatch.setattr(web_mod.data_codex, "session_writer_state", lambda sid: state)
+        monkeypatch.setattr(web_mod.lock_owner, "holders", lambda path: holders)
+        forgotten = []
+        monkeypatch.setattr(web_mod.lock_owner, "forget", lambda path: forgotten.append(path))
+        if platform:
+            monkeypatch.setattr(sys, "platform", platform)
+        snap = _lk_snap(procs, cwds=[self._CWD] if folder else [], sids=[self._SID] if resume else [])
+        session = Session(session_id=self._SID, title="t", cwd=self._CWD, created_at="", updated_at="",
+                          first_prompt="", last_prompt="", last_reply_tail="")
+        self.forgotten = forgotten
+        return web_mod._session_is_live(snap, session, "codex")
+
+    def test_free_is_not_live_even_with_a_codex_process_in_the_folder_and_recent_activity(
+            self, monkeypatch, fresh_rollout):
+        assert self.live(monkeypatch, "free", None, {}) is False
+        assert self.forgotten and self.forgotten[0].endswith(f"{self._SID}.lock"), "the owner entry is dropped"
+
+    def test_unknown_uses_todays_rule_both_ways(self, monkeypatch, fresh_rollout):
+        assert self.live(monkeypatch, "unknown", None, {}, folder=True) is True
+        assert self.live(monkeypatch, "unknown", None, {}, folder=False) is False
+
+    def test_held_by_a_terminal_is_live_without_a_codex_process_in_the_folder(self, monkeypatch, fresh_rollout):
+        assert self.live(monkeypatch, "held", ((10, 100.0),), self.TERMINAL, folder=False) is True
+
+    def test_held_by_something_else_is_not_live_although_the_folder_and_the_activity_say_live(
+            self, monkeypatch, fresh_rollout):
+        assert self.live(monkeypatch, "held", ((11, 100.0),), self.OTHER, folder=True) is False
+
+    @pytest.mark.parametrize("holders", [None, "PENDING"])
+    def test_held_with_an_unknown_or_pending_owner_uses_todays_rule(self, monkeypatch, fresh_rollout, holders):
+        from power_atlas import lock_owner
+        got = lock_owner.PENDING if holders == "PENDING" else None
+        assert self.live(monkeypatch, "held", got, {}, folder=True) is True
+        assert self.live(monkeypatch, "held", got, {}, folder=False) is False
+
+    def test_held_with_a_holder_the_snapshot_does_not_know_uses_todays_rule(self, monkeypatch, fresh_rollout):
+        assert self.live(monkeypatch, "held", ((999, 5.0),), self.TERMINAL, folder=True) is True
+        assert self.live(monkeypatch, "held", ((999, 5.0),), self.TERMINAL, folder=False) is False
+
+    @pytest.mark.parametrize("state", ["free", "held", "unknown"])
+    def test_a_resume_uuid_on_a_command_line_is_live_in_every_case(self, monkeypatch, fresh_rollout, state):
+        assert self.live(monkeypatch, state, ((11, 100.0),), self.OTHER, folder=False, resume=True) is True
+
+    @pytest.mark.parametrize("state,holders,procs", [
+        ("free", None, {}), ("held", ((11, 100.0),), {11: (100.0, "helper", 500)}),
+        ("held", ((10, 100.0),), {10: (100.0, "terminal", None)}), ("unknown", None, {})])
+    def test_off_windows_it_is_todays_rule_in_every_case(self, monkeypatch, fresh_rollout, state, holders, procs):
+        assert self.live(monkeypatch, state, holders, procs, folder=True, platform="linux") is True
+        assert self.live(monkeypatch, state, holders, procs, folder=False, platform="linux") is False
+        assert not self.forgotten
+
+    def test_another_provider_is_untouched(self, monkeypatch, fresh_rollout):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod.data_codex, "session_writer_state",
+                            lambda sid: pytest.fail("the writer state was read for another provider"))
+        snap = _lk_snap()
+        session = Session(session_id="x", title="t", cwd="C:\\nowhere", created_at="", updated_at="",
+                          first_prompt="", last_prompt="", last_reply_tail="")
+        assert web_mod._session_is_live(snap, session, "claude-code") is False
+
+    def test_a_row_carries_no_pid_command_line_or_owner_verdict(self, monkeypatch, fresh_rollout):
+        from power_atlas import web as web_mod
+        assert self.live(monkeypatch, "held", ((10, 100.0),), self.TERMINAL, folder=False) is True
+        row = {"live": True, "resume_locked": True}
+        text = json.dumps(row) + json.dumps(web_mod._codex_diagnostics())
+        assert not any(word in text for word in ("pid", "owner\"", "terminal", "command", "verdict"))
+
+
+class TestCodexLockEnumeratorAndTiles:
+    """The shared enumerator of the locks a terminal holds, and the Overview's tile source (D13, D21)."""
+    TERMINAL = {10: (100.0, "terminal", None)}
+
+    @pytest.fixture
+    def locks_dir(self, isolated_config):
+        folder = isolated_config / "codex-home" / "thread-writer-locks"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / ".coordination.lock").write_bytes(b"")
+        return folder
+
+    @pytest.fixture
+    def world(self, monkeypatch):
+        """Every probe is recorded; `held` maps id -> holders (or None); the snapshot has one terminal."""
+        from power_atlas import web as web_mod
+        w = types.SimpleNamespace(probes=[], held={}, now=[1000.0])
+        monkeypatch.setattr(web_mod.data_codex, "session_writer_state",
+                            lambda sid: (w.probes.append(sid), "held" if sid in w.held else "free")[1])
+        monkeypatch.setattr(web_mod.lock_owner, "holders", lambda path: w.held.get(os.path.basename(path)[:-5]))
+        monkeypatch.setattr(web_mod, "_codex_clock", lambda: w.now[0])
+        return w
+
+    @staticmethod
+    def make_locks(folder, n, offset=100):
+        ids = [f"{offset + i:08x}-1111-4222-8333-{offset + i:012x}" for i in range(n)]
+        for sid in ids:
+            (folder / f"{sid}.lock").write_bytes(b"")
+        return ids
+
+    def threads(self, procs=None, sids=()):
+        from power_atlas import web as web_mod
+        return web_mod._codex_terminal_threads(_lk_snap(self.TERMINAL if procs is None else procs, sids=sids))
+
+    def test_only_the_threads_a_terminal_holds_are_returned(self, locks_dir, world):
+        a, b, c = self.make_locks(locks_dir, 3)
+        world.held = {a: ((10, 100.0),), b: ((11, 100.0),)}      # a: terminal; b: a helper nobody knows
+        assert self.threads({10: (100.0, "terminal", None), 11: (100.0, "helper", 500)}) == [a]
+        assert c not in self.threads()
+
+    def test_nothing_is_probed_without_a_codex_terminal_or_a_lock_file(self, locks_dir, world):
+        self.make_locks(locks_dir, 5)
+        assert self.threads({11: (100.0, "helper", 500)}) == [] and world.probes == []
+        world.now[0] += 10
+        for child in locks_dir.iterdir():
+            child.unlink()
+        assert self.threads() == [] and world.probes == []
+
+    def test_only_uuid_lock_names_are_candidates(self, locks_dir, world):
+        ids = self.make_locks(locks_dir, 2)
+        for name in ("notes.lock", ".coordination.lock", "x.txt", ids[0].upper() + ".lock",
+                     ids[0] + ".lock.bak", "sess_" + ids[0] + ".lock"):
+            (locks_dir / name).write_bytes(b"")
+        self.threads()
+        assert sorted(set(world.probes)) == sorted(ids)
+
+    def test_300_stale_lock_files_cost_at_most_8_probes_per_call_and_the_cursor_covers_them_all(
+            self, locks_dir, world):
+        ids = self.make_locks(locks_dir, 300)
+        seen = set()
+        for _ in range(40):
+            world.probes.clear()
+            self.threads()
+            assert len(set(world.probes)) <= 8
+            seen |= set(world.probes)
+            world.now[0] += 4                                       # past the 3 s reuse
+        assert seen == set(ids), "the rotating cursor reaches every lock file in the end"
+
+    def test_the_result_is_reused_for_three_seconds(self, locks_dir, world):
+        self.make_locks(locks_dir, 3)
+        self.threads()
+        first = len(world.probes)
+        world.now[0] += 2.9
+        self.threads()
+        assert len(world.probes) == first
+        world.now[0] += 0.2
+        self.threads()
+        assert len(world.probes) > first
+
+    def test_ids_seen_held_and_ids_on_a_resume_command_line_are_probed_first(self, locks_dir, world):
+        ids = self.make_locks(locks_dir, 40)
+        world.held = {ids[39]: ((10, 100.0),)}
+        for _ in range(6):                                          # the cursor moves on, id 39 is far from it
+            world.now[0] += 4
+            self.threads()
+        world.now[0] += 4
+        world.probes.clear()
+        self.threads()
+        assert ids[39] in world.probes[:8] and world.probes[0] == ids[39], "a thread seen held is probed first"
+        world.now[0] += 4
+        world.probes.clear()
+        world.held = {}
+        self.threads(sids=[ids[20]])
+        assert ids[20] in world.probes[:2], "a resume id goes first"
+
+    def test_a_dead_second_call_is_not_cached_as_held_when_the_lock_is_released(self, locks_dir, world):
+        a, = self.make_locks(locks_dir, 1)
+        world.held = {a: ((10, 100.0),)}
+        assert self.threads() == [a]
+        world.held = {}
+        world.now[0] += 4
+        assert self.threads() == []
+
+    # -- the candidate rules of D21 --
+
+    def _candidate(self, monkeypatch, sid, cwd, *, records=True, hidden=(), shown=True):
+        from power_atlas import data, data_codex, overview
+        monkeypatch.setattr(data_codex, "find_session_workspace", lambda s: cwd)
+        sessions = [Session(sid, "t", cwd, "", "", "", "", "")] if records and isinstance(cwd, str) else []
+        originals = {data._normalize_path(cwd): cwd} if isinstance(cwd, str) and cwd else {}
+        return overview._codex_terminal_candidate(
+            sid, originals, lambda prov, c: shown and c not in hidden, lambda prov, c: sessions)
+
+    SID = "0000000d-1111-4222-8333-00000000000d"
+
+    def test_a_terminal_held_thread_with_a_store_record_in_a_shown_workspace_gets_a_tile(self, monkeypatch):
+        got = self._candidate(monkeypatch, self.SID, "C:\\ws\\proj")
+        assert got is not None and got[1] == "C:\\ws\\proj" and got[3] is True and got[2] is False
+
+    @pytest.mark.parametrize("cwd", ["\\\\srv\\share\\ws", "//srv/share/ws", "\\\\?\\UNC\\srv\\share", "rel\\ws",
+                                     "", None, "C:\\" + "d" * 300])
+    def test_a_cwd_cwd_class_rejects_gives_no_tile_and_never_reaches_the_hidden_filter(self, monkeypatch, cwd):
+        from power_atlas import overview
+        from power_atlas import data
+        calls = []
+        monkeypatch.setattr("power_atlas.data_codex.find_session_workspace", lambda s: cwd)
+        # The workspace IS known to the rail and the thread HAS a store record: only the cwd rule rejects it.
+        originals = {data._normalize_path(cwd): cwd} if isinstance(cwd, str) and cwd else {}
+        sessions = [Session(self.SID, "t", cwd or "", "", "", "", "", "")]
+        got = overview._codex_terminal_candidate(self.SID, originals, lambda p, c: calls.append(c) or True,
+                                                 lambda p, c: sessions)
+        assert got is None and calls == []
+
+    def test_a_helper_thread_lock_a_sub_agent_and_an_absent_rollout_give_no_tile(self, monkeypatch):
+        assert self._candidate(monkeypatch, self.SID, "C:\\ws\\proj", records=False) is None, "no store record"
+        assert self._candidate(monkeypatch, self.SID, None) is None, "no rollout at all"
+
+    def test_a_hidden_workspace_or_a_disabled_provider_gives_no_tile(self, monkeypatch):
+        assert self._candidate(monkeypatch, self.SID, "C:\\ws\\proj", hidden=("C:\\ws\\proj",)) is None
+        assert self._candidate(monkeypatch, self.SID, "C:\\ws\\proj", shown=False) is None
+
+    def test_a_workspace_the_rail_never_discovered_gives_no_tile(self, monkeypatch):
+        from power_atlas import data_codex, overview
+        monkeypatch.setattr(data_codex, "find_session_workspace", lambda s: "C:\\ws\\elsewhere")
+        record = [Session(self.SID, "t", "C:\\ws\\elsewhere", "", "", "", "", "")]
+        assert overview._codex_terminal_candidate(self.SID, {}, lambda p, c: True, lambda p, c: record) is None
+
+
+class TestCodexTileSourceWiring:
+    def test_the_overview_live_route_passes_the_shared_enumerator_to_live_sessions(self, monkeypatch):
+        from power_atlas import overview, web as web_mod
+        seen = {}
+        monkeypatch.setattr(overview, "live_sessions", lambda held, snap, f, deps, originals: seen.update(deps=deps) or [])
+        monkeypatch.setattr(web_mod.data, "discover_workspaces_with_counts", lambda *a, **k: [])
+        web_mod._overview_live({}, "all")
+        assert seen["deps"].codex_terminal_threads is web_mod._codex_terminal_threads
+
+
+class TestCodexOwnerLookupReach:
+    """D19: the owner lookup is reachable from the dashboard's loopback routes only."""
+
+    def test_no_dashboard_or_overview_path_is_open_to_a_remote_peer(self):
+        from power_atlas import web as web_mod
+        for path in (web_mod._DASHBOARD_LISTING_PATH, web_mod._DASHBOARD_OVERVIEW_LIVE_PATH,
+                     web_mod._DASHBOARD_OVERVIEW_SUMMARY_PATH):
+            assert path not in web_mod._REMOTE_ALLOWED_PATHS, path
+        assert web_mod._ACP_LISTING_PATH in web_mod._REMOTE_ALLOWED_PATHS, "the remote listing route is unchanged"
+
+    def test_a_listing_without_include_provider_never_asks_for_liveness_or_an_owner(self, isolated_config, monkeypatch):
+        from power_atlas import data, data_codex, web as web_mod
+        now = time.time()
+        _ovx_rollout(isolated_config / "codex-home" / "sessions", 71, [_ovx_user(now - 60, "hello")], at=now - 60)
+        data_codex._clear_caches()
+        data.invalidate_workspace_counts()           # the workspace list is cached for 30 s, process-wide
+        monkeypatch.setattr(data, "_cache", {})        # and so is each listing: nothing may outlive this test
+        asked = []
+        monkeypatch.setattr(web_mod, "_session_is_live", lambda snap, s, prov: asked.append(("live", prov)) or True)
+        monkeypatch.setattr(web_mod.lock_owner, "holders", lambda path: asked.append(("owner", path)))
+        plain = web_mod._acp_flat_listing(1, 10, {}, {}, providers=frozenset({"codex"}), include_provider=False)
+        assert [r["id"] for r in plain["sessions"]] == [_ovx_id(71)] and asked == []
+        assert "live" not in plain["sessions"][0] and "codex_diagnostics" not in plain
+        rich = web_mod._acp_flat_listing(1, 10, {}, {}, providers=frozenset({"codex"}), include_provider=True)
+        assert rich["sessions"][0]["live"] is True and asked == [("live", "codex")]
+
+
+class TestCodexDiagnostics:
+    def test_owner_lookup_is_the_resolvers_status_and_turn_watch_is_off(self, monkeypatch):
+        from power_atlas import web as web_mod
+        for status in ("ok", "backing-off", "disabled"):
+            monkeypatch.setattr(web_mod.lock_owner, "status", lambda s=status: s)
+            assert web_mod._codex_diagnostics() == {"owner_lookup": status, "turn_watch": "off"}
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert web_mod._codex_diagnostics()["owner_lookup"] == "disabled"
+
+    def test_the_dashboard_listings_carry_it_when_codex_is_enabled_and_no_other_listing_does(
+            self, isolated_config, monkeypatch):
+        from power_atlas import data, web as web_mod
+        data.invalidate_workspace_counts()           # the workspace list is cached for 30 s, process-wide
+        monkeypatch.setattr(data, "_cache", {})        # so nothing this test lists may outlive it
+        flat = web_mod._acp_flat_listing(1, 10, {}, {}, providers=frozenset({"codex"}), include_provider=True)
+        assert flat["codex_diagnostics"] == {"owner_lookup": web_mod.lock_owner.status() if sys.platform == "win32"
+                                              else "disabled", "turn_watch": "off"}
+        plain = web_mod._acp_flat_listing(1, 10, {}, {}, providers=frozenset({"codex"}), include_provider=False)
+        assert "codex_diagnostics" not in plain
+        other = web_mod._acp_flat_listing(1, 10, {}, {}, providers=frozenset({web_mod._ACP_V3_LISTING_PROVIDER}),
+                                          include_provider=True)
+        assert "codex_diagnostics" not in other
 
 
 class TestCodexLiveDotAndResumeLock:
