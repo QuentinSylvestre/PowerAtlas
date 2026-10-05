@@ -406,10 +406,11 @@ class TestLaunchSession:
     @patch("power_atlas.launcher.subprocess.Popen")
     @patch("power_atlas.launcher.shutil.which")
     def test_launch_session_scrubs_claude_markers(self, mock_which, mock_popen, monkeypatch, tmp_path):
-        """CLAUDECODE, CLAUDE_CODE_*, CLAUDE_PID absent from launched session env; POWER_ATLAS_SESSION present."""
+        """CLAUDECODE, CLAUDE_CODE_*, CLAUDE_PID, NO_COLOR absent from launched session env; POWER_ATLAS_SESSION present."""
         monkeypatch.setenv("CLAUDECODE", "1")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
         monkeypatch.setenv("CLAUDE_PID", "999")
+        monkeypatch.setenv("NO_COLOR", "1")
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "wt": str(tmp_path / "wt.exe")}.get(n)
         cwd = str(tmp_path)
         result = launch_session(cwd, session_id=None, provider="kiro-cli-v3", launch_profile=LaunchProfile(terminal_command=str(tmp_path / "wt.exe")))
@@ -418,6 +419,7 @@ class TestLaunchSession:
         assert "CLAUDECODE" not in env
         assert "CLAUDE_CODE_SESSION_ID" not in env
         assert "CLAUDE_PID" not in env
+        assert "NO_COLOR" not in env
         assert env["POWER_ATLAS_SESSION"] == "1"
 
 

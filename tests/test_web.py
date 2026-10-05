@@ -19961,9 +19961,10 @@ class TestSpawnEnv:
         assert "PATH" in env  # base os.environ keys survive the filter
 
     def test_spawn_env_scrubs_claude_markers(self, tmp_path, monkeypatch):
-        """CLAUDECODE, CLAUDE_PID, and CLAUDE_CODE_* keys are absent."""
+        """CLAUDECODE, CLAUDE_PID, NO_COLOR, and CLAUDE_CODE_* keys are absent."""
         from unittest.mock import MagicMock, patch
         from power_atlas import acp as acp_mod
+        monkeypatch.setenv("NO_COLOR", "1")
         monkeypatch.setenv("CLAUDECODE", "1")
         monkeypatch.setenv("CLAUDE_PID", "999")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
@@ -19983,6 +19984,7 @@ class TestSpawnEnv:
         env = mock_popen.call_args.kwargs["env"]
         assert "CLAUDECODE" not in env
         assert "CLAUDE_PID" not in env
+        assert "NO_COLOR" not in env
         assert "CLAUDE_CODE_SESSION_ID" not in env
         assert "CLAUDE_CODE_CHILD_SESSION" not in env
         assert "CLAUDE_CODE_BRIDGE_SESSION_ID" not in env

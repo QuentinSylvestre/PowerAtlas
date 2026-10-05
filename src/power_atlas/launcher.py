@@ -34,14 +34,17 @@ _CODEX_SESSION_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 # lives in acp.py (isolation boundary prevents shared import).
 # Keep the function body and both constants in sync with that copy.
 _SCRUB_PREFIXES = ("CLAUDE_CODE_",)
-_SCRUB_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID"})
+_SCRUB_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID", "NO_COLOR"})
 
 
 def _build_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """Build the environment dict for a spawned provider child process.
 
     Strips CLAUDE_CODE_* / CLAUDECODE / CLAUDE_PID markers inherited from the
-    PowerAtlas tray process, and injects POWER_ATLAS_SESSION=1. ``extra`` is
+    PowerAtlas tray process, and NO_COLOR: a PowerAtlas started from inside a
+    Claude Code session inherits NO_COLOR=1 from that session's tool shell,
+    which would otherwise render every launched terminal session uncoloured.
+    Injects POWER_ATLAS_SESSION=1. ``extra`` is
     optional (no per-launch extras needed for provider sessions). ``extra`` keys
     override same-named keys from os.environ (last-write-wins).
     """

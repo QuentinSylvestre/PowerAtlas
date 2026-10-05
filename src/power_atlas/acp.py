@@ -689,16 +689,18 @@ _MAX_PENDING_EARLY_FRAMES = 50
 # tray process into spawned kiro-cli ACP sessions.
 # CLAUDE_CODE_* covers CLAUDE_CODE_CHILD_SESSION, CLAUDE_CODE_SESSION_ID, etc.
 # CLAUDECODE and CLAUDE_PID are separate names without the CLAUDE_CODE_ prefix.
+# NO_COLOR is scrubbed too: a tray started from a Claude Code session inherits it.
 # (Sync note: see _build_child_env docstring below.)
 _SCRUB_PREFIXES = ("CLAUDE_CODE_",)
-_SCRUB_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID"})
+_SCRUB_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID", "NO_COLOR"})
 
 
 def _build_child_env(extra: dict[str, str]) -> dict[str, str]:
     """Build the environment dict for the spawned kiro-cli ACP child process.
 
     Strips CLAUDE_CODE_* / CLAUDECODE / CLAUDE_PID markers inherited from the
-    PowerAtlas tray process, and injects PowerAtlas identity vars. ``extra``
+    PowerAtlas tray process, and NO_COLOR (kept in step with launcher.py, where
+    it stops launched terminal sessions rendering uncoloured), and injects PowerAtlas identity vars. ``extra``
     is merged last so call-site additions override same-named keys from os.environ.
     ``extra`` is required (not optional) because every ACP spawn always passes
     at least KIRO_CLI_ACP_CLIENT_NAME.
