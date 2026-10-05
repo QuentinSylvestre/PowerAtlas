@@ -1181,13 +1181,14 @@ class _FakeProc:
     """Minimal psutil.Process stand-in for presence scan tests."""
 
     def __init__(self, name, cmdline, cwd=None, cwd_error=False,
-                 pid=None, create_time=None):
+                 pid=None, create_time=None, ppid=None):
         self.info = {"name": name, "cmdline": cmdline}
         if pid is not None:
             self.info["pid"] = pid
         self._cwd = cwd
         self._cwd_error = cwd_error
         self._create_time = create_time
+        self._ppid = ppid
 
     def cwd(self):
         if self._cwd_error:
@@ -1198,6 +1199,11 @@ class _FakeProc:
         if self._create_time is None:
             raise RuntimeError("no create_time")
         return self._create_time
+
+    def ppid(self):
+        if self._ppid is None:
+            raise RuntimeError("no ppid")
+        return self._ppid
 
 
 def _scan_with(procs, claude_dir=None):
@@ -3932,6 +3938,94 @@ _CX_CWD = "C:\\Work\\Proj"
 
 def _cx_basename(argv0: str) -> str:
     return argv0.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3 (D8): the snapshot
+# records every Codex process with its kind and parent; `_match_provider` is untouched.
+class TestCodexProcessKinds:
+    @staticmethod
+    def _p(pid, argv, ppid=None, ct=100.0, name=None):
+        return _FakeProc(name or _cx_basename(argv[0]), argv, cwd=_CX_CWD, pid=pid, create_time=ct, ppid=ppid)
+
+    def _procs(self, *procs):
+        return _scan_with(list(procs)).codex_procs()
+
+    def test_a_no_daemon_terminal_is_a_terminal(self):
+        got = self._procs(self._p(10, ["codex.exe", "--no-daemon"], ppid=2), self._p(2, ["pwsh.exe"], name="pwsh.exe"))
+        assert got == {10: (100.0, "terminal", 2)}
+
+    def test_a_plain_terminal_and_a_resume_are_terminals(self):
+        got = self._procs(self._p(10, ["codex.exe"]), self._p(11, ["codex.exe", "resume", _cx_id(7)]))
+        assert {pid: kind for pid, (_c, kind, _pp) in got.items()} == {10: "terminal", 11: "terminal"}
+
+    def test_a_managed_daemon_is_a_daemon_even_though_it_carries_a_helper_token(self):
+        argv = ["codex.exe", "app-server", "--listen", "unix://x", "--managed-daemon"]
+        assert {pid: kind for pid, (_c, kind, _pp) in self._procs(self._p(20, argv)).items()} == {20: "daemon"}
+
+    @pytest.mark.parametrize("token", ["app-server", "exec", "mcp-server", "login"])
+    def test_any_other_helper_subcommand_is_a_helper(self, token):
+        got = self._procs(self._p(30, ["codex.exe", token]))
+        assert {pid: kind for pid, (_c, kind, _pp) in got.items()} == {30: "helper"}
+
+    def test_the_parent_is_kept_when_it_is_alive_and_none_when_it_is_gone_or_unreadable(self):
+        host = _FakeProc("ChatGPT.exe", ["ChatGPT.exe"], pid=500, create_time=1.0)
+        got = self._procs(
+            host,
+            self._p(31, ["codex.exe", "app-server"], ppid=500),          # a live non-Codex parent
+            self._p(32, ["codex.exe", "app-server"], ppid=999),          # a parent that is gone
+            self._p(33, ["codex.exe", "app-server"], ppid=None))         # a parent that cannot be read
+        assert got[31][2] == 500 and got[32][2] is None and got[33][2] is None
+        assert all(kind == "helper" for _c, kind, _pp in got.values())
+
+    def test_a_codex_parent_is_kept_so_a_helper_can_be_traced_to_its_terminal(self):
+        got = self._procs(self._p(40, ["codex.exe"]), self._p(41, ["codex.exe", "app-server"], ppid=40))
+        assert got[41][2] == 40 and got[40][1] == "terminal"
+
+    @pytest.mark.parametrize("name,argv", [
+        ("ChatGPT.exe", ["ChatGPT.exe"]),
+        ("ChatGPT.exe", ["ChatGPT.exe", "--type=renderer"]),
+        ("codex.exe", ["codex.exe", "--type=utility"]),
+        ("codex-code-mode-host.exe", ["codex-code-mode-host.exe"]),
+        ("codex-windows-sandbox-service.exe", ["codex-windows-sandbox-service.exe"]),
+        ("node.exe", ["node", "C:\\npm\\codex.js", "resume", _cx_id(7)]),
+        ("pwsh.exe", ["pwsh.exe", "-c", "codex.exe app-server"]),
+        ("ChatGPT.exe", ["ChatGPT.exe", "app-server"]),
+        ("codex-code-mode-host.exe", ["codex-code-mode-host.exe", "exec"]),
+        ("codex.exe", ["codex.exe", "app-server", "--type=utility"]),
+    ])
+    def test_other_processes_are_not_recorded(self, name, argv):
+        assert self._procs(_FakeProc(name, argv, pid=50, create_time=1.0, ppid=1)) == {}
+
+    def test_a_process_whose_start_time_cannot_be_read_is_not_recorded(self):
+        assert self._procs(_FakeProc("codex.exe", ["codex.exe"], pid=60, create_time=None, ppid=1)) == {}
+
+    def test_has_codex_terminal_needs_a_terminal_or_a_daemon(self):
+        from power_atlas import presence
+        snap = _scan_with([self._p(70, ["codex.exe", "app-server"])])
+        assert snap.has_codex_terminal() is False
+        assert _scan_with([self._p(71, ["codex.exe"])]).has_codex_terminal() is True
+        assert _scan_with([self._p(72, ["codex.exe", "app-server", "--managed-daemon"])]).has_codex_terminal() is True
+        assert presence._EMPTY.has_codex_terminal() is False and presence._EMPTY.codex_procs() == {}
+
+    def test_the_new_field_is_trailing_and_keyword_defaulted_and_the_map_is_a_copy(self):
+        from power_atlas import presence
+        snap = presence.Snapshot(set(), set(), {}, {}, {}, {}, {})   # the positional call sites keep working
+        assert snap.codex_procs() == {}
+        snap = presence.Snapshot(set(), set(), codex_procs={1: (1.0, "terminal", None)})
+        snap.codex_procs().clear()
+        assert snap.codex_procs() == {1: (1.0, "terminal", None)}
+
+    def test_match_provider_still_rejects_helpers_and_accepts_a_daemon_free_terminal(self):
+        from power_atlas import presence
+        assert presence._match_provider("codex.exe", ["codex.exe", "app-server", "--managed-daemon"]) is None
+        assert presence._match_provider("codex.exe", ["codex.exe"]) == "codex"
+
+    def test_presence_gains_no_state_and_no_import(self):
+        src = Path(data_codex.__file__).with_name("presence.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        imports = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        froms = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+        assert "lock_owner" not in imports | froms and "data_codex" not in imports | froms
 
 
 class TestCodexPresence:

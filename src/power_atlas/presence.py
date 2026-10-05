@@ -394,7 +394,8 @@ class Snapshot:
                  sid_status: dict[tuple[str, str], str] | None = None,
                  sid_reason: dict[tuple[str, str], str] | None = None,
                  sid_kind: dict[tuple[str, str], str] | None = None,
-                 sid_entrypoint: dict[tuple[str, str], str] | None = None):
+                 sid_entrypoint: dict[tuple[str, str], str] | None = None,
+                 codex_procs: dict[int, tuple[float, str, int | None]] | None = None):
         # live_sids: {(provider, session_id)}
         # live_cwds: {(provider, normalized_cwd)}
         self._live_sids = live_sids
@@ -419,6 +420,24 @@ class Snapshot:
         # silently re-binds an existing argument at every positional site.
         self._sid_kind = sid_kind or {}
         self._sid_entrypoint = sid_entrypoint or {}
+        # codex_procs: {pid -> (create_time, kind, parent_pid)} for every Codex process, in
+        # the same trailing, keyword-defaulted position and for the same reason. `kind` is
+        # "terminal" (a process `_match_provider` accepts, `--no-daemon` TUIs included),
+        # "daemon" (a command line holding `--managed-daemon`) or "helper" (any other
+        # process carrying a `_CODEX_HELPER_SUBCOMMANDS` token); `parent_pid` is None when
+        # the parent is gone or could not be read. Whoever holds a thread's writer lock is
+        # classified against this map by `web._codex_holder_verdict`; this module only
+        # records what the scan saw. 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3 (D8)
+        self._codex_procs = dict(codex_procs or {})
+
+    def codex_procs(self) -> dict[int, tuple[float, str, int | None]]:
+        """Every Codex process the scan saw: ``{pid: (create_time, kind, parent_pid)}``."""
+        return dict(self._codex_procs)
+
+    def has_codex_terminal(self) -> bool:
+        """True when a Codex process that can hold a terminal thread's lock exists (a
+        terminal or the shared managed daemon)."""
+        return any(kind in ("terminal", "daemon") for _ct, kind, _pp in self._codex_procs.values())
 
     def reported_status(self, provider: str, session_id: str) -> str:
         """Provider-reported live status, or "" when the provider offers none."""
@@ -575,6 +594,31 @@ def _match_provider(name: str, cmdline: list[str]) -> str | None:
     return None
 
 
+def _codex_kind(name: str, cmdline: list[str], provider: str | None) -> str | None:
+    """`terminal`, `daemon` or `helper` for a Codex process, None for anything else.
+
+    A Codex binary only (Electron children with `--type=` and the app's other binaries are
+    not). `daemon` is a command line holding `--managed-daemon` (the shared server a
+    default-mode terminal starts, which holds that terminal's lock and outlives it);
+    `terminal` is a process `_match_provider` accepted; `helper` is any other process
+    carrying a helper subcommand token. `_match_provider`'s contract is unchanged.
+    """
+    if any(a.startswith("--type=") for a in cmdline[1:]):
+        return None
+    candidates = {name.lower()} if name else set()
+    if cmdline:
+        candidates.add(Path(cmdline[0]).name.lower())
+    if not candidates & set(_PROVIDER_SPECS["codex"][0]):
+        return None
+    if "--managed-daemon" in cmdline[1:]:
+        return "daemon"
+    if provider == "codex":
+        return "terminal"
+    if any(a in _CODEX_HELPER_SUBCOMMANDS for a in cmdline[1:]):
+        return "helper"
+    return None
+
+
 def _scan() -> Snapshot:
     if not _AVAILABLE:
         return _EMPTY
@@ -591,6 +635,10 @@ def _scan() -> Snapshot:
     # unrelated binary (svchost, firefox, the IDE), and requiring the provider
     # to match eliminates it without touching the process at all.
     provider_pids: dict[int, tuple[str, float]] = {}
+    # Every Codex process: pid -> (create_time, kind, parent pid), and every pid seen at
+    # all (a parent that is not in it is gone).
+    codex_raw: dict[int, tuple[float, str, int | None]] = {}
+    seen_pids: set[int] = set()
     try:
         # create_time is deliberately not requested for the whole table —
         # that costs ~25ms across ~500 processes. It is read below only for
@@ -603,10 +651,22 @@ def _scan() -> Snapshot:
     for proc in procs:
         try:
             info = proc.info
+            if info.get("pid") is not None:
+                seen_pids.add(info["pid"])
             cmdline = info.get("cmdline") or []
             if not cmdline:
                 continue
             provider = _match_provider(info.get("name") or "", cmdline)
+            kind = _codex_kind(info.get("name") or "", cmdline, provider)
+            if kind is not None and info.get("pid") is not None:
+                try:
+                    parent = proc.ppid()
+                except Exception:
+                    parent = None
+                try:
+                    codex_raw[info["pid"]] = (proc.create_time(), kind, parent)
+                except Exception:
+                    pass  # a process whose start time cannot be read cannot be matched later
             if provider is None:
                 continue
             pid = info.get("pid")
@@ -726,8 +786,10 @@ def _scan() -> Snapshot:
             log.exception("sidecar record rejected: provider=%s sid=%r", provider, sid)
             continue
 
+    codex_procs = {pid: (ct, kind, parent if parent in seen_pids else None)
+                   for pid, (ct, kind, parent) in codex_raw.items()}
     return Snapshot(live_sids, live_cwds, sid_to_cwd, sid_status, sid_reason,
-                    sid_kind, sid_entrypoint)
+                    sid_kind, sid_entrypoint, codex_procs=codex_procs)
 
 
 def get_snapshot(force: bool = False) -> Snapshot:
