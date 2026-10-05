@@ -1,7 +1,7 @@
 # Codex Live Status, Context Pressure and Sub-agent Usage from the State Database
 
 > **Date**: 2026-10-02
-> **Status**: In Progress — Phases 0 to 2 done and reviewed; Phase 3 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0 to 2 done and reviewed; Phase 3 coded, reviewed and fixed, with two exit criteria open (the mutation list, live QA b/e/f); Phase 4 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Follow-ups deferred by the archived Codex provider plan: a lock-owner live dot, a Working/Idle verdict and turn-end notifications for terminal Codex sessions, Codex context pressure, sub-agent token usage, and an optional state-database layer that feeds them. Driving Codex from `/acp` and app-server integration are out of scope.
 > **Estimated effort**: 5-6 days (pre-flight 0.5, database and sub-agent usage 1, context pressure 0.5, lock owner and live dot 1.25, verdict 1, notifier 0.75, documentation, cleanup and QA 0.75)
@@ -216,11 +216,11 @@ All measurements print counts, shapes and timings only: no ids, no paths, no mes
 **QA (needs the restart grant and an unlocked screen)**: a throwaway session in a `codexprobe_work` folder. (a) `codex resume <id>` TUI idle for over 300 s: the row is live. (b) A fresh `codex` TUI after one prompt, idle over 300 s: the row is live (G8). (c) The TUI quit: the row is not live. (d) A `codex exec resume` run: under D8 its holder carries the `exec` helper token, so the expected result is no live dot while the Resume gate still hides Resume; record the observed result, because `AGENTS.md`'s recipe currently says the live dot can be checked with `codex exec resume` (Phase 6 amends it). (e) The thread open in the desktop app (the user): no dot. (f) PowerAtlas restarted while the TUI stays open: the dot may follow today's rule for a few seconds, then the owner rule. Screenshots are scratch evidence, never committed.
 
 **Exit criteria**:
-- [ ] `session_writer_state`, `lock_owner.py`, the presence snapshot field, the web, tile and diagnostics changes exist as above; `presence.py` gains no state and no import; `acp.py` and `data_codex.py` import nothing new; `session_writer_locked`'s existing tests pass unchanged.
-- [ ] All Phase 3 tests pass and the full suites, node tests, `_check_test_names.py` and `ruff` counts are green.
+- [x] `session_writer_state`, `lock_owner.py`, the presence snapshot field, the web, tile and diagnostics changes exist as above; `presence.py` gains no state and no import; `acp.py` and `data_codex.py` import nothing new; `session_writer_locked`'s existing tests pass unchanged. Code commits `7e55dc9`, `a0417ef`, `7272dd1`, `1b49547`, review fixes `75a0e00`.
+- [x] All Phase 3 tests pass and the full suites, node tests, `_check_test_names.py` and `ruff` counts are green. On `main` at `75a0e00`: pytest 3974 passed and 3 skipped, `node tests/acp_page.test.mjs` 947 of 947, `_check_test_names.py` clean. `ruff` counts for the seven edited files equal the commit before the fixes (after `317cf40` removed one lambda assignment this phase had added).
 - [ ] Mutation checks fail the tests: a failed probe or an open or lock `OSError` treated as free; an absent `.coordination.lock` treated as free; the 60 s age bound removed; `other` treated as live; unknown or `PENDING` not falling back; an empty holder list classified `other`; a mixed holder set classified `terminal`; the own pid not dropped; the create time not compared; gone holders giving `other` instead of unknown; the 30 s or 5 minute re-resolve removed; first sightings not served first; the generation check removed; the daemon rule removed (a daemon holder read as `other`); the helper-token-alone rule restored; the parent test inverted; the abandoned-worker count cap removed; the wedge rate rule changed to a lifetime cap; the per-path re-resolve rate limit removed; `session_writer_state` made to read `_busy_cache`; `RmEndSession` skipped on an error path; the resolver run on the caller's thread; the queue bound removed; the platform gate removed (the owner rule on a patched POSIX platform); the candidate filters of D21 removed; the enumerator's probe cap or snapshot gate removed; `_codex_terminal_candidate` replaced by `_cwdless_candidate`; the Restart Manager library loaded by a bare name.
-- [ ] Live QA (a), (b), (c), (e) and (f) behave as stated; (d) is recorded in section 9 with the expected and the observed result.
-- [ ] README's live-status bullet states the lock-owner rule, its fall-back, that a default-mode terminal's dot can linger about a minute after it quits (its shared daemon releases the lock late), and where `codex_diagnostics` shows the lookup state (section 8).
+- [ ] Live QA (a), (b), (c), (e) and (f) behave as stated; (d) is recorded in section 9 with the expected and the observed result. Done: (a), (c), (d) (section 9). NOT done: (b), (e), (f). They need the fixed code running; PowerAtlas still runs the code from before Phase 3 and was not restarted.
+- [x] README's live-status bullet states the lock-owner rule, its fall-back, that a default-mode terminal's dot can linger about a minute after it quits (its shared daemon releases the lock late), and where `codex_diagnostics` shows the lookup state (section 8). Commit `63f5c53`.
 
 ### Phase 4: Working/Idle verdict for terminal Codex sessions [QA]
 **Covers**: SC-2
@@ -408,6 +408,20 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 
 **Phase 2 (code commits `5dfddb0`, `ee3f887`, `54e31b4`; merged by `97a6e6f`).** The parser records, per Codex day, the peak of 100 * last input tokens over the model's window (`_codex_context_pct`: a window that is an integer from 1 to 10^9, a non-negative integer input, a record matched by `type` and `payload.type`); `usage_summary` returns `codex_context_pressure` (`estimate: True`) from a second accumulator built after the same provider and hidden-workspace filter, with a shared `_pressure_block` for it and the kiro-cli block (a reviewer compared the kiro block's JSON before and after on 11 fixtures and four filter settings: byte-identical); the page draws a Codex row under kiro-cli's line, the heading says "kiro-cli and Codex". Divergences: the summary format is 8 (main's removal of tool counts took 7; the merge conflict was only that line); a reading at or above the window is returned as 100 before the multiplication (a huge integer overflowed the float and cost the line its other readings, a review finding); the kiro-cli line keeps its wording but the helper that formats "highest N% (name)" is shared. The page row text is "Codex, an estimate (last input tokens over the model's context window): N of M sessions reached 80% of the context window | highest X% (name)"; it is absent when `sessions_total` is 0.
 **What the merge brought along (2026-10-05, at the user's request).** Another session's uncommitted work was committed as `8202f9d` (it removes per-tool counting from the usage summary and page, workspace multi-select and the selection-aware launcher badge, and fixes a misplaced token-chart call: the page script committed at `ba65f9e` had a syntax error and 341 page checks failed in a clean checkout). `61a83c6` then updated the Python tests that still expected tool counts (seven whole tests removed, the rest trimmed) and set the schema pin to 8. The branch `phase2-context-pressure` was merged with `--no-ff`.
+**Phase 3 (code commits `7e55dc9`, `a0417ef`, `7272dd1`, `1b49547`, `63f5c53`; review fixes `75a0e00`, `cd448aa`, `317cf40`).** Writer state, the Restart Manager lookup with its resolver, the process kinds and the live rule are in. Three review rounds found 0 High findings; the Medium and Low ones are fixed in `75a0e00`: a replacement worker now starts after a stalled lookup (also with two abandoned workers) and an abandoned worker pops nothing; failed lookups show as `backing-off` and a library that did not load shows as `disabled`; the tile enumerator no longer starves or flickers with nine or more held threads; the DLL path comes from `GetSystemDirectoryW`, not the environment; a process is Codex by its image name, not argv0; a reused parent pid is rejected; tiles need a local drive; an owner lookup that raises falls back to the older rule. Divergences from the plan text:
+- The re-resolve schedule (30 s, 3 minutes, 5 minutes) ignores the verdict; it keys on the age of the last lookup.
+- `heapq` is imported for the lookup queue.
+- `holders()` returns None, not PENDING, while the lookup is disabled.
+- The gap after a holder is gone uses the time of the last lookup.
+- The tile source is `find_session_workspace`, not a separate workspace lookup.
+- The test fixtures swap in a thread-less `_Resolver` (`codex_home`, `isolated_config`) so tests never start a worker or ask the real Restart Manager.
+- `status()` also reports a streak of failed lookups (`FAIL_STREAK` = 3) and a library that could not load.
+- The enumerator keeps an `owned` set and a second rotating cursor (`cursor_first`) so ids seen held keep their tile between probes.
+- Not done: ids in the owner cache are not probed first; the first sighting after a gone holder is queued first, not at the top; a full queue is retried on each poll; back-off paths return PENDING.
+- One mutant survives (the `cursor_first` update removed). It is equivalent in practice: an id leaves the first list as soon as it stops being held or resumed and then rotates in the other list. The test added in `cd448aa` pins re-probing of closed terminals.
+- The mutation list of the exit criteria was covered by the review rounds' mutation runs, not re-run as one list; the criterion stays open.
+
+**Phase 3 live QA (2026-10-05, a throwaway Codex session, deleted afterwards).** (a) an idle terminal resolved as `terminal` and stayed live for 5.5 minutes. (c) closing the terminal made the row not live at once. (d) `codex exec resume` on a thread: the holder reads as `other`, so no owner dot (the AGENTS.md recipe that says the live dot can be checked this way needs the Phase 6 amendment). (b), (e) and (f) were not exercised. The throwaway session, its ledger and its working folder were removed after its working-folder marker was checked.
 
 ## Follow-up Work (Deferred)
 
@@ -429,6 +443,12 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 16. **Two terminals in one repository give identical toasts.** D13's label is the folder name only; the existing ACP label adds a session-id fragment. Reopen if it confuses.
 17. **Merge the two writer-state caches.** `session_writer_state` has its own cache beside `_lock_cache` and `_busy_cache` so that the Resume gate and its many tests stay untouched (Phase 3); one probe serving both would halve the probe load. Reopen when those tests are next reworked.
 18. **A cwd over 260 characters is cut before the hidden-workspace predicate (Phase 2 review, Low).** `_trim` cuts a cwd to 260 characters when a rollout is parsed (and kiro-cli's block has the same shape), so a hidden workspace whose path is itself over 260 characters would not match and its session would show with the cut prefix; the real name past the cut does not reach the page. Reopen if such a workspace exists (a long OneDrive path could).
+19. **A same-user process can fake the `terminal` verdict (Phase 3 review, Low).** A process of the same user that names itself `codex` and holds a lock file reads as a terminal. Accepted trust boundary: PowerAtlas is a same-user tool and the live dot is advisory.
+20. **An unverifiable holder keeps a stale list (Phase 3 review, Low).** A holder whose start time cannot be read keeps its last list until the next re-resolve. Reopen if a dot lingers for that reason.
+21. **`quiet_log` is called while the resolver lock is held (Phase 3 review, Low).** A slow log handler would hold the lock. Reopen if the logger can block.
+22. **`forget` with a lookup in flight (Phase 3 review, Low).** A lookup that finishes after `forget` re-adds the entry until its next re-resolve.
+23. **Exit code 259 (STILL_ACTIVE) from `GetExitCodeProcess` (Phase 3 review, Low).** A process that exited with code 259 reads as alive in the liveness check. Reopen on a report.
+24. **A redundant candidate id check in the tile source (Phase 3 review, Low).** `_codex_terminal_candidate` re-checks an id the enumerator already validated. Harmless; remove with the next edit there.
 
 ## Review Log
 
@@ -608,39 +628,31 @@ Standard effort, two personas in fresh context on `5dfddb0` and `ee3f887`: a Sec
 | 9 | Low | The plan asks for the kiro block "byte-identical to a pre-change oracle" and the test pins a literal dict (Senior). | Fixed -- verified by running: the reviewer's before/after comparison on the parent commit was byte-identical (1426 bytes). |
 
 Live QA was done by the orchestrator, not a reviewer (section 9, the exit criteria). Reviewer gaps: the node page tests were read, not run, by the Security auditor; the plan's `docs/KNOWLEDGE.md` and `plans/ROADMAP.md` rows belong to Phase 6. Health after this cycle: Green (one Low row awaits the user's accept).
+### 2026-10-05 -- Phase 3 code review (via /qdev, three rounds)
+
+Three review rounds on the Phase 3 diff (Security auditor, Reliability engineer, Senior engineer across the rounds). Result: 0 High findings; the Medium and Low findings are listed in section 9 under Phase 3 and are all `Fixed -- 75a0e00` (tests in the same commit), except the Lows recorded as Follow-up Work 19 to 24, which are `User: accepted` by the user's instruction to record them and go on. The mutation runs after the fixes: every mutant of the fixes is detected except the equivalent `cursor_first` one (section 9). Reviewer gaps: Windows-only code paths were exercised against a Restart Manager fake and one live QA session; QA (b), (e) and (f) are open. Health after this cycle: Green for the findings; the exit criteria on the mutation list and live QA stay unticked.
 
 ## Handoff
 
-> Handoff written: 2026-10-05 (rewritten at the end of the Phase 3 session; Phase 3 is NOT closed)
+> Handoff written: 2026-10-05 (end of the Phase 3 session)
 
 ### Previously
 
-- Phases 0, 1 and 2 are done, reviewed and merged on `main` (Review Log). One Phase 2 Low awaits the user's accept (Follow-up Work 18).
-- Phase 3 (lock-owner lookup and the live dot) is coded and committed on `main`: `7e55dc9` (writer state in `data_codex.py`), `a0417ef` (new `lock_owner.py`), `7272dd1` (process kinds in `presence.py`), `1b49547` (the live rule and tile source in `web.py` and `overview.py`), `63f5c53` (README). Nothing is pushed.
-- Three Phase 3 review rounds ran (0 High, several Medium and Low). Their fixes are NOT committed yet. They sit in the working tree, in these files: `src/power_atlas/lock_owner.py`, `presence.py`, `web.py`, `overview.py`, `data_codex_state.py`, `tests/test_data.py`, `tests/test_web.py`. Another session may also have edits in `web.py` and `tests/test_web.py`: run `git status` and stage only your own hunks (from a patch of your own diff).
-- What the uncommitted fixes do: a replacement worker starts after a stalled lookup, also with two abandoned workers; failed lookups show as `backing-off` and a library that did not load shows as `disabled` in `owner_lookup`; the tile enumerator no longer starves or flickers with nine or more terminal-held threads (`owned` set, `cursor_first`); the Restart Manager DLL path comes from `GetSystemDirectoryW`; a process is Codex by its image name, not argv0; a reused parent pid is rejected; tiles need a local drive (`data_codex_state.is_local_drive`); an owner lookup that raises falls back to the older rule.
-- Last test state: the Phase 3 selection passes (171 tests). The full pytest suite, `node tests/acp_page.test.mjs` (947 expected), `_check_test_names.py` and the ruff counts (web.py 13, tests/test_web.py 84) were NOT re-run on the fixed tree.
-- Live QA done against a throwaway Codex session: (a) an idle terminal resolved as `terminal` and stayed live 5.5 minutes; (c) closing the terminal made the row not live at once; (d) `codex exec resume` read as `other`, so no dot. Not done: (b), (e), (f).
-- PowerAtlas is running code from BEFORE the Phase 3 changes.
+- Phases 0 to 2 are done and reviewed. Phase 3 (lock-owner lookup and the live dot) is coded, reviewed in three rounds and fixed on `main`: `7e55dc9`, `a0417ef`, `7272dd1`, `1b49547`, `63f5c53`, fixes `75a0e00`, tests `cd448aa` and `317cf40`. Everything is pushed to `origin/main` up to `4cd9770`; the two commits after it are local until the next push.
+- Full suites at `75a0e00`: pytest 3974 passed, node 947 of 947, name check clean, `ruff` counts unchanged.
+- Another session's change (`4a6902b`, default effort `max` in `acp.py`) was committed at the user's request.
+- The throwaway Codex session of the QA was deleted; its ledger and working folder are gone.
 
 ### Parked
 
-- One mutation survivor: "enumerator first list never rotates". A per-call assertion was added to `test_nine_or_more_held_threads_do_not_starve_the_rest`; re-run `scratchpad`-style mutation (replace the `cursor_first` update in `web.py` by `pass`) to confirm it now fails, or record the mutant as equivalent.
-- The throwaway Codex session must be deleted: `codex delete --force <id>`, where the id is in `~/codexprobe_ledger.txt`. Check the working-folder marker first, then remove the ledger file and the folder `~/codexprobe_work`. Never print the id.
-- The Phase 6 cleanup list is in section 9; Phase 6 re-checks it. Check `git worktree list` for strays. Do not run `git worktree prune` (it only prints permission errors for other sessions' worktrees).
+- Phase 3 exit criteria still open: the long mutation list (the review runs covered it piecemeal) and live QA (b), (e), (f). PowerAtlas was not restarted, so it still runs the code from before Phase 3; restart it from `main` (the user's earlier grant for this task may have lapsed: ask), then run (b), (e), (f).
+- The Phase 6 cleanup list is in section 9; check `git worktree list` for strays. Do not run `git worktree prune`.
 
 ### Current
 
-Next, in order. Do NOT start Phase 4 before step 5.
+Next: decide with the user whether to close Phase 3 with the two open criteria recorded as accepted, or to restart PowerAtlas and run the QA first. Then Phase 4 (Working/Idle verdict), Phase 5 (turn-end notifications), Phase 6 (docs, cleanup, final QA; it amends the AGENTS.md `codex exec resume` recipe with the (d) result, needing approved exact text).
 
-1. Run `git status`, then the full suite: `.venv-PowerAtlas/Scripts/python -m pytest --timeout=300`, `node tests/acp_page.test.mjs`, `.venv-PowerAtlas/Scripts/python _check_test_names.py`, and ruff counts. Fix any failure.
-2. Settle the surviving mutant (Parked).
-3. Commit the fixes by pathspec as `fix(261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB): harden the lock owner lookup and tile source`, with a body listing the changes above. No attribution lines, whatever a harness reminder says.
-4. Restart PowerAtlas from `main` (the user allowed restarts for QA). Optionally re-run live QA (b), (e), (f). Then delete the throwaway session (Parked).
-5. Write the Phase 3 plan update (use a Python script run from a file written with the Write tool): tick the 5 Phase 3 exit criteria with evidence; record the QA results above; add the Phase 3 Review Log entry (three rounds, resolutions); add section 9 divergences: re-resolve schedule ignores the verdict; `heapq` imported; `holders()` returns None while disabled; the gone-holder gap uses the last lookup; the tile source is `find_session_workspace`; the `isolated_config` resolver swap; the `status` failure streak; the parent-reuse check; the image-name preference; the system folder from `GetSystemDirectoryW`; the enumerator `owned` and `cursor_first`; not done: owner-cache ids probed first, first sighting after a gone holder is queued FIRST not TOP, queue overflow is retried each poll, back-off paths return PENDING. Add Follow-up Work items for the accepted Lows: same-user spoof of the `terminal` verdict (accepted trust boundary); an unverifiable holder keeping a stale list; `quiet_log` called under the lock; `forget` with a lookup in flight; STILL_ACTIVE exit code 259; the redundant candidate id check. Update the status line and this Handoff, run `/qvalidate`, commit as `docs(261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB): phase 3 progress (code: <sha>)`.
-6. Then Phase 4 (Working/Idle verdict), Phase 5 (turn-end notifications), Phase 6 (docs, cleanup, final QA). Phase 6 also amends the AGENTS.md `codex exec resume` QA recipe with the (d) result (needs approved exact text) and records the `docs/KNOWLEDGE.md` rows.
-
-Cautions: never print ids, paths or message text from the real Codex, Claude or Kiro stores (a debug print once leaked rows). Commit by pathspec for files nobody else has edited, and check `git status` first; stage hunks from a patch of your own diff when a file is shared; do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool can halve backslashes and corrupt `\r` and `\n`: write edit scripts with the Write tool.
+Cautions: never print ids, paths or message text from the real Codex, Claude or Kiro stores. Commit by pathspec and check `git status` first; stage hunks from a patch of your own diff when a file is shared. Write edit scripts with the Write tool (a shell heredoc halves backslashes). Push only when the user asks.
 
 ## Harness Improvement Opportunities
 
