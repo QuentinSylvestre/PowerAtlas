@@ -4426,6 +4426,8 @@ def locks(codex_home, monkeypatch):
     monkeypatch.setattr(data_codex, "_LOCK_BUSY_TTL", 0.0)
     monkeypatch.setattr(data_codex, "_LOCK_STUCK_TTL", 0.0)
     monkeypatch.setattr(data_codex, "_probe_stuck_until", 0.0)
+    monkeypatch.setattr(data_codex, "_STATE_TTL", 0.0)
+    monkeypatch.setattr(data_codex, "_STATE_BUSY_TTL", 0.0)
     events = []
     real_open, real_lock, real_unlock = data_codex.open_shared, data_codex._lock_byte, data_codex._unlock_byte
 
@@ -5159,6 +5161,200 @@ class TestCodexWriterLock:
         monkeypatch.setattr(data_codex, "open_shared", lambda p, mode="rb": modes.append(mode) or real(p, mode))
         assert data_codex.session_writer_locked(self.SID) is False
         assert modes == ["rb", "rb"]
+
+
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3 (D10):
+# the tri-state sibling of session_writer_locked.
+class TestCodexWriterState:
+    SID = _cx_id(61)
+
+    @_needs_os_locks
+    def test_held_by_another_process_is_held(self, locks):
+        path = _cx_lockfile(locks, self.SID)
+        with _cx_hold(path):
+            assert data_codex.session_writer_state(self.SID) == "held"
+
+    def test_an_unlocked_file_is_free_because_the_probe_took_the_lock(self, locks):
+        _cx_lockfile(locks, self.SID)
+        thread = f"{self.SID}.lock"
+        assert data_codex.session_writer_state(self.SID) == "free"
+        assert locks.events == [
+            ("open", ".coordination.lock"), ("lock", ".coordination.lock"),
+            ("open", thread), ("lock", thread), ("unlock", thread), ("close", thread),
+            ("unlock", ".coordination.lock"), ("close", ".coordination.lock")]
+
+    def test_an_absent_lock_file_beside_a_coordination_file_is_free_without_opening_anything(self, locks):
+        assert data_codex.session_writer_state(self.SID) == "free"
+        assert locks.events == []
+
+    def test_an_absent_lock_file_and_an_absent_coordination_file_is_unknown(self, locks):
+        (locks / ".coordination.lock").unlink()
+        assert data_codex.session_writer_state(self.SID) == "unknown"
+        assert not (locks / ".coordination.lock").exists(), "the probe never creates it"
+
+    def test_a_present_lock_file_with_no_coordination_file_is_unknown_and_is_not_opened(self, locks):
+        (locks / ".coordination.lock").unlink()
+        _cx_lockfile(locks, self.SID)
+        assert data_codex.session_writer_state(self.SID) == "unknown"
+        assert ("open", f"{self.SID}.lock") not in locks.events
+        assert not (locks / ".coordination.lock").exists()
+
+    @pytest.mark.parametrize("bad", [
+        "", "abc", "../" + _cx_id(61), _cx_id(61) + "\n", _cx_id(61) + ".lock",
+        _cx_id(61)[:-1], "g" + _cx_id(61)[1:], _cx_id(61).upper(), None, 7, b"x"])
+    def test_an_invalid_id_is_unknown_without_touching_a_file(self, locks, bad):
+        for name in ("abc", _cx_id(61)[:-1]):
+            (locks / f"{name}.lock").write_bytes(b"")
+        assert data_codex.session_writer_state(bad) == "unknown"
+        assert locks.events == []
+
+    def test_a_stat_error_other_than_file_not_found_is_unknown(self, locks, monkeypatch):
+        _cx_lockfile(locks, self.SID)
+        real = os.stat
+
+        def failing(path, *a, **k):
+            if os.path.basename(os.fspath(path)) == f"{self.SID}.lock":
+                raise PermissionError(errno.EACCES, "denied", os.fspath(path))
+            return real(path, *a, **k)
+
+        monkeypatch.setattr(data_codex.os, "stat", failing)
+        assert data_codex.session_writer_state(self.SID) == "unknown"
+        assert locks.events == []
+
+    def test_an_oserror_opening_the_thread_file_is_unknown_and_the_coordination_lock_is_released(
+            self, locks, monkeypatch):
+        _cx_lockfile(locks, self.SID)
+        real = data_codex.open_shared
+
+        def failing(p, mode="rb"):
+            if os.path.basename(os.fspath(p)) == f"{self.SID}.lock":
+                raise PermissionError(errno.EACCES, "denied", os.fspath(p))
+            return real(p, mode)
+
+        monkeypatch.setattr(data_codex, "open_shared", failing)
+        assert data_codex.session_writer_state(self.SID) == "unknown"
+        assert locks.events[-2:] == [("unlock", ".coordination.lock"), ("close", ".coordination.lock")]
+
+    def test_an_oserror_locking_the_thread_file_is_unknown(self, locks, monkeypatch):
+        _cx_lockfile(locks, self.SID)
+        real = data_codex._lock_byte
+
+        def failing(fh):
+            if fh._name == f"{self.SID}.lock":
+                raise OSError(errno.EBADF, "bad descriptor")
+            return real(fh)
+
+        monkeypatch.setattr(data_codex, "_lock_byte", failing)
+        assert data_codex.session_writer_state(self.SID) == "unknown"
+
+    def test_a_lock_file_that_vanishes_between_the_stat_and_the_open_is_free(self, locks, monkeypatch):
+        path = _cx_lockfile(locks, self.SID)
+        real = data_codex.open_shared
+
+        def vanishing(p, mode="rb"):
+            if os.path.basename(os.fspath(p)) == path.name:
+                os.remove(path)
+            return real(p, mode)
+
+        monkeypatch.setattr(data_codex, "open_shared", vanishing)
+        assert data_codex.session_writer_state(self.SID) == "free"
+
+    @_needs_os_locks
+    def test_a_busy_coordination_lock_with_a_cold_cache_is_unknown_never_free(self, locks, monkeypatch):
+        monkeypatch.setattr(data_codex, "_STATE_BUSY_TTL", 1.0)
+        _cx_lockfile(locks, self.SID)
+        with _cx_hold(locks / ".coordination.lock"):
+            with patch.object(data_codex.time, "sleep", lambda s: None):
+                assert data_codex.session_writer_state(self.SID) == "unknown"
+                opened = locks.events.count(("open", ".coordination.lock"))
+                assert data_codex.session_writer_state(self.SID) == "unknown", "a second call within 1 s"
+        assert opened == 4, "one try and three retries"
+        assert locks.events.count(("open", ".coordination.lock")) == opened, "the second call came from the 1 s cache"
+        assert not [e for e in locks.events if e[1] == f"{self.SID}.lock"]
+
+    @_needs_os_locks
+    def test_a_busy_coordination_lock_falls_back_on_a_definitive_answer_younger_than_60_seconds(
+            self, locks):
+        _cx_lockfile(locks, self.SID)
+        with _cx_hold(locks / ".coordination.lock"), patch.object(data_codex.time, "sleep", lambda s: None):
+            data_codex._state_cache.put(self.SID, (time.monotonic() - 30.0, "held"))
+            assert data_codex.session_writer_state(self.SID) == "held"
+            data_codex._state_busy_cache.clear()
+            data_codex._state_cache.put(self.SID, (time.monotonic() - 61.0, "held"))
+            assert data_codex.session_writer_state(self.SID) == "unknown", "older than 60 s is not trusted"
+
+    def test_a_probe_that_raises_is_unknown(self, locks, monkeypatch):
+        _cx_lockfile(locks, self.SID)
+        monkeypatch.setattr(data_codex, "_probe_writer_state", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+        assert data_codex.session_writer_state(self.SID) == "unknown"
+
+    @_needs_os_locks
+    def test_the_old_caches_are_never_read_or_written(self, locks):
+        path = _cx_lockfile(locks, self.SID)
+        data_codex._lock_cache.put(self.SID, (time.monotonic(), False))
+        data_codex._busy_cache.put(self.SID, (time.monotonic(), False))
+        with _cx_hold(path):
+            assert data_codex.session_writer_state(self.SID) == "held", "a planted False does not read as free"
+        assert data_codex._lock_cache.get(self.SID)[1] is False
+        data_codex._lock_cache.clear()
+        data_codex._busy_cache.clear()
+        data_codex.session_writer_state(self.SID)
+        assert data_codex._lock_cache.get(self.SID) is None and data_codex._busy_cache.get(self.SID) is None
+
+    def test_held_and_free_are_reused_for_five_seconds_and_unknown_for_one(self, locks, monkeypatch):
+        monkeypatch.setattr(data_codex, "_STATE_TTL", 5.0)
+        _cx_lockfile(locks, self.SID)
+        assert [data_codex.session_writer_state(self.SID) for _ in range(3)] == ["free"] * 3
+        assert locks.events.count(("open", f"{self.SID}.lock")) == 1
+        data_codex._state_cache.put(self.SID, (time.monotonic() - 5.5, "held"))
+        assert data_codex.session_writer_state(self.SID) == "free", "an expired answer is probed again"
+        monkeypatch.setattr(data_codex, "_STATE_BUSY_TTL", 1.0)
+        data_codex._state_cache.clear()
+        other = _cx_id(62)
+        (locks / f"{other}.lock").write_bytes(b"")
+        real = data_codex.open_shared
+
+        def failing(p, mode="rb"):
+            if os.path.basename(os.fspath(p)) == f"{other}.lock":
+                raise PermissionError(errno.EACCES, "denied", os.fspath(p))
+            return real(p, mode)
+
+        monkeypatch.setattr(data_codex, "open_shared", failing)
+        before = locks.events.count(("open", ".coordination.lock"))
+        assert [data_codex.session_writer_state(other) for _ in range(2)] == ["unknown"] * 2
+        assert locks.events.count(("open", ".coordination.lock")) == before + 1, "the second unknown came from the 1 s cache"
+
+    def test_an_unknown_answer_is_not_kept_for_the_five_second_definitive_window(self, locks, monkeypatch):
+        monkeypatch.setattr(data_codex, "_STATE_TTL", 5.0)
+        _cx_lockfile(locks, self.SID)
+        real = data_codex.open_shared
+        broken = [True]
+
+        def flaky(p, mode="rb"):
+            if broken[0] and os.path.basename(os.fspath(p)) == f"{self.SID}.lock":
+                raise PermissionError(errno.EACCES, "denied", os.fspath(p))
+            return real(p, mode)
+
+        monkeypatch.setattr(data_codex, "open_shared", flaky)
+        assert data_codex.session_writer_state(self.SID) == "unknown"
+        broken[0] = False
+        assert data_codex.session_writer_state(self.SID) == "free", "the unknown was not served as if it were definitive"
+
+    def test_the_second_probe_path_adds_at_most_one_probe_per_row_per_five_seconds(self, locks, monkeypatch):
+        monkeypatch.setattr(data_codex, "_STATE_TTL", 5.0)
+        monkeypatch.setattr(data_codex, "_LOCK_TTL", 5.0)
+        _cx_lockfile(locks, self.SID)
+        for _ in range(3):
+            data_codex.session_writer_locked(self.SID)
+            data_codex.session_writer_state(self.SID)
+        assert locks.events.count(("open", f"{self.SID}.lock")) == 2, "one per path"
+
+    def test_session_writer_locked_is_unchanged(self, locks):
+        """The Resume gate: a busy or absent probe still reads False, as before."""
+        (locks / ".coordination.lock").unlink()
+        _cx_lockfile(locks, self.SID)
+        assert data_codex.session_writer_locked(self.SID) is False
+        assert data_codex.session_writer_state(self.SID) == "unknown"
 
 
 class _CountingLock:

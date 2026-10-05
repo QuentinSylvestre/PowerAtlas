@@ -1580,6 +1580,146 @@ def session_writer_locked(session_id: str) -> bool:
     return fallback("writer_lock.busy", "the coordination lock stayed busy through the retry budget")
 
 
+# --- Writer state (D10) --------------------------------------------------------------------
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3
+#
+# `session_writer_locked` answers False for a probe that failed or could not run, which a caller
+# that wants to know whether the thread is FREE cannot tell from "free". `session_writer_state`
+# is its tri-state sibling: held, free or unknown. It shares the probe's rules (the coordination
+# lock first, read-only opens, one probe at a time in this process) through the same helpers,
+# but has caches of its own and never reads `_lock_cache` or `_busy_cache`, whose cached False
+# for a busy or erroring probe would read as free here. `session_writer_locked` and its caches
+# are not changed, so the Resume gate behaves as before on every platform.
+
+_STATE_TTL = 5.0            # seconds a held or free answer is reused
+_STATE_BUSY_TTL = 1.0       # seconds an unknown (or fallback) answer is reused
+_STATE_STALE_MAX = 60.0     # a busy coordination lock falls back on a held or free answer this young
+_state_cache = BoundedCache(512)        # id -> (monotonic time, "held" | "free"): definitive answers only
+_state_busy_cache = BoundedCache(512)   # id -> (monotonic time, state): what a probe that could not run answered
+WRITER_HELD, WRITER_FREE, WRITER_UNKNOWN = "held", "free", "unknown"
+
+
+def _thread_lock_state(path: str, deferred: list) -> str:
+    """held / free / unknown for <id>.lock. Runs under the coordination lock: only open,
+    try-lock, unlock and close happen here (failures are queued in `deferred`, as in
+    `_thread_lock_held`). A vanished file is free; an OSError opening or locking is unknown,
+    not free."""
+    try:
+        fh = open_shared(path, "rb")
+    except FileNotFoundError:
+        return WRITER_FREE
+    except OSError as exc:
+        deferred.append(("writer_lock.open", exc, path))
+        return WRITER_UNKNOWN
+    try:
+        try:
+            got = _lock_byte(fh)
+        except OSError as exc:
+            deferred.append(("writer_lock.lock", exc, path))
+            return WRITER_UNKNOWN
+        if got:
+            _release(fh, deferred, path)
+            return WRITER_FREE
+        return WRITER_HELD
+    finally:
+        fh.close()  # first: a Python handle on a lock file blocks Codex's removal of it
+
+
+def _probe_writer_state(lock_path: str, coord_path: str) -> str | None:
+    """held / free / unknown for the thread lock, None when the coordination lock is busy.
+    An absent coordination file is unknown here (an older Codex build, so a free lock cannot
+    be told from one never taken). Failures queued under the coordination lock are logged
+    after it is released and closed."""
+    deferred: list = []
+    try:
+        try:
+            coord = open_shared(coord_path, "rb")
+        except FileNotFoundError:
+            return WRITER_UNKNOWN
+        try:
+            if not _lock_byte(coord):
+                return None
+            try:
+                return _thread_lock_state(lock_path, deferred)
+            finally:
+                _release(coord, deferred)  # last: Codex's blocking lock() has no timeout
+        finally:
+            coord.close()
+    finally:
+        for kind, exc, path in deferred:
+            try:
+                _warn(kind, exc, path)
+            except Exception:  # a failing log must neither replace the probe's result nor skip the rest
+                pass
+
+
+@_safe("session_writer_state", lambda: WRITER_UNKNOWN)
+def session_writer_state(session_id: str) -> str:
+    """`held` when another process holds the thread's writer lock, `free` when none does,
+    `unknown` when this probe could not tell. Total: any error is `unknown`.
+
+    free: the lock file is absent while `.coordination.lock` exists, or the probe took the
+    lock itself. unknown: an invalid id; a stat error other than file-not-found; an OSError
+    opening or locking <id>.lock; an absent `.coordination.lock`; a coordination lock busy
+    through the retry budget with no held or free answer younger than _STATE_STALE_MAX. A
+    held or free answer is reused for _STATE_TTL seconds and an unknown one for
+    _STATE_BUSY_TTL only. The probe order, the retry budget and the process-wide lock are
+    those of `session_writer_locked`.
+    """
+    if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+        return WRITER_UNKNOWN
+    key = session_id
+    lock_path = str(Path(CODEX_LOCKS_DIR) / f"{key}.lock")
+    coord_path = str(Path(CODEX_LOCKS_DIR) / _COORDINATION)
+    try:
+        os.stat(lock_path)
+    except FileNotFoundError:
+        try:
+            os.stat(coord_path)
+        except OSError:
+            return WRITER_UNKNOWN
+        return WRITER_FREE
+    except OSError:
+        return WRITER_UNKNOWN
+    known = _state_cache.get(key)
+    if _fresh(known, _STATE_TTL):
+        return known[1]
+    busy = _state_busy_cache.get(key)
+    if _fresh(busy, _STATE_BUSY_TTL):
+        return busy[1]
+
+    def settle(state: str) -> str:
+        """Remember what a probe saw: held and free as definitive answers, unknown briefly."""
+        if state == WRITER_UNKNOWN:
+            _state_busy_cache.put(key, (time.monotonic(), state))
+        else:
+            _state_cache.put(key, (time.monotonic(), state))
+        return state
+
+    def fallback(kind: str, why: str) -> str:
+        current = _state_cache.get(key)
+        answer = current[1] if _fresh(current, _STATE_STALE_MAX) else WRITER_UNKNOWN
+        _state_busy_cache.put(key, (time.monotonic(), answer))
+        _warn(kind, note=why)
+        return answer
+
+    for attempt in range(_LOCK_RETRIES + 1):
+        if not _acquire_probe_lock():
+            return fallback("writer_state.wait", "the probe lock was not free in time (an open or a lock call is stuck)")
+        try:
+            fresh = _state_cache.get(key)  # another thread may have just probed this id
+            if _fresh(fresh, _STATE_TTL):
+                return fresh[1]
+            state = _probe_writer_state(lock_path, coord_path)
+            if state is not None:
+                return settle(state)
+        finally:
+            _probe_lock.release()
+        if attempt < _LOCK_RETRIES:
+            time.sleep(_LOCK_RETRY_SLEEP)
+    return fallback("writer_state.busy", "the coordination lock stayed busy through the retry budget")
+
+
 # --- Test seam ---------------------------------------------------------------------
 
 
@@ -1600,6 +1740,8 @@ def _clear_caches() -> None:
     _parse_failed.clear()
     _lock_cache.clear()
     _busy_cache.clear()
+    _state_cache.clear()
+    _state_busy_cache.clear()
     _probe_stuck_until = 0.0
     with _warn_lock:
         _warned.clear()
