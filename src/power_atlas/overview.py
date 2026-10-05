@@ -1232,12 +1232,15 @@ CODEX_DURATION_CAP_SECONDS = 24 * 3600
 # rollout that interleaves two cumulative series.
 _CODEX_RECENT_EVENTS = 8
 # A `turn_context` model and a `session_meta` cwd reach the page through the usage summary, from
-# a file an agent writes: each is cut to this many characters when the file is parsed (a model
-# the way a tile's tool name is, `_clip`; a cwd by `_trim`, which keeps its whitespace, so a
-# workspace the rail hides still matches). 260 is a Windows MAX_PATH.
+# a file an agent writes. A model is cut to `_CODEX_NAME_MAX` characters when the file is parsed
+# (the way a tile's tool name is, `_clip`). A cwd is never cut, because a path cut short would not
+# match the workspace the rail hides: one longer than `_CODEX_CWD_MAX` (far above a Windows
+# MAX_PATH of 260) leaves the file out of the summary instead (fail closed), and a shorter one is
+# kept exactly, whitespace and all.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB (a cwd was cut at 260)
 _CODEX_NAME_MAX = 80
-_CODEX_CWD_MAX = 260
+_CODEX_CWD_MAX = 4096
 USAGE_REUSE_SECONDS = 30.0
 CONTEXT_PRESSURE_PERCENT = 80.0
 _USAGE_TOP_WORKSPACES = 8
@@ -1739,6 +1742,8 @@ def _parse_codex_usage(path: Path) -> dict:
             return _empty_summary(_CODEX, stem)
         sid = meta.get("id")
         cwd = meta.get("cwd")
+        if isinstance(cwd, str) and len(cwd) > _CODEX_CWD_MAX:
+            return _empty_summary(_CODEX, stem)  # a path that long cannot be matched to a hidden tag
         for line in _iter_lines(fh, USAGE_MAX_LINE_BYTES):
             if not any(key in line for key in _CODEX_KEYS):
                 continue

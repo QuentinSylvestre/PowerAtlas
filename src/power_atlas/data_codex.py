@@ -1325,20 +1325,136 @@ def last_event_epoch(path) -> float | None:
     return _last_event(target, os.stat(target))
 
 
+# --- Reading the appended end of a rollout (D11, D13) ---------------------------------------
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phases 4 and 5
+#
+# One piece of machinery serves the turn verdict and the turn-end notifier: a `TurnWatch` marks
+# how far a rollout has been read (a line start, plus hashes that show the file was only appended
+# to), and `_read_complete_lines` returns the complete lines after it.
+
+TURN_READ_BYTES = 1024 * 1024  # most appended bytes one read takes
+_HEAD_HASH_BYTES = 512         # the head of the file the state is checked against
+_TAIL_HASH_BYTES = 4096        # the bytes just before the offset the state is checked against
+
+
+class TurnWatch(NamedTuple):
+    """How far a rollout was read: a byte offset (a line start, unless `mid_line`) and hashes of
+    the head of the file and of the bytes just before the offset. A hash, never the bytes: the
+    rollout holds the conversation. `mid_line` marks an offset inside a line longer than a read,
+    whose rest is skipped up to its newline."""
+    offset: int
+    head_len: int
+    head_hash: str
+    tail_len: int
+    tail_hash: str
+    mid_line: bool = False
+
+
+def _hash_at(fh, start: int, length: int) -> str:
+    fh.seek(start)
+    return hashlib.sha1(fh.read(length)).hexdigest()
+
+
+def _watch_state(fh, offset: int, head_len: int, head_hash: str, mid_line: bool = False) -> TurnWatch:
+    tail_len = min(offset, _TAIL_HASH_BYTES)
+    tail_hash = _hash_at(fh, offset - tail_len, tail_len) if tail_len else ""
+    return TurnWatch(offset, head_len, head_hash, tail_len, tail_hash, mid_line)
+
+
+def _end_of_last_line(fh, size: int) -> tuple[int, bool]:
+    """(offset, mid_line) just after the last complete line within the last TURN_READ_BYTES. A file
+    whose last read-sized window holds no newline ends inside a very long line: its offset is the
+    end of the file, marked `mid_line`."""
+    window = min(size, TURN_READ_BYTES)
+    fh.seek(size - window)
+    nl = fh.read(window).rfind(b"\n")
+    if nl >= 0:
+        return size - window + nl + 1, False
+    return (0, False) if size <= TURN_READ_BYTES else (size, True)
+
+
+def _state_holds(fh, size: int, state: TurnWatch) -> bool:
+    """Whether the file is still the one `state` was taken from, grown by appends only."""
+    if size < state.offset or _hash_at(fh, 0, state.head_len) != state.head_hash:
+        return False
+    if state.offset:
+        if state.tail_len != min(state.offset, _TAIL_HASH_BYTES):
+            return False
+        fh.seek(state.offset - state.tail_len)
+        before = fh.read(state.tail_len)
+        if (before[-1:] != b"\n" and not state.mid_line) or hashlib.sha1(before).hexdigest() != state.tail_hash:
+            return False
+    return True
+
+
+def _read_complete_lines(fh, size: int, state: TurnWatch, head_len: int, head_hash: str) -> tuple[list[bytes], TurnWatch]:
+    """The complete lines after `state`, at most TURN_READ_BYTES of them, and the state after them.
+    A torn last line waits for its newline. A line longer than a read is skipped: the state moves
+    past what was read and is marked `mid_line` until the line ends."""
+    fh.seek(state.offset)
+    chunk = fh.read(min(size - state.offset, TURN_READ_BYTES))
+    end = chunk.rfind(b"\n")
+    if end < 0:
+        if len(chunk) >= TURN_READ_BYTES:
+            return [], _watch_state(fh, state.offset + len(chunk), head_len, head_hash, True)
+        return [], _watch_state(fh, state.offset, head_len, head_hash, state.mid_line)
+    lines = chunk[:end].split(b"\n")
+    if state.mid_line:
+        lines = lines[1:]  # the first fragment is the end of a line whose start was skipped
+    return lines, _watch_state(fh, state.offset + end + 1, head_len, head_hash)
+
+
+def _head_of(fh, size: int) -> tuple[int, str]:
+    head_len = min(size, _HEAD_HASH_BYTES)
+    return head_len, _hash_at(fh, 0, head_len)
+
+
 # --- Turn verdict (D11) ---------------------------------------------------------------------
-# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 4
 
 TURN_STUCK_SECONDS = 30 * 60.0  # a turn whose newest record is older than this has no verdict
 _TURN_RECORDS = {"task_started": "working", "task_complete": "idle", "turn_aborted": "idle"}
 _TURN_CACHE_SIZE = 256  # only threads a terminal holds are asked about
-_turn_cache = BoundedCache(_TURN_CACHE_SIZE)  # path -> (mtime_ns, size, verdict, newest record epoch)
+# path -> (mtime_ns, size, verdict, newest record epoch, TurnWatch at the end of the last complete line)
+_turn_cache = BoundedCache(_TURN_CACHE_SIZE)
 
 
-def _read_turn_state(path: str) -> tuple[str | None, float | None]:
-    """(verdict of the last turn record in the tail window, epoch of the newest record)."""
-    newest = None
+def _scan_turn_lines(lines, verdict, newest):
+    """Fold lines (oldest first) into (verdict of the last turn record, epoch of the newest record)."""
+    for line in lines:
+        if not line or len(line) > _LINE_CAP:
+            continue
+        obj = loads(line)
+        if not isinstance(obj, dict):
+            continue
+        when = _record_time(obj)
+        if when is not None:
+            newest = when.timestamp()
+        payload = obj.get("payload")
+        if obj.get("type") == "event_msg" and isinstance(payload, dict):
+            found = _TURN_RECORDS.get(payload.get("type"))
+            if found is not None:
+                verdict = found
+    return verdict, newest
+
+
+def _read_turn_state(path: str, prior) -> tuple[str | None, float | None, TurnWatch]:
+    """(verdict, newest record epoch, where the read stopped). With a `prior` cache entry whose
+    state still holds (the file was only appended to) it reads just the appended bytes, so a turn
+    that wrote more than the tail window keeps its verdict; otherwise it reads the tail window."""
     with open_shared(path) as fh:
         size = fh.seek(0, 2)
+        head_len, head_hash = _head_of(fh, size)
+        if prior is not None and prior[4] is not None and _state_holds(fh, size, prior[4]):
+            verdict, newest, watch = prior[2], prior[3], prior[4]
+            while watch.offset < size:
+                lines, nxt = _read_complete_lines(fh, size, watch, head_len, head_hash)
+                verdict, newest = _scan_turn_lines(lines, verdict, newest)
+                moved = nxt.offset != watch.offset
+                watch = nxt
+                if not moved:
+                    break
+            return verdict, newest, watch
+        verdict = newest = None
         for line in _iter_lines_reverse(fh, size):
             obj = loads(line)
             if not isinstance(obj, dict):
@@ -1351,20 +1467,24 @@ def _read_turn_state(path: str) -> tuple[str | None, float | None]:
             if obj.get("type") == "event_msg" and isinstance(payload, dict):
                 verdict = _TURN_RECORDS.get(payload.get("type"))
                 if verdict is not None:
-                    return verdict, newest
-    return None, newest
+                    break
+        offset, mid_line = _end_of_last_line(fh, size)
+        return verdict, newest, _watch_state(fh, offset, head_len, head_hash, mid_line)
 
 
 @_safe("turn_state", lambda: None, path_arg=True)
 def turn_state(path) -> str | None:
     """``working`` or ``idle`` from the last turn record of a rollout, else None.
 
-    The last of ``task_started`` (working), ``task_complete`` and ``turn_aborted`` (idle)
-    in the tail window, matched on ``type`` and ``payload.type`` and never as text, because
-    a rollout routinely quotes these words in tool output. None when the window holds no
-    such record, and None when the verdict is working but the newest record is older than
-    TURN_STUCK_SECONDS (a stuck turn) or stamped in the future. Cached by (mtime_ns, size), never mtime alone:
-    Windows freezes the mtime of a rollout Codex holds open while its size grows.
+    The last of ``task_started`` (working), ``task_complete`` and ``turn_aborted`` (idle),
+    matched on ``type`` and ``payload.type`` and never as text, because a rollout routinely
+    quotes these words in tool output. The first read takes the tail window (at most
+    `_TAIL_MAX`); after that only the appended bytes are read while the file is still the same
+    one grown by appends (head and tail hashes), so a long turn keeps its verdict. None when no
+    turn record is known, and None when the verdict is working but the newest record is older than
+    TURN_STUCK_SECONDS (a stuck turn), stamped in the future, or has no time. Cached by
+    (mtime_ns, size), never mtime alone: Windows freezes the mtime of a rollout Codex holds open
+    while its size grows.
     """
     target = os.fspath(path)
     st = os.stat(target)
@@ -1372,8 +1492,8 @@ def turn_state(path) -> str | None:
     if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
         verdict, newest = cached[2], cached[3]
     else:
-        verdict, newest = _read_turn_state(target)
-        _turn_cache.put(target, (st.st_mtime_ns, st.st_size, verdict, newest))
+        verdict, newest, watch = _read_turn_state(target, cached)
+        _turn_cache.put(target, (st.st_mtime_ns, st.st_size, verdict, newest, watch))
     if verdict == "working":
         now = time.time()
         # An unknown age, a stamp from the future (a clock error, like `activity_epoch`'s) and a
@@ -1384,33 +1504,6 @@ def turn_state(path) -> str | None:
 
 
 # --- Turn ends since the last look (D13) ----------------------------------------------------
-# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 5
-
-TURN_READ_BYTES = 1024 * 1024  # most appended bytes one call reads
-_HEAD_HASH_BYTES = 512         # the head of the file the state is checked against
-_TAIL_HASH_BYTES = 64          # the bytes just before the offset the state is checked against
-
-
-class TurnWatch(NamedTuple):
-    """Where `new_turn_ends` stopped reading: a byte offset (always the start of a line) and
-    hashes of the head of the file and of the bytes just before the offset. A hash, never the
-    bytes: the rollout holds the conversation."""
-    offset: int
-    head_len: int
-    head_hash: str
-    tail_len: int
-    tail_hash: str
-
-
-def _hash_at(fh, start: int, length: int) -> str:
-    fh.seek(start)
-    return hashlib.sha1(fh.read(length)).hexdigest()
-
-
-def _watch_state(fh, offset: int, head_len: int, head_hash: str) -> TurnWatch:
-    tail_len = min(offset, _TAIL_HASH_BYTES)
-    tail_hash = _hash_at(fh, offset - tail_len, tail_len) if tail_len else ""
-    return TurnWatch(offset, head_len, head_hash, tail_len, tail_hash)
 
 
 @_safe("new_turn_ends", lambda: (0, None))  # no path in the warning: the notifier's log lines carry none (D20)
@@ -1421,49 +1514,26 @@ def new_turn_ends(path, state: TurnWatch | None, from_start: bool = False) -> tu
     complete line (`from_start` records offset 0 instead, for a rollout this process saw
     appear, so its first turn is counted). Later calls read at most TURN_READ_BYTES of appended
     bytes, complete lines only; a torn last line waits for its newline. A line over the line
-    cap or one that does not parse is skipped. Records are counted by key path (`type` is
-    `event_msg` and `payload.type` is `task_complete`), never by text. The state is dropped
-    (new state None, count 0, nothing notified) when the file shrank, its head changed, the
-    bytes before the offset changed (a rewritten file) or the byte before the offset is no
-    newline; the caller then treats the next call as a first sight. Never raises.
+    cap, a line longer than a read, or one that does not parse is skipped. Records are counted by
+    key path (`type` is `event_msg` and `payload.type` is `task_complete`), never by text. The
+    state is dropped (new state None, count 0, nothing notified) when the file shrank, its head
+    changed, the bytes before the offset changed (a rewritten file) or the byte before the offset
+    is no newline; the caller then treats the next call as a first sight. Never raises.
     """
     target = os.fspath(path)
     with open_shared(target) as fh:
         size = fh.seek(0, 2)
-        head_len = min(size, _HEAD_HASH_BYTES)
-        head_hash = _hash_at(fh, 0, head_len)
+        head_len, head_hash = _head_of(fh, size)
         if state is None:
-            if from_start:
-                offset = 0
-            else:
-                window = min(size, TURN_READ_BYTES)
-                fh.seek(size - window)
-                nl = fh.read(window).rfind(b"\n")
-                if nl >= 0:
-                    offset = size - window + nl + 1
-                else:
-                    offset = 0 if size <= TURN_READ_BYTES else size
-                return 0, _watch_state(fh, offset, head_len, head_hash)
-        else:
-            offset = state.offset
-            if size < offset or _hash_at(fh, 0, state.head_len) != state.head_hash:
-                return 0, None
-            if offset:
-                if state.tail_len != min(offset, _TAIL_HASH_BYTES):
-                    return 0, None
-                fh.seek(offset - state.tail_len)
-                before = fh.read(state.tail_len)
-                if before[-1:] != b"\n" or hashlib.sha1(before).hexdigest() != state.tail_hash:
-                    return 0, None
-        fh.seek(offset)
-        chunk = fh.read(min(size - offset, TURN_READ_BYTES))
-        end = chunk.rfind(b"\n")
-        if end < 0:
-            if len(chunk) >= TURN_READ_BYTES:
-                return 0, None  # one line longer than a read: start over rather than stall on it
-            return 0, _watch_state(fh, offset, head_len, head_hash)
+            if not from_start:
+                offset, mid_line = _end_of_last_line(fh, size)
+                return 0, _watch_state(fh, offset, head_len, head_hash, mid_line)
+            state = _watch_state(fh, 0, head_len, head_hash)
+        elif not _state_holds(fh, size, state):
+            return 0, None
+        lines, new_state = _read_complete_lines(fh, size, state, head_len, head_hash)
         count = 0
-        for line in chunk[:end].split(b"\n"):
+        for line in lines:
             if not line or len(line) > _LINE_CAP:
                 continue
             obj = loads(line)
@@ -1471,7 +1541,7 @@ def new_turn_ends(path, state: TurnWatch | None, from_start: bool = False) -> tu
             if (isinstance(obj, dict) and obj.get("type") == "event_msg" and isinstance(payload, dict)
                     and payload.get("type") == "task_complete"):
                 count += 1
-        return count, _watch_state(fh, offset + end + 1, head_len, head_hash)
+        return count, new_state
 
 
 def activity_epoch(path, st) -> float:

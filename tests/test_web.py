@@ -34277,8 +34277,10 @@ class TestOverviewUsage:
     def test_codex_strings_that_reach_the_page_are_cut_to_their_limits(self):
         """Final review finding B6 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW):
         a tool name, a `turn_context` model and a `session_meta` cwd came from the file with no
-        limit and went to the page whole. A name or model is cut to 80 characters, a cwd to 260;
-        one at the limit is untouched, and a failed call still lands on its cut name's row."""
+        limit and went to the page whole. A name or model is cut to 80 characters; a cwd is never
+        cut (a cut path would not match a hidden workspace): one over 4096 characters leaves the file
+        out of the summary. One at the limit is untouched, and a failed call still lands on its cut
+        name's row."""
         from power_atlas import overview
         ellipsis = "\u2026"
         t = self.now - 7200
@@ -34292,16 +34294,30 @@ class TestOverviewUsage:
         prefix = "C:\\ws\\"
         path = self.codex(1, records, cwd=prefix + "d" * 600)
         summary = overview._parse_usage_file(path, "codex")
-        assert len(summary["cwd"]) == 260 and summary["cwd"].startswith(prefix + "d" * 200)
-        assert summary["cwd"].endswith(ellipsis)
+        assert summary["cwd"] == prefix + "d" * 600, "a long cwd is kept whole, so a hidden tag can match it"
         assert summary["model"] == "m" * 79 + ellipsis, "the most frequent model, cut"
         usage = self.summary()
         assert [m["model"] for m in usage["models"]] == ["m" * 79 + ellipsis]
         assert usage["by_workspace"] and all(
-            len(r["cwd"]) <= 260 and len(r["name"]) <= 260 for r in usage["by_workspace"])
+            len(r["cwd"]) <= 4096 and len(r["name"]) <= 4096 for r in usage["by_workspace"])
         # A cwd inside the limit is kept exactly, whitespace and all (the rail's hidden match is exact).
         kept = self.codex(2, [_ovx_user(t, "x")], cwd=prefix + "two  spaces")
         assert overview._parse_usage_file(kept, "codex")["cwd"] == prefix + "two  spaces"
+        # Over 4096 characters: no cwd that can be checked against a hidden tag, so the file is left out.
+        huge = self.codex(3, records, cwd=prefix + "h" * 5000)
+        left_out = overview._parse_usage_file(huge, "codex")
+        assert left_out["cwd"] == "" and left_out["days"] == {} and left_out["model"] is None
+
+    def test_a_hidden_workspace_with_a_long_path_is_left_out_of_the_usage_summary(self):
+        """Phase 2 review (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB):
+        a cwd over 260 characters was cut before the hidden check, so the workspace the rail hides
+        still counted."""
+        t = self.now - 7200
+        hidden_cwd = "C:\\ws\\" + "d" * 300
+        self.codex(1, [_ovx_user(t, "x"), _ovx_started(t + 1), _ovx_complete(t + 2, duration_ms=60_000)], cwd=hidden_cwd)
+        assert any(r["cwd"] == hidden_cwd for r in self.summary()["by_workspace"]), "counted when not hidden"
+        hidden = self.summary(hidden=lambda cwd: cwd == hidden_cwd)
+        assert all(r["cwd"] != hidden_cwd for r in hidden["by_workspace"])
 
     def test_a_set_stop_event_ends_the_codex_scan_at_once_with_what_it_has(self, monkeypatch):
         """Final review finding B5 (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW):
@@ -35577,6 +35593,20 @@ class TestCodexTurnWatchTick:
         assert web_mod._codex_turn_watch_once(state, deps, 5) == 1
         assert toasts == [("PowerAtlas \u2014 Proj", "Done \u2014 waiting for you")]
 
+    def test_a_removed_rollout_is_dropped_and_looked_up_again(self, world):
+        world.add(_WS1, lines=1)
+        world.tick(0)
+        world.paths[_WS1].unlink()
+        assert world.tick(5) == 0 and _WS1 not in world.state.ids
+        replacement = world.dir / "replacement.jsonl"
+        replacement.write_bytes(b"")
+        world.paths[_WS1] = replacement
+        world.tick(40)                       # looked up again: a new first sight at the end of the new file
+        assert _WS1 in world.state.ids and world.state.ids[_WS1].path == replacement
+        with open(replacement, "ab") as fh:
+            fh.write(_WatchWorld._end())
+        assert world.tick(45) == 1
+
     def test_a_failing_id_does_not_stop_the_others_and_the_tick_never_raises(self, world):
         world.add(_WS1)
         world.add(_WS2)
@@ -35803,6 +35833,34 @@ class TestCodexTurnWatcherThread:
 
 async def _noop_async():
     return None
+
+
+class TestCodexEnumeratorOneRunAtATime:
+    """Phase 5 review: the Overview polls and the notifier thread both call the enumerator."""
+
+    def test_a_caller_that_finds_a_run_in_progress_takes_the_previous_answer_and_probes_nothing(self, monkeypatch):
+        from power_atlas import data_codex, web as web_mod
+        monkeypatch.setattr(web_mod, "_codex_enum", {"at": -1e9, "ids": [_WS1], "cursor": 0, "cursor_first": 0,
+                                                     "held": {_WS1}, "owned": {_WS1}})
+        monkeypatch.setattr(data_codex, "session_writer_state", lambda sid: pytest.fail("a second run probed"))
+        assert web_mod._codex_enum_compute.acquire(blocking=False)
+        try:
+            assert web_mod._codex_terminal_threads(_lk_snap()) == [_WS1]
+        finally:
+            web_mod._codex_enum_compute.release()
+
+    def test_the_run_lock_is_released_after_a_run_and_after_one_that_raises(self, monkeypatch):
+        from power_atlas import web as web_mod
+
+        def boom(snapshot):
+            raise RuntimeError("x")
+        monkeypatch.setattr(web_mod, "_codex_terminal_threads_compute", boom)
+        monkeypatch.setattr(web_mod, "_codex_enum", {"at": -1e9, "ids": [], "cursor": 0, "cursor_first": 0,
+                                                     "held": set(), "owned": set()})
+        with pytest.raises(RuntimeError):
+            web_mod._codex_terminal_threads(_lk_snap())
+        assert web_mod._codex_enum_compute.acquire(blocking=False), "released after the failure"
+        web_mod._codex_enum_compute.release()
 
 
 class TestCodexOwnerVerdictNeverRaises:

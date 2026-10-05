@@ -378,16 +378,31 @@ def _codex_diagnostics() -> dict:
 _CODEX_ENUM_PROBES = 8
 _CODEX_ENUM_REUSE = 3.0
 _codex_enum_lock = threading.Lock()
+_codex_enum_compute = threading.Lock()  # held while one run probes the locks
 _codex_clock = time.monotonic  # a seam, so a test can move time
 _codex_enum: dict = {"at": -1e9, "ids": [], "cursor": 0, "cursor_first": 0, "held": set(), "owned": set()}
 
 
 def _codex_terminal_threads(snapshot) -> list[str]:
-    """Ids of the threads whose lock a Codex terminal holds right now. Blocking: it probes locks."""
+    """Ids of the threads whose lock a Codex terminal holds right now. Blocking: it probes locks.
+
+    One computation at a time: the Overview polls and the turn-end notifier thread both call it,
+    and two overlapping runs would each overwrite the other's cursors and held set. A caller that
+    finds another run in progress takes that run's previous answer instead of waiting."""
     now = _codex_clock()
     with _codex_enum_lock:
         if now - _codex_enum["at"] < _CODEX_ENUM_REUSE:
             return list(_codex_enum["ids"])
+    if not _codex_enum_compute.acquire(blocking=False):
+        with _codex_enum_lock:
+            return list(_codex_enum["ids"])
+    try:
+        return _codex_terminal_threads_compute(snapshot)
+    finally:
+        _codex_enum_compute.release()
+
+
+def _codex_terminal_threads_compute(snapshot) -> list[str]:
     ids: list[str] = []
     owned_now: set[str] = set()
     if sys.platform == "win32" and snapshot.has_codex_terminal():
@@ -585,6 +600,11 @@ def _codex_turn_watch_id(state: _WatchState, deps: dict, snapshot, sid: str, now
     count, tracked.turn = deps["read"](tracked.path, tracked.turn, from_start=tracked.from_start)
     if tracked.turn is not None:
         tracked.from_start = False  # a failed or reset read keeps it: the first turn is still counted
+    elif not os.path.exists(tracked.path):
+        # the rollout was removed or replaced by another file for this thread (none was seen in
+        # 643 threads, measured 2026-10-05): look the thread up again next tick
+        state.ids.pop(sid, None)
+        return 0
     if count:
         tracked.waiting += [now] * (1 if count > _TURN_TOASTS_PER_ID else count)
         del tracked.waiting[_TURN_TOASTS_PER_TICK:]

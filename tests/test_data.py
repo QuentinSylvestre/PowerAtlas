@@ -4344,6 +4344,53 @@ class TestCodexTurnState:
         data_codex._clear_caches()
         assert data_codex._turn_cache.get(os.fspath(path)) is None
 
+    def test_a_long_turn_keeps_its_verdict_when_it_outgrows_the_tail_window(self, codex_home, monkeypatch):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        assert got == "working"
+        def fresh():
+            return _cx_rec("turn_context", {"model": "m", "pad": "p" * 1000}, _cx_iso(time.time() - 1))
+        monkeypatch.setattr(data_codex, "_iter_lines_reverse", lambda *a, **k: pytest.fail("a full re-read"))
+        for _ in range(3):
+            with open(path, "ab") as fh:
+                fh.write(b"".join(_cx_line(fresh()) for _ in range(1100)))   # about 1.1 MB each: 3.3 MB > 2 MiB
+            assert data_codex.turn_state(path) == "working"
+        with open(path, "ab") as fh:
+            fh.write(_cx_line(self._ev("task_complete", 1)))
+        assert data_codex.turn_state(path) == "idle"
+
+    def test_an_appended_torn_turn_record_waits_for_its_newline(self, codex_home):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        whole = _cx_line(self._ev("task_complete", 1))
+        with open(path, "ab") as fh:
+            fh.write(whole[:-7])
+        assert data_codex.turn_state(path) == "working"
+        with open(path, "ab") as fh:
+            fh.write(whole[-7:])
+        assert data_codex.turn_state(path) == "idle"
+
+    def test_an_appended_read_is_taken_in_steps(self, codex_home, monkeypatch):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        monkeypatch.setattr(data_codex, "TURN_READ_BYTES", 4096)
+        with open(path, "ab") as fh:
+            fh.write(b"".join(_cx_line(_cx_rec("turn_context", {"pad": "p" * 100}, _cx_iso(time.time() - 1))) for _ in range(200)))
+            fh.write(_cx_line(self._ev("task_complete", 1)))
+        assert data_codex.turn_state(path) == "idle", "the record after many read-sized steps is found"
+
+    def test_a_rewritten_file_is_read_again_from_its_tail(self, codex_home):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        assert got == "working"
+        head = path.read_bytes()[:data_codex._HEAD_HASH_BYTES]
+        path.write_bytes(head.replace(b"cli", b"vsc") + _cx_line(self._ev("task_complete", 2)) * 2)
+        assert data_codex.turn_state(path) == "idle"
+
+    def test_a_giant_last_line_does_not_hide_the_records_after_it(self, codex_home, monkeypatch):
+        monkeypatch.setattr(data_codex, "TURN_READ_BYTES", 4096)
+        got, path = self._state(codex_home, [self._ev("task_started", 20)], tail=b"g" * 9000)
+        assert got == "working"
+        with open(path, "ab") as fh:
+            fh.write(b"\n" + _cx_line(self._ev("task_complete", 1)))
+        assert data_codex.turn_state(path) == "idle"
+
     def test_a_missing_file_gives_none_and_never_raises(self, codex_home):
         assert data_codex.turn_state(codex_home / "sessions" / "nope.jsonl") is None
 
@@ -4466,7 +4513,7 @@ class TestCodexNewTurnEnds:
         path, state = self._first(codex_home, [self._done(1)])
         self._append(path, _cx_line(self._done(2)))
         raw = path.read_bytes()
-        forged = state._replace(offset=state.offset - 5, tail_len=min(state.offset - 5, 64))
+        forged = state._replace(offset=state.offset - 5, tail_len=min(state.offset - 5, data_codex._TAIL_HASH_BYTES))
         assert raw[forged.offset - 1:forged.offset] != b"\n"
         assert data_codex.new_turn_ends(path, forged) == (0, None)
 
@@ -4479,10 +4526,46 @@ class TestCodexNewTurnEnds:
         assert path.read_bytes()[mid - 1:mid] != b"\n"
         assert data_codex.new_turn_ends(path, forged) == (0, None), "only the newline check can tell"
 
-    def test_one_line_longer_than_a_read_starts_over_instead_of_stalling(self, codex_home, monkeypatch):
+    def test_one_line_longer_than_a_read_is_skipped_to_its_end_and_the_next_record_still_counts(self, codex_home, monkeypatch):
         monkeypatch.setattr(data_codex, "TURN_READ_BYTES", 4096)
         path, state = self._first(codex_home)
         self._append(path, b"x" * 10000)
+        count, state = data_codex.new_turn_ends(path, state)
+        assert count == 0 and state is not None and state.mid_line is True
+        for _ in range(5):
+            count, state = data_codex.new_turn_ends(path, state)
+            assert count == 0 and state is not None, "it does not reset or stall"
+        self._append(path, b"y" * 300 + b"\n" + _cx_line(self._done(1)))
+        count, state = data_codex.new_turn_ends(path, state)
+        assert (count, state.mid_line) == (1, False), "the rest of the long line is skipped, then records count again"
+        assert data_codex.new_turn_ends(path, state)[0] == 0
+
+    def test_the_rest_of_a_skipped_line_is_never_read_as_a_record(self, codex_home, monkeypatch):
+        monkeypatch.setattr(data_codex, "TURN_READ_BYTES", 4096)
+        path, state = self._first(codex_home)
+        # one line: 4096 filler bytes, then text that would be a turn end if it began a line
+        self._append(path, b"x" * 4096 + _cx_line(self._done(1)))
+        count, state = data_codex.new_turn_ends(path, state)
+        assert count == 0 and state.mid_line is True
+        count, state = data_codex.new_turn_ends(path, state)
+        assert count == 0, "the fragment after the cut is the end of the long line, not a record"
+
+    def test_a_first_sight_inside_a_line_longer_than_a_read_does_not_reset_on_the_next_call(self, codex_home, monkeypatch):
+        monkeypatch.setattr(data_codex, "TURN_READ_BYTES", 4096)
+        path = _cx_write(codex_home, self.SID, self.CWD, [self._done(1)], tail=b"z" * 9000)
+        count, state = data_codex.new_turn_ends(path, None)
+        assert count == 0 and state.mid_line is True and state.offset == path.stat().st_size
+        assert data_codex.new_turn_ends(path, state)[1] is not None, "the old offset=end-of-file state failed the newline check"
+        self._append(path, b"\n" + _cx_line(self._done(2)))
+        assert data_codex.new_turn_ends(path, state)[0] == 1
+
+    def test_the_tail_check_covers_four_kilobytes(self, codex_home):
+        assert data_codex._TAIL_HASH_BYTES == 4096
+        path, state = self._first(codex_home, [_cx_user("a" * 3000)])
+        assert state.tail_len == min(state.offset, 4096)
+        raw = bytearray(path.read_bytes())
+        raw[state.offset - 3000] ^= 1          # a change 3000 bytes before the offset: past the old 64
+        path.write_bytes(bytes(raw) + _cx_line(self._done(2)))
         assert data_codex.new_turn_ends(path, state) == (0, None)
 
     def test_a_reset_state_makes_the_next_call_a_first_sight(self, codex_home):
