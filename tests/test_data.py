@@ -6601,7 +6601,8 @@ class TestLockOwner:
             assert r._abandoned == 1
             gate.set()
             assert self._wait(lambda: r._abandoned == 0)
-            workers = lambda: [th for th in threading.enumerate() if th.name == "lock-owner" and th.is_alive()]
+            def workers():
+                return [th for th in threading.enumerate() if th.name == "lock-owner" and th.is_alive()]
             assert self._wait(lambda: len(workers()) == 1), "the abandoned worker left its loop"
         finally:
             gate.set()
