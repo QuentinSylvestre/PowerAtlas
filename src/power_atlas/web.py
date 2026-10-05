@@ -450,6 +450,7 @@ _TURN_WATCH_RESTART_GAP = 60.0    # a dead thread is restarted at most this ofte
 _TURN_WATCH_FORGET = 600.0        # an id with no `terminal` verdict for this long is forgotten
 _TURN_WATCH_WAIT = 60.0           # a toast waits this long for a `terminal` verdict
 _TURN_WATCH_SKIP = 60.0           # an id found out of scope is looked at again after this long
+_TURN_WATCH_ROLLOUT_RETRY = 30.0  # a held id with no rollout yet is looked up again after this long
 _TURN_WATCH_ENABLED_REUSE = 30.0  # `_notifications_enabled` parses the config file; reuse its answer
 _TURN_TOASTS_PER_ID = 3           # more than this many ends in one tick coalesce into one toast
 _TURN_TOASTS_PER_TICK = 6
@@ -468,19 +469,26 @@ class _Tracked:
 
 
 class _WatchState:
-    __slots__ = ("ids", "skipped", "no_rollout", "first_tick_done")
+    __slots__ = ("ids", "skipped", "no_rollout", "rollout_checked", "first_tick_done")
 
     def __init__(self):
         self.ids: dict[str, _Tracked] = {}
         self.skipped: dict[str, float] = {}
         self.no_rollout: set[str] = set()
+        self.rollout_checked: dict[str, float] = {}  # when a held id with no rollout was last looked up
         self.first_tick_done = False
 
     def drop_all(self):
         self.ids.clear()
         self.skipped.clear()
         self.no_rollout.clear()
+        self.rollout_checked.clear()
         self.first_tick_done = False
+
+    def prune(self, now: float):
+        """Forget the bookkeeping of ids that have not been looked at for a while, so it cannot grow."""
+        self.skipped = {k: v for k, v in self.skipped.items() if now - v < _TURN_WATCH_SKIP}
+        self.rollout_checked = {k: v for k, v in self.rollout_checked.items() if now - v < _TURN_WATCH_ROLLOUT_RETRY}
 
 
 def _clean_watch_cwd(cwd: str) -> str:
@@ -502,16 +510,18 @@ def _turn_label(cwd: str) -> str:
 
 def _codex_turn_watch_once(state: _WatchState, deps: dict, now: float) -> int:
     """One tick. `deps` holds the injected `enabled`, `snapshot`, `has_terminal`, `candidates`
-    (held thread ids), `lock_state`, `verdict`, `rollout`, `meta`, `allowed`, `read` and `notify`.
+    (held thread ids), `lock_state`, `verdict`, `rollout`, `meta`, `allowed`, `provider_on`, `read`
+    and `notify`.
     Returns the number of toasts sent. Never raises: a failing id does not stop the others."""
     try:
-        if not deps["enabled"]():
+        if not deps["enabled"]() or not deps["provider_on"]():
             state.drop_all()  # enabling later is a first sight: no burst of old turn ends
             return 0
         snapshot = deps["snapshot"]()
         if not deps["has_terminal"](snapshot):
             state.ids.clear()
             state.no_rollout.clear()
+            state.rollout_checked.clear()
             state.first_tick_done = True
             return 0
         candidates = list(deps["candidates"](snapshot))
@@ -525,15 +535,19 @@ def _codex_turn_watch_once(state: _WatchState, deps: dict, now: float) -> int:
         except Exception as exc:
             quiet_log.warn(log, "codex turn watch: an id failed", exc)
     state.first_tick_done = True
+    state.prune(now)
     return sent
 
 
 def _codex_turn_watch_id(state: _WatchState, deps: dict, snapshot, sid: str, now: float, budget: int) -> int:
     tracked = state.ids.get(sid)
-    if deps["lock_state"](sid) != "held":
+    lock = deps["lock_state"](sid)
+    if lock == "free":
         state.ids.pop(sid, None)
         state.no_rollout.discard(sid)
         return 0
+    if lock != "held":
+        return 0  # unknown (a busy probe): keep what is tracked and look again next tick
     verdict = deps["verdict"](snapshot, sid)
     if verdict == "other":
         state.ids.pop(sid, None)
@@ -541,8 +555,11 @@ def _codex_turn_watch_id(state: _WatchState, deps: dict, snapshot, sid: str, now
     if tracked is None:
         if now - state.skipped.get(sid, -1e9) < _TURN_WATCH_SKIP:
             return 0
+        if now - state.rollout_checked.get(sid, -1e9) < _TURN_WATCH_ROLLOUT_RETRY:
+            return 0  # looked up not long ago: a rollout lookup can rebuild the store index
         path = deps["rollout"](sid)
         if path is None:
+            state.rollout_checked[sid] = now
             if state.first_tick_done:
                 state.no_rollout.add(sid)  # a rollout that shows up later is a new file of this terminal
             return 0
@@ -566,7 +583,8 @@ def _codex_turn_watch_id(state: _WatchState, deps: dict, snapshot, sid: str, now
         state.ids.pop(sid, None)  # no verdict for 10 minutes: forget it; a return is a first sight
         return 0
     count, tracked.turn = deps["read"](tracked.path, tracked.turn, from_start=tracked.from_start)
-    tracked.from_start = False
+    if tracked.turn is not None:
+        tracked.from_start = False  # a failed or reset read keeps it: the first turn is still counted
     if count:
         tracked.waiting += [now] * (1 if count > _TURN_TOASTS_PER_ID else count)
         del tracked.waiting[_TURN_TOASTS_PER_TICK:]
@@ -605,6 +623,10 @@ def _codex_watch_allowed(cwd) -> bool:
     return "codex" in providers and not hidden(_clean_watch_cwd(cwd))
 
 
+def _codex_provider_on() -> bool:
+    return "codex" in _overview_filters_cached()[0]
+
+
 def _codex_watch_candidates(snapshot) -> list[str]:
     _codex_terminal_threads(snapshot)  # refreshes the shared enumerator (3 s reuse)
     with _codex_enum_lock:
@@ -622,6 +644,7 @@ def _codex_watch_deps() -> dict:
         "rollout": data_codex.rollout_path,
         "meta": data_codex.read_meta,
         "allowed": _codex_watch_allowed,
+        "provider_on": _codex_provider_on,
         "read": data_codex.new_turn_ends,
         "notify": lambda label: notifications.notify_turn_end(label, "end_turn"),
     }
@@ -639,8 +662,13 @@ class _CodexTurnWatcher:
         self._thread: threading.Thread | None = None
         self._heartbeat = 0.0
         self._last_start = -1e9
+        self._lock = threading.Lock()  # two requests must not both start a thread
 
     def start(self) -> None:
+        with self._lock:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
@@ -669,10 +697,11 @@ class _CodexTurnWatcher:
 
     def ensure_running(self) -> None:
         """Restart a thread that died, at most once a minute. Called by the dashboard sessions request."""
-        if self._stop.is_set() or (self._thread is not None and self._thread.is_alive()):
-            return
-        if self._clock() - self._last_start >= _TURN_WATCH_RESTART_GAP:
-            self.start()
+        with self._lock:
+            if self._stop.is_set() or (self._thread is not None and self._thread.is_alive()):
+                return
+            if self._clock() - self._last_start >= _TURN_WATCH_RESTART_GAP:
+                self._start_locked()
 
     def status(self) -> str:
         """`off` (not running or notifications off), `ok` or `stalled` (no heartbeat for 60 s)."""

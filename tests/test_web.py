@@ -35198,6 +35198,7 @@ class _WatchWorld:
         self.paths: dict = {}
         self.allowed = lambda cwd: True
         self.enabled = True
+        self.provider_on = True
         self.terminal = True
         self.notified: list = []
         self.reads: list = []
@@ -35218,6 +35219,7 @@ class _WatchWorld:
             "meta": lambda path: {"cwd": self.cwds.get(Path(path).stem, "C:\\Work\\Proj"),
                                   "source": self.sources.get(Path(path).stem, "cli")},
             "allowed": lambda cwd: self.allowed(cwd),
+            "provider_on": lambda: self.provider_on,
             "read": read,
             "notify": lambda label: self.notified.append(label),
         }
@@ -35378,8 +35380,8 @@ class TestCodexTurnWatchTick:
         world.lock_states[_WS2] = "held"      # a new terminal's lock appears; no rollout yet
         assert world.tick(5) == 0 and _WS2 not in world.state.ids
         world.add(_WS2, lines=1)              # the rollout appears with its first turn already done
-        assert world.tick(10) == 1, "the first sight of a new file starts at offset 0"
-        assert world.tick(15) == 0, "and it is counted once"
+        assert world.tick(40) == 1, "the first sight of a new file starts at offset 0"
+        assert world.tick(45) == 0, "and it is counted once"
 
     def test_a_thread_seen_in_the_first_tick_starts_at_the_end_of_its_last_line(self, world):
         world.add(_WS1, lines=4)
@@ -35464,6 +35466,116 @@ class TestCodexTurnWatchTick:
         monkeypatch.setattr(web_mod, "_codex_notify_enabled_memo", [time.monotonic(), True])
         assert client.post("/api/notifications").status_code == 200
         assert web_mod._codex_notify_enabled_memo[0] == -1e9
+
+    def test_the_coalescing_threshold_is_more_than_three(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.end(_WS1, 3)
+        assert world.tick(5) == 3
+        world.end(_WS1, 4)
+        assert world.tick(10) == 1
+
+    def test_waiting_toasts_never_pile_up_beyond_six_in_memory(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.verdicts[_WS1] = "unknown"
+        for step in range(1, 6):
+            world.end(_WS1, 3)
+            world.tick(step * 5)
+        assert len(world.state.ids[_WS1].waiting) <= 6
+
+    def test_a_thread_whose_lock_appears_with_no_rollout_in_the_first_tick_starts_at_the_end_of_its_file(self, world):
+        world.lock_states[_WS1] = "held"           # no rollout yet, and this is the first tick
+        world.tick(0)
+        world.add(_WS1, lines=3)                   # the rollout shows up, already holding turn ends
+        assert world.tick(40) == 0, "not a new file of this terminal: it was already running at startup"
+
+    def test_a_held_thread_with_no_rollout_is_looked_up_at_most_every_thirty_seconds(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.lock_states[_WS2] = "held"
+        lookups = []
+        real = world.deps["rollout"]
+        world.deps["rollout"] = lambda sid: lookups.append(sid) or real(sid)
+        for now in range(5, 65, 5):
+            world.tick(now)
+        looked = [s for s in lookups if s == _WS2]
+        assert 1 <= len(looked) <= 3, "a lookup can rebuild the store index; it is not made every tick"
+
+    def test_an_unknown_lock_state_keeps_the_tracked_id_and_its_waiting_toasts(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.verdicts[_WS1] = "unknown"
+        world.end(_WS1)
+        world.tick(5)
+        world.lock_states[_WS1] = "unknown"       # one tick with a busy coordination lock
+        assert world.tick(10) == 0 and _WS1 in world.state.ids
+        world.lock_states[_WS1] = "held"
+        world.verdicts[_WS1] = "terminal"
+        assert world.tick(15) == 1, "the toast that waited is still sent"
+
+    def test_a_failed_first_read_of_a_new_file_still_counts_its_first_turn_later(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.lock_states[_WS2] = "held"
+        world.tick(5)
+        world.add(_WS2, lines=1)
+        real = world.deps["read"]
+        calls = []
+
+        def flaky(path, state, from_start=False):
+            if Path(path).stem != _WS2:
+                return real(path, state, from_start=from_start)
+            calls.append(from_start)
+            return (0, None) if len(calls) == 1 else real(path, state, from_start=from_start)
+        world.deps["read"] = flaky
+        assert world.tick(40) == 0, "the first read failed"
+        assert world.tick(45) == 1 and calls == [True, True], "and the retry still starts at offset 0"
+
+    def test_the_bookkeeping_of_out_of_scope_ids_does_not_grow_without_bound(self, world):
+        world.allowed = lambda cwd: False
+        for i in range(30):
+            sid = f"0000b{i:03d}-1111-4222-8333-444444444444"
+            world.add(sid)
+        world.tick(0)
+        assert len(world.state.skipped) == 30
+        world.tick(200)
+        assert world.state.skipped == {} or len(world.state.skipped) == 30  # re-skipped now, old ones pruned
+        world.lock_states.clear()
+        world.tick(400)
+        assert world.state.skipped == {} and world.state.rollout_checked == {}
+
+    def test_with_the_codex_provider_off_nothing_is_probed(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.provider_on = False
+        for key in ("snapshot", "candidates", "lock_state", "verdict", "read"):
+            world.deps[key] = lambda *a, **k: pytest.fail("a probe or read with the Codex provider off")
+        assert world.tick(5) == 0 and world.state.ids == {}
+
+    def test_the_real_dependencies_are_wired_to_the_names_the_tick_uses(self, tmp_path, monkeypatch):
+        from power_atlas import data_codex, notifications, web as web_mod
+        sid = _WS1
+        rollout = tmp_path / f"{sid}.jsonl"
+        rollout.write_bytes(b"")
+        toasts = []
+        monkeypatch.setattr(web_mod, "_codex_notify_enabled", lambda: True)
+        monkeypatch.setattr(web_mod, "_overview_filters_cached", lambda: ({"codex"}, lambda p: False))
+        monkeypatch.setattr(web_mod.presence, "get_snapshot", lambda: _lk_snap({10: (100.0, "terminal", None)}))
+        monkeypatch.setattr(web_mod, "_codex_watch_candidates", lambda snap: [sid])
+        monkeypatch.setattr(data_codex, "session_writer_state", lambda s: "held")
+        monkeypatch.setattr(web_mod, "_codex_owner_verdict", lambda snap, s: "terminal")
+        monkeypatch.setattr(data_codex, "rollout_path", lambda s: rollout)
+        monkeypatch.setattr(data_codex, "read_meta", lambda p: {"cwd": "C:\\Work\\Proj", "source": "cli"})
+        monkeypatch.setattr(web_mod.data_codex_state, "is_local_drive", lambda cwd: True)
+        monkeypatch.setattr(notifications, "_fire_toast", lambda title, body: toasts.append((title, body)))
+        state = web_mod._WatchState()
+        deps = web_mod._codex_watch_deps()
+        assert web_mod._codex_turn_watch_once(state, deps, 0) == 0
+        with open(rollout, "ab") as fh:
+            fh.write(_WatchWorld._end())
+        assert web_mod._codex_turn_watch_once(state, deps, 5) == 1
+        assert toasts == [("PowerAtlas \u2014 Proj", "Done \u2014 waiting for you")]
 
     def test_a_failing_id_does_not_stop_the_others_and_the_tick_never_raises(self, world):
         world.add(_WS1)
@@ -35605,6 +35717,84 @@ class TestCodexTurnWatcherThread:
         monkeypatch.setattr(sys, "platform", "linux")
         asyncio.run(run())
         assert "start" not in order
+
+    def test_the_heartbeat_is_refreshed_after_every_tick(self, web_mod):
+        clock = [1000.0]
+        ticks = []
+        watcher = web_mod._CodexTurnWatcher(tick=lambda: ticks.append(1), interval=0.01, clock=lambda: clock[0])
+        watcher.start()
+        try:
+            clock[0] += 500
+            before = len(ticks)
+            deadline = time.monotonic() + 5
+            while len(ticks) < before + 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.05)
+            assert watcher._heartbeat == clock[0], "a healthy thread keeps its heartbeat current"
+            assert watcher.status() == "ok"
+        finally:
+            watcher.stop(join_seconds=1.0)
+
+    def test_two_concurrent_restarts_start_one_thread(self, web_mod):
+        clock = [1000.0]
+        watcher = web_mod._CodexTurnWatcher(tick=lambda: None, interval=0.01, clock=lambda: clock[0])
+        starts = []
+        real = threading.Thread
+
+        class Counting(real):
+            def start(self):
+                starts.append(1)
+                time.sleep(0.05)
+                super().start()
+        web_mod.threading.Thread = Counting
+        try:
+            workers = [real(target=watcher.ensure_running) for _ in range(4)]
+            for w in workers:
+                w.start()
+            for w in workers:
+                w.join()
+        finally:
+            web_mod.threading.Thread = real
+            watcher.stop(join_seconds=1.0)
+        assert len(starts) == 1
+
+    def test_the_lifespan_stops_the_watcher_first_and_joins_it_after_the_rest_of_the_teardown(self, web_mod, monkeypatch):
+        order = []
+        fake = type("W", (), {"start": lambda self: order.append("start"),
+                              "stop": lambda self, join_seconds=0.0: order.append(("stop", join_seconds)),
+                              "ensure_running": lambda self: None,
+                              "status": lambda self: "off"})()
+        monkeypatch.setattr(web_mod, "_turn_watcher", fake)
+        monkeypatch.setattr(web_mod, "_TURN_WATCH_THREAD", True)
+        monkeypatch.setattr(web_mod, "_startup_sync_derived_agent", lambda: _noop_async())
+        monkeypatch.setattr(web_mod, "_startup_load_local_secret", lambda: _noop_async())
+        monkeypatch.setattr(web_mod.overview, "warm_usage", lambda stop: None)
+        monkeypatch.setattr(web_mod.acp, "shutdown", lambda: order.append("acp.shutdown"))
+        monkeypatch.setattr(web_mod, "_flush_gate_refusal_warnings", lambda: order.append("flush"))
+        monkeypatch.setattr(sys, "platform", "win32")
+
+        async def run():
+            async with web_mod.lifespan(web_mod.app):
+                order.append("serving")
+        asyncio.run(run())
+        assert order.index("start") < order.index("serving")
+        assert order.index(("stop", 0.0)) < order.index("acp.shutdown"), "stopped first"
+        assert order.index("flush") < order.index(("stop", 1.0)) == len(order) - 1, "joined last"
+
+    def test_a_dashboard_listing_asks_the_watcher_to_run_only_on_windows_with_the_thread_enabled(self, web_mod, monkeypatch):
+        asked = []
+        fake = type("W", (), {"ensure_running": lambda self: asked.append(1), "status": lambda self: "off"})()
+        monkeypatch.setattr(web_mod, "_turn_watcher", fake)
+        monkeypatch.setattr(web_mod, "_TURN_WATCH_THREAD", True)
+        monkeypatch.setattr(sys, "platform", "win32")
+        web_mod._ensure_turn_watch()
+        assert asked == [1]
+        monkeypatch.setattr(sys, "platform", "linux")
+        web_mod._ensure_turn_watch()
+        monkeypatch.setattr(web_mod, "_TURN_WATCH_THREAD", False)
+        monkeypatch.setattr(sys, "platform", "win32")
+        web_mod._ensure_turn_watch()
+        assert asked == [1]
 
     def test_the_diagnostics_show_the_watcher_status(self, web_mod, monkeypatch):
         monkeypatch.setattr(web_mod, "_turn_watcher", type("W", (), {"status": lambda self: "stalled"})())
