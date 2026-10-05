@@ -351,6 +351,19 @@ Each server entry:
 - `_kiro/tools/didChange` — fires on session/new, unknown params shape  
 - `_kiro/powers/items_changed` — fires on session/new, unknown params shape
 
+### Tool search must be forwarded at `initialize`, or one bad MCP schema fails every request
+
+**Measured on kiro-cli 2.27.1, 2026-10-05**, from the agent's `kiro.log` and its bundled `acp-server.js`.
+
+- `kiro-cli acp` does not read `~/.kiro/settings/cli.json`. The terminal UI reads it and forwards behaviour settings at `initialize` as `clientCapabilities._meta.kiro.settings` (its log: `[kas-settings] Built settings for initialize`). A client that sends none gets the agent's defaults. For `toolSearch` that default is off.
+- With tool search off, every MCP tool's full schema goes to the model on every request. `custom_agent.tool_selection` in `kiro.log` shows it: 131 tools before the MCP servers connected, 284 after, against a steady 98 in the terminal UI on the same session.
+- One session failed that way under PowerAtlas and ran fine in the terminal. Bedrock answered `TOOL_SCHEMA_INVALID` (`toolConfig.tools.N.toolSpec.inputSchema ... $.required: the items in the array must be unique`) on the first request after the zoho MCP server connected. 69 of its 128 tools list a `required` entry twice, e.g. `ZohoDesk_getTicket` lists `path_variables` twice. Claude Code rejects the same 69 tools up front. The failure names only a tool index, and the request never reaches a model, so no tool call is involved.
+- The shape: `toolSearch: {enabled, minPct?, minTokens?}`, mapped from `toolSearch.enabled`, `toolSearch.minPct` and `toolSearch.minTokens`.
+
+**Implemented 2026-10-05**: `acp.py` `_kiro_tool_search_settings` mirrors those three keys from `cli.json` into `_kiro_client_capabilities`, so an ACP session behaves as the terminal does and a user who turned tool search off stays off. This defers the broken schemas; it does not repair them. A zoho tool the model loads through tool search is still sent with its invalid schema, and a user who turns tool search off gets the original failure back.
+
+**Repaired at the source 2026-10-05**: `~/.kiro/mcp-wrappers/dedupe-required.mjs` (outside this repo, user level) runs the zoho server and deduplicates `required` in each tool's `inputSchema`/`outputSchema` of `tools/list` results. Everything else passes through unchanged, and a tool without a duplicate is byte-identical. The zoho entry in `~/.kiro/settings/mcp.json` launches `node <wrapper> npx -y mcp-remote@latest <url>`, so the terminal UI and PowerAtlas both get valid schemas. Measured: all 128 tools kept with names and order, the 69 defective ones repaired (equal to an independent dedupe), and a live ACP agent with tool search **off** (232 tools per request, which failed before) ended its turn normally. To go back, restore `"command": "npx"` and drop the first two `args`. Any other MCP server that lists a repeated `required` entry needs the same wrapper in front of it; the symptom and the check are in the bullets above.
+
 ---
 
 ## ACP permission wire shapes (measured 2026-09-23, kiro-cli KAS 2.23.1)

@@ -838,17 +838,64 @@ class _SecretStore:
 _secrets = _SecretStore(ACP_SECRETS_PATH)
 
 
+# kiro-cli's own settings file. The terminal UI reads it and forwards the
+# `toolSearch.*` keys to the agent at `initialize` (as
+# `clientCapabilities._meta.kiro.settings.toolSearch`); `kiro-cli acp` itself
+# never reads it, so a client that stays silent gets the agent's default, which
+# is tool search off. Read at call time so tests can redirect it.
+KIRO_CLI_SETTINGS_PATH = Path.home() / ".kiro" / "settings" / "cli.json"
+
+
+def _kiro_tool_search_settings() -> dict[str, Any] | None:
+    """The user's ``toolSearch.*`` settings from kiro-cli's ``cli.json``.
+
+    With tool search on, the agent defers every MCP tool's schema instead of
+    sending all of them to the model on each request. With it off, one MCP
+    server publishing an invalid schema fails every request: on 2026-10-05 69
+    zoho tools carried a ``required`` list with repeated entries, Bedrock
+    answered ``TOOL_SCHEMA_INVALID`` once those tools connected, and the same
+    session ran fine in the terminal UI, which sent this setting.
+
+    Mirrors the terminal UI's own mapping (``enabled``, ``minPct``,
+    ``minTokens``) rather than forcing the feature on, so a user who turned it
+    off stays off. ``None`` when the file is absent, unreadable or sets
+    nothing; the agent's default then applies, exactly as for the terminal.
+    """
+    try:
+        with open(KIRO_CLI_SETTINGS_PATH, encoding="utf-8-sig") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    enabled = raw.get("toolSearch.enabled")
+    if not isinstance(enabled, bool):
+        return None
+    out: dict[str, Any] = {"enabled": enabled}
+    for key in ("minPct", "minTokens"):
+        value = raw.get(f"toolSearch.{key}")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = value
+    return out
+
+
 def _kiro_client_capabilities() -> dict:
     """The kiro-specific ``clientCapabilities`` this client can honour.
 
-    Both hinge on ``_secrets``: without somewhere to keep a sign-in, opening
-    a sign-in page would only produce tokens kiro-cli throws away. Off
-    Windows (no DPAPI) nothing is declared and OAuth MCP servers behave as
-    before: failed, needing sign-in.
+    ``secretStorage`` and ``openExternalUrl`` hinge on ``_secrets``: without
+    somewhere to keep a sign-in, opening a sign-in page would only produce
+    tokens kiro-cli throws away. Off Windows (no DPAPI) neither is declared and
+    OAuth MCP servers behave as before: failed, needing sign-in.
+
+    ``settings.toolSearch`` does not hinge on it; see `_kiro_tool_search_settings`.
     """
-    if not _secrets.available:
-        return {}
-    return {"_meta": {"kiro": {"secretStorage": True, "openExternalUrl": True}}}
+    kiro: dict[str, Any] = {}
+    if _secrets.available:
+        kiro.update(secretStorage=True, openExternalUrl=True)
+    tool_search = _kiro_tool_search_settings()
+    if tool_search is not None:
+        kiro["settings"] = {"toolSearch": tool_search}
+    return {"_meta": {"kiro": kiro}} if kiro else {}
 
 
 # Overlay steering delivered to every ACP session via _meta.kiro.steering.

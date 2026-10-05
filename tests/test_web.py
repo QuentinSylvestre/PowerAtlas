@@ -29671,13 +29671,72 @@ class TestAcpMcpSignIn:
         monkeypatch.undo()
         assert path.read_bytes() == b"keep me"
 
-    def test_capabilities_follow_store_availability(self, monkeypatch):
+    def _cli_json(self, acp_mod, monkeypatch, tmp_path, text=None):
+        """Point the kiro-cli settings path at a temp file, or at nothing."""
+        path = tmp_path / "cli.json"
+        if text is not None:
+            path.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(acp_mod, "KIRO_CLI_SETTINGS_PATH", path)
+
+    def test_capabilities_follow_store_availability(self, monkeypatch, tmp_path):
         from power_atlas import acp as acp_mod
+        self._cli_json(acp_mod, monkeypatch, tmp_path)
         monkeypatch.setattr(acp_mod, "win32crypt", object())
         assert acp_mod._kiro_client_capabilities() == {
             "_meta": {"kiro": {"secretStorage": True, "openExternalUrl": True}}}
         monkeypatch.setattr(acp_mod, "win32crypt", None)
         assert acp_mod._kiro_client_capabilities() == {}
+
+    def test_tool_search_setting_is_forwarded_from_cli_json(self, monkeypatch, tmp_path):
+        """kiro-cli's terminal UI forwards `toolSearch.*` from cli.json at
+        initialize; the agent defaults to tool search off when a client sends
+        nothing, and then every MCP schema goes to the model on every request
+        (2026-10-05: 69 zoho tools with a duplicated `required` list failed
+        each request with TOOL_SCHEMA_INVALID, only under PowerAtlas)."""
+        from power_atlas import acp as acp_mod
+        # A UTF-8 BOM is written by some Windows editors; kiro-cli's own
+        # mcp.json carries one, so read it the same tolerant way.
+        self._cli_json(acp_mod, monkeypatch, tmp_path, "﻿" + json.dumps({
+            "toolSearch.enabled": True, "toolSearch.minPct": 10,
+            "toolSearch.minTokens": 2000.5, "chat.enableThinking": True}))
+        monkeypatch.setattr(acp_mod, "win32crypt", None)
+        # Independent of the secret store: still sent when nothing else is.
+        assert acp_mod._kiro_client_capabilities() == {"_meta": {"kiro": {"settings": {
+            "toolSearch": {"enabled": True, "minPct": 10, "minTokens": 2000.5}}}}}
+        monkeypatch.setattr(acp_mod, "win32crypt", object())
+        kiro = acp_mod._kiro_client_capabilities()["_meta"]["kiro"]
+        assert kiro["secretStorage"] is True and kiro["openExternalUrl"] is True
+        assert kiro["settings"]["toolSearch"]["enabled"] is True
+
+    def test_tool_search_off_in_cli_json_stays_off(self, monkeypatch, tmp_path):
+        """A user who turned it off is mirrored, not overridden."""
+        from power_atlas import acp as acp_mod
+        self._cli_json(acp_mod, monkeypatch, tmp_path,
+                       json.dumps({"toolSearch.enabled": False}))
+        assert acp_mod._kiro_tool_search_settings() == {"enabled": False}
+
+    @pytest.mark.parametrize("text", [
+        None,                                              # no file
+        "{not json",                                       # unparseable
+        "[]",                                              # not an object
+        "{}",                                              # setting absent
+        json.dumps({"toolSearch.enabled": "yes"}),         # wrong type
+        json.dumps({"toolSearch.enabled": 1}),             # int is not a bool here
+    ])
+    def test_tool_search_setting_absent_or_malformed_sends_nothing(
+            self, monkeypatch, tmp_path, text):
+        from power_atlas import acp as acp_mod
+        self._cli_json(acp_mod, monkeypatch, tmp_path, text)
+        monkeypatch.setattr(acp_mod, "win32crypt", None)
+        assert acp_mod._kiro_tool_search_settings() is None
+        assert acp_mod._kiro_client_capabilities() == {}
+
+    def test_tool_search_numeric_keys_reject_booleans_and_strings(self, monkeypatch, tmp_path):
+        from power_atlas import acp as acp_mod
+        self._cli_json(acp_mod, monkeypatch, tmp_path, json.dumps({
+            "toolSearch.enabled": True, "toolSearch.minPct": True,
+            "toolSearch.minTokens": "5"}))
+        assert acp_mod._kiro_tool_search_settings() == {"enabled": True}
 
     @_needs_dpapi
     def test_secret_requests_are_answered_from_the_store(self, monkeypatch, tmp_path):
