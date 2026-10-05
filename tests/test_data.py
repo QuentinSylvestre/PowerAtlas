@@ -4497,6 +4497,15 @@ class TestCodexNewTurnEnds:
     def test_a_missing_file_gives_a_reset_and_never_raises(self, codex_home):
         assert data_codex.new_turn_ends(codex_home / "sessions" / "nope.jsonl", None) == (0, None)
 
+    def test_a_failure_logs_the_exception_class_and_no_path(self, codex_home, caplog):
+        path, state = self._first(codex_home)
+        path.unlink()
+        folder = str(codex_home).lower()
+        with caplog.at_level("WARNING"):
+            assert data_codex.new_turn_ends(path, state) == (0, None)
+        text = " ".join(r.getMessage() for r in caplog.records).lower()
+        assert "new_turn_ends" in text and folder not in text and self.SID not in text
+
     def test_the_state_holds_hashes_never_content(self, codex_home):
         path, state = self._first(codex_home, [_cx_user("secret words")])
         assert b"secret" not in repr(state).encode()

@@ -1413,7 +1413,7 @@ def _watch_state(fh, offset: int, head_len: int, head_hash: str) -> TurnWatch:
     return TurnWatch(offset, head_len, head_hash, tail_len, tail_hash)
 
 
-@_safe("new_turn_ends", lambda: (0, None), path_arg=True)
+@_safe("new_turn_ends", lambda: (0, None))  # no path in the warning: the notifier's log lines carry none (D20)
 def new_turn_ends(path, state: TurnWatch | None, from_start: bool = False) -> tuple[int, TurnWatch | None]:
     """`(count, new state)`: how many `task_complete` records were appended since `state`.
 

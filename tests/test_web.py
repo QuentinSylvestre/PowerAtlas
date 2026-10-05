@@ -35432,6 +35432,39 @@ class TestCodexTurnWatchTick:
         assert world.notified == ["x" * 60]
         assert "someone" not in world.notified[0]
 
+    def test_a_tracked_id_is_dropped_when_its_workspace_is_hidden_later(self, world):
+        world.add(_WS1)
+        world.tick(0)
+        world.allowed = lambda cwd: False       # tagged hidden, or Codex switched off, since first seen
+        world.end(_WS1)
+        assert world.tick(5) == 0 and world.notified == []
+        assert _WS1 not in world.state.ids
+        world.allowed = lambda cwd: True
+        assert world.tick(10) == 0, "an id out of scope is looked at again only after a minute"
+
+    @pytest.mark.parametrize("cwd", [
+        "\\\\?\\C:\\Hidden\\proj", "C:\\Hidden\\.\\proj", "C:\\Hidden\\x\\..\\proj",
+        "C:\\Hidden.\\proj", "C:\\Hidden\\proj. ", "C:/Hidden/proj", "c:\\HIDDEN\\Proj"])
+    def test_a_hidden_workspace_is_recognised_whatever_spelling_the_rollout_uses(self, monkeypatch, cwd):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_overview_filters_cached",
+                            lambda: ({"codex"}, lambda p: p.lower() == "c:\\hidden\\proj"))
+        assert web_mod._codex_watch_allowed(cwd) is False
+        assert web_mod._codex_watch_allowed("C:\\Visible\\proj") is True
+
+    def test_the_label_drops_prefixes_control_and_direction_characters(self):
+        from power_atlas import web as web_mod
+        assert web_mod._turn_label("\\\\?\\C:\\Work\\proj") == "proj"
+        assert web_mod._turn_label("C:\\a\\\u202etxt.exe\x07") == "txt.exe"
+        assert web_mod._turn_label("C:\\") == "C:", "a drive root is not shown as a path"
+        assert web_mod._turn_label("C:\\\u202e") == "Codex", "nothing printable is left"
+
+    def test_toggling_notifications_makes_the_codex_notifier_re_read_the_setting(self, client, monkeypatch):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_codex_notify_enabled_memo", [time.monotonic(), True])
+        assert client.post("/api/notifications").status_code == 200
+        assert web_mod._codex_notify_enabled_memo[0] == -1e9
+
     def test_a_failing_id_does_not_stop_the_others_and_the_tick_never_raises(self, world):
         world.add(_WS1)
         world.add(_WS2)

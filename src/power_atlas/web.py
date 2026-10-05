@@ -459,10 +459,10 @@ _TURN_WATCH_THREAD = True         # a test sets False so no real thread starts
 
 class _Tracked:
     """What the watcher keeps per thread: where it stopped reading and the toasts that wait."""
-    __slots__ = ("path", "label", "turn", "from_start", "last_ok", "waiting")
+    __slots__ = ("path", "cwd", "label", "turn", "from_start", "last_ok", "waiting")
 
-    def __init__(self, path, label, from_start, now):
-        self.path, self.label, self.turn, self.from_start = path, label, None, from_start
+    def __init__(self, path, cwd, label, from_start, now):
+        self.path, self.cwd, self.label, self.turn, self.from_start = path, cwd, label, None, from_start
         self.last_ok = now
         self.waiting: list[float] = []
 
@@ -483,9 +483,21 @@ class _WatchState:
         self.first_tick_done = False
 
 
+def _clean_watch_cwd(cwd: str) -> str:
+    """A rollout's cwd as the hidden-workspace tags see it: no extended-length prefix, `.` and `..`
+    folded, and no trailing dots or spaces on a component (Windows treats them as the same folder).
+    The rollout is untrusted input, and `hidden()` compares plain spellings."""
+    parts = os.path.normpath(data_codex_state.strip_extended_prefix(cwd)).split("\\")
+    return "\\".join(part.rstrip(" .") if part not in ("", ".", "..") else part for part in parts)
+
+
 def _turn_label(cwd: str) -> str:
-    """The workspace folder name only, never the full path, cut to 60 characters."""
-    return (Path(cwd).name or cwd)[:_TURN_LABEL_CHARS]
+    """The workspace folder name only, never the full path, cut to 60 characters, with control
+    and direction characters dropped (the toast text is not markup, but it is read by a person)."""
+    clean = _clean_watch_cwd(cwd)
+    name = Path(clean).name or clean.rstrip("\\")
+    shown = "".join(ch for ch in name if ch.isprintable())
+    return shown[:_TURN_LABEL_CHARS] or "Codex"
 
 
 def _codex_turn_watch_once(state: _WatchState, deps: dict, now: float) -> int:
@@ -541,8 +553,13 @@ def _codex_turn_watch_id(state: _WatchState, deps: dict, snapshot, sid: str, now
                 or not deps["allowed"](cwd)):
             state.skipped[sid] = now
             return 0
-        tracked = state.ids[sid] = _Tracked(path, _turn_label(cwd), sid in state.no_rollout, now)
+        tracked = state.ids[sid] = _Tracked(path, cwd, _turn_label(cwd), sid in state.no_rollout, now)
         state.no_rollout.discard(sid)
+    elif not deps["allowed"](tracked.cwd):
+        # tagged hidden, or the Codex provider switched off, since it was first seen
+        state.ids.pop(sid, None)
+        state.skipped[sid] = now
+        return 0
     if verdict == "terminal":
         tracked.last_ok = now
     elif now - tracked.last_ok > _TURN_WATCH_FORGET:
@@ -585,7 +602,7 @@ def _codex_watch_allowed(cwd) -> bool:
     if data_codex_state.cwd_class(cwd) != "local" or not data_codex_state.is_local_drive(cwd):
         return False
     providers, hidden = _overview_filters_cached()
-    return "codex" in providers and not hidden(cwd)
+    return "codex" in providers and not hidden(_clean_watch_cwd(cwd))
 
 
 def _codex_watch_candidates(snapshot) -> list[str]:
@@ -4990,6 +5007,7 @@ async def toggle_notifications():
     enabled = not bool(config.notifications.get("enabled", False))
     config.notifications = {"enabled": enabled}
     save_config(config)
+    _codex_notify_enabled_memo[:] = [-1e9, False]  # the Codex notifier sees the change at its next tick
     return {"enabled": enabled}
 
 
