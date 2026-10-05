@@ -23,7 +23,7 @@ from unittest.mock import patch
 import pytest
 
 from power_atlas import data as data_mod
-from power_atlas import data_codex, data_codex_state, quiet_log
+from power_atlas import data_codex, data_codex_state, lock_owner, quiet_log
 from power_atlas.data import (
     Session, SessionCache, _FileInfo,
     get_sessions, session_cache,
@@ -1728,6 +1728,7 @@ def codex_home(tmp_path, monkeypatch):
     monkeypatch.setattr(data_codex, "_STORE_TTL", 0.0)
     monkeypatch.setattr(data_codex, "_AVAILABLE_TTL", 0.0)
     monkeypatch.setattr(data_codex_state, "CODEX_STATE_DIR", home)
+    monkeypatch.setattr(lock_owner, "_resolver", lock_owner._Resolver(threads=False, self_test=False))
     data_codex._clear_caches()
     data_codex_state.clear_memo()
     quiet_log.reset()
@@ -6221,3 +6222,510 @@ class TestQuietLog:
         messages = [r.getMessage() for r in caplog.records]
         assert messages == ["k (OSError)", "other", "k"], messages
         assert not any("secret" in m for m in messages)
+
+
+# --- lock_owner (Phase 3 of 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB) ---
+# The resolver is driven without a thread: `step()` runs one queued lookup on the calling thread, the
+# lookup, the liveness check and the clock are injected, and no real process or file is asked.
+
+class _LoClock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def _lo_resolver(lookup=None, alive=None, **kw):
+    clock = _LoClock()
+    calls = []
+    answers = {}
+
+    def default_lookup(path):
+        calls.append(path)
+        return answers.get(path, ((111, 5.0),))
+
+    r = lock_owner._Resolver(lookup=lookup or default_lookup, alive=alive or (lambda pid, start: "alive"),
+                             clock=clock, threads=False, self_test=False, **kw)
+    r.calls, r.answers, r.clock = calls, answers, clock
+    return r
+
+
+def _lo_run(r, path, seconds=1.0):
+    """Let a path's queued lookup run (the gap between lookups elapses first)."""
+    r.clock.t += seconds
+    assert r.step() is True
+    r.clock.t += 0.0
+
+
+class TestLockOwner:
+    P = "C:\\locks\\a.lock"
+    Q = "C:\\locks\\b.lock"
+
+    # -- first sighting, the cache and the schedule --
+
+    def test_the_first_sighting_is_pending_and_the_next_call_answers_from_the_cache(self):
+        r = _lo_resolver()
+        assert r.holders(self.P) is lock_owner.PENDING
+        _lo_run(r, self.P)
+        assert r.holders(self.P) == ((111, 5.0),)
+        assert r.holders(self.P) == ((111, 5.0),) and r.calls == [self.P], "the second call did not look again"
+
+    def test_a_lookup_that_raises_gives_unknown_and_is_not_repeated_for_30_seconds(self):
+        def boom(path):
+            raise RuntimeError("x")
+        r = _lo_resolver(lookup=boom)
+        assert r.holders(self.P) is lock_owner.PENDING
+        _lo_run(r, self.P)
+        assert r.holders(self.P) is None
+        r.clock.t += 29
+        assert r.holders(self.P) is None and r.step() is False
+        r.clock.t += 2
+        assert r.holders(self.P) is lock_owner.PENDING, "after 30 s it is looked up again"
+
+    def test_a_failed_lookup_result_none_is_unknown(self):
+        r = _lo_resolver(lookup=lambda path: None)
+        r.holders(self.P)
+        _lo_run(r, self.P)
+        assert r.holders(self.P) is None
+
+    def test_a_terminal_style_entry_is_re_resolved_at_30_seconds_and_3_minutes_then_every_5_minutes(self):
+        r = _lo_resolver()
+        r.holders(self.P)
+        _lo_run(r, self.P)
+        first = r.clock.t
+        looks = lambda: len(r.calls)
+        assert looks() == 1
+        r.clock.t = first + 29
+        r.holders(self.P)
+        assert r.step() is False and looks() == 1, "not yet"
+        r.clock.t = first + 31
+        r.holders(self.P)
+        assert r.step() is True and looks() == 2, "30 s after the first resolution"
+        r.clock.t = first + 170
+        r.holders(self.P)
+        assert r.step() is False
+        r.clock.t = first + 181
+        r.holders(self.P)
+        assert r.step() is True and looks() == 3, "3 minutes after the first"
+        last = r.clock.t
+        r.clock.t = last + 299
+        r.holders(self.P)
+        assert r.step() is False
+        r.clock.t = last + 301
+        r.holders(self.P)
+        assert r.step() is True and looks() == 4, "then every 5 minutes"
+
+    def test_a_holder_swap_with_a_still_live_pid_is_caught_by_the_re_resolve(self):
+        r = _lo_resolver()
+        r.holders(self.P)
+        _lo_run(r, self.P)
+        r.answers[self.P] = ((222, 9.0),)
+        r.clock.t += 31
+        assert r.holders(self.P) == ((111, 5.0),), "the old answer is used meanwhile"
+        assert r.step() is True
+        assert r.holders(self.P) == ((222, 9.0),)
+
+    # -- liveness --
+
+    def test_a_cached_holder_that_is_gone_gives_unknown_and_a_top_priority_re_resolve(self):
+        states = {"v": "alive"}
+        r = _lo_resolver(alive=lambda pid, start: states["v"])
+        r.holders(self.P)
+        _lo_run(r, self.P)
+        r.holders(self.Q)                                  # another path waiting in the queue
+        r.clock.t += 11                                    # the lookup is older than the 10 s gap
+        states["v"] = "gone"
+        assert r.holders(self.P) is None
+        r.answers[self.P] = ((333, 7.0),)
+        r.clock.t += 1
+        assert r.step() is True and r.calls[-1] == self.P, "the gone holder's path goes before the new sighting"
+
+    def test_pid_reuse_is_unknown(self):
+        r = _lo_resolver(alive=lambda pid, start: "alive" if start == 5.0 else "gone")
+        r.holders(self.P)
+        _lo_run(r, self.P)
+        assert r.holders(self.P) == ((111, 5.0),)
+        r._alive = lambda pid, start: "gone"
+        assert r.holders(self.P) is None
+
+    def test_an_unverifiable_holder_keeps_its_answer_and_queues_nothing(self):
+        r = _lo_resolver(alive=lambda pid, start: "unknown")
+        r.holders(self.P)
+        _lo_run(r, self.P)
+        r.clock.t += 400
+        assert r.holders(self.P) == ((111, 5.0),)
+        assert r.step() is False, "no re-resolve even though one was due"
+
+    def test_a_gone_holder_re_resolves_at_most_once_per_10_seconds_per_path(self):
+        r = _lo_resolver(alive=lambda pid, start: "gone")   # every lookup finds a holder that is gone at once
+        r.holders(self.P)
+        started = r.clock.t
+        for _ in range(26):                                 # a poll and a worker step every second
+            r.clock.t += 1
+            r.holders(self.P)
+            r.step()
+        assert len(r.calls) <= 4, f"{len(r.calls)} lookups in {r.clock.t - started:.0f} s"
+        assert len(r.calls) >= 2, "it does look again once the gap has passed"
+
+    def test_a_path_that_keeps_giving_no_usable_holder_backs_off_30s_5min_30min(self):
+        r = _lo_resolver(lookup=lambda path: r.calls.append(path) or ())
+        r.holders(self.P)
+        gaps = []
+        for expected in lock_owner.BACKOFF:
+            _lo_run(r, self.P)
+            stamp = r.clock.t
+            assert r.holders(self.P) is None
+            assert r._cache[self.P].not_before == pytest.approx(stamp + expected)
+            gaps.append(expected)
+            r.clock.t = stamp + expected + lock_owner.FAILED_TTL + 1
+            r.holders(self.P)
+        assert gaps == [30.0, 300.0, 1800.0]
+        _lo_run(r, self.P)
+        assert r._cache[self.P].not_before == pytest.approx(r.clock.t + 1800.0), "the last step holds"
+        assert r.status() == "backing-off"
+
+    def test_forget_drops_the_path_and_its_queued_lookup(self):
+        r = _lo_resolver()
+        r.holders(self.P)
+        r.forget(self.P)
+        assert r._queued == {}, "the queued lookup went with it"
+        r.clock.t += 2
+        assert r.step() is False and r.calls == []
+        assert r.holders(self.P) is lock_owner.PENDING, "a forgotten path is a first sighting again"
+
+    # -- order, bounds --
+
+    def test_first_sightings_are_served_before_re_resolves(self):
+        r = _lo_resolver()
+        paths = [f"C:\\locks\\{n}.lock" for n in range(20)]
+        for path in paths:
+            r.holders(path)
+            r.clock.t += 1
+            while r.step():
+                r.clock.t += 1
+        r.clock.t += 400
+        for path in paths[:7]:
+            r.holders(path)                                 # seven re-resolves queued
+        new = "C:\\locks\\new.lock"
+        r.holders(new)
+        r.clock.t += 1
+        before = len(r.calls)
+        assert r.step() is True and r.calls[before] == new, "the new path went first"
+
+    def test_the_queue_holds_at_most_eight_and_an_overflow_stays_pending(self):
+        r = _lo_resolver()
+        paths = [f"C:\\locks\\q{n}.lock" for n in range(12)]
+        assert all(r.holders(path) is lock_owner.PENDING for path in paths)
+        assert len(r._queued) == lock_owner.MAX_QUEUE
+        assert r.holders(paths[-1]) is lock_owner.PENDING, "retried later, still pending"
+
+    def test_at_most_256_paths_are_cached_and_an_evicted_one_is_pending_again(self):
+        r = _lo_resolver()
+        for n in range(lock_owner.MAX_PATHS + 5):
+            r.holders(f"C:\\locks\\c{n}.lock")
+        assert len(r._cache) == lock_owner.MAX_PATHS
+        assert r.holders("C:\\locks\\c0.lock") is lock_owner.PENDING
+
+    def test_lookups_are_at_least_a_second_apart(self):
+        r = _lo_resolver()
+        r.holders(self.P)
+        r.holders(self.Q)
+        r.clock.t += 1
+        assert r.step() is True
+        r.clock.t += 0.5
+        assert r.step() is False
+        r.clock.t += 0.6
+        assert r.step() is True
+
+    # -- the wedge rule and the abandoned workers --
+
+    def _wedge(self, r):
+        """Pretend the current worker has been inside a lookup for longer than the bound."""
+        r._busy = (r._gen, self.P, r.clock.t)
+        r.clock.t += lock_owner.LOOKUP_WEDGE_SECONDS + 1
+        return r._gen
+
+    def test_a_wedged_lookup_abandons_its_worker_and_the_late_result_is_dropped(self):
+        r = _lo_resolver()
+        r.holders(self.P)
+        old = self._wedge(r)
+        r.holders(self.Q)                                   # a caller notices (any call does)
+        assert r._gen == old + 1 and r._abandoned == 1
+        r._finish(old, self.P, ((999, 1.0),))               # the stuck call returns at last
+        assert r._abandoned == 0
+        assert r._cache[self.P].holders is None, "an abandoned worker's result is dropped"
+
+    def test_two_wedges_within_ten_minutes_disable_the_lookup_and_a_recovery_re_enables_it(self):
+        r = _lo_resolver()
+        r.holders(self.P)
+        first = self._wedge(r)
+        r.status()
+        r._finish(first, self.P, None)
+        r.clock.t += 60
+        second = self._wedge(r)
+        assert r.status() == "disabled"
+        assert r.holders(self.Q) is None, "a disabled lookup answers unknown"
+        r._finish(second, self.P, None)
+        r.clock.t += lock_owner.WEDGE_WINDOW_SECONDS + 1
+        assert r.status() == "ok", "after 10 minutes it may run again"
+        assert r.holders(self.Q) is lock_owner.PENDING
+
+    def test_two_wedges_further_apart_than_ten_minutes_do_not_disable_it(self):
+        r = _lo_resolver()
+        r.holders(self.P)
+        first = self._wedge(r)
+        r.status()
+        r._finish(first, self.P, None)
+        r.clock.t += lock_owner.WEDGE_WINDOW_SECONDS + 5
+        self._wedge(r)
+        assert r.status() in ("ok", "backing-off")
+
+    def test_two_still_blocked_abandoned_workers_disable_it_with_no_third_thread_and_one_returning_re_enables(self):
+        r = _lo_resolver()
+        r._threads = True                                   # count the threads it would start
+        starts = []
+        r._ensure_worker = lambda: starts.append(1)
+        r.holders(self.P)
+        one = self._wedge(r)
+        r.status()
+        r.clock.t += lock_owner.WEDGE_WINDOW_SECONDS + 5     # the first wedge ages out of the rate window
+        two = self._wedge(r)
+        r.status()
+        assert r._abandoned == 2 and r.status() == "disabled"
+        before = len(starts)
+        r.holders(self.Q)
+        assert len(starts) == before, "no replacement worker while two are still blocked"
+        r._finish(one, self.P, None)
+        r.clock.t += lock_owner.WEDGE_WINDOW_SECONDS + 5
+        assert r.status() != "disabled", "one returned, and the rate window passed"
+        r._finish(two, self.P, None)
+
+    def test_the_self_test_runs_before_any_lookup_and_a_list_with_the_own_pid_passes(self, tmp_path):
+        seen = []
+
+        def lookup(path):
+            seen.append(path)
+            return ((os.getpid(), 1.0), (4242, 2.0))        # this process, and a scanner
+
+        clock = _LoClock()
+        r = lock_owner._Resolver(lookup=lookup, alive=lambda p, s: "alive", clock=clock, threads=False)
+        assert r.holders(self.P) is lock_owner.PENDING, "callers get PENDING while the worker tests"
+        clock.t += 2
+        assert r.step() is True and len(seen) == 1 and not os.path.exists(seen[0]), "the temp file is gone"
+        assert r._self_tested is True
+        clock.t += 2
+        assert r.step() is True and seen[-1] == self.P
+
+    def test_a_self_test_that_does_not_list_this_process_disables_the_lookup(self):
+        clock = _LoClock()
+        r = lock_owner._Resolver(lookup=lambda path: ((4242, 2.0),), alive=lambda p, s: "alive", clock=clock,
+                                 threads=False)
+        r.holders(self.P)
+        clock.t += 2
+        r.step()
+        assert r.status() == "disabled"
+        assert r.holders(self.Q) is None
+        clock.t += lock_owner.WEDGE_WINDOW_SECONDS + 1
+        assert r.status() == "ok"
+
+    def test_a_self_test_whose_lookup_raises_disables_the_lookup(self):
+        def boom(path):
+            raise OSError("x")
+        clock = _LoClock()
+        r = lock_owner._Resolver(lookup=boom, alive=lambda p, s: "alive", clock=clock, threads=False)
+        r.holders(self.P)
+        clock.t += 2
+        r.step()
+        assert r.status() == "disabled"
+
+    def test_no_worker_is_started_while_the_lookup_is_disabled(self):
+        r = lock_owner._Resolver(lookup=lambda p: None, threads=True, self_test=False)
+        r._disabled_until = r._clock() + 100
+        r._ensure_worker()
+        assert r._worker is None
+        r.stop()
+
+    def test_the_worker_is_a_daemon_thread_and_resolves_in_the_background(self, monkeypatch):
+        monkeypatch.setattr(lock_owner, "MIN_LOOKUP_GAP", 0.0)
+        r = lock_owner._Resolver(lookup=lambda path: ((1, 1.0),), alive=lambda p, s: "alive", threads=True,
+                                 self_test=False)
+        try:
+            assert r.holders(self.P) is lock_owner.PENDING
+            assert r._worker is not None and r._worker.daemon is True
+            deadline = time.monotonic() + 10
+            while r.holders(self.P) is lock_owner.PENDING and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert r.holders(self.P) == ((1, 1.0),)
+        finally:
+            r.stop()
+
+    # -- the module functions --
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="off Windows the module function answers unknown")
+    def test_the_module_functions_use_the_one_resolver_and_status_reports_it(self):
+        assert lock_owner.status() == "ok"
+        assert lock_owner.holders(self.P) is lock_owner.PENDING
+        lock_owner.forget(self.P)
+        assert lock_owner.holders(self.P) is lock_owner.PENDING
+
+    def test_off_windows_the_module_function_answers_unknown_and_find_holders_returns_none(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(lock_owner, "_resolver", lock_owner._Resolver(threads=False, self_test=False))
+        assert lock_owner.find_holders(self.P) is None
+        assert lock_owner.holders(self.P) is None
+
+
+class _RmFake:
+    """A stand-in for the Restart Manager library that records what it was asked."""
+
+    def __init__(self, list_codes=(0,), count=1, needed=1, start_code=0, register_code=0):
+        self.calls, self.list_codes, self.count, self.needed = [], list(list_codes), count, needed
+        self.start_code, self.register_code = start_code, register_code
+        self.RmStartSession = self._start
+        self.RmRegisterResources = self._register
+        self.RmGetList = self._get
+        self.RmEndSession = self._end
+
+    def _start(self, session, flags, key):
+        self.calls.append("start")
+        session._obj.value = 7
+        return self.start_code
+
+    def _register(self, session, n, names, a, b, c, d):
+        self.calls.append("register")
+        return self.register_code
+
+    def _get(self, session, needed, count, infos, reasons):
+        self.calls.append("list")
+        code = self.list_codes.pop(0) if self.list_codes else 0
+        needed._obj.value = self.needed
+        if code == 0:
+            count._obj.value = self.count
+            for i in range(min(self.count, len(infos))):
+                infos[i].Process.dwProcessId = 100 + i
+        return code
+
+    def _end(self, session):
+        self.calls.append("end")
+        return 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Restart Manager is Windows only")
+class TestRestartManagerCalls:
+    def _patched(self, monkeypatch, fake):
+        monkeypatch.setattr(lock_owner, "_lib", fake)
+        monkeypatch.setattr(lock_owner, "_lib_failed", False)
+
+    def test_the_structure_and_buffer_sizes_are_pinned(self):
+        unique, info = lock_owner._structures()
+        assert ctypes.sizeof(unique) == 12 and ctypes.sizeof(info) == 668
+
+    def test_a_list_is_returned_as_pid_and_start_time_pairs_and_the_session_is_ended(self, monkeypatch):
+        fake = _RmFake(count=2)
+        self._patched(monkeypatch, fake)
+        found = lock_owner.find_holders("C:\\x.lock")
+        assert [pid for pid, _s in found] == [100, 101]
+        assert fake.calls == ["start", "register", "list", "end"]
+
+    def test_more_than_64_entries_give_unknown(self, monkeypatch):
+        fake = _RmFake(count=65)
+        self._patched(monkeypatch, fake)
+        assert lock_owner.find_holders("C:\\x.lock") is None and fake.calls[-1] == "end"
+        fake = _RmFake(list_codes=(234,), needed=65)
+        self._patched(monkeypatch, fake)
+        assert lock_owner.find_holders("C:\\x.lock") is None and fake.calls[-1] == "end"
+
+    def test_more_data_is_retried_at_most_three_times(self, monkeypatch):
+        fake = _RmFake(list_codes=(234, 234, 234, 234), needed=9)
+        self._patched(monkeypatch, fake)
+        assert lock_owner.find_holders("C:\\x.lock") is None
+        assert fake.calls.count("list") == 3 and fake.calls[-1] == "end"
+        fake = _RmFake(list_codes=(234, 0), needed=9, count=9)
+        self._patched(monkeypatch, fake)
+        assert len(lock_owner.find_holders("C:\\x.lock")) == 9
+
+    @pytest.mark.parametrize("kw", [{"register_code": 5}, {"list_codes": (5,)}])
+    def test_the_session_is_ended_on_every_error_path(self, monkeypatch, kw):
+        fake = _RmFake(**kw)
+        self._patched(monkeypatch, fake)
+        assert lock_owner.find_holders("C:\\x.lock") is None
+        assert fake.calls[-1] == "end"
+
+    def test_a_session_that_does_not_start_is_unknown_and_not_ended(self, monkeypatch):
+        fake = _RmFake(start_code=5)
+        self._patched(monkeypatch, fake)
+        assert lock_owner.find_holders("C:\\x.lock") is None and fake.calls == ["start"]
+
+    def test_the_library_is_loaded_by_absolute_path_from_the_system_folder(self, monkeypatch):
+        seen = []
+
+        def loader(path):
+            seen.append(path)
+            raise OSError("not here")
+
+        monkeypatch.setattr(lock_owner, "_lib", None)
+        monkeypatch.setattr(lock_owner, "_lib_failed", False)
+        monkeypatch.setattr(lock_owner, "_load_library", loader)
+        assert lock_owner.find_holders("C:\\x.lock") is None
+        assert len(seen) == 1 and os.path.isabs(seen[0]) and seen[0].lower().endswith("system32\\rstrtmgr.dll")
+        assert lock_owner.find_holders("C:\\x.lock") is None and len(seen) == 1, "a failed load is remembered"
+
+    def test_the_real_library_lists_this_process_for_a_file_it_holds_open(self, tmp_path):
+        target = tmp_path / "held.bin"
+        target.write_bytes(b"x")
+        with open(target, "rb"):
+            found = lock_owner.find_holders(str(target))
+        assert found is not None and os.getpid() in {pid for pid, _s in found}
+        assert os.getpid() not in {pid for pid, _s in (lock_owner.find_holders(str(target)) or ())}
+
+    def test_process_state_tells_alive_gone_and_a_reused_pid(self):
+        me = lock_owner.find_holders  # noqa: F841 (the module is loaded)
+        import psutil
+        proc = psutil.Process(os.getpid())
+        assert lock_owner._process_state(proc.pid, proc.create_time()) == "alive"
+        assert lock_owner._process_state(proc.pid, proc.create_time() - 3600) == "gone", "same pid, other start time"
+        assert lock_owner._process_state(2 ** 22 + 12345, 1.0) == "gone"
+
+
+class TestLockOwnerIsolation:
+    def test_there_is_no_top_level_windll_or_msvcrt_import(self):
+        tree = ast.parse(Path(lock_owner.__file__).read_text(encoding="utf-8"))
+        top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        assert not [n for n in top if any(a.name.split(".")[0] in ("msvcrt", "winreg") for a in getattr(n, "names", []))]
+        src = Path(lock_owner.__file__).read_text(encoding="utf-8")
+        assert "windll" not in src.replace("WinDLL", ""), "no ctypes.windll anywhere"
+
+    def test_it_imports_only_the_standard_library_and_quiet_log(self):
+        tree = ast.parse(Path(lock_owner.__file__).read_text(encoding="utf-8"))
+        names = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                names |= {a.name.split(".")[0] for a in n.names}
+            elif isinstance(n, ast.ImportFrom):
+                names.add(("." * n.level) + (n.module or ""))
+                if n.level:
+                    names |= {"." * n.level + a.name for a in n.names}
+        allowed = {"__future__", "collections", "ctypes", "heapq", "logging", "os", "sys", "tempfile", "threading",
+                   "time", ".", ".quiet_log"}
+        assert names <= allowed, sorted(names - allowed)
+
+    def test_importing_acp_loads_neither_lock_owner_nor_data_codex_state(self):
+        code = ("import sys; import power_atlas.acp; "
+                "print(sorted(m for m in ('power_atlas.lock_owner', 'power_atlas.data_codex_state') if m in sys.modules))")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
+                             cwd=str(Path(lock_owner.__file__).parents[2]),
+                             env=dict(os.environ, PYTHONPATH=str(Path(lock_owner.__file__).parents[1])))
+        assert out.stdout.strip() == "[]", out.stdout + out.stderr
+
+    def test_no_log_line_carries_a_pid_or_a_path(self, caplog):
+        def boom(path):
+            raise PermissionError(13, "denied", "C:\\secret\\path.lock")
+        r = _lo_resolver(lookup=boom)
+        with caplog.at_level("WARNING"):
+            r.holders("C:\\secret\\path.lock")
+            _lo_run(r, "C:\\secret\\path.lock")
+        text = " ".join(rec.getMessage() for rec in caplog.records)
+        assert "PermissionError" in text and "secret" not in text and "path.lock" not in text
+
+
