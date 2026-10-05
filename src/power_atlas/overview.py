@@ -2093,10 +2093,12 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     def is_hidden(cwd: str) -> bool:
         try:
             return hidden is not None and bool(hidden(cwd))
-        except Exception:
+        except Exception as exc:
             if "hidden" not in failed:
                 failed.add("hidden")
-                log.exception("Overview: the hidden-workspace filter failed for usage (%s)", cwd)
+                # The class only: `cwd` may come from another program's database or a
+                # transcript, and a log is read in transcripts (D20).
+                log.warning("Overview: the hidden-workspace filter failed for usage (%s)", type(exc).__name__)
             return True
 
     day_list, since = _window(now)

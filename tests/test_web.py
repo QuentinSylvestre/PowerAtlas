@@ -33218,6 +33218,7 @@ class TestOverviewUsage:
         con.close()
         if wal:
             Path(str(path) + "-wal").write_bytes(b"")
+            Path(str(path) + "-shm").write_bytes(b"")
         return path
 
     def sub_row(self, tokens, kind="thread_spawn", cwd="C:\\ws\\gamma", archived=0):
@@ -33265,6 +33266,35 @@ class TestOverviewUsage:
         usage = self.summary()
         assert usage["codex_subagent_tokens"] is None and usage["codex_state_db_status"] == "idle"
         assert sorted(p.name for p in self.state_dir.iterdir()) == before
+
+    def test_a_stop_requested_after_the_transcripts_were_read_skips_the_database(self, monkeypatch):
+        from power_atlas import data_codex_state, overview
+        stop = threading.Event()
+        real = overview._refresh
+
+        def refresh_then_stop(*args, **kwargs):
+            out = real(*args, **kwargs)
+            stop.set()
+            return out
+
+        monkeypatch.setattr(overview, "_refresh", refresh_then_stop)
+        monkeypatch.setattr(data_codex_state, "subagent_usage",
+                            lambda *a, **k: pytest.fail("the database was read after a stop"))
+        with pytest.raises(overview._UsageStopped):
+            self.summary(stop_event=stop)
+
+    def test_a_hidden_filter_that_raises_logs_its_class_and_never_the_workspace(self, caplog):
+        t = self.now - 7200
+        self.codex(1, [_ovx_user(t, "go"), _ovx_tokens(t + 1, 900, 400, 50)])
+        self.state_db([self.sub_row(100, cwd="C:\\ws\\leaky-name")])
+
+        def boom(cwd):
+            raise RuntimeError(cwd)
+
+        with caplog.at_level("WARNING", logger="power_atlas.overview"):
+            usage = self.summary(hidden=boom)
+        assert usage["codex_subagent_tokens"]["total"] == 0, "a filter that raises excludes"
+        assert "leaky-name" not in caplog.text and "RuntimeError" in caplog.text, caplog.text
 
     def test_the_window_start_is_the_first_midnight_and_a_stop_ends_the_pass(self, monkeypatch):
         from power_atlas import data_codex_state, overview

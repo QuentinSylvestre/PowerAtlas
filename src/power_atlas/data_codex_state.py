@@ -8,8 +8,9 @@ reads a few columns of the database's ``threads`` table, for one consumer today:
 Never ``immutable=1`` (it misses the newest row of a WAL database), never writes to the
 database, never raises. Opening a WAL database read-only creates its ``-shm`` and
 ``-wal`` files when they are absent, which would write into Codex's folder. So the read
-is skipped when there is no ``-wal`` file (Codex is not running; gate G9, the user's
-choice 2026-10-05) and the status says ``idle``.
+is skipped unless both the ``-wal`` and the ``-shm`` file exist (Codex is not running;
+gate G9, the user's choice 2026-10-05) and the status says ``idle``. A process that
+exits between that check and the open can still leave the open to create them.
 
 Every value read from the file is untrusted: columns are cut with ``substr``, a result
 that hit the row cap is dropped whole, and any failure gives None with the exception
@@ -102,19 +103,20 @@ def cwd_class(raw) -> str:
 def state_db_path() -> Path | None:
     """The state database: the file whose whole name is ``state_<N>.sqlite`` with the
     highest N, directly in the Codex home (not in a sub-folder: a stale copy sits in
-    one). Never falls back to a lower number."""
-    best: tuple[int, str] | None = None
+    one). Never falls back to a lower number: when the highest-numbered entry is not a
+    plain file (a directory, a link), the answer is None."""
+    best: tuple[int, str, bool] | None = None
     try:
         with os.scandir(CODEX_STATE_DIR) as entries:
             for entry in entries:
                 match = _STATE_NAME_RE.fullmatch(entry.name)
-                if match and entry.is_file(follow_symlinks=False):
+                if match:
                     number = int(match.group(1))
                     if best is None or number > best[0]:
-                        best = (number, entry.path)
+                        best = (number, entry.path, entry.is_file(follow_symlinks=False))
     except OSError:
         return None
-    return Path(best[1]) if best else None
+    return Path(best[1]) if best and best[2] else None
 
 
 def _int(value) -> int | None:
@@ -142,6 +144,9 @@ def _query(path: Path, window_start_ms: int) -> tuple[list | None, str]:
     """Open the database read-only, run the two fixed statements, close it."""
     uri = path.resolve().as_uri() + "?mode=ro"
     con = sqlite3.connect(uri, uri=True, timeout=_CONNECT_TIMEOUT_S)
+    # One undecodable value must not fail the whole read: it becomes replacement
+    # characters, and `cwd_class` then leaves that row out.
+    con.text_factory = lambda raw: raw.decode("utf-8", "replace")
     try:
         deadline = time.monotonic() + _QUERY_BUDGET_S
         con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, _PROGRESS_OPS)
@@ -170,7 +175,9 @@ def _read(window_start_ms: int) -> tuple[list | None, str]:
     path = state_db_path()
     if path is None:
         return None, "absent"
-    if not Path(str(path) + "-wal").is_file():
+    # Both side files exist only while a process holds the database open in WAL mode.
+    # Opening it read-only when either is missing would create it in Codex's folder.
+    if not (Path(str(path) + "-wal").is_file() and Path(str(path) + "-shm").is_file()):
         return None, "idle"
     try:
         return _query(path, window_start_ms)

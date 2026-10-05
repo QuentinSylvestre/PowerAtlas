@@ -17992,7 +17992,7 @@ check("dashboard overview usage: the Tokens area shows a Claude Code block and a
 
 // 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1: the Codex "Sub-agent threads" line.
 const OV_SUBAGENTS = { threads: 26, total: 24200000, thread_spawn: 20000000, guardian: 4200000 };
-const OV_SUBAGENT_NOTE = "Codex sub-agent thread totals are lifetime totals from Codex's state database and include context inherited at spawn.";
+const OV_SUBAGENT_NOTE = "Codex sub-agent thread totals are lifetime totals from Codex's state database and include context inherited at spawn, so they are an upper bound.";
 
 check("dashboard overview usage: a sub-agent line in the Codex block, and the note says what the total is", () => {
   const p = loadDashPicker();

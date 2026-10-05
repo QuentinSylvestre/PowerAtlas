@@ -5476,7 +5476,7 @@ def _st_row(source=_ST_SPAWN, cwd="C:\\ws", tokens=100, created=None, archived=0
 
 
 def _st_db(home, rows, *, name="state_5.sqlite", columns=_ST_COLUMNS, wal=True, live=False):
-    """A state database with a `threads` table. `wal` leaves an empty -wal file beside it
+    """A state database with a `threads` table. `wal` leaves empty -wal and -shm files beside it
     (Codex running); `live=True` keeps a real WAL writer open and returns it too."""
     home.mkdir(parents=True, exist_ok=True)
     path = home / name
@@ -5494,6 +5494,7 @@ def _st_db(home, rows, *, name="state_5.sqlite", columns=_ST_COLUMNS, wal=True, 
     con.close()
     if wal:
         Path(str(path) + "-wal").write_bytes(b"")
+        Path(str(path) + "-shm").write_bytes(b"")
     return path, None
 
 
@@ -5672,6 +5673,34 @@ class TestCodexStateReader:
         assert sorted(p.name for p in codex_home.iterdir()) == before, "no -wal or -shm may appear in Codex's folder"
         assert not Path(str(path) + "-shm").exists()
 
+    def test_a_wal_file_without_a_shm_file_is_idle_and_creates_no_file(self, codex_home):
+        path, _ = _st_db(codex_home, [_st_row()])
+        Path(str(path) + "-shm").unlink()
+        _st_fresh(codex_home)
+        before = sorted(p.name for p in codex_home.iterdir())
+        assert _st_usage() == (None, "idle")
+        assert sorted(p.name for p in codex_home.iterdir()) == before, "opening it would have created the -shm file"
+
+    def test_a_read_leaves_the_folder_and_the_database_file_unchanged(self, codex_home):
+        import hashlib
+        path, _ = _st_db(codex_home, [_st_row(tokens=5)])
+        _st_fresh(codex_home)
+
+        def snapshot():
+            return (sorted((p.name, p.stat().st_size) for p in codex_home.iterdir() if p.is_file()),
+                    hashlib.sha256(path.read_bytes()).hexdigest())
+
+        before = snapshot()
+        assert _st_usage()[0]["total"] == 5
+        assert snapshot() == before
+
+    def test_a_directory_with_the_highest_number_is_not_skipped_for_a_lower_file(self, codex_home):
+        _st_db(codex_home, [_st_row()], name="state_5.sqlite")
+        (codex_home / "state_9.sqlite").mkdir()
+        _st_fresh(codex_home)
+        assert data_codex_state.state_db_path() is None
+        assert _st_usage() == (None, "absent")
+
     def test_a_row_written_after_the_first_read_shows_on_the_next_read(self, codex_home):
         path, writer = _st_db(codex_home, [_st_row(tokens=1)], live=True)
         try:
@@ -5734,15 +5763,20 @@ class TestCodexStateReader:
         _st_fresh(codex_home)
         (codex_home / "state_5.sqlite").write_bytes(b"not a database" * 200)
         Path(str(codex_home / "state_5.sqlite") + "-wal").write_bytes(b"")
+        Path(str(codex_home / "state_5.sqlite") + "-shm").write_bytes(b"")
         assert _st_usage() == (None, "error")
-        data_codex_state.clear_memo()
-        (codex_home / "state_5.sqlite").unlink()
-        path, _ = _st_db(codex_home, [_st_row()])
+
+    def test_one_row_with_an_undecodable_value_is_left_out_not_the_whole_read(self, codex_home):
+        path, _ = _st_db(codex_home, [_st_row(tokens=3), _st_row(tokens=50)])
+        _st_fresh(codex_home)
         con = sqlite3.connect(path)
-        con.execute("UPDATE threads SET cwd = CAST(x'ffc3' AS TEXT)")
+        con.execute("UPDATE threads SET cwd = CAST(x'ffc3' AS TEXT) WHERE tokens_used = 50")
         con.commit()
         con.close()
-        assert _st_usage() == (None, "error"), "an undecodable value fails the read, never the caller"
+        Path(str(path) + "-wal").write_bytes(b"")
+        Path(str(path) + "-shm").write_bytes(b"")
+        usage, status = _st_usage()
+        assert status == "ok" and usage["total"] == 3 and usage["threads"] == 1
 
     def test_a_one_mebibyte_column_that_is_not_selected_does_not_fail_the_query(self, codex_home):
         _st_db(codex_home, [_st_row(tokens=3) + ("t" * (1 << 20),)], columns=_ST_COLUMNS + ", title TEXT")
@@ -5846,6 +5880,7 @@ class TestCodexStateReader:
         bad = codex_home / "state_5.sqlite"
         bad.write_bytes(b"garbage" * 300)
         Path(str(bad) + "-wal").write_bytes(b"")
+        Path(str(bad) + "-shm").write_bytes(b"")
         with caplog.at_level("WARNING"):
             assert _st_usage() == (None, "error")
             assert _st_usage() == (None, "error")
@@ -5856,6 +5891,23 @@ class TestCodexStateReader:
         monkeypatch.setattr(data_codex_state, "_read", lambda ms: reads.append(ms) or (None, "error"))
         _st_usage()
         assert not reads, "the memoised failure was reused"
+
+    def test_a_refresh_stopped_during_the_read_is_not_memoised(self, codex_home, monkeypatch):
+        _st_db(codex_home, [_st_row(tokens=4)])
+        _st_fresh(codex_home)
+        stop = threading.Event()
+        reads = []
+        real = data_codex_state._read
+
+        def read_then_stop(ms):
+            reads.append(ms)
+            stop.set()
+            return real(ms)
+
+        monkeypatch.setattr(data_codex_state, "_read", read_then_stop)
+        assert _st_usage(stop_event=stop) == (None, "error")
+        assert _st_usage()[0]["total"] == 4
+        assert len(reads) == 2, "the stopped read left nothing in the memo, so the next call read again"
 
     def test_a_filter_that_raises_gives_none_and_never_raises(self, codex_home):
         _st_db(codex_home, [_st_row()])

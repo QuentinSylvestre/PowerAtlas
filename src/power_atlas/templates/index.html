@@ -2081,7 +2081,7 @@ function dashOvRenderUsage(usage, state){
     'Codex agent time is exact from 0.139 and estimated before; ' +
     (subPresent
       ? 'Codex sub-agent thread totals are lifetime totals from Codex\'s state database ' +
-        'and include context inherited at spawn.'
+        'and include context inherited at spawn, so they are an upper bound.'
       : 'Codex sub-agent threads are not counted.')));
 }
 // A failed summary keeps usage already drawn; only a section still showing
