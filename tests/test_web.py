@@ -35483,6 +35483,16 @@ class TestCodexTurnWatchTick:
         assert client.post("/api/notifications").status_code == 200
         assert web_mod._codex_notify_enabled_memo[0] == -1e9
 
+    def test_a_tick_that_sends_toasts_logs_only_their_count(self, world, caplog):
+        world.cwds[_WS1] = "C:\\Secret\\Client"
+        world.add(_WS1)
+        world.tick(0)
+        world.end(_WS1, 2)
+        with caplog.at_level("INFO", logger="power_atlas.web"):
+            assert world.tick(5) == 2
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "2 toast(s) sent" in text and "Secret" not in text and _WS1 not in text
+
     def test_the_coalescing_threshold_is_more_than_three(self, world):
         world.add(_WS1)
         world.tick(0)

@@ -551,6 +551,8 @@ def _codex_turn_watch_once(state: _WatchState, deps: dict, now: float) -> int:
             quiet_log.warn(log, "codex turn watch: an id failed", exc)
     state.first_tick_done = True
     state.prune(now)
+    if sent:
+        log.info("codex turn watch: %d toast(s) sent", sent)  # a count only: no id, path or label (D20)
     return sent
 
 
