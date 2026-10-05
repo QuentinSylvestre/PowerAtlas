@@ -364,6 +364,17 @@ Each server entry:
 
 **Repaired at the source 2026-10-05**: `~/.kiro/mcp-wrappers/dedupe-required.mjs` (outside this repo, user level) runs the zoho server and deduplicates `required` in each tool's `inputSchema`/`outputSchema` of `tools/list` results. Everything else passes through unchanged, and a tool without a duplicate is byte-identical. The zoho entry in `~/.kiro/settings/mcp.json` launches `node <wrapper> npx -y mcp-remote@latest <url>`, so the terminal UI and PowerAtlas both get valid schemas. Measured: all 128 tools kept with names and order, the 69 defective ones repaired (equal to an independent dedupe), and a live ACP agent with tool search **off** (232 tools per request, which failed before) ended its turn normally. To go back, restore `"command": "npx"` and drop the first two `args`. Any other MCP server that lists a repeated `required` entry needs the same wrapper in front of it; the symptom and the check are in the bullets above.
 
+### An ACP session runs at `high` effort unless the client sets it; the terminal UI runs at `max`
+
+**Measured on kiro-cli 2.27.1, 2026-10-05**, from a fresh `session/new` result, the stored `session.json` and the agent's bundled `acp-server.js`.
+
+- `session/new` returns a `configOptions` entry `{id: "effortLevel", category: "thought_level", currentValue: "high", options: low | medium | high | max}`. `high` is the model default. A `thinking` option (`on`/`off`) sits beside it.
+- The terminal UI runs at `max` because `cli.json` sets `chat.modelDefaults` (`output_config.effort: max`) and the UI applies it. `kiro-cli acp` does not read that file, so a PowerAtlas session ran one level below the same session in the terminal.
+- The level is changed with `session/set_config_option` (`sessionId`, `configId: "effortLevel"`, `value`). The agent persists it as `effortLevel` in the session's `session.json`; a session that never had one has no such key.
+- `kiro.log` never records the effort, so the stored `effortLevel` is the only evidence of what a session ran at.
+
+**Implemented 2026-10-05** (`4a6902b`): `acp.py` `DEFAULT_EFFORT_LEVEL` is `"max"`. `_Supervisor._apply_default_effort` sets it right after `session/new`, and after `session/load` only when `_stored_session_effort_v3` finds no stored level, so a level chosen for a session is never overwritten on resume. It skips quietly when the agent does not offer the option or `max` is not among its levels, and a failed call is logged, never raised. Checked live after a restart: a new `/acp` session stored `effortLevel: "max"`. The value is a constant and ignores `cli.json`; exposing the choice is a roadmap item (*Expose the effort level*, `plans/ROADMAP.md`).
+
 ---
 
 ## ACP permission wire shapes (measured 2026-09-23, kiro-cli KAS 2.23.1)
