@@ -3,6 +3,7 @@
 import ast
 import builtins
 import contextlib
+import ctypes
 import errno
 import importlib.util
 import io
@@ -5581,11 +5582,82 @@ class TestCodexStateReader:
     def test_a_network_relative_or_missing_cwd_is_excluded_without_a_hidden_check(
             self, codex_home):
         cwds = ["\\\\?\\UNC\\srv\\share\\x", "//srv/share", "\\\\?\\unc\\srv\\share", "ws\\rel", "", None, "   "]
-        _st_db(codex_home, [_st_row(cwd=c, tokens=3) for c in cwds] + [_st_row(cwd="D:/fwd", tokens=2)])
+        _st_db(codex_home, [_st_row(cwd=c, tokens=3) for c in cwds] + [_st_row(cwd="C:/fwd", tokens=2)])
         _st_fresh(codex_home)
         seen = []
         usage, _ = _st_usage(hidden=lambda c: seen.append(c) or False)
-        assert usage["total"] == 2 and seen == ["D:\\fwd"], "only the drive-letter path reaches the filter"
+        assert usage["total"] == 2 and seen == ["C:\\fwd"], "only the drive-letter path reaches the filter"
+
+    def test_a_cwd_on_a_network_or_unknown_drive_is_left_out_without_a_hidden_check(
+            self, codex_home, monkeypatch):
+        types_by_drive = {"C:\\": 3, "D:\\": 4, "E:\\": 1, "F:\\": 2}
+        monkeypatch.setattr(data_codex_state, "_drive_type", lambda root: types_by_drive.get(root, 0))
+        _st_db(codex_home, [_st_row(cwd=c, tokens=n) for c, n in
+                            (("C:\\a", 1), ("d:\\mapped", 10), ("E:\\gone", 100), ("F:\\usb", 1000), ("G:\\none", 5))])
+        _st_fresh(codex_home)
+        seen = []
+        usage, _ = _st_usage(hidden=lambda c: seen.append(c) or False)
+        assert usage["total"] == 1001 and seen == ["C:\\a", "F:\\usb"], seen
+
+    def test_the_real_drive_type_call_answers_for_the_system_drive(self):
+        system_drive = os.environ.get("SystemDrive", "C:") + "\\"
+        if sys.platform == "win32":
+            assert data_codex_state._drive_type(system_drive) == 3
+        else:
+            assert data_codex_state._drive_type("C:\\") == 3
+
+    def test_a_non_integer_archived_value_is_left_out(self, codex_home):
+        _st_db(codex_home, [_st_row(archived="x", tokens=7), _st_row(archived=None, tokens=9),
+                            _st_row(archived=0.5, tokens=11), _st_row(tokens=1)])
+        _st_fresh(codex_home)
+        assert _st_usage()[0]["total"] == 1
+
+    def test_a_database_over_the_size_cap_is_not_read(self, codex_home, monkeypatch, caplog):
+        _st_db(codex_home, [_st_row()])
+        _st_fresh(codex_home)
+        monkeypatch.setattr(data_codex_state, "_MAX_DB_BYTES", 10)
+        monkeypatch.setattr(data_codex_state, "_query", lambda *a: pytest.fail("a database over the cap was opened"))
+        with caplog.at_level("WARNING"):
+            assert _st_usage() == (None, "error")
+        assert [r.getMessage() for r in caplog.records] == ["codex state database is too large to read"]
+
+    def test_the_row_loop_stops_when_asked(self, codex_home):
+        _st_db(codex_home, [_st_row(cwd=f"C:\\w{n}", tokens=1) for n in range(600)])
+        _st_fresh(codex_home)
+        stop = threading.Event()
+        seen = []
+
+        def hidden(cwd):
+            seen.append(cwd)
+            stop.set()
+            return False
+
+        assert _st_usage(hidden=hidden, stop_event=stop) == (None, "error")
+        assert 0 < len(seen) < 600, "the loop looked at the event again before the end"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="8.3 short names exist on Windows")
+    def test_a_short_8_3_spelling_of_a_hidden_folder_is_excluded_by_the_real_filter(self, codex_home, tmp_path):
+        long_dir = tmp_path / "A Rather Long Folder Name"
+        long_dir.mkdir()
+        buf = ctypes.create_unicode_buffer(520)
+        if not ctypes.windll.kernel32.GetShortPathNameW(str(long_dir), buf, 520) or buf.value == str(long_dir):
+            pytest.skip("this volume has no 8.3 short names")
+        assert "~" in buf.value
+        _st_db(codex_home, [_st_row(cwd=buf.value, tokens=40), _st_row(cwd=str(long_dir), tokens=2),
+                            _st_row(cwd="C:\\visible", tokens=1)])
+        _st_fresh(codex_home)
+        key = data_mod._normalize_path(str(long_dir))
+        usage, _ = _st_usage(hidden=lambda c: data_mod._normalize_path(c) == key)
+        assert usage["total"] == 1, "both spellings of the hidden folder are left out"
+
+    def test_a_unc_cwd_with_a_tilde_never_reaches_the_filesystem_expansion(self, codex_home, monkeypatch):
+        calls = []
+        monkeypatch.setattr(data_mod, "_expand_short_path", lambda p: calls.append(p) or p)
+        _st_db(codex_home, [_st_row(cwd="\\\\srv\\share\\A~1", tokens=3),
+                            _st_row(cwd="\\\\?\\UNC\\srv\\share\\B~2", tokens=4), _st_row(tokens=1)])
+        _st_fresh(codex_home)
+        usage, _ = _st_usage(hidden=lambda c: data_mod._normalize_path(c) == "never")
+        assert usage["total"] == 1 and calls == [], calls
 
     def test_cwd_class_names_each_rejected_shape(self):
         cases = {"C:\\ok": "local", "c:/ok": "local", "\\\\?\\C:\\ok": "local",

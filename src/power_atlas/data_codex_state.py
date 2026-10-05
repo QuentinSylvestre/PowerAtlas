@@ -13,18 +13,22 @@ gate G9, the user's choice 2026-10-05) and the status says ``idle``. A process t
 exits between that check and the open can still leave the open to create them.
 
 Every value read from the file is untrusted: columns are cut with ``substr``, a result
-that hit the row cap is dropped whole, and any failure gives None with the exception
-class logged once a minute through ``quiet_log`` (no path, no id).
+that hit the row cap is dropped whole, a database (with its ``-wal``) over 256 MiB is
+not read, a cwd on a network or unknown drive is left out before the hidden-workspace
+filter can expand its 8.3 name, and any failure gives None with the exception class
+logged once a minute through ``quiet_log`` (no path, no id).
 
 This module imports from ``data_codex`` only the Codex home, ``activity_epoch`` and
 ``canonical_rollouts``, and must not import ``overview``, ``web`` or ``presence``.
 """
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -58,6 +62,13 @@ _NEWEST_ROLLOUTS = 20
 _MAX_TOKENS = 10 ** 15
 _MAX_TOTAL = 2 ** 53 - 1
 _MAX_CWD = 260
+# The query abort cannot interrupt one huge value (SQLite reads it inside a single
+# step), so the time is bounded by the file instead: a database over this is not read.
+_MAX_DB_BYTES = 256 * 1024 * 1024
+_STOP_CHECK_ROWS = 256
+# GetDriveTypeW: removable, fixed, CD-ROM and RAM disk are local; remote (4), unknown (0)
+# and no root (1) are not.
+_LOCAL_DRIVE_TYPES = frozenset({2, 3, 5, 6})
 
 _clock = time.monotonic  # tests replace it to step the memo
 _memo_lock = threading.Lock()
@@ -98,6 +109,14 @@ def cwd_class(raw) -> str:
     if re.match(r"[A-Za-z]:\\", clean):
         return "local"
     return "relative"
+
+
+def _drive_type(root: str) -> int:
+    """The Windows drive type of `root` (``C:\\``), answered from the drive-letter table:
+    no network traffic, even for a disconnected share. 3 (fixed) off Windows."""
+    if sys.platform != "win32":
+        return 3
+    return int(ctypes.windll.kernel32.GetDriveTypeW(root))  # type: ignore[attr-defined]
 
 
 def state_db_path() -> Path | None:
@@ -180,6 +199,9 @@ def _read(window_start_ms: int) -> tuple[list | None, str]:
     if not (Path(str(path) + "-wal").is_file() and Path(str(path) + "-shm").is_file()):
         return None, "idle"
     try:
+        if path.stat().st_size + Path(str(path) + "-wal").stat().st_size > _MAX_DB_BYTES:
+            quiet_log.warn(log, "codex state database is too large to read")
+            return None, "error"
         return _query(path, window_start_ms)
     except Exception as exc:
         if not path.exists():
@@ -214,15 +236,24 @@ def clear_memo() -> None:
 
 # --- The consumer ---------------------------------------------------------------
 
-def _tally(rows: list, is_hidden) -> dict:
+def _tally(rows: list, is_hidden, stop_event=None) -> dict | None:
+    """The totals, or None when `stop_event` was set part-way."""
     total = spawn = guardian = threads = 0
     hidden_memo: dict[str, bool] = {}
-    for source, cwd, tokens, created in rows:
+    drive_local: dict[str, bool] = {}
+    for n, (source, cwd, tokens, created) in enumerate(rows):
+        if stop_event is not None and n % _STOP_CHECK_ROWS == 0 and stop_event.is_set():
+            return None
         if _int(tokens) is None or _int(created) is None or not isinstance(source, str):
             continue
         if cwd_class(cwd) != "local":
             continue  # fail closed: a long, network, relative or missing cwd is left out
         clean = strip_extended_prefix(cwd)
+        drive = clean[:3].upper()
+        if drive not in drive_local:
+            drive_local[drive] = _drive_type(drive) in _LOCAL_DRIVE_TYPES
+        if not drive_local[drive]:
+            continue  # a mapped network drive: the filter's 8.3 expansion would reach the share
         if clean not in hidden_memo:
             hidden_memo[clean] = bool(is_hidden(clean))
         if hidden_memo[clean]:
@@ -260,7 +291,10 @@ def subagent_usage(window_start_epoch: float, shown, is_hidden, stop_event=None)
             return None, status
         if stop_event is not None and stop_event.is_set():
             return None, "error"
-        return _tally(rows, is_hidden), "ok"
+        usage = _tally(rows, is_hidden, stop_event)
+        if usage is None:
+            return None, "error"  # stopped part-way
+        return usage, "ok"
     except Exception as exc:
         quiet_log.warn(log, "codex sub-agent usage failed", exc)
         return None, "error"
