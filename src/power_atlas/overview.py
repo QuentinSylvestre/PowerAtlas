@@ -1282,7 +1282,10 @@ _stall_clock = time.monotonic
 # 5: a Codex tool name, model and cwd are cut to `_CODEX_NAME_MAX` / `_CODEX_CWD_MAX`.
 # 6: a Codex tool name carries the `_CODEX_TOOL_PREFIX` prefix.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
-_USAGE_SCHEMA = 6
+# 7: a Codex day carries a `context_peak`, the peak of last input tokens over the model's
+# context window (`_codex_context_pct`).
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 2
+_USAGE_SCHEMA = 7
 # The keys `usage_summary` reads from a file summary.
 _SUMMARY_KEYS = frozenset({"provider", "session_id", "cwd", "model", "subagent", "days"})
 
@@ -1676,6 +1679,31 @@ def _empty_summary(provider: str, session_id: str = "") -> dict:
             "subagent": False, "days": {}}
 
 
+# A model context window outside 1 to this is not believed (a hostile or corrupt record).
+_CODEX_WINDOW_MAX = 10 ** 9
+
+
+def _codex_context_pct(info) -> float | None:
+    """How full the context window looked at one Codex `token_count`, in percent: the
+    event's last input tokens over the model's window, clipped to 0-100. None unless the
+    window is an integer from 1 to `_CODEX_WINDOW_MAX` and the last input a non-negative
+    integer (a bool, a string or a negative number gives None). An estimate: the last
+    input is the tokens sent in one request, which is what Codex's own indicator tracks,
+    not a count of what the model holds. 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB
+    Phase 2"""
+    if not isinstance(info, dict):
+        return None
+    window = info.get("model_context_window")
+    last = info.get("last_token_usage")
+    used = last.get("input_tokens") if isinstance(last, dict) else None
+    for n in (window, used):
+        if not isinstance(n, int) or isinstance(n, bool):
+            return None
+    if not 1 <= window <= _CODEX_WINDOW_MAX or used < 0:
+        return None
+    return max(0.0, min(100.0, 100.0 * used / window))
+
+
 def _parse_codex_usage(path: Path) -> dict:
     """One Codex rollout's usage summary (see the Codex bullet above).
 
@@ -1786,6 +1814,11 @@ def _parse_codex_usage(path: Path) -> dict:
                 elif otype == "event_msg":
                     if ptype == "token_count":
                         info = payload.get("info")
+                        pct = _codex_context_pct(info)
+                        if pct is not None:
+                            peak_day = day_of(epoch)
+                            peak = peak_day["context_peak"]
+                            peak_day["context_peak"] = pct if peak is None else max(peak, pct)
                         total = info.get("total_token_usage") if isinstance(info, dict) else None
                         if not isinstance(total, dict):
                             continue
@@ -2037,6 +2070,15 @@ def _ide_daily(days: set[str], since: float, shown: Callable, hidden: Callable) 
     return counts
 
 
+def _pressure_block(rows: list[dict], total: int) -> dict:
+    """`{"sessions_over_80", "sessions_total", "top"}` from the sessions that have a peak:
+    compared and sorted on the raw peak, rounded for display only."""
+    over_80 = sum(1 for p in rows if p["peak"] >= CONTEXT_PRESSURE_PERCENT)
+    ranked = sorted(rows, key=lambda p: (-p["peak"], p["session_id"]))
+    return {"sessions_over_80": over_80, "sessions_total": total,
+            "top": [dict(p, peak=round(p["peak"], 1)) for p in ranked[:_USAGE_TOP_CONTEXT]]}
+
+
 def usage_summary(now: float | None = None, provider_shown: Callable | None = None,
                   hidden: Callable | None = None, stop_event=None,
                   partial: bool = False) -> dict:
@@ -2057,7 +2099,11 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     (`top` by calls over the window with `fail_rate`, `failing` this week with
     at least 3 calls), `context_pressure` (kiro-cli v3 only: `sessions_total`
     is every in-window kiro-cli session, `sessions_over_80` those whose
-    in-window peak `usagePercentage` reached 80), `models` (sessions per
+    in-window peak `usagePercentage` reached 80) and its sibling
+    `codex_context_pressure` (the same fields plus `estimate: True`, for Codex
+    sessions that are not sub-agents: `sessions_total` is every one active in
+    the window, the peak is last input tokens over the model's context window,
+    so a session whose rollout holds no usable reading counts in the total only), `models` (sessions per
     model), `claude_tokens` and `codex_tokens` (each with `cache_hit_ratio` =
     cache reads / (input + cache reads + cache writes), 0 when that is 0; a
     Codex `input` excludes its cached tokens and `cache_creation` is the
@@ -2123,6 +2169,8 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
               for p in (_CLAUDE, _CODEX)}
     pressure: list[dict] = []
     v3_sessions = 0
+    codex_pressure: list[dict] = []
+    codex_sessions = 0
     for s in summaries:
         provider, cwd, sub = s["provider"], s["cwd"], s["subagent"]
         if sub and not cwd:
@@ -2174,12 +2222,15 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
             continue
         if s["model"]:
             models[s["model"]] = models.get(s["model"], 0) + 1
-        if provider == _V3:
-            v3_sessions += 1
+        if provider == _V3 or provider == _CODEX:
+            if provider == _V3:
+                v3_sessions += 1
+            else:
+                codex_sessions += 1
             if peak is not None:
-                pressure.append({"session_id": s["session_id"], "cwd": cwd,
-                                 "name": (Path(cwd).name or cwd) if cwd else "",
-                                 "peak": float(peak)})
+                (pressure if provider == _V3 else codex_pressure).append({
+                    "session_id": s["session_id"], "cwd": cwd,
+                    "name": (Path(cwd).name or cwd) if cwd else "", "peak": float(peak)})
     for day_key, count in _ide_daily(day_set, since, shown, is_hidden).items():
         daily[day_key]["sessions"][_IDE] = count
 
@@ -2192,10 +2243,6 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     failing = [(n, c, f) for n, (c, f) in tools_week.items()
                if c >= _USAGE_FAILING_MIN_CALLS and f > 0]
     failing.sort(key=lambda t: (-t[2], -t[2] / t[1], t[0]))
-    # Compared and sorted on the raw peak; rounded for display only.
-    over_80 = sum(1 for p in pressure if p["peak"] >= CONTEXT_PRESSURE_PERCENT)
-    pressure.sort(key=lambda p: (-p["peak"], p["session_id"]))
-    top_pressure = [dict(p, peak=round(p["peak"], 1)) for p in pressure[:_USAGE_TOP_CONTEXT]]
     # Codex sub-agent threads: a lifetime total per thread from the state database,
     # shown on its own line and never folded into `codex_tokens`.
     # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1
@@ -2223,11 +2270,8 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
             "failing": [{"name": n, "failed": f, "calls": c}
                         for n, c, f in failing[:_USAGE_TOP_FAILING]],
         },
-        "context_pressure": {
-            "sessions_over_80": over_80,
-            "sessions_total": v3_sessions,
-            "top": top_pressure,
-        },
+        "context_pressure": _pressure_block(pressure, v3_sessions),
+        "codex_context_pressure": dict(_pressure_block(codex_pressure, codex_sessions), estimate=True),
         "models": [{"model": m, "sessions": n} for m, n in
                    sorted(models.items(), key=lambda kv: (-kv[1], kv[0]))[:_USAGE_TOP_MODELS]],
         "claude_tokens": with_ratio(tokens[_CLAUDE]),

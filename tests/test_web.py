@@ -32231,7 +32231,7 @@ class TestOverviewUsage:
         assert tools["failing"] == [{"name": "Bash", "failed": 2, "calls": 3},
                                     {"name": "shell", "failed": 1, "calls": 4}]
 
-    def test_context_peak_is_kiro_cli_only(self):
+    def test_the_kiro_context_peak_ignores_claude_code_and_codex(self):
         def meta(pct):
             return {"type": "session_metadata", "key": "contextUsage",
                     "value": {"usagePercentage": pct}}
@@ -32244,9 +32244,116 @@ class TestOverviewUsage:
         # the "N of M sessions" the line counts, with no peak of its own.
         self.v3("sess_c", [(now, {"type": "user", "content": "hi"})])
         self.claude("33333333-3333-3333-3333-333333333333", [self.c_user(now, "hi")])
+        self.codex(9, [_ovx_user(now - 60, "go"), self.cx_ctx(now - 30, 100, 99)])
         cp = self.summary()["context_pressure"]
         assert (cp["sessions_over_80"], cp["sessions_total"]) == (1, 3)
         assert [(p["session_id"], p["peak"]) for p in cp["top"]] == [("sess_a", 85.2), ("sess_b", 30.0)]
+
+    # -- Codex context pressure (Phase 2 of
+    # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB) --
+
+    @staticmethod
+    def cx_ctx(at, window, used, total_input=None):
+        """A `token_count` carrying a context reading: the last request's input tokens and
+        the model's window. `total_input` adds a cumulative block, which must not be used."""
+        info = {"last_token_usage": {"input_tokens": used}, "model_context_window": window}
+        if total_input is not None:
+            info["total_token_usage"] = {"input_tokens": total_input, "cached_input_tokens": 0,
+                                         "output_tokens": 0, "reasoning_output_tokens": 0,
+                                         "total_tokens": total_input}
+        return _ovx_event(at, "token_count", rate_limits=None, info=info)
+
+    def test_a_codex_day_peaks_on_last_input_over_the_window_and_clips_at_100(self):
+        t = self.now - 7200
+        path = self.codex(1, [
+            _ovx_user(t, "go"),
+            self.cx_ctx(t + 1, 200_000, 50_000),
+            self.cx_ctx(t + 2, 200_000, 160_000, total_input=9_000_000),
+            self.cx_ctx(t + 3, 200_000, 20_000),
+        ])
+        peak = self.cx_days(path)[_ov_day(t)]["context_peak"]
+        assert peak == pytest.approx(80.0), "the peak is the largest reading, a later drop (compaction) keeps it"
+        over = self.codex(2, [_ovx_user(t, "go"), self.cx_ctx(t + 1, 100, 150)])
+        assert self.cx_days(over)[_ov_day(t)]["context_peak"] == 100.0, "a ratio above 1 is clipped"
+        edge = self.codex(3, [_ovx_user(t, "go"), self.cx_ctx(t + 1, 10 ** 9, 10 ** 8), self.cx_ctx(t + 2, 1, 0)])
+        assert self.cx_days(edge)[_ov_day(t)]["context_peak"] == pytest.approx(10.0), \
+            "a window of 1 and of 10**9 are accepted"
+
+    def test_a_codex_reading_without_a_usable_window_or_input_counts_nothing(self):
+        t = self.now - 7200
+        last = {"input_tokens": 5}
+        infos = [
+            {"last_token_usage": last},
+            {"model_context_window": 100},
+            {"last_token_usage": last, "model_context_window": 0},
+            {"last_token_usage": last, "model_context_window": -5},
+            {"last_token_usage": last, "model_context_window": True},
+            {"last_token_usage": last, "model_context_window": "100"},
+            {"last_token_usage": last, "model_context_window": 100.0},
+            {"last_token_usage": last, "model_context_window": 10 ** 9 + 1},
+            {"last_token_usage": {"input_tokens": -1}, "model_context_window": 100},
+            {"last_token_usage": {"input_tokens": True}, "model_context_window": 100},
+            {"last_token_usage": {"input_tokens": "5"}, "model_context_window": 100},
+            {"last_token_usage": {"input_tokens": 5.0}, "model_context_window": 100},
+            {"last_token_usage": {"output_tokens": 5}, "model_context_window": 100},
+            {"last_token_usage": "x", "model_context_window": 100},
+            "not a dict", None, [],
+        ]
+        records = [_ovx_user(t, "go")]
+        records += [_ovx_event(t + i, "token_count", rate_limits=None, info=info) for i, info in enumerate(infos, 1)]
+        # A record that only quotes the key, and one of another type that carries the same fields.
+        records.append(_ovx_user(t + 30, 'the "token_count" event has "model_context_window": 100 and "input_tokens": 90'))
+        records.append(_ovx_event(t + 31, "agent_message", token_count=None,
+                                  info={"last_token_usage": {"input_tokens": 90}, "model_context_window": 100}))
+        days = self.cx_days(self.codex(1, records))
+        assert [d["context_peak"] for d in days.values()] == [None]
+
+    def test_codex_context_pressure_counts_sessions_ranks_them_and_clips_the_boundary(self):
+        t = self.now - 7200
+        spawn = {"subagent": {"thread_spawn": {"parent_thread_id": _ovx_id(1), "depth": 1}}}
+        go = _ovx_user(t, "go")
+        self.codex(1, [go, self.cx_ctx(t + 1, 100, 85)])
+        self.codex(2, [go, self.cx_ctx(t + 1, 100, 80)])
+        self.codex(3, [go, self.cx_ctx(t + 1, 1000, 799)])
+        self.codex(4, [go])
+        self.codex(5, [go, self.cx_ctx(t + 1, 100, 99)], source=spawn)
+        self.codex(6, [go, self.cx_ctx(t + 1, 100, 95)], cwd="C:\\ws\\secret")
+        cp = self.summary()["codex_context_pressure"]
+        assert cp["estimate"] is True
+        assert (cp["sessions_over_80"], cp["sessions_total"]) == (3, 5), \
+            "a sub-agent is not a session; a session with no reading counts in the total; 80.0 is over, 79.9 is not"
+        assert [(r["session_id"], r["peak"], r["name"]) for r in cp["top"]] == [
+            (_ovx_id(6), 95.0, "secret"), (_ovx_id(1), 85.0, "gamma"), (_ovx_id(2), 80.0, "gamma"),
+            (_ovx_id(3), 79.9, "gamma")]
+        hidden = self.summary(hidden=lambda cwd: cwd == "C:\\ws\\secret")["codex_context_pressure"]
+        assert (hidden["sessions_over_80"], hidden["sessions_total"]) == (2, 4)
+        assert "secret" not in json.dumps(hidden), "a hidden workspace's name never reaches the block"
+
+    def test_the_codex_row_ranks_ties_by_session_id_and_keeps_only_five(self):
+        t = self.now - 7200
+        for n in range(7, 0, -1):
+            self.codex(n, [_ovx_user(t, "go"), self.cx_ctx(t + 1, 100, 50)])
+        cp = self.summary()["codex_context_pressure"]
+        assert [r["session_id"] for r in cp["top"]] == [_ovx_id(n) for n in range(1, 6)]
+        assert cp["sessions_total"] == 7
+
+    def test_equal_peaks_rank_by_session_id_whatever_the_input_order(self):
+        from power_atlas import overview
+        rows = [{"session_id": sid, "cwd": "", "name": "", "peak": 50.0} for sid in ("b", "c", "a")]
+        assert [r["session_id"] for r in overview._pressure_block(rows, 3)["top"]] == ["a", "b", "c"]
+
+    def test_the_provider_filter_empties_the_codex_row_and_the_kiro_block_is_untouched_by_codex(self):
+        t = self.now - 7200
+        self.codex(1, [_ovx_user(t, "go"), self.cx_ctx(t + 1, 100, 99)])
+        self.v3("sess_a", [(self.now, {"type": "session_metadata", "key": "contextUsage",
+                                       "value": {"usagePercentage": 85.25}}),
+                           (self.now, {"type": "user", "content": "hi"})])
+        usage = self.summary()
+        assert usage["context_pressure"] == {"sessions_over_80": 1, "sessions_total": 1, "top": [
+            {"session_id": "sess_a", "cwd": "C:\\ws\\alpha", "name": "alpha", "peak": 85.2}]}
+        assert usage["codex_context_pressure"]["sessions_total"] == 1
+        off = self.summary(provider_shown=lambda p: p != "codex")["codex_context_pressure"]
+        assert off == {"sessions_over_80": 0, "sessions_total": 0, "top": [], "estimate": True}
 
     def test_claude_tokens_once_per_message_and_the_cache_hit_ratio(self):
         now = self.now
@@ -33311,19 +33418,21 @@ class TestOverviewUsage:
             self.summary(stop_event=stop)
         assert calls == [overview._window(self.now)[1]]
 
-    def test_the_schema_is_6_and_an_older_worker_is_ignored(self):
+    def test_the_schema_is_7_and_an_older_worker_is_ignored(self):
         """`_parse_usage_file` gained a `codex` provider and lost its Claude fall-through
         (schema 2); the Codex stream rule, exec failures and the duration cap changed what it
         returns for an existing file (schema 3); counting each event's own last_token_usage
         changed it again (schema 4); cutting a Codex tool name, model and cwd to 80, 80 and 260
         characters changed what it returns for a file with a longer one (schema 5, final review
         finding B6); the `codex:` prefix on a Codex tool name changed it once more (schema 6,
-        final review finding on the shared `shell` name). A child on any older format must not mix its summaries into the memo."""
+        final review finding on the shared `shell` name); a Codex day gained a `context_peak` (schema 7, Phase 2 of
+        261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB). A child on any
+        older format must not mix its summaries into the memo."""
         from power_atlas import overview
-        assert overview._USAGE_SCHEMA == 6
+        assert overview._USAGE_SCHEMA == 7
         good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
                 "subagent": False, "days": {}}
-        for older in (1, 2, 3, 4, 5):
+        for older in (1, 2, 3, 4, 5, 6):
             old = self.fake_worker()
             for record in (["schema", older], ["C:/x.jsonl", 1, 1, good], ["stage", 0]):
                 old._lines.put(json.dumps(record).encode() + b"\n")
