@@ -1329,7 +1329,8 @@ def last_event_epoch(path) -> float | None:
 
 TURN_STUCK_SECONDS = 30 * 60.0  # a turn whose newest record is older than this has no verdict
 _TURN_RECORDS = {"task_started": "working", "task_complete": "idle", "turn_aborted": "idle"}
-_turn_cache = BoundedCache(256)  # path -> (mtime_ns, size, verdict, newest record epoch)
+_TURN_CACHE_SIZE = 256  # only threads a terminal holds are asked about
+_turn_cache = BoundedCache(_TURN_CACHE_SIZE)  # path -> (mtime_ns, size, verdict, newest record epoch)
 
 
 def _read_turn_state(path: str) -> tuple[str | None, float | None]:
@@ -1361,7 +1362,7 @@ def turn_state(path) -> str | None:
     in the tail window, matched on ``type`` and ``payload.type`` and never as text, because
     a rollout routinely quotes these words in tool output. None when the window holds no
     such record, and None when the verdict is working but the newest record is older than
-    TURN_STUCK_SECONDS (a stuck turn). Cached by (mtime_ns, size), never mtime alone:
+    TURN_STUCK_SECONDS (a stuck turn) or stamped in the future. Cached by (mtime_ns, size), never mtime alone:
     Windows freezes the mtime of a rollout Codex holds open while its size grows.
     """
     target = os.fspath(path)
@@ -1372,8 +1373,12 @@ def turn_state(path) -> str | None:
     else:
         verdict, newest = _read_turn_state(target)
         _turn_cache.put(target, (st.st_mtime_ns, st.st_size, verdict, newest))
-    if verdict == "working" and (newest is None or time.time() - newest > TURN_STUCK_SECONDS):
-        return None
+    if verdict == "working":
+        now = time.time()
+        # An unknown age, a stamp from the future (a clock error, like `activity_epoch`'s) and a
+        # stamp older than the cap all give no verdict: nothing shows that the turn is alive.
+        if newest is None or newest > now + FUTURE_SKEW or now - newest > TURN_STUCK_SECONDS:
+            return None
     return verdict
 
 
@@ -1789,7 +1794,7 @@ def _clear_caches() -> None:
         _verdict_cache = BoundedCache(_cache_cap)
         _parse_cache = BoundedCache(_cache_cap)
         _last_event_cache = BoundedCache(_cache_cap)
-        _turn_cache = BoundedCache(256)
+        _turn_cache = BoundedCache(_TURN_CACHE_SIZE)
     _missing.clear()
     _parse_failed.clear()
     _lock_cache.clear()

@@ -4297,6 +4297,12 @@ class TestCodexTurnState:
                                           _cx_user("tick", ts=_cx_iso(time.time() - 10))])
         assert got == "working"
 
+    def test_a_working_turn_stamped_in_the_future_is_not_trusted(self, codex_home):
+        got, _ = self._state(codex_home, [self._ev("task_started", -3600)])
+        assert got is None, "a clock error must not keep a turn alive for ever"
+        got, _ = self._state(codex_home, [self._ev("task_started", -1.5)])
+        assert got == "working", "a stamp a second ahead is jitter"
+
     def test_an_old_idle_turn_stays_idle(self, codex_home):
         got, _ = self._state(codex_home, [self._ev("task_complete", 90000)])
         assert got == "idle"
@@ -4331,6 +4337,12 @@ class TestCodexTurnState:
         real = time.time
         monkeypatch.setattr(data_codex.time, "time", lambda: real() + 120)
         assert data_codex.turn_state(path) is None, "the clock moved on; the file did not"
+
+    def test_clearing_the_caches_drops_a_cached_verdict(self, codex_home):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        assert got == "working" and data_codex._turn_cache.get(os.fspath(path)) is not None
+        data_codex._clear_caches()
+        assert data_codex._turn_cache.get(os.fspath(path)) is None
 
     def test_a_missing_file_gives_none_and_never_raises(self, codex_home):
         assert data_codex.turn_state(codex_home / "sessions" / "nope.jsonl") is None

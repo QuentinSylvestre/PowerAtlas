@@ -31418,6 +31418,20 @@ class TestOverviewLive:
         assert tiles[other]["status"] == "", "live by the folder rule, but no terminal owns it"
         assert asked == [_LK_TILE_SID], "no rollout is read for a tile that gets no verdict"
 
+    def test_a_tile_reads_the_real_rollout_for_its_verdict(self, monkeypatch, store):
+        from power_atlas import data_codex
+        cwd = "C:\\ws\\proj"
+        store.add("codex", cwd, _LK_TILE_SID)
+        now = time.time()
+        rollout = store.files[_LK_TILE_SID]
+        rollout.write_text(json.dumps(_ovx_event(now - 5, "task_started")) + "\n", encoding="utf-8")
+        monkeypatch.setattr(data_codex, "find_session_workspace", lambda s: cwd)
+        deps = self._deps()._replace(codex_terminal_threads=lambda snap: [_LK_TILE_SID])
+        assert [t["status"] for t in self._live({}, self._snap(), deps, self._originals(cwd))] == ["working"]
+        with open(rollout, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_ovx_event(now - 1, "task_complete")) + "\n")
+        assert [t["status"] for t in self._live({}, self._snap(), deps, self._originals(cwd))] == ["idle"]
+
     def test_a_tile_with_no_turn_record_has_an_empty_status(self, monkeypatch, store):
         from power_atlas import data_codex
         cwd = "C:\\ws\\proj"
@@ -35090,7 +35104,7 @@ class TestCodexTurnVerdictWiring:
         assert rows[_ovx_id(81)]["status"] == "working"
         assert rows[_ovx_id(82)]["status"] == "idle"
 
-    def test_the_grouped_listing_and_the_pinned_rows_carry_it_too(self, codex_rollouts, monkeypatch):
+    def test_the_grouped_listing_carries_it_too(self, codex_rollouts, monkeypatch):
         from power_atlas import web as web_mod
         now = time.time()
         _ovx_rollout(codex_rollouts, 83, [_ovx_event(now - 20, "task_started")], at=now - 30)
@@ -35136,8 +35150,8 @@ class TestCodexTurnVerdictWiring:
         self._own(monkeypatch, True)
         row = self._flat(web_mod)["sessions"][0]
         assert row["status"] in ("working", "idle", "")
-        text = json.dumps(row)
-        assert not any(word in text for word in ("pid", "verdict", "command"))
+        assert set(row) <= {"id", "title", "updated_at", "availability", "status", "cwd", "name", "exists",
+                            "provider", "created_at", "live", "resume_locked"}, "no field beyond today's row"
 
 
 class TestCodexTurnBoundaryParity:
