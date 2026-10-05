@@ -611,23 +611,36 @@ Live QA was done by the orchestrator, not a reviewer (section 9, the exit criter
 
 ## Handoff
 
-> Handoff written: 2026-10-05T14:12:36-05:00
+> Handoff written: 2026-10-05 (rewritten at the end of the Phase 3 session; Phase 3 is NOT closed)
 
 ### Previously
 
-- Phases 0, 1 and 2 are done and reviewed (Review Log, three entries on 2026-10-05); every review row is Fixed except one Low in Phase 2 awaiting the user's accept (Follow-up Work 18). Phase 2 code: `5dfddb0`, `ee3f887`, `54e31b4`, merged by `97a6e6f` on `main`.
-- On the user's instruction the other session's uncommitted work was committed (`8202f9d`) and the tests it broke were updated (`61a83c6`); `main` is green: pytest 3779 passed, node 947 of 947.
-- PowerAtlas runs again from the `main` working tree (restarted 2026-10-05). Nothing is pushed.
+- Phases 0, 1 and 2 are done, reviewed and merged on `main` (Review Log). One Phase 2 Low awaits the user's accept (Follow-up Work 18).
+- Phase 3 (lock-owner lookup and the live dot) is coded and committed on `main`: `7e55dc9` (writer state in `data_codex.py`), `a0417ef` (new `lock_owner.py`), `7272dd1` (process kinds in `presence.py`), `1b49547` (the live rule and tile source in `web.py` and `overview.py`), `63f5c53` (README). Nothing is pushed.
+- Three Phase 3 review rounds ran (0 High, several Medium and Low). Their fixes are NOT committed yet. They sit in the working tree, in these files: `src/power_atlas/lock_owner.py`, `presence.py`, `web.py`, `overview.py`, `data_codex_state.py`, `tests/test_data.py`, `tests/test_web.py`. Another session may also have edits in `web.py` and `tests/test_web.py`: run `git status` and stage only your own hunks (from a patch of your own diff).
+- What the uncommitted fixes do: a replacement worker starts after a stalled lookup, also with two abandoned workers; failed lookups show as `backing-off` and a library that did not load shows as `disabled` in `owner_lookup`; the tile enumerator no longer starves or flickers with nine or more terminal-held threads (`owned` set, `cursor_first`); the Restart Manager DLL path comes from `GetSystemDirectoryW`; a process is Codex by its image name, not argv0; a reused parent pid is rejected; tiles need a local drive (`data_codex_state.is_local_drive`); an owner lookup that raises falls back to the older rule.
+- Last test state: the Phase 3 selection passes (171 tests). The full pytest suite, `node tests/acp_page.test.mjs` (947 expected), `_check_test_names.py` and the ruff counts (web.py 13, tests/test_web.py 84) were NOT re-run on the fixed tree.
+- Live QA done against a throwaway Codex session: (a) an idle terminal resolved as `terminal` and stayed live 5.5 minutes; (c) closing the terminal made the row not live at once; (d) `codex exec resume` read as `other`, so no dot. Not done: (b), (e), (f).
+- PowerAtlas is running code from BEFORE the Phase 3 changes.
 
 ### Parked
 
-- The Phase 6 cleanup list is in section 9; Phase 6 re-checks it. The temporary checkouts (`PowerAtlas-wt-phase2`, `PowerAtlas-wt-overlay`) and the merged branch `phase2-context-pressure` are removed by the orchestrator at the end of the Phase 2 session; check `git worktree list` for strays.
+- One mutation survivor: "enumerator first list never rotates". A per-call assertion was added to `test_nine_or_more_held_threads_do_not_starve_the_rest`; re-run `scratchpad`-style mutation (replace the `cursor_first` update in `web.py` by `pass`) to confirm it now fails, or record the mutant as equivalent.
+- The throwaway Codex session must be deleted: `codex delete --force <id>`, where the id is in `~/codexprobe_ledger.txt`. Check the working-folder marker first, then remove the ledger file and the folder `~/codexprobe_work`. Never print the id.
+- The Phase 6 cleanup list is in section 9; Phase 6 re-checks it. Check `git worktree list` for strays. Do not run `git worktree prune` (it only prints permission errors for other sessions' worktrees).
 
 ### Current
 
-Next: Phase 3 (lock-owner lookup and the live dot), which needs the amended D8 classifier (kinds `terminal`, `daemon`, `helper`, parent process) and the README caveat that a daemon terminal's dot can linger about a minute. It touches `presence.py`, a new `lock_owner.py`, `web.py` and tests; PowerAtlas restarts are allowed for QA by the user's 2026-10-05 statement. QA of anything that reads the Codex state database or lock files needs Codex running (the desktop app was running during Phase 1 and 2 QA).
+Next, in order. Do NOT start Phase 4 before step 5.
 
-Cautions: commit by pathspec for files nobody else has edited, and check `git status` first; stage hunks from a patch of your own diff when a file is shared; no attribution lines in commit messages, whatever a harness reminder says; do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool can halve backslashes and corrupt `\r` and `\n`: write edit scripts with the Write tool.
+1. Run `git status`, then the full suite: `.venv-PowerAtlas/Scripts/python -m pytest --timeout=300`, `node tests/acp_page.test.mjs`, `.venv-PowerAtlas/Scripts/python _check_test_names.py`, and ruff counts. Fix any failure.
+2. Settle the surviving mutant (Parked).
+3. Commit the fixes by pathspec as `fix(261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB): harden the lock owner lookup and tile source`, with a body listing the changes above. No attribution lines, whatever a harness reminder says.
+4. Restart PowerAtlas from `main` (the user allowed restarts for QA). Optionally re-run live QA (b), (e), (f). Then delete the throwaway session (Parked).
+5. Write the Phase 3 plan update (use a Python script run from a file written with the Write tool): tick the 5 Phase 3 exit criteria with evidence; record the QA results above; add the Phase 3 Review Log entry (three rounds, resolutions); add section 9 divergences: re-resolve schedule ignores the verdict; `heapq` imported; `holders()` returns None while disabled; the gone-holder gap uses the last lookup; the tile source is `find_session_workspace`; the `isolated_config` resolver swap; the `status` failure streak; the parent-reuse check; the image-name preference; the system folder from `GetSystemDirectoryW`; the enumerator `owned` and `cursor_first`; not done: owner-cache ids probed first, first sighting after a gone holder is queued FIRST not TOP, queue overflow is retried each poll, back-off paths return PENDING. Add Follow-up Work items for the accepted Lows: same-user spoof of the `terminal` verdict (accepted trust boundary); an unverifiable holder keeping a stale list; `quiet_log` called under the lock; `forget` with a lookup in flight; STILL_ACTIVE exit code 259; the redundant candidate id check. Update the status line and this Handoff, run `/qvalidate`, commit as `docs(261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB): phase 3 progress (code: <sha>)`.
+6. Then Phase 4 (Working/Idle verdict), Phase 5 (turn-end notifications), Phase 6 (docs, cleanup, final QA). Phase 6 also amends the AGENTS.md `codex exec resume` QA recipe with the (d) result (needs approved exact text) and records the `docs/KNOWLEDGE.md` rows.
+
+Cautions: never print ids, paths or message text from the real Codex, Claude or Kiro stores (a debug print once leaked rows). Commit by pathspec for files nobody else has edited, and check `git status` first; stage hunks from a patch of your own diff when a file is shared; do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool can halve backslashes and corrupt `\r` and `\n`: write edit scripts with the Write tool.
 
 ## Harness Improvement Opportunities
 
