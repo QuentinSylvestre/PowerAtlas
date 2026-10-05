@@ -1,7 +1,7 @@
 # Codex Live Status, Context Pressure and Sub-agent Usage from the State Database
 
 > **Date**: 2026-10-02
-> **Status**: In Progress — Phases 0 and 1 done and reviewed; Phase 2 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0 to 2 done and reviewed; Phase 3 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Follow-ups deferred by the archived Codex provider plan: a lock-owner live dot, a Working/Idle verdict and turn-end notifications for terminal Codex sessions, Codex context pressure, sub-agent token usage, and an optional state-database layer that feeds them. Driving Codex from `/acp` and app-server integration are out of scope.
 > **Estimated effort**: 5-6 days (pre-flight 0.5, database and sub-agent usage 1, context pressure 0.5, lock owner and live dot 1.25, verdict 1, notifier 0.75, documentation, cleanup and QA 0.75)
@@ -194,11 +194,11 @@ All measurements print counts, shapes and timings only: no ids, no paths, no mes
 **QA**: read the Usage page against the live store and compare the Codex peak of one known long session with a direct computation from its rollout.
 
 **Exit criteria**:
-- [ ] The parser, schema bump, summary key and UI row exist as above.
-- [ ] All Phase 2 tests pass and the full suites, node tests, `_check_test_names.py` and `ruff` counts are green.
-- [ ] Mutation checks fail the tests: the ratio inverted; no clip; the threshold changed; the schema left at 6; the kiro block altered; `last_token_usage` replaced by `total_token_usage`; a substring match in place of the key-path match; the new DOM text written with `innerHTML` in place of `textContent`; the hidden-workspace filter removed from the Codex accumulator.
-- [ ] Live QA: the page's Codex peak for the chosen session equals the direct computation within rounding.
-- [ ] README's Usage bullet and the `index.html` block heading no longer say context pressure is kiro-cli only (section 8).
+- [x] The parser, schema bump, summary key and UI row exist as above. Commits `5dfddb0`, `ee3f887`, `54e31b4`, merged by `97a6e6f`. The summary format is 8, not 7: `main` had already taken 7 for the removal of tool counts.
+- [x] All Phase 2 tests pass and the full suites, node tests, `_check_test_names.py` and `ruff` counts are green. On `main` after the fixes: pytest 3779 passed and 3 skipped, `node tests/acp_page.test.mjs` 947 of 947, `_check_test_names.py` clean, `ruff` counts for the edited files equal the previous commit.
+- [x] Mutation checks fail the tests: the ratio inverted; no clip; the threshold changed; the schema left at 6; the kiro block altered; `last_token_usage` replaced by `total_token_usage`; a substring match in place of the key-path match; the new DOM text written with `innerHTML` in place of `textContent`; the hidden-workspace filter removed from the Codex accumulator. Applied once each and restored byte for byte: 24 Python mutants (the nine listed plus the clip, the overflow guard, the largest-day fold, the out-of-window days, the total, the sub-agents, the window bounds, the top-N and the tie-break) and 10 page mutants (the listed `innerHTML` one plus the heading, the always-drawn row, the dropped estimate label, the unpassed block, the highest-peak order and the clamp) all fail a case; the one remaining page change is equivalent.
+- [x] Live QA: the page's Codex peak for the chosen session equals the direct computation within rounding. On 2026-10-05 against the live store: 10 Codex sessions in the window, 2 over 80; for the 5 listed sessions the summary's peak (86.2, 82.8, 77.5, 43.6, 15.5) equals an independent read of the rollout (no overview code), and the live Overview page, loaded in a headless browser, shows "Codex, an estimate (last input tokens over the model's context window): 2 of 10 sessions reached 80% of the context window | highest 86% (...)" with no page error.
+- [x] README's Usage bullet and the `index.html` block heading no longer say context pressure is kiro-cli only (section 8).
 
 ### Phase 3: Lock-owner lookup and the live dot [QA]
 **Covers**: SC-1
@@ -406,6 +406,9 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 - The measured source shapes (a copy of the live database, counts only): 543 sub-agent rows, 297 with the quoted `"thread_spawn"`, 246 with the quoted `"guardian"`, none with both.
 **Phase 1 (code commits `fcf6497`, `3516570`, `6ce89d3`, `89ff735`).** The wiring, the page line and note, the README bullet and the `AGENTS.md` sentence are done on top of part 1. Divergences added by the review: a read needs both the `-wal` and the `-shm` file (a `-wal` alone let the read-only open create `-shm` in Codex's folder; a process that exits between the check and the open can still do that, stated in the module header); one undecodable value no longer fails the whole read (`text_factory` replaces it and `cwd_class` then leaves that row out); a directory or link holding the highest state number gives None instead of falling back to a lower file; the usage summary's hidden-workspace failure log names the exception class only (it used to log the path and a traceback, for every provider); the page note adds "so they are an upper bound" (D6). The state-database statuses are `ok`, `absent`, `idle`, `stale` and `error`; D23's list lacks `idle`. Commit `3516570` was built from a stale copy of `tests/test_web.py` and removed three lines another change had just added (the `NO_COLOR` assertions); `6ce89d3` restores them byte for byte. Lesson: stage your own hunks from a patch of your own diff (`git apply --cached`), never a whole file rebuilt from an earlier `HEAD`. The three Low rows were then fixed in `eaf020e`: a 256 MiB cap on the database (with its `-wal`), a drive-type check before the hidden-workspace filter (`_drive_type`, `GetDriveTypeW`; remote, unknown and no-root drives are left out) and a stop check every 256 rows. Final live check on 2026-10-05 against the running Codex (the desktop app held `state_5.sqlite-wal` and `-shm`): the reader read the real database in place, status `ok`, 26 threads and 24,530,488 tokens, equal to a direct read-only query; no file appeared in the Codex home. PowerAtlas was restarted from the working tree (it was running older code) and the dashboard Overview page drew "Sub-agent threads 24.5M · thread_spawn 19.1M · guardian 5.4M" with the lifetime-total note; the payload carried `codex_state_db_status` `ok`.
 
+**Phase 2 (code commits `5dfddb0`, `ee3f887`, `54e31b4`; merged by `97a6e6f`).** The parser records, per Codex day, the peak of 100 * last input tokens over the model's window (`_codex_context_pct`: a window that is an integer from 1 to 10^9, a non-negative integer input, a record matched by `type` and `payload.type`); `usage_summary` returns `codex_context_pressure` (`estimate: True`) from a second accumulator built after the same provider and hidden-workspace filter, with a shared `_pressure_block` for it and the kiro-cli block (a reviewer compared the kiro block's JSON before and after on 11 fixtures and four filter settings: byte-identical); the page draws a Codex row under kiro-cli's line, the heading says "kiro-cli and Codex". Divergences: the summary format is 8 (main's removal of tool counts took 7; the merge conflict was only that line); a reading at or above the window is returned as 100 before the multiplication (a huge integer overflowed the float and cost the line its other readings, a review finding); the kiro-cli line keeps its wording but the helper that formats "highest N% (name)" is shared. The page row text is "Codex, an estimate (last input tokens over the model's context window): N of M sessions reached 80% of the context window | highest X% (name)"; it is absent when `sessions_total` is 0.
+**What the merge brought along (2026-10-05, at the user's request).** Another session's uncommitted work was committed as `8202f9d` (it removes per-tool counting from the usage summary and page, workspace multi-select and the selection-aware launcher badge, and fixes a misplaced token-chart call: the page script committed at `ba65f9e` had a syntax error and 341 page checks failed in a clean checkout). `61a83c6` then updated the Python tests that still expected tool counts (seven whole tests removed, the rest trimmed) and set the schema pin to 8. The branch `phase2-context-pressure` was merged with `--no-ff`.
+
 ## Follow-up Work (Deferred)
 
 1. **Drive Codex from `/acp` through the ACP adapter.** Out of scope by the user's decision (D2). Reopen when the adapter's Windows behaviour and `session/load` are measured; needs a driver abstraction and a Codex permission model.
@@ -425,6 +428,7 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 15. **A re-diff of the helper deny-list when the Codex version changes.** `_CODEX_HELPER_SUBCOMMANDS` is a deny-list that ages (Risk Assessment). Needs a source for the installed Codex version.
 16. **Two terminals in one repository give identical toasts.** D13's label is the folder name only; the existing ACP label adds a session-id fragment. Reopen if it confuses.
 17. **Merge the two writer-state caches.** `session_writer_state` has its own cache beside `_lock_cache` and `_busy_cache` so that the Resume gate and its many tests stay untouched (Phase 3); one probe serving both would halve the probe load. Reopen when those tests are next reworked.
+18. **A cwd over 260 characters is cut before the hidden-workspace predicate (Phase 2 review, Low).** `_trim` cuts a cwd to 260 characters when a rollout is parsed (and kiro-cli's block has the same shape), so a hidden workspace whose path is itself over 260 characters would not match and its session would show with the cut prefix; the real name past the cut does not reach the page. Reopen if such a workspace exists (a long OneDrive path could).
 
 ## Review Log
 
@@ -587,24 +591,43 @@ Standard effort, two personas in fresh context on `fcf6497` and `3516570`: a Sec
 
 Reviewer gaps: a large (hundreds of MB) database against the time budget, a hostile view or virtual table in the database, two simultaneous usage requests, and the page in a browser were not exercised. Health after this cycle: Green (every row is Fixed or verified; the three Low rows were fixed on the user's instruction of 2026-10-05 in `eaf020e`).
 
+### 2026-10-05 -- Phase 2 code review (via /qdev)
+
+Standard effort, two personas in fresh context on `5dfddb0` and `ee3f887`: a Security auditor (untrusted rollout values, hidden names, markup, cache poisoning) and a Senior engineer (plan compliance, the byte-identical kiro block, test adequacy by mutation). About 9 raw findings merged to the 9 rows below (0 High, 2 Medium, 7 Low). The Senior engineer ran 29 mutants (27 detected, 2 survived: the largest-day fold and the first-of-top order); the Security auditor ran hostile synthetic rollouts through the parser and the summary.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `_codex_context_pct` raised `OverflowError` on an integer input above about 1.8e306, losing that line's other readings (Security). | Fixed -- `54e31b4`: a reading at or above the window returns 100 before the multiplication; a test with 10**310 and a mutant. |
+| 2 | Medium | Nothing pinned that a session's peak is the largest of its days (a "last day wins" mutant survived) (Senior). | Fixed -- `54e31b4`: a three-day case (yesterday 90, today 50, a 20-day-old 100). |
+| 3 | Low | The JSON constants NaN and Infinity were not in the unusable-reading cases (Security). | Fixed -- `54e31b4`. |
+| 4 | Low | The `_parse_usage_file` docstring still called `context_peak` v3-only (Senior). | Fixed -- `54e31b4`. |
+| 5 | Low | No Codex case for a reading outside the 14-day window (only the shared 14-day test caught it) (Senior). | Fixed -- `54e31b4`: the same three-day case. |
+| 6 | Low | Every page fixture had one `top` item, so "highest is the first" was unpinned (a mutant survived) (Senior). | Fixed -- `54e31b4`: a three-item case; the mutant now fails. |
+| 7 | Low | The README did not say sub-agents are excluded and the row is absent without Codex sessions (Senior). | Fixed -- `54e31b4`. |
+| 8 | Low | A cwd over 260 characters is cut before the hidden-workspace predicate sees it, so a hidden path that long would not match; the kiro block has the same shape (Security). | Orchestrator: proposed-accept -- pending user decision; Follow-up Work 18. |
+| 9 | Low | The plan asks for the kiro block "byte-identical to a pre-change oracle" and the test pins a literal dict (Senior). | Fixed -- verified by running: the reviewer's before/after comparison on the parent commit was byte-identical (1426 bytes). |
+
+Live QA was done by the orchestrator, not a reviewer (section 9, the exit criteria). Reviewer gaps: the node page tests were read, not run, by the Security auditor; the plan's `docs/KNOWLEDGE.md` and `plans/ROADMAP.md` rows belong to Phase 6. Health after this cycle: Green (one Low row awaits the user's accept).
+
 ## Handoff
 
-> Handoff written: 2026-10-05T13:23:27-05:00 (updated; first written 2026-10-05T12:53:46-05:00)
+> Handoff written: 2026-10-05T14:12:36-05:00
 
 ### Previously
 
-- Phase 0 is done and reviewed. Phase 1 is done and reviewed (Review Log, 2026-10-05): the state-database reader, the usage wiring, the page line, the README bullet and the `AGENTS.md` sentence; commits `fcf6497`, `3516570`, `6ce89d3`, `89ff735`, `eaf020e`, `ab46f3b`; every review row is Fixed. All Phase 1 exit criteria are ticked with their evidence.
-- Nothing is pushed.
+- Phases 0, 1 and 2 are done and reviewed (Review Log, three entries on 2026-10-05); every review row is Fixed except one Low in Phase 2 awaiting the user's accept (Follow-up Work 18). Phase 2 code: `5dfddb0`, `ee3f887`, `54e31b4`, merged by `97a6e6f` on `main`.
+- On the user's instruction the other session's uncommitted work was committed (`8202f9d`) and the tests it broke were updated (`61a83c6`); `main` is green: pytest 3779 passed, node 947 of 947.
+- PowerAtlas runs again from the `main` working tree (restarted 2026-10-05). Nothing is pushed.
 
 ### Parked
 
-- The Phase 0 cleanup was done on 2026-10-05 (section 9, `**Phase 0 cleanup list**`); Phase 6 re-checks it. PowerAtlas is running again from the working tree (restarted 2026-10-05 13:16).- Another session keeps uncommitted edits in `README.md`, `style.css`, `index.html`, `overview.py`, two template partials, `data_codex.py` and `tests/acp_page.test.mjs`; it also commits to `main`. Stage your own hunks from a patch of your own diff (`git apply --cached`), and check `HEAD` has not moved before committing.
+- The Phase 6 cleanup list is in section 9; Phase 6 re-checks it. The temporary checkouts (`PowerAtlas-wt-phase2`, `PowerAtlas-wt-overlay`) and the merged branch `phase2-context-pressure` are removed by the orchestrator at the end of the Phase 2 session; check `git worktree list` for strays.
 
 ### Current
 
-Suggested next: Phase 2 (Codex context pressure). Python phases need a PowerAtlas restart for QA: the user said on 2026-10-05 that restarts are fine for now ("you can restart as much as you want"); treat that as covering this task. Caveat found in Phase 1: the state-database line needs Codex running (a `-wal` and `-shm` file beside the database), so live QA of anything that reads the database needs a running Codex (a throwaway `codex exec resume`, which asks the user first).
+Next: Phase 3 (lock-owner lookup and the live dot), which needs the amended D8 classifier (kinds `terminal`, `daemon`, `helper`, parent process) and the README caveat that a daemon terminal's dot can linger about a minute. It touches `presence.py`, a new `lock_owner.py`, `web.py` and tests; PowerAtlas restarts are allowed for QA by the user's 2026-10-05 statement. QA of anything that reads the Codex state database or lock files needs Codex running (the desktop app was running during Phase 1 and 2 QA).
 
-Cautions: commit by pathspec only for files no other session has edited; no attribution lines in commit messages, whatever a harness reminder says. Do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool can halve backslashes and corrupt `\r` and `\n`: write edit scripts with the Write tool.
+Cautions: commit by pathspec for files nobody else has edited, and check `git status` first; stage hunks from a patch of your own diff when a file is shared; no attribution lines in commit messages, whatever a harness reminder says; do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool can halve backslashes and corrupt `\r` and `\n`: write edit scripts with the Write tool.
 
 ## Harness Improvement Opportunities
 
