@@ -126,13 +126,14 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     with uncommitted edits, or one in a folder that is not a git repository or has no such commit,
     counts from the file's modification time. Click a row with a tracker to expand it.
   - *Usage* covers the last 14 days: agent time per workspace this week against the week before,
-    daily agent time and session counts by provider, tool reliability, context pressure, model mix,
-    and Claude Code and Codex token totals, each with the cache-hit ratio. It is computed in memory in
+    daily agent time and session counts by provider, context pressure, model mix, and Claude Code
+    and Codex token totals, each with the cache-hit ratio and a per-day chart of input, output and
+    cache tokens, so daily token use can be followed. It is computed in memory in
     the background after startup. It shows a loading state first, then a partial view while Claude Code
     sub-agent transcripts are still being counted. Claude Code agent time is estimated from message
     timestamps. Codex agent time is exact from Codex 0.139 and estimated before; Codex sub-agent threads
     are not counted, so Codex totals leave them out, and a running Codex session's usage can lag by
-    about two minutes. Codex tools are listed as `codex:<name>`, so they stay apart from kiro-cli tools of the same name. Context pressure is kiro-cli only. Token totals cover Claude Code and Codex only,
+    about two minutes. Context pressure is kiro-cli only. Token totals cover Claude Code and Codex only,
     with no cost estimate.
   - *Return paths*: the Home button in the panel header, Escape, clicking the open session's row
     again, or closing or deleting the open session. Escape does nothing while focus is in the

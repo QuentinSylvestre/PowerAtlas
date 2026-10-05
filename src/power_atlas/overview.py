@@ -2051,7 +2051,9 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     raises `_UsageStopped` and evicts nothing.
 
     Keys: `by_workspace` (top 8 by this week's agent seconds), `daily` (14
-    days, oldest first, sessions and agent seconds per provider), `tools`
+    days, oldest first, sessions and agent seconds per provider, and `tokens`:
+    the four counters per provider that records them, only on a day it has
+    any, summing to `claude_tokens` and `codex_tokens`), `tools`
     (`top` by calls over the window with `fail_rate`, `failing` this week with
     at least 3 calls), `context_pressure` (kiro-cli v3 only: `sessions_total`
     is every in-window kiro-cli session, `sessions_over_80` those whose
@@ -2103,7 +2105,7 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     # hidden-workspace filter still applies to it.
     parent_cwd = {s["session_id"]: s["cwd"] for s in summaries
                   if s["provider"] == _CLAUDE and not s["subagent"] and s["cwd"]}
-    daily = {d: {"sessions": {}, "agent_s": {}} for d in day_list}
+    daily = {d: {"sessions": {}, "agent_s": {}, "tokens": {}} for d in day_list}
     workspaces: dict[str, dict] = {}
     tools: dict[str, list[int]] = {}
     tools_week: dict[str, list[int]] = {}
@@ -2132,6 +2134,13 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
                     slot[1] += t["failed"]
             if provider in tokens:
                 acc = tokens[provider]
+                # The same counts again per day, for the Tokens charts. Added
+                # here, before the sub-agent `continue`, so a day's bar and the
+                # window total always agree.
+                if any(day["tokens"][key] for key in acc):
+                    day_acc = daily[day_key]["tokens"].setdefault(provider, dict.fromkeys(acc, 0))
+                    for key in acc:
+                        day_acc[key] += day["tokens"][key]
                 for key in acc:
                     acc[key] += day["tokens"][key]
             if sub:
@@ -2189,7 +2198,8 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
         "by_workspace": ws_rows[:_USAGE_TOP_WORKSPACES],
         "daily": [{"date": d,
                    "sessions": daily[d]["sessions"],
-                   "agent_s": {p: round(v, 1) for p, v in daily[d]["agent_s"].items()}}
+                   "agent_s": {p: round(v, 1) for p, v in daily[d]["agent_s"].items()},
+                   "tokens": daily[d]["tokens"]}
                   for d in day_list],
         "tools": {
             "top": [{"name": n, "calls": c, "fail_rate": round(f / c, 4) if c else 0.0}

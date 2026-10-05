@@ -32252,6 +32252,11 @@ class TestOverviewUsage:
         usage = self.summary()
         assert usage["claude_tokens"] == {"input": 10, "output": 12, "cache_read": 80,
                                           "cache_creation": 10, "cache_hit_ratio": 0.8}
+        # The same counts per day: on the day they were recorded, and nowhere
+        # else, including no entry for a provider that records no tokens.
+        assert self.daily(usage, _ov_day(now))["tokens"] == {
+            "claude-code": {"input": 10, "output": 12, "cache_read": 80, "cache_creation": 10}}
+        assert all(d["tokens"] == {} for d in usage["daily"] if d["date"] != _ov_day(now))
         assert usage["models"] == [{"model": "claude-opus-5-5", "sessions": 1},
                                    {"model": "claude-sonnet-4.6", "sessions": 1}]
 
@@ -32303,7 +32308,7 @@ class TestOverviewUsage:
         assert [r["name"] for r in usage["by_workspace"]] == ["open"]
         assert self.daily(usage, _ov_day(now)) == {
             "date": _ov_day(now), "sessions": {"kiro-cli-v3": 1, "kiro-ide": 1},
-            "agent_s": {"kiro-cli-v3": 2.0}}
+            "agent_s": {"kiro-cli-v3": 2.0}, "tokens": {}}
         assert usage["models"] == [{"model": "m-open", "sessions": 1}]
         assert usage["claude_tokens"]["cache_hit_ratio"] == 0.0
         no_ide = self.summary(provider_shown=lambda p: p != "kiro-ide")
@@ -32586,14 +32591,21 @@ class TestOverviewUsage:
         assert usage["claude_tokens"]["cache_read"] == 100 * 4
         assert {t["name"]: (t["calls"], t["fail_rate"]) for t in usage["tools"]["top"]} == {
             "Grep": (1, 1.0), "Read": (1, 0.0)}
-        # Not sessions of their own: no session, agent time, model or row.
-        for key in ("daily", "by_workspace", "models", "context_pressure"):
+        # Not sessions of their own: no session, agent time, model or row. Their
+        # tokens do land on their day, so a day's bar agrees with the total.
+        def no_tokens(daily):
+            return [{k: v for k, v in d.items() if k != "tokens"} for d in daily]
+        assert no_tokens(usage["daily"]) == no_tokens(base["daily"]), "daily"
+        for key in ("by_workspace", "models", "context_pressure"):
             assert usage[key] == base[key], key
+        assert self.daily(usage, _ov_day(now))["tokens"] == {
+            "claude-code": {"input": 20, "output": 4, "cache_read": 400, "cache_creation": 0}}
         # The parent's workspace and provider filters apply to them too.
         for kw in ({"hidden": lambda cwd: cwd == "C:\\ws\\beta"},
                    {"provider_shown": lambda p: p != "claude-code"}):
             filtered = self.summary(**kw)
             assert filtered["claude_tokens"]["input"] == 0, kw
+            assert all(d["tokens"] == {} for d in filtered["daily"]), kw
             assert filtered["tools"]["top"] == [], kw
 
     def test_concurrent_requests_share_one_computation(self, monkeypatch):
@@ -32750,6 +32762,7 @@ class TestOverviewUsage:
             assert usage["partial"] is True
             assert sorted(r["name"] for r in usage["by_workspace"]) == ["alpha", "beta"]
             assert usage["claude_tokens"]["input"] == 1, "main transcripts only"
+            assert sum(d["tokens"].get("claude-code", {}).get("input", 0) for d in usage["daily"]) == 1
             assert usage["tools"]["top"] == []
             assert overview._usage_cache[1] is None, "a partial aggregate is never cached"
             assert set(seen[:2]) == {overview._V3, overview._CLAUDE}
@@ -32763,6 +32776,7 @@ class TestOverviewUsage:
         usage = body["usage"]
         assert usage["partial"] is False
         assert usage["claude_tokens"]["input"] == 11
+        assert sum(d["tokens"].get("claude-code", {}).get("input", 0) for d in usage["daily"]) == 11
         assert [t["name"] for t in usage["tools"]["top"]] == ["Grep"]
         assert usage["reparsed"] == 0, "the two stages filled the memo"
 
@@ -33794,6 +33808,8 @@ class TestOverviewUsage:
         assert usage["codex_tokens"] == {"input": 500, "output": 50, "cache_read": 400,
                                          "cache_creation": 0, "cache_hit_ratio": round(400 / 900, 4)}
         assert self.daily(usage, _ov_day(t))["sessions"] == {"codex": 1}
+        assert self.daily(usage, _ov_day(t))["tokens"] == {
+            "codex": {"input": 500, "output": 50, "cache_read": 400, "cache_creation": 0}}
         assert usage["tools"]["top"] == []
         for child in children:
             assert overview._parse_codex_usage(child)["days"] == {}, child.name

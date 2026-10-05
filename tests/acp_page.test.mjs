@@ -17821,10 +17821,11 @@ function ovUsage(over = {}) {
     ],
     daily: ovUsageDays((i) => (i === 13
       ? { sessions: { "claude-code": 2, "kiro-cli-v3": 1, "kiro-ide": 1 },
-          agent_s: { "claude-code": 300, "kiro-cli-v3": 100 } }
-      : i === 12 ? { sessions: { "kiro-cli-v3": 1 }, agent_s: { "kiro-cli-v3": 800 } } : {})),
-    tools: { top: [{ name: "Bash", calls: 1200, fail_rate: 0.0333 }],
-             failing: [{ name: "shell", failed: 4, calls: 10 }] },
+          agent_s: { "claude-code": 300, "kiro-cli-v3": 100 },
+          tokens: { "claude-code": { input: 100, output: 200, cache_read: 1000, cache_creation: 300 } } }
+      : i === 12 ? { sessions: { "kiro-cli-v3": 1 }, agent_s: { "kiro-cli-v3": 800 },
+                     tokens: { "claude-code": { input: 400, output: 600, cache_read: 2000, cache_creation: 1000 } } }
+      : {})),
     context_pressure: { sessions_over_80: 1, sessions_total: 5,
                         top: [{ session_id: "sess_a", cwd: "C:\\ws\\alpha", name: "alpha", peak: 82.5 }] },
     models: [{ model: "claude-opus-5-5", sessions: 3 }],
@@ -17871,7 +17872,7 @@ check("dashboard overview usage: the short re-fetch does nothing once the Overvi
   assertEqual(calls.length, 1, "no fetch while a session is open");
 });
 
-check("dashboard overview usage: week, daily bars, tools, context, models and tokens, with their scope labels", () => {
+check("dashboard overview usage: week, daily bars, context, models and tokens, with their scope labels", () => {
   const p = loadDashPicker();
   p.sandbox.dashOvRenderUsage(ovUsage(), "ready");
   const b = ovUsageBody(p);
@@ -17885,7 +17886,7 @@ check("dashboard overview usage: week, daily bars, tools, context, models and to
   assertEqual(rows[2].querySelector(".dash-ov-usage-delta").textContent, "new");
   assertEqual(rows[0].querySelector(".dash-ov-usage-ws-name").title, "C:\\ws\\alpha");
   const charts = b.querySelectorAll(".dash-ov-bars");
-  assertEqual(charts.length, 1, "one combined chart: agent time, with session counts on hover");
+  assertEqual(charts.length, 2, "agent time (with session counts on hover), then the Claude Code tokens per day");
   const time = charts[0].querySelectorAll(".dash-ov-bar");
   assertEqual(time.length, 14);
   assert(!b.querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent).includes("Sessions per day"),
@@ -17908,9 +17909,9 @@ check("dashboard overview usage: week, daily bars, tools, context, models and to
   assertEqual(time[13].getAttribute("role"), "img");
   // Kiro IDE has no agent time, so no segment; its legend item says so.
   assertEqual(b.querySelector(".dash-ov-legend").textContent, "Claude Codekiro-cliKiro IDE (sessions only)Codex");
-  const tools = b.querySelectorAll(".dash-ov-tool-row");
-  assertEqual(tools[0].textContent, "Bash1.2k calls3% failed");
-  assertEqual(tools[1].textContent, "shell4 of 1040%");
+  // The tool reliability section is gone, and nothing of it is left drawn.
+  assert(!b.textContent.includes("Tool reliability"), "no Tool reliability section");
+  assertEqual(b.querySelectorAll(".dash-ov-tool-row").length, 0, "no tool rows");
   const labels = b.querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent);
   assert(labels.includes("Context pressurekiro-cli only"), `context is labelled kiro-cli only: ${labels}`);
   assert(labels.includes("TokensClaude Code only"), `tokens are labelled Claude Code only: ${labels}`);
@@ -17951,7 +17952,7 @@ check("dashboard overview usage: a Codex segment, legend entry and tooltip text"
   assertEqual(time[13].title, "2026-09-25: 7m · 4 sessions (Claude Code 1, Codex 3)");
   assertEqual(time[12].title, "2026-09-24: 13m · 1 session (Codex 1)");
   assertEqual(time[13].getAttribute("aria-label"), time[13].title);
-  const legend = b.querySelectorAll(".dash-ov-legend-item");
+  const legend = b.querySelector(".dash-ov-legend").querySelectorAll(".dash-ov-legend-item");
   assertEqual(legend.map((l) => l.className).join("|"),
     "dash-ov-legend-item is-claude|dash-ov-legend-item is-kiro-cli|dash-ov-legend-item is-kiro-ide|dash-ov-legend-item is-codex");
   assertEqual(legend[3].textContent, "Codex");
@@ -17989,6 +17990,66 @@ check("dashboard overview usage: the Tokens area shows a Claude Code block and a
   assertEqual(b.querySelectorAll(".dash-ov-usage-note").length, 1, "one note, not a second section");
 });
 
+check("dashboard overview usage: each Tokens block charts its provider's tokens per day, stacked by counter on one scale", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({
+    daily: ovUsageDays((i) => (i === 13
+      ? { tokens: { "claude-code": { input: 100, output: 200, cache_read: 1000, cache_creation: 300 },
+                    codex: { input: 50, output: 50, cache_read: 300, cache_creation: 0 } } }
+      : i === 12 ? { tokens: { "claude-code": { input: 400, output: 600, cache_read: 2000, cache_creation: 1000 } } }
+      : {})),
+  }), "ready");
+  const b = ovUsageBody(p);
+  const charts = b.querySelectorAll(".dash-ov-bars");
+  assertEqual(charts.length, 3, "agent time, Claude Code tokens, Codex tokens");
+  const blocks = b.querySelectorAll(".dash-ov-usage-block");
+  const claudeBlock = blocks.find((x) => x.textContent.startsWith("TokensClaude Code only"));
+  const codexBlock = blocks.find((x) => x.textContent.startsWith("TokensCodex"));
+  assert(claudeBlock.querySelector(".dash-ov-bars") && codexBlock.querySelector(".dash-ov-bars"),
+    "each Tokens block holds its own chart, under its totals line");
+  const claude = claudeBlock.querySelectorAll(".dash-ov-bar");
+  assertEqual(claude.length, 14);
+  // One scale: day 12 (4000 tokens) is the tallest, day 13 (1600) 40% of it.
+  assertEqual(claude[12].querySelector(".dash-ov-bar-stack").style.height, "100%");
+  assertEqual(claude[13].querySelector(".dash-ov-bar-stack").style.height, "40%");
+  assertEqual(claude[0].querySelector(".dash-ov-bar-stack").style.height, "0%");
+  // Stacked bottom first: cache read, cache write, input, output.
+  const segs = claude[12].querySelectorAll(".dash-ov-bar-seg");
+  assertEqual(segs.map((s) => s.className).join("|"),
+    "dash-ov-bar-seg is-tok-cache-read|dash-ov-bar-seg is-tok-cache-write|dash-ov-bar-seg is-tok-input|dash-ov-bar-seg is-tok-output");
+  assertEqual(segs.map((s) => s.style.height).join("|"), "50%|25%|10%|15%");
+  assertEqual(claude[12].title, "2026-09-24: 4.0k tokens · Cache read 2.0k · Cache write 1.0k · Input 400 · Output 600");
+  assertEqual(claude[13].title, "2026-09-25: 1.6k tokens · Cache read 1.0k · Cache write 300 · Input 100 · Output 200");
+  assertEqual(claude[0].title, "2026-09-12: 0 tokens");
+  assertEqual(claude[13].getAttribute("aria-label"), claude[13].title);
+  assertEqual(claude[13].getAttribute("role"), "img");
+  assertEqual(claudeBlock.querySelector(".dash-ov-bars-axis").textContent, "2026-09-12today");
+  assertEqual(claudeBlock.querySelector(".dash-ov-legend").textContent, "Cache readCache writeInputOutput");
+  // Codex: its own day's tokens only, and no cache-write counter at all.
+  const codex = codexBlock.querySelectorAll(".dash-ov-bar");
+  assertEqual(codex[13].querySelector(".dash-ov-bar-stack").style.height, "100%");
+  assertEqual(codex[12].querySelector(".dash-ov-bar-stack").style.height, "0%", "Claude's day 12 is not Codex's");
+  assertEqual(codex[13].querySelectorAll(".dash-ov-bar-seg").map((s) => s.className).join("|"),
+    "dash-ov-bar-seg is-tok-cache-read|dash-ov-bar-seg is-tok-input|dash-ov-bar-seg is-tok-output");
+  assertEqual(codex[13].querySelectorAll(".dash-ov-bar-seg").map((s) => s.style.height).join("|"), "75%|12.5%|12.5%");
+  assertEqual(codex[13].title, "2026-09-25: 400 tokens · Cache read 300 · Input 50 · Output 50");
+  assertEqual(codexBlock.querySelector(".dash-ov-legend").textContent, "Cache readInputOutput");
+});
+
+check("dashboard overview usage: a payload with no per-day tokens still draws flat token charts", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({ daily: ovUsageDays() }), "ready");
+  const b = ovUsageBody(p);
+  const charts = b.querySelectorAll(".dash-ov-bars");
+  assertEqual(charts.length, 3);
+  for (const chart of [charts[1], charts[2]]) {
+    const bars = chart.querySelectorAll(".dash-ov-bar");
+    assertEqual(bars.length, 14);
+    assert(bars.every((bar) => bar.querySelector(".dash-ov-bar-stack").style.height === "0%"), "every bar is flat");
+    assertEqual(chart.querySelectorAll(".dash-ov-bar-seg").length, 0, "no segment");
+  }
+});
+
 check("dashboard overview usage: a partial aggregate attaches the sub-agent note to the Claude block only", () => {
   const p = loadDashPicker();
   p.sandbox.dashOvRenderUsage(ovCodexUsage({ partial: true }), "warming");
@@ -17999,7 +18060,7 @@ check("dashboard overview usage: a partial aggregate attaches the sub-agent note
   assert(claude && codex, "both token blocks are drawn");
   assertEqual(claude.querySelectorAll(".dash-ov-usage-partial").length, 1, "the Claude block carries the note");
   assertEqual(codex.querySelectorAll(".dash-ov-usage-partial").length, 0, "the Codex block does not");
-  assertEqual(b.querySelectorAll(".dash-ov-usage-partial").length, 2, "and one more under Tool reliability, as before");
+  assertEqual(b.querySelectorAll(".dash-ov-usage-partial").length, 1, "and no other block carries one");
 });
 
 check("dashboard overview usage: hostile Codex fields stay text and numbers (D26)", () => {
@@ -18026,7 +18087,7 @@ check("dashboard overview usage: no Codex block for an absent or empty Codex pay
   }
 });
 
-check("dashboard overview usage: markup in a workspace, tool or model name stays text, and bar heights are numbers only (D26)", () => {
+check("dashboard overview usage: markup in a workspace or model name stays text, and bar heights are numbers only (D26)", () => {
   const p = loadDashPicker();
   p.sandbox.dashOvRenderUsage(ovUsage({
     by_workspace: [{ cwd: OV_XSS, name: OV_XSS, this_week_s: OV_XSS, last_week_s: "1); x:y" }],
@@ -18039,9 +18100,12 @@ check("dashboard overview usage: markup in a workspace, tool or model name stays
                                 "kiro-ide": OV_XSS }),
       agent_s: i === 3 ? { "claude-code": "50%; color:red", "kiro-cli-v3": 1e308 * 10 }
                        : { "claude-code": -40, constructor: 7 },
+      // A real own `__proto__` key must never be read as a provider; only
+      // the 7 output tokens of the one real count reach the chart.
+      tokens: Object.assign(JSON.parse('{"__proto__":{"input":99}}'),
+                            { "claude-code": { input: OV_XSS, output: "7", cache_read: -5,
+                                               cache_creation: 1e308 * 10 } }),
     })),
-    tools: { top: [{ name: OV_XSS, calls: OV_XSS, fail_rate: OV_XSS }],
-             failing: [{ name: OV_XSS, failed: OV_XSS, calls: OV_XSS }] },
     context_pressure: { sessions_over_80: OV_XSS, sessions_total: 3,
                         top: [{ session_id: OV_XSS, cwd: OV_XSS, name: OV_XSS, peak: "900" }] },
     models: [{ model: OV_XSS, sessions: OV_XSS }, "not an object"],
@@ -18068,15 +18132,22 @@ check("dashboard overview usage: markup in a workspace, tool or model name stays
   }
   assertEqual(b.querySelector(".dash-ov-usage-ws-name").textContent, OV_XSS, "shown as text");
   assertEqual(b.querySelector(".dash-ov-usage-ws-name").title, OV_XSS, "the tooltip is text too");
-  assertEqual(b.querySelector(".dash-ov-tool-name").textContent, OV_XSS);
   assertEqual(b.querySelector(".dash-ov-chip-name").textContent, OV_XSS);
   assertEqual(b.querySelectorAll(".dash-ov-chip").length, 1, "a non-object model entry is skipped");
   const segClasses = new Set(b.querySelectorAll(".dash-ov-bar-seg").map((s) => s.className));
   for (const c of segClasses) {
     assert(["dash-ov-bar-seg is-claude", "dash-ov-bar-seg is-kiro-cli", "dash-ov-bar-seg is-kiro-ide",
-            "dash-ov-bar-seg is-codex"].includes(c),
+            "dash-ov-bar-seg is-codex", "dash-ov-bar-seg is-tok-cache-read",
+            "dash-ov-bar-seg is-tok-cache-write", "dash-ov-bar-seg is-tok-input",
+            "dash-ov-bar-seg is-tok-output"].includes(c),
       `a segment class comes from the fixed map, got ${c}`);
   }
+  // Hostile counts are zero; the one real count is the whole bar, and the
+  // own `__proto__` entry is not a provider.
+  const tokenBar = b.querySelectorAll(".dash-ov-bars")[1].querySelector(".dash-ov-bar");
+  assertEqual(tokenBar.title, `${OV_XSS}: 7 tokens · Cache read 0 · Cache write 0 · Input 0 · Output 7`);
+  assertEqual(tokenBar.querySelectorAll(".dash-ov-bar-seg").map((s) => s.className).join("|"),
+    "dash-ov-bar-seg is-tok-output");
   // A hostile date lands in the bar tooltip and accessible name as text;
   // only the fixed providers' numeric counts reach the session text.
   const bar = b.querySelector(".dash-ov-bar");
@@ -18140,7 +18211,7 @@ check("dashboard overview usage: a partial aggregate shows a note and is re-fetc
   await p.settle(); await p.settle();
   const notes = () => ovUsageBody(p).querySelectorAll(".dash-ov-usage-partial");
   assert(ovUsageBody(p).querySelector(".dash-ov-usage-ws"), "the partial data is drawn");
-  assertEqual(notes().length, 2, "one note under Tool reliability, one under Tokens");
+  assertEqual(notes().length, 1, "one note, under the Claude Code Tokens block");
   assertEqual(notes()[0].textContent, "Still counting sub-agent transcripts…");
   let retry = p.timers.filter((t) => t.ms === 3000);
   assertEqual(retry.length, 1, "a 3 s re-fetch is scheduled while partial");
@@ -18176,7 +18247,7 @@ check("dashboard overview usage: a partial note says the count stopped when the 
     p.timers.filter((t) => t.ms === 3000)[0].fn();
     await p.settle(); await p.settle();
     const notes = ovUsageBody(p).querySelectorAll(".dash-ov-usage-partial");
-    assertEqual(notes.length, 2, `${failure}: the partial data stays drawn`);
+    assertEqual(notes.length, 1, `${failure}: the partial data stays drawn`);
     assertEqual(notes[0].textContent, "Sub-agent transcripts are not counted yet.", failure);
     assertEqual(p.timers.filter((t) => t.ms === 3000).length, 1, `${failure}: no further re-fetch`);
   }

@@ -1711,7 +1711,7 @@ function dashOvLiveFailed(){
 // replaces the skeleton within seconds. The pass reads the main transcripts
 // first: after that `usage` is a partial aggregate (`usage.partial`, still
 // "warming") without the Claude Code sub-agent transcripts, drawn with a note
-// under Tool reliability and Tokens, and re-fetched on the same 3 s timer
+// under the Claude Code Tokens block, and re-fetched on the same 3 s timer
 // until the complete aggregate ("ready") replaces it. Built from DOM nodes only (D26):
 // workspace, tool and model names are free text from transcripts; the only
 // styles written are clamped numbers, and provider colours come from the
@@ -1807,6 +1807,40 @@ function dashOvUsageWeek(rows){
     } else {
       var up = now >= before;
       delta = dashOvText('span', 'dash-ov-usage-delta ' + (up ? 'is-up' : 'is-down'),
+// One chart column, shared by the agent-time and the token charts: a stack
+// `pct` percent tall (dashOvPct's clamped number is the only style written)
+// with one segment per [class, value] of `segs`, each as tall as its share of
+// `total`. `tip` is the hover tooltip and, as role img with an aria-label
+// (not allowed on a plain div), the accessible name, so screen-reader and
+// touch users get the text the tooltip shows.
+function dashOvBarCol(tip, pct, segs, total){
+  var col = document.createElement('div');
+  col.className = 'dash-ov-bar';
+  col.title = tip;
+  col.setAttribute('role', 'img');
+  col.setAttribute('aria-label', tip);
+  var stack = document.createElement('div');
+  stack.className = 'dash-ov-bar-stack';
+  stack.style.height = pct + '%';
+  segs.forEach(function(s){
+    if (!s[1]) return;
+    var seg = document.createElement('div');
+    seg.className = 'dash-ov-bar-seg ' + s[0];
+    seg.style.height = dashOvPct(s[1], total) + '%';
+    stack.appendChild(seg);
+  });
+  col.appendChild(stack);
+  return col;
+}
+// The first day's date at the left, "today" at the right.
+function dashOvBarsAxis(days){
+  var axis = document.createElement('div');
+  axis.className = 'dash-ov-bars-axis';
+  axis.appendChild(dashOvText('span', '', days[0].date));
+  axis.appendChild(dashOvText('span', '', 'today'));
+  return axis;
+}
+function dashOvDayLabel(d){ return d.date == null ? '' : String(d.date); }
         (up ? '▲ ' : '▼ ') + dashOvDuration(Math.abs(now - before)));
     }
     delta.title = 'Last week: ' + dashOvDuration(before);
@@ -1842,38 +1876,13 @@ function dashOvUsageChart(days){
   chart.className = 'dash-ov-bars';
   days.forEach(function(d, i){
     var m = dashOvObj(d.agent_s);
-    var col = document.createElement('div');
-    col.className = 'dash-ov-bar';
-    // The same text as the accessible name (role img: aria-label is not
-    // allowed on a plain div), so screen-reader and touch users get the
-    // session counts the hover tooltip shows.
-    var tip = (d.date == null ? '' : String(d.date)) + ': ' + dashOvDuration(totals[i]) +
+    var tip = dashOvDayLabel(d) + ': ' + dashOvDuration(totals[i]) +
       ' · ' + dashOvUsageSessionText(d.sessions);
-    col.title = tip;
-    col.setAttribute('role', 'img');
-    col.setAttribute('aria-label', tip);
-    var stack = document.createElement('div');
-    stack.className = 'dash-ov-bar-stack';
-    stack.style.height = dashOvPct(totals[i], max) + '%';
-    DASH_OV_USAGE_PROVIDERS.forEach(function(p){
-      var v = dashOvOwn(m, p[0]);
-      if (!v) return;
-      var seg = document.createElement('div');
-      seg.className = 'dash-ov-bar-seg ' + p[1];
-      seg.style.height = dashOvPct(v, totals[i]) + '%';
-      stack.appendChild(seg);
-    });
-    col.appendChild(stack);
-    chart.appendChild(col);
+    chart.appendChild(dashOvBarCol(tip, dashOvPct(totals[i], max),
+      DASH_OV_USAGE_PROVIDERS.map(function(p){ return [p[1], dashOvOwn(m, p[0])]; }), totals[i]));
   });
   block.appendChild(chart);
-  if (days.length) {
-    var axis = document.createElement('div');
-    axis.className = 'dash-ov-bars-axis';
-    axis.appendChild(dashOvText('span', '', days[0].date));
-    axis.appendChild(dashOvText('span', '', 'today'));
-    block.appendChild(axis);
-  }
+  if (days.length) block.appendChild(dashOvBarsAxis(days));
   return block;
 }
 function dashOvUsageLegend(){
@@ -1884,40 +1893,50 @@ function dashOvUsageLegend(){
   });
   return legend;
 }
-function dashOvToolList(title, rows, cells, empty){
-  var wrap = document.createElement('div');
-  wrap.className = 'dash-ov-tool-table';
-  wrap.appendChild(dashOvText('div', 'dash-ov-tool-head', title));
-  if (!rows.length) {
-    wrap.appendChild(dashOvText('div', 'dash-ov-empty', empty));
-    return wrap;
-  }
-  var list = document.createElement('ul');
-  list.className = 'dash-ov-tool-list';
-  rows.forEach(function(t){
-    var li = document.createElement('li');
-    li.className = 'dash-ov-tool-row';
-    li.appendChild(dashOvText('span', 'dash-ov-tool-name', t.name));
-    cells(t).forEach(function(c){ li.appendChild(dashOvText('span', 'dash-ov-tool-cell', c)); });
-    list.appendChild(li);
+// [counter, class, label] of the token counters, in stacking order, bottom
+// first: the large, steady cache reads at the foot, output on top.
+var DASH_OV_TOKEN_KINDS = [
+  ['cache_read', 'is-tok-cache-read', 'Cache read'],
+  ['cache_creation', 'is-tok-cache-write', 'Cache write'],
+  ['input', 'is-tok-input', 'Input'],
+  ['output', 'is-tok-output', 'Output']
+];
+// 14 stacked bars of one provider's tokens per day, one segment per counter,
+// on one scale (the tallest day), so a bar's height is the same total as the
+// totals line above it. `provider` is the key into each day's `tokens` map,
+// read as an own key only. A provider with no cache-write counter passes
+// `omitCacheWrite`.
+function dashOvUsageTokenChart(days, provider, omitCacheWrite){
+  var kinds = DASH_OV_TOKEN_KINDS.filter(function(k){ return !(omitCacheWrite && k[0] === 'cache_creation'); });
+  var perDay = days.map(function(d){
+    var m = dashOvObj(d.tokens);
+    return Object.prototype.hasOwnProperty.call(m, provider) ? dashOvObj(m[provider]) : {};
   });
-  wrap.appendChild(list);
+  var totals = perDay.map(function(t){
+    return kinds.reduce(function(sum, k){ return sum + dashOvOwn(t, k[0]); }, 0);
+  });
+  var max = totals.reduce(function(a, b){ return Math.max(a, b); }, 0);
+  var wrap = document.createElement('div');
+  wrap.className = 'dash-ov-token-chart';
+  var chart = document.createElement('div');
+  chart.className = 'dash-ov-bars';
+  days.forEach(function(d, i){
+    var tip = dashOvDayLabel(d) + ': ' + dashOvCompact(totals[i]) + ' tokens';
+    if (totals[i]) {
+      tip += ' · ' + kinds.map(function(k){ return k[2] + ' ' + dashOvCompact(dashOvOwn(perDay[i], k[0])); }).join(' · ');
+    }
+    chart.appendChild(dashOvBarCol(tip, dashOvPct(totals[i], max),
+      kinds.map(function(k){ return [k[1], dashOvOwn(perDay[i], k[0])]; }), totals[i]));
+  });
+  wrap.appendChild(chart);
+  if (days.length) wrap.appendChild(dashOvBarsAxis(days));
+  var legend = document.createElement('div');
+  legend.className = 'dash-ov-legend';
+  kinds.forEach(function(k){
+    legend.appendChild(dashOvText('span', 'dash-ov-legend-item ' + k[1], k[2]));
+  });
+  wrap.appendChild(legend);
   return wrap;
-}
-function dashOvUsageTools(tools){
-  tools = dashOvObj(tools);
-  var block = dashOvBlock('Tool reliability', '');
-  var grid = document.createElement('div');
-  grid.className = 'dash-ov-usage-tools';
-  grid.appendChild(dashOvToolList('Most used', dashOvArr(tools.top), function(t){
-    return [dashOvCompact(t.calls) + ' calls', dashOvRatio(t.fail_rate) + ' failed'];
-  }, 'No tool calls'));
-  grid.appendChild(dashOvToolList('Most failing this week', dashOvArr(tools.failing), function(t){
-    var calls = dashOvNum(t.calls), failed = dashOvNum(t.failed);
-    return [dashOvCount(failed) + ' of ' + dashOvCount(calls), dashOvRatio(calls ? failed / calls : 0)];
-  }, 'No failing tools'));
-  block.appendChild(grid);
-  return block;
 }
 function dashOvUsageContext(cp){
   cp = dashOvObj(cp);
@@ -1945,6 +1964,7 @@ function dashOvUsageModels(models){
   chips.className = 'dash-ov-chips';
   models.forEach(function(m){
     var chip = document.createElement('span');
+  block.appendChild(dashOvUsageTokenChart(days, provider, omitCacheWrite));
     chip.className = 'dash-ov-chip';
     chip.appendChild(dashOvText('span', 'dash-ov-chip-name', m.model));
     chip.appendChild(dashOvText('span', 'dash-ov-chip-n', dashOvCount(m.sessions)));
@@ -1954,9 +1974,11 @@ function dashOvUsageModels(models){
   return block;
 }
 // One Tokens block per provider that records tokens: `label` is its scope
-// ("Claude Code only", "Codex"). A provider with no cache-write counter passes
-// `omitCacheWrite`. 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
-function dashOvUsageTokens(t, label, omitCacheWrite){
+// ("Claude Code only", "Codex"), `provider` its key in each day's `tokens`
+// map. The totals line, then the same counters per day. A provider with no
+// cache-write counter passes `omitCacheWrite`.
+// 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+function dashOvUsageTokens(t, label, days, provider, omitCacheWrite){
   t = dashOvObj(t);
   var block = dashOvBlock('Tokens', label);
   block.appendChild(dashOvText('div', 'dash-ov-usage-line',
@@ -2025,18 +2047,15 @@ function dashOvRenderUsage(usage, state){
   body.appendChild(dashOvUsageChart(days));
   body.appendChild(dashOvUsageLegend());
   var partial = usage.partial === true;
-  var tools = dashOvUsageTools(usage.tools);
-  if (partial) tools.appendChild(dashOvUsagePartialNote());
-  body.appendChild(tools);
   body.appendChild(dashOvUsageContext(usage.context_pressure));
   body.appendChild(dashOvUsageModels(usage.models));
   // The sub-agent note belongs to the Claude block only: Codex sub-agent
   // threads are never counted, so there is nothing for it to be still counting.
-  var tokens = dashOvUsageTokens(usage.claude_tokens, 'Claude Code only');
+  var tokens = dashOvUsageTokens(usage.claude_tokens, 'Claude Code only', days, 'claude-code');
   if (partial) tokens.appendChild(dashOvUsagePartialNote());
   body.appendChild(tokens);
   if (dashOvHasTokens(usage.codex_tokens)) {
-    body.appendChild(dashOvUsageTokens(usage.codex_tokens, 'Codex', true));
+    body.appendChild(dashOvUsageTokens(usage.codex_tokens, 'Codex', days, 'codex', true));
   }
   body.appendChild(dashOvText('div', 'dash-ov-usage-note',
     'Claude agent time is estimated from message timestamps. ' +

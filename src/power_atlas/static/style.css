@@ -1463,19 +1463,21 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .dash-ov-bar-seg.is-kiro-ide, .dash-ov-legend-item.is-kiro-ide::before { background: #a78bfa; }
 /* 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4 */
 .dash-ov-bar-seg.is-codex, .dash-ov-legend-item.is-codex::before { background: #e5e7eb; }
-.dash-ov-usage-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.dash-ov-tool-head { margin-bottom: 2px; font-size: 11px; color: var(--text-dim); }
-.dash-ov-tool-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
-.dash-ov-tool-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 11.5px; }
-.dash-ov-tool-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 10.5px; }
-.dash-ov-tool-cell { flex-shrink: 0; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* Token counters in the daily Tokens charts, one fixed class each. Chosen
+   apart from the provider colours above, so a segment is never read as a
+   provider; checked against the dark surface with the dataviz validator. */
+.dash-ov-token-chart { margin-top: 6px; }
+.dash-ov-bar-seg.is-tok-cache-read, .dash-ov-legend-item.is-tok-cache-read::before { background: #0f9e8e; }
+.dash-ov-bar-seg.is-tok-cache-write, .dash-ov-legend-item.is-tok-cache-write::before { background: #c08400; }
+.dash-ov-bar-seg.is-tok-input, .dash-ov-legend-item.is-tok-input::before { background: #3b8fd6; }
+.dash-ov-bar-seg.is-tok-output, .dash-ov-legend-item.is-tok-output::before { background: #d9508f; }
 .dash-ov-usage-line { font-size: 12px; color: var(--text-muted); }
 .dash-ov-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .dash-ov-chip { display: inline-flex; align-items: baseline; gap: 6px; padding: 1px 8px; border-radius: 10px; background: var(--surface); font-size: 11px; }
 .dash-ov-chip-n { color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .dash-ov-usage-note { margin-top: 12px; font-size: 11px; font-style: italic; color: var(--text-dim); }
-/* Stage 2 of the usage warm pass: tools and tokens lack the Claude Code
-   sub-agent transcripts. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE */
+/* Stage 2 of the usage warm pass: the Claude Code tokens lack the sub-agent
+   transcripts. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE */
 .dash-ov-usage-partial { margin-top: 4px; font-size: 11px; font-style: italic; color: var(--text-dim); }
 /* Data drawn earlier that could not be refreshed: the live tiles after three
    failed polls, and a usage aggregate whose recompute failed.
