@@ -31403,6 +31403,30 @@ class TestOverviewLive:
         deps = base._replace(codex_terminal_threads=boom)
         assert self._live({}, self._snap(), deps, self._originals(cwd)) == []
 
+    def test_a_tile_gets_the_turn_verdict_only_for_a_thread_the_enumerator_returned(self, monkeypatch, store):
+        from power_atlas import data_codex
+        cwd = "C:\\ws\\proj"
+        other = "0000000f-1111-4222-8333-00000000000f"
+        store.add("codex", cwd, _LK_TILE_SID)
+        store.add("codex", cwd, other)
+        asked = []
+        monkeypatch.setattr(data_codex, "find_session_workspace", lambda s: cwd)
+        monkeypatch.setattr(data_codex, "turn_state", lambda path: asked.append(path.stem) or "working")
+        deps = self._deps(recent={other})._replace(codex_terminal_threads=lambda snap: [_LK_TILE_SID])
+        tiles = {t["id"]: t for t in self._live({}, self._snap(live_cwds=[("codex", cwd)]), deps, self._originals(cwd))}
+        assert tiles[_LK_TILE_SID]["status"] == "working"
+        assert tiles[other]["status"] == "", "live by the folder rule, but no terminal owns it"
+        assert asked == [_LK_TILE_SID], "no rollout is read for a tile that gets no verdict"
+
+    def test_a_tile_with_no_turn_record_has_an_empty_status(self, monkeypatch, store):
+        from power_atlas import data_codex
+        cwd = "C:\\ws\\proj"
+        store.add("codex", cwd, _LK_TILE_SID)
+        monkeypatch.setattr(data_codex, "find_session_workspace", lambda s: cwd)
+        monkeypatch.setattr(data_codex, "turn_state", lambda path: None)
+        deps = self._deps()._replace(codex_terminal_threads=lambda snap: [_LK_TILE_SID])
+        assert [t["status"] for t in self._live({}, self._snap(), deps, self._originals(cwd))] == [""]
+
     # --- the rail's rule, by expected-set equality --------------------------
 
     def test_the_rail_rule(self, store, tmp_path):
@@ -35018,6 +35042,129 @@ class TestCodexTileSourceWiring:
         monkeypatch.setattr(web_mod.data, "discover_workspaces_with_counts", lambda *a, **k: [])
         web_mod._overview_live({}, "all")
         assert seen["deps"].codex_terminal_threads is web_mod._codex_terminal_threads
+
+
+class TestCodexTurnVerdictWiring:
+    """Phase 4 (D11, D12, D19, D21): a Codex thread a terminal holds carries `working` or `idle` on
+    its dashboard row and its Overview tile; nothing else does, and `/api/acp/sessions` is untouched."""
+
+    @pytest.fixture
+    def codex_rollouts(self, isolated_config):
+        from power_atlas import data, data_codex
+        data_codex._clear_caches()
+        data.invalidate_workspace_counts()
+        yield isolated_config / "codex-home" / "sessions"
+        # the session cache is process-wide and keyed by workspace: leave nothing for the next test
+        data_codex._clear_caches()
+        data.session_cache.clear()
+        data.invalidate_workspace_counts()
+
+    @staticmethod
+    def _reset_listing_cache(monkeypatch):
+        """Call after the rollouts are written: the store, the session cache, the workspace list and
+        each listing are cached process-wide."""
+        from power_atlas import data, data_codex
+        data_codex._clear_caches()
+        data.session_cache.clear()
+        data.invalidate_workspace_counts()
+        monkeypatch.setattr(data, "_cache", {})
+
+    def _flat(self, web_mod, include_provider=True):
+        return web_mod._acp_flat_listing(1, 10, {}, {}, providers=frozenset({"codex"}),
+                                         include_provider=include_provider)
+
+    def _own(self, monkeypatch, owned):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_codex_terminal_owned", lambda snap, sid: owned)
+        monkeypatch.setattr(web_mod, "_session_is_live", lambda snap, s, prov: True)
+
+    def test_a_terminal_held_thread_row_shows_the_last_turn_record(self, codex_rollouts, monkeypatch):
+        from power_atlas import web as web_mod
+        now = time.time()
+        _ovx_rollout(codex_rollouts, 81, [_ovx_user(now - 30), _ovx_event(now - 20, "task_started")], at=now - 30)
+        _ovx_rollout(codex_rollouts, 82, [_ovx_event(now - 40, "task_started"), _ovx_event(now - 10, "task_complete")],
+                     at=now - 40)
+        self._reset_listing_cache(monkeypatch)
+        self._own(monkeypatch, True)
+        rows = {r["id"]: r for r in self._flat(web_mod)["sessions"]}
+        assert rows[_ovx_id(81)]["status"] == "working"
+        assert rows[_ovx_id(82)]["status"] == "idle"
+
+    def test_the_grouped_listing_and_the_pinned_rows_carry_it_too(self, codex_rollouts, monkeypatch):
+        from power_atlas import web as web_mod
+        now = time.time()
+        _ovx_rollout(codex_rollouts, 83, [_ovx_event(now - 20, "task_started")], at=now - 30)
+        self._reset_listing_cache(monkeypatch)
+        self._own(monkeypatch, True)
+        out = web_mod._acp_listing("C:\\ws\\gamma", 1, 10, 1, 10, {}, {}, providers=frozenset({"codex"}),
+                                   include_provider=True)
+        rows = [r for g in out["groups"] for r in g["sessions"]]
+        assert [r["status"] for r in rows if r["id"] == _ovx_id(83)] == ["working"]
+
+    def test_a_thread_no_terminal_holds_keeps_an_empty_status(self, codex_rollouts, monkeypatch):
+        from power_atlas import web as web_mod
+        now = time.time()
+        _ovx_rollout(codex_rollouts, 84, [_ovx_event(now - 20, "task_started")], at=now - 30)
+        self._reset_listing_cache(monkeypatch)
+        self._own(monkeypatch, False)
+        assert [r["status"] for r in self._flat(web_mod)["sessions"] if r["id"] == _ovx_id(84)] == [""]
+
+    def test_a_listing_without_include_provider_has_no_status_and_asks_no_owner(self, codex_rollouts, monkeypatch):
+        from power_atlas import web as web_mod
+        now = time.time()
+        _ovx_rollout(codex_rollouts, 85, [_ovx_event(now - 20, "task_started")], at=now - 30)
+        self._reset_listing_cache(monkeypatch)
+        monkeypatch.setattr(web_mod, "_codex_terminal_owned",
+                            lambda snap, sid: pytest.fail("the owner was asked for a non-dashboard listing"))
+        rows = self._flat(web_mod, include_provider=False)["sessions"]
+        assert [r["status"] for r in rows if r["id"] == _ovx_id(85)] == [""]
+
+    def test_the_verdict_needs_a_windows_owner_rule(self, codex_rollouts, monkeypatch):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(web_mod, "_codex_terminal_owned",
+                            lambda snap, sid: pytest.fail("the owner rule ran off Windows"))
+        session = Session(session_id=_ovx_id(86), title="t", cwd="C:\\ws\\gamma", created_at="", updated_at="",
+                          first_prompt="", last_prompt="", last_reply_tail="")
+        assert web_mod._codex_turn_status(_lk_snap(), session) == ""
+
+    def test_a_row_status_is_one_of_three_words_and_carries_no_owner_data(self, codex_rollouts, monkeypatch):
+        from power_atlas import web as web_mod
+        now = time.time()
+        _ovx_rollout(codex_rollouts, 87, [_ovx_event(now - 20, "task_started")], at=now - 30)
+        self._reset_listing_cache(monkeypatch)
+        self._own(monkeypatch, True)
+        row = self._flat(web_mod)["sessions"][0]
+        assert row["status"] in ("working", "idle", "")
+        text = json.dumps(row)
+        assert not any(word in text for word in ("pid", "verdict", "command"))
+
+
+class TestCodexTurnBoundaryParity:
+    """Phase 4: the verdict reader and the usage parser agree on where a turn starts and ends. A
+    turn the usage parser has closed (it adds agent time) is idle to the verdict reader; a turn it
+    still holds open is working."""
+
+    @staticmethod
+    def _agent_seconds(path):
+        from power_atlas import overview
+        summary = overview._parse_usage_file(path, "codex")
+        return sum(day["agent_seconds"] for day in summary["days"].values())
+
+    @pytest.mark.parametrize("n,records,verdict,closed", [
+        (91, [("task_started", 40)], "working", False),
+        (92, [("task_started", 40), ("task_complete", 10)], "idle", True),
+        (93, [("task_started", 40), ("turn_aborted", 20)], "idle", True),
+        (94, [("task_started", 80), ("task_complete", 50), ("task_started", 5)], "working", True),
+        (95, [("task_complete", 50)], "idle", False),
+    ])
+    def test_the_two_readers_agree_on_turn_boundaries(self, isolated_config, n, records, verdict, closed):
+        from power_atlas import data_codex
+        now = time.time()
+        root = isolated_config / "codex-home" / "sessions"
+        path = _ovx_rollout(root, n, [_ovx_event(now - ago, kind) for kind, ago in records], at=now - 100)
+        assert data_codex.turn_state(path) == verdict
+        assert (self._agent_seconds(path) > 0) is closed
 
 
 class TestCodexOwnerVerdictNeverRaises:

@@ -1324,6 +1324,59 @@ def last_event_epoch(path) -> float | None:
     return _last_event(target, os.stat(target))
 
 
+# --- Turn verdict (D11) ---------------------------------------------------------------------
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 4
+
+TURN_STUCK_SECONDS = 30 * 60.0  # a turn whose newest record is older than this has no verdict
+_TURN_RECORDS = {"task_started": "working", "task_complete": "idle", "turn_aborted": "idle"}
+_turn_cache = BoundedCache(256)  # path -> (mtime_ns, size, verdict, newest record epoch)
+
+
+def _read_turn_state(path: str) -> tuple[str | None, float | None]:
+    """(verdict of the last turn record in the tail window, epoch of the newest record)."""
+    newest = None
+    with open_shared(path) as fh:
+        size = fh.seek(0, 2)
+        for line in _iter_lines_reverse(fh, size):
+            obj = loads(line)
+            if not isinstance(obj, dict):
+                continue
+            if newest is None:
+                when = _record_time(obj)
+                if when is not None:
+                    newest = when.timestamp()
+            payload = obj.get("payload")
+            if obj.get("type") == "event_msg" and isinstance(payload, dict):
+                verdict = _TURN_RECORDS.get(payload.get("type"))
+                if verdict is not None:
+                    return verdict, newest
+    return None, newest
+
+
+@_safe("turn_state", lambda: None, path_arg=True)
+def turn_state(path) -> str | None:
+    """``working`` or ``idle`` from the last turn record of a rollout, else None.
+
+    The last of ``task_started`` (working), ``task_complete`` and ``turn_aborted`` (idle)
+    in the tail window, matched on ``type`` and ``payload.type`` and never as text, because
+    a rollout routinely quotes these words in tool output. None when the window holds no
+    such record, and None when the verdict is working but the newest record is older than
+    TURN_STUCK_SECONDS (a stuck turn). Cached by (mtime_ns, size), never mtime alone:
+    Windows freezes the mtime of a rollout Codex holds open while its size grows.
+    """
+    target = os.fspath(path)
+    st = os.stat(target)
+    cached = _turn_cache.get(target)
+    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+        verdict, newest = cached[2], cached[3]
+    else:
+        verdict, newest = _read_turn_state(target)
+        _turn_cache.put(target, (st.st_mtime_ns, st.st_size, verdict, newest))
+    if verdict == "working" and (newest is None or time.time() - newest > TURN_STUCK_SECONDS):
+        return None
+    return verdict
+
+
 def activity_epoch(path, st) -> float:
     """When the rollout last showed activity: the later of its mtime and, only when
     the mtime is older than ACTIVITY_WINDOW, the last complete record's timestamp (D16).
@@ -1726,7 +1779,7 @@ def session_writer_state(session_id: str) -> str:
 def _clear_caches() -> None:
     """Drop every cache and memo. Tests call it after each store mutation."""
     global _store_memo, _available_memo, _names_memo, _cache_cap, _verdict_cache, _parse_cache
-    global _last_event_cache, _probe_stuck_until
+    global _last_event_cache, _probe_stuck_until, _turn_cache
     with _store_lock:
         _store_memo = None
     _available_memo = None
@@ -1736,6 +1789,7 @@ def _clear_caches() -> None:
         _verdict_cache = BoundedCache(_cache_cap)
         _parse_cache = BoundedCache(_cache_cap)
         _last_event_cache = BoundedCache(_cache_cap)
+        _turn_cache = BoundedCache(256)
     _missing.clear()
     _parse_failed.clear()
     _lock_cache.clear()

@@ -514,7 +514,9 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
 /* A row that's live (any provider) but not held by this PowerAtlas -- no
    working/waiting/errored classification available (see dashRailDotClass()),
    so a neutral, unanimated dot rather than one of the four semantic colours
-   above, which would overclaim a verdict nobody computed. */
+   above, which would overclaim a verdict nobody computed. (A Codex thread a
+   terminal holds is the exception: it gets `.status-thinking` or
+   `.status-idle` from its last turn record.) */
 .session-status.status-live { background: #94a3b8; box-shadow: 0 0 0 2px rgba(148, 163, 184, 0.22); }
 /* Machine-driven session marker — `bg`, `daemon`, `daemon-worker` or `sdk`.
    Deliberately muted and typographic rather than coloured: it qualifies what
@@ -2633,7 +2635,8 @@ mark.rail-hit { background: color-mix(in srgb, var(--accent) 32%, transparent); 
    the drift this removes.
 
    A non-held row that is still live somewhere (`.status-live`, all
-   providers) draws the same neutral dot for the same reason. Only a row with
+   providers) draws the same neutral dot for the same reason, except a Codex
+   thread a terminal holds, which draws the working or idle dot. Only a row with
    no live process anywhere carries no dot at all — greyed-`locked` rows still
    get `.status-live` when the foreign holder is actually running; a plain
    `.acp-rail-row-pad` keeps the dot's width so the title column does not step

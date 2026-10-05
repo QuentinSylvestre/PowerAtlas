@@ -882,6 +882,15 @@ def _cwdless_candidate(provider: str, sid: str, originals: dict[str, str],
     return (data.Session(sid, _CWDLESS_TITLE, cwd, "", "", "", "", ""), cwd, False, True, path)
 
 
+def _codex_tile_status(provider: str, sid: str, path, terminal_owned: set[str]) -> str:
+    """`working`, `idle` or "" for a Codex tile: only a thread in the set `codex_terminal_threads`
+    returned (the one predicate the rail rows use) gets the last turn record's verdict (D11, D21)."""
+    if provider != _CODEX or sid not in terminal_owned or path is None:
+        return ""
+    from . import data_codex
+    return data_codex.turn_state(path) or ""
+
+
 def _codex_terminal_candidate(sid: str, originals: dict[str, str], shown: Callable,
                               sessions_in: Callable):
     """A `live_sessions` candidate for a Codex thread whose lock a terminal holds, or None.
@@ -968,6 +977,7 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
     # (provider, sid) -> (session, cwd, held, live, transcript path or None).
     # The path is set only where it was found without the cwd (`_find_cwdless`).
     cands: dict[tuple[str, str], tuple] = {}
+    terminal_owned: set[str] = set()  # Codex thread ids a terminal holds the lock of (D21)
 
     # (a) Held sessions. The cwd comes from the supervisor's record.
     for sid, held_cwd in held.items():
@@ -1021,6 +1031,7 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
             except Exception:
                 log.exception("Overview: could not list the Codex threads a terminal holds")
                 owned = []
+            terminal_owned = {sid for sid in owned if isinstance(sid, str)}
             for sid in owned:
                 if (_CODEX, sid) in cands or not data.SESSION_ID_RE.fullmatch(sid or ""):
                     continue
@@ -1115,7 +1126,7 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
             "created_at": session.created_at or "",
             "updated_at": session.updated_at or "",
             "availability": availability.get(sid, "held" if is_held else "available"),
-            "status": statuses.get(sid, ""),
+            "status": statuses.get(sid, "") or _codex_tile_status(provider, sid, path, terminal_owned),
             "live": live,
             "last_activity": (datetime.fromtimestamp(activity, tz=timezone.utc).isoformat()
                               if activity else ""),

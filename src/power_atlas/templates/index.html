@@ -6628,6 +6628,14 @@ function dashRailRowHoverText(session, workspace){
   return parts.join(' - ');
 }
 function dashRailDotClass(session){
+  // A Codex thread a terminal holds carries `working` or `idle` from its last turn record,
+  // whatever its availability (it is never held by this PowerAtlas). The raw value is compared
+  // here, never through dashRailRowStatus(), which turns an empty value into `working`.
+  // 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 4
+  if (session.provider === 'codex') {
+    if (session.status === 'working') return 'status-thinking';
+    if (session.status === 'idle') return 'status-idle';
+  }
   if (dashRailAvailability(session.availability) === 'held') {
     var status = dashRailRowStatus(session.status);
     if (status === 'errored') return 'status-errored';
@@ -6640,7 +6648,7 @@ function dashRailDotClass(session){
   // (that costs a transcript-tail read server-side, reserved for held rows),
   // but `session.live` is a cheap all-provider "is a process running" signal
   // and still earns a dot: a neutral one, since there is no richer verdict
-  // to show. Absent entirely on routes that never asked for it (session.live
+  // to show (a Codex thread a terminal holds is the exception, above). Absent entirely on routes that never asked for it (session.live
   // is undefined, not false -- see `include_provider` server-side).
   if (session.live) return 'status-live';
   return null;
@@ -8007,6 +8015,11 @@ function dashRailRefreshStates(incoming){
     }
     if (dashRailAvailability(fresh.availability) === 'held' &&
         dashRailRowStatus(s.status) !== dashRailRowStatus(fresh.status)) {
+      s.status = fresh.status;
+      changed = true;
+    } else if (fresh.provider === 'codex' && (s.status || '') !== (fresh.status || '')) {
+      // A Codex terminal row's verdict: compared raw, so an empty status turning `working`
+      // counts as a change (dashRailRowStatus would read both as `working`).
       s.status = fresh.status;
       changed = true;
     }

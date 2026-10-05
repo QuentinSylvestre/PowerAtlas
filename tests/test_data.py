@@ -4217,6 +4217,125 @@ def _cx_iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+class TestCodexTurnState:
+    """Phase 4 (D11): `turn_state` is the last of task_started (working), task_complete and
+    turn_aborted (idle), matched on `type` and `payload.type`, None past the tail window and
+    None for a working turn whose newest record is older than 30 minutes."""
+
+    SID, CWD = _cx_id(31), "C:\\W"
+
+    @staticmethod
+    def _ev(kind, ago):
+        return _cx_rec("event_msg", {"type": kind}, _cx_iso(time.time() - ago))
+
+    def _state(self, home, records, **kw):
+        path = _cx_write(home, self.SID, self.CWD, records, **kw)
+        return data_codex.turn_state(path), path
+
+    def test_each_last_record_gives_its_verdict(self, codex_home):
+        for kind, want in (("task_started", "working"), ("task_complete", "idle"),
+                           ("turn_aborted", "idle")):
+            got, _ = self._state(codex_home, [self._ev("task_started", 50), self._ev(kind, 10)])
+            assert got == want, kind
+
+    def test_the_last_turn_record_wins_over_earlier_ones(self, codex_home):
+        got, _ = self._state(codex_home, [self._ev("task_complete", 90), self._ev("task_started", 20),
+                                          _cx_user("go", ts=_cx_iso(time.time() - 15))])
+        assert got == "working"
+
+    def test_no_turn_record_gives_none(self, codex_home):
+        got, _ = self._state(codex_home, [_cx_user("hi", ts=_cx_iso(time.time() - 5))])
+        assert got is None
+
+    def test_a_torn_last_line_is_skipped(self, codex_home):
+        got, _ = self._state(codex_home, [self._ev("task_started", 20)],
+                             tail=b'{"timestamp":"2099-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_comp')
+        assert got == "working"
+
+    def test_a_line_over_the_cap_is_skipped_not_parsed(self, codex_home):
+        huge = _cx_line(_cx_rec("event_msg", {"type": "task_complete", "pad": "p" * (data_codex._LINE_CAP + 10)},
+                                _cx_iso(time.time() - 5)))
+        got, _ = self._state(codex_home, [self._ev("task_started", 20)], tail=huge)
+        assert got == "working", "an over-long record is dropped unparsed, so it cannot end the turn"
+
+    def test_a_tool_output_that_quotes_the_words_is_not_a_record(self, codex_home):
+        quoted = _cx_output("c1", 'saw {"type":"event_msg","payload":{"type":"task_complete"}} in the log',
+                            ts=_cx_iso(time.time() - 5))
+        got, _ = self._state(codex_home, [self._ev("task_started", 20), quoted])
+        assert got == "working"
+
+    def test_a_message_inside_an_event_that_quotes_the_words_is_not_a_turn_record(self, codex_home):
+        said = _cx_rec("event_msg", {"type": "item_completed", "item": {"type": "AgentMessage", "content": [
+            {"type": "Text", "text": 'the log says {"type":"event_msg","payload":{"type":"task_complete"}}'}]}},
+            _cx_iso(time.time() - 5))
+        got, _ = self._state(codex_home, [self._ev("task_started", 20), said])
+        assert got == "working", "matched on the payload's own type, not on a word anywhere in the line"
+
+    def test_a_working_turn_whose_records_carry_no_time_is_not_trusted(self, codex_home):
+        got, _ = self._state(codex_home, [_cx_rec("event_msg", {"type": "task_started"}, ts=None)])
+        assert got is None, "its age cannot be checked, so it cannot be called working"
+
+    def test_a_record_of_another_type_with_the_same_payload_type_does_not_count(self, codex_home):
+        other = _cx_rec("response_item", {"type": "task_complete"}, _cx_iso(time.time() - 5))
+        got, _ = self._state(codex_home, [self._ev("task_started", 20), other])
+        assert got == "working"
+
+    def test_a_turn_start_beyond_the_tail_window_gives_none(self, codex_home):
+        pad = _cx_filler(int(data_codex._TAIL_MAX / 1000) + 400)
+        got, _ = self._state(codex_home, [self._ev("task_started", 40)] + pad)
+        assert got is None
+
+    def test_a_working_turn_with_no_record_for_30_minutes_is_stuck_and_gives_none(self, codex_home):
+        got, _ = self._state(codex_home, [self._ev("task_started", data_codex.TURN_STUCK_SECONDS + 60)])
+        assert got is None
+        got, _ = self._state(codex_home, [self._ev("task_started", data_codex.TURN_STUCK_SECONDS - 60)])
+        assert got == "working"
+
+    def test_the_stuck_cap_looks_at_the_newest_record_not_the_turn_start(self, codex_home):
+        # a long command: the turn started 40 minutes ago but a record landed 10 seconds ago
+        got, _ = self._state(codex_home, [self._ev("task_started", 2400),
+                                          _cx_user("tick", ts=_cx_iso(time.time() - 10))])
+        assert got == "working"
+
+    def test_an_old_idle_turn_stays_idle(self, codex_home):
+        got, _ = self._state(codex_home, [self._ev("task_complete", 90000)])
+        assert got == "idle"
+
+    def test_the_verdict_follows_a_file_that_grows(self, codex_home):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        assert got == "working"
+        with open(path, "ab") as fh:
+            fh.write(_cx_line(self._ev("task_complete", 1)))
+        assert data_codex.turn_state(path) == "idle"
+
+    def test_a_frozen_mtime_with_a_changing_size_refreshes(self, codex_home):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        frozen = os.stat(path).st_mtime_ns
+        with open(path, "ab") as fh:
+            fh.write(_cx_line(self._ev("task_complete", 1)))
+        os.utime(path, ns=(frozen, frozen))
+        assert data_codex.turn_state(path) == "idle", "keyed on mtime alone it would still say working"
+
+    def test_an_unchanged_file_is_read_once(self, codex_home, monkeypatch):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        calls = []
+        real = data_codex._read_turn_state
+        monkeypatch.setattr(data_codex, "_read_turn_state", lambda p: calls.append(p) or real(p))
+        data_codex.turn_state(path)
+        data_codex.turn_state(path)
+        assert calls == [], "the first call in this test already filled the cache"
+
+    def test_the_stuck_cap_applies_to_a_cached_answer_too(self, codex_home, monkeypatch):
+        got, path = self._state(codex_home, [self._ev("task_started", data_codex.TURN_STUCK_SECONDS - 30)])
+        assert got == "working"
+        real = time.time
+        monkeypatch.setattr(data_codex.time, "time", lambda: real() + 120)
+        assert data_codex.turn_state(path) is None, "the clock moved on; the file did not"
+
+    def test_a_missing_file_gives_none_and_never_raises(self, codex_home):
+        assert data_codex.turn_state(codex_home / "sessions" / "nope.jsonl") is None
+
+
 class TestCodexActivityEpoch:
     """D16: the later of the rollout mtime and, only when the mtime is older than the
     300 s window, the last complete record's timestamp; a stamp from the future is

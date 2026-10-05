@@ -19328,6 +19328,111 @@ check("dashboard rail: the 60 s refresh picks up a changed resume_locked, in bot
   assertEqual(box.dashRailRefreshStates(fresh({ resume_locked: false })), false, "false and omitted are the same state");
 });
 
+// Phase 4 (D12): a Codex thread a terminal holds carries `working` or `idle`; the dot, the 60 s
+// refresh and the metadata strip follow the raw value, never dashRailRowStatus (which turns an
+// empty value into `working`).
+function loadCodexVerdictHelpers() {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const cut = (start, end) => {
+    const from = src.indexOf(start);
+    const to = src.indexOf(end, from);
+    assert(from >= 0 && to > from, `${start} moved in index.html`);
+    return src.slice(from, to);
+  };
+  const dot = cut("var DASH_RAIL_AVAILABILITY = Object.create(null);", "// ---- fetch + status line") +
+    cut("function dashRailDotClass(session){", "// ---- the session row");
+  const dotBox = vm.runInNewContext(dot + "\n({dashRailDotClass, dashRailRowStatus});", {});
+  const refresh = cut("function dashRailIndex(){", "function dashRailRefresh(){");
+  return { src, dotBox, refresh, cut };
+}
+
+check("dashboard rail: a Codex row's dot follows its working or idle status whatever its availability", () => {
+  const { dotBox } = loadCodexVerdictHelpers();
+  for (const availability of ["available", "held", "locked", undefined]) {
+    assertEqual(dotBox.dashRailDotClass({ provider: "codex", availability, status: "working", live: true }), "status-thinking", `working/${availability}`);
+    assertEqual(dotBox.dashRailDotClass({ provider: "codex", availability, status: "idle", live: true }), "status-idle", `idle/${availability}`);
+  }
+});
+
+check("dashboard rail: a Codex row with no verdict keeps the neutral dot or none, and a hostile status is no verdict", () => {
+  const { dotBox } = loadCodexVerdictHelpers();
+  assertEqual(dotBox.dashRailDotClass({ provider: "codex", availability: "available", status: "", live: true }), "status-live");
+  assertEqual(dotBox.dashRailDotClass({ provider: "codex", availability: "available", status: "", live: false }), null);
+  const evil = "<img src=x onerror=alert(1)>";
+  const got = dotBox.dashRailDotClass({ provider: "codex", availability: "available", status: evil, live: true });
+  assertEqual(got, "status-live", "an unknown value is not a class name");
+});
+
+check("dashboard rail: other providers' dots are unchanged by the Codex mapping", () => {
+  const { dotBox } = loadCodexVerdictHelpers();
+  for (const provider of ["kiro-cli-v3", "claude-code", undefined]) {
+    assertEqual(dotBox.dashRailDotClass({ provider, availability: "available", status: "working", live: true }), "status-live", `${provider} not held`);
+    assertEqual(dotBox.dashRailDotClass({ provider, availability: "available", status: "idle", live: false }), null, `${provider} no process`);
+    assertEqual(dotBox.dashRailDotClass({ provider, availability: "held", status: "waiting" }), "status-waiting", `${provider} held`);
+    assertEqual(dotBox.dashRailDotClass({ provider, availability: "held", status: "" }), "status-thinking", `${provider} held, empty status`);
+  }
+});
+
+check("dashboard rail: the 60 s refresh follows a Codex row's status, including an empty one turning working", () => {
+  const { src, refresh } = loadCodexVerdictHelpers();
+  const stale = { id: "c1", provider: "codex", availability: "available", status: "", live: true, title: "t" };
+  const kiro = { id: "k1", provider: "kiro-cli-v3", availability: "held", status: "working", live: true, title: "t" };
+  const other = { id: "o1", provider: "claude-code", availability: "available", status: "", live: true, title: "t" };
+  const box = {
+    dashRailGroups: [{ sessions: [stale, kiro, other] }], dashRailFlat: [], dashRailPinned: [],
+    dashRailAvailability: (v) => v || "available",
+    // as the page maps it: an empty value reads as `working`, which is why the Codex branch compares raw values
+    dashRailRowStatus: (v) => ({ working: "working", idle: "idle", waiting: "waiting", errored: "errored" })[v] || "working",
+    dashRailTitleText: (s) => s.title,
+  };
+  vm.createContext(box);
+  vm.runInContext(refresh, box);
+  const fresh = (id, provider, availability, status) => ({ sessions: [{ id, provider, availability, status, live: true, title: "t" }] });
+  assertEqual(box.dashRailRefreshStates(fresh("c1", "codex", "available", "")), false, "no change");
+  assertEqual(box.dashRailRefreshStates(fresh("c1", "codex", "available", "working")), true, "empty to working is a change");
+  assertEqual(stale.status, "working");
+  assertEqual(box.dashRailRefreshStates(fresh("c1", "codex", "available", "idle")), true, "working to idle is a change");
+  assertEqual(stale.status, "idle");
+  assertEqual(box.dashRailRefreshStates(fresh("c1", "codex", "available", "idle")), false, "the same verdict again is no change");
+  assertEqual(box.dashRailRefreshStates(fresh("c1", "codex", "available", "")), true, "a verdict that goes away is a change");
+  assertEqual(box.dashRailRefreshStates(fresh("k1", "kiro-cli-v3", "held", "waiting")), true, "a held kiro row still updates");
+  assertEqual(kiro.status, "waiting");
+  assertEqual(box.dashRailRefreshStates(fresh("o1", "claude-code", "available", "working")), false, "another provider's non-held row takes no status");
+  assertEqual(other.status, "");
+});
+
+check("dashboard: the metadata strip says Working or Idle for a Codex thread with a verdict, and Running without one", () => {
+  const { src, dotBox, cut } = loadCodexVerdictHelpers();
+  const meta = cut("var DASH_META_STATUS = {", "// ---- 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE: panel mode");
+  class Node_ {
+    constructor(tag) { this.tag = tag; this.children = []; this.className = ""; this.textContent = ""; }
+    appendChild(c) { this.children.push(c); return c; }
+    setAttribute() {}
+    remove() {}
+  }
+  const root = new Node_("div");
+  const box = {
+    document: {
+      getElementById: (id) => (id === "dashSessionMeta" ? root : null),
+      createElement: (tag) => new Node_(tag),
+      createTextNode: (text) => ({ text }),
+    },
+    dashRailDotClass: dotBox.dashRailDotClass,
+    dashRailTitleText: (s) => s.title || "",
+    dashRailParse: () => null,
+  };
+  vm.createContext(box);
+  vm.runInContext(meta, box);
+  const texts = (n) => (n.text !== undefined ? [n.text] : [n.textContent, ...n.children.flatMap(texts)]).filter(Boolean);
+  const label = (status, live) => {
+    box.dashSessionMetaRender({ provider: "codex", availability: "available", status, live, title: "t", cwd: "C:\\w", name: "w" }, null);
+    return texts(root);
+  };
+  assert(label("working", true).includes("Working") && !label("working", true).includes("Running"), "working");
+  assert(label("idle", true).includes("Idle") && !label("idle", true).includes("Running"), "idle");
+  assert(label("", true).includes("Running"), "no verdict keeps Running");
+});
+
 check("dashboard: the provider maps behind the launcher settings and the New menu list Codex as a terminal provider", () => {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
   const display = src.match(/var _providerBinaryDisplay=\{([^}]*)\};/);

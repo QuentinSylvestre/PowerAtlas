@@ -348,6 +348,20 @@ def _codex_terminal_owned(snapshot, session_id: str) -> bool:
             and _codex_owner_verdict(snapshot, session_id) == "terminal")
 
 
+def _codex_turn_status(snapshot, session) -> str:
+    """`working`, `idle` or "" for a Codex thread a terminal holds (D11, D12, D19).
+
+    Ownership decides, not argv: only a held lock with a `terminal` owner gets a verdict, so
+    a thread the desktop app holds, or one nobody holds, keeps today's empty status. The
+    verdict is the last turn record of the rollout; "" when there is none.
+    """
+    if sys.platform != "win32" or not _codex_terminal_owned(snapshot, session.session_id):
+        return ""
+    from .status_classifier import _resolve_jsonl_path
+    path = _resolve_jsonl_path(session.session_id, "codex", session.cwd)
+    return (data_codex.turn_state(path) or "") if path else ""
+
+
 def _codex_diagnostics() -> dict:
     """Two short status strings for the dashboard, never a pid, path or id (D23).
 
@@ -3244,6 +3258,8 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             # verdict `status` carries for held rows.
             d["live"] = _session_is_live(snapshot, s, prov_name)
             _mark_resume_locked(d, s, prov_name)
+            if prov_name == "codex":
+                d["status"] = _codex_turn_status(snapshot, s) or d["status"]
         return d
 
     groups = []
@@ -3427,6 +3443,8 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
             # See _acp_listing's identical field for what this is and why.
             d["live"] = _session_is_live(snapshot, s, prov_name)
             _mark_resume_locked(d, s, prov_name)
+            if prov_name == "codex":
+                d["status"] = _codex_turn_status(snapshot, s) or d["status"]
         return d
 
     payload = {
