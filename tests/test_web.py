@@ -33631,13 +33631,14 @@ class TestOverviewUsage:
         characters changed what it returns for a file with a longer one (schema 5, final review
         finding B6); the `codex:` prefix on a Codex tool name changed it once more (schema 6,
         final review finding on the shared `shell` name); a day lost its per-tool counts (schema 7); a Codex day gained a
-        `context_peak` (schema 8, Phase 2 of 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB).
+        `context_peak` (schema 8, Phase 2 of 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB); a Codex
+        cwd kept whole instead of cut at 260 (schema 9).
         A child on any older format must not mix its summaries into the memo."""
         from power_atlas import overview
-        assert overview._USAGE_SCHEMA == 8
+        assert overview._USAGE_SCHEMA == 9
         good = {"provider": "claude-code", "session_id": "s", "cwd": "", "model": None,
                 "subagent": False, "days": {}}
-        for older in (1, 2, 3, 4, 5, 6, 7):
+        for older in (1, 2, 3, 4, 5, 6, 7, 8):
             old = self.fake_worker()
             for record in (["schema", older], ["C:/x.jsonl", 1, 1, good], ["stage", 0]):
                 old._lines.put(json.dumps(record).encode() + b"\n")
@@ -34303,6 +34304,9 @@ class TestOverviewUsage:
         # A cwd inside the limit is kept exactly, whitespace and all (the rail's hidden match is exact).
         kept = self.codex(2, [_ovx_user(t, "x")], cwd=prefix + "two  spaces")
         assert overview._parse_usage_file(kept, "codex")["cwd"] == prefix + "two  spaces"
+        # Exactly 4096 characters is kept; 4097 leaves the file out.
+        assert overview._parse_usage_file(self.codex(4, records, cwd="C" + "c" * 4095), "codex")["cwd"] == "C" + "c" * 4095
+        assert overview._parse_usage_file(self.codex(5, records, cwd="C" + "c" * 4096), "codex")["days"] == {}
         # Over 4096 characters: no cwd that can be checked against a hidden tag, so the file is left out.
         huge = self.codex(3, records, cwd=prefix + "h" * 5000)
         left_out = overview._parse_usage_file(huge, "codex")

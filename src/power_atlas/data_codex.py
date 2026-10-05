@@ -1427,13 +1427,35 @@ def _scan_turn_lines(lines, verdict, newest):
         if not isinstance(obj, dict):
             continue
         when = _record_time(obj)
-        if when is not None:
-            newest = when.timestamp()
+        stamp = when.timestamp() if when is not None else None
+        if stamp is not None:
+            newest = stamp
         payload = obj.get("payload")
         if obj.get("type") == "event_msg" and isinstance(payload, dict):
             found = _TURN_RECORDS.get(payload.get("type"))
             if found is not None:
-                verdict = found
+                # As the reverse scan does: the newest time counts from the turn record on, so a turn
+                # record with no time of its own (and nothing stamped after it) has no known age.
+                verdict, newest = found, stamp
+    return verdict, newest
+
+
+def _scan_tail(fh, size: int) -> tuple[str | None, float | None]:
+    """(verdict of the last turn record, epoch of the newest record from there on) in the tail window."""
+    verdict = newest = None
+    for line in _iter_lines_reverse(fh, size):
+        obj = loads(line)
+        if not isinstance(obj, dict):
+            continue
+        if newest is None:
+            when = _record_time(obj)
+            if when is not None:
+                newest = when.timestamp()
+        payload = obj.get("payload")
+        if obj.get("type") == "event_msg" and isinstance(payload, dict):
+            verdict = _TURN_RECORDS.get(payload.get("type"))
+            if verdict is not None:
+                break
     return verdict, newest
 
 
@@ -1446,6 +1468,16 @@ def _read_turn_state(path: str, prior) -> tuple[str | None, float | None, TurnWa
         head_len, head_hash = _head_of(fh, size)
         if prior is not None and prior[4] is not None and _state_holds(fh, size, prior[4]):
             verdict, newest, watch = prior[2], prior[3], prior[4]
+            if size - watch.offset > _TAIL_MAX:
+                # A long gap since the last look: read the newest window only (a call stays bounded). A
+                # turn record in it decides; without one the earlier verdict stands.
+                tail_verdict, tail_newest = _scan_tail(fh, size)
+                if tail_verdict is not None:
+                    verdict, newest = tail_verdict, tail_newest
+                elif tail_newest is not None:
+                    newest = tail_newest
+                offset, mid_line = _end_of_last_line(fh, size)
+                return verdict, newest, _watch_state(fh, offset, head_len, head_hash, mid_line)
             while watch.offset < size:
                 lines, nxt = _read_complete_lines(fh, size, watch, head_len, head_hash)
                 verdict, newest = _scan_turn_lines(lines, verdict, newest)
@@ -1454,20 +1486,7 @@ def _read_turn_state(path: str, prior) -> tuple[str | None, float | None, TurnWa
                 if not moved:
                     break
             return verdict, newest, watch
-        verdict = newest = None
-        for line in _iter_lines_reverse(fh, size):
-            obj = loads(line)
-            if not isinstance(obj, dict):
-                continue
-            if newest is None:
-                when = _record_time(obj)
-                if when is not None:
-                    newest = when.timestamp()
-            payload = obj.get("payload")
-            if obj.get("type") == "event_msg" and isinstance(payload, dict):
-                verdict = _TURN_RECORDS.get(payload.get("type"))
-                if verdict is not None:
-                    break
+        verdict, newest = _scan_tail(fh, size)
         offset, mid_line = _end_of_last_line(fh, size)
         return verdict, newest, _watch_state(fh, offset, head_len, head_hash, mid_line)
 

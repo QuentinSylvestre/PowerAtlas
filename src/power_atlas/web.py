@@ -397,6 +397,9 @@ def _codex_terminal_threads(snapshot) -> list[str]:
         with _codex_enum_lock:
             return list(_codex_enum["ids"])
     try:
+        with _codex_enum_lock:
+            if _codex_clock() - _codex_enum["at"] < _CODEX_ENUM_REUSE:  # the run that just ended filled it
+                return list(_codex_enum["ids"])
         return _codex_terminal_threads_compute(snapshot)
     finally:
         _codex_enum_compute.release()

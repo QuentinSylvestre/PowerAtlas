@@ -1328,10 +1328,12 @@ _stall_clock = time.monotonic
 # 6: a Codex tool name carries the `_CODEX_TOOL_PREFIX` prefix.
 # 7: a day holds no per-tool call and failure counts: `tools` is gone.
 # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
+# 9: a Codex cwd is kept whole up to 4096 characters (it was cut at 260), and a longer one leaves the
+# file out of the summary.
 # 8: a Codex day carries a `context_peak`, the peak of last input tokens over the model's
 # context window (`_codex_context_pct`).
 # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 2
-_USAGE_SCHEMA = 8
+_USAGE_SCHEMA = 9
 # The keys `usage_summary` reads from a file summary.
 _SUMMARY_KEYS = frozenset({"provider", "session_id", "cwd", "model", "subagent", "days"})
 

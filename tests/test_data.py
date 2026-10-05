@@ -4391,6 +4391,81 @@ class TestCodexTurnState:
             fh.write(b"\n" + _cx_line(self._ev("task_complete", 1)))
         assert data_codex.turn_state(path) == "idle"
 
+    def test_a_complete_record_with_no_newline_yet_is_not_read_as_a_turn_record(self, codex_home):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        whole = _cx_line(self._ev("task_complete", 1))
+        with open(path, "ab") as fh:
+            fh.write(whole[:-1])                     # complete JSON, newline still to come
+        assert data_codex.turn_state(path) == "working", "only complete lines count"
+        with open(path, "ab") as fh:
+            fh.write(whole[-1:])
+        assert data_codex.turn_state(path) == "idle"
+
+    def test_an_unterminated_turn_record_after_a_complete_line_is_left_for_the_next_read(self, codex_home):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        with open(path, "ab") as fh:
+            fh.write(_cx_line(_cx_user("tick", ts=_cx_iso(time.time() - 2))) + _cx_line(self._ev("task_complete", 1))[:-1])
+        assert data_codex.turn_state(path) == "working"
+
+    def test_the_rest_of_a_skipped_long_line_is_not_read_as_a_turn_record(self, codex_home, monkeypatch):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        assert got == "working"
+        monkeypatch.setattr(data_codex, "TURN_READ_BYTES", 4096)
+        with open(path, "ab") as fh:
+            fh.write(b"x" * 4096 + _cx_line(self._ev("task_complete", 1)))   # the record starts at the cut
+        assert data_codex.turn_state(path) == "working"
+        with open(path, "ab") as fh:
+            fh.write(_cx_line(_cx_user("later", ts=_cx_iso(time.time() - 1))))
+        assert data_codex.turn_state(path) == "working", "the fragment after the cut is not a record"
+
+    def test_a_rewritten_file_with_the_same_tail_but_another_head_is_read_again(self, codex_home):
+        filler = b"".join(_cx_line(_cx_rec("turn_context", {"pad": "p" * 100}, _cx_iso(time.time() - 1))) for _ in range(60))
+        def build(cwd, kind):
+            head = _cx_line(_cx_meta(self.SID, cwd))
+            return head + _cx_line(self._ev(kind, 5)) + filler
+        path = _cx_write(codex_home, self.SID, self.CWD, [])
+        path.write_bytes(build("C:\\W", "task_started"))
+        assert data_codex.turn_state(path) == "working"
+        path.write_bytes(build("C:\\X", "task_complete"))
+        os.utime(path, (time.time() + 5, time.time() + 5))
+        assert data_codex.turn_state(path) == "idle", "only the head hash tells this file is another one"
+
+    def test_the_warm_and_the_cold_read_agree_on_a_turn_record_with_no_time(self, codex_home):
+        got, path = self._state(codex_home, [_cx_user("hi", ts=_cx_iso(time.time() - 5))])
+        assert got is None
+        stampless = _cx_rec("event_msg", {"type": "task_started"}, ts=None)
+        with open(path, "ab") as fh:
+            fh.write(_cx_line(stampless))
+        warm = data_codex.turn_state(path)
+        data_codex._turn_cache = data_codex.BoundedCache(8)
+        cold = data_codex.turn_state(path)
+        assert warm == cold is None, "no known age: neither calls it working"
+
+    def test_a_long_gap_reads_only_the_newest_window_and_keeps_the_verdict_it_cannot_see_the_start_of(self, codex_home, monkeypatch):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        assert got == "working"
+        monkeypatch.setattr(data_codex, "_TAIL_MAX", 20000)
+        monkeypatch.setattr(data_codex, "TURN_READ_BYTES", 2000)
+        reads = []
+        real = data_codex._read_complete_lines
+        monkeypatch.setattr(data_codex, "_read_complete_lines", lambda *a, **k: reads.append(1) or real(*a, **k))
+        with open(path, "ab") as fh:
+            fh.write(b"".join(_cx_line(_cx_rec("turn_context", {"pad": "p" * 100}, _cx_iso(time.time() - 1))) for _ in range(400)))
+        assert data_codex.turn_state(path) == "working"
+        assert reads == [], "a gap over the tail window is not read in read-sized steps"
+        with open(path, "ab") as fh:
+            fh.write(_cx_line(self._ev("task_complete", 1)))
+        assert data_codex.turn_state(path) == "idle", "and the next small append is incremental again"
+
+    def test_a_long_gap_with_a_turn_record_in_the_newest_window_takes_that_record(self, codex_home, monkeypatch):
+        got, path = self._state(codex_home, [self._ev("task_started", 20)])
+        monkeypatch.setattr(data_codex, "_TAIL_MAX", 20000)
+        with open(path, "ab") as fh:
+            fh.write(b"".join(_cx_line(_cx_rec("turn_context", {"pad": "p" * 100}, _cx_iso(time.time() - 3))) for _ in range(300)))
+            fh.write(_cx_line(self._ev("task_complete", 2)))
+            fh.write(b"".join(_cx_line(_cx_rec("turn_context", {"pad": "p" * 100}, _cx_iso(time.time() - 1))) for _ in range(40)))
+        assert data_codex.turn_state(path) == "idle"
+
     def test_a_missing_file_gives_none_and_never_raises(self, codex_home):
         assert data_codex.turn_state(codex_home / "sessions" / "nope.jsonl") is None
 
@@ -4567,6 +4642,23 @@ class TestCodexNewTurnEnds:
         raw[state.offset - 3000] ^= 1          # a change 3000 bytes before the offset: past the old 64
         path.write_bytes(bytes(raw) + _cx_line(self._done(2)))
         assert data_codex.new_turn_ends(path, state) == (0, None)
+
+    def test_a_complete_record_with_no_newline_yet_waits_for_it(self, codex_home):
+        path, state = self._first(codex_home)
+        whole = _cx_line(self._done(1))
+        self._append(path, whole[:-1])
+        count, state = data_codex.new_turn_ends(path, state)
+        assert count == 0, "not counted before its newline, so never counted twice"
+        self._append(path, whole[-1:])
+        assert data_codex.new_turn_ends(path, state)[0] == 1
+
+    def test_a_complete_record_with_no_newline_after_a_complete_line_is_left_for_the_next_read(self, codex_home):
+        path, state = self._first(codex_home)
+        self._append(path, _cx_line(self._done(1)) + _cx_line(self._done(2))[:-1])
+        count, state = data_codex.new_turn_ends(path, state)
+        assert count == 1, "the line with its newline counts; the unterminated one does not"
+        self._append(path, b"\n")
+        assert data_codex.new_turn_ends(path, state)[0] == 1, "and it counts once, when its newline arrives"
 
     def test_a_reset_state_makes_the_next_call_a_first_sight(self, codex_home):
         path, state = self._first(codex_home, [self._done(1)] * 3)

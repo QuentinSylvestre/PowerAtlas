@@ -186,9 +186,9 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   setting also covers Codex threads that a terminal holds (Windows only): PowerAtlas checks them every
   5 seconds and sends one desktop toast, titled with the workspace folder name, for each turn that
   finishes, even while you are looking at that terminal. A turn that ends before PowerAtlas first sees
-  the thread's lock (about one check) can be missed, a turn already running when PowerAtlas starts or
-  when you switch notifications on is not announced, and a burst of turn ends in one check is
-  coalesced (at most 3 toasts per thread and 6 per check). Threads in a hidden workspace, on a network
+  the thread's lock (about one check) can be missed, turns that ended before PowerAtlas started or
+  before you switched notifications on are not announced (a turn still running then is announced
+  when it ends), and a burst of turn ends in one check is coalesced (at most 3 toasts per thread and 6 per check). Threads in a hidden workspace, on a network
   path, held by the desktop app or VS Code, or run as sub-agents send nothing. `codex_diagnostics.turn_watch`
   in the dashboard sessions response (`ok`, `stalled` or `off`) shows whether the check is running
 - **Agent permissions** (gear icon in topbar) sets the permission mode for ACP sessions PowerAtlas
