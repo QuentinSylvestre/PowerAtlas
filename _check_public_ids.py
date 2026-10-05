@@ -38,9 +38,12 @@ on (`# ---... >8 ---...` immediately followed by `# Do not modify or remove the
 line above.`) is ignored: git cuts the message there, and under `commit -v` the
 diff below it is already scanned as the staged change. A scissors line typed in a
 message without that second line is not a cut (with `-m` or `-F` git keeps the
-text below it), so the scan goes on. And a status-template line `#<TAB>deleted:`
-or `#<TAB>renamed:` is skipped, because an editor-mode template lists the paths
-of a deleted or renamed-away file, which pre-commit allows. A hand-typed
+text below it), so the scan goes on, unless the typed pair is exact (both lines):
+that is read as git's cut, because the hook cannot tell it from the real one. A line
+ending in CR is compared without it. And a status-template line is skipped
+(`#<TAB>deleted:`, `renamed:`, `modified:`, `typechange:`, `# On branch`, `# Your
+branch`, `# HEAD detached`), because an editor-mode template lists those paths and
+the branch name, which pre-commit allows and git strips. A hand-typed
 `#<TAB>deleted: <id>` line therefore passes. The same template also lists untracked
 and unstaged files as `#<TAB><path>`: one named with a store id blocks an editor-mode
 commit until it is renamed or removed (a false positive).
@@ -55,10 +58,11 @@ Limits, stated so nobody trusts it for more than it does:
   `thread_history_*.sqlite`, and an id that exists only in the Codex state database
   (`state_*.sqlite`); the Kiro IDE `workspace-sessions` folder; PowerAtlas's own
   config folder. The store walk is not atomic with the commit;
-- other binary files (images, archives); UTF-16 and UTF-32 without a byte-order
-  mark; and text files that contain a NUL byte or that .gitattributes marks binary
-  or `-diff` (git treats them as binary, and without a UTF mark they are not
-  decoded);
+- UTF-16 and UTF-32 without a byte-order mark; and a UTF-16/32 file that
+  .gitattributes marks as text (`diff`), which git then never lists as binary, so
+  it is not decoded. Any other file is read as ASCII text whatever git thinks of
+  it (`git diff --text`), so an ASCII id inside an image or archive is found, at the
+  cost of reading a large binary whole;
 - a merge: `git merge --no-commit` (or a conflicted merge) stages the merged
   branch's content, so every line that history added counts as added and an id
   already in it blocks the merge commit;
@@ -74,9 +78,11 @@ Limits, stated so nobody trusts it for more than it does:
   line-span` anchors there (`shared/skills/qdream/memory-rules.md`, Memory File
   Format);
 - a blob that cannot be read (or is too large) is skipped with a warning and does
-  not change the exit code; and when no store folder could be read, or a walk hit
-  an error, one warning says ids could not be checked against the stores, and the
-  exit code stays 0.
+  not change the exit code; and when no store folder could be read, a walk hit an
+  error, or a provider's home folder (Codex, including a wrong CODEX_HOME; Claude
+  Code; Kiro) does not exist, one warning says ids could not be checked against
+  every store, and the exit code stays 0 (a machine without Kiro warns on a commit
+  that holds id-shaped text).
 
 The report names the file and line and never prints an id: a path that holds an
 id is printed with the id replaced by `<id>`, because a hook's output ends up in
@@ -103,7 +109,9 @@ _ANCHOR_MARK = "**Source**"
 # then an explanation whose first line follows it immediately.
 _SCISSORS = "# ------------------------ >8 ------------------------"
 _SCISSORS_NEXT = "# Do not modify or remove the line above."
-_TEMPLATE_PATH_RE = re.compile(r"#\t(deleted|renamed):")
+# Lines of git's editor-mode status template that name a path or a branch: a path
+# listed there was allowed by pre-commit, and the comment is stripped from the message.
+_TEMPLATE_PATH_RE = re.compile(r"#\t(deleted|renamed|modified|typechange):|# (On branch |Your branch |HEAD detached )")
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 _UTF32_BOMS = (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")
 _DIFF_TIMEOUT = 60  # seconds, per git diff call
@@ -169,11 +177,27 @@ def store_ids(roots: list[Path]) -> tuple[set[str], bool]:
     return found, readable > 0 and not failed
 
 
+def _missing_providers() -> list[str]:
+    """Providers whose session folder does not exist at all (not installed, or CODEX_HOME is wrong)."""
+    home = Path.home()
+    codex = Path(os.environ.get("CODEX_HOME") or home / ".codex")
+    missing = []
+    for name, folder in (("Codex", codex), ("Claude Code", home / ".claude"), ("Kiro", home / ".kiro")):
+        try:
+            if not folder.is_dir():
+                missing.append(name)
+        except OSError:
+            missing.append(name)
+    return missing
+
+
 def _known_ids() -> set[str]:
     found, complete = store_ids(_store_roots())
-    if not complete:
-        print("_check_public_ids: warning: ids could not be checked against the local "
-              "session stores (none found, or one was unreadable)", file=sys.stderr)
+    missing = _missing_providers()
+    if not complete or missing:
+        note = f"; no folder for {', '.join(missing)}" if missing else ""
+        print("_check_public_ids: warning: ids could not be checked against every local "
+              f"session store (none found, or one was unreadable{note})", file=sys.stderr)
     return found
 
 
@@ -388,7 +412,10 @@ def _binary_paths(raw: bytes) -> set[str]:
 
 def staged_candidates() -> list[Candidate]:
     """Everything the staged change adds that could hold an id."""
-    diff = _git(["diff", "-U0", *_DIFF_FLAGS]).decode("utf-8", errors="replace")
+    # --text: a file git calls binary (a NUL byte, or `-diff` in .gitattributes) is
+    # still read as text, so an ASCII id inside it is found. A UTF-16/32 file is
+    # found through the blob reader below instead.
+    diff = _git(["diff", "-U0", "--text", *_DIFF_FLAGS]).decode("utf-8", errors="replace")
     changes = _raw_changes(_git(["diff", "--raw", "-z", "--no-abbrev", *_DIFF_FLAGS]))
     candidates = [a for a in added_lines(diff) if _UUID_RE.search(a[2])]
     # The path of an added or renamed file; a modified file keeps its name.
@@ -433,7 +460,8 @@ def check_message(path: str) -> int:
     kept: list[Candidate] = []
     for n, text in enumerate(lines, 1):
         if wide is None:
-            if text == _SCISSORS and lines[n:n + 1] == [_SCISSORS_NEXT]:
+            # rstrip: an editor may have rewritten the line endings to CRLF
+            if text.rstrip("\r") == _SCISSORS and lines[n:n + 1] and lines[n].rstrip("\r") == _SCISSORS_NEXT:
                 break
             if _TEMPLATE_PATH_RE.match(text):
                 continue

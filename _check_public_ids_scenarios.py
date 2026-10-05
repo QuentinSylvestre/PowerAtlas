@@ -435,7 +435,7 @@ STAGED = [
     ("UTF-16 file in an odd path", w("a b/é c'd.txt", f"id {A}\n", "utf-16"), "block"),
     ("UTF-16 rename plus edit", utf16_rename_mod, "block"),
     ("CRLF text", w("a.md", f"x\r\nid {A}\r\n"), "block"),
-    ("pinned limit: NUL byte in UTF-8 text passes", w("a.md", f"x\0\nid {A}\n"), "pass"),
+    ("a NUL byte in UTF-8 text does not hide an id", w("a.md", f"x\0\nid {A}\n"), "block"),
     ("BOM-only 2-byte file", w("e.txt", b"\xff\xfe"), "pass"),
     ("big random binary without a mark passes", w("big.bin", b"\x89" + os.urandom(3_000_000)), "pass"),
     ("several ids in content, names and UTF-16/32 files", many, "block"),
@@ -472,7 +472,12 @@ MESSAGES = [
     ("template line #<TAB>deleted: passes", f"subject\n\n# Changes to be committed:\n#\tdeleted:    docs/{A}.md\n", "pass"),
     ("template line #<TAB>renamed: passes", f"subject\n\n#\trenamed:    docs/{A}.md -> kept.md\n", "pass"),
     ("pinned limit: a hand-typed #<TAB>deleted: <id> passes", f"subject\n\n#\tdeleted: {A}\n", "pass"),
-    ("#<TAB>modified: line is scanned", f"subject\n\n#\tmodified:   docs/{A}.md\n", "block"),
+    ("template line #<TAB>modified: passes", f"subject\n\n#\tmodified:   docs/{A}.md\n", "pass"),
+    ("template line # On branch passes", f"subject\n\n# On branch work/{A}\n", "pass"),
+    ("template line # Your branch passes", f"subject\n\n# Your branch is up to date with 'origin/{A}'.\n", "pass"),
+    ("a merge subject naming an id blocks", f"Merge branch '{A}'\n", "block"),
+    ("CRLF message: id above git's scissors block", f"subject\r\n\r\nbody {A}\r\n{SCISSORS}\r\n{SCISSORS_NEXT}\r\n", "block"),
+    ("CRLF message: id only below git's scissors block passes", f"subject\r\n\r\n{SCISSORS}\r\n{SCISSORS_NEXT}\r\n-id {A}\r\n", "pass"),
     ("'# deleted:' with a space is scanned", f"subject\n\n# deleted: {A}\n", "block"),
     ("pinned limit: an untracked id-named file in the template blocks", f"subject\n\n# Untracked files:\n#\tdocs/{A}.md\n", "block"),
     ("other # lines are scanned", f"subject\n\n# note {A}\n", "block"),
@@ -482,6 +487,85 @@ MESSAGES = [
 ]
 for _name, _data, _want in MESSAGES:
     message(_name, _data, _want)
+
+
+# ---- diff options and report details ----
+def rename_then_add(r: Repo) -> None:
+    """A rename is listed before the next file: a wrong token stride would drop that file."""
+    r.write("old.md", "line one\nline two\nline three\n")
+    r.stage("old.md")
+    r.commit_old()
+    r.git("mv", "old.md", "new.md")
+    r.write(f"z-{A}.md", "x\n")
+    r.stage(f"z-{A}.md")
+
+
+def forced_colour(r: Repo) -> None:
+    r.git("config", "color.ui", "always")
+    r.write("a.md", f"id {A}\n")
+    r.stage("a.md")
+
+
+def diff_attr(r: Repo) -> None:
+    r.write(".gitattributes", "*.md -diff\n")
+    r.write("n.md", f"id {A}\n")
+    r.stage(".gitattributes", "n.md")
+
+
+def modify_id_named(r: Repo) -> None:
+    r.write(f"keep-{A}.md", "one\n")
+    r.stage(f"keep-{A}.md")
+    r.commit_old()
+    r.write(f"keep-{A}.md", "one\ntwo\n")
+    r.stage(f"keep-{A}.md")
+
+
+for _name, _setup, _want in [
+    ("a rename listed before an id-bearing file does not hide it", rename_then_add, "block"),
+    ("git's color.ui=always does not hide an id", forced_colour, "block"),
+    ("a -diff attribute does not hide an ASCII id", diff_attr, "block"),
+    ("modifying an id-named file passes", modify_id_named, "pass"),
+]:
+    staged(_name, _setup, _want)
+
+
+@case("the report names the line of the added id")
+def _() -> None:
+    r = Repo()
+    w("a.md", f"x\ny\nid {A}\nz\n")(r)
+    rc, out = run_main([], r.path)
+    check(rc == 1 and "a.md:3:" in out, f"rc={rc}: {clean(out)}")
+    r2 = Repo()
+    r2.write("b.md", "one\n")
+    r2.stage("b.md")
+    r2.commit_old()
+    r2.write("b.md", f"one\nid {A}\nthree\n")
+    r2.stage("b.md")
+    rc, out = run_main([], r2.path)
+    check(rc == 1 and "b.md:2:" in out, f"rc={rc}: {clean(out)}")
+
+
+@case("a provider home that does not exist: the warning names it, an id elsewhere still blocks")
+def _() -> None:
+    home = Path(empty_home("nokiro")["HOME"])
+    build_home(home)
+    _rmtree(home / ".kiro")
+    r = Repo()
+    w("a.md", f"id {FAKE}\nid {A}\n")(r)
+    with env(HOME=str(home), USERPROFILE=str(home), CODEX_HOME=str(home / ".codex")):
+        rc, out = run_main([], r.path)
+    check(rc == 1 and "no folder for Kiro" in out and "Codex" not in out.split("no folder for")[-1],
+          f"rc={rc}: {clean(out)}")
+    check(not leaks(out), "an id appeared in the output")
+
+
+@case("a wrong CODEX_HOME warns instead of passing silently")
+def _() -> None:
+    r = Repo()
+    w("a.md", f"id {A}\n")(r)
+    with env(CODEX_HOME=str(TMP / "no-such-codex-home")):
+        rc, out = run_main([], r.path)
+    check(rc == 0 and "no folder for Codex" in out, f"rc={rc}: {clean(out)}")
 
 
 # ---- the checker's own failure modes ----
