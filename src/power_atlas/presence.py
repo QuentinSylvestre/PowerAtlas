@@ -605,9 +605,9 @@ def _codex_kind(name: str, cmdline: list[str], provider: str | None) -> str | No
     """
     if any(a.startswith("--type=") for a in cmdline[1:]):
         return None
-    candidates = {name.lower()} if name else set()
-    if cmdline:
-        candidates.add(Path(cmdline[0]).name.lower())
+    # The image name is the operating system's; the command line is whatever the process
+    # says it is, so argv[0] only stands in when the scan got no name at all.
+    candidates = {name.lower()} if name else ({Path(cmdline[0]).name.lower()} if cmdline else set())
     if not candidates & set(_PROVIDER_SPECS["codex"][0]):
         return None
     if "--managed-daemon" in cmdline[1:]:
@@ -639,6 +639,7 @@ def _scan() -> Snapshot:
     # all (a parent that is not in it is gone).
     codex_raw: dict[int, tuple[float, str, int | None]] = {}
     seen_pids: set[int] = set()
+    by_pid: dict[int, object] = {}
     try:
         # create_time is deliberately not requested for the whole table —
         # that costs ~25ms across ~500 processes. It is read below only for
@@ -653,6 +654,7 @@ def _scan() -> Snapshot:
             info = proc.info
             if info.get("pid") is not None:
                 seen_pids.add(info["pid"])
+                by_pid[info["pid"]] = proc
             cmdline = info.get("cmdline") or []
             if not cmdline:
                 continue
@@ -786,7 +788,20 @@ def _scan() -> Snapshot:
             log.exception("sidecar record rejected: provider=%s sid=%r", provider, sid)
             continue
 
-    codex_procs = {pid: (ct, kind, parent if parent in seen_pids else None)
+    def live_parent(child_start: float, parent: int | None) -> int | None:
+        """The parent pid when that process is alive and started no later than its child (a
+        pid that Windows reused for a newer process is not the parent), else None."""
+        if parent not in seen_pids:
+            return None
+        other = by_pid.get(parent)
+        try:
+            if other is not None and other.create_time() > child_start + 1.0:
+                return None
+        except Exception:
+            pass  # cannot tell: keep the parent
+        return parent
+
+    codex_procs = {pid: (ct, kind, live_parent(ct, parent))
                    for pid, (ct, kind, parent) in codex_raw.items()}
     return Snapshot(live_sids, live_cwds, sid_to_cwd, sid_status, sid_reason,
                     sid_kind, sid_entrypoint, codex_procs=codex_procs)

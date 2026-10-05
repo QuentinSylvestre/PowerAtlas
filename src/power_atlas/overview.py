@@ -896,7 +896,8 @@ def _codex_terminal_candidate(sid: str, originals: dict[str, str], shown: Callab
     from . import data, data_codex, data_codex_state
 
     cwd = data_codex.find_session_workspace(sid)
-    if not isinstance(cwd, str) or data_codex_state.cwd_class(cwd) != "local":
+    if (not isinstance(cwd, str) or data_codex_state.cwd_class(cwd) != "local"
+            or not data_codex_state.is_local_drive(cwd)):
         return None
     original = originals.get(data._normalize_path(cwd))
     if not original or not shown(_CODEX, original):

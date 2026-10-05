@@ -52,6 +52,7 @@ MAX_QUEUE = 8
 MAX_PATHS = 256
 MAX_ENTRIES = 64                 # more holders than this is not believed
 FAILED_TTL = 30.0                # a failed lookup is cached as unknown this long
+FAIL_STREAK = 3                  # this many lookups in a row that could not be made: status backing-off
 GONE_REQUEUE_GAP = 10.0          # a path whose holders are gone re-resolves at most this often
 BACKOFF = (30.0, 300.0, 1800.0)  # a path that keeps giving no usable holder
 FIRST_RESOLVES = (30.0, 180.0)   # after the first resolution, then every STEADY_SECONDS
@@ -109,6 +110,18 @@ def _structures():
     return _structs
 
 
+def _system_directory() -> str | None:
+    """The Windows system folder as the OS reports it (``GetSystemDirectoryW``), never from an
+    environment variable that the launcher could point somewhere else."""
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.GetSystemDirectoryW.argtypes = [ctypes.c_wchar_p, wintypes.UINT]
+    kernel32.GetSystemDirectoryW.restype = wintypes.UINT
+    buf = ctypes.create_unicode_buffer(260)
+    size = kernel32.GetSystemDirectoryW(buf, 260)
+    return buf.value if 0 < size < 260 else None
+
+
 def _library():
     """The Restart Manager library, or None when it cannot be loaded. Never raises."""
     global _lib, _lib_failed
@@ -116,8 +129,10 @@ def _library():
         return _lib
     try:
         from ctypes import wintypes
-        root = os.environ.get("SystemRoot") or r"C:\Windows"
-        lib = _load_library(os.path.join(root, "System32", "rstrtmgr.dll"))
+        folder = _system_directory()
+        if not folder or not os.path.isabs(folder):
+            raise OSError("no system folder")
+        lib = _load_library(os.path.join(folder, "rstrtmgr.dll"))
         _, info = _structures()
         lib.RmStartSession.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.c_wchar_p]
         lib.RmStartSession.restype = wintypes.DWORD
@@ -260,6 +275,8 @@ class _Resolver:
         self._self_tested = False
         self._last_lookup = -1e9
         self._worker: threading.Thread | None = None
+        self._worker_gen = -1
+        self._fail_streak = 0  # consecutive lookups that could not be made
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._logged_disabled = False
@@ -320,7 +337,8 @@ class _Resolver:
             self._watch(now)
             if self._disabled(now):
                 return "disabled"
-            if self._abandoned or any(e.not_before > now for e in self._cache.values()):
+            if (self._abandoned or self._fail_streak >= FAIL_STREAK
+                    or any(e.not_before > now for e in self._cache.values())):
                 return "backing-off"
             return "ok"
 
@@ -370,27 +388,31 @@ class _Resolver:
             if not self._logged_disabled:
                 self._logged_disabled = True
                 quiet_log.warn(log, "lock owner: lookup disabled after repeated stalls")
-        elif self._abandoned < MAX_ABANDONED:
-            self._worker = None
-            self._ensure_worker()
+        self._ensure_worker()  # a replacement, unless the lookup is disabled
 
     def _ensure_worker(self) -> None:
         if not self._threads or self._stop.is_set():
             return
-        if self._worker is not None and self._worker.is_alive():
-            return
+        if self._worker is not None and self._worker.is_alive() and self._worker_gen == self._gen:
+            return  # the current generation has a live worker; an abandoned one does not count
         if self._disabled(self._clock()):
             return
         gen = self._gen
-        self._worker = threading.Thread(target=self._loop, args=(gen,), name="lock-owner", daemon=True)
-        self._worker.start()
+        worker = threading.Thread(target=self._loop, args=(gen,), name="lock-owner", daemon=True)
+        try:
+            worker.start()
+        except RuntimeError as exc:  # no thread could be started: the callers keep the fall-back
+            quiet_log.warn(log, "lock owner: the worker could not be started", exc)
+            return
+        self._worker, self._worker_gen = worker, gen
 
     # --- the worker's side ---
 
-    def step(self, now: float | None = None) -> bool:
+    def step(self, now: float | None = None, gen: int | None = None) -> bool:
         """Run at most one queued lookup on the calling thread; True when one ran. The worker
-        loop calls this; the tests call it directly."""
-        gen = self._gen
+        loop passes its own generation, so an abandoned worker pops nothing; the tests call it
+        directly."""
+        gen = self._gen if gen is None else gen
         now = self._clock() if now is None else now
         with self._lock:
             if gen != self._gen or self._disabled(now) or now - self._last_lookup < MIN_LOOKUP_GAP:
@@ -438,9 +460,11 @@ class _Resolver:
             if entry is None:
                 return
             if result is None:
+                self._fail_streak += 1
                 entry.holders = None
                 entry.failed_until = now + FAILED_TTL
                 return
+            self._fail_streak = 0
             entry.last_at = now
             if entry.resolves == 0:
                 entry.first_at = now
@@ -487,7 +511,7 @@ class _Resolver:
     def _loop(self, gen: int) -> None:
         while not self._stop.is_set() and gen == self._gen:
             try:
-                ran = self.step()
+                ran = self.step(gen=gen)
             except Exception as exc:  # the worker must outlive any one failure
                 quiet_log.warn(log, "lock owner: the worker failed", exc)
                 ran = False
@@ -519,5 +543,8 @@ def forget(lock_path: str) -> None:
 
 
 def status() -> str:
-    """`ok`, `backing-off` (an abandoned worker, or a path that keeps giving no holder) or `disabled`."""
+    """`ok`, `backing-off` (an abandoned worker, a path that keeps giving no holder, or lookups that keep
+    failing) or `disabled` (stalled, or the Restart Manager could not be loaded)."""
+    if _lib_failed and _resolver._lookup is find_holders:
+        return "disabled"
     return _resolver.status()

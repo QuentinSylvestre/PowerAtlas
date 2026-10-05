@@ -152,7 +152,7 @@ def isolated_config(tmp_path, monkeypatch):
     # the owner lookup has no thread and an empty cache; the tile enumerator starts with no memo.
     monkeypatch.setattr(data_codex_mod, "session_writer_state", lambda sid: "unknown")
     monkeypatch.setattr(lock_owner_mod, "_resolver", lock_owner_mod._Resolver(threads=False, self_test=False))
-    monkeypatch.setattr(web_mod, "_codex_enum", {"at": -1e9, "ids": [], "cursor": 0, "held": set()})
+    monkeypatch.setattr(web_mod, "_codex_enum", {"at": -1e9, "ids": [], "cursor": 0, "cursor_first": 0, "held": set(), "owned": set()})
     data_codex_state_mod.clear_memo()
     quiet_log_mod.reset()
     data_codex_mod._clear_caches()
@@ -29607,6 +29607,106 @@ _needs_dpapi = pytest.mark.skipif(
     reason="DPAPI (pywin32) is Windows-only")
 
 
+class TestAcpDefaultEffort:
+    """ACP sessions run at `max` effort. kiro-cli defaults to `high` and
+    `kiro-cli acp` ignores the terminal UI's `chat.modelDefaults` effort."""
+
+    LEVELS = [{"value": v} for v in ("low", "medium", "high", "max")]
+
+    def _sent(self, result, fail=False):
+        from power_atlas import acp as acp_mod
+        sent = []
+
+        async def fake_request(self, method, params, timeout=None):
+            sent.append((method, params))
+            if fail:
+                raise RuntimeError("agent refused")
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request):
+            asyncio.run(acp_mod._Supervisor()._apply_default_effort("sess_x-1", result))
+        return sent
+
+    def _result(self, current="high", levels=None):
+        return {"configOptions": [{"id": "mode"}, {
+            "id": "effortLevel", "currentValue": current,
+            "options": self.LEVELS if levels is None else levels}]}
+
+    def test_max_is_set_when_the_agent_offers_it(self):
+        assert self._sent(self._result()) == [("session/set_config_option", {
+            "sessionId": "sess_x-1", "configId": "effortLevel", "value": "max"})]
+
+    @pytest.mark.parametrize("result", [
+        None, {}, {"configOptions": []}, {"configOptions": [{"id": "mode"}]},
+        {"configOptions": "x"},
+    ])
+    def test_nothing_is_sent_without_an_effort_option(self, result):
+        assert self._sent(result) == []
+
+    def test_nothing_is_sent_when_already_max(self):
+        assert self._sent(self._result(current="max")) == []
+
+    def test_nothing_is_sent_when_max_is_not_offered(self):
+        assert self._sent(self._result(levels=self.LEVELS[:3])) == []
+
+    def test_a_refusal_is_swallowed(self):
+        assert len(self._sent(self._result(), fail=True)) == 1
+
+    def test_stored_effort_is_read_from_session_json(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        assert Path.home() == tmp_path   # never the real ~/.kiro
+        root = tmp_path / ".kiro" / "sessions" / "0123456789abcdef"
+        bodies = {"sess_eff-0001": {"effortLevel": "high"}, "sess_eff-0002": {},
+                  "sess_eff-0003": {"effortLevel": ""}, "sess_eff-0004": {"effortLevel": 3}}
+        for sid, body in bodies.items():
+            (root / sid).mkdir(parents=True)
+            (root / sid / "session.json").write_text(json.dumps(body), encoding="utf-8")
+        ids = [*bodies, "sess_absent-0001", "../x"]
+        got = [acp_mod._stored_session_effort_v3(s) for s in ids]
+        assert got == ["high", None, None, None, None, None]
+
+    def _calls(self, acp_mod, run, answers):
+        """Run `run()` against a stub agent; return the (method, params) sent."""
+        calls = []
+
+        async def fake_request(sup, method, params, timeout=None):
+            calls.append((method, params))
+            return answers.get(method, {})
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(run())
+        return calls
+
+    def test_new_session_sets_max_once_it_exists(self, acp_store):
+        acp_mod, store = acp_store
+        sid = "sess_effnew-0001"
+        answers = {"session/new": {"_meta": {"id": sid}, **self._result()}}
+        sup = acp_mod._supervisor
+        calls = self._calls(acp_mod, lambda: sup.new_session(str(store)), answers)
+        sup.sessions.pop(sid, None)
+        sup.history.pop(sid, None)
+        assert [m for m, _ in calls] == ["session/new", "session/set_config_option"]
+        assert calls[1][1] == {"sessionId": sid, "configId": "effortLevel", "value": "max"}
+
+    @pytest.mark.parametrize("stored, applied", [(None, True), ("high", False)])
+    def test_load_sets_max_only_when_no_level_was_chosen(
+            self, acp_store, monkeypatch, stored, applied):
+        acp_mod, store = acp_store
+        sid = f"sess_effload-{stored or 'none'}-01"
+        monkeypatch.setattr(acp_mod, "_stored_session_effort_v3", lambda s: stored)
+        sup = acp_mod._supervisor
+        calls = self._calls(
+            acp_mod, lambda: sup.load_session(sid, str(store)),
+            {"session/load": self._result()})
+        sup.sessions.pop(sid, None)
+        sup.history.pop(sid, None)
+        sent = [m for m, _ in calls if m == "session/set_config_option"]
+        assert bool(sent) is applied
+
+
 class TestAcpMcpSignIn:
     """MCP OAuth sign-in over ACP: the client-side secret store kiro-cli keeps
     sign-ins in, the gated ``_kiro/openExternalUrl``, and the panel's
@@ -34790,6 +34890,27 @@ class TestCodexLockEnumeratorAndTiles:
             world.now[0] += 4                                       # past the 3 s reuse
         assert seen == set(ids), "the rotating cursor reaches every lock file in the end"
 
+    def test_nine_or_more_held_threads_do_not_starve_the_rest(self, locks_dir, world):
+        ids = self.make_locks(locks_dir, 40)
+        held = ids[:12]
+        world.held = {sid: ((10, 100.0),) for sid in held}
+        probed, calls = set(), []
+        for _ in range(60):
+            world.probes.clear()
+            calls.append(set(self.threads()))
+            probed |= set(world.probes)
+            world.now[0] += 4
+        assert all(call == set(held) for call in calls[25:]), "once seen, every held thread is reported on every call, not only the eight probed"
+        assert probed == set(ids), "and the rotation still reaches every other lock file"
+
+    def test_a_lock_seen_free_drops_its_owner_entry(self, locks_dir, world, monkeypatch):
+        from power_atlas import web as web_mod
+        a, = self.make_locks(locks_dir, 1)
+        forgotten = []
+        monkeypatch.setattr(web_mod.lock_owner, "forget", lambda path: forgotten.append(os.path.basename(path)))
+        self.threads()
+        assert forgotten == [f"{a}.lock"]
+
     def test_the_result_is_reused_for_three_seconds(self, locks_dir, world):
         self.make_locks(locks_dir, 3)
         self.threads()
@@ -34859,6 +34980,13 @@ class TestCodexLockEnumeratorAndTiles:
         assert self._candidate(monkeypatch, self.SID, "C:\\ws\\proj", records=False) is None, "no store record"
         assert self._candidate(monkeypatch, self.SID, None) is None, "no rollout at all"
 
+    def test_a_cwd_on_a_network_or_unknown_drive_gives_no_tile_and_never_reaches_the_hidden_filter(self, monkeypatch):
+        from power_atlas import data_codex_state
+        monkeypatch.setattr(data_codex_state, "_drive_type", lambda root: 4)
+        assert self._candidate(monkeypatch, self.SID, "Z:\\ws\\proj") is None
+        monkeypatch.setattr(data_codex_state, "_drive_type", lambda root: 3)
+        assert self._candidate(monkeypatch, self.SID, "Z:\\ws\\proj") is not None
+
     def test_a_hidden_workspace_or_a_disabled_provider_gives_no_tile(self, monkeypatch):
         assert self._candidate(monkeypatch, self.SID, "C:\\ws\\proj", hidden=("C:\\ws\\proj",)) is None
         assert self._candidate(monkeypatch, self.SID, "C:\\ws\\proj", shown=False) is None
@@ -34878,6 +35006,20 @@ class TestCodexTileSourceWiring:
         monkeypatch.setattr(web_mod.data, "discover_workspaces_with_counts", lambda *a, **k: [])
         web_mod._overview_live({}, "all")
         assert seen["deps"].codex_terminal_threads is web_mod._codex_terminal_threads
+
+
+class TestCodexOwnerVerdictNeverRaises:
+    def test_a_lookup_that_raises_is_unknown_and_logged_without_the_path(self, monkeypatch, caplog):
+        from power_atlas import web as web_mod
+
+        def boom(path):
+            raise OSError(5, "denied", path)
+
+        monkeypatch.setattr(web_mod.lock_owner, "holders", boom)
+        with caplog.at_level("WARNING"):
+            assert web_mod._codex_owner_verdict(_lk_snap(), "0000000e-1111-4222-8333-00000000000e") == "unknown"
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "OSError" in text and "thread-writer-locks" not in text and "0000000e" not in text
 
 
 class TestCodexOwnerLookupReach:
@@ -34906,8 +35048,33 @@ class TestCodexOwnerLookupReach:
         rich = web_mod._acp_flat_listing(1, 10, {}, {}, providers=frozenset({"codex"}), include_provider=True)
         assert rich["sessions"][0]["live"] is True and asked == [("live", "codex")]
 
+    def test_the_remote_listing_route_never_asks_for_liveness_or_an_owner(self, client, isolated_config, monkeypatch):
+        from power_atlas import data, data_codex, web as web_mod
+        now = time.time()
+        _ovx_rollout(isolated_config / "codex-home" / "sessions", 72, [_ovx_user(now - 60, "hello")], at=now - 60)
+        data_codex._clear_caches()
+        data.invalidate_workspace_counts()
+        monkeypatch.setattr(data, "_cache", {})
+        asked = []
+        monkeypatch.setattr(web_mod, "_session_is_live", lambda snap, s, prov: asked.append(prov) or True)
+        monkeypatch.setattr(web_mod.lock_owner, "holders", lambda path: asked.append("owner"))
+        monkeypatch.setattr(web_mod.data_codex, "session_writer_state", lambda sid: asked.append("state") or "unknown")
+        for query in ("", "?mode=flat&page=1&size=10", "?provider=codex", "?cwd=C:%5Cws%5Cgamma"):
+            response = client.get(web_mod._ACP_LISTING_PATH + query)
+            assert response.status_code in (200, 400, 404), (query, response.status_code)
+            assert "codex_diagnostics" not in response.text
+        assert asked == [], asked
+
 
 class TestCodexDiagnostics:
+    def test_the_grouped_listing_carries_it_only_for_the_dashboard(self, isolated_config, monkeypatch):
+        from power_atlas import data, web as web_mod
+        data.invalidate_workspace_counts()
+        monkeypatch.setattr(data, "_cache", {})
+        for include, want in ((True, True), (False, False)):
+            out = web_mod._acp_listing("", 1, 10, 1, 10, {}, {}, providers=frozenset({"codex"}), include_provider=include)
+            assert ("codex_diagnostics" in out) is want, include
+
     def test_owner_lookup_is_the_resolvers_status_and_turn_watch_is_off(self, monkeypatch):
         from power_atlas import web as web_mod
         for status in ("ok", "backing-off", "disabled"):

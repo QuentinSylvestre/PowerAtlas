@@ -3985,6 +3985,8 @@ class TestCodexProcessKinds:
         ("ChatGPT.exe", ["ChatGPT.exe"]),
         ("ChatGPT.exe", ["ChatGPT.exe", "--type=renderer"]),
         ("codex.exe", ["codex.exe", "--type=utility"]),
+        ("notepad.exe", ["codex.exe", "--managed-daemon"]),
+        ("notepad.exe", ["C:\\bin\\codex.exe", "app-server"]),
         ("codex-code-mode-host.exe", ["codex-code-mode-host.exe"]),
         ("codex-windows-sandbox-service.exe", ["codex-windows-sandbox-service.exe"]),
         ("node.exe", ["node", "C:\\npm\\codex.js", "resume", _cx_id(7)]),
@@ -3995,6 +3997,21 @@ class TestCodexProcessKinds:
     ])
     def test_other_processes_are_not_recorded(self, name, argv):
         assert self._procs(_FakeProc(name, argv, pid=50, create_time=1.0, ppid=1)) == {}
+
+    def test_argv0_stands_in_only_when_the_scan_got_no_image_name(self):
+        got = self._procs(_FakeProc("", ["C:\\bin\\codex.exe", "app-server", "--managed-daemon"], pid=80, create_time=1.0, ppid=1))
+        assert {pid: kind for pid, (_c, kind, _pp) in got.items()} == {80: "daemon"}
+
+    def test_a_parent_pid_that_belongs_to_a_newer_process_is_not_the_parent(self):
+        host = _FakeProc("ChatGPT.exe", ["ChatGPT.exe"], pid=500, create_time=500.0)
+        newer = self._procs(host, self._p(41, ["codex.exe", "app-server"], ppid=500, ct=100.0))
+        assert newer[41][2] is None, "pid 500 started after its supposed child: a reused pid"
+        older = self._procs(_FakeProc("ChatGPT.exe", ["ChatGPT.exe"], pid=500, create_time=50.0),
+                            self._p(41, ["codex.exe", "app-server"], ppid=500, ct=100.0))
+        assert older[41][2] == 500
+        unreadable = self._procs(_FakeProc("ChatGPT.exe", ["ChatGPT.exe"], pid=500, create_time=None),
+                                 self._p(41, ["codex.exe", "app-server"], ppid=500, ct=100.0))
+        assert unreadable[41][2] == 500, "a parent whose start time cannot be read is kept"
 
     def test_a_process_whose_start_time_cannot_be_read_is_not_recorded(self):
         assert self._procs(_FakeProc("codex.exe", ["codex.exe"], pid=60, create_time=None, ppid=1)) == {}
@@ -4559,6 +4576,9 @@ _CX_LOCK_TTL = data_codex._LOCK_TTL
 _CX_LOCK_BUSY_TTL = data_codex._LOCK_BUSY_TTL
 _CX_LOCK_PROBE_WAIT = data_codex._LOCK_PROBE_WAIT
 _CX_LOCK_STUCK_TTL = data_codex._LOCK_STUCK_TTL
+_CX_STATE_TTL = data_codex._STATE_TTL
+_CX_STATE_BUSY_TTL = data_codex._STATE_BUSY_TTL
+_CX_STATE_STALE_MAX = data_codex._STATE_STALE_MAX
 
 
 def _cx_fake_posix(monkeypatch, script, calls):
@@ -5262,6 +5282,9 @@ class TestCodexWriterLock:
 # the tri-state sibling of session_writer_locked.
 class TestCodexWriterState:
     SID = _cx_id(61)
+
+    def test_the_shipped_cache_times_are_five_seconds_one_second_and_sixty(self):
+        assert (_CX_STATE_TTL, _CX_STATE_BUSY_TTL, _CX_STATE_STALE_MAX) == (5.0, 1.0, 60.0)
 
     @_needs_os_locks
     def test_held_by_another_process_is_held(self, locks):
@@ -6540,6 +6563,123 @@ class TestLockOwner:
         r.clock.t += lock_owner.LOOKUP_WEDGE_SECONDS + 1
         return r._gen
 
+    # -- the same rules under real threads: a replacement worker, and recovery after an abandoned one returns --
+
+    @staticmethod
+    def _wait(predicate, seconds=5.0):
+        deadline = time.monotonic() + seconds
+        while not predicate() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return predicate()
+
+    def _gated_resolver(self, monkeypatch, gates):
+        """Lookups of a path with a gate block until it is set; every other lookup answers at once."""
+        monkeypatch.setattr(lock_owner, "LOOKUP_WEDGE_SECONDS", 0.15)
+        monkeypatch.setattr(lock_owner, "MIN_LOOKUP_GAP", 0.0)
+        monkeypatch.setattr(lock_owner, "WEDGE_WINDOW_SECONDS", 0.05)   # the two stalls below are not "within" it
+        entered = []
+
+        def lookup(path):
+            entered.append(path)
+            if path in gates:
+                gates[path].wait(30)
+            return ((1, 1.0),)
+
+        r = lock_owner._Resolver(lookup=lookup, alive=lambda p, s: "alive", threads=True, self_test=False)
+        r.entered = entered
+        return r
+
+    def test_a_stalled_lookup_gets_a_replacement_worker_and_the_stuck_one_exits_when_it_returns(self, monkeypatch):
+        gate = threading.Event()
+        r = self._gated_resolver(monkeypatch, {self.P: gate})
+        try:
+            assert r.holders(self.P) is lock_owner.PENDING
+            assert self._wait(lambda: self.P in r.entered)
+            time.sleep(0.3)                                      # past the 0.15 s bound
+            assert r.holders(self.Q) is lock_owner.PENDING        # any call notices the stall
+            assert self._wait(lambda: r.holders(self.Q) == ((1, 1.0),)), "the replacement worker looked it up"
+            assert r._abandoned == 1
+            gate.set()
+            assert self._wait(lambda: r._abandoned == 0)
+            workers = lambda: [th for th in threading.enumerate() if th.name == "lock-owner" and th.is_alive()]
+            assert self._wait(lambda: len(workers()) == 1), "the abandoned worker left its loop"
+        finally:
+            gate.set()
+            r.stop()
+
+    def test_a_status_poll_alone_starts_the_replacement_worker(self, monkeypatch):
+        gate = threading.Event()
+        r = self._gated_resolver(monkeypatch, {self.P: gate})
+        try:
+            r.holders(self.P)
+            assert self._wait(lambda: self.P in r.entered)
+            r.holders(self.Q)                                    # queued behind the blocked worker
+            time.sleep(0.3)
+            r.status()                                           # only a status poll notices the stall
+            assert self._wait(lambda: r._cache[self.Q].holders is not None), "the replacement looked it up"
+        finally:
+            gate.set()
+            r.stop()
+
+    def test_with_two_abandoned_workers_the_lookup_resumes_when_one_returns_not_when_both_do(self, monkeypatch):
+        gate_a, gate_b = threading.Event(), threading.Event()
+        r = self._gated_resolver(monkeypatch, {self.P: gate_a, self.Q: gate_b})
+        third = "C:\\locks\\c.lock"
+        try:
+            r.holders(self.P)
+            assert self._wait(lambda: self.P in r.entered)
+            time.sleep(0.3)
+            r.holders(self.Q)                                    # abandons the first worker, starts a second
+            assert self._wait(lambda: self.Q in r.entered)
+            time.sleep(0.3)
+            assert r.holders(third) is None and r.status() == "disabled", "two blocked workers: disabled, no third thread"
+            gate_a.set()                                         # one returns
+            assert self._wait(lambda: r._abandoned == 1)
+            assert self._wait(lambda: r.holders(third) == ((1, 1.0),)), "a new worker serves it while the other is still blocked"
+            assert not gate_b.is_set()
+        finally:
+            gate_a.set()
+            gate_b.set()
+            r.stop()
+
+    def test_an_abandoned_worker_pops_nothing(self):
+        r = _lo_resolver()
+        r.holders(self.P)
+        old = r._gen
+        r._gen += 1
+        r.clock.t += 2
+        assert r.step(gen=old) is False and r.calls == []
+        assert r.step() is True
+
+    def test_lookups_that_keep_failing_show_as_backing_off_and_a_success_clears_it(self):
+        results = {"v": None}
+        r = _lo_resolver(lookup=lambda path: results["v"])
+        for n in range(lock_owner.FAIL_STREAK):
+            r.holders(f"C:\\locks\\f{n}.lock")
+            _lo_run(r, f"C:\\locks\\f{n}.lock")
+        assert r.status() == "backing-off"
+        results["v"] = ((1, 1.0),)
+        r.holders("C:\\locks\\ok.lock")
+        _lo_run(r, "C:\\locks\\ok.lock")
+        assert r.status() == "ok"
+
+    def test_a_library_that_could_not_be_loaded_reports_disabled(self, monkeypatch):
+        monkeypatch.setattr(lock_owner, "_lib_failed", True)
+        monkeypatch.setattr(lock_owner, "_resolver", lock_owner._Resolver(threads=False, self_test=False))
+        assert lock_owner.status() == "disabled"
+
+    def test_a_thread_that_cannot_be_started_leaves_the_fall_back_in_place(self, monkeypatch):
+        class NoThread:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(lock_owner.threading, "Thread", NoThread)
+        r = lock_owner._Resolver(lookup=lambda p: None, threads=True, self_test=False)
+        assert r.holders(self.P) is lock_owner.PENDING and r._worker is None
+
     def test_a_wedged_lookup_abandons_its_worker_and_the_late_result_is_dropped(self):
         r = _lo_resolver()
         r.holders(self.P)
@@ -6764,6 +6904,60 @@ class TestRestartManagerCalls:
         assert lock_owner.find_holders("C:\\x.lock") is None
         assert len(seen) == 1 and os.path.isabs(seen[0]) and seen[0].lower().endswith("system32\\rstrtmgr.dll")
         assert lock_owner.find_holders("C:\\x.lock") is None and len(seen) == 1, "a failed load is remembered"
+
+    def test_the_system_folder_comes_from_the_os_never_from_the_environment(self, monkeypatch):
+        seen = []
+        monkeypatch.setenv("SystemRoot", "D:\\evil")
+        monkeypatch.setattr(lock_owner, "_lib", None)
+        monkeypatch.setattr(lock_owner, "_lib_failed", False)
+        monkeypatch.setattr(lock_owner, "_load_library", lambda path: seen.append(path) or (_ for _ in ()).throw(OSError("x")))
+        assert lock_owner.find_holders("C:\\x.lock") is None
+        assert len(seen) == 1 and "evil" not in seen[0].lower()
+        assert os.path.dirname(seen[0]).lower() == lock_owner._system_directory().lower()
+
+    @pytest.mark.parametrize("folder", [None, "", "system32", "..\\system32"])
+    def test_a_missing_or_relative_system_folder_loads_nothing(self, monkeypatch, folder):
+        seen = []
+        monkeypatch.setattr(lock_owner, "_lib", None)
+        monkeypatch.setattr(lock_owner, "_lib_failed", False)
+        monkeypatch.setattr(lock_owner, "_system_directory", lambda: folder)
+        monkeypatch.setattr(lock_owner, "_load_library", lambda path: seen.append(path))
+        assert lock_owner.find_holders("C:\\x.lock") is None and seen == []
+
+    def test_the_library_is_loaded_with_the_system32_search_flag(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(lock_owner.ctypes, "WinDLL", lambda path, **kw: seen.update(path=path, kw=kw) or "lib")
+        assert lock_owner._load_library("C:\\Windows\\System32\\rstrtmgr.dll") == "lib"
+        assert seen["kw"] == {"winmode": 0x800}
+
+    def test_a_filetime_converts_to_unix_seconds(self):
+        base = 116444736000000000
+        assert lock_owner._filetime_epoch(base & 0xFFFFFFFF, base >> 32) == 0.0
+        assert lock_owner._filetime_epoch((base + 10 ** 7) & 0xFFFFFFFF, (base + 10 ** 7) >> 32) == 1.0
+        assert lock_owner._filetime_epoch(0, 0) == -11644473600.0
+
+    @pytest.mark.parametrize("times_ok,code,want", [(True, 259, "alive"), (True, 1, "gone"), (False, 259, "unknown")])
+    def test_the_process_handle_is_closed_on_every_path(self, monkeypatch, times_ok, code, want):
+        closed = []
+
+        class Kernel32:
+            def OpenProcess(self, access, inherit, pid):
+                return 77
+
+            def GetProcessTimes(self, handle, *rest):
+                return 1 if times_ok else 0
+
+            def GetExitCodeProcess(self, handle, out):
+                out._obj.value = code
+                return 1
+
+            def CloseHandle(self, handle):
+                closed.append(handle)
+                return 1
+
+        monkeypatch.setattr(lock_owner, "_kernel32", Kernel32())
+        assert lock_owner._process_state(1234, lock_owner._filetime_epoch(0, 0)) == want
+        assert closed == [77]
 
     def test_the_real_library_lists_this_process_for_a_file_it_holds_open(self, tmp_path):
         target = tmp_path / "held.bin"

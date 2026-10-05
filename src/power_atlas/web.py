@@ -47,6 +47,7 @@ from .config import (load_config, save_config, ConfigUnreadableError,
                      ACP_PERMISSION_MODES)
 from . import agent_profile, autostart, data, data_codex, icons, launcher, lock_owner, notifications, presence
 from . import overview
+from . import quiet_log
 from . import permission_rows
 from .status_classifier import get_semantic_status, SemanticStatus
 
@@ -330,10 +331,14 @@ def _codex_lock_path(session_id: str) -> str:
 def _codex_owner_verdict(snapshot, session_id: str) -> str:
     """The verdict for a held thread's lock, from the owner cache: `terminal`, `other` or
     `unknown` (also while the first lookup is still pending)."""
-    got = lock_owner.holders(_codex_lock_path(session_id))
-    if got is None or got is lock_owner.PENDING:
+    try:
+        got = lock_owner.holders(_codex_lock_path(session_id))
+        if got is None or got is lock_owner.PENDING:
+            return "unknown"
+        return _codex_holder_verdict(got, snapshot)
+    except Exception as exc:  # a row must never fail for a dot it cannot decide: the older rule applies
+        quiet_log.warn(log, "codex owner verdict failed", exc)
         return "unknown"
-    return _codex_holder_verdict(got, snapshot)
 
 
 def _codex_terminal_owned(snapshot, session_id: str) -> bool:
@@ -360,7 +365,7 @@ _CODEX_ENUM_PROBES = 8
 _CODEX_ENUM_REUSE = 3.0
 _codex_enum_lock = threading.Lock()
 _codex_clock = time.monotonic  # a seam, so a test can move time
-_codex_enum: dict = {"at": -1e9, "ids": [], "cursor": 0, "held": set()}
+_codex_enum: dict = {"at": -1e9, "ids": [], "cursor": 0, "cursor_first": 0, "held": set(), "owned": set()}
 
 
 def _codex_terminal_threads(snapshot) -> list[str]:
@@ -370,6 +375,7 @@ def _codex_terminal_threads(snapshot) -> list[str]:
         if now - _codex_enum["at"] < _CODEX_ENUM_REUSE:
             return list(_codex_enum["ids"])
     ids: list[str] = []
+    owned_now: set[str] = set()
     if sys.platform == "win32" and snapshot.has_codex_terminal():
         try:
             names = os.listdir(data_codex.CODEX_LOCKS_DIR)
@@ -379,23 +385,39 @@ def _codex_terminal_threads(snapshot) -> list[str]:
         if every:
             with _codex_enum_lock:
                 held_before, cursor = set(_codex_enum["held"]), _codex_enum["cursor"]
+                owned_before = set(_codex_enum["owned"])
             resumed = {sid for prov, sid, _cwd in snapshot.live_sids() if prov == "codex"}
             first = [sid for sid in every if sid in held_before or sid in resumed]
-            rest = [sid for sid in every if sid not in set(first)]
-            start = cursor % len(rest) if rest else 0
-            rotated = rest[start:] + rest[:start]
-            probe = (first + rotated)[:_CODEX_ENUM_PROBES]
+            known = set(first)
+            rest = [sid for sid in every if sid not in known]
+            # Half the probes at most go to ids already seen held or named by a resume command line,
+            # so a rail of nine or more terminals cannot starve the rest; each list has its own cursor.
+            first_start = _codex_enum["cursor_first"] % len(first) if first else 0
+            first_rot = first[first_start:] + first[:first_start]
+            rest_start = cursor % len(rest) if rest else 0
+            rest_rot = rest[rest_start:] + rest[:rest_start]
+            take_first = first_rot[:_CODEX_ENUM_PROBES if not rest_rot else _CODEX_ENUM_PROBES // 2]
+            probe = take_first + rest_rot[:_CODEX_ENUM_PROBES - len(take_first)]
             held_now: set[str] = set()
+            found: set[str] = set()
             for sid in probe:
+                state = data_codex.session_writer_state(sid)
+                if state == "free":
+                    lock_owner.forget(_codex_lock_path(sid))  # a lock seen free drops its owner entry
                 if _codex_terminal_owned(snapshot, sid):
-                    ids.append(sid)
-                if data_codex.session_writer_state(sid) == "held":
+                    found.add(sid)
+                if state == "held":
                     held_now.add(sid)
+            # A thread not probed this time keeps its earlier answer until its turn comes round, so
+            # more than eight terminals do not make their tiles flicker.
+            owned_now = (owned_before - set(probe)) & set(every) | found
+            ids = sorted(owned_now)
             with _codex_enum_lock:
                 _codex_enum["held"] = (held_before - set(probe)) | held_now
-                _codex_enum["cursor"] = cursor + max(0, len(probe) - len(first))
+                _codex_enum["cursor"] = cursor + (len(probe) - len(take_first))
+                _codex_enum["cursor_first"] = _codex_enum["cursor_first"] + len(take_first)
     with _codex_enum_lock:
-        _codex_enum["at"], _codex_enum["ids"] = _codex_clock(), list(ids)
+        _codex_enum["at"], _codex_enum["ids"], _codex_enum["owned"] = _codex_clock(), list(ids), owned_now
     return ids
 
 

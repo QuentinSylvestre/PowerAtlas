@@ -119,6 +119,12 @@ def _drive_type(root: str) -> int:
     return int(ctypes.windll.kernel32.GetDriveTypeW(root))  # type: ignore[attr-defined]
 
 
+def is_local_drive(cwd: str) -> bool:
+    """Whether a drive-letter path is on a local drive (fixed, removable, CD-ROM or RAM disk),
+    answered from the drive-letter table, so a disconnected network share costs no traffic."""
+    return _drive_type(strip_extended_prefix(cwd)[:3].upper()) in _LOCAL_DRIVE_TYPES
+
+
 def state_db_path() -> Path | None:
     """The state database: the file whose whole name is ``state_<N>.sqlite`` with the
     highest N, directly in the Codex home (not in a sub-folder: a stale copy sits in
