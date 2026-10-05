@@ -1,7 +1,7 @@
 # Codex Live Status, Context Pressure and Sub-agent Usage from the State Database
 
 > **Date**: 2026-10-02
-> **Status**: In Progress — Phases 0 to 2 done and reviewed; Phase 3 coded, reviewed and fixed, with two exit criteria open (the mutation list, live QA b/e/f); Phase 4 coded and reviewed, live QA open; Phase 5 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phases 0 to 2 done and reviewed; Phase 3 coded, reviewed and fixed, with two exit criteria open (the mutation list, live QA b/e/f); Phase 4 and Phase 5 coded and reviewed, live QA open for 3, 4 and 5; Phase 6 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Follow-ups deferred by the archived Codex provider plan: a lock-owner live dot, a Working/Idle verdict and turn-end notifications for terminal Codex sessions, Codex context pressure, sub-agent token usage, and an optional state-database layer that feeds them. Driving Codex from `/acp` and app-server integration are out of scope.
 > **Estimated effort**: 5-6 days (pre-flight 0.5, database and sub-agent usage 1, context pressure 0.5, lock owner and live dot 1.25, verdict 1, notifier 0.75, documentation, cleanup and QA 0.75)
@@ -248,12 +248,12 @@ All measurements print counts, shapes and timings only: no ids, no paths, no mes
 **QA (restart grant, unlocked screen)**: enable notifications; in a live TUI send a short prompt: exactly one toast per turn (a turn that ends before the watcher first sees the lock, about one tick, may be missed, D13); start PowerAtlas while a turn is running: no toast for the turn already in flight, a toast for the next; hide the workspace: no toast; record the idle cost of a tick (the process scan and the lock probes) with the notifier on and no browser open, and launch a TUI while the notifier runs to confirm Codex's own lock acquire is not delayed.
 
 **Exit criteria**:
-- [ ] `new_turn_ends`, the tick function and the daemon thread exist as above.
-- [ ] All Phase 5 tests pass and the full suites, node tests, `_check_test_names.py` and `ruff` counts are green.
-- [ ] Mutation checks fail the tests: first sight notifying; the offset not advanced; a torn line consumed; the shrink reset notifying; the head hash check removed; the tail hash check removed; the newline check removed; the enabled flag ignored; the per-tick byte cap removed; the per-id and per-tick toast caps removed; the hidden-workspace and network-shape filters removed; the sub-agent skip removed; a remembered absent rollout; the offset-0 first sight for a new rollout removed; the forget rule changed to 60 s of `unknown`; the probe cap or rotating cursor removed; the label clamp or the folder-name-only rule removed; a substring match in place of the key-path match; an exception inside the tick escaping; the thread made non-daemon or the tick moved to the shared executor; the unparseable-line skip removed.
-- [ ] Live QA shows one toast per turn, none for the turn in flight at startup, none for a hidden workspace; the idle tick cost is recorded in section 9.
-- [ ] README states the terminal turn-end toast and its setting: the live-status bullet's notification sentence, the "Notify me" bullet and the config sample's comment on `notifications.enabled` all cover it, and say that a toast also fires while the user is looking at that terminal and that a turn that ends before the watcher first sees the lock can be missed. The live-status bullet's existing sentence says toasts fire on a Working to Waiting or Errored transition, which is the removed poll-shaped model; because Phase 5 rewrites that sentence it is corrected to the event-shaped model and the correction is noted in section 9.
-- [ ] The notify toggle's `title` in `index.html` and `notifications.py`'s docstring match the shipped behaviour.
+- [x] `new_turn_ends`, the tick function and the daemon thread exist as above. Code commits `dbf3a4d`, review fixes `a47bfd5` and `39f3093`.
+- [x] All Phase 5 tests pass and the full suites, node tests, `_check_test_names.py` and `ruff` counts are green. On `main` at `39f3093`: pytest 4079 passed and 3 skipped, `node tests/acp_page.test.mjs` 952 of 952, `_check_test_names.py` clean, `ruff` counts for the edited files equal `HEAD` before the phase (web.py 13, tests/test_web.py 84, tests/test_data.py 13).
+- [x] Mutation checks fail the tests (about 60 mutants run, all detected except three equivalent ones, section 9): first sight notifying; the offset not advanced; a torn line consumed; the shrink reset notifying; the head hash check removed; the tail hash check removed; the newline check removed; the enabled flag ignored; the per-tick byte cap removed; the per-id and per-tick toast caps removed; the hidden-workspace and network-shape filters removed; the sub-agent skip removed; a remembered absent rollout; the offset-0 first sight for a new rollout removed; the forget rule changed to 60 s of `unknown`; the probe cap or rotating cursor removed; the label clamp or the folder-name-only rule removed; a substring match in place of the key-path match; an exception inside the tick escaping; the thread made non-daemon or the tick moved to the shared executor; the unparseable-line skip removed.
+- [ ] Live QA shows one toast per turn, none for the turn in flight at startup, none for a hidden workspace; the idle tick cost is recorded in section 9. NOT done: it needs PowerAtlas restarted from `main`, notifications switched on and a real Codex terminal (the user's call on both).
+- [x] README states the terminal turn-end toast and its setting: the live-status bullet's notification sentence, the "Notify me" bullet and the config sample's comment on `notifications.enabled` all cover it, and say that a toast also fires while the user is looking at that terminal and that a turn that ends before the watcher first sees the lock can be missed. The live-status bullet's existing sentence says toasts fire on a Working to Waiting or Errored transition, which is the removed poll-shaped model; because Phase 5 rewrites that sentence it is corrected to the event-shaped model and the correction is noted in section 9.
+- [x] The notify toggle's `title` in `index.html` and `notifications.py`'s docstring match the shipped behaviour.
 
 ### Phase 6: Documentation, cleanup and final QA
 **Covers**: SC-7, SC-8
@@ -428,6 +428,13 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 - The "tile reader agrees on turn boundaries" parity case compares `turn_state` with the usage parser's agent-time pairing (five record sets); `tail_events` is not part of it.
 - Mutation run (22 mutants of `turn_state`, the row wiring, the tile wiring and the page script): two survived at first (a substring match inside an `event_msg` message, and an unknown age trusted); two tests were added and both are detected.
 - Not done: Phase 4 live QA (needs the restart and a real 90-second turn); a node test for the tile dot path (the tile uses the same `dashRailDotClass`).
+**Phase 5 (code commits `dbf3a4d`, review fixes `a47bfd5` and `39f3093`).** `data_codex.new_turn_ends` (a `TurnWatch` state: offset, head hash, tail hash; one `hashlib` import), the tick in `web._codex_turn_watch_once` and its per-id helper, the daemon thread `_CodexTurnWatcher` (started and stopped by the lifespan, restarted by `_ensure_turn_watch` from both dashboard listing builders, status in `codex_diagnostics.turn_watch`), the notify toggle title, the `notifications.py` docstring paragraph and the README. Divergences from the plan text:
+- Candidates are the shared enumerator's `held` and `owned` sets (`_codex_watch_candidates` refreshes the enumerator and reads both), so the probe cap (8 per call), the rotating cursors and the 3 s reuse are the enumerator's, not a second listing.
+- The toast calls `notifications.notify_turn_end(label, "end_turn")`, so its body is the existing "Done — waiting for you".
+- Review additions: the rollout's cwd is cleaned (`_clean_watch_cwd`: no `\\?\` prefix, `.` and `..` folded, no trailing dots or spaces) before the hidden-workspace check and for the label, because `hidden()` compares plain spellings; the scope check runs on every tick for a tracked id, not only at first sight; the label drops control and direction characters; toggling notifications resets the 30 s setting cache; `new_turn_ends` logs no path; a new `provider_on` dependency stops all probing while the Codex provider is off; a held thread with no rollout is looked up at most every 30 s (`_TURN_WATCH_ROLLOUT_RETRY`); only a free lock forgets a thread (an unknown lock state keeps it); a failed or reset read keeps `from_start`; the out-of-scope bookkeeping is pruned; thread start and restart take a lock.
+- Tests: `isolated_config` sets `_TURN_WATCH_THREAD` to False and swaps in a fresh watcher and setting cache, so no test starts a real thread unless it builds its own `_CodexTurnWatcher` with injected tick and clock.
+- Mutation run: about 60 mutants of `new_turn_ends`, the tick, the thread, the lifespan and the wiring. Equivalent, so left alone: the shrink check in `new_turn_ends` (the head and tail hash checks reset first), the per-tick waiting cap seen through the send budget (now pinned by a memory-bound test), and the `ensure_running` lock (the `_last_start` gap already makes a second start impossible). The plan's "shared executor" and "unparseable-line skip" mutants do not apply (no executor is used; `loads` returns None and the key-path test covers it).
+- Not done: Phase 5 live QA and the idle tick cost (a restart, notifications on and a real Codex terminal are needed); the "ids in the owner cache are probed first" rule is the enumerator's and was not changed.
 
 ## Follow-up Work (Deferred)
 
@@ -459,6 +466,11 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 26. **A `task_complete` record over 256 KiB is not read (Phase 4 review, Low).** Lines over `_LINE_CAP` are skipped, so such a record cannot end a turn; the row reads working until 30 minutes pass without a record. Unlikely; reopen on a report.
 27. **A Codex row with a verdict stays in the Available bucket in Status grouping (Phase 4 review, Low; D12).** The buckets mean "held by this PowerAtlas" by decision.
 28. **The positive row tests need `sys.platform == "win32"` (Phase 4 review, Low).** Like the lock-owner live rule tests. No CI exists; patch the platform if one is added.
+29. **Warnings from `read_meta` and `rollout_path` carry a redacted path (Phase 5 review, Medium).** The adapter's `_warn` convention keeps the folder and hides only the id; the notifier calls both from a background thread, once a minute at most per failure. `new_turn_ends` was changed to log no path; the other two follow the adapter's existing convention. Reopen if the log should hold no path at all.
+30. **A final rollout line over 1 MiB stops the notifier for that thread (Phase 5 review, Low).** A first sight whose last 1 MiB holds no newline resets on every tick, so no turn end is seen until a line boundary appears; each tick re-reads up to 1 MiB. Lines over 256 KiB are skipped everywhere else, so this is not a normal rollout. Reopen on a report.
+31. **The tail check covers 64 bytes (Phase 5 review, Low).** A rewritten file with the same head and the same 64 bytes before the old offset reads as an append; the damage is capped at 3 toasts per thread and 6 per tick.
+32. **The shared enumerator is written by two threads (Phase 5 review, Low).** The notifier thread now calls `_codex_terminal_threads` every 5 s beside the request threads; its read-modify-write of the cursor and the held set can lose an update and delay a new terminal's discovery by a tick.
+33. **A rollout that Codex rotates for the same thread id is not followed (Phase 5 review, unverified).** `tracked.path` is fixed when the thread is first tracked; whether Codex ever starts a second rollout for one id is not measured.
 
 ## Review Log
 
@@ -660,27 +672,48 @@ Two reviewers on commit `42733c7`: a Senior engineer (acceptance criteria, corre
 | 11 | Low | A quoted-form sniff mutant survives (Reliability, test-strength note; such a sniff has no false positive). | Skipped: no behavioural consequence. |
 
 Reviewer gaps: neither measured the per-call cost of a 2 MiB scan; neither read the real Codex store (not allowed), so the event names rest on the Phase 0 evidence; the live UI was not exercised. Health after this cycle: Yellow until the user accepts rows 1 and 2 (Orchestrator: proposed-accept -- pending user decision).
+### 2026-10-05 -- Phase 5 code review (via /qdev)
+
+Two reviewers on commit `dbf3a4d`: a Security auditor (reproduced the High by running the real code on synthetic data) and a Reliability engineer (mutation runs in a scratch copy). 1 High, 6 Medium and 8 Low in all; findings and resolutions:
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | A hidden workspace spelled `\\?\C:\Hidden\proj`, `C:\Hidden\.\proj`, `C:\Hidden.\proj` and the like passed the hidden check and its folder name reached the toast (Security, reproduced). | Fixed -- `a47bfd5`: `_clean_watch_cwd` before the check and for the label; parametrised tests of seven spellings. |
+| 2 | Medium | A tracked thread was never re-checked: hiding the workspace or disabling Codex later kept the toasts coming (both). | Fixed -- `a47bfd5`. |
+| 3 | Medium | `new_turn_ends` warnings carried a redacted path (Security). | Fixed -- `a47bfd5` for this function; Follow-up Work 29 for `read_meta` and `rollout_path`. |
+| 4 | Medium | Provider-off and filter checks ran after the process scan and lock probes (Reliability). | Fixed -- `39f3093`: `provider_on` first. |
+| 5 | Medium | A held thread with no rollout forced a store-index rebuild every tick (Reliability). | Fixed -- `39f3093`: a 30 s lookup gap. |
+| 6 | Medium | An unknown lock state forgot a tracked thread and its waiting toasts (Reliability). | Fixed -- `39f3093`. |
+| 7 | Medium | Two test gaps: nothing pinned the heartbeat refresh or the lifespan stop-first/join-last order (Reliability, shown by mutants). | Fixed -- `39f3093`. |
+| 8 | Low | The 30 s setting cache was not reset by the toggle (Security). | Fixed -- `a47bfd5`. |
+| 9 | Low | Control and direction characters in the label; an empty label (Security). | Fixed -- `a47bfd5`. |
+| 10 | Low | A failed or reset first read lost `from_start` (Reliability). | Fixed -- `39f3093`. |
+| 11 | Low | `skipped` and `rollout_checked` grew without bound; start and restart unlocked (Reliability). | Fixed -- `39f3093`. |
+| 12 | Low | Test gaps: the coalescing threshold, the waiting cap, the first-tick guard, the wiring (Reliability, shown by mutants). | Fixed -- `39f3093`. |
+| 13 | Low | A final line over 1 MiB; a 64-byte tail check; the enumerator written by two threads; an unverified rollout rotation (both). | Orchestrator: proposed-accept -- pending user decision; Follow-up Work 30 to 33. |
+| 14 | Low | `test_an_offset_that_is_not_a_line_start` is redundant with the hash check (Reliability). | Skipped: the matching-hash test pins the newline check. |
+
+Reviewer gaps: neither measured the process-scan or store-rebuild cost; no live toast was fired (the toast helper is patched in every test); the real Restart Manager path was not exercised. Health after this cycle: Yellow while the Phase 4 rows 1 and 2 await the user's accept; the Phase 5 findings are Green once rows 13 are accepted (Low rows do not hold health).
 
 ## Handoff
 
-> Handoff written: 2026-10-05 (end of the Phase 4 coding session)
+> Handoff written: 2026-10-05 (end of the Phase 5 coding session)
 
 ### Previously
 
-- Phases 0 to 2 are done. Phase 3 (lock-owner lookup) and Phase 4 (Working/Idle verdict) are coded, reviewed and fixed on `main`. Phase 4: `42733c7`, review fixes `b05e7fa`; full suites at `b05e7fa`: pytest 4009 passed, node 952 of 952, name check clean, `ruff` counts unchanged. Everything up to `d99ac75` is pushed; the Phase 4 commits and this note are local until the next push.
-- Two Phase 3 exit criteria and Phase 4's live QA criterion are open (see Parked). Review rows 1 and 2 of the Phase 4 review await the user's accept.
+- Phases 0 to 2 are done. Phases 3, 4 and 5 are coded, reviewed and fixed on `main`: Phase 4 `42733c7` and `b05e7fa`; Phase 5 `dbf3a4d`, `a47bfd5` and `39f3093`. Full suites at `39f3093`: pytest 4079 passed, node 952 of 952, name check clean, `ruff` counts unchanged. Everything up to `d99ac75` is pushed; the later commits and this note are local until the next push.
+- Open exit criteria: Phase 3 (the long mutation list, live QA b/e/f), Phase 4 live QA, Phase 5 live QA and idle-tick cost. Review rows awaiting the user's accept: Phase 4 rows 1 and 2, Phase 5 row 13 (Follow-up Work 30 to 33), Phase 2 row 8.
 
 ### Parked
 
-- PowerAtlas still runs code from before Phase 3. Restart it from `main` (the user's earlier restart grant may have lapsed: ask), then run Phase 3 QA (b), (e), (f) and Phase 4 QA: in a real Codex terminal, send a prompt that runs a command for at least 90 seconds; the tile shows Working within seconds and Idle after, the rail dot follows within about a minute; quitting the terminal removes the dot. Throwaway Codex sessions need a ledger and cleanup (never print ids).
-- The Phase 3 mutation list criterion (covered piecemeal by the review runs).
+- PowerAtlas still runs code from before Phase 3. All live QA waits on a restart from `main` (the user's earlier restart grant may have lapsed: ask), notifications switched on in the UI (a user setting: ask), and a real Codex terminal (a throwaway session in a scratch folder named `codexprobe_work`, with an id ledger outside the repository; never print ids). Phase 3 QA (b), (e), (f); Phase 4 QA (a prompt that runs a command for 90 seconds: Working then Idle on the tile within seconds, the rail dot within about a minute, quitting removes the dot); Phase 5 QA (exactly one toast per turn, none for the turn in flight at startup, none for a hidden workspace, and the idle tick cost with no browser open; launch a TUI while the notifier runs to confirm Codex's own lock acquire is not delayed).
 - The Phase 6 cleanup list is in section 9; check `git worktree list` for strays. Do not run `git worktree prune`.
 
 ### Current
 
-Next: Phase 5 (turn-end notifications for terminal Codex sessions: `new_turn_ends`, a tick function and a daemon thread; see the plan's Phase 5 section and D13). It needs `data_codex.turn_state` and the shared enumerator `web._codex_terminal_threads`, both now in place. Then Phase 6 (docs, cleanup, final QA; it amends the AGENTS.md `codex exec resume` recipe with the Phase 3 (d) result, needing approved exact text).
+Next: Phase 6 (documentation, cleanup and final QA). It makes the section 8 rows owned by Phase 6 (`docs/KNOWLEDGE.md`, `plans/ROADMAP.md`, `plans/tests/260701_POWERATLAS.md`), runs the id and path scan before any deletion, shows each cleanup ledger item to the user, amends the AGENTS.md `codex exec resume` recipe with the Phase 3 (d) result (exact text shown to the user first, D22), and records the final browser pass. The live QA above is best done together with Phase 6's final QA once the user is present and the screen is unlocked.
 
-Cautions: never print ids, paths or message text from the real Codex, Claude or Kiro stores. Commit by pathspec and check `git status` first. Write edit scripts with the Write tool, never a shell heredoc (it halves backslashes: this corrupted `\n` in a test edit again this phase). A test that lists sessions must clear `data.session_cache` and the Codex caches after writing its rollouts, and again at teardown. Push only when the user asks.
+Cautions: never print ids, paths or message text from the real Codex, Claude or Kiro stores. Commit by pathspec and check `git status` first. Write edit scripts with the Write tool, never a shell heredoc (it halves backslashes and breaks on an apostrophe). A test that lists sessions must clear `data.session_cache` and the Codex caches after writing its rollouts and again at teardown. A test needing the notifier thread builds its own `_CodexTurnWatcher`. Push only when the user asks.
 
 ## Harness Improvement Opportunities
 
@@ -690,3 +723,5 @@ Cautions: never print ids, paths or message text from the real Codex, Claude or 
 - A commit built from a whole file rebuilt from an earlier `HEAD` silently removed another change's lines that landed in between — cost: one High review finding and a fix commit — suggested change: in `/qdev`'s staging notes, say to stage own hunks from a patch of the own diff (`git apply --cached`) and to compare `HEAD` before and after, whenever another session shares the files.
 - A shell heredoc halved backslashes in a Python edit script a fourth time (a `\n` in a test string became a real newline and broke the file's syntax) — cost: two extra tool rounds — suggested change: the existing rule in Harness Improvement Opportunities, unchanged; make it a hard rule in the Windows steering.
 - Process-wide session caches (`data.session_cache`) leaked sessions between tests that list sessions, failing an unrelated test later in the run — cost: four debugging rounds — suggested change: AGENTS.md's Codex test note names `data.session_cache.clear()` beside the Codex redirects.
+- A shell heredoc broke on an apostrophe inside the Python text it carried (the whole call failed) and halved backslashes again — cost: three extra tool rounds in this phase — suggested change: the Windows steering says to write every edit script with the Write tool, never a heredoc.
+- A reviewer reproduced a hidden-workspace bypass only because it ran the real predicate on hostile spellings; the plan's tests stubbed that predicate — cost: one High found at review, not at test time — suggested change: `/qplan`'s test list for a filter on untrusted input names the real predicate and a table of hostile spellings.
