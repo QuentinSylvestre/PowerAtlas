@@ -9,6 +9,7 @@ import io
 import itertools
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -21,7 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from power_atlas import data as data_mod
-from power_atlas import data_codex
+from power_atlas import data_codex, data_codex_state, quiet_log
 from power_atlas.data import (
     Session, SessionCache, _FileInfo,
     get_sessions, session_cache,
@@ -1725,9 +1726,14 @@ def codex_home(tmp_path, monkeypatch):
     monkeypatch.setattr(data_codex, "CODEX_LOCKS_DIR", home / "thread-writer-locks")
     monkeypatch.setattr(data_codex, "_STORE_TTL", 0.0)
     monkeypatch.setattr(data_codex, "_AVAILABLE_TTL", 0.0)
+    monkeypatch.setattr(data_codex_state, "CODEX_STATE_DIR", home)
     data_codex._clear_caches()
+    data_codex_state.clear_memo()
+    quiet_log.reset()
     yield home
     data_codex._clear_caches()
+    data_codex_state.clear_memo()
+    quiet_log.reset()
 
 
 def _cx_rec(rtype, payload, ts=_CX_TS):
@@ -5448,3 +5454,450 @@ class TestCodexWriterLockStuckProbe:
         with caplog.at_level("WARNING", logger="power_atlas.data_codex"):
             assert data_codex.session_writer_locked(self.SID) is False
         assert not [r for r in caplog.records if "writer_lock" in r.getMessage()]
+
+
+# --- Codex state database reader (data_codex_state) and quiet_log -----------------
+# 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1.
+# Every database here is built in tmp_path from synthetic rows; no real thread, path
+# or id belongs in this file (the repository is public).
+
+_ST_NOW = time.time()
+_ST_START = _ST_NOW - 14 * 86400
+_ST_SPAWN = '{"subagent":{"thread_spawn":{"parent_thread_id":"%s","depth":1,"agent_nickname":"%s"}}}' % (
+    _cx_id(900), "n" * 70)
+_ST_GUARDIAN = '{"subagent":{"other":"guardian"}}'
+_ST_COLUMNS = ("source TEXT, cwd TEXT, tokens_used INTEGER, created_at_ms INTEGER, "
+               "archived INTEGER, updated_at_ms INTEGER")
+
+
+def _st_row(source=_ST_SPAWN, cwd="C:\\ws", tokens=100, created=None, archived=0, updated=None):
+    return (source, cwd, tokens, int((_ST_NOW - 86400) * 1000) if created is None else created,
+            archived, int(_ST_NOW * 1000) if updated is None else updated)
+
+
+def _st_db(home, rows, *, name="state_5.sqlite", columns=_ST_COLUMNS, wal=True, live=False):
+    """A state database with a `threads` table. `wal` leaves an empty -wal file beside it
+    (Codex running); `live=True` keeps a real WAL writer open and returns it too."""
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / name
+    con = sqlite3.connect(path)
+    if live:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA wal_autocheckpoint=0")
+    con.execute(f"CREATE TABLE threads ({columns})")
+    names = [c.split()[0] for c in columns.split(",")]
+    con.executemany(f"INSERT INTO threads ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
+                    rows)
+    con.commit()
+    if live:
+        return path, con
+    con.close()
+    if wal:
+        Path(str(path) + "-wal").write_bytes(b"")
+    return path, None
+
+
+def _st_iso(offset_s):
+    return datetime.fromtimestamp(_ST_NOW + offset_s, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _st_fresh(home, *, mtime=None, name=None):
+    """One top-level rollout whose activity is `_ST_NOW`, so the freshness guard can pass."""
+    return _cx_write(home, _cx_id(1), "C:\\ws", mtime=_ST_NOW if mtime is None else mtime, name=name)
+
+
+def _st_usage(shown=None, hidden=None, stop_event=None):
+    return data_codex_state.subagent_usage(
+        _ST_START, shown or (lambda p: True), hidden or (lambda c: False), stop_event)
+
+
+class TestCodexStateReader:
+    def test_kinds_are_split_from_a_long_prefix_and_a_short_one(self, codex_home):
+        _st_db(codex_home, [_st_row(_ST_SPAWN, tokens=100), _st_row(_ST_GUARDIAN, tokens=20),
+                            _st_row('{"subagent":"memory"}', tokens=3)])
+        _st_fresh(codex_home)
+        usage, status = _st_usage()
+        assert status == "ok"
+        assert usage == {"threads": 3, "total": 123, "thread_spawn": 100, "guardian": 20}
+        assert len(_ST_SPAWN) > 96, "the fixture must be longer than the cut, like every real thread_spawn source"
+
+    def test_a_source_holding_both_kind_strings_counts_as_thread_spawn(self, codex_home):
+        both = '{"subagent":{"thread_spawn":{"a":"guardian"},"other":"guardian"}}'
+        _st_db(codex_home, [_st_row(both, tokens=7)])
+        _st_fresh(codex_home)
+        usage, _ = _st_usage()
+        assert usage["thread_spawn"] == 7 and usage["guardian"] == 0
+
+    def test_a_row_that_is_not_a_subagent_or_is_archived_is_left_out(self, codex_home):
+        _st_db(codex_home, [_st_row('{"cli":1}'), _st_row(archived=1), _st_row(tokens=5)])
+        _st_fresh(codex_home)
+        usage, _ = _st_usage()
+        assert usage["total"] == 5 and usage["threads"] == 1
+
+    def test_the_window_is_on_created_at_ms(self, codex_home):
+        edge = int(_ST_START * 1000)
+        _st_db(codex_home, [_st_row(tokens=1, created=edge), _st_row(tokens=10, created=edge - 1),
+                            _st_row(tokens=100, created="soon")])
+        _st_fresh(codex_home)
+        usage, _ = _st_usage()
+        assert usage["total"] == 1, "on the boundary counts, a millisecond earlier and a non-integer do not"
+
+    def test_hostile_token_counts_add_nothing_and_the_sum_is_capped(self, codex_home):
+        rows = [_st_row(tokens=-5), _st_row(tokens=10 ** 16), _st_row(tokens="many"), _st_row(tokens=4)]
+        _st_db(codex_home, rows)
+        _st_fresh(codex_home)
+        assert _st_usage()[0]["total"] == 4
+        data_codex_state.clear_memo()
+        _st_db(codex_home, [_st_row(tokens=10 ** 15) for _ in range(10)], name="state_6.sqlite")
+        usage, _ = _st_usage()
+        assert usage["total"] == 2 ** 53 - 1, "ten rows of 10**15 exceed 2**53 and are capped"
+
+    def test_a_row_with_a_hostile_source_or_a_huge_cwd_is_cut_not_trusted(self, codex_home):
+        huge_source = _ST_SPAWN + "x" * 10 ** 6
+        _st_db(codex_home, [_st_row(huge_source, tokens=9), _st_row(cwd="C:\\" + "d" * 10 ** 6, tokens=50)])
+        _st_fresh(codex_home)
+        usage, status = _st_usage()
+        assert (status, usage["total"], usage["thread_spawn"]) == ("ok", 9, 9)
+
+    def test_a_cwd_of_260_characters_or_more_is_excluded_including_a_prefixed_hidden_one(
+            self, codex_home):
+        hidden_257 = "C:\\" + "h" * 254
+        assert len(hidden_257) == 257
+        rows = [_st_row(cwd="C:\\" + "a" * 257, tokens=1), _st_row(cwd="\\\\?\\" + hidden_257, tokens=2),
+                _st_row(cwd=hidden_257, tokens=4)]
+        _st_db(codex_home, rows)
+        _st_fresh(codex_home)
+        seen = []
+        usage, _ = _st_usage(hidden=lambda c: seen.append(c) or False)
+        assert usage["total"] == 4 and seen == [hidden_257], "the 257-character path is checked, the 260+ ones are not"
+
+    def test_the_extended_prefix_is_stripped_before_the_hidden_check(self, codex_home):
+        _st_db(codex_home, [_st_row(cwd="\\\\?\\C:\\secret", tokens=8), _st_row(cwd="C:\\open", tokens=1)])
+        _st_fresh(codex_home)
+        usage, _ = _st_usage(hidden=lambda c: c == "C:\\secret")
+        assert usage["total"] == 1
+
+    def test_a_network_relative_or_missing_cwd_is_excluded_without_a_hidden_check(
+            self, codex_home):
+        cwds = ["\\\\?\\UNC\\srv\\share\\x", "//srv/share", "\\\\?\\unc\\srv\\share", "ws\\rel", "", None, "   "]
+        _st_db(codex_home, [_st_row(cwd=c, tokens=3) for c in cwds] + [_st_row(cwd="D:/fwd", tokens=2)])
+        _st_fresh(codex_home)
+        seen = []
+        usage, _ = _st_usage(hidden=lambda c: seen.append(c) or False)
+        assert usage["total"] == 2 and seen == ["D:\\fwd"], "only the drive-letter path reaches the filter"
+
+    def test_cwd_class_names_each_rejected_shape(self):
+        cases = {"C:\\ok": "local", "c:/ok": "local", "\\\\?\\C:\\ok": "local",
+                 "\\\\?\\UNC\\s\\x": "network", "\\\\?\\unc\\s\\x": "network", "//s/x": "network",
+                 "\\\\.\\pipe\\x": "network", "rel\\x": "relative", "x": "relative",
+                 "": "empty", "  ": "empty", None: "empty", 5: "empty", "C:\\" + "a" * 257: "long"}
+        for raw, want in cases.items():
+            assert data_codex_state.cwd_class(raw) == want, raw
+        assert data_codex_state.strip_extended_prefix("\\\\?\\UNC\\s\\x") == "\\\\s\\x"
+        assert data_codex_state.strip_extended_prefix("\\\\?\\C:\\x") == "C:\\x"
+
+    def test_a_provider_the_rail_does_not_show_reads_nothing(self, codex_home, monkeypatch):
+        _st_db(codex_home, [_st_row()])
+        _st_fresh(codex_home)
+        monkeypatch.setattr(data_codex_state, "_read", lambda ms: pytest.fail("the database was read"))
+        assert _st_usage(shown=lambda p: p != "codex") == (None, "absent")
+
+    # --- opening the file ---------------------------------------------------------
+
+    def test_the_uri_is_read_only_and_never_immutable(self, codex_home, monkeypatch):
+        _st_db(codex_home, [_st_row()])
+        _st_fresh(codex_home)
+        uris = []
+        real = sqlite3.connect
+
+        def spy(target, *args, **kwargs):
+            uris.append(str(target))
+            return real(target, *args, **kwargs)
+
+        monkeypatch.setattr(data_codex_state.sqlite3, "connect", spy)
+        assert _st_usage()[1] == "ok"
+        assert len(uris) == 1 and "mode=ro" in uris[0] and "immutable" not in uris[0]
+
+    def test_the_connection_is_locked_down_and_the_statements_are_bounded(self, codex_home, monkeypatch):
+        _st_db(codex_home, [_st_row()])
+        _st_fresh(codex_home)
+        executed, kwargs = [], []
+        real = sqlite3.connect
+
+        class Spy:
+            def __init__(self, con):
+                self._con = con
+
+            def execute(self, sql, *args):
+                executed.append(sql)
+                return self._con.execute(sql, *args)
+
+            def set_progress_handler(self, handler, ops):
+                executed.append(("progress", ops))
+                return self._con.set_progress_handler(handler, ops)
+
+            def close(self):
+                return self._con.close()
+
+        def spy(target, *args, **kw):
+            kwargs.append(kw)
+            return Spy(real(target, *args, **kw))
+
+        monkeypatch.setattr(data_codex_state.sqlite3, "connect", spy)
+        assert _st_usage()[1] == "ok"
+        assert "PRAGMA query_only=1" in executed and "PRAGMA trusted_schema=OFF" in executed
+        assert ("progress", data_codex_state._PROGRESS_OPS) in executed, "a progress handler bounds the query"
+        assert kwargs[0]["timeout"] == 1.0 and kwargs[0]["uri"] is True
+        sql = data_codex_state._SUBAGENT_SQL
+        assert sql.count("?") == 1 and sql.endswith(f"LIMIT {data_codex_state._ROW_LIMIT + 1}")
+        assert "substr(source, 1, 96)" in sql and "substr(cwd, 1, 260)" in sql
+
+    def test_a_folder_with_a_space_hash_and_percent_and_a_relative_folder_both_open(
+            self, codex_home, tmp_path, monkeypatch):
+        odd = tmp_path / "a b#c%d"
+        _st_db(odd, [_st_row(tokens=6)])
+        _st_fresh(codex_home)
+        monkeypatch.setattr(data_codex_state, "CODEX_STATE_DIR", odd)
+        assert _st_usage()[0]["total"] == 6
+        data_codex_state.clear_memo()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(data_codex_state, "CODEX_STATE_DIR", Path("a b#c%d"))
+        assert _st_usage()[0]["total"] == 6
+
+    def test_a_database_with_no_wal_file_is_not_opened_and_creates_no_file(self, codex_home):
+        path, _ = _st_db(codex_home, [_st_row()], wal=False)
+        _st_fresh(codex_home)
+        before = sorted(p.name for p in codex_home.iterdir())
+        assert _st_usage() == (None, "idle")
+        assert sorted(p.name for p in codex_home.iterdir()) == before, "no -wal or -shm may appear in Codex's folder"
+        assert not Path(str(path) + "-shm").exists()
+
+    def test_a_row_written_after_the_first_read_shows_on_the_next_read(self, codex_home):
+        path, writer = _st_db(codex_home, [_st_row(tokens=1)], live=True)
+        try:
+            _st_fresh(codex_home)
+            assert _st_usage()[0]["total"] == 1
+            writer.execute("INSERT INTO threads VALUES (?,?,?,?,?,?)", _st_row(tokens=10))
+            writer.commit()
+            assert Path(str(path) + "-wal").stat().st_size > 0, "the new row must be only in the WAL"
+            data_codex_state.clear_memo()
+            assert _st_usage()[0]["total"] == 11, "a read-only open honours the WAL"
+        finally:
+            writer.close()
+
+    def test_only_the_highest_numbered_state_file_in_the_folder_itself_is_used(self, codex_home):
+        _st_db(codex_home, [_st_row(tokens=1)], name="state_5.sqlite")
+        _st_db(codex_home, [_st_row(tokens=2)], name="state_7.sqlite")
+        _st_db(codex_home / "old", [_st_row(tokens=500)], name="state_99.sqlite")
+        for decoy in ("state_8.sqlite.bak", "xstate_9.sqlite", "state_9.sqlite-wal", "state_.sqlite"):
+            (codex_home / decoy).write_bytes(b"x")
+        _st_fresh(codex_home)
+        assert data_codex_state.state_db_path().name == "state_7.sqlite"
+        assert _st_usage()[0]["total"] == 2
+
+    def test_a_higher_numbered_file_with_the_wrong_schema_gives_none_with_no_fallback(
+            self, codex_home):
+        _st_db(codex_home, [_st_row(tokens=1)], name="state_5.sqlite")
+        _st_db(codex_home, [("a",)], name="state_999999.sqlite", columns="other TEXT")
+        _st_fresh(codex_home)
+        assert _st_usage() == (None, "error")
+
+    def test_a_sub_folder_copy_alone_is_not_a_database(self, codex_home):
+        _st_db(codex_home / "stale-copy", [_st_row()], name="state_5.sqlite")
+        _st_fresh(codex_home)
+        assert _st_usage() == (None, "absent") and data_codex_state.state_db_path() is None
+
+    def test_a_missing_file_missing_folder_table_or_column_gives_none(self, codex_home, tmp_path,
+                                                                    monkeypatch, caplog):
+        _st_fresh(codex_home)
+        with caplog.at_level("WARNING"):
+            assert _st_usage() == (None, "absent")
+            monkeypatch.setattr(data_codex_state, "CODEX_STATE_DIR", tmp_path / "nowhere")
+            assert _st_usage() == (None, "absent")
+        assert not caplog.records, "an absent database is silent"
+        monkeypatch.setattr(data_codex_state, "CODEX_STATE_DIR", codex_home)
+        data_codex_state.clear_memo()
+        path, _ = _st_db(codex_home, [], columns="a TEXT")
+        assert _st_usage() == (None, "error")
+        data_codex_state.clear_memo()
+        path.unlink()
+        _st_db(codex_home, [_st_row()[:5]], columns="source TEXT, cwd TEXT, tokens_used INTEGER, "
+                                                     "created_at_ms INTEGER, archived INTEGER")
+        caplog.set_level("WARNING")
+        caplog.clear()
+        quiet_log.reset()
+        assert _st_usage() == (None, "error"), "a database lacking updated_at_ms is not used"
+        assert [r.getMessage() for r in caplog.records] == ["codex state database has an unexpected schema"], \
+            "a schema mismatch is named in the log, not left to a failing statement"
+
+    def test_a_corrupt_file_and_an_invalid_utf8_value_give_none_and_never_raise(self, codex_home):
+        _st_fresh(codex_home)
+        (codex_home / "state_5.sqlite").write_bytes(b"not a database" * 200)
+        Path(str(codex_home / "state_5.sqlite") + "-wal").write_bytes(b"")
+        assert _st_usage() == (None, "error")
+        data_codex_state.clear_memo()
+        (codex_home / "state_5.sqlite").unlink()
+        path, _ = _st_db(codex_home, [_st_row()])
+        con = sqlite3.connect(path)
+        con.execute("UPDATE threads SET cwd = CAST(x'ffc3' AS TEXT)")
+        con.commit()
+        con.close()
+        assert _st_usage() == (None, "error"), "an undecodable value fails the read, never the caller"
+
+    def test_a_one_mebibyte_column_that_is_not_selected_does_not_fail_the_query(self, codex_home):
+        _st_db(codex_home, [_st_row(tokens=3) + ("t" * (1 << 20),)], columns=_ST_COLUMNS + ", title TEXT")
+        _st_fresh(codex_home)
+        assert _st_usage()[0]["total"] == 3
+
+    def test_more_rows_than_the_limit_give_none_not_a_partial_total(self, codex_home, monkeypatch):
+        monkeypatch.setattr(data_codex_state, "_ROW_LIMIT", 3)
+        monkeypatch.setattr(data_codex_state, "_SUBAGENT_SQL",
+                            data_codex_state._SUBAGENT_SQL.replace("LIMIT 20001", "LIMIT 4"))
+        _st_db(codex_home, [_st_row() for _ in range(5)])
+        _st_fresh(codex_home)
+        assert _st_usage() == (None, "error")
+        data_codex_state.clear_memo()
+        con = sqlite3.connect(codex_home / "state_5.sqlite")
+        con.execute("DELETE FROM threads WHERE rowid > 3")
+        con.commit()
+        con.close()
+        assert _st_usage()[0]["threads"] == 3, "exactly the limit is a complete result"
+
+    def test_a_locked_database_returns_within_the_timeout(self, codex_home, monkeypatch):
+        monkeypatch.setattr(data_codex_state, "_CONNECT_TIMEOUT_S", 0.2)
+        path, _ = _st_db(codex_home, [_st_row()])
+        _st_fresh(codex_home)
+        locker = sqlite3.connect(path, isolation_level=None)
+        locker.execute("BEGIN EXCLUSIVE")
+        try:
+            started = time.monotonic()
+            assert _st_usage() == (None, "error")
+            assert time.monotonic() - started < 3
+        finally:
+            locker.close()
+
+    def test_a_query_that_runs_too_long_is_aborted_and_the_next_read_works(self, codex_home,
+                                                                           monkeypatch):
+        _st_db(codex_home, [_st_row() for _ in range(60)])
+        _st_fresh(codex_home)
+        monkeypatch.setattr(data_codex_state, "_QUERY_BUDGET_S", -1.0)
+        monkeypatch.setattr(data_codex_state, "_PROGRESS_OPS", 1)
+        assert _st_usage() == (None, "error")
+        monkeypatch.setattr(data_codex_state, "_QUERY_BUDGET_S", 1.5)
+        monkeypatch.setattr(data_codex_state, "_PROGRESS_OPS", 1000)
+        data_codex_state.clear_memo()
+        assert _st_usage()[0]["threads"] == 60
+
+    # --- the freshness guard ------------------------------------------------------
+
+    def test_a_database_far_older_than_the_rollouts_is_stale(self, codex_home):
+        _st_db(codex_home, [_st_row(updated=int((_ST_NOW - 3 * 3600) * 1000))])
+        _st_fresh(codex_home)
+        assert _st_usage() == (None, "stale")
+
+    def test_a_database_within_the_margin_is_fresh(self, codex_home):
+        _st_db(codex_home, [_st_row(updated=int((_ST_NOW - 1700) * 1000))])
+        _st_fresh(codex_home)
+        assert _st_usage()[1] == "ok"
+
+    def test_a_rollout_with_a_frozen_mtime_still_counts_by_its_last_record(self, codex_home):
+        _cx_write(codex_home, _cx_id(2), "C:\\ws", records=[_cx_agent("x", ts=_st_iso(-60))],
+                  mtime=_ST_NOW - 86400)
+        _st_db(codex_home, [_st_row(updated=int((_ST_NOW - 60) * 1000))])
+        assert _st_usage()[1] == "ok"
+        data_codex_state.clear_memo()
+        con = sqlite3.connect(codex_home / "state_5.sqlite")
+        con.execute("UPDATE threads SET updated_at_ms = ?", (int((_ST_NOW - 4 * 3600) * 1000),))
+        con.commit()
+        con.close()
+        assert _st_usage() == (None, "stale"), "the record's timestamp, not the old mtime, sets the rollout's age"
+
+    def test_no_rollout_at_all_gives_none(self, codex_home):
+        _st_db(codex_home, [_st_row()])
+        assert _st_usage() == (None, "stale")
+
+    def test_only_the_twenty_most_recently_modified_rollouts_are_compared(self, codex_home):
+        for n in range(20):
+            _cx_write(codex_home, _cx_id(10 + n), "C:\\ws", mtime=_ST_NOW - 10 * 3600)
+        _cx_write(codex_home, _cx_id(40), "C:\\ws", mtime=_ST_NOW - 20 * 3600,
+                  records=[_cx_agent("x", ts=_st_iso(-60))])
+        _st_db(codex_home, [_st_row(updated=int((_ST_NOW - 10 * 3600) * 1000))])
+        assert _st_usage()[1] == "ok", "the 21st rollout by mtime is not looked at"
+
+    # --- the memo, logging and filters ---------------------------------------------
+
+    def test_the_memo_holds_raw_rows_so_a_new_hidden_tag_applies_at_once(self, codex_home,
+                                                                         monkeypatch):
+        _st_db(codex_home, [_st_row(cwd="C:\\a", tokens=2), _st_row(cwd="C:\\b", tokens=5)])
+        _st_fresh(codex_home)
+        reads = []
+        real = data_codex_state._read
+        monkeypatch.setattr(data_codex_state, "_read", lambda ms: reads.append(ms) or real(ms))
+        assert _st_usage()[0]["total"] == 7
+        assert _st_usage(hidden=lambda c: c == "C:\\a")[0]["total"] == 5
+        assert len(reads) == 1, "the second call came from the memo"
+        clock = [time.monotonic()]
+        monkeypatch.setattr(data_codex_state, "_clock", lambda: clock[0] + 31)
+        assert _st_usage()[0]["total"] == 7 and len(reads) == 2, "after about 30 s the file is read again"
+
+    def test_a_failure_is_memoised_and_logged_once_without_a_path_or_id(self, codex_home,
+                                                                         monkeypatch, caplog):
+        _st_fresh(codex_home)
+        bad = codex_home / "state_5.sqlite"
+        bad.write_bytes(b"garbage" * 300)
+        Path(str(bad) + "-wal").write_bytes(b"")
+        with caplog.at_level("WARNING"):
+            assert _st_usage() == (None, "error")
+            assert _st_usage() == (None, "error")
+        lines = [r.getMessage() for r in caplog.records]
+        assert len(lines) == 1 and "DatabaseError" in lines[0]
+        assert str(codex_home) not in lines[0] and "state_5" not in lines[0] and _cx_id(1) not in lines[0]
+        reads = []
+        monkeypatch.setattr(data_codex_state, "_read", lambda ms: reads.append(ms) or (None, "error"))
+        _st_usage()
+        assert not reads, "the memoised failure was reused"
+
+    def test_a_filter_that_raises_gives_none_and_never_raises(self, codex_home):
+        _st_db(codex_home, [_st_row()])
+        _st_fresh(codex_home)
+
+        def boom(cwd):
+            raise RuntimeError("filter")
+
+        assert _st_usage(hidden=boom) == (None, "error")
+
+    def test_a_stopped_refresh_is_not_memoised(self, codex_home):
+        _st_db(codex_home, [_st_row(tokens=4)])
+        _st_fresh(codex_home)
+        stop = threading.Event()
+        stop.set()
+        assert _st_usage(stop_event=stop) == (None, "error")
+        assert _st_usage()[0]["total"] == 4
+
+    def test_the_module_imports_no_overview_web_or_presence(self):
+        source = Path(data_codex_state.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names}
+        modules = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+        assert not modules & {"overview", "web", "presence"}
+        assert imported & {"_CODEX_HOME", "activity_epoch", "canonical_rollouts"} == {
+            "_CODEX_HOME", "activity_epoch", "canonical_rollouts"}
+
+
+class TestQuietLog:
+    def test_a_kind_is_logged_once_a_minute_with_only_the_exception_class(self, monkeypatch, caplog):
+        now = [1000.0]
+        monkeypatch.setattr(quiet_log, "_clock", lambda: now[0])
+        quiet_log.reset()
+        logger = __import__("logging").getLogger("power_atlas.test_quiet")
+        with caplog.at_level("WARNING", logger="power_atlas.test_quiet"):
+            assert quiet_log.warn(logger, "k", OSError("C:\\secret")) is True
+            assert quiet_log.warn(logger, "k", OSError("C:\\secret")) is False
+            assert quiet_log.warn(logger, "other") is True, "another kind has its own throttle"
+            now[0] += 59
+            assert quiet_log.warn(logger, "k") is False
+            now[0] += 2
+            assert quiet_log.warn(logger, "k") is True
+        messages = [r.getMessage() for r in caplog.records]
+        assert messages == ["k (OSError)", "other", "k"], messages
+        assert not any("secret" in m for m in messages)
