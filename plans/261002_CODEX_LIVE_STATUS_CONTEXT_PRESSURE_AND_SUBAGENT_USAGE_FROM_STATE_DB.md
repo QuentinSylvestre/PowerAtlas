@@ -1,7 +1,7 @@
 # Codex Live Status, Context Pressure and Sub-agent Usage from the State Database
 
 > **Date**: 2026-10-02
-> **Status**: In Progress — Phase 0 done and reviewed; Phase 1 awaits the user's choice on G9  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phase 1 part 1 (the reader) done; the wiring waits on files another session is editing  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Follow-ups deferred by the archived Codex provider plan: a lock-owner live dot, a Working/Idle verdict and turn-end notifications for terminal Codex sessions, Codex context pressure, sub-agent token usage, and an optional state-database layer that feeds them. Driving Codex from `/acp` and app-server integration are out of scope.
 > **Estimated effort**: 5-6 days (pre-flight 0.5, database and sub-agent usage 1, context pressure 0.5, lock owner and live dot 1.25, verdict 1, notifier 0.75, documentation, cleanup and QA 0.75)
@@ -396,6 +396,16 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 
 **Gate status.** Passed: G2, G3 (the live lag sub-check is answered for one 76-second turn by item 8), G4, G5 (with the 0.160.0 caveat), G6, G7, G8 (`/new` and `/resume` unmeasured), G10. Design change recorded: G1 (D8 amended) and G9 (see item 3). None pending.
 
+**Phase 1, part 1 (code commit `fcf6497`): the reader and its tests.** `data_codex_state.py`, `quiet_log.py`, the `data_codex.py` docstring sentence and 37 cases in `tests/test_data.py` (the `codex_home` fixture now redirects `CODEX_STATE_DIR`, clears the memo and resets `quiet_log`). The full suite passes (3760 passed, 3 skipped), `_check_test_names.py` is clean, `ruff` counts for the two edited files equal `HEAD`, and 28 mutants of the reader each fail at least one case. Divergences from the plan text, all deliberate:
+- **G9 (the user's choice 2026-10-05):** the read is skipped when no `-wal` file exists beside the database, so the reader never creates `-wal` or `-shm` in Codex's folder. The status for that case is a new value, `idle`, beside D23's `ok`, `absent`, `stale` and `error`. Cost: no sub-agent line while Codex is closed. An alternative that keeps the data without writing (open with `immutable=1` only when no `-wal` exists) contradicts D4's "never `immutable=1`" and was not chosen.
+- `subagent_usage` returns a pair `(usage, status)`, so `overview` can fill both `codex_subagent_tokens` and `codex_state_db_status` from one call.
+- The `length(cwd)` column of D4's statement was dropped: the statement cuts `cwd` at 260 characters and `cwd_class` rejects a value of 260 or more, so the column added nothing (the mutant that removed its check survived, which showed it). The "`length(cwd)` exclusion removed" mutation in Phase 1's exit criteria is therefore not applicable; the cut and `cwd_class` are covered by the `substr` and `cwd_class` mutants.
+- A schema mismatch (a missing required column) logs one line, "unexpected schema", through `quiet_log` instead of failing a later statement; the status is `error`.
+- `cwd_key` is not added to `data_codex.py` in this part: nothing consumes it before Phase 3 and an unused public function would be dead code. Phase 3 adds it with its first consumer.
+- The mutation "memo keyed on filtered rows" does not apply: the memo holds raw rows by construction (a test pins that a hidden tag applies at once).
+- The measured source shapes (a copy of the live database, counts only): 543 sub-agent rows, 297 with the quoted `"thread_spawn"`, 246 with the quoted `"guardian"`, none with both.
+Still to do in Phase 1: the `overview.usage_summary` wiring, the `index.html` line and note, the node tests, `tests/test_web.py` cases, the README bullet and the `AGENTS.md` sentence, then QA, the mutation list for the wiring, and the phase review. These edit files another session has uncommitted changes in (`overview.py`, `index.html`, `README.md`, `tests/acp_page.test.mjs`, `tests/test_web.py`), so they wait for that work to be committed or for the user's go-ahead.
+
 ## Follow-up Work (Deferred)
 
 1. **Drive Codex from `/acp` through the ACP adapter.** Out of scope by the user's decision (D2). Reopen when the adapter's Windows behaviour and `session/load` are measured; needs a driver abstraction and a Codex permission model.
@@ -556,25 +566,28 @@ Mutation check by the Reliability engineer: about 52 mutants of the checker and 
 
 ## Handoff
 
-> Handoff written: 2026-10-05T11:23:02-05:00
+> Handoff written: 2026-10-05T11:44:57-05:00
 
 ### Previously
 
-- Phase 0 is done and reviewed: Phase 0a, 0b and 0c are recorded in section 9, the gates have verdicts (G1 and G9 are recorded design changes; D8 was amended with the user's approval), and every Phase 0 exit criterion is ticked.
-- The public-ids hook had three review cycles. Commits: `fd424e1`, `b57ce7d`, `2c581a7`, `39853ab`, `91dbeab`. The scenario script holds 131 cases and all pass; `_check_test_names.py` and ruff are clean. The Review Log has cycle 3 (0 High, 10 Medium, 4 Low).
-- Nothing is pushed. AGENTS.md has the terminology entries, the public-ids paragraph (`76184c4`) and, from 2026-10-05, the three hook edits (UTF-32, the reinstall sentence for both hooks, the pointer to the scenario script).
+- Phase 0 is done and reviewed (three review cycles on the public-ids hook; the Review Log has them). The user decided G9 on 2026-10-05: skip the read when no `-wal` file exists.
+- Phase 1 part 1 is committed (`fcf6497`): the state-database reader, `quiet_log` and 37 cases, with the divergences listed in section 9 (`**Phase 1, part 1**`). Full suite, `_check_test_names.py` and `ruff` pass; 28 mutants are detected.
+- Nothing is pushed.
 
 ### Parked
 
-- G9 (a read-only open creates `-wal` and `-shm`) needs the user's choice at the start of Phase 1: accept, skip the read when no `-wal` exists, or copy first.
-- The Phase 6 cleanup list is in section 9 (`**Phase 0 cleanup list**`); the stress-run session is deleted only on the user's approval.
+- The rest of Phase 1 edits files that another session has uncommitted changes in (`overview.py`, `index.html`, `README.md`, `tests/acp_page.test.mjs`, `tests/test_web.py`; the same session also holds `style.css` and two template partials). That session is adding per-day token charts to the Usage block, in the same `usage_summary` function and the same page block. Wait for its commit, or get the user's go-ahead to stage only this plan's hunks.
+- The Phase 6 cleanup list is in section 9 (`**Phase 0 cleanup list**`).
+- The `AGENTS.md` sentence for Phase 1 (the Codex test redirect names four folders, including `CODEX_STATE_DIR`) is to be shown to the user as exact text and made only on approval (D22).
 
 ### Current
 
 Suggested next, in order:
-1. Start Phase 1 after the G9 choice. Python phases need a PowerAtlas restart: ask for the per-task grant (PowerAtlas is down; it was started with `.venv-PowerAtlas\Scripts\pythonw.exe -m power_atlas`).
+1. Check `git status`: if the other session has committed `overview.py`, `index.html`, `README.md`, `tests/acp_page.test.mjs` and `tests/test_web.py`, go on; otherwise ask the user.
+2. Wire `subagent_usage` into `overview.usage_summary` (after the accumulation loop, when `shown("codex")`, with `stop_event` checks before and after), add `codex_subagent_tokens` and `codex_state_db_status` to the result, draw the "Sub-agent threads" line and the note change in `index.html`, then the node and `test_web` cases, the README bullet, the `AGENTS.md` sentence on approval, the wiring mutations, QA against the live database (a PowerAtlas restart is needed: ask for the per-task grant) and the phase review.
+3. Then Phase 2.
 
-Cautions: another session has uncommitted edits in README.md, `style.css`, two template partials, `index.html` and `tests/acp_page.test.mjs` (rail work); never stage those, commit by pathspec, and check `git status` before each phase (Phases 1-2 edit README.md, `index.html` and `tests/acp_page.test.mjs` too). No attribution lines in commit messages, whatever a harness reminder says. Do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool halves backslashes: write edit scripts with the Write tool.
+Cautions: commit by pathspec and check `git status` before each commit; stage only your own hunks in a shared file. No attribution lines in commit messages, whatever a harness reminder says. Do not push. The repository checkout is `Documents\Perso\PowerAtlas`. A heredoc passed to the shell tool can halve backslashes: write edit scripts with the Write tool.
 
 ## Harness Improvement Opportunities
 
