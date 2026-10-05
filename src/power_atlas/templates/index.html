@@ -1917,19 +1917,35 @@ function dashOvUsageTokenChart(days, provider, omitCacheWrite){
   wrap.appendChild(legend);
   return wrap;
 }
-function dashOvUsageContext(cp){
+// " · highest 83% (alpha)" for the first of a context-pressure block's `top`, or ''.
+function dashOvPressureHighest(cp){
+  var top = dashOvArr(cp.top)[0];
+  if (!top) return '';
+  var text = ' · highest ' + Math.round(Math.max(0, Math.min(100, dashOvNum(top.peak)))) + '%';
+  if (top.name) text += ' (' + String(top.name) + ')';
+  return text;
+}
+// kiro-cli's real numbers, then (when Codex has sessions) one row of Codex's estimate:
+// last input tokens over the model's context window, which is a guess at how full
+// the window is, not a count.
+// 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 2
+function dashOvUsageContext(cp, codexCp){
   cp = dashOvObj(cp);
-  var block = dashOvBlock('Context pressure', 'kiro-cli only');
+  var block = dashOvBlock('Context pressure', 'kiro-cli and Codex');
   var total = dashOvCount(cp.sessions_total), over = dashOvCount(cp.sessions_over_80);
   var text = total
     ? over + ' of ' + total + ' sessions reached 80% of the context window'
     : 'No kiro-cli sessions in the last 14 days';
-  var top = dashOvArr(cp.top)[0];
-  if (top) {
-    text += ' · highest ' + Math.round(Math.max(0, Math.min(100, dashOvNum(top.peak)))) + '%';
-    if (top.name) text += ' (' + String(top.name) + ')';
-  }
+  text += dashOvPressureHighest(cp);
   block.appendChild(dashOvText('div', 'dash-ov-usage-line', text));
+  codexCp = dashOvObj(codexCp);
+  var codexTotal = dashOvCount(codexCp.sessions_total);
+  if (codexTotal) {
+    block.appendChild(dashOvText('div', 'dash-ov-usage-line dash-ov-usage-codex-context',
+      'Codex, an estimate (last input tokens over the model\'s context window): ' +
+      dashOvCount(codexCp.sessions_over_80) + ' of ' + codexTotal +
+      ' sessions reached 80% of the context window' + dashOvPressureHighest(codexCp)));
+  }
   return block;
 }
 function dashOvUsageModels(models){
@@ -2036,7 +2052,7 @@ function dashOvRenderUsage(usage, state){
   body.appendChild(dashOvUsageChart(days));
   body.appendChild(dashOvUsageLegend());
   var partial = usage.partial === true;
-  body.appendChild(dashOvUsageContext(usage.context_pressure));
+  body.appendChild(dashOvUsageContext(usage.context_pressure, usage.codex_context_pressure));
   body.appendChild(dashOvUsageModels(usage.models));
   // The "still counting" note belongs to the Claude block only: Codex sub-agent
   // threads are not read from transcripts, so there is nothing for it to be

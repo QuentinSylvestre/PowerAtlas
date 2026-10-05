@@ -17913,7 +17913,8 @@ check("dashboard overview usage: week, daily bars, context, models and tokens, w
   assert(!b.textContent.includes("Tool reliability"), "no Tool reliability section");
   assertEqual(b.querySelectorAll(".dash-ov-tool-row").length, 0, "no tool rows");
   const labels = b.querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent);
-  assert(labels.includes("Context pressurekiro-cli only"), `context is labelled kiro-cli only: ${labels}`);
+  assert(labels.includes("Context pressurekiro-cli and Codex"), `context is labelled kiro-cli and Codex: ${labels}`);
+  assert(!labels.some((l) => l.includes("kiro-cli only")), `nothing says kiro-cli only any more: ${labels}`);
   assert(labels.includes("TokensClaude Code only"), `tokens are labelled Claude Code only: ${labels}`);
   const lines = b.querySelectorAll(".dash-ov-usage-line").map((l) => l.textContent);
   assertEqual(lines[0], "1 of 5 sessions reached 80% of the context window · highest 83% (alpha)");
@@ -18047,6 +18048,43 @@ check("dashboard overview usage: a hostile sub-agent payload is drawn as text an
   p.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_subagent_tokens: [OV_XSS] }), "ready");
   assert(ovUsageBody(p).querySelector(".dash-ov-usage-note").textContent.includes("sub-agent threads are not counted"),
     "an array is not a payload");
+});
+
+// 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 2: the Codex context row.
+const OV_CODEX_CONTEXT = { sessions_over_80: 2, sessions_total: 4, estimate: true,
+  top: [{ session_id: "s1", cwd: "C:\\ws\\gamma", name: "gamma", peak: 85.2 }] };
+
+check("dashboard overview usage: a Codex context row labelled as an estimate, under kiro-cli's unchanged line", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_context_pressure: OV_CODEX_CONTEXT }), "ready");
+  const b = ovUsageBody(p);
+  const lines = b.querySelectorAll(".dash-ov-usage-line").map((l) => l.textContent);
+  assertEqual(lines[0], "1 of 5 sessions reached 80% of the context window · highest 83% (alpha)", "kiro-cli's wording and numbers are unchanged");
+  assertEqual(lines[1], "Codex, an estimate (last input tokens over the model's context window): 2 of 4 sessions reached 80% of the context window · highest 85% (gamma)");
+  assertEqual(b.querySelectorAll(".dash-ov-usage-codex-context").length, 1);
+  const labels = b.querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent);
+  assert(labels.includes("Context pressurekiro-cli and Codex"), `${labels}`);
+  assert(!labels.some((l) => l.includes("kiro-cli only")), `${labels}`);
+});
+
+check("dashboard overview usage: no Codex context row without Codex sessions", () => {
+  for (const codex of [undefined, null, {}, { sessions_total: 0, sessions_over_80: 0, top: [] }, [OV_CODEX_CONTEXT]]) {
+    const p = loadDashPicker();
+    p.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_context_pressure: codex }), "ready");
+    assertEqual(ovUsageBody(p).querySelectorAll(".dash-ov-usage-codex-context").length, 0, JSON.stringify(codex));
+  }
+});
+
+check("dashboard overview usage: hostile Codex context values are drawn as text and never as markup", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_context_pressure: {
+    sessions_over_80: OV_XSS, sessions_total: "3", estimate: OV_XSS,
+    top: [{ session_id: OV_XSS, cwd: OV_XSS, name: OV_XSS, peak: "1e9" }] } }), "ready");
+  const b = ovUsageBody(p);
+  assertEqual(b.querySelectorAll("img").length, 0, "no element was made from the payload");
+  const row = b.querySelector(".dash-ov-usage-codex-context");
+  assertEqual(row.textContent,
+    "Codex, an estimate (last input tokens over the model's context window): 0 of 3 sessions reached 80% of the context window · highest 100% (" + OV_XSS + ")");
 });
 
 check("dashboard overview usage: each Tokens block charts its provider's tokens per day, stacked by counter on one scale", () => {

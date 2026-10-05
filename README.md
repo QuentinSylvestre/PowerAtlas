@@ -139,8 +139,9 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     Codex is closed or when the database is absent, stale or in a format PowerAtlas does not
     know; `codex_state_db_status` in the Usage payload (`ok`, `absent`, `idle`, `stale` or
     `error`) says which. A running Codex session's usage can lag by about two minutes.
-    Context pressure is kiro-cli only. Token totals cover Claude Code and Codex only, with no
-    cost estimate.
+    Context pressure shows kiro-cli's own numbers and, in a separate row, an estimate for Codex
+    (the last request's input tokens over the model's context window, so a guess at how full the
+    window is). Token totals cover Claude Code and Codex only, with no cost estimate.
   - *Return paths*: the Home button in the panel header, Escape, clicking the open session's row
     again, or closing or deleting the open session. Escape does nothing while focus is in the
     composer, the search field or a dialog, or while a menu, the new-session picker or the MCP panel
