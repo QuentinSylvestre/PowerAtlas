@@ -2065,12 +2065,17 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     (files parsed for this call rather than taken from the memo),
     `aggregate_age_s` and `partial`. Codex enters `daily`, `by_workspace`,
     `tools` and `models` like the other providers; its sub-agent rollouts are
-    not read at all. Claude Code sub-agent transcripts count in `tools` and
+    not read at all. The lifetime token total of its sub-agent threads comes
+    from the state database as `codex_subagent_tokens` (None without a usable
+    database, else `threads`, `total`, `thread_spawn` and `guardian`, an upper
+    bound that includes context inherited at spawn) with the reason in
+    `codex_state_db_status`; neither touches `codex_tokens`. Claude Code
+    sub-agent transcripts count in `tools` and
     `claude_tokens` only; with `partial` True they are left out (neither listed
     nor parsed, nothing is evicted) and the result says `partial: True`.
     261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4
     """
-    from . import data
+    from . import data, data_codex_state
 
     now = time.time() if now is None else now
     # A filter that raises is logged once per aggregate, not once per file.
@@ -2189,6 +2194,15 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
     over_80 = sum(1 for p in pressure if p["peak"] >= CONTEXT_PRESSURE_PERCENT)
     pressure.sort(key=lambda p: (-p["peak"], p["session_id"]))
     top_pressure = [dict(p, peak=round(p["peak"], 1)) for p in pressure[:_USAGE_TOP_CONTEXT]]
+    # Codex sub-agent threads: a lifetime total per thread from the state database,
+    # shown on its own line and never folded into `codex_tokens`.
+    # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1
+    if stop_event is not None and stop_event.is_set():
+        raise _UsageStopped()
+    subagent_tokens, state_db_status = data_codex_state.subagent_usage(since, shown, is_hidden, stop_event)
+    if stop_event is not None and stop_event.is_set():
+        raise _UsageStopped()
+
     def with_ratio(t: dict) -> dict:
         denom = t["input"] + t["cache_read"] + t["cache_creation"]
         return dict(t, cache_hit_ratio=round(t["cache_read"] / denom, 4) if denom else 0.0)
@@ -2216,6 +2230,8 @@ def usage_summary(now: float | None = None, provider_shown: Callable | None = No
                    sorted(models.items(), key=lambda kv: (-kv[1], kv[0]))[:_USAGE_TOP_MODELS]],
         "claude_tokens": with_ratio(tokens[_CLAUDE]),
         "codex_tokens": with_ratio(tokens[_CODEX]),
+        "codex_subagent_tokens": subagent_tokens,
+        "codex_state_db_status": state_db_status,
         "reparsed": reparsed,
         "aggregate_age_s": 0.0,
         "partial": partial,

@@ -144,9 +144,17 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(data_codex_mod, "CODEX_LOCKS_DIR", tmp_path / "codex-home" / "thread-writer-locks")
     monkeypatch.setattr(data_codex_mod, "_STORE_TTL", 0.0)
     monkeypatch.setattr(data_codex_mod, "_AVAILABLE_TTL", 0.0)
+    # The state database folder moves too, and its memo and log throttle start empty
+    # (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1).
+    from power_atlas import data_codex_state as data_codex_state_mod, quiet_log as quiet_log_mod
+    monkeypatch.setattr(data_codex_state_mod, "CODEX_STATE_DIR", tmp_path / "codex-home")
+    data_codex_state_mod.clear_memo()
+    quiet_log_mod.reset()
     data_codex_mod._clear_caches()
     yield tmp_path
     data_codex_mod._clear_caches()
+    data_codex_state_mod.clear_memo()
+    quiet_log_mod.reset()
     thread = overview_mod._usage_bg[0]
     if thread is not None:
         thread.join(timeout=30)
@@ -716,12 +724,12 @@ class TestCodexProviderSurface:
     def test_codex_roots_are_redirected_from_the_real_home(self, isolated_config):
         """Fails if the fixture left a Codex root under the real ~/.codex: the
         lifespan warm-up and every provider listing would read a developer's store."""
-        from power_atlas import data_codex
+        from power_atlas import data_codex, data_codex_state
         real = [Path.home() / ".codex"]
         if os.environ.get("CODEX_HOME", "").strip():
             real.append(Path(os.environ["CODEX_HOME"]))
         for root in (data_codex.CODEX_SESSIONS_DIR, data_codex.CODEX_SESSION_INDEX,
-                     data_codex.CODEX_LOCKS_DIR):
+                     data_codex.CODEX_LOCKS_DIR, data_codex_state.CODEX_STATE_DIR):
             assert Path(root).resolve().is_relative_to(isolated_config.resolve()), root
             for forbidden in real:
                 assert not Path(root).resolve().is_relative_to(forbidden.resolve()), root
@@ -19961,10 +19969,9 @@ class TestSpawnEnv:
         assert "PATH" in env  # base os.environ keys survive the filter
 
     def test_spawn_env_scrubs_claude_markers(self, tmp_path, monkeypatch):
-        """CLAUDECODE, CLAUDE_PID, NO_COLOR, and CLAUDE_CODE_* keys are absent."""
+        """CLAUDECODE, CLAUDE_PID, and CLAUDE_CODE_* keys are absent."""
         from unittest.mock import MagicMock, patch
         from power_atlas import acp as acp_mod
-        monkeypatch.setenv("NO_COLOR", "1")
         monkeypatch.setenv("CLAUDECODE", "1")
         monkeypatch.setenv("CLAUDE_PID", "999")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
@@ -19984,7 +19991,6 @@ class TestSpawnEnv:
         env = mock_popen.call_args.kwargs["env"]
         assert "CLAUDECODE" not in env
         assert "CLAUDE_PID" not in env
-        assert "NO_COLOR" not in env
         assert "CLAUDE_CODE_SESSION_ID" not in env
         assert "CLAUDE_CODE_CHILD_SESSION" not in env
         assert "CLAUDE_CODE_BRIDGE_SESSION_ID" not in env
@@ -32091,6 +32097,12 @@ class TestOverviewUsage:
         # Codex's sessions folder, redirected like the other three
         # (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4).
         monkeypatch.setattr(data_codex, "CODEX_SESSIONS_DIR", roots.codex)
+        # The state database folder, redirected with them (Phase 1 of
+        # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB).
+        from power_atlas import data_codex_state
+        self.state_dir = tmp_path / "codex-state"
+        self.state_dir.mkdir()
+        monkeypatch.setattr(data_codex_state, "CODEX_STATE_DIR", self.state_dir)
         monkeypatch.setattr(overview, "_usage_roots", _REAL_USAGE_ROOTS)
         # Local noon today: every "k days ago" below lands on a known local day.
         self.now = dt.datetime.now().replace(hour=12, minute=0, second=0,
@@ -33189,6 +33201,83 @@ class TestOverviewUsage:
     @staticmethod
     def cx_total(days, key):
         return sum(d["tokens"][key] for d in days.values())
+
+    # -- Codex sub-agent threads from the state database (Phase 1 of
+    # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB) --
+
+    def state_db(self, rows, wal=True):
+        import sqlite3
+        path = self.state_dir / "state_5.sqlite"
+        con = sqlite3.connect(path)
+        con.execute("CREATE TABLE threads (source TEXT, cwd TEXT, tokens_used INTEGER, "
+                    "created_at_ms INTEGER, archived INTEGER, updated_at_ms INTEGER)")
+        con.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?)", rows)
+        con.commit()
+        con.close()
+        if wal:
+            Path(str(path) + "-wal").write_bytes(b"")
+        return path
+
+    def sub_row(self, tokens, kind="thread_spawn", cwd="C:\\ws\\gamma", archived=0):
+        source = ('{"subagent":{"thread_spawn":{"parent_thread_id":"%s","depth":1,"agent_nickname":"%s"}}}'
+                  % (_ovx_id(1), "n" * 70)) if kind == "thread_spawn" else '{"subagent":{"other":"guardian"}}'
+        return (source, cwd, tokens, int((self.now - 3600) * 1000), archived, int(time.time() * 1000))
+
+    def test_without_a_state_database_the_subagent_total_is_none_and_nothing_else_changes(self):
+        t = self.now - 7200
+        self.codex(1, [_ovx_user(t, "go"), _ovx_tokens(t + 1, 900, 400, 50)])
+        usage = self.summary()
+        assert usage["codex_subagent_tokens"] is None and usage["codex_state_db_status"] == "absent"
+        assert usage["codex_tokens"]["input"] == 500
+
+    def test_the_subagent_total_is_reported_beside_the_codex_tokens_never_inside_them(self):
+        from power_atlas import data_codex_state
+        t = self.now - 7200
+        self.codex(1, [_ovx_user(t, "go"), _ovx_tokens(t + 1, 900, 400, 50)])
+        before = self.summary()
+        self.state_db([self.sub_row(100), self.sub_row(20, "guardian"), self.sub_row(7, archived=1)])
+        data_codex_state.clear_memo()
+        usage = self.summary()
+        assert usage["codex_state_db_status"] == "ok"
+        assert usage["codex_subagent_tokens"] == {"threads": 2, "total": 120, "thread_spawn": 100, "guardian": 20}
+        for key in ("codex_tokens", "claude_tokens", "daily", "models", "by_workspace", "tools"):
+            assert usage[key] == before[key], f"{key} must not change when the database appears"
+
+    def test_the_subagent_total_follows_the_rails_filters(self):
+        from power_atlas import data_codex_state
+        t = self.now - 7200
+        self.codex(1, [_ovx_user(t, "go"), _ovx_tokens(t + 1, 900, 400, 50)])
+        self.state_db([self.sub_row(100), self.sub_row(30, cwd="C:\\ws\\secret")])
+        assert self.summary()["codex_subagent_tokens"]["total"] == 130
+        assert self.summary(hidden=lambda cwd: cwd == "C:\\ws\\secret")["codex_subagent_tokens"]["total"] == 100, \
+            "a hidden tag applies at the next aggregate, not after the memo expires"
+        usage = self.summary(provider_shown=lambda p: p != "codex")
+        assert usage["codex_subagent_tokens"] is None and usage["codex_state_db_status"] == "absent"
+        data_codex_state.clear_memo()
+
+    def test_a_database_with_no_wal_file_is_idle_and_creates_no_file(self):
+        t = self.now - 7200
+        self.codex(1, [_ovx_user(t, "go"), _ovx_tokens(t + 1, 900, 400, 50)])
+        self.state_db([self.sub_row(100)], wal=False)
+        before = sorted(p.name for p in self.state_dir.iterdir())
+        usage = self.summary()
+        assert usage["codex_subagent_tokens"] is None and usage["codex_state_db_status"] == "idle"
+        assert sorted(p.name for p in self.state_dir.iterdir()) == before
+
+    def test_the_window_start_is_the_first_midnight_and_a_stop_ends_the_pass(self, monkeypatch):
+        from power_atlas import data_codex_state, overview
+        calls = []
+        stop = threading.Event()
+
+        def fake(since, shown, is_hidden, stop_event=None):
+            calls.append(since)
+            stop.set()
+            return None, "error"
+
+        monkeypatch.setattr(data_codex_state, "subagent_usage", fake)
+        with pytest.raises(overview._UsageStopped):
+            self.summary(stop_event=stop)
+        assert calls == [overview._window(self.now)[1]]
 
     def test_the_schema_is_6_and_an_older_worker_is_ignored(self):
         """`_parse_usage_file` gained a `codex` provider and lost its Claude fall-through

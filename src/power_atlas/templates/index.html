@@ -1988,6 +1988,16 @@ function dashOvUsageTokens(t, label, days, provider, omitCacheWrite){
     ' · Cache hit ' + dashOvRatio(t.cache_hit_ratio)));
   return block;
 }
+// The Codex block's "Sub-agent threads" line: a lifetime total per thread from
+// Codex's state database, with its two kinds. A separate line, never added to the
+// Input and Output counts above it, because the database holds one total per thread.
+function dashOvUsageSubagentLine(sub){
+  sub = dashOvObj(sub);
+  return dashOvText('div', 'dash-ov-usage-line dash-ov-usage-subagents',
+    'Sub-agent threads ' + dashOvCompact(sub.total) +
+    ' · thread_spawn ' + dashOvCompact(sub.thread_spawn) +
+    ' · guardian ' + dashOvCompact(sub.guardian));
+}
 // Whether a token payload holds any count: the Codex block is drawn only for a
 // machine that has Codex usage, so the others see no empty block.
 function dashOvHasTokens(t){
@@ -2049,18 +2059,30 @@ function dashOvRenderUsage(usage, state){
   var partial = usage.partial === true;
   body.appendChild(dashOvUsageContext(usage.context_pressure));
   body.appendChild(dashOvUsageModels(usage.models));
-  // The sub-agent note belongs to the Claude block only: Codex sub-agent
-  // threads are never counted, so there is nothing for it to be still counting.
+  // The "still counting" note belongs to the Claude block only: Codex sub-agent
+  // threads are not read from transcripts, so there is nothing for it to be
+  // counting. Their total comes from Codex's state database (codex_subagent_tokens,
+  // null without one) and is drawn as one line inside the Codex block, which is
+  // therefore drawn even when the top-level Codex tokens are all 0.
+  // 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1
   var tokens = dashOvUsageTokens(usage.claude_tokens, 'Claude Code only', days, 'claude-code');
   if (partial) tokens.appendChild(dashOvUsagePartialNote());
   body.appendChild(tokens);
-  if (dashOvHasTokens(usage.codex_tokens)) {
-    body.appendChild(dashOvUsageTokens(usage.codex_tokens, 'Codex', days, 'codex', true));
+  var sub = usage.codex_subagent_tokens;
+  var subPresent = !!sub && typeof sub === 'object' && !Array.isArray(sub);
+  var subTotal = subPresent ? dashOvNum(sub.total) : 0;
+  if (dashOvHasTokens(usage.codex_tokens) || subTotal > 0) {
+    var codexBlock = dashOvUsageTokens(usage.codex_tokens, 'Codex', days, 'codex', true);
+    if (subTotal > 0) codexBlock.appendChild(dashOvUsageSubagentLine(sub));
+    body.appendChild(codexBlock);
   }
   body.appendChild(dashOvText('div', 'dash-ov-usage-note',
     'Claude agent time is estimated from message timestamps. ' +
     'Codex agent time is exact from 0.139 and estimated before; ' +
-    'Codex sub-agent threads are not counted.'));
+    (subPresent
+      ? 'Codex sub-agent thread totals are lifetime totals from Codex\'s state database ' +
+        'and include context inherited at spawn.'
+      : 'Codex sub-agent threads are not counted.')));
 }
 // A failed summary keeps usage already drawn; only a section still showing
 // its first "Loading…", or the warming skeleton, says so. The skeleton's own

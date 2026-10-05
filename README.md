@@ -131,9 +131,14 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     cache tokens, so daily token use can be followed. It is computed in memory in
     the background after startup. It shows a loading state first, then a partial view while Claude Code
     sub-agent transcripts are still being counted. Claude Code agent time is estimated from message
-    timestamps. Codex agent time is exact from Codex 0.139 and estimated before; Codex sub-agent threads
-    are not counted, so Codex totals leave them out, and a running Codex session's usage can lag by
-    about two minutes. Context pressure is kiro-cli only. Token totals cover Claude Code and Codex only,
+    timestamps. Codex agent time is exact from Codex 0.139 and estimated before. While Codex is running and its
+    state database is readable, the Codex block adds a "Sub-agent threads" line: the lifetime
+    token total of sub-agent threads created in the window, split into `thread_spawn` and
+    `guardian`. It is an upper bound (it includes context inherited at spawn) and is never added
+    to the Codex totals above it, which leave sub-agent threads out. The line is missing while
+    Codex is closed or when the database is absent, stale or in a format PowerAtlas does not
+    know; `codex_state_db_status` in the Usage payload (`ok`, `absent`, `idle`, `stale` or
+    `error`) says which. A running Codex session's usage can lag by about two minutes. Context pressure is kiro-cli only. Token totals cover Claude Code and Codex only,
     with no cost estimate.
   - *Return paths*: the Home button in the panel header, Escape, clicking the open session's row
     again, or closing or deleting the open session. Escape does nothing while focus is in the

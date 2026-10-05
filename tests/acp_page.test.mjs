@@ -17990,6 +17990,65 @@ check("dashboard overview usage: the Tokens area shows a Claude Code block and a
   assertEqual(b.querySelectorAll(".dash-ov-usage-note").length, 1, "one note, not a second section");
 });
 
+// 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1: the Codex "Sub-agent threads" line.
+const OV_SUBAGENTS = { threads: 26, total: 24200000, thread_spawn: 20000000, guardian: 4200000 };
+const OV_SUBAGENT_NOTE = "Codex sub-agent thread totals are lifetime totals from Codex's state database and include context inherited at spawn.";
+
+check("dashboard overview usage: a sub-agent line in the Codex block, and the note says what the total is", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_subagent_tokens: OV_SUBAGENTS, codex_state_db_status: "ok" }), "ready");
+  const b = ovUsageBody(p);
+  const lines = b.querySelectorAll(".dash-ov-usage-line").map((l) => l.textContent);
+  assertEqual(lines[2], "Input 2.2M · Output 210.0k · Cache read 38.0M · Cache hit 95%", "the top-level line is unchanged");
+  assertEqual(lines[3], "Sub-agent threads 24.2M · thread_spawn 20.0M · guardian 4.2M");
+  assertEqual(b.querySelectorAll(".dash-ov-usage-subagents").length, 1);
+  const note = b.querySelector(".dash-ov-usage-note").textContent;
+  assert(note.includes(OV_SUBAGENT_NOTE), note);
+  assert(!note.includes("sub-agent threads are not counted"), "the old clause is gone when the total is shown: " + note);
+  assertEqual(b.querySelectorAll(".dash-ov-usage-note").length, 1);
+});
+
+check("dashboard overview usage: the sub-agent line is drawn even when the top-level Codex tokens are 0", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovUsage({ codex_tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0, cache_hit_ratio: 0 },
+    codex_subagent_tokens: OV_SUBAGENTS }), "ready");
+  const b = ovUsageBody(p);
+  const labels = b.querySelectorAll(".dash-ov-usage-label").map((l) => l.textContent);
+  assert(labels.includes("TokensCodex"), `the Codex block is drawn for sub-agents alone: ${labels}`);
+  assert(b.querySelector(".dash-ov-usage-subagents"), "the line is there");
+});
+
+check("dashboard overview usage: with no sub-agent total there is no line and today's note", () => {
+  for (const payload of [ovCodexUsage(), ovCodexUsage({ codex_subagent_tokens: null, codex_state_db_status: "stale" }),
+    ovCodexUsage({ codex_subagent_tokens: { threads: 0, total: 0, thread_spawn: 0, guardian: 0 }, codex_state_db_status: "ok" })]) {
+    const p = loadDashPicker();
+    p.sandbox.dashOvRenderUsage(payload, "ready");
+    const b = ovUsageBody(p);
+    assertEqual(b.querySelectorAll(".dash-ov-usage-subagents").length, 0, "a zero or missing total draws no line");
+  }
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_subagent_tokens: null }), "ready");
+  assert(ovUsageBody(p).querySelector(".dash-ov-usage-note").textContent.includes("Codex sub-agent threads are not counted."),
+    "null means no database: today's note");
+  const q = loadDashPicker();
+  q.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_subagent_tokens: { threads: 0, total: 0, thread_spawn: 0, guardian: 0 } }), "ready");
+  assert(ovUsageBody(q).querySelector(".dash-ov-usage-note").textContent.includes(OV_SUBAGENT_NOTE),
+    "a database that reports 0 still gets the lifetime-total note");
+});
+
+check("dashboard overview usage: a hostile sub-agent payload is drawn as text and never as markup", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_subagent_tokens: { threads: OV_XSS, total: "9", thread_spawn: OV_XSS, guardian: { x: OV_XSS } },
+    codex_state_db_status: OV_XSS }), "ready");
+  const b = ovUsageBody(p);
+  assertEqual(b.querySelectorAll("img").length, 0, "no element was made from the payload");
+  const line = b.querySelector(".dash-ov-usage-subagents");
+  assertEqual(line.textContent, "Sub-agent threads 9 · thread_spawn 0 · guardian 0");
+  p.sandbox.dashOvRenderUsage(ovCodexUsage({ codex_subagent_tokens: [OV_XSS] }), "ready");
+  assert(ovUsageBody(p).querySelector(".dash-ov-usage-note").textContent.includes("sub-agent threads are not counted"),
+    "an array is not a payload");
+});
+
 check("dashboard overview usage: each Tokens block charts its provider's tokens per day, stacked by counter on one scale", () => {
   const p = loadDashPicker();
   p.sandbox.dashOvRenderUsage(ovCodexUsage({
