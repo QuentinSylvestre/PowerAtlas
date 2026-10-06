@@ -142,19 +142,14 @@ class TestCreatePeek:
 
         captured_args = {}
 
-        def mock_init(self, server_url, hotkey="ctrl+shift+z"):
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
             captured_args["server_url"] = server_url
             captured_args["hotkey"] = hotkey
+            captured_args["mode"] = mode
             # Minimal init to avoid real webview/pynput usage
             self._server_url = server_url
             self._hotkey = hotkey
-            self._window = None
-            self._visible = False
-            self._listener = None
-            self._trigger_keys = peek_mod.PeekWindow._parse_hotkey(hotkey)
-            self._pressed_keys = set()
-            self._triggered = False
-            self._webview_ready = None
+            self._mode = mode
 
         monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
 
@@ -169,17 +164,14 @@ class TestCreatePeek:
 
         captured_args = {}
 
-        def mock_init(self, server_url, hotkey="ctrl+shift+z"):
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
+            captured_args["server_url"] = server_url
             captured_args["hotkey"] = hotkey
+            captured_args["mode"] = mode
+            # Minimal init to avoid real webview/pynput usage
             self._server_url = server_url
             self._hotkey = hotkey
-            self._window = None
-            self._visible = False
-            self._listener = None
-            self._trigger_keys = peek_mod.PeekWindow._parse_hotkey(hotkey)
-            self._pressed_keys = set()
-            self._triggered = False
-            self._webview_ready = None
+            self._mode = mode
 
         monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
 
@@ -194,18 +186,14 @@ class TestCreatePeek:
 
         captured_args = {}
 
-        def mock_init(self, server_url, hotkey="ctrl+shift+z"):
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
             captured_args["server_url"] = server_url
             captured_args["hotkey"] = hotkey
+            captured_args["mode"] = mode
+            # Minimal init to avoid real webview/pynput usage
             self._server_url = server_url
             self._hotkey = hotkey
-            self._window = None
-            self._visible = False
-            self._listener = None
-            self._trigger_keys = peek_mod.PeekWindow._parse_hotkey(hotkey)
-            self._pressed_keys = set()
-            self._triggered = False
-            self._webview_ready = None
+            self._mode = mode
 
         monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
 
@@ -220,7 +208,7 @@ class TestCreatePeek:
 
         monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
 
-        def mock_init(self, server_url, hotkey="ctrl+shift+z"):
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
             raise RuntimeError("Something broke")
 
         monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
@@ -228,6 +216,58 @@ class TestCreatePeek:
         result = peek_mod.create_peek("http://localhost:8000")
         assert result is None
 
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2:
+    # `create_peek(server_url, hotkey, mode)`; an unknown mode warns and holds.
+
+    def _capture(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        captured = {}
+
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
+            captured["mode"] = mode
+            captured["hotkey"] = hotkey
+
+        monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
+        return peek_mod, captured
+
+    def test_mode_defaults_to_hold(self, monkeypatch):
+        peek_mod, captured = self._capture(monkeypatch)
+        assert peek_mod.create_peek("http://localhost:8000", "ctrl+alt+p")
+        assert captured["mode"] == "hold"
+
+    def test_toggle_mode_is_passed_through(self, monkeypatch, caplog):
+        peek_mod, captured = self._capture(monkeypatch)
+        with caplog.at_level("WARNING", logger="power_atlas.peek"):
+            assert peek_mod.create_peek("http://localhost:8000", "ctrl+alt+p",
+                                        "toggle")
+        assert captured == {"mode": "toggle", "hotkey": "ctrl+alt+p"}
+        assert not [r for r in caplog.records if "peek_mode" in r.getMessage()]
+
+    def test_a_hand_edited_mode_is_normalised(self, monkeypatch):
+        peek_mod, captured = self._capture(monkeypatch)
+        assert peek_mod.create_peek("http://localhost:8000", "ctrl+alt+p",
+                                    " Toggle ")
+        assert captured["mode"] == "toggle"
+
+    @pytest.mark.parametrize("mode", ["x", "", "togle", 3])
+    def test_an_unknown_mode_falls_back_to_hold_with_a_warning(
+            self, monkeypatch, caplog, mode):
+        peek_mod, captured = self._capture(monkeypatch)
+        with caplog.at_level("WARNING", logger="power_atlas.peek"):
+            assert peek_mod.create_peek("http://localhost:8000", "ctrl+alt+p",
+                                        mode)
+        assert captured["mode"] == "hold"
+        assert captured["hotkey"] == "ctrl+alt+p"  # the hotkey is untouched
+        assert any("peek_mode" in r.getMessage() and r.levelname == "WARNING"
+                   for r in caplog.records)
+
+    def test_peek_window_keeps_its_mode(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        assert peek_mod.PeekWindow("http://x", "ctrl+shift+z")._mode == "hold"
+        assert peek_mod.PeekWindow("http://x", "ctrl+shift+z",
+                                   "toggle")._mode == "toggle"
 
 
 class TestHotkeyStateMachine:
@@ -1015,6 +1055,327 @@ class TestWindowStateMachine:
         assert opened == ["http://127.0.0.1:4915/signed"]
         assert pw._state == peek_mod.HIDDEN  # the peek ended first
         assert not any(c[0] == "apply_app" for c in a.calls)
+
+
+class TestToggleStateMachine:
+    """Every Toggle cell of the plan's state-machine table, plus the
+    double-tap rule under Toggle, fed straight into the worker's handler.
+    Expected calls come from the table and its Definitions ("end peek →
+    HIDDEN", "end peek → APP", "→ APP, focused"), not from the code.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+    """
+
+    # What "end peek → HIDDEN" does when the peek never took the foreground.
+    END_TO_HIDDEN = [("reset_overlays",), ("hide",),
+                     ("restore_foreground", OTHER_APP, False)]
+
+    def _peek(self, monkeypatch, fg=OTHER_APP):
+        from power_atlas import web as web_mod
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        pw = peek_mod.PeekWindow("http://127.0.0.1:4915", "ctrl+shift+z",
+                                 "toggle")
+        pw._adapter = _FakeAdapter(fg=fg)
+        pw._ready.set()
+        pw._signed_gen = web_mod.local_secret_generation()
+        return pw, pw._adapter
+
+    @staticmethod
+    def _press(pw, t):
+        pw._handle(("press", "peek", t))
+
+    def _in_app(self, pw, a, foreground=True):
+        pw._handle(("show_app",))
+        if not foreground:
+            a.fg = OTHER_APP
+        a.calls.clear()
+
+    # -- Peek press, not a double-tap (Toggle) ------------------------------
+
+    def test_press_from_hidden_shows_peek(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 1000)
+        assert a.window_calls() == [("show_peek",)]
+        assert (pw._state, pw._return_to) == (peek_mod.PEEK, None)
+        assert pw._peek_showing is True
+
+    def test_a_second_press_after_the_interval_ends_the_peek(self,
+                                                             monkeypatch):
+        """Press, then press 0.8 s later: the peek ends → HIDDEN, with
+        `resetOverlays` (D-11). Hold would have ignored this press."""
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 1000)
+        a.calls.clear()
+        self._press(pw, 1800)
+        assert a.window_calls() == self.END_TO_HIDDEN
+        assert (pw._state, pw._return_to) == (peek_mod.HIDDEN, None)
+        assert pw._peek_showing is False
+
+    def test_a_press_in_a_peek_over_app_returns_to_app(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._in_app(pw, a)
+        saved = a.live = _Placement("before-peek")
+        self._press(pw, 1000)
+        assert (pw._state, pw._return_to) == (peek_mod.PEEK, "app")
+        a.calls.clear()
+        self._press(pw, 1800)
+        assert a.window_calls()[0] == ("apply_app", saved, False)
+        assert ("reset_overlays",) not in a.calls
+        assert (pw._state, pw._peek_showing) == (peek_mod.APP, False)
+
+    def test_press_from_app_saves_then_peeks(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._in_app(pw, a)
+        a.live = _Placement("resized")
+        self._press(pw, 1000)
+        assert pw._app_placement is a.live
+        assert a.window_calls() == [("show_peek",)]
+        assert a.names().index("get_placement") < a.names().index("show_peek")
+        assert (pw._state, pw._return_to) == (peek_mod.PEEK, "app")
+
+    def test_presses_far_apart_cycle_peek_and_hidden(self, monkeypatch):
+        """HIDDEN → PEEK → HIDDEN → PEEK → HIDDEN, one transition per press."""
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        states = []
+        for t in (1000, 2000, 3000, 4000):
+            self._press(pw, t)
+            states.append(pw._state)
+        assert states == [peek_mod.PEEK, peek_mod.HIDDEN,
+                          peek_mod.PEEK, peek_mod.HIDDEN]
+
+    # -- Modifier release (Toggle): a no-op everywhere ----------------------
+
+    def test_release_in_a_peek_is_a_no_op(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 1000)
+        a.calls.clear()
+        pw._handle(("release",))
+        assert a.calls == []
+        assert (pw._state, pw._peek_showing) == (peek_mod.PEEK, True)
+        # The peek still ends on the next press.
+        self._press(pw, 1800)
+        assert pw._state == peek_mod.HIDDEN
+
+    def test_release_in_a_peek_over_app_is_a_no_op(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._in_app(pw, a)
+        self._press(pw, 1000)
+        a.calls.clear()
+        pw._handle(("release",))
+        assert a.calls == []
+        assert (pw._state, pw._return_to) == (peek_mod.PEEK, "app")
+
+    @pytest.mark.parametrize("where", ["hidden", "app"])
+    def test_release_outside_a_peek_is_a_no_op(self, monkeypatch, where):
+        pw, a = self._peek(monkeypatch)
+        if where == "app":
+            self._in_app(pw, a)
+        pw._handle(("release",))
+        assert a.window_calls() == []
+
+    # -- Esc and X still end a peek in Toggle -------------------------------
+
+    def test_esc_ends_a_peek_to_hidden(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 1000)
+        a.calls.clear()
+        pw._handle(("esc",))
+        assert a.window_calls() == self.END_TO_HIDDEN
+        assert pw._state == peek_mod.HIDDEN
+
+    def test_esc_ends_a_peek_back_to_app(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._in_app(pw, a)
+        saved = a.live
+        self._press(pw, 1000)
+        a.calls.clear()
+        pw._handle(("esc",))
+        assert a.window_calls()[0] == ("apply_app", saved, False)
+        assert pw._state == peek_mod.APP
+
+    def test_user_close_in_a_peek_is_esc(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 1000)
+        a.calls.clear()
+        pw._handle(("user_close",))
+        assert a.window_calls() == self.END_TO_HIDDEN
+        assert pw._state == peek_mod.HIDDEN
+
+    def test_user_close_in_app_saves_and_hides(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._in_app(pw, a)
+        pw._handle(("user_close",))
+        assert a.window_calls() == [("hide",)]
+        assert pw._state == peek_mod.HIDDEN
+
+    def test_tray_open_from_a_peek_opens_app(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 1000)
+        a.calls.clear()
+        pw._handle(("show_app",))
+        assert a.window_calls() == [("apply_app", None, True), ("focus",)]
+        assert pw._state == peek_mod.APP
+
+    # -- Double-tap rule under Toggle ---------------------------------------
+
+    def test_press_press_from_hidden_opens_app(self, monkeypatch):
+        """Press, press within 0.5 s from HIDDEN: the first shows a peek, the
+        second is a double-tap and opens APP focused (not a toggle-off)."""
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 1000)
+        a.calls.clear()
+        self._press(pw, 1200)
+        assert a.window_calls() == [("apply_app", None, True), ("focus",)]
+        assert ("reset_overlays",) not in a.calls
+        assert (pw._state, pw._peek_showing) == (peek_mod.APP, False)
+
+    def test_press_press_from_a_peek_ends_it_then_opens_app(self,
+                                                            monkeypatch):
+        """From PEEK(None) the first press ends the peek and the second, within
+        0.5 s, opens APP: the accepted flicker of the double-tap rule."""
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 1000)  # PEEK(None)
+        a.calls.clear()
+        self._press(pw, 3000)  # ends it
+        assert a.window_calls() == self.END_TO_HIDDEN
+        assert pw._tap_origin == (peek_mod.PEEK, False)
+        a.calls.clear()
+        self._press(pw, 3200)  # double-tap
+        assert a.window_calls() == [("apply_app", None, True), ("focus",)]
+        assert pw._state == peek_mod.APP
+
+    def test_double_tap_from_a_foreground_app_hides_it(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._in_app(pw, a, foreground=True)
+        self._press(pw, 1000)
+        assert pw._tap_origin == (peek_mod.APP, True)
+        a.calls.clear()
+        self._press(pw, 1100)
+        assert a.window_calls() == [("hide",)]
+        assert pw._state == peek_mod.HIDDEN
+
+    def test_double_tap_from_a_background_app_focuses_it(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._in_app(pw, a, foreground=False)
+        saved = a.live
+        self._press(pw, 1000)
+        a.calls.clear()
+        self._press(pw, 1100)
+        assert a.window_calls() == [("apply_app", saved, True), ("focus",)]
+        assert pw._state == peek_mod.APP
+
+    def test_a_third_tap_is_a_fresh_press(self, monkeypatch):
+        """After a double-tap opened APP, a third quick press is a first
+        press from APP: save, → PEEK("app")."""
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 1000)
+        self._press(pw, 1200)
+        a.calls.clear()
+        self._press(pw, 1400)
+        assert a.window_calls() == [("show_peek",)]
+        assert (pw._state, pw._return_to) == (peek_mod.PEEK, "app")
+
+    @pytest.mark.parametrize("gap, expected", [(499, "app"), (500, "hidden")])
+    def test_the_double_tap_boundary(self, monkeypatch, gap, expected):
+        """At 499 ms the second press is a double-tap (APP); at 500 ms it is
+        an ordinary Toggle press, which ends the peek (HIDDEN)."""
+        pw, a = self._peek(monkeypatch)
+        self._press(pw, 7000)
+        self._press(pw, 7000 + gap)
+        assert pw._state == expected
+
+    def test_without_app_mode_press_press_opens_the_browser(self,
+                                                            monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        a.has_app_mode = False
+        opened = []
+        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        self._press(pw, 1000)
+        self._press(pw, 1100)
+        assert opened == ["http://127.0.0.1:4915/signed"]
+        assert pw._state == peek_mod.HIDDEN
+
+
+class TestToggleHook:
+    """Toggle at the hook: a held chord key's auto-repeat is never an event,
+    or every repeat would flip the peek on and off.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+    """
+
+    def _peek(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        pw = peek_mod.PeekWindow("http://127.0.0.1:4915", "ctrl+shift+z",
+                                 "toggle")
+        pw._adapter = _FakeAdapter()
+        return pw
+
+    @staticmethod
+    def _feed(pw, msg, vk, t):
+        try:
+            pw._win32_event_filter(msg, _KbData(vk, t))
+        except _Suppress:
+            return True
+        return False
+
+    def test_win32_auto_repeat_is_one_event(self, monkeypatch):
+        pw = self._peek(monkeypatch)
+        pw._listener = _Listener()
+        pw._pressed_keys.update(("ctrl", "shift"))
+        # Key-downs with no key-up between them: auto-repeat.
+        suppressed = [self._feed(pw, 0x0100, 0x5A, t)
+                      for t in (100, 130, 160, 190)]
+        assert suppressed == [True] * 4  # every repeat is still swallowed
+        assert _drain(pw) == [("press", "peek", 100)]
+        # The key-up re-arms: the next key-down is a second press.
+        self._feed(pw, 0x0101, 0x5A, 250)
+        self._feed(pw, 0x0100, 0x5A, 900)
+        assert _drain(pw) == [("press", "peek", 900)]
+
+    def test_portable_auto_repeat_is_one_event(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        pw = self._peek(monkeypatch)
+        for k in (_make_key(name="ctrl_l"), _make_key(name="shift_l"),
+                  _make_key(char="z"), _make_key(char="z"),
+                  _make_key(char="z")):
+            pw._on_press(k)
+        assert [e[0] for e in _drain(pw)] == ["press"]
+
+    def test_a_held_chord_keeps_its_peek(self, monkeypatch):
+        """End to end: a held chord in Toggle shows one peek and keeps it,
+        even with repeats more than 0.5 s apart."""
+        import power_atlas.peek as peek_mod
+        from power_atlas import web as web_mod
+        pw = self._peek(monkeypatch)
+        pw._listener = _Listener()
+        pw._ready.set()
+        pw._signed_gen = web_mod.local_secret_generation()
+        pw._pressed_keys.update(("ctrl", "shift"))
+        for t in (100, 700, 1300):
+            self._feed(pw, 0x0100, 0x5A, t)
+        for ev in _drain(pw):
+            pw._handle(ev)
+        assert pw._state == peek_mod.PEEK
 
 
 class TestFailedTransitions:

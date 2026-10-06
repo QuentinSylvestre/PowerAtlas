@@ -619,6 +619,69 @@ class TestSaveSettingAllowlist:
         mock_save.assert_called_once()
 
 
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2:
+# `peek_mode` is "hold" or "toggle", normalised and refused on the write path.
+
+@pytest.mark.parametrize("sent, stored", [
+    ("hold", "hold"), ("toggle", "toggle"), (" Toggle ", "toggle"),
+    ("HOLD ", "hold"),
+])
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_peek_mode_accepted(mock_load, mock_save, client,
+                                         sent, stored):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    body = client.post("/api/save-setting",
+                       json={"key": "peek_mode", "value": sent},
+                       headers={"Origin": "http://127.0.0.1"}).json()
+    assert body == {"ok": True, "restart_required": True}
+    assert mock_save.call_args[0][0].peek_mode == stored
+
+
+@pytest.mark.parametrize("sent", ["x", "", "  ", "hold toggle", "toggled"])
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_peek_mode_refused(mock_load, mock_save, client, sent):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    body = client.post("/api/save-setting",
+                       json={"key": "peek_mode", "value": sent},
+                       headers={"Origin": "http://127.0.0.1"}).json()
+    assert body == {"ok": False, "error": "Peek mode must be hold or toggle"}
+    mock_save.assert_not_called()
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_peek_mode_wrong_type_refused(mock_load, mock_save,
+                                                   client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    body = client.post("/api/save-setting",
+                       json={"key": "peek_mode", "value": 1},
+                       headers={"Origin": "http://127.0.0.1"}).json()
+    assert body["ok"] is False
+    mock_save.assert_not_called()
+
+
+def test_settings_modal_renders_the_stored_peek_mode(client):
+    """The select opens on the stored value: Hold by default, Toggle once
+    saved, so the dialog never shows a mode that is not stored."""
+    page = client.get("/").text
+    assert 'id="peekMode"' in page
+    assert re.search(r'<option value="hold"\s+selected', page)
+    assert not re.search(r'<option value="toggle"\s+selected', page)
+    assert client.post("/api/save-setting",
+                       json={"key": "peek_mode", "value": "toggle"}).json()["ok"]
+    page = client.get("/").text
+    assert re.search(r'<option value="toggle"\s+selected', page)
+    assert not re.search(r'<option value="hold"\s+selected', page)
+    # Inside the row the badge code looks for.
+    row = page.split('class="settings-row peek-mode-group"', 1)[1]
+    assert row.index('id="peekMode"') < row.index('class="settings-row ')
+
+
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
 def test_save_setting_port_valid(mock_load, mock_save, client):
@@ -1599,7 +1662,7 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     resp = client.get("/api/settings")
     assert resp.status_code == 200
     body = resp.json()
-    expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
+    expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "peek_mode", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
                      "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds",
                      "remote_bind_address", "restart_to_apply", "in_force",
                      "restart_pending", "local_secret"}
@@ -1620,6 +1683,7 @@ def test_api_settings_reflects_config_values(mock_load, mock_autostart, client):
         launch_profiles=[LaunchProfile(id="prod", name="Production", terminal_command="wt.exe")],
         active_launch_profile="prod",
         peek_hotkey="ctrl+shift+z",
+        peek_mode="toggle",
         port=8080,
         provider_settings={
             "kiro-cli": {"default_args": "-a", "color": "#ff0000", "enabled": True},
@@ -1636,6 +1700,7 @@ def test_api_settings_reflects_config_values(mock_load, mock_autostart, client):
     assert body["launch_profiles"][0]["name"] == "Production"
     assert body["launch_profiles"][0]["terminal_command"] == "wt.exe"
     assert body["peek_hotkey"] == "ctrl+shift+z"
+    assert body["peek_mode"] == "toggle"
     assert body["port"] == 8080
     assert body["provider_settings"]["kiro-cli"]["default_args"] == "-a"
     assert body["provider_settings"]["kiro-cli"]["color"] == "#ff0000"
@@ -13494,7 +13559,7 @@ class TestSettingsSurface:
 
     def test_peek_hotkey_says_restart_to_apply(self, client):
         """`peek_hotkey` is read once, at startup:
-        `create_peek(server_url, config.peek_hotkey)` hands it to
+        `create_peek(server_url, config.peek_hotkey, config.peek_mode)` hands it to
         `PeekWindow.__init__`, which parses it into `self._trigger_keys`.
         Nothing re-reads the config or re-registers the listener afterwards,
         while `index.html` offers a live input for it.
@@ -13508,6 +13573,30 @@ class TestSettingsSurface:
         body = client.post("/api/save-setting",
                            json={"key": "peek_hotkey", "value": "ctrl+shift+p"}).json()
         assert body == {"ok": True, "restart_required": True}
+
+    def test_peek_mode_says_restart_to_apply(self, client):
+        """`peek_mode` is read once, at startup, by the same `create_peek`
+        call, and `PeekWindow` keeps it for the run. A save reports the
+        restart, is snapshotted at startup and reads as pending until then.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+        """
+        import power_atlas.web as web_mod
+        from power_atlas.config import load_config
+        assert "peek_mode" in web_mod._RESTART_TO_APPLY
+        saved = web_mod._STARTUP_VALUES
+        try:
+            web_mod.set_startup_config(load_config())
+            assert web_mod._STARTUP_VALUES["peek_mode"] == "hold"
+            body = client.post("/api/save-setting",
+                               json={"key": "peek_mode", "value": "toggle"}).json()
+            assert body == {"ok": True, "restart_required": True}
+            settings = client.get("/api/settings").json()
+            assert "peek_mode" in settings["restart_to_apply"]
+            assert "peek_mode" in settings["restart_pending"]
+            assert settings["in_force"]["peek_mode"] == "hold"
+            assert settings["peek_mode"] == "toggle"
+        finally:
+            web_mod._STARTUP_VALUES = saved
 
     def test_an_invalid_remote_bind_address_is_refused_by_name(self, client):
         body = client.post("/api/save-setting",

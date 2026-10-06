@@ -43,7 +43,7 @@
           <div class="settings-row peek-hotkey-group">
             <div class="settings-row-text">
               <div class="settings-row-head"><label class="settings-row-title" for="peekHotkey">Peek hotkey</label></div>
-              <div class="settings-row-desc">Shows or hides the peek overlay window from anywhere. Takes effect on the next launch.</div>
+              <div class="settings-row-desc">Hold to peek at PowerAtlas from anywhere; double-tap to open it as a window. Takes effect on the next launch.</div>
             </div>
             <div class="settings-row-control">
               <div class="hotkey-field" onclick="document.getElementById('peekHotkey').focus()">
@@ -52,11 +52,28 @@
                        onblur="this.parentElement.classList.remove('focused')"
                        onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})}).then(loadRestartKeys)">
                 <!-- The `.then(loadRestartKeys)` is load-bearing: this field
-                     is the only restart-only control that saves and stays on
+                     and the peek mode select are the restart-only controls that save and stay on
                      the page (savePortAndRestart restarts and navigates
                      away). Without it, saving a hotkey leaves the "on
                      relaunch" badge absent until a reload. -->
               </div>
+            </div>
+          </div>
+          <!-- 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2.
+               Restart-only like the hotkey, so it saves the same way and its
+               `.then(loadRestartKeys)` is load-bearing for the same reason.
+               It borrows the port select's `port-mode` class for its look. -->
+          <div class="settings-row peek-mode-group">
+            <div class="settings-row-text">
+              <div class="settings-row-head"><label class="settings-row-title" for="peekMode">Peek mode</label></div>
+              <div class="settings-row-desc">Hold shows PowerAtlas while the shortcut is held. Toggle shows it on one press and hides it on the next. Takes effect on the next launch.</div>
+            </div>
+            <div class="settings-row-control">
+              <select class="port-mode" id="peekMode"
+                      onchange="fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_mode',value:this.value})}).then(loadRestartKeys)">
+                <option value="hold" {% if peek_mode != 'toggle' %}selected{% endif %}>Hold to show</option>
+                <option value="toggle" {% if peek_mode == 'toggle' %}selected{% endif %}>Press to show, press again to hide</option>
+              </select>
             </div>
           </div>
           <div class="settings-row settings-row-stack port-group">

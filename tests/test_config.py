@@ -400,6 +400,27 @@ def test_custom_launchers_round_trip():
     assert loaded.custom_launchers[0]["name"] == "Dev"
 
 
+def test_peek_mode_defaults_to_hold(tmp_path):
+    """An older config.toml without `peek_mode` loads as Hold, today's
+    behaviour. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2"""
+    assert Config().peek_mode == "hold"
+    _write_toml(tmp_path, {"peek_hotkey": "alt+z"})
+    assert load_config().peek_mode == "hold"
+
+
+def test_peek_mode_round_trip():
+    cfg = Config(peek_mode="toggle")
+    save_config(cfg)
+    assert load_config().peek_mode == "toggle"
+
+
+def test_peek_mode_wrong_type_gets_default(tmp_path):
+    _write_toml(tmp_path, {"peek_mode": 1, "peek_hotkey": "alt+p"})
+    cfg = load_config()
+    assert cfg.peek_mode == "hold"
+    assert cfg.peek_hotkey == "alt+p"  # the other key still loads
+
+
 def test_peek_hotkey_round_trip():
     """peek_hotkey persists through save/load cycle with custom value."""
     cfg = Config(peek_hotkey="alt+p")

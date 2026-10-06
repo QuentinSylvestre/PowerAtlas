@@ -77,6 +77,13 @@ _RESET_OVERLAYS_JS = "if(typeof resetOverlays==='function') resetOverlays()"
 # Window states.
 HIDDEN, PEEK, APP = "hidden", "peek", "app"
 
+# Peek modes (`Config.peek_mode`). Hold: the peek shows while the shortcut is
+# held and ends when a chord modifier is released. Toggle: a press shows it and
+# the next press ends it; modifier release does nothing.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+HOLD, TOGGLE = "hold", "toggle"
+_PEEK_MODES = (HOLD, TOGGLE)
+
 # Win32 message constants seen by the keyboard filter.
 _WM_KEYDOWN = 0x0100
 _WM_KEYUP = 0x0101
@@ -104,11 +111,15 @@ class PeekWindow:
     runs on the worker thread (`_window_worker`).
     """
 
-    def __init__(self, server_url: str, hotkey: str = "ctrl+shift+z"):
+    def __init__(self, server_url: str, hotkey: str = "ctrl+shift+z",
+                 mode: str = HOLD):
         if not _AVAILABLE:
             raise RuntimeError(f"Peek unavailable: {_IMPORT_ERROR}")
         self._server_url = server_url
         self._hotkey = hotkey
+        # Set once here and only read afterwards (restart-to-apply, D-6).
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+        self._mode = mode
         self._window = None
         self._listener = None
         # Hook-side state: read and written only by the listener thread.
@@ -365,7 +376,13 @@ class PeekWindow:
         kind = ev[0]
         if kind == "press":
             self._on_peek_press(ev[2])
-        elif kind in ("release", "esc"):
+        elif kind == "release":
+            # Modifier release ends a peek in Hold only; in Toggle the next
+            # press ends it. Esc and X still end a peek in both modes.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+            if self._state == PEEK and self._mode != TOGGLE:
+                self._end_peek()
+        elif kind == "esc":
             if self._state == PEEK:
                 self._end_peek()
         elif kind == "user_close":
@@ -387,12 +404,17 @@ class PeekWindow:
         self._last_press = t
         app_fg = self._state == APP and self._adapter.is_foreground()
         self._tap_origin = (self._state, app_fg)
-        # Hold mode: a press shows a peek; while one shows it is a no-op.
+        # A press shows a peek from HIDDEN or APP in both modes. While a peek
+        # shows it is a no-op in Hold, and ends the peek in Toggle (back to
+        # HIDDEN or to APP, per `return_to`).
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
         if self._state == HIDDEN:
             self._to_peek(None)
         elif self._state == APP:
             self._save()
             self._to_peek("app")
+        elif self._state == PEEK and self._mode == TOGGLE:
+            self._end_peek()
 
     def _double_tap(self, origin) -> None:
         """The double-tap rule, decided from `tap_origin`, never the current state."""
@@ -556,7 +578,8 @@ class PeekWindow:
             self._listener = keyboard.Listener(**kwargs)
             self._listener.daemon = True
             self._listener.start()
-            log.info("Peek hotkey listener started (hotkey: %s)", self._hotkey)
+            log.info("Peek hotkey listener started (hotkey: %s, mode: %s)",
+                     self._hotkey, self._mode)
         except Exception as e:
             log.warning("Failed to start hotkey listener: %s", e)
             self._listener = None
@@ -1211,8 +1234,14 @@ class _Win32Window:
             raise box["e"]
 
 
-def create_peek(server_url: str, hotkey: str = "ctrl+shift+z") -> PeekWindow | None:
-    """Factory: create PeekWindow if available, else log warning and return None."""
+def create_peek(server_url: str, hotkey: str = "ctrl+shift+z",
+                mode: str = HOLD) -> PeekWindow | None:
+    """Factory: create PeekWindow if available, else log warning and return None.
+
+    An unknown `mode` (a hand-edited config.toml; the settings write path
+    refuses one) logs a warning and uses Hold.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+    """
     if not is_available():
         log.warning("Peek window disabled: %s", _IMPORT_ERROR)
         return None
@@ -1223,8 +1252,12 @@ def create_peek(server_url: str, hotkey: str = "ctrl+shift+z") -> PeekWindow | N
     if not modifiers or not non_modifiers:
         log.warning("Invalid peek_hotkey '%s' (need modifier+key). Falling back to ctrl+shift+z", hotkey)
         hotkey = "ctrl+shift+z"
+    normalized = mode.strip().lower() if isinstance(mode, str) else ""
+    if normalized not in _PEEK_MODES:
+        log.warning("Invalid peek_mode '%s' (need hold or toggle). Falling back to hold", mode)
+        normalized = HOLD
     try:
-        return PeekWindow(server_url, hotkey)
+        return PeekWindow(server_url, hotkey, normalized)
     except Exception as e:
         log.warning("Peek window disabled: %s", e)
         return None

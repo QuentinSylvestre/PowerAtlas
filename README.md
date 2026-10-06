@@ -61,7 +61,10 @@ tool that closes windows by posting `WM_CLOSE` (AutoHotkey `WinClose`, for examp
 instead. **Peek mode** is the overlay: hold
 the peek hotkey to show it full screen and on top, release to hide it, or press Esc. Peek mode does not
 take the keyboard focus, so the app you were typing in keeps it. Holding the hotkey while the window is
-in app mode shows peek mode for as long as you hold it, then returns to app mode. A double-tap while
+in app mode shows peek mode for as long as you hold it, then returns to app mode. With the **Peek mode**
+setting on **Toggle** instead of **Hold** (the default), you do not hold the hotkey: one press shows peek
+mode and the next press ends it, back to hidden or to app mode; releasing the keys does nothing. A
+double-tap opens app mode in either setting. A double-tap while
 the window is in app mode and focused hides it. The window shows the page you left in either mode; it
 is not reset to the dashboard. Where app mode is unavailable (pywebview missing, or not Windows), tray
 **Open PowerAtlas** and the double-tap open the browser instead, and **Open in browser** is not listed.
@@ -193,7 +196,8 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 - Global launch profiles with configurable Windows Terminal profile and terminal command
 - Settings (gear icon in topbar): a short menu with the launch profile, remote access, **Autostart on
   login**, **Notify me** and the current permission mode. **All settings…** opens the Settings dialog,
-  whose sections are General (peek hotkey, port), Agent permissions and Browser sign-in. A dot on the
+  whose sections are General (peek hotkey, peek mode Hold or Toggle, port), Agent permissions and
+  Browser sign-in. The peek hotkey and peek mode take effect on the next launch. A dot on the
   gear, and on the section, marks anything that needs attention.
 - Launch-profile management (gear icon in topbar) for window mode, autostart, and profile switching
 - **Notify me** (gear icon in topbar, off by default) tells you when an ACP session finishes a turn
@@ -235,6 +239,9 @@ port = 0  # 0 = random (default), or set e.g. 8080 for a fixed port.
           # bookmark an OS-assigned port, and with 0 the two listeners would be given different
           # numbers. The combination is rejected with a named error rather than half-applied.
 peek_hotkey = "ctrl+shift+z"  # global overlay hotkey (modifier+key format)
+peek_mode = "hold"  # "hold": shown while the hotkey is held; "toggle": a press shows it, the next
+                    # press hides it. A double-tap opens the app window either way. Read at startup;
+                    # an unknown value falls back to "hold" with a warning in the log.
 default_directory = ""  # Global fallback directory for provider launches without workspace selection
 pinned_folders = []
 pinned_sessions = []

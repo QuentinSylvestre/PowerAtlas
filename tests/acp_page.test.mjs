@@ -4962,6 +4962,8 @@ function loadPanel(opts = {}) {
   // would run the badge code and assert on nothing.
   const hosts = new Map([
     [".peek-hotkey-group", new El("div")],
+    // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+    [".peek-mode-group", new El("div")],
     [".port-group", new El("div")],
   ]);
   ACTIVE = null;
@@ -5597,6 +5599,46 @@ check("the badge marks what is not in force, not what could ever need a restart"
               "the badge survived the relaunch that applied the value");
   assertEqual(p.rows()[1].querySelector(".restart-badge"), null,
               "the row badge survived the relaunch that applied the value");
+});
+
+check("peek_mode is labelled and badges its own row in the Settings dialog", () => {
+  // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2. The
+  // panel falls back to the raw key when a label is missing, so a row count
+  // alone would pass with the label deleted; the text is asserted directly.
+  const p = loadPanel();
+  p.sandbox.renderRestartKeys({
+    restart_to_apply: ["port", "peek_hotkey", "peek_mode"],
+    restart_pending: ["peek_mode"],
+    in_force: { port: 4915, peek_hotkey: "ctrl+shift+z", peek_mode: "hold" },
+    port: 4915,
+    peek_hotkey: "ctrl+shift+z",
+    peek_mode: "toggle",
+  });
+  const rows = p.rows();
+  const named = rows.map((r) => r.querySelector(".remote-restart-key").textContent);
+  assertEqual(named[2], "Peek mode", "peek_mode rendered without its label");
+  const values = rows.map((r) => r.querySelector(".remote-restart-value").textContent);
+  assertEqual(values[2], "hold", "the peek_mode row did not show the mode in force");
+  const badge = p.badge(".peek-mode-group");
+  assert(badge, "a pending peek_mode put no badge on .peek-mode-group");
+  assertEqual(badge.textContent, "on relaunch", "the peek_mode badge says nothing");
+  // Only the pending key is badged: the badge goes to the mode's own row,
+  // never to its neighbour the hotkey.
+  assertEqual(p.badge(".peek-hotkey-group"), null,
+              "a pending peek_mode badged the peek hotkey row");
+  assertEqual(p.badge(".port-group"), null,
+              "a pending peek_mode badged the port row");
+  // And it clears on the relaunch that applies it.
+  p.sandbox.renderRestartKeys({
+    restart_to_apply: ["port", "peek_hotkey", "peek_mode"],
+    restart_pending: [],
+    in_force: { port: 4915, peek_hotkey: "ctrl+shift+z", peek_mode: "toggle" },
+    port: 4915,
+    peek_hotkey: "ctrl+shift+z",
+    peek_mode: "toggle",
+  });
+  assertEqual(p.badge(".peek-mode-group"), null,
+              "the peek_mode badge survived the relaunch that applied it");
 });
 
 check("the status pill is the one thing in the topbar that cannot be squeezed", () => {

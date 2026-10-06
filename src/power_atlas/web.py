@@ -2706,6 +2706,7 @@ async def index(request: Request):
         # Stripped: this one lands in the page source via `|tojson`.
         "launchers": _launchers_without_env(config.custom_launchers),
         "peek_hotkey": config.peek_hotkey,
+        "peek_mode": config.peek_mode,
         "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
         "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
@@ -5535,6 +5536,7 @@ async def api_settings():
         "active_launch_profile": config.active_launch_profile,
         "launch_profiles": [asdict(p) for p in config.launch_profiles],
         "peek_hotkey": config.peek_hotkey,
+        "peek_mode": config.peek_mode,
         "port": config.port,
         "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
@@ -5828,6 +5830,9 @@ async def delete_launch_profile(request: Request):
 _SETTING_TYPES: dict[str, type] = {
     "port": int,
     "peek_hotkey": str,
+    # "hold" or "toggle", refused otherwise on the write path below.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+    "peek_mode": str,
     "default_directory": str,
     "pinned_folders": list,
     "pinned_sessions": list,
@@ -5864,13 +5869,17 @@ _RESTART_TO_APPLY = frozenset({
     "port", "acp_max_sessions", "acp_idle_ttl_seconds",
     "acp_prompt_silence_seconds", "remote_bind_address",
     # `peek_hotkey` is consumed once, at startup, by
-    # `create_peek(server_url, config.peek_hotkey)`; `PeekWindow.__init__`
-    # parses it into `self._trigger_keys` and nothing re-reads or re-registers
-    # it afterwards. `index.html` offers a live input for it, so omitting it
+    # `create_peek(server_url, config.peek_hotkey, config.peek_mode)`;
+    # `PeekWindow.__init__` parses it into `self._trigger_keys` and nothing
+    # re-reads or re-registers it afterwards. `index.html` offers a live input for it, so omitting it
     # here made the endpoint answer `restart_required: False` for a key that
     # genuinely needs one — a field that is positively wrong is worse than no
     # field, because the user acts on it.
     "peek_hotkey",
+    # `peek_mode` is the same: `create_peek` hands it to `PeekWindow`, which
+    # keeps it for the run, and the settings dialog offers a live select.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+    "peek_mode",
 })
 
 # The restart-only values as this process actually read them, captured once
@@ -6017,6 +6026,13 @@ async def save_setting(request: Request):
         # unqualified success for a rename whose regeneration had failed.
         return {**answer, "restart_required": key in _RESTART_TO_APPLY,
                 **(await _current_acp_permission_state())}
+    if key == "peek_mode":
+        # Normalised and checked before it is persisted: an unknown value
+        # would otherwise only surface as a startup warning and a silent Hold.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+        value = value.strip().lower()
+        if value not in ("hold", "toggle"):
+            return {"ok": False, "error": "Peek mode must be hold or toggle"}
     setattr(config, key, value)
     save_config(config)
     return {"ok": True, "restart_required": key in _RESTART_TO_APPLY}

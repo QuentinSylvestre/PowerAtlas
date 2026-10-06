@@ -92,6 +92,9 @@ class LaunchProfile:
 class Config:
     port: int = 0  # 0 = random (OS-assigned), >0 = static port
     peek_hotkey: str = "ctrl+shift+z"
+    # "hold" or "toggle"; read once at startup by `create_peek`.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+    peek_mode: str = "hold"
     default_directory: str = ""  # Global fallback for provider launches without workspace selection
     active_launch_profile: str = "default"
     launch_profiles: list[LaunchProfile] = field(default_factory=lambda: [LaunchProfile()])

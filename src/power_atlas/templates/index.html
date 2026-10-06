@@ -5783,7 +5783,7 @@ function refreshNotifyToggle(){
     .then(function(d){if(d)el.classList.toggle('active',!!d.enabled)})
     .catch(function(){});
 }
-function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
+function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var peekModeSel=document.getElementById('peekMode');if(peekModeSel)peekModeSel.value=d.peek_mode==='toggle'?'toggle':'hold';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){
   fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});
   initProviderFilter();initWorkspaceFilters();
@@ -9306,6 +9306,7 @@ function loadRemoteAccess() {
 var _RESTART_KEY_LABELS = {
   port: 'Server port',
   peek_hotkey: 'Peek hotkey',
+  peek_mode: 'Peek mode',
   remote_bind_address: 'Remote bind address',
   acp_max_sessions: 'ACP: maximum concurrent sessions',
   acp_idle_ttl_seconds: 'ACP: idle session TTL (seconds)',
@@ -9423,7 +9424,7 @@ function markTopbarRestart(pending) {
   }
 }
 
-// The two keys with a live control in the Settings dialog. Without this the hotkey field
+// The keys with a live control in the Settings dialog. Without this the hotkey field
 // accepts a new value, saves it, and behaves as though nothing happened until
 // the next launch — which is the same lie the API side was fixed for.
 //
@@ -9439,7 +9440,10 @@ function markTopbarRestart(pending) {
 // there to answer — when does my saved change take effect — and reads
 // correctly whether or not the reader knows it is conditional.
 function markRestartInputs(keys) {
-  var owners = {peek_hotkey: 'peek-hotkey-group', port: 'port-group'};
+  // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2: the
+  // peek mode select is a third live restart-only control.
+  var owners = {peek_hotkey: 'peek-hotkey-group', peek_mode: 'peek-mode-group',
+                port: 'port-group'};
   Object.keys(owners).forEach(function (key) {
     var host = document.querySelector('.' + owners[key]);
     if (!host) return;

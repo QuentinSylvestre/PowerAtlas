@@ -899,7 +899,7 @@ def _run_foreground() -> None:
     from .web import set_restart_callback
     set_restart_callback(trigger_restart)
 
-    peek = create_peek(server_url, config.peek_hotkey)
+    peek = create_peek(server_url, config.peek_hotkey, config.peek_mode)
 
     # The shutdown sequence, once. Besides the normal path below, the
     # PowerAtlas window's `stop()` watchdog runs it when the UI loop will not
