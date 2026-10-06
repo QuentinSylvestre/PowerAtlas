@@ -1661,9 +1661,9 @@ _WS_EX_TOOLWINDOW = 0x00000080
 _WS_EX_APPWINDOW = 0x00040000
 _HWND_TOP, _HWND_TOPMOST, _HWND_NOTOPMOST = 0, -1, -2
 _SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOZORDER = 0x1, 0x2, 0x4
-_SWP_NOACTIVATE, _SWP_FRAMECHANGED, _SWP_SHOWWINDOW = 0x10, 0x20, 0x40
+_SWP_NOACTIVATE, _SWP_FRAMECHANGED = 0x10, 0x20
 _SW_HIDE, _SW_SHOWNORMAL, _SW_SHOWMINIMIZED, _SW_SHOWMAXIMIZED = 0, 1, 2, 3
-_SW_SHOWNOACTIVATE, _SW_SHOWMINNOACTIVE = 4, 7
+_SW_SHOWNOACTIVATE, _SW_SHOW, _SW_SHOWMINNOACTIVE, _SW_SHOWNA = 4, 5, 7, 8
 _WPF_RESTORETOMAXIMIZED = 0x2
 _DEFAULT_APP_SIZE = (1280, 800)  # logical pixels (D-9)
 
@@ -1762,6 +1762,15 @@ class _Win32Window(_CookieReader):
     switches where toggling `ShowInTaskbar` recreated the handle every time
     and lost the WebView2 child in peek mode.
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+
+    A hidden window is always made visible by `ShowWindow` (or
+    `SetWindowPlacement`), never by `SetWindowPos(SWP_SHOWWINDOW)`: that flag
+    sends no `WM_SHOWWINDOW`, so WinForms keeps the form's `Visible` False.
+    The WebView2 control then never sets its controller visible (it starts
+    invisible, because pywebview creates the form hidden) and the page is not
+    painted: a blank white window. `Form.Activate()` is also a no-op while
+    `Visible` is False. The window is placed while hidden, then shown.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS blank-window fix
     """
 
     @property
@@ -1931,7 +1940,9 @@ class _Win32Window(_CookieReader):
                 u.ShowWindow(h, _SW_SHOWNOACTIVATE)
             b = WinForms.Screen.PrimaryScreen.Bounds
             u.SetWindowPos(h, _HWND_TOPMOST, b.X, b.Y, b.Width, b.Height,
-                           _SWP_NOACTIVATE | _SWP_SHOWWINDOW)
+                           _SWP_NOACTIVATE)
+            # `ShowWindow`, never `SWP_SHOWWINDOW` (class docstring).
+            u.ShowWindow(h, _SW_SHOWNA)
             return h
 
         self._keep_hwnd(self._ui(run, "show peek"))
@@ -1959,8 +1970,9 @@ class _Win32Window(_CookieReader):
                 hh = min(int(_DEFAULT_APP_SIZE[1] * scale), wa.Height)
                 x = wa.X + (wa.Width - w) // 2
                 y = wa.Y + (wa.Height - hh) // 2
-                flags = _SWP_SHOWWINDOW | (0 if focused else _SWP_NOACTIVATE)
-                u.SetWindowPos(h, _HWND_TOP, x, y, w, hh, flags)
+                u.SetWindowPos(h, _HWND_TOP, x, y, w, hh, _SWP_NOACTIVATE)
+                # `ShowWindow`, never `SWP_SHOWWINDOW` (class docstring).
+                u.ShowWindow(h, _SW_SHOW if focused else _SW_SHOWNA)
                 wp = WP()
                 wp.length = ctypes.sizeof(WP)
                 u.GetWindowPlacement(h, ctypes.byref(wp))

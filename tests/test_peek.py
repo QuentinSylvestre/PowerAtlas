@@ -2323,6 +2323,145 @@ class TestWin32Plumbing:
         pw._window.native.BeginInvoke.assert_not_called()
 
 
+class _ShowUser32:
+    """A user32 stand-in that records the calls the show primitives make.
+
+    The window starts hidden, as it is after `create_window(hidden=True)`.
+    """
+
+    def __init__(self):
+        self.calls = []
+        self.visible = False
+
+    def IsWindowVisible(self, h):
+        return self.visible
+
+    def ShowWindow(self, h, cmd):
+        self.calls.append(("ShowWindow", h, cmd))
+        self.visible = cmd != 0
+        return True
+
+    def GetWindowLongW(self, h, index):
+        return 0
+
+    def SetWindowLongW(self, h, index, value):
+        self.calls.append(("SetWindowLongW", h, index, value))
+        return 0
+
+    def SetWindowPos(self, h, after, x, y, w, hh, flags):
+        self.calls.append(("SetWindowPos", h, after, x, y, w, hh, flags))
+        return True
+
+    def IsIconic(self, h):
+        return False
+
+    def IsZoomed(self, h):
+        return False
+
+    def GetDpiForWindow(self, h):
+        return 96
+
+    def GetWindowPlacement(self, h, wp):
+        return True
+
+    def SetWindowPlacement(self, h, wp):
+        self.calls.append(("SetWindowPlacement", h))
+        return True
+
+
+class TestWin32ShowPrimitives:
+    """A window shown by `SetWindowPos(SWP_SHOWWINDOW)` alone stayed blank
+    white: that flag sends no `WM_SHOWWINDOW`, so WinForms kept the form's
+    `Visible` False and the WebView2 control never made its controller
+    visible (pixel probe 2026-10-06: the first app show and a peek from
+    hidden before any app show were white; every show through
+    `ShowWindow` or `SetWindowPlacement` painted). Each show primitive
+    therefore places the hidden window first, with no show flag, and then
+    shows it with `ShowWindow`. Values from winuser.h: `SWP_SHOWWINDOW`
+    0x40, `SWP_NOACTIVATE` 0x10, `SW_SHOW` 5, `SW_SHOWNA` 8,
+    `SW_SHOWNORMAL` 1, `HWND_TOPMOST` -1.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS blank-window fix
+    """
+
+    SCREEN = (-1280, 40, 1920, 1080)       # asymmetric, off-origin bounds
+    WORK = (-1280, 40, 1920, 1032)
+
+    def _adapter(self, monkeypatch):
+        import ctypes
+        import types
+        import power_atlas.peek as peek_mod
+
+        class WP(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_uint), ("flags", ctypes.c_uint),
+                        ("showCmd", ctypes.c_uint),
+                        ("ptMinPosition", ctypes.c_long * 2),
+                        ("ptMaxPosition", ctypes.c_long * 2),
+                        ("rcNormalPosition", ctypes.c_long * 4)]
+
+        forms = _fake_dotnet(monkeypatch)
+        rect = lambda x, y, w, h: types.SimpleNamespace(X=x, Y=y, Width=w,
+                                                        Height=h)
+        forms.Screen = types.SimpleNamespace(PrimaryScreen=types.SimpleNamespace(
+            Bounds=rect(*self.SCREEN), WorkingArea=rect(*self.WORK)))
+        forms.FormBorderStyle = types.SimpleNamespace(Sizable="sizable",
+                                                      **{"None": "none"})
+        u = _ShowUser32()
+        monkeypatch.setattr(peek_mod, "_win32", lambda: (u, WP))
+        pw = _new_peek(monkeypatch)
+        native = _FakeNative()
+        a = peek_mod._Win32Window(pw, types.SimpleNamespace(native=native))
+        a._native = native
+        pw._hwnd = _FakeNative.HWND
+        return a, u, WP
+
+    @staticmethod
+    def _shows(u):
+        return [(i, c[2]) for i, c in enumerate(u.calls)
+                if c[0] == "ShowWindow" and c[2] != 0]
+
+    @staticmethod
+    def _no_show_flag(u):
+        return all(not (c[7] & 0x40) for c in u.calls if c[0] == "SetWindowPos")
+
+    def test_peek_is_shown_by_showwindow_without_activation(self, monkeypatch):
+        a, u, _ = self._adapter(monkeypatch)
+        a.show_peek()
+        assert self._no_show_flag(u), u.calls
+        placed = [i for i, c in enumerate(u.calls) if c[0] == "SetWindowPos"
+                  and c[2] == -1 and c[3:7] == self.SCREEN]
+        assert placed and u.calls[placed[0]][7] & 0x10, "topmost, not activating"
+        shows = self._shows(u)
+        assert [cmd for _, cmd in shows] == [8], "one SW_SHOWNA, nothing activating"
+        assert shows[0][0] > placed[0], "shown after it is placed"
+        assert u.visible
+
+    @pytest.mark.parametrize("focused, cmd", [(True, 5), (False, 8)])
+    def test_first_app_show_is_shown_by_showwindow(self, monkeypatch,
+                                                   focused, cmd):
+        a, u, _ = self._adapter(monkeypatch)
+        assert a.apply_app(None, focused) is not None
+        assert self._no_show_flag(u), u.calls
+        # D-9 default, centred in the asymmetric work area.
+        x, y = -1280 + (1920 - 1280) // 2, 40 + (1032 - 800) // 2
+        placed = [i for i, c in enumerate(u.calls)
+                  if c[0] == "SetWindowPos" and c[3:7] == (x, y, 1280, 800)]
+        assert placed, u.calls
+        shows = self._shows(u)
+        assert [c for _, c in shows] == [cmd]
+        assert shows[0][0] > placed[0], "shown after it is placed"
+
+    def test_a_saved_placement_is_shown_by_setwindowplacement(self,
+                                                             monkeypatch):
+        """The path that already painted: no show flag and no extra show."""
+        a, u, WP = self._adapter(monkeypatch)
+        saved = WP()
+        saved.showCmd = 1
+        a.apply_app(saved, True)
+        assert self._no_show_flag(u)
+        assert ("SetWindowPlacement", _FakeNative.HWND) in u.calls
+        assert self._shows(u) == []
+
+
 class TestReadinessOffWindows:
     """Fix 13: peek off Windows does not depend on `events.shown`."""
 
