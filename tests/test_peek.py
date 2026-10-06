@@ -2709,7 +2709,7 @@ def test_webview2_controller_field_exists():
     if r.returncode == 4:
         pytest.skip(out)
     assert r.returncode == 0, out
-    assert out.splitlines()[-1] == (
+    assert r.stdout.strip().splitlines()[-1] == (
         "Microsoft.Web.WebView2.Core.CoreWebView2Controller"), out
 
 
