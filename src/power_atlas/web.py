@@ -2109,10 +2109,12 @@ _LOGIN_CODE_TTL_SECONDS = 120.0
 # A code is minted by tray Open in browser, tray Open PowerAtlas when it falls
 # back to the browser, the browser shortcut, the double-tap's browser fallback
 # off Windows, the PowerAtlas window at creation and when it is signed out,
-# and "Copy login link"; 64 outstanding codes is far past any real
+# a same-origin link the window opens as a new window, and "Copy login
+# link"; 64 outstanding codes is far past any real
 # use, and past it the oldest is evicted rather than the store growing.
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4;
 # door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
+# and Phase 5 (follow-up 6)
 _LOGIN_CODE_MAX_OUTSTANDING = 64
 # The clock the TTL is measured on (D-21, R-18): monotonic, because the codes
 # are process-local and wall time only adds NTP and sleep corrections. A module
@@ -2142,10 +2144,12 @@ def mint_login_code() -> str:
     `_LOCAL_AUTH_PATH`: tray Open in browser, tray Open PowerAtlas when it falls
     back to the browser, the browser shortcut, the double-tap's browser
     fallback off Windows, the PowerAtlas window at creation and when it is
-    signed out, and "Copy login link". Returns ``""`` when there is
+    signed out, a same-origin link the window opens as a new window, and
+    "Copy login link". Returns ``""`` when there is
     no local secret, because a code would exchange for a cookie that verifies
     nowhere.
     door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
+    and Phase 5 (follow-up 6)
     """
     if not _LOCAL_SECRET:
         return ""
@@ -2717,7 +2721,8 @@ def login_url(server_url: str, next: str | None = None) -> str:
     PowerAtlas when it falls back to the browser, the browser shortcut, the
     double-tap's browser fallback off Windows, "Copy login link", and the
     PowerAtlas window at creation and when it is signed out (not on every
-    show: the window keeps its page) — so none of them assembles the
+    show: the window keeps its page), and a same-origin link the window
+    opens as a new window (with ``next``) — so none of them assembles the
     path by hand. ``server_url`` is built by `__main__` from `LOOPBACK_HOST`.
     With no local secret there is no code to mint; the bare URL is returned
     and the gate's page tells the user why. ``next`` is the page to land on

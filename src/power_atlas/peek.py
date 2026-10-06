@@ -19,8 +19,9 @@ log = logging.getLogger("power_atlas.peek")
 
 # Every door here needs the `pa_local` cookie: the window at creation and
 # whenever it finds itself signed out (a local-secret rotation, or a missing
-# or invalid cookie), and the browser (the browser shortcut, and app mode's
-# browser fallback). The login code in this URL is exchanged for it
+# or invalid cookie), and the browser (the browser shortcut, app mode's
+# browser fallback, and a same-origin link the window opens as a new window,
+# through `_NewWindowBrowser`). The login code in this URL is exchanged for it
 # on first load. The helper is shared with the tray through `doors`, which
 # imports `web` lazily, so this module still loads without the web app.
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11);

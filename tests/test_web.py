@@ -29929,8 +29929,9 @@ class TestLoopbackDoors:
                                             caplog):
         """No door logs its link: "Copy login link" (every branch), tray Open
         PowerAtlas (browser fallback) and Open in browser, the peek double-tap
-        where there is no app mode, the browser shortcut (Phase 3), and the
-        window's sign-in reload after a rotation. At DEBUG for every logger, `power_atlas.*` included, no
+        where there is no app mode, the browser shortcut (Phase 3), the
+        window's sign-in reload after a rotation, and a same-origin link the
+        window opens as a new window (Phase 5, follow-up 6). At DEBUG for every logger, `power_atlas.*` included, no
         record carries the login path, the ``code=`` field or the code itself.
         260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (all
         doors but Copy login link: Phase 5 review); openers since
