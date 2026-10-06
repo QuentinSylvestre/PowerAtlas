@@ -11681,6 +11681,46 @@ check("permission prompt: the in-page browser notification clamps the title to 2
     "the clamp reached the transcript row, which must show the whole title");
 });
 
+// 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final fix 2:
+// the hidden PowerAtlas window now reports `hidden`, and a permission request
+// already gets the server's desktop toast, so the window raises no web
+// notification of its own. A browser tab (no pywebview, no WebView2 host
+// object; desktop Chrome has a `window.chrome` without `webview`) still does.
+for (const [label, marker, expected] of [
+  ["a browser tab", () => {}, 2],
+  ["desktop Chrome (window.chrome without webview)", (s) => { s.chrome = { runtime: {} }; }, 2],
+  ["the PowerAtlas window (window.pywebview)", (s) => { s.pywebview = { platform: "edgechromium" }; }, 0],
+  ["the PowerAtlas window before pywebview injects (window.chrome.webview)",
+    (s) => { s.chrome = { webview: { postMessage() {} } }; }, 0],
+]) {
+  check(`hidden page notifications: ${label} raises ${expected}`, async (tpl) => {
+    const raised = [];
+    const page = loadPage(tpl, {
+      visibility: "hidden",
+      answer: (url) => url === "/api/notifications" ? { body: { enabled: true } } : null,
+    });
+    page.sandbox.Notification = class {
+      constructor(title, o) { raised.push(o.tag); }
+    };
+    page.sandbox.Notification.permission = "granted";
+    marker(page.sandbox);
+    page.open();
+    const live = "sess-live-0002";
+    page.deliver({ type: "session", sessionId: live, payload: {
+      sessionId: live, cwd: "C:\\work\\repo", created: true, turnActive: true, contextPercent: null } });
+    await page.settle();
+    page.deliver(permFrame(live, 602, "run the build", { capability: "shell" }));
+    page.deliver({ type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } });
+    await page.settle();
+    assertEqual(raised.length, expected,
+      `${label}: expected ${expected} notifications, got ${JSON.stringify(raised)}`);
+    if (expected) {
+      assertEqual(raised[0], "pa-perm-" + live, "the permission notification is missing");
+      assertEqual(raised[1], "pa-turn-" + live, "the turn-end notification is missing");
+    }
+  });
+}
+
 // The new-session Default against the permission profile (SC-3).
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3 (G1, user
 // decision 2026-09-23): the server resolves Default. Every page path sends the

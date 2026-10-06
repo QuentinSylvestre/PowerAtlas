@@ -2519,6 +2519,19 @@
     // the settings toggle, where a user gesture exists to carry it.
     if (Notification.permission !== 'granted') return;
     if (document.visibilityState !== 'hidden') return;
+    // Never from inside the PowerAtlas window: hidden, it now reports
+    // `hidden` (the window sets the WebView2 controller invisible), and a
+    // permission request already gets the server's own desktop toast, so a
+    // web notification here would be a second one. Markers: pywebview
+    // injects `window.pywebview` into every page it loads, js_api or not,
+    // but only once the navigation completes; WebView2's
+    // `window.chrome.webview` exists from document creation. A browser has
+    // neither (desktop Chrome's `window.chrome` has no `webview`).
+    // Consequence, unchanged from before the window reported `hidden`: a
+    // turn end in a session only the hidden window is attached to notifies
+    // nobody, since the server toasts that only for an unwatched session.
+    // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final fix 2
+    if (window.pywebview || (window.chrome && window.chrome.webview)) return;
     try {
       // `tag` coalesces: two tabs on one session replace each other's
       // notification rather than stacking two identical ones.
