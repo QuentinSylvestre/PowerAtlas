@@ -370,8 +370,9 @@ class PeekWindow:
         # suppressed too, and the key-up re-arms its chords.
         self._chord_down: dict = {}
         self._esc_down_suppressed = False  # the filter suppressed Esc's key-down
-        # Hook tick of the filter's last key-down per modifier name (repeats
-        # refresh it; its key-up removes it). Hook thread only (follow-up 20).
+        # Hook tick of the filter's last key-down per modifier name (its
+        # auto-repeats refresh it, but Windows repeats only the most recently
+        # pressed key; its key-up removes it). Hook thread only (follow-up 20).
         self._modifier_tick: dict = {}
         # The filter just suppressed the key of a chord that needs the mask
         # (`_needs_mask`): send the mask key before returning (follow-ups
@@ -1357,9 +1358,13 @@ class PeekWindow:
         ours saw it (remote desktop, VM, remapper): the async state never
         says it is down, but its key-down (or its latest repeat) is recent
         while the user holds it. A modifier with no key-down tick (tracked
-        before the filter saw it) counts as old. Residual: a modifier held
-        still for more than 2 s before the chord key, in such an app, is
-        still dropped.
+        before the filter saw it) counts as old. Residual: Windows
+        auto-repeats only the most recently pressed key, so only that
+        modifier's tick stays fresh while held. In such an app a modifier
+        whose last key-down came more than `_STALE_MODIFIER_MS` (2 s) before
+        the chord key is still dropped: one held alone that long, or, with
+        two held, the one pressed first, once two seconds have passed since
+        its own key-down even while the second is still repeating.
         261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS follow-up 20
         A check that raises (user32 not bound, the call failing) keeps the
         modifier, as before this check existed: the filter must not stop
