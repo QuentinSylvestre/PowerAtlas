@@ -615,10 +615,16 @@ class PeekWindow:
         # `TopMost` property would be reapplied by WinForms on each style
         # update, and its setter may activate the window.
         # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+        #
+        # `easy_drag=False`: pywebview defaults it on for a frameless window,
+        # which makes a drag anywhere in the page move the window, so selecting
+        # text moved it. App mode has a real title bar to drag by, and the peek
+        # is never dragged.
         self._window = webview.create_window(
             "PowerAtlas",
             _login_url(self._server_url),
             frameless=True,
+            easy_drag=False,
             on_top=False,
             hidden=True,
             width=1,

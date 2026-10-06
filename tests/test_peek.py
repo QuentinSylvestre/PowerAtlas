@@ -3539,6 +3539,23 @@ class TestStopOnEveryPath:
         assert pw._start_returned.is_set()
 
 
+class TestWindowCreationOptions:
+    def test_the_page_does_not_drag_the_window(self, monkeypatch):
+        """pywebview turns `easy_drag` on by default for a frameless window,
+        so any drag in the page moved the window and selecting text moved it
+        (user report, 2026-10-06). Dragging belongs to app mode's title bar.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS"""
+        import power_atlas.peek as peek_mod
+        pw = _new_peek(monkeypatch)
+        fake = MagicMock()
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        monkeypatch.setattr(peek_mod, "webview", fake, raising=False)
+        pw._run_webview()
+        kwargs = fake.create_window.call_args.kwargs
+        assert kwargs.get("frameless") is True
+        assert kwargs.get("easy_drag") is False
+
+
 class TestSignInCookieCheck:
     """Final review fix 2: before a show the window reads its own `pa_local`
     cookie, at most every 10 s, and re-signs when it is missing or invalid.
