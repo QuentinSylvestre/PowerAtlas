@@ -289,13 +289,21 @@ The working tree held another session's unrelated edits (`docs/KNOWLEDGE.md`, `p
 Tests: `tests/test_peek.py` `TestCreatePeek` (`test_invalid_hotkey_fallback`, `test_invalid_hotkey_only_modifier`, `test_valid_hotkey`): update every `mock_init` signature to accept the new arguments and stop setting `_visible`; add a test that `mode` is passed through and that an unknown mode falls back to `hold` with a warning. The docstring in `tests/test_web.py` that cites `create_peek(server_url, config.peek_hotkey)` (restart-to-apply test) is updated with the `web.py` comment. `tests/acp_page.test.mjs`: extend its hardcoded `hosts` map (`.peek-hotkey-group`/`.port-group`) with `.peek-mode-group`. `test_config.py` default, round trip and wrong-type fallback for `peek_mode`; `test_web.py` save accepts `hold`/`toggle` (and `" Toggle "` normalised), refuses `"x"`, payload `expected_keys` includes `peek_mode`, restart-to-apply includes it; `test_peek.py` every Toggle cell plus Toggle auto-repeat; `acp_page.test.mjs` asserts directly that `peek_mode` renders with the label "Peek mode" (not the raw key) and that a pending `peek_mode` puts the badge on `.peek-mode-group`.
 
 **Exit criteria**:
-- [ ] Toggle-mode cells of the state-machine table and Toggle auto-repeat tested in `tests/test_peek.py`; pass.
-- [ ] `acp_page.test.mjs` asserts the `peek_mode` label and `.peek-mode-group` badge (a test that passes with the label entry deleted does not count).
-- [ ] Python suite command from Phase 1 passes; `node tests/acp_page.test.mjs` passes.
-- [ ] Unattended window probe from Phase 1 re-run with `mode="toggle"` events (press, press after 0.8 s, press-press within 0.5 s) and passes.
-- [ ] Smoke as in Phase 1.
+- [x] Toggle-mode cells of the state-machine table and Toggle auto-repeat tested in `tests/test_peek.py`; pass.
+- [x] `acp_page.test.mjs` asserts the `peek_mode` label and `.peek-mode-group` badge (a test that passes with the label entry deleted does not count).
+- [x] Python suite command from Phase 1 passes; `node tests/acp_page.test.mjs` passes.
+- [x] Unattended window probe from Phase 1 re-run with `mode="toggle"` events (press, press after 0.8 s, press-press within 0.5 s) and passes.
+- [x] Smoke as in Phase 1.
 - [ ] Live QA: settings modal shows the Peek mode select, saving shows the "on relaunch" badge; after restart with `toggle`, injected press/press hides and press/press-within-0.5 s opens app mode (or BLOCKED if locked); `peek_mode` restored to its previous value afterwards.
-- [ ] Update `README.md` config sample (around line 219) with `peek_mode` and the settings section description (around line 178).
+- [x] Update `README.md` config sample (around line 219) with `peek_mode` and the settings section description (around line 178).
+
+Implementation (2026-10-06, code: 315bb5c)
+Phase 2 adds the Peek mode setting from config to window, in commits `315bb5c` and `c889589`. `Config.peek_mode` defaults to `"hold"`. In `web.py`, `peek_mode` is in `_SETTING_TYPES`, in `_RESTART_TO_APPLY` (its comment now cites `create_peek(server_url, config.peek_hotkey, config.peek_mode)`), in the index page context and in `/api/settings`. `/api/save-setting` strips and lowercases the value and refuses anything but hold or toggle with "Peek mode must be hold or toggle". `create_peek(server_url, hotkey, mode="hold")` normalises the mode and falls back to hold with a warning; `__main__.py` passes `config.peek_mode`. In `peek.py`, `PeekWindow` keeps the mode, and the worker adds the Toggle rows of the state machine: a press while a peek shows ends it, back to HIDDEN or to APP per `return_to`; modifier release does nothing in Toggle; Esc and X still end a peek; the double-tap rule is unchanged, so two quick presses open app mode. Auto-repeat was already never an event, and new hook tests cover it under Toggle. The Settings dialog has a Peek mode select after the hotkey row. It saves on change and then calls `loadRestartKeys`, and the hotkey row has the plan's new description. `index.html` sets the select in `refreshSettings`, labels the key "Peek mode" and adds the `.peek-mode-group` badge owner. The README describes Toggle, the settings section and the config sample. Tests cover every Toggle cell and the double-tap rule under Toggle, the `create_peek` mode handling, the config default, round trip and wrong type, save accepts and refusals, the payload keys, restart-to-apply and pending, the rendered select, and a node check that the label and the badge are asserted directly. The plan file has 6 of 7 Phase 2 boxes ticked and is not staged. The unticked one is the injected-keystroke live QA, blocked because the desktop is locked and deferred to Phase 3.
+
+Implementation (2026-10-06, code: 41836bf)
+peek_mode is now normalised once, when config.toml is loaded. The value is stripped and lowercased, and anything other than hold or toggle becomes "hold". This means a hand-edited "TOGGLE" or "x" now shows the same mode in four places: the settings select (both the Jinja render and refreshSettings), /api/settings, the restart-pending snapshot, and create_peek at runtime. In the Settings dialog, the Peek mode option labels are now "Hold (show while held)" and "Toggle (press to show, press again to hide)", so the names used in the row description and the README appear in the UI. The Peek hotkey description no longer says "Hold to peek", which was wrong in Toggle mode. New tests cover the load-time normalisation (tests/test_config.py), the API and rendered-select view of a hand-edited value (tests/test_web.py), and refreshSettings applying peek_mode to #peekMode (tests/acp_page.test.mjs). The commit is 41836bf.
+
+QA (Step 5b): unattended window probe in toggle mode PASS 36/36 (press, press after 800 ms hides; press-press within 200 ms from HIDDEN opens APP; release is a no-op; press ends a peek back to APP; normal, minimized and maximized placements round-trip; Esc and `SC_CLOSE` end a toggle peek; page state kept). Settings modal in Playwright PASS 10/10 (select, options, badge on `.peek-mode-group`, cleared on restore). Smoke PASS on three restarts (hold, toggle, hold), each logging the mode and `PowerAtlas window ready`. Live injected-key QA BLOCKED (desktop locked); deferred to Phase 3. The running instance was left on `peek_mode = "hold"`; config.toml now carries an explicit `peek_mode = "hold"` line. Each restart ended any active kiro-cli ACP sessions (restarts were granted for this task).
 
 ### Phase 3: Browser shortcut and shared shortcut validation [QA]
 **Goal**: `browser_hotkey` exists end to end, and every shortcut save and startup goes through one validator with conflict checks.
@@ -326,6 +334,7 @@ Tests: `hotkeys.py` behaviour tested inside `tests/test_peek.py` (a new class th
 - [ ] Live QA: with a browser shortcut set and PowerAtlas restarted, injecting it opens a browser tab signed in: the count of `loopback browser signed in with a login code` lines in `orchestrator.log` rises by one (or BLOCKED if locked). Restore the user's original shortcut values afterwards.
 - [ ] Update `README.md` config sample and settings description with `browser_hotkey` and the validation rule.
 - [ ] Update `plans/tests/260701_POWERATLAS.md` "validation only at peek startup" row and its settings allowlist (`peek_mode`, `browser_hotkey`).
+- [ ] (deferred from Phase 2) Live QA of Phase 2's Toggle mode on an unlocked desktop: after a restart with `toggle`, injected press then press after 0.8 s hides, and press-press within 0.5 s opens app mode; restore `peek_mode` afterwards.
 - [ ] (deferred from Phase 1) Live QA of Phase 1's SC-1 to SC-4, SC-8, Esc and `target=_blank` checks on an unlocked desktop, using `qa_phase1.py` per `## 7) Verification`; BLOCKED again if the session is still locked.
 
 ### Phase 4: Documentation and stale comments
@@ -424,6 +433,14 @@ Phase 1 review fixes (code `0a73501`):
 - **Off Windows, a missing `shown` event logs a WARNING and readiness still completes** (`_PortableWindow` needs no form handle). On GTK, pywebview 6.2.1 fires `shown` for hidden windows (`gtk.py` around 205, 369-373, 487-494), so this guards other backends only.
 - **A timed-out Win32 reload logs a WARNING and does not retry**; `_signed_gen` advances and the posted `load_url` runs when the UI thread recovers. `_PortableWindow.reload` keeps the synchronous call.
 - **A timed-out app show** from HIDDEN or APP changes neither state nor placement; from PEEK it falls back to HIDDEN (rule above); inside end peek → APP the state still advances, since the posted re-place normally runs late.
+
+Phase 2 (code `315bb5c`, `c889589`, `41836bf`):
+- **`create_peek` normalises the mode with strip/lower**, and since `41836bf` `load_config` normalises `peek_mode` too (unknown → `hold`), so disk, settings UI, restart snapshot and runtime agree. `create_peek`'s "invalid mode" warning therefore no longer fires for a hand-edited value; `load_config` logs nothing because it is uncached and called often.
+- **The Peek mode select reuses the `port-mode` CSS class** (no `style.css` change; `style.css` was outside Phase 2's scope).
+- **The listener start log line names the mode**: `Peek hotkey listener started (hotkey: ..., mode: ...)`; the smoke grep still matches.
+- **Toggle is handled in the worker only**: the hook still posts `release`, and the worker ignores it in Toggle (D-21's single owner).
+- **Extra comment-fix commit `c889589`** (startup-snapshot comment counts) because amending is banned; two stale template comments updated.
+- **Settings copy differs from the plan's verbatim text**: option labels "Hold (show while held)" and "Toggle (press to show, press again to hide)"; the hotkey row reads "Shows PowerAtlas from anywhere (see Peek mode); double-tap to open it as a window. Takes effect on the next launch." The plan's "Hold to peek…" was wrong in Toggle mode (review finding).
 
 ## Follow-up Work (Deferred)
 
@@ -537,6 +554,21 @@ Implementation health: Yellow (all findings fixed in `0a73501`; live QA BLOCKED 
 | 16 | Low | Bare `WM_CLOSE` quits PowerAtlas, undocumented. | Fixed — README sentence; D-22 behaviour unchanged. |
 
 Reviewers also asked to verify the Linux `shown` event for hidden windows: confirmed from pywebview's `gtk.py` and hardened (section 9). Mutation testing by the Senior engineer killed all five targeted mutations.
+
+### 2026-10-06 -- Implementation Review (after Phase 2, persona: Senior engineer)
+
+Implementation health: Green (all findings fixed in `41836bf` or the plan; live QA BLOCKED and deferred).
+5 findings (0 High, 1 Medium, 4 Low). One review cycle per the user's override; fixes not re-reviewed.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Section 9 had no Phase 2 divergences. | Fixed — Phase 2 block written to section 9 by the orchestrator. |
+| 2 | Low | A hand-edited case variant or invalid `peek_mode` ran one mode while the UI showed another. | Fixed — `load_config` normalises `peek_mode`; 14 new cases. |
+| 3 | Low | Copy named "Hold"/"Toggle" but no option carried those names. | Fixed — option labels renamed to start with Hold and Toggle. |
+| 4 | Low | The plan-dictated hotkey description said "Hold to peek", wrong in Toggle. | Fixed — mode-neutral wording; recorded as a divergence. |
+| 5 | Low | Nothing tested `refreshSettings` setting `#peekMode`. | Fixed — node check drives the line in a sandbox. |
+
+Mutation testing by the reviewer killed all six targeted mutations (Toggle press return target, release no-op, Hold press no-op, save refusal, restart label, badge owner).
 
 ## Harness Improvement Opportunities
 
