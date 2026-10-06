@@ -1932,19 +1932,35 @@ _LOCAL_COOKIE_SUBJECT = "loopback"
 LOCAL_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 3600
 
 
+# Bumped by every `set_local_secret`, so the PowerAtlas window can tell that
+# the key its cookie was signed under has changed (a rotation) and sign in
+# again, without reloading the page on every show. Process-local and never
+# persisted: a restart re-signs the window at creation anyway.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 (D-13)
+_local_secret_generation = 0
+
+
+def local_secret_generation() -> int:
+    """How many times `set_local_secret` has run in this process.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 (D-13)
+    """
+    return _local_secret_generation
+
+
 def set_local_secret(secret: str) -> None:
     """Load the local secret, mirroring `set_remote_secret`.
 
     ``""`` restores the fail-closed state. A value shorter than
     ``REMOTE_SECRET_MIN_LEN`` is refused rather than trusted.
     """
-    global _LOCAL_SECRET
+    global _LOCAL_SECRET, _local_secret_generation
     value = (secret or "").strip()
     if value and len(value) < REMOTE_SECRET_MIN_LEN:
         log.error("local secret is shorter than %d characters; no loopback "
                   "cookie will verify", REMOTE_SECRET_MIN_LEN)
         value = ""
     _LOCAL_SECRET = value
+    _local_secret_generation += 1
 
 
 def make_local_cookie(issued_at: int | None = None) -> str:

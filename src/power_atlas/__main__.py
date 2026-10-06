@@ -860,15 +860,48 @@ def _run_foreground() -> None:
 
     # Warmup pinned workspaces in background (non-blocking)
     from .peek import create_peek
-    from .tray import run_tray, restart_requested, set_peek_stop_callback, trigger_restart
+    from .tray import run_tray, restart_requested, set_window_controller, trigger_restart
     from .data import warmup_all
     from .web import set_restart_callback
     set_restart_callback(trigger_restart)
 
     peek = create_peek(server_url, config.peek_hotkey)
 
+    # The shutdown sequence, once. Besides the normal path below, the
+    # PowerAtlas window's `stop()` watchdog runs it when the UI loop will not
+    # end, so tray Quit and Restart still end the process (and Restart still
+    # relaunches). It is guarded so the two paths cannot both run it.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+    tail_lock = threading.Lock()
+    tail_ran = []
+
+    def shutdown_tail() -> None:
+        with tail_lock:
+            if tail_ran:
+                return
+            tail_ran.append(True)
+        server.should_exit = True
+        server_thread.join(timeout=5)
+
+        should_restart = restart_requested()
+
+        _remove_pid()
+        _release_mutex()
+        # Ahead of the logging teardown below, or the last window's count is
+        # written to a closed handler and lost — the one case the
+        # sweep-on-next-record cannot reach, since `log_level="warning"` leaves
+        # this logger silent once a flood stops.
+        repeat_filter.flush()
+        logging.shutdown()
+
+        if should_restart:
+            _relaunch_detached()
+
+        _exit_immediately(0)
+
     if peek:
-        set_peek_stop_callback(peek.stop)
+        set_window_controller(peek)
+        peek.shutdown_tail = shutdown_tail
 
         # pywebview requires the main thread on all platforms
         # (Windows EdgeChromium + Linux GTK both enforce this).
@@ -886,24 +919,7 @@ def _run_foreground() -> None:
     if peek:
         peek.stop()  # no-op if already stopped by tray callback
 
-    server.should_exit = True
-    server_thread.join(timeout=5)
-
-    should_restart = restart_requested()
-
-    _remove_pid()
-    _release_mutex()
-    # Ahead of the logging teardown below, or the last window's count is
-    # written to a closed handler and lost — the one case the
-    # sweep-on-next-record cannot reach, since `log_level="warning"` leaves
-    # this logger silent once a flood stops.
-    repeat_filter.flush()
-    logging.shutdown()
-
-    if should_restart:
-        _relaunch_detached()
-
-    _exit_immediately(0)
+    shutdown_tail()
 
 
 def main() -> None:

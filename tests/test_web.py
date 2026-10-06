@@ -29114,24 +29114,33 @@ class TestLoopbackDoors:
         monkeypatch.setattr(tray_mod.pystray, "Menu", lambda *items: dict(items))
         monkeypatch.setattr(tray_mod.pystray, "Icon", _Icon)
         monkeypatch.setattr(tray_mod, "_icon_instance", None)
+        # No window registered: "Open PowerAtlas" falls back to the browser.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+        monkeypatch.setattr(tray_mod, "_window_controller", None)
         tray_mod.run_tray(self._SERVER, Config())
         return tray_mod, tray_mod._icon_instance
 
-    def test_tray_open(self, local_enabled, monkeypatch):
+    # The tray's "Open" became "Open PowerAtlas" (app mode, browser without
+    # it) and "Open in browser" (D-5); both browser paths are doors.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+    @pytest.mark.parametrize("label", ["Open PowerAtlas", "Open in browser"])
+    def test_tray_open(self, local_enabled, monkeypatch, label):
         tray_mod, icon = self._tray_menu(monkeypatch)
         opened = []
         monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
-        icon.menu["Open"](icon, None)
+        icon.menu[label](icon, None)
         assert len(opened) == 1
         _signs_in_in_one_navigation(opened[0], self._SERVER)
 
-    def test_tray_open_goes_through_login_url(self, local_enabled, monkeypatch):
+    @pytest.mark.parametrize("label", ["Open PowerAtlas", "Open in browser"])
+    def test_tray_open_goes_through_login_url(self, local_enabled, monkeypatch,
+                                              label):
         tray_mod, icon = self._tray_menu(monkeypatch)
         opened = []
         monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
         monkeypatch.setattr(local_enabled, "login_url",
                             lambda server_url: "sentinel:" + server_url)
-        icon.menu["Open"](icon, None)
+        icon.menu[label](icon, None)
         assert opened == ["sentinel:" + self._SERVER]
 
     def test_tray_copy_login_link_uses_the_clipboard(self, local_enabled,
@@ -29244,19 +29253,20 @@ class TestLoopbackDoors:
 
     def test_the_login_link_is_never_logged(self, local_enabled, monkeypatch,
                                             caplog):
-        """No door logs its link: "Copy login link" (every branch), tray Open,
-        the peek double-tap and the peek show. At DEBUG for every logger,
-        `power_atlas.*` included, no record carries the login path, the
-        ``code=`` field or the code itself.
+        """No door logs its link: "Copy login link" (every branch), tray Open
+        PowerAtlas (browser fallback) and Open in browser, the peek double-tap
+        where there is no app mode, and the window's sign-in reload after a
+        rotation. At DEBUG for every logger, `power_atlas.*` included, no
+        record carries the login path, the ``code=`` field or the code itself.
         260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (all
-        doors but Copy login link: Phase 5 review)
+        doors but Copy login link: Phase 5 review); openers since
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1,
+        no longer the per-show navigation, which is gone (D-13)
         """
-        from unittest.mock import MagicMock
         tray_mod, icon = self._tray_menu(monkeypatch)
-        peek_mod, pw = self._peek()
+        peek_mod, pw, window = self._peek(monkeypatch, app_mode=False)
         urls = []
         monkeypatch.setattr(tray_mod, "_open_in_browser", urls.append)
-        monkeypatch.setattr(peek_mod.webbrowser, "open", urls.append)
         monkeypatch.setattr(tray_mod.time, "sleep", lambda s: None)
         with caplog.at_level(logging.DEBUG), \
                 caplog.at_level(logging.DEBUG, logger="power_atlas"):
@@ -29270,17 +29280,18 @@ class TestLoopbackDoors:
             monkeypatch.setitem(sys.modules, "win32clipboard",
                                 self._failing_clipboard(0, []))
             urls.append(tray_mod.copy_login_link(self._SERVER, icon))
-            # Tray Open.
-            icon.menu["Open"](icon, None)
-            # Peek show, then a double-tap. `sys` is one module, so the
-            # platform patched for the clipboard above is patched here too.
-            monkeypatch.setattr(peek_mod.sys, "platform", "linux")
-            pw._window = MagicMock()
-            pw._show()
-            (shown,), _ = pw._window.load_url.call_args
-            urls.append(shown)
-            pw._show()
-        assert len(urls) == 6
+            # Tray Open PowerAtlas (no window: the browser) and Open in browser.
+            icon.menu["Open PowerAtlas"](icon, None)
+            icon.menu["Open in browser"](icon, None)
+            # The double-tap without app mode opens the browser.
+            pw._handle(("press", "peek", 1000))
+            pw._handle(("press", "peek", 1100))
+            # A rotation, then the next show signs the window in again.
+            local_enabled.set_local_secret("Q" * 43)
+            pw._handle(("press", "peek", 9000))
+            urls.extend(window.reloads)
+        assert len(urls) == 7
+        assert len(window.reloads) == 1
         records = "\n".join(r.getMessage() for r in caplog.records)
         for text in (caplog.text, records):
             assert "/local-auth" not in text
@@ -29288,33 +29299,102 @@ class TestLoopbackDoors:
             for url in urls:
                 assert url.rsplit("=", 1)[1] not in text
 
-    def _peek(self):
+    class _DoorWindow:
+        """A window adapter for the peek doors: records reloads and app
+        shows. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS
+        Phase 1
+        """
+
+        def __init__(self, app_mode):
+            self.has_app_mode = app_mode
+            self.reloads = []
+            self.apps = []
+
+        def foreground(self):
+            return None
+
+        def is_foreground(self):
+            return False
+
+        def get_placement(self):
+            return None
+
+        def show_peek(self):
+            pass
+
+        def hide(self):
+            pass
+
+        def apply_app(self, placement, focused):
+            self.apps.append(focused)
+            return placement
+
+        def focus(self):
+            pass
+
+        def restore_foreground(self, prev, pa_fg):
+            pass
+
+        def put_below(self, prev):
+            pass
+
+        def fire_reset_overlays(self):
+            pass
+
+        def reload(self, url):
+            self.reloads.append(url)
+
+    def _peek(self, monkeypatch, app_mode=True):
+        """A ready PowerAtlas window over a recording adapter, signed in
+        under the current generation."""
         from power_atlas import peek as peek_mod
-        pw = peek_mod.PeekWindow.__new__(peek_mod.PeekWindow)
-        pw._server_url = self._SERVER
-        pw._visible = False
-        pw._webview_ok = True
-        pw._last_trigger_time = 0.0
-        pw._window = None
-        return peek_mod, pw
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        pw = peek_mod.PeekWindow(self._SERVER)
+        window = self._DoorWindow(app_mode)
+        pw._adapter = window
+        pw._ready.set()
+        pw._signed_gen = web_mod.local_secret_generation()
+        return peek_mod, pw, window
+
+    def test_peek_double_tap_opens_app_mode_on_windows(self, local_enabled,
+                                                       monkeypatch):
+        """A double-tap now opens app mode (D-4) and mints no browser login.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+        """
+        from power_atlas import tray as tray_mod
+        peek_mod, pw, window = self._peek(monkeypatch, app_mode=True)
+        opened = []
+        monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
+        pw._handle(("press", "peek", 1000))
+        pw._handle(("press", "peek", 1100))
+        assert window.apps == [True]
+        assert opened == []
 
     def test_peek_double_tap(self, local_enabled, monkeypatch):
-        peek_mod, pw = self._peek()
+        """Without app mode (non-Windows) the double-tap still opens a
+        signed-in browser, through the tray's helper."""
+        from power_atlas import tray as tray_mod
+        peek_mod, pw, window = self._peek(monkeypatch, app_mode=False)
         opened = []
-        monkeypatch.setattr(peek_mod.webbrowser, "open", opened.append)
-        pw._show()
-        pw._show()
+        monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
+        pw._handle(("press", "peek", 1000))
+        pw._handle(("press", "peek", 1100))
         assert len(opened) == 1
         _signs_in_in_one_navigation(opened[0], self._SERVER)
 
     def test_peek_webview_at_creation(self, local_enabled, monkeypatch):
-        peek_mod, pw = self._peek()
+        from power_atlas import peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        pw = peek_mod.PeekWindow(self._SERVER)
         created = []
+        gens = []
 
         class _Webview:
             @staticmethod
             def create_window(title, url, **kwargs):
                 created.append(url)
+                gens.append(local_enabled.local_secret_generation())
                 return object()
 
             @staticmethod
@@ -29325,43 +29405,57 @@ class TestLoopbackDoors:
         pw._run_webview()
         assert len(created) == 1
         _signs_in_in_one_navigation(created[0], self._SERVER)
+        # The generation is read before the mint (D-13).
+        assert pw._signed_gen == gens[0]
+        assert pw._window_created.is_set() and pw._start_returned.is_set()
 
-    def _show_url(self, peek_mod, pw, monkeypatch):
-        from unittest.mock import MagicMock
-        win = MagicMock()
-        pw._window = win
-        pw._visible = False
-        pw._last_trigger_time = 0.0
-        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
-        pw._show()
-        # `load_url`, not `evaluate_js`, since the Phase 5 review (H1).
-        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 review
-        win.evaluate_js.assert_not_called()
-        (url,), _ = win.load_url.call_args
-        return url
-
-    def test_peek_show_mints_a_fresh_code_every_time(self, local_enabled,
+    def test_a_show_without_a_rotation_mints_no_code(self, local_enabled,
                                                      monkeypatch):
-        peek_mod, pw = self._peek()
-        first = self._show_url(peek_mod, pw, monkeypatch)
-        second = self._show_url(peek_mod, pw, monkeypatch)
-        assert first != second
-        _signs_in_in_one_navigation(first, self._SERVER)
-        _signs_in_in_one_navigation(second, self._SERVER)
+        """Replaces "a fresh code on every show": the window keeps its page
+        (SC-1), so a show mints nothing unless the key changed (D-13).
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+        """
+        web_mod = local_enabled
+        peek_mod, pw, window = self._peek(monkeypatch)
+        minted = []
+        real_mint = web_mod.mint_login_code
+        monkeypatch.setattr(web_mod, "mint_login_code",
+                            lambda: minted.append(1) or real_mint())
+        pw._handle(("press", "peek", 1000))
+        pw._handle(("release",))
+        pw._handle(("press", "peek", 5000))
+        pw._handle(("show_app",))
+        assert minted == []
+        assert window.reloads == []
 
     def test_peek_survives_a_local_secret_rotation(self, local_enabled,
                                                    monkeypatch):
         """Phase 4 review finding 9: the webview's cookie dies with the old
-        key, and the next show must sign it in under the new one."""
+        key, and the next show must sign it in under the new one — once.
+        Since 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS
+        Phase 1 the trigger is the generation counter (D-13)."""
         web_mod = local_enabled
-        peek_mod, pw = self._peek()
+        peek_mod, pw, window = self._peek(monkeypatch)
         old_cookie = web_mod.make_local_cookie()
         web_mod.set_local_secret("N" * 43)  # what a rotation applies
         with web_mod._login_codes_lock:
             web_mod._login_codes.clear()  # and a rotation clears the codes
         assert not web_mod._local_cookie_ok(_local_scope(old_cookie))
-        url = self._show_url(peek_mod, pw, monkeypatch)
-        _signs_in_in_one_navigation(url, self._SERVER)
+        pw._handle(("press", "peek", 1000))
+        pw._handle(("release",))
+        pw._handle(("press", "peek", 5000))
+        assert len(window.reloads) == 1
+        _signs_in_in_one_navigation(window.reloads[0], self._SERVER)
+
+    def test_set_local_secret_bumps_the_generation(self, local_enabled):
+        """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS
+        Phase 1 (D-13)."""
+        web_mod = local_enabled
+        before = web_mod.local_secret_generation()
+        web_mod.set_local_secret("G" * 43)
+        assert web_mod.local_secret_generation() == before + 1
+        web_mod.set_local_secret("")  # even the fail-closed state is a change
+        assert web_mod.local_secret_generation() == before + 2
 
 
 class TestLoginLinkIsNotARoute:

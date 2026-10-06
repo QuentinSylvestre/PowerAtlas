@@ -7,7 +7,6 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Callable
 
 import pystray
 from PIL import Image, ImageDraw
@@ -19,13 +18,54 @@ log = logging.getLogger("power_atlas.tray")
 _shutdown_event = threading.Event()
 _restart_requested = False
 _icon_instance = None
-_peek_stop_callback: Callable | None = None
+# The PowerAtlas window (`peek.PeekWindow`), registered by `__main__`. The tray
+# cannot import `peek` at module level: `peek` imports `_login_url` from here.
+# It exposes `show_app()`, `stop()` and `supports_app_mode`.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 (D-15)
+_window_controller = None
 
 
-def set_peek_stop_callback(cb: Callable) -> None:
-    """Register a callback to stop the peek window on quit/restart."""
-    global _peek_stop_callback
-    _peek_stop_callback = cb
+def set_window_controller(ctrl) -> None:
+    """Register the PowerAtlas window: tray Open uses it, Quit/Restart stop it."""
+    global _window_controller
+    _window_controller = ctrl
+
+
+def _stop_window() -> None:
+    ctrl = _window_controller
+    if ctrl is not None:
+        try:
+            ctrl.stop()
+        except Exception:
+            pass
+
+
+def _app_mode_possible() -> bool:
+    """Static facts only: Windows, a window registered, peek importable.
+
+    Decides whether **Open in browser** is listed. pystray on Windows builds
+    the menu once at setup, before the window is ready, so readiness cannot
+    decide visibility; it decides routing at click time instead.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+    """
+    if sys.platform != "win32" or _window_controller is None:
+        return False
+    try:
+        from . import peek
+        return peek.is_available()
+    except Exception:
+        return False
+
+
+def _app_mode_available() -> bool:
+    """Click-time check: the window is registered and app mode is ready."""
+    ctrl = _window_controller
+    if ctrl is None:
+        return False
+    try:
+        return bool(ctrl.supports_app_mode)
+    except Exception:
+        return False
 
 
 def _create_icon() -> Image.Image:
@@ -55,9 +95,11 @@ def _login_url(server_url: str) -> str:
     so importing this module does not pull in the web app.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
 
-    The one door helper: `peek` imports this function for its two doors
-    rather than keeping a copy of it.
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11)
+    The one door helper: `peek` imports this function for the window at
+    creation, its sign-in after a rotation and its browser fallback, rather
+    than keeping a copy of it.
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11);
+    door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
     """
     from .web import login_url
     return login_url(server_url)
@@ -164,17 +206,34 @@ def copy_login_link(server_url: str, icon=None) -> str:
     return url
 
 
-def run_tray(server_url: str, config: Config) -> None:
-    """Run pystray on the calling thread (blocks). Opens browser for UI."""
+def _warmup() -> None:
+    from .data import warmup_pinned
+    from .config import load_config as _load_config
+    threading.Thread(target=warmup_pinned,
+                     args=(_load_config().pinned_folders,), daemon=True).start()
 
-    def on_open(icon, item):
-        import threading as _t
-        from .data import warmup_pinned
-        from .config import load_config as _load_config
-        _t.Thread(target=warmup_pinned, args=(_load_config().pinned_folders,), daemon=True).start()
+
+def _build_menu(server_url: str) -> "pystray.Menu":
+    """The tray menu, built apart from the icon so tests can inspect it.
+
+    **Open PowerAtlas** (default) shows the window in app mode, or opens the
+    browser when app mode is unavailable; **Open in browser** is listed only
+    where app mode is possible.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 (D-5)
+    """
+
+    def on_open_browser(icon, item):
+        _warmup()
         # A fresh login code per open, so the browser lands signed in.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
         _open_in_browser(_login_url(server_url))
+
+    def on_open_app(icon, item):
+        if _app_mode_available():
+            _warmup()
+            _window_controller.show_app()
+        else:
+            on_open_browser(icon, item)
 
     def on_copy_login_link(icon, item):
         copy_login_link(server_url, icon)
@@ -189,34 +248,33 @@ def run_tray(server_url: str, config: Config) -> None:
                 _sp.Popen(["xdg-open", str(log_path)])
 
     def on_quit(icon, item):
-        if _peek_stop_callback:
-            try:
-                _peek_stop_callback()
-            except Exception:
-                pass
+        _stop_window()
         _shutdown_event.set()
         icon.stop()
 
     def on_restart(icon, item):
         global _restart_requested
         _restart_requested = True
-        if _peek_stop_callback:
-            try:
-                _peek_stop_callback()
-            except Exception:
-                pass
+        _stop_window()
         _shutdown_event.set()
         icon.stop()
 
-    menu = pystray.Menu(
-        pystray.MenuItem("Open", on_open, default=True),
+    return pystray.Menu(
+        pystray.MenuItem("Open PowerAtlas", on_open_app, default=True),
+        pystray.MenuItem("Open in browser", on_open_browser,
+                         visible=lambda item: _app_mode_possible()),
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
         pystray.MenuItem("Copy login link", on_copy_login_link),
         pystray.MenuItem("Logs", on_logs),
         pystray.MenuItem("Restart", on_restart),
         pystray.MenuItem("Quit", on_quit),
     )
-    icon = pystray.Icon("power-atlas", _create_icon(), "PowerAtlas", menu)
+
+
+def run_tray(server_url: str, config: Config) -> None:
+    """Run pystray on the calling thread (blocks)."""
+    icon = pystray.Icon("power-atlas", _create_icon(), "PowerAtlas",
+                        _build_menu(server_url))
     global _icon_instance
     _icon_instance = icon
     icon.run()
@@ -239,11 +297,7 @@ def trigger_restart() -> None:
     """
     global _restart_requested
     _restart_requested = True
-    if _peek_stop_callback:
-        try:
-            _peek_stop_callback()
-        except Exception:
-            pass
+    _stop_window()
     _shutdown_event.set()
     if _icon_instance is not None:
         _icon_instance.stop()

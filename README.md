@@ -49,7 +49,22 @@ rather than adding the venv's `Scripts`/`bin` directory itself — that director
 "<checkout>\.venv-PowerAtlas\Scripts\python.exe" -m power_atlas %*
 ```
 
-The app starts as a system tray icon. Click to open the dashboard UI. The kiro-cli agent surface lives
+The app starts as a system tray icon. Click it to open the PowerAtlas window. The tray menu has **Open
+PowerAtlas** (the default, also the icon click), **Open in browser**, **Copy login link**, **Logs**,
+**Restart** and **Quit**.
+
+On Windows the PowerAtlas window is one desktop window with two modes. **App mode** is a normal framed
+window in the taskbar: tray **Open PowerAtlas** and a double-tap of the peek hotkey open it, focused, at
+its last size, position and maximized state for this run (1280x800 centred the first time). Closing it
+with X only hides it; it keeps its page, and PowerAtlas keeps running. **Peek mode** is the overlay: hold
+the peek hotkey to show it full screen and on top, release to hide it, or press Esc. Peek mode does not
+take the keyboard focus, so the app you were typing in keeps it. Holding the hotkey while the window is
+in app mode shows peek mode for as long as you hold it, then returns to app mode. A double-tap while
+the window is in app mode and focused hides it. The window shows the page you left in either mode; it
+is not reset to the dashboard. Where app mode is unavailable (pywebview missing, or not Windows), tray
+**Open PowerAtlas** and the double-tap open the browser instead, and **Open in browser** is not listed.
+
+The kiro-cli agent surface lives
 at `/acp` — a workspace-grouped session browser beside a conversation pane, two panes on a desktop and a
 drill-down below 768 px. Reach it from the **ACP** button beside the dashboard's logo, from the *open in
 ACP* action on any kiro-cli session row, or by opening `/acp` directly.
@@ -58,11 +73,12 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
 
 Every page and API route on `http://127.0.0.1:<port>` needs a sign-in cookie. Only the sign-in route
 itself and `/static` files are exempt. PowerAtlas signs your browser in for you when you open it from
-one of its three doors:
+one of its doors:
 
-- the tray icon's **Open** item;
-- a double-tap of the peek hotkey;
-- the peek overlay, whose built-in browser signs in again each time it is shown.
+- the tray's **Open in browser** item, and **Open PowerAtlas** where it opens the browser;
+- a double-tap of the peek hotkey, where it opens the browser;
+- the PowerAtlas window, whose built-in browser is signed in when it is created and again after the
+  local secret is rotated.
 
 Each door puts a fresh **login code** in the URL it opens. The browser exchanges that code once for a
 cookie, `pa_local`, and lands on the dashboard. The code works exactly once and expires after 120

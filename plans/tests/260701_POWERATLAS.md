@@ -570,13 +570,17 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 Per the automatable-only scope decision, these are documented but NOT part of the run-mode probe set:
 
-- **Native tray menu interaction** (`tray.py` Open / Logs / Restart / Quit) — require a human clicking the
-  native system-tray icon; not drivable by browser/MCP tooling. *Library-testable bits ARE in scope indirectly*:
-  `_create_icon` fallback, `set_peek_stop_callback`, `get_shutdown_event`, `restart_requested` (exercise as units).
-- **Peek native behavior** (`peek.py` global hotkey hold-to-show, fullscreen overlay display, Escape dismiss,
-  Windows win32 keystroke suppression) — user-assisted; requires a real desktop + human keypresses.
-  *Library-testable logic (create_peek validation/fallback, `_parse_hotkey`, `_normalize_key` control-code
-  mapping, `_vk_to_name`) can be unit-verified but is deferred here as low-value vs. the existing 32 peek unit tests.*
+- **Native tray menu interaction** (`tray.py` Open PowerAtlas / Open in browser / Logs / Restart / Quit) — require
+  a human clicking the native system-tray icon; not drivable by browser/MCP tooling. *Library-testable bits ARE in
+  scope indirectly*: `_create_icon` fallback, `_build_menu` (labels, order, static visibility, click-time routing),
+  `set_window_controller`, `get_shutdown_event`, `restart_requested` (exercise as units).
+- **PowerAtlas window native behavior** (`peek.py` global hotkey hold-to-show peek mode, double-tap to app mode,
+  X-to-hide, Escape dismiss, Windows win32 keystroke suppression, focus) — user-assisted; requires a real desktop +
+  human keypresses. *Library-testable logic (create_peek validation/fallback, the hook filter, the window state
+  machine over a fake window adapter, `_parse_hotkey`, `_normalize_key` control-code mapping, `_vk_to_name`) is
+  unit-verified in `tests/test_peek.py` and deferred here as low-value. Window chrome, placement and X are also
+  checkable unattended by an in-process ctypes probe
+  (`plans/261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS.md` § 7).*
 - **All Linux-specific paths** — Linux terminal command builders (kitty/alacritty/gnome-terminal/konsole/xterm),
   `.desktop` autostart, X11/Wayland display probing (`_ensure_display`), `/proc` PID fallback, flock single-instance.
   This is a Windows machine; these are code-inspection-only. A Linux run of this plan would promote them to full briefs.
