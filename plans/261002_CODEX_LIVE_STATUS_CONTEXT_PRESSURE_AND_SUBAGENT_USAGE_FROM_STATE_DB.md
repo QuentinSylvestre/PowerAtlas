@@ -1,7 +1,7 @@
 # Codex Live Status, Context Pressure and Sub-agent Usage from the State Database
 
 > **Date**: 2026-10-02
-> **Status**: In Progress — all six phases coded, reviewed, fixed and live-checked; waiting on the user for the AGENTS.md recipe text, the cleanup ledger and Phase 3 case (e), then /qclose  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete — ready to close  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Follow-ups deferred by the archived Codex provider plan: a lock-owner live dot, a Working/Idle verdict and turn-end notifications for terminal Codex sessions, Codex context pressure, sub-agent token usage, and an optional state-database layer that feeds them. Driving Codex from `/acp` and app-server integration are out of scope.
 > **Estimated effort**: 5-6 days (pre-flight 0.5, database and sub-agent usage 1, context pressure 0.5, lock owner and live dot 1.25, verdict 1, notifier 0.75, documentation, cleanup and QA 0.75)
@@ -219,7 +219,7 @@ All measurements print counts, shapes and timings only: no ids, no paths, no mes
 - [x] `session_writer_state`, `lock_owner.py`, the presence snapshot field, the web, tile and diagnostics changes exist as above; `presence.py` gains no state and no import; `acp.py` and `data_codex.py` import nothing new; `session_writer_locked`'s existing tests pass unchanged. Code commits `7e55dc9`, `a0417ef`, `7272dd1`, `1b49547`, review fixes `75a0e00`.
 - [x] All Phase 3 tests pass and the full suites, node tests, `_check_test_names.py` and `ruff` counts are green. On `main` at `75a0e00`: pytest 3974 passed and 3 skipped, `node tests/acp_page.test.mjs` 947 of 947, `_check_test_names.py` clean. `ruff` counts for the seven edited files equal the commit before the fixes (after `317cf40` removed one lambda assignment this phase had added).
 - [x] Mutation checks fail the tests: a failed probe or an open or lock `OSError` treated as free; an absent `.coordination.lock` treated as free; the 60 s age bound removed; `other` treated as live; unknown or `PENDING` not falling back; an empty holder list classified `other`; a mixed holder set classified `terminal`; the own pid not dropped; the create time not compared; gone holders giving `other` instead of unknown; the 30 s or 5 minute re-resolve removed; first sightings not served first; the generation check removed; the daemon rule removed (a daemon holder read as `other`); the helper-token-alone rule restored; the parent test inverted; the abandoned-worker count cap removed; the wedge rate rule changed to a lifetime cap; the per-path re-resolve rate limit removed; `session_writer_state` made to read `_busy_cache`; `RmEndSession` skipped on an error path; the resolver run on the caller's thread; the queue bound removed; the platform gate removed (the owner rule on a patched POSIX platform); the candidate filters of D21 removed; the enumerator's probe cap or snapshot gate removed; `_codex_terminal_candidate` replaced by `_cwdless_candidate`; the Restart Manager library loaded by a bare name. Run 2026-10-05: about 120 mutants over the three review rounds and a closing pass; every item of this list has a mutant that a test detects (the last two, the resolver run on the caller's thread and the strict tile candidate replaced by the cwd-less one, were detected on 2026-10-05).
-- [ ] Live QA (a), (b), (c), (e) and (f) behave as stated; (d) is recorded in section 9 with the expected and the observed result. Done on 2026-10-05: (a), (b), (c), (d), (f) (section 9). NOT done: (e), the thread open in the Codex desktop app, which needs the user.
+- [x] Live QA (a), (b), (c), (e) and (f) behave as stated; (d) is recorded in section 9 with the expected and the observed result. Done 2026-10-05 and 2026-10-06: (a), (b), (c), (d), (f) (section 9); (e) checked on 2026-10-06 with the user's desktop-app thread open: the Codex lock directory held 8 held locks, none by a terminal, and the running instance showed no Codex tile and no live dot (owner verdicts of the held locks: `other` for 4, the rest unresolved in the checking process); the user opened the thread and confirmed "done".
 - [x] README's live-status bullet states the lock-owner rule, its fall-back, that a default-mode terminal's dot can linger about a minute after it quits (its shared daemon releases the lock late), and where `codex_diagnostics` shows the lookup state (section 8). Commit `63f5c53`.
 
 ### Phase 4: Working/Idle verdict for terminal Codex sessions [QA]
@@ -270,8 +270,8 @@ All measurements print counts, shapes and timings only: no ids, no paths, no mes
 
 **Exit criteria**:
 - [x] Every row of section 8 owned by Phase 6 is made, and `grep` for "not counted", "kiro-cli only", "1.6 %", "1.6%" and "never show a dot" in README, `docs/KNOWLEDGE.md`, `plans/ROADMAP.md`, `plans/tests/260701_POWERATLAS.md` and the `index.html` usage text finds only statements that are still true. Done 2026-10-06 in `01ec95b`: `docs/KNOWLEDGE.md`, `plans/ROADMAP.md`, `plans/CLOSED_INVESTIGATIONS.md` and the oracle lines of `plans/tests/260701_POWERATLAS.md`; the README rows were made in Phases 1 to 5. The grep finds only true statements: KNOWLEDGE.md quotes the withdrawn 1.6 % claim as withdrawn; `index.html` keeps "Codex sub-agent threads are not counted" as the fallback shown when the state database is unavailable; no hit in the README, ROADMAP or the test plan.
-- [ ] The id and path scan of the added lines ran before any deletion and found nothing; every cleanup ledger item is shown to the user and either removed or recorded as kept with the user's decision; the verification check passes.
-- [ ] `AGENTS.md`'s Codex QA recipe no longer says the live dot can be checked with `codex exec resume` (or says what Phase 3 QA (d) observed), on the user's approval.
+- [x] The id and path scan of the added lines ran before any deletion and found nothing (section 9); every cleanup ledger item was shown to the user and removed on the user's approval of 2026-10-06 (the two reviewer scratch folders under `%TEMP%` and the session scratchpad), or was not present (the state-database copy); no rollout with the `codexprobe_work` marker remains; the verification check passes.
+- [x] `AGENTS.md`'s Codex QA recipe no longer says the live dot can be checked with `codex exec resume`; it says what Phase 3 QA (d) observed. The exact text was shown to the user and approved on 2026-10-06 ("ok"); commit `6e226df`.
 - [x] The final suites, node tests, name check and `ruff` are green and the last browser pass is recorded in section 9. On 2026-10-06 with the other project's uncommitted edits in the tree: pytest 4516 passed and 3 skipped, `node tests/acp_page.test.mjs` 960 of 960, `_check_test_names.py` clean, `ruff` counts for the edited files not above `HEAD` before this plan (web.py 13, tests/test_web.py 82, tests/test_data.py 13); every comment naming a phase carries this plan's slug (`32877ab`).
 - [x] The Terminology entries (lock owner, state database, sub-agent thread, guardian review thread) were saved to `AGENTS.md` on 2026-10-02 at the user's "accept and save"; Phase 6 only checks that the wording still matches the shipped behaviour.
 
@@ -450,6 +450,7 @@ Data drift since exploration: the database has 643 rows (was 644) and 92 unarchi
 - No rollout with the `codexprobe_work` marker remains, and no ledger file or QA folder is left.
 - Not done, waiting on the user: the AGENTS.md recipe sentence (exact text shown to the user first, D22); the cleanup ledger (the session scratchpad, 1.4 GB in 188 files, and two reviewer scratch folders under `%TEMP%`); the final browser pass over the Usage page, the rail and the tiles, which needs a live Codex terminal and waits for the Codex usage reset at 07:47 on 2026-10-06 (a resume is scheduled for 07:49).
 **Phase 6 final QA (2026-10-06, after the Codex usage reset; a scheduled resume ran it).** A throwaway Codex terminal ran a 100 s command with the real dashboard open in a headless browser: the Overview tile dot read Working at 51 s and Idle at 127 s, and the rail model of the opened group read Working, then Idle at 163 s (the next 60 s refresh). The Overview Usage block drew its Context pressure block labelled "kiro-cli and Codex" with the Codex row marked an estimate, a Codex tokens block and the sub-agent line (or its fallback note), with no page error. Every throwaway session was deleted with `codex delete --force` after its working-folder marker was checked; no rollout with the marker, no ledger and no QA folder is left. The probe call needs `--skip-git-repo-check` (a throwaway `codex exec` refuses an untrusted folder without it). Not done: Phase 3 case (e), a thread open in the Codex desktop app (the user's own thread).
+**Phase 6 closing (2026-10-06).** The user approved the AGENTS.md recipe text and the cleanup ledger, confirmed the desktop-app thread check, and asked for the `docs/KNOWLEDGE.md` user-name fragment to be scrubbed (`6e226df`; the fragment is still in the git history of that file, a public repository: only a history rewrite, which this plan does not do, would remove it). The two reviewer scratch folders and the session scratchpad were deleted.
 
 ## Follow-up Work (Deferred)
 
@@ -729,22 +730,19 @@ Reviewer gaps: no real two-thread race, no Windows sharing violation, production
 
 ## Handoff
 
-> Handoff written: 2026-10-06 (all phases done; waiting on the user)
+> Handoff written: 2026-10-06 (the plan is complete and ready for `/qclose`)
 
 ### Previously
 
-- All six phases are coded, reviewed, fixed and live-checked on `main`: Phases 4 and 5 live QA and the final browser pass passed on 2026-10-06; the documentation is committed (`01ec95b`); every phase comment carries the slug (`32877ab`). Full suites: pytest 4516 passed, node 960 of 960, name check clean, `ruff` counts not above `HEAD`. The commits after `15b1117` are local until the user asks for a push (a push is allowed for this task's work; the other project's uncommitted edits stay unstaged).
-- The other project (peek and app window, plan `261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS`) edits `peek.py`, `tests/test_peek.py` and others at the same time: commit by pathspec or by staged hunks of your own diff.
+- All six phases are done, reviewed and live-checked; every exit criterion is ticked. The user approved the AGENTS.md recipe text, the cleanup and the desktop-app check on 2026-10-06. Latest commits: `6e226df` (AGENTS.md and KNOWLEDGE.md) and the plan commit after it.
 
 ### Parked
 
-- Waiting on the user: (1) the exact text of the AGENTS.md `codex exec resume` recipe sentence (shown in the last report; the plan's exit criterion stays open until it is approved and written); (2) the cleanup ledger: the session scratchpad (1.4 GB in 188 files, scripts only, outside the repository) and two reviewer scratch folders under `%TEMP%` (`rv`, `pa_mut`); (3) Phase 3 (e), a thread open in the Codex desktop app shows no dot (the user's own thread); (4) `docs/KNOWLEDGE.md` line 146 holds a user-name fragment (another plan's text) the user may want scrubbed.
+- Nothing. The accepted Lows are Follow-up Work 34 and 35; the deferred features are on `plans/ROADMAP.md`.
 
 ### Current
 
-Next: act on the user's answers to (1) and (2), tick the two remaining Phase 6 criteria (the ledger and the AGENTS.md recipe) and Phase 3 (e) when the user has done it, then `/qclose` (archive, memory consolidation). Ask the user at the start of the next piece of work on PowerAtlas whether restarts are allowed.
-
-Cautions: never print ids, paths or message text from the real Codex, Claude or Kiro stores. Commit by pathspec or staged own hunks. Write edit scripts with the Write tool, never a shell heredoc.
+Next: `/qclose` (archive the plan, memory consolidation). Ask the user at the start of the next piece of work on PowerAtlas whether restarts are allowed.
 
 ## Harness Improvement Opportunities
 
