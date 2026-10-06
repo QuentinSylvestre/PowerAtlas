@@ -2613,6 +2613,59 @@ class TestHiddenPageVisibility:
         assert "LookupError" in warnings[0].getMessage()
 
 
+_CONTROLLER_FIELD_PROBE = r'''
+import os, sys
+try:
+    try:
+        import clr
+    except Exception:
+        os.environ["PYTHONNET_RUNTIME"] = "coreclr"
+        import clr
+    from webview.util import interop_dll_path
+    clr.AddReference("System.Windows.Forms")
+    clr.AddReference(interop_dll_path("Microsoft.Web.WebView2.Core.dll"))
+    clr.AddReference(interop_dll_path("Microsoft.Web.WebView2.WinForms.dll"))
+    from Microsoft.Web.WebView2.WinForms import WebView2
+    from System.Reflection import BindingFlags
+    t = clr.GetClrType(WebView2)
+except Exception as e:
+    print("cannot load: " + type(e).__name__)
+    sys.exit(4)
+flags = BindingFlags.Instance | BindingFlags.NonPublic
+field = None
+while t is not None and field is None:
+    field = t.GetField("_coreWebView2Controller", flags)
+    t = t.BaseType
+if field is None:
+    print("no _coreWebView2Controller field")
+    sys.exit(3)
+print(field.FieldType.FullName)
+sys.exit(0)
+'''
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="WebView2 is Windows only")
+def test_webview2_controller_field_exists():
+    """`_Win32Window._set_page_visible` reads the WinForms control's private
+    field `_coreWebView2Controller` by reflection. A pywebview upgrade that
+    bundles a WebView2 WinForms assembly without it fails here rather than
+    quietly costing the hidden page its `hidden` state. Run in a child
+    process: loading the real CLR here would make `System.Reflection` real
+    for every test that stands in a fake one. Skipped when pythonnet or the
+    bundled assembly cannot load.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final fix 3
+    """
+    import subprocess
+    r = subprocess.run([sys.executable, "-c", _CONTROLLER_FIELD_PROBE],
+                       capture_output=True, text=True, timeout=120)
+    out = (r.stdout + r.stderr).strip()
+    if r.returncode == 4:
+        pytest.skip(out)
+    assert r.returncode == 0, out
+    assert out.splitlines()[-1] == (
+        "Microsoft.Web.WebView2.Core.CoreWebView2Controller"), out
+
+
 class TestReadinessOffWindows:
     """Fix 13: peek off Windows does not depend on `events.shown`."""
 
