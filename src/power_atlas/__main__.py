@@ -581,6 +581,40 @@ def _stop_running() -> bool:
     return True
 
 
+# How long a second caller of the shutdown tail waits for the first to finish
+# (the tail ends the process, so success never returns). Bounded so a stuck
+# first run cannot hold the main thread forever; long enough for the server
+# join (5 s) and the relaunch. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 11
+_TAIL_WAIT = 15.0
+
+
+def _run_once_or_wait(fn, wait: float = _TAIL_WAIT):
+    """Return a callable that runs `fn` once; later callers wait for that run.
+
+    A later caller does not return at once: the main thread's tail, called
+    while the `stop()` watchdog is mid-tail, would otherwise fall off the end
+    of `_run_foreground` and let interpreter exit kill the watchdog before it
+    removed the PID file or relaunched. It waits up to `wait` seconds.
+    """
+    lock = threading.Lock()
+    started = []
+    done = threading.Event()
+
+    def run() -> None:
+        with lock:
+            first = not started
+            started.append(True)
+        if not first:
+            done.wait(wait)
+            return
+        try:
+            fn()
+        finally:
+            done.set()
+
+    return run
+
+
 def _exit_immediately(code: int) -> None:
     """Exit without unwinding, flushing stdio first.
 
@@ -870,16 +904,10 @@ def _run_foreground() -> None:
     # The shutdown sequence, once. Besides the normal path below, the
     # PowerAtlas window's `stop()` watchdog runs it when the UI loop will not
     # end, so tray Quit and Restart still end the process (and Restart still
-    # relaunches). It is guarded so the two paths cannot both run it.
+    # relaunches). It is guarded so the two paths cannot both run it, and the
+    # second caller waits for the first (`_run_once_or_wait`).
     # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
-    tail_lock = threading.Lock()
-    tail_ran = []
-
-    def shutdown_tail() -> None:
-        with tail_lock:
-            if tail_ran:
-                return
-            tail_ran.append(True)
+    def _shutdown_tail_body() -> None:
         server.should_exit = True
         server_thread.join(timeout=5)
 
@@ -898,6 +926,8 @@ def _run_foreground() -> None:
             _relaunch_detached()
 
         _exit_immediately(0)
+
+    shutdown_tail = _run_once_or_wait(_shutdown_tail_body)
 
     if peek:
         set_window_controller(peek)

@@ -453,6 +453,44 @@ class TestWin32Filter:
         assert not self._feed(pw, peek_mod._WM_KEYUP, self._VK_ESC)
         assert _drain(pw) == []
 
+    def test_esc_key_up_follows_its_suppressed_key_down(self, monkeypatch):
+        """The worker ends the peek between Esc down and up: the up must
+        still be suppressed, or the user's app gets a lone key-up
+        (review fix 9)."""
+        import power_atlas.peek as peek_mod
+        pw = self._peek(monkeypatch, held=())
+        pw._peek_showing = True
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, self._VK_ESC)
+        pw._peek_showing = False  # the worker handled `esc`
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, self._VK_ESC), \
+            "auto-repeat of a suppressed Esc stays suppressed"
+        assert self._feed(pw, peek_mod._WM_KEYUP, self._VK_ESC)
+        assert _drain(pw) == [("esc",)], "auto-repeat is not another event"
+        # The pair is over: the next Esc reaches the app again.
+        assert not self._feed(pw, peek_mod._WM_KEYDOWN, self._VK_ESC)
+        assert not self._feed(pw, peek_mod._WM_KEYUP, self._VK_ESC)
+
+    def test_esc_key_up_follows_its_passed_key_down(self, monkeypatch):
+        """Esc went down before the peek showed: the app got the down, so it
+        gets the up too, even though a peek now shows."""
+        import power_atlas.peek as peek_mod
+        pw = self._peek(monkeypatch, held=())
+        pw._peek_showing = False
+        assert not self._feed(pw, peek_mod._WM_KEYDOWN, self._VK_ESC)
+        pw._peek_showing = True
+        assert not self._feed(pw, peek_mod._WM_KEYUP, self._VK_ESC)
+        assert _drain(pw) == []
+
+    def test_a_cleared_listener_does_not_raise_from_the_filter(self,
+                                                               monkeypatch):
+        """`stop()` clears `_listener` while the hook may still fire
+        (review fix 12)."""
+        import power_atlas.peek as peek_mod
+        pw = self._peek(monkeypatch)
+        pw._listener = None
+        pw._win32_event_filter(peek_mod._WM_KEYDOWN, _KbData(self._VK_Z, 5))
+        assert _drain(pw) == [("press", "peek", 5)]
+
     def test_on_windows_on_press_posts_nothing(self, monkeypatch):
         """The filter owns the chord and Esc on Windows; `_on_press` only
         records the keys it let through."""
@@ -481,8 +519,11 @@ class TestParseHotkeyEdgeCases:
 class _Placement:
     """An opaque saved placement; identity is what the worker must carry."""
 
-    def __init__(self, label):
+    def __init__(self, label, activates=False):
         self.label = label
+        # A maximized placement: `SW_SHOWMAXIMIZED` has no non-activating
+        # form, so re-applying it takes the foreground even when not focused.
+        self.activates = activates
 
     def __repr__(self):
         return f"<placement {self.label}>"
@@ -525,7 +566,7 @@ class _FakeAdapter:
     def apply_app(self, placement, focused):
         self.calls.append(("apply_app", placement, focused))
         self.live = placement or self.default
-        if focused:
+        if focused or self.live.activates:
             self.fg = self.HWND
         return self.live
 
@@ -534,7 +575,11 @@ class _FakeAdapter:
         self.fg = self.HWND
 
     def restore_foreground(self, prev, pa_fg):
+        """Models the primitive: hands the foreground back only when told
+        PowerAtlas holds it and `prev` is another window."""
         self.calls.append(("restore_foreground", prev, pa_fg))
+        if pa_fg and prev and prev != self.HWND:
+            self.fg = prev
 
     def put_below(self, prev):
         self.calls.append(("put_below", prev))
@@ -817,9 +862,29 @@ class TestWindowStateMachine:
         pw._handle(("release",))
         calls = a.window_calls()
         assert calls[0][0] == "apply_app" and calls[0][2] is False
-        assert ("restore_foreground", OTHER_APP, False) in calls
+        # The outcome, not a call: the user's app is still foreground.
+        assert a.fg == OTHER_APP
         assert ("put_below", OTHER_APP) in calls
         assert ("focus",) not in calls
+
+    def test_peek_over_a_background_maximized_app_restores_the_foreground(
+            self, monkeypatch):
+        """A maximized placement has no non-activating show, so re-applying
+        it takes the foreground; the user's app must get it back, with
+        PowerAtlas put back below it (review fix 2)."""
+        pw, a = self._peek(monkeypatch)
+        self._in_app(pw, a, foreground=False)
+        a.live = _Placement("maximized", activates=True)
+        self._press(pw, 1000)
+        assert pw._app_was_foreground is False
+        assert a.fg == OTHER_APP  # the peek did not take it
+        a.calls.clear()
+        pw._handle(("release",))
+        assert a.fg == OTHER_APP
+        names = a.names()
+        assert ("restore_foreground", OTHER_APP, True) in a.calls
+        assert names.index("restore_foreground") < names.index("put_below")
+        assert ("focus",) not in a.calls
 
     def test_peek_over_a_foreground_app_gives_it_the_foreground_back(
             self, monkeypatch):
@@ -952,6 +1017,159 @@ class TestWindowStateMachine:
         assert not any(c[0] == "apply_app" for c in a.calls)
 
 
+class TestFailedTransitions:
+    """A window call that raises or times out never strands the state
+    machine: an exit from PEEK always clears `_peek_showing` (otherwise the
+    filter swallows every Esc), and a timed-out call never replaces the
+    saved placement or advances the state.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fixes 4 and 6
+    """
+
+    def _peek(self, monkeypatch, fg=OTHER_APP):
+        from power_atlas import web as web_mod
+        pw = _new_peek(monkeypatch)
+        pw._adapter = _FakeAdapter(fg=fg)
+        pw._ready.set()
+        pw._signed_gen = web_mod.local_secret_generation()
+        return pw, pw._adapter
+
+    @staticmethod
+    def _raise(exc):
+        def f(*args, **kwargs):
+            raise exc
+        return f
+
+    def test_a_raising_re_place_on_end_peek_falls_back_to_hidden(
+            self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        pw._handle(("show_app",))
+        pw._handle(("press", "peek", 1000))
+        assert (pw._state, pw._return_to) == (peek_mod.PEEK, "app")
+        a.calls.clear()
+        monkeypatch.setattr(a, "apply_app",
+                            self._raise(OSError(1400, "Invalid window handle")))
+        with pytest.raises(OSError):
+            pw._handle(("release",))
+        assert pw._peek_showing is False
+        assert (pw._state, pw._return_to) == (peek_mod.HIDDEN, None)
+        assert ("hide",) in a.calls, "best-effort hide"
+
+    def test_a_raising_reset_on_end_peek_still_hides(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        pw._handle(("press", "peek", 1000))
+        a.calls.clear()
+        monkeypatch.setattr(a, "fire_reset_overlays",
+                            self._raise(RuntimeError("no form")))
+        with pytest.raises(RuntimeError):
+            pw._handle(("esc",))
+        assert pw._peek_showing is False
+        assert pw._state == peek_mod.HIDDEN
+        assert ("hide",) in a.calls
+
+    def test_a_raising_hide_on_double_tap_from_a_peek_clears_the_peek(
+            self, monkeypatch):
+        """Double-tap from a foreground APP: the second press arrives in
+        PEEK("app") and goes to HIDDEN through `_to_hidden`."""
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        pw._handle(("show_app",))
+        pw._handle(("press", "peek", 1000))
+        monkeypatch.setattr(a, "hide", self._raise(OSError(5, "denied")))
+        with pytest.raises(OSError):
+            pw._handle(("press", "peek", 1100))
+        assert pw._peek_showing is False
+        assert pw._state == peek_mod.HIDDEN
+
+    def test_a_raising_hide_from_app_keeps_app(self, monkeypatch):
+        """Not an exit from PEEK: the window is still in app mode."""
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        pw._handle(("show_app",))
+        monkeypatch.setattr(a, "hide", self._raise(OSError(5, "denied")))
+        with pytest.raises(OSError):
+            pw._handle(("user_close",))
+        assert pw._state == peek_mod.APP
+        assert pw._peek_showing is False
+
+    def test_after_a_failed_end_peek_esc_reaches_the_users_app(
+            self, monkeypatch):
+        """The user-visible symptom: Esc swallowed system-wide."""
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        pw._listener = _Listener()
+        pw._handle(("press", "peek", 1000))
+        monkeypatch.setattr(a, "hide", self._raise(OSError(5, "denied")))
+        with pytest.raises(OSError):
+            pw._handle(("esc",))
+        pw._win32_event_filter(peek_mod._WM_KEYDOWN, _KbData(0x1B))
+        assert pw._listener.suppressed == 0
+
+    def test_a_timed_out_placement_read_keeps_the_saved_one(self,
+                                                            monkeypatch):
+        pw, a = self._peek(monkeypatch)
+        pw._handle(("show_app",))
+        a.live = kept = _Placement("user-resized")
+        pw._handle(("user_close",))  # save: reads `kept`
+        assert pw._app_placement is kept
+        pw._handle(("show_app",))
+        monkeypatch.setattr(a, "get_placement", lambda: None)  # timed out
+        pw._handle(("press", "peek", 9000))
+        assert pw._app_placement is kept
+
+    def test_a_timed_out_re_read_in_app_keeps_the_saved_one(self,
+                                                            monkeypatch):
+        pw, a = self._peek(monkeypatch)
+        pw._handle(("show_app",))
+        kept = pw._app_placement
+        monkeypatch.setattr(a, "get_placement", lambda: None)
+        a.calls.clear()
+        pw._handle(("show_app",))
+        assert ("apply_app", kept, True) in a.calls
+        assert pw._app_placement is kept
+
+    def test_a_timed_out_app_show_from_hidden_changes_nothing(self,
+                                                              monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        before = pw._app_placement = _Placement("saved-earlier")
+
+        def timed_out(placement, focused):
+            a.calls.append(("apply_app", placement, focused))
+            return None
+
+        monkeypatch.setattr(a, "apply_app", timed_out)
+        pw._handle(("show_app",))
+        assert pw._state == peek_mod.HIDDEN
+        assert pw._app_placement is before
+        assert ("focus",) not in a.calls
+
+    def test_a_timed_out_app_show_in_app_stays_app(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        pw._handle(("show_app",))
+        kept = pw._app_placement
+        monkeypatch.setattr(a, "get_placement", lambda: None)
+        monkeypatch.setattr(a, "apply_app", lambda p, focused: None)
+        a.calls.clear()
+        pw._handle(("show_app",))
+        assert pw._state == peek_mod.APP
+        assert pw._app_placement is kept
+        assert ("focus",) not in a.calls
+
+    def test_a_timed_out_app_show_from_a_peek_clears_the_peek(self,
+                                                              monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = self._peek(monkeypatch)
+        pw._handle(("press", "peek", 1000))
+        monkeypatch.setattr(a, "apply_app", lambda p, focused: None)
+        pw._handle(("show_app",))
+        assert pw._peek_showing is False
+        assert pw._state == peek_mod.HIDDEN
+        assert pw._app_placement is None
+
+
 class TestWindowWorker:
     """The worker thread: readiness, dropped events, error containment.
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
@@ -965,19 +1183,64 @@ class TestWindowWorker:
         assert not t.is_alive(), "the worker did not stop"
 
     def test_events_before_ready_are_dropped(self, monkeypatch):
+        # `_establish_ready` returns the adapter; the worker sets `_ready`
+        # after the drain (review fix 8), so the fake no longer sets it.
         pw = _new_peek(monkeypatch)
         a = _FakeAdapter()
-
-        def ready():
-            pw._adapter = a
-            pw._ready.set()
-
-        monkeypatch.setattr(pw, "_establish_ready", ready)
+        monkeypatch.setattr(pw, "_establish_ready", lambda: a)
         pw._events.put(("press", "peek", 1000))  # before readiness
         pw._events.put(("show_app",))
         pw._events.put(("stop",))
         self._run(pw)
         assert a.calls == []
+
+    def test_ready_is_set_and_logged_after_a_successful_gate(self,
+                                                             monkeypatch,
+                                                             caplog):
+        pw = _new_peek(monkeypatch)
+        a = _FakeAdapter()
+        monkeypatch.setattr(pw, "_establish_ready", lambda: a)
+        import threading
+        with caplog.at_level(logging.INFO, logger="power_atlas"):
+            t = threading.Thread(target=pw._window_worker, daemon=True)
+            t.start()
+            assert pw._ready.wait(5)
+            pw._events.put(("stop",))
+            t.join(5)
+        assert not t.is_alive()
+        assert pw._adapter is a
+        assert "PowerAtlas window ready" in caplog.text
+
+    def test_a_tray_open_right_at_readiness_is_not_dropped(self,
+                                                           monkeypatch):
+        """Tray Open can post only once `_ready` is set. A click landing
+        right at readiness must be handled, never drained with the stale
+        pre-ready events (review fix 8)."""
+        import threading
+        from power_atlas import web as web_mod
+        pw = _new_peek(monkeypatch)
+        pw._signed_gen = web_mod.local_secret_generation()
+        a = _FakeAdapter()
+        monkeypatch.setattr(pw, "_establish_ready", lambda: a)
+        handled = threading.Event()
+
+        class _ClickOnReady(threading.Event):
+            def set(inner):
+                super().set()
+                # The tray click: posted the moment `_ready` is visible.
+                pw._events.put(("show_app",))
+                pw._events.put(("stop",))
+
+        pw._ready = _ClickOnReady()
+        orig_focus = a.focus
+
+        def focus():
+            orig_focus()
+            handled.set()
+
+        a.focus = focus
+        self._run(pw)
+        assert handled.is_set(), "the tray click was dropped"
 
     def test_events_are_dropped_while_never_ready(self, monkeypatch):
         pw = _new_peek(monkeypatch)
@@ -1042,9 +1305,8 @@ class TestWindowWorker:
 
         def ready():
             from power_atlas import web as web_mod
-            pw._adapter = a
             pw._signed_gen = web_mod.local_secret_generation()
-            pw._ready.set()
+            return a
 
         monkeypatch.setattr(pw, "_establish_ready", ready)
         import threading
@@ -1197,6 +1459,25 @@ class TestSignInGeneration:
                             web_mod.local_secret_generation() + 1)
         pw._handle(("release",))
         assert minted == []
+
+    def test_ending_a_peek_back_to_app_checks(self, monkeypatch):
+        """End peek → APP ends in APP, so it signs in (D-13, review fix 1):
+        a rotation during a peek over APP reloads exactly once, before the
+        window is re-placed."""
+        pw, a, web_mod, minted = self._peek(monkeypatch)
+        pw._handle(("show_app",))
+        pw._handle(("press", "peek", 1000))
+        a.calls.clear()
+        monkeypatch.setattr(web_mod, "_local_secret_generation",
+                            web_mod.local_secret_generation() + 1)
+        pw._handle(("release",))
+        reloads = [c for c in a.calls if c[0] == "reload"]
+        assert reloads == [("reload", "http://127.0.0.1:4915/signed/1")]
+        assert a.names().index("reload") < a.names().index("apply_app")
+        # Signed in: the next event does not reload again.
+        pw._handle(("press", "peek", 5000))
+        pw._handle(("release",))
+        assert [c[0] for c in a.calls].count("reload") == 1
 
 
 class _CloseArgs:
@@ -1358,3 +1639,363 @@ class TestPywebviewLoggerClamp:
         pywebview_logger.setLevel(logging.DEBUG)
         importlib.reload(peek_mod)
         assert pywebview_logger.level == logging.INFO
+
+
+# ---- review fixes: Win32 adapter plumbing, stop(), the shutdown tail -------
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fixes
+
+
+def _fake_dotnet(monkeypatch):
+    """Stand-ins for pythonnet's `System` and `System.Windows.Forms`:
+    `Action` is the identity, so `BeginInvoke` receives the callable."""
+    import types
+    system = types.ModuleType("System")
+    system.Action = lambda f: f
+    windows = types.ModuleType("System.Windows")
+    forms = types.ModuleType("System.Windows.Forms")
+    forms.Application = types.SimpleNamespace(Exit=object())
+    windows.Forms = forms
+    system.Windows = windows
+    monkeypatch.setitem(sys.modules, "System", system)
+    monkeypatch.setitem(sys.modules, "System.Windows", windows)
+    monkeypatch.setitem(sys.modules, "System.Windows.Forms", forms)
+    return forms
+
+
+class _FakeEvent:
+    def __init__(self):
+        self.handlers = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+
+class _FakeNative:
+    """A form whose UI thread drops the first `drop` callables (a busy UI
+    thread: they are kept, and run later by hand) and runs the rest."""
+
+    HWND = 0x5151
+
+    def __init__(self, drop=0):
+        import types
+        self.drop = drop
+        self.dropped = []
+        self.IsHandleCreated = True
+        self.FormClosing = _FakeEvent()
+        self.Handle = types.SimpleNamespace(ToInt64=lambda: self.HWND)
+
+    def BeginInvoke(self, action):
+        if len(self.dropped) < self.drop:
+            self.dropped.append(action)
+            return
+        action()
+
+
+class _FakeUser32:
+    def __init__(self):
+        self.calls = []
+
+    def IsWindow(self, h):
+        self.calls.append(("IsWindow", h))
+        return True
+
+    def SetForegroundWindow(self, h):
+        self.calls.append(("SetForegroundWindow", h))
+        return True
+
+
+class TestWin32Plumbing:
+    def _adapter(self, monkeypatch, native):
+        import types
+        import power_atlas.peek as peek_mod
+        _fake_dotnet(monkeypatch)
+        pw = _new_peek(monkeypatch)
+        win = types.SimpleNamespace(native=native)
+        return pw, peek_mod._Win32Window(pw, win)
+
+    def test_ui_gives_up_on_a_ui_thread_that_never_runs(self, monkeypatch,
+                                                        caplog):
+        """Fix 7: the bounded wait. A wait without a timeout would hang
+        here and fail the join."""
+        import threading
+        import time as _t
+        import power_atlas.peek as peek_mod
+        native = _FakeNative(drop=1)
+        pw, a = self._adapter(monkeypatch, native)
+        a._native = native
+        box = {}
+
+        def call():
+            t0 = _t.monotonic()
+            box["v"] = a._ui(lambda: "ran", "the probe operation")
+            box["dt"] = _t.monotonic() - t0
+
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            t = threading.Thread(target=call, daemon=True)
+            t.start()
+            t.join(peek_mod._UI_TIMEOUT + 3)
+        assert not t.is_alive(), "the wait had no timeout"
+        assert box["v"] is None
+        assert peek_mod._UI_TIMEOUT - 0.1 <= box["dt"] < peek_mod._UI_TIMEOUT + 1
+        assert "did not run the probe operation" in caplog.text
+
+    def test_attach_retries_a_busy_ui_thread_and_subscribes_once(
+            self, monkeypatch):
+        """Fix 5: the first two attempts time out; the third answers. The
+        two late callables then run and must not subscribe again."""
+        import time as _t
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_UI_TIMEOUT", 0.05)
+        native = _FakeNative(drop=2)
+        pw, a = self._adapter(monkeypatch, native)
+        assert a.attach(_t.monotonic() + 5) == "ready"
+        assert pw._hwnd == _FakeNative.HWND
+        assert len(native.dropped) == 2
+        for late in native.dropped:
+            late()
+        assert native.FormClosing.handlers == [pw._on_form_closing]
+
+    def test_attach_without_a_form_is_not_a_timeout(self, monkeypatch):
+        import time as _t
+        pw, a = self._adapter(monkeypatch, None)
+        assert a.attach(_t.monotonic() + 5) == "no_form"
+        native = _FakeNative()
+        native.IsHandleCreated = False
+        pw, a = self._adapter(monkeypatch, native)
+        assert a.attach(_t.monotonic() + 5) == "no_form"
+        assert native.FormClosing.handlers == []
+
+    def test_a_readiness_timeout_is_logged_distinctly(self, monkeypatch,
+                                                      caplog):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "win32")
+        monkeypatch.setattr(peek_mod, "_UI_TIMEOUT", 0.05)
+        monkeypatch.setattr(peek_mod, "_READY_TIMEOUT", 0.3)
+        _fake_dotnet(monkeypatch)
+        pw = _new_peek(monkeypatch)
+        win = MagicMock()
+        win.native = _FakeNative(drop=10_000)
+        win.events.shown.wait.return_value = True
+        pw._window = win
+        pw._window_created.set()
+        with caplog.at_level(logging.INFO, logger="power_atlas"):
+            assert pw._establish_ready() is None
+        assert "did not answer the readiness check" in caplog.text
+        assert "no native form" not in caplog.text
+        assert len(win.native.dropped) >= 2, "it retried"
+        # Quiet retries: one WARNING for the gate, not one per attempt.
+        assert "did not run the readiness check" not in caplog.text
+
+    def test_restore_foreground_runs_on_the_ui_thread(self, monkeypatch):
+        """Fix 3: no Win32 call from the worker; the work is the callable."""
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_UI_TIMEOUT", 0.05)
+        u = _FakeUser32()
+        monkeypatch.setattr(peek_mod, "_win32", lambda: (u, None))
+        native = _FakeNative(drop=1)
+        pw, a = self._adapter(monkeypatch, native)
+        a._native = native
+        pw._hwnd = _FakeNative.HWND
+        a.restore_foreground(OTHER_APP, True)
+        assert u.calls == [], "called on the worker"
+        native.dropped[0]()
+        assert u.calls == [("IsWindow", OTHER_APP),
+                           ("SetForegroundWindow", OTHER_APP)]
+
+    @pytest.mark.parametrize("prev, pa_fg", [(OTHER_APP, False),
+                                             (None, True)])
+    def test_restore_foreground_without_cause_posts_nothing(
+            self, monkeypatch, prev, pa_fg):
+        import power_atlas.peek as peek_mod
+        u = _FakeUser32()
+        monkeypatch.setattr(peek_mod, "_win32", lambda: (u, None))
+        native = _FakeNative(drop=1)
+        pw, a = self._adapter(monkeypatch, native)
+        a._native = native
+        a.restore_foreground(prev, pa_fg)
+        assert native.dropped == [] and u.calls == []
+
+    def test_restore_foreground_never_targets_itself(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        u = _FakeUser32()
+        monkeypatch.setattr(peek_mod, "_win32", lambda: (u, None))
+        native = _FakeNative()
+        pw, a = self._adapter(monkeypatch, native)
+        a._native = native
+        pw._hwnd = _FakeNative.HWND
+        a.restore_foreground(_FakeNative.HWND, True)
+        assert u.calls == []
+
+    def test_a_hung_reload_is_bounded(self, monkeypatch, caplog):
+        """Fix 10: `load_url` is a synchronous `Form.Invoke`."""
+        import threading
+        import time as _t
+        import types
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_UI_TIMEOUT", 0.1)
+        release = threading.Event()
+        win = types.SimpleNamespace(load_url=lambda url: release.wait(5))
+        a = peek_mod._Win32Window(None, win)
+        url = "http://127.0.0.1:4915/signed/SECRET-CODE"
+        t0 = _t.monotonic()
+        try:
+            with caplog.at_level(logging.WARNING, logger="power_atlas"):
+                a.reload(url)
+            assert _t.monotonic() - t0 < 2
+            assert "did not load the sign-in page" in caplog.text
+            assert "SECRET-CODE" not in caplog.text
+        finally:
+            release.set()
+
+    def test_a_failing_reload_still_raises(self, monkeypatch):
+        import types
+        import power_atlas.peek as peek_mod
+
+        def broken(url):
+            raise RuntimeError("webview gone")
+
+        a = peek_mod._Win32Window(None, types.SimpleNamespace(load_url=broken))
+        with pytest.raises(RuntimeError):
+            a.reload("http://127.0.0.1:4915/signed/1")
+
+    def test_a_hung_destroy_posts_the_ui_loop_exit(self, monkeypatch):
+        """Fix 7: the `Application.Exit` branch of `stop()`."""
+        import threading
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_DESTROY_TIMEOUT", 0.05)
+        monkeypatch.setattr(peek_mod, "_EXIT_WATCHDOG", 5)
+        forms = _fake_dotnet(monkeypatch)
+        pw = _new_peek(monkeypatch)
+        release = threading.Event()
+        pw._window = MagicMock()
+        pw._window.destroy.side_effect = lambda: release.wait(5)
+        try:
+            pw.stop()
+            pw._window.native.BeginInvoke.assert_called_once_with(
+                forms.Application.Exit)
+        finally:
+            pw._start_returned.set()  # the loop exited: no shutdown tail
+            release.set()
+
+    def test_a_prompt_destroy_posts_no_exit(self, monkeypatch):
+        _fake_dotnet(monkeypatch)
+        pw = _new_peek(monkeypatch)
+        pw._window = MagicMock()
+        pw.stop()
+        pw._window.native.BeginInvoke.assert_not_called()
+
+
+class TestReadinessOffWindows:
+    """Fix 13: peek off Windows does not depend on `events.shown`."""
+
+    def test_a_missing_shown_still_gives_a_portable_window(self, monkeypatch,
+                                                           caplog):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        monkeypatch.setattr(peek_mod, "_READY_TIMEOUT", 0.01)
+        pw = _new_peek(monkeypatch)
+        win = MagicMock()
+        win.events.shown.wait.return_value = False
+        pw._window = win
+        pw._window_created.set()
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            adapter = pw._establish_ready()
+        assert isinstance(adapter, peek_mod._PortableWindow)
+        assert "peek goes on regardless" in caplog.text
+
+    def test_a_missing_shown_on_windows_gives_nothing(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "win32")
+        monkeypatch.setattr(peek_mod, "_READY_TIMEOUT", 0.01)
+        pw = _new_peek(monkeypatch)
+        win = MagicMock()
+        win.events.shown.wait.return_value = False
+        pw._window = win
+        pw._window_created.set()
+        assert pw._establish_ready() is None
+
+
+class TestShutdownTailOnce:
+    """Fix 11: `__main__._run_once_or_wait` — the second caller waits for
+    the first, bounded, instead of returning at once."""
+
+    def test_runs_once_and_a_second_caller_waits(self):
+        import threading
+        from power_atlas import __main__ as main_mod
+        gate = threading.Event()
+        started = threading.Event()
+        runs = []
+
+        def body():
+            runs.append(1)
+            started.set()
+            gate.wait(5)
+
+        tail = main_mod._run_once_or_wait(body, wait=5)
+        t1 = threading.Thread(target=tail, daemon=True)
+        t1.start()
+        assert started.wait(5)
+        t2 = threading.Thread(target=tail, daemon=True)
+        t2.start()
+        t2.join(0.3)
+        assert t2.is_alive(), "the second caller returned before the first ended"
+        gate.set()
+        t2.join(5)
+        t1.join(5)
+        assert not t2.is_alive() and not t1.is_alive()
+        assert runs == [1]
+        tail()  # after the run: returns at once, never runs again
+        assert runs == [1]
+
+    def test_the_second_callers_wait_is_bounded(self):
+        import threading
+        import time as _t
+        from power_atlas import __main__ as main_mod
+        gate = threading.Event()
+        started = threading.Event()
+
+        def body():
+            started.set()
+            gate.wait(10)
+
+        tail = main_mod._run_once_or_wait(body, wait=0.2)
+        threading.Thread(target=tail, daemon=True).start()
+        assert started.wait(5)
+        t0 = _t.monotonic()
+        tail()
+        try:
+            assert 0.15 <= _t.monotonic() - t0 < 2
+        finally:
+            gate.set()
+
+    def test_a_failing_first_run_releases_the_waiters(self):
+        import threading
+        from power_atlas import __main__ as main_mod
+        started = threading.Event()
+        proceed = threading.Event()
+
+        def body():
+            started.set()
+            proceed.wait(5)
+            raise RuntimeError("tail failed")
+
+        tail = main_mod._run_once_or_wait(body, wait=10)
+        errors = []
+
+        def first():
+            try:
+                tail()
+            except RuntimeError as e:
+                errors.append(e)
+
+        t1 = threading.Thread(target=first, daemon=True)
+        t1.start()
+        assert started.wait(5)
+        t2 = threading.Thread(target=tail, daemon=True)
+        t2.start()
+        proceed.set()
+        t2.join(3)
+        assert not t2.is_alive()
+        t1.join(3)
+        assert len(errors) == 1

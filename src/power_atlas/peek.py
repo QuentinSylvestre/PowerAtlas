@@ -116,6 +116,7 @@ class PeekWindow:
         self._pressed_keys: set = set()
         self._triggered = False  # the peek chord's key is down (auto-repeat guard)
         self._chord_key_down = False  # the filter suppressed the chord key's key-down
+        self._esc_down_suppressed = False  # the filter suppressed Esc's key-down
         self._release_armed = False  # a press was posted since the last release
         # Shared plumbing.
         self._events: queue.SimpleQueue = queue.SimpleQueue()
@@ -274,12 +275,17 @@ class PeekWindow:
 
     def _window_worker(self) -> None:
         """The one thread that touches the window. Loops on `_events`."""
+        adapter = None
         try:
-            self._establish_ready()
+            adapter = self._establish_ready()
         except Exception as e:
             log.warning("PowerAtlas window readiness failed: %s: %s",
                         type(e).__name__, e)
-        # Events that arrived before readiness are dropped, not replayed.
+        # Events that arrived before readiness are dropped, not replayed. The
+        # drain comes before `_ready` is set: a tray Open PowerAtlas can only
+        # post once `_ready` is set, so it lands after the drain and is
+        # handled, never dropped with the stale ones.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 8
         while True:
             try:
                 ev = self._events.get_nowait()
@@ -288,6 +294,10 @@ class PeekWindow:
             if ev[0] == "stop":
                 return
             log.debug("PowerAtlas window: dropped %s before ready", ev[0])
+        if adapter is not None:
+            self._adapter = adapter
+            self._ready.set()
+            log.info("PowerAtlas window ready")
         while True:
             ev = self._events.get()
             if ev[0] == "stop":
@@ -303,35 +313,52 @@ class PeekWindow:
                 log.warning("PowerAtlas window: %s failed: %s: %s",
                             ev[0], type(e).__name__, e)
 
-    def _establish_ready(self) -> None:
-        """The readiness gate (Threading model).
+    def _establish_ready(self):
+        """The readiness gate (Threading model). Returns the adapter, or None.
 
         `start(func=...)` runs before the form exists, so readiness waits for
         `events.shown` (set for a hidden window too), then checks the form and
         its handle on the UI thread, subscribes `FormClosing` and caches the
-        HWND. Only then is `_ready` set and `PowerAtlas window ready` logged.
+        HWND. The worker then sets `_ready` and logs `PowerAtlas window ready`.
         261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
         """
         if not self._window_created.wait(_READY_TIMEOUT):
             log.warning("PowerAtlas window was not created within %.0f s; app "
                         "mode stays unavailable", _READY_TIMEOUT)
-            return
+            return None
         win = self._window
-        if not win.events.shown.wait(_READY_TIMEOUT):
+        deadline = time.monotonic() + _READY_TIMEOUT
+        shown = win.events.shown.wait(_READY_TIMEOUT)
+        if sys.platform != "win32":
+            # Peek off Windows needs no form handle, so a missing `shown`
+            # never turns it off. On GTK `shown` is set for a hidden window
+            # too (`show()` runs `show_all()` before `hide()`, and the
+            # WebView's `notify::visible` sets it); this only guards other
+            # backends and future pywebview versions.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 13
+            if not shown:
+                log.warning("PowerAtlas window was not shown within %.0f s; "
+                            "peek goes on regardless", _READY_TIMEOUT)
+            return _PortableWindow(self, win)
+        if not shown:
             log.warning("PowerAtlas window was not shown within %.0f s; app "
                         "mode stays unavailable", _READY_TIMEOUT)
-            return
-        if sys.platform == "win32":
-            adapter = _Win32Window(self, win)
-            if not adapter.attach():
-                log.warning("PowerAtlas window has no native form; app mode "
-                            "stays unavailable")
-                return
-        else:
-            adapter = _PortableWindow(self, win)
-        self._adapter = adapter
-        self._ready.set()
-        log.info("PowerAtlas window ready")
+            return None
+        adapter = _Win32Window(self, win)
+        # The whole gate fits one readiness timeout, `shown` included, with at
+        # least one full UI-thread wait for the check itself.
+        deadline = max(deadline, time.monotonic() + _UI_TIMEOUT)
+        result = adapter.attach(deadline)
+        if result == "timeout":
+            log.warning("PowerAtlas window: the UI thread did not answer the "
+                        "readiness check within %.0f s; app mode stays "
+                        "unavailable", _READY_TIMEOUT)
+            return None
+        if result != "ready":
+            log.warning("PowerAtlas window has no native form; app mode "
+                        "stays unavailable")
+            return None
+        return adapter
 
     def _handle(self, ev: tuple) -> None:
         """Run one event through the state machine (worker thread only)."""
@@ -385,8 +412,15 @@ class PeekWindow:
     # ---- transitions (worker thread only) -----------------------------------
 
     def _save(self) -> None:
-        """The Save rule: placement and foreground, on every exit from APP."""
-        self._app_placement = self._adapter.get_placement()
+        """The Save rule: placement and foreground, on every exit from APP.
+
+        A placement read that timed out (None) keeps the last saved one: the
+        user's placement is never replaced by nothing.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 6
+        """
+        placement = self._adapter.get_placement()
+        if placement is not None:
+            self._app_placement = placement
         self._app_was_foreground = self._adapter.is_foreground()
 
     def _to_peek(self, return_to) -> None:
@@ -396,32 +430,63 @@ class PeekWindow:
         self._peek_showing = True
         self._state, self._return_to = PEEK, return_to
 
+    def _fail_to_hidden(self) -> None:
+        """A failed exit from PEEK: best-effort hide, then HIDDEN.
+
+        Never stays PEEK: `_peek_showing` would stay True and the filter would
+        swallow every Esc system-wide. The caller re-raises, so the worker
+        still logs the failure.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 4
+        """
+        try:
+            self._adapter.hide()
+        except Exception:
+            pass
+        self._peek_showing = False
+        self._state, self._return_to = HIDDEN, None
+
     def _end_peek(self) -> None:
         a = self._adapter
-        if self._return_to == "app":
-            pa_fg = a.is_foreground()
-            a.apply_app(self._app_placement, focused=False)
-            self._peek_showing = False
-            if self._app_was_foreground:
-                # The chrome switch hides the window, which costs it the
-                # foreground; it was foreground before the peek, so it gets it
-                # back (SC-3). 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
-                a.focus()
+        try:
+            if self._return_to == "app":
+                # Ends in APP, so it signs in first (D-13).
+                self._sign_in_check()
+                pa_fg = a.is_foreground()
+                a.apply_app(self._app_placement, focused=False)
+                self._peek_showing = False
+                if self._app_was_foreground:
+                    # The chrome switch hides the window, which costs it the
+                    # foreground; it was foreground before the peek, so it gets
+                    # it back (SC-3). 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+                    a.focus()
+                else:
+                    # A maximized placement has no non-activating show, so
+                    # the re-place itself may have taken the foreground:
+                    # read it again after, not only before.
+                    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 2
+                    pa_fg = pa_fg or a.is_foreground()
+                    a.restore_foreground(self._prev_foreground, pa_fg)
+                    a.put_below(self._prev_foreground)
+                self._state, self._return_to = APP, None
             else:
+                a.fire_reset_overlays()
+                pa_fg = a.is_foreground()
+                a.hide()
+                self._peek_showing = False
                 a.restore_foreground(self._prev_foreground, pa_fg)
-                a.put_below(self._prev_foreground)
-            self._state, self._return_to = APP, None
-        else:
-            a.fire_reset_overlays()
-            pa_fg = a.is_foreground()
-            a.hide()
-            self._peek_showing = False
-            a.restore_foreground(self._prev_foreground, pa_fg)
-            self._state, self._return_to = HIDDEN, None
+                self._state, self._return_to = HIDDEN, None
+        except Exception:
+            self._fail_to_hidden()
+            raise
 
     def _to_hidden(self) -> None:
         """→ HIDDEN from APP or by double-tap: no `resetOverlays`."""
-        self._adapter.hide()
+        try:
+            self._adapter.hide()
+        except Exception:
+            if self._state == PEEK:
+                self._fail_to_hidden()
+            raise
         self._peek_showing = False
         self._state, self._return_to = HIDDEN, None
 
@@ -429,10 +494,26 @@ class PeekWindow:
         self._sign_in_check()
         if self._state == APP:
             # Already in app mode: its live placement is newer than the saved
-            # one (a resize since the last exit).
-            self._app_placement = self._adapter.get_placement()
-        self._app_placement = self._adapter.apply_app(self._app_placement,
-                                                      focused=True)
+            # one (a resize since the last exit). A timed-out read keeps it.
+            live = self._adapter.get_placement()
+            if live is not None:
+                self._app_placement = live
+        try:
+            placement = self._adapter.apply_app(self._app_placement,
+                                                focused=True)
+        except Exception:
+            if self._state == PEEK:
+                self._fail_to_hidden()
+            raise
+        if placement is None:
+            # The UI thread did not answer (already logged): the window did
+            # not change, so neither does the state, nor the saved placement.
+            # From PEEK that would leave Esc swallowed, so it falls back.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 6
+            if self._state == PEEK:
+                self._fail_to_hidden()
+            return
+        self._app_placement = placement
         self._peek_showing = False
         self._adapter.focus()
         self._state, self._return_to = APP, None
@@ -490,13 +571,17 @@ class PeekWindow:
         261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
         """
         suppress = False
+        # Read once: `stop()` clears `_listener` while the hook may still
+        # fire, and an AttributeError here would escape the filter.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 12
+        listener = self._listener
         try:
             suppress = self._filter_decide(msg, data.vkCode, data.time)
         except Exception as e:
             log.warning("Peek hotkey filter error: %s", type(e).__name__)
             suppress = False
-        if suppress:
-            self._listener.suppress_event()
+        if suppress and listener is not None:
+            listener.suppress_event()
 
     def _filter_decide(self, msg, vk: int, t: int) -> bool:
         """Update key state, post an event, and say whether to suppress."""
@@ -509,10 +594,23 @@ class PeekWindow:
         if name == "esc":
             # Peek no longer takes focus (D-20), so an Esc that dismisses it
             # must not also reach the user's app. Otherwise it passes through.
+            # A key-up is suppressed exactly when its key-down was: the worker
+            # may end the peek between the two, and the user's app must never
+            # see half a keystroke (a lone key-up, or a key-down whose key-up
+            # it never gets). Auto-repeat of a suppressed Esc stays suppressed
+            # and is not another event.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 9
+            if not is_down:
+                if self._esc_down_suppressed:
+                    self._esc_down_suppressed = False
+                    return True
+                return False
+            if self._esc_down_suppressed:
+                return True
             if not self._peek_showing:
                 return False
-            if is_down:
-                self._events.put(("esc",))
+            self._esc_down_suppressed = True
+            self._events.put(("esc",))
             return True
         if is_down:
             if not self._matches_chord(name):
@@ -837,9 +935,18 @@ class _Win32Window:
         self._win = win
         self._native = None
         self._chrome = None
+        # UI thread only: `FormClosing` is subscribed once, however many
+        # readiness attempts the UI thread runs late.
+        self._closing_hooked = False
 
     # Bounded UI-thread call.
-    def _ui(self, fn, what: str, wait: bool = True):
+    def _ui(self, fn, what: str, wait: bool = True, timeout: float | None = None,
+            timed_out=None):
+        """Run `fn` on the UI thread and wait at most `timeout` (2 s) for it.
+
+        On a timeout, logs a WARNING (unless `timed_out` is given, for a
+        caller that retries) and returns `timed_out`, None by default.
+        """
         from System import Action  # type: ignore[import]
         done = threading.Event()
         box: dict = {}
@@ -855,32 +962,54 @@ class _Win32Window:
         self._native.BeginInvoke(Action(run))
         if not wait:
             return None
-        if not done.wait(_UI_TIMEOUT):
+        limit = _UI_TIMEOUT if timeout is None else timeout
+        if not done.wait(limit):
+            if timed_out is not None:
+                return timed_out
             log.warning("PowerAtlas window: the UI thread did not run %s within "
-                        "%.0f s", what, _UI_TIMEOUT)
+                        "%.0f s", what, limit)
             return None
         if "e" in box:
             raise box["e"]
         return box.get("v")
 
-    def attach(self) -> bool:
+    def attach(self, deadline: float) -> str:
+        """The readiness check, retried until `deadline` (`time.monotonic`).
+
+        Returns "ready", "no_form" (no native form or no handle) or
+        "timeout" (the UI thread never answered in time). A UI thread busy
+        past one 2 s wait at startup is retried rather than leaving app mode,
+        and the peek shortcut with it, off for the whole run.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 5
+        """
         native = getattr(self._win, "native", None)
         if native is None:
-            return False
+            return "no_form"
         self._native = native
         owner = self._o
 
         def run():
             if not native.IsHandleCreated:
-                return None
-            native.FormClosing += owner._on_form_closing
+                return 0
+            if not self._closing_hooked:
+                # A timed-out attempt still runs later; subscribe once.
+                native.FormClosing += owner._on_form_closing
+                self._closing_hooked = True
             return int(native.Handle.ToInt64())
 
-        hwnd = self._ui(run, "the readiness check")
-        if not hwnd:
-            return False
-        owner._hwnd = hwnd
-        return True
+        timed_out = object()
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return "timeout"
+            hwnd = self._ui(run, "the readiness check",
+                            timeout=min(_UI_TIMEOUT, left), timed_out=timed_out)
+            if hwnd is timed_out:
+                continue
+            if not hwnd:
+                return "no_form"
+            owner._hwnd = hwnd
+            return "ready"
 
     @property
     def _h(self):
@@ -1017,9 +1146,17 @@ class _Win32Window:
             log.info("PowerAtlas window could not take the foreground")
 
     def restore_foreground(self, prev, pa_fg: bool) -> None:
+        """On the UI thread, like every other primitive (review fix 3)."""
+        if not (pa_fg and prev):
+            return
         u, _ = _win32()
-        if pa_fg and prev and prev != self._h and u.IsWindow(prev):
-            u.SetForegroundWindow(prev)
+        h = self._h
+
+        def run():
+            if prev != h and u.IsWindow(prev):
+                u.SetForegroundWindow(prev)
+
+        self._ui(run, "restore the foreground")
 
     def put_below(self, prev) -> None:
         u, _ = _win32()
@@ -1044,8 +1181,34 @@ class _Win32Window:
         self._ui(run, "resetOverlays", wait=False)
 
     def reload(self, url: str) -> None:
-        # Marshals itself; never from inside a UI-thread callable.
-        self._win.load_url(url)
+        """pywebview's `load_url`, bounded.
+
+        It marshals itself with a synchronous `Form.Invoke` (never call it
+        from inside a UI-thread callable), so a hung UI thread would block the
+        worker for good. It runs on a short-lived thread instead; past 2 s a
+        WARNING is logged and the worker moves on. The load stays posted and
+        runs when the UI thread recovers, so the caller treats it as done.
+        The URL carries a live login code: no log line names it.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 10
+        """
+        win = self._win
+        box: dict = {}
+
+        def run():
+            try:
+                win.load_url(url)
+            except Exception as e:
+                box["e"] = e
+
+        t = threading.Thread(target=run, name="power-atlas-reload", daemon=True)
+        t.start()
+        t.join(_UI_TIMEOUT)
+        if t.is_alive():
+            log.warning("PowerAtlas window: the UI thread did not load the "
+                        "sign-in page within %.0f s", _UI_TIMEOUT)
+            return
+        if "e" in box:
+            raise box["e"]
 
 
 def create_peek(server_url: str, hotkey: str = "ctrl+shift+z") -> PeekWindow | None:

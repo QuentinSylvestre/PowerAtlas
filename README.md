@@ -56,7 +56,9 @@ PowerAtlas** (the default, also the icon click), **Open in browser**, **Copy log
 On Windows the PowerAtlas window is one desktop window with two modes. **App mode** is a normal framed
 window in the taskbar: tray **Open PowerAtlas** and a double-tap of the peek hotkey open it, focused, at
 its last size, position and maximized state for this run (1280x800 centred the first time). Closing it
-with X only hides it; it keeps its page, and PowerAtlas keeps running. **Peek mode** is the overlay: hold
+with X only hides it; it keeps its page, and PowerAtlas keeps running. Task Manager's **End task**, or a
+tool that closes windows by posting `WM_CLOSE` (AutoHotkey `WinClose`, for example), quits PowerAtlas
+instead. **Peek mode** is the overlay: hold
 the peek hotkey to show it full screen and on top, release to hide it, or press Esc. Peek mode does not
 take the keyboard focus, so the app you were typing in keeps it. Holding the hotkey while the window is
 in app mode shows peek mode for as long as you hold it, then returns to app mode. A double-tap while
