@@ -1,12 +1,26 @@
 # Codex Live Status, Context Pressure and Sub-agent Usage from the State Database
 
 > **Date**: 2026-10-02
-> **Status**: Complete — ready to close  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-10-06 09:33
 > **Scope**: Follow-ups deferred by the archived Codex provider plan: a lock-owner live dot, a Working/Idle verdict and turn-end notifications for terminal Codex sessions, Codex context pressure, sub-agent token usage, and an optional state-database layer that feeds them. Driving Codex from `/acp` and app-server integration are out of scope.
 > **Estimated effort**: 5-6 days (pre-flight 0.5, database and sub-agent usage 1, context pressure 0.5, lock owner and live dot 1.25, verdict 1, notifier 0.75, documentation, cleanup and QA 0.75)
 
 ---
+
+## Completion Summary
+
+All six phases shipped on `main` (2026-10-02 to 2026-10-06): the Codex state-database reader and sub-agent usage, Codex context pressure, the lock-owner lookup behind the live dot, the Working/Idle verdict, the turn-end toast, and the documentation. Final verification on 2026-10-06: pytest 4516 passed, `node tests/acp_page.test.mjs` 960 of 960, name check clean, `ruff` counts not above `HEAD`; a real Codex terminal turn showed the right dots on the Overview tile and the rail, one toast, and nothing for a hidden workspace.
+
+### Acknowledged at archival
+
+- Accepted: review-log rows 22 (Medium: the `terminal` verdict rests on a best-effort deny-list), 29, 4, 6, 10, 11 and 14 (Lows), on the user's decision of 2026-10-06 ("accept"). Deferred features and Lows are on `plans/ROADMAP.md` and in Follow-up Work (Deferred).
+- Accepted: the implementation divergences of section 9, one decision per phase group (Phase 0, 1, 2, 3, 4 and 5 with their review fixes, the deferred fixes with live QA, Phase 6 and closing), on the user's decision of 2026-10-06 ("accept").
+- Promoted: heredocs halve backslashes on Windows (items 1, 3, 5, 7) into `shared/AGENTS.md § Code Quality`; the stage-own-hunks method (item 4) into `shared/AGENTS.md § Git Staging`; the session-cache leak (item 6) and the `codex exec` trust flag (item 11) into this project's `AGENTS.md`. Removal-candidate search: none found for the heredoc rule; the staging rule only gained a pointer to `memory/topics/git.md`.
+- Accepted (harness opportunity): a count taken through a proxy filter gave 2 % instead of 40 % (item 2).
+- Accepted (harness opportunity): a test that stubbed a filter on untrusted input hid a High bug (item 8).
+- Accepted (harness opportunity): a live-QA script should check that the turn really ran (item 9).
+- Accepted (harness opportunity): the QA ledger file was overwritten by the next run (item 10; the rule is already in `AGENTS.md`).
 
 ## Intent
 
@@ -727,22 +741,6 @@ One Reliability engineer on commit `58a57bc` (11,000 randomised differential cas
 | 7 | Low | The 4096 cwd limit was untested at its edge; the schema was not bumped. | Fixed -- `6667a48`: tests at 4096 and 4097; schema 9. |
 
 Reviewer gaps: no real two-thread race, no Windows sharing violation, production-size constants checked only by timing. Health after this cycle: Green (row 6 is a Low).
-
-## Handoff
-
-> Handoff written: 2026-10-06 (the plan is complete and ready for `/qclose`)
-
-### Previously
-
-- All six phases are done, reviewed and live-checked; every exit criterion is ticked. The user approved the AGENTS.md recipe text, the cleanup and the desktop-app check on 2026-10-06. Latest commits: `6e226df` (AGENTS.md and KNOWLEDGE.md) and the plan commit after it.
-
-### Parked
-
-- Nothing. The accepted Lows are Follow-up Work 34 and 35; the deferred features are on `plans/ROADMAP.md`.
-
-### Current
-
-Next: `/qclose` (archive the plan, memory consolidation). Ask the user at the start of the next piece of work on PowerAtlas whether restarts are allowed.
 
 ## Harness Improvement Opportunities
 
