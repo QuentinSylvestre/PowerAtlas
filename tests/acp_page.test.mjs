@@ -4791,6 +4791,9 @@ const PANEL_NAMES = [
   "renderRemoteAccess", "rotateRemoteSecret",
   "loadRemoteAccess", "_RESTART_KEY_LABELS", "renderRestartKeys",
   "markRestartInputs", "loadRestartKeys", "openRemoteModal",
+  // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+  // (follow-up 9): the notes under the shortcut fields.
+  "renderShortcutNotes",
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3; the mode
   // picker replaced the toggle in 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL
   // Phase 1.
@@ -4932,6 +4935,14 @@ function loadPanel(opts = {}) {
   byId.set("localSecretWarn", secretWarn);
   byId.set("localSecretRotate", secretRotate);
   byId.set("localSecretNote", secretNote);
+  // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+  // (follow-up 9): the notes under the two shortcut fields, hidden as in the
+  // markup.
+  for (const id of ["peekHotkeyNote", "browserHotkeyNote"]) {
+    const note = new El("div");
+    note.hidden = true;
+    byId.set(id, note);
+  }
   // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA: the gear
   // button and the menu it opens, driven by the real open/close wiring when
   // `opts.topbarMenu` extracts it (topbarMenuSource below). The menu starts
@@ -5802,6 +5813,168 @@ check("both shortcut fields save through saveShortcut", () => {
     assert(tag.includes("data-saved="), `#${id} has no data-saved for the revert`);
     assert(modal.includes(`id="${id}Error"`), `#${id} has no error line`);
   }
+});
+
+// 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+// (follow-up 9): a note under a shortcut field whose stored value is not the
+// one that runs, drawn by renderRestartKeys from `/api/settings`. Expected
+// texts are the ones the plan's follow-up describes.
+check("a shortcut field whose stored value does not run carries a note", () => {
+  const p = loadPanel();
+  const note = (id) => p.sandbox.document.getElementById(id);
+  const base = { restart_to_apply: [], restart_pending: [], in_force: {} };
+  const draw = (fields) => p.sandbox.renderRestartKeys({ ...base, ...fields });
+
+  // Both run as stored: no note. The browser value is a hand edit in other
+  // case and spacing, which runs normalised; a raw comparison would flag it.
+  draw({ peek_hotkey: "ctrl+alt+p", effective_peek_hotkey: "ctrl+alt+p",
+         browser_hotkey: " Ctrl+Alt+B", effective_browser_hotkey: "ctrl+alt+b",
+         browser_hotkey_off_reason: "" });
+  assertEqual(note("peekHotkeyNote").hidden, true, "a running peek shortcut got a note");
+  assertEqual(note("browserHotkeyNote").hidden, true,
+              "a running browser shortcut in other case got a note");
+
+  // An invalid peek shortcut runs as the default; a browser shortcut that
+  // overlaps it is off.
+  draw({ peek_hotkey: "ctrl+foo", effective_peek_hotkey: "ctrl+shift+z",
+         browser_hotkey: "ctrl+z", effective_browser_hotkey: "",
+         browser_hotkey_off_reason: "overlap" });
+  assertEqual(note("peekHotkeyNote").hidden, false, "an invalid peek shortcut has no note");
+  assertEqual(note("peekHotkeyNote").textContent,
+              "Not valid; ctrl+shift+z is used instead.", "the peek note is wrong");
+  assertEqual(note("browserHotkeyNote").hidden, false, "an off browser shortcut has no note");
+  assertEqual(note("browserHotkeyNote").textContent, "Off: overlaps the peek hotkey.",
+              "the overlap note is wrong");
+
+  // Invalid browser shortcut: a different reason.
+  draw({ peek_hotkey: "ctrl+alt+p", effective_peek_hotkey: "ctrl+alt+p",
+         browser_hotkey: "ctrl+bogus", effective_browser_hotkey: "",
+         browser_hotkey_off_reason: "invalid" });
+  assertEqual(note("peekHotkeyNote").hidden, true, "the peek note outlived the fix");
+  assertEqual(note("browserHotkeyNote").textContent, "Off: not a valid shortcut.",
+              "the invalid note is wrong");
+
+  // None stored is off by choice: no note.
+  draw({ peek_hotkey: "ctrl+alt+p", effective_peek_hotkey: "ctrl+alt+p",
+         browser_hotkey: "", effective_browser_hotkey: "",
+         browser_hotkey_off_reason: "" });
+  assertEqual(note("browserHotkeyNote").hidden, true, "an empty browser shortcut got a note");
+  assertEqual(note("browserHotkeyNote").textContent, "", "the old note text stayed");
+
+  // A server without the fields: no note, whatever the stored values.
+  draw({ peek_hotkey: "ctrl+alt+p", effective_peek_hotkey: "ctrl+shift+z" });
+  assertEqual(note("peekHotkeyNote").hidden, false, "set up: the note shows");
+  draw({ peek_hotkey: "ctrl+foo", browser_hotkey: "ctrl+bogus" });
+  assertEqual(note("peekHotkeyNote").hidden, true, "a note drawn without the fields");
+  assertEqual(note("browserHotkeyNote").hidden, true, "a note drawn without the fields");
+});
+
+check("the shortcut notes exist in the modal and keep a [hidden] rule", () => {
+  const modal = fs.readFileSync(SETTINGS_TEMPLATE, "utf8");
+  for (const [row, id] of [["peek-hotkey-group", "peekHotkeyNote"],
+                           ["browser-hotkey-group", "browserHotkeyNote"],
+                           ["browser-hotkey-group", "browserHotkeyNext"]]) {
+    const start = modal.indexOf(`settings-row ${row}`);
+    const end = modal.indexOf('class="settings-row ', start + 1);
+    const region = modal.slice(start, end < 0 ? undefined : end);
+    const at = region.indexOf(`id="${id}"`);
+    assert(at >= 0, `#${id} is not in .${row}`);
+    const open = region.lastIndexOf("<", at);
+    const tag = region.slice(open, region.indexOf(">", at));
+    assert(/\bhidden\b/.test(tag), `#${id} does not start hidden`);
+    assert(tag.includes('class="pa-modal-hint"'), `#${id} lost its class`);
+  }
+  const css = fs.readFileSync(STYLESHEET, "utf8");
+  // The rule is a selector list: `.pa-modal-field-error[hidden],
+  // .pa-modal-hint[hidden], … { display: none; }`.
+  assert(/\.pa-modal-hint\[hidden\][^{]*\{\s*display:\s*none/.test(css),
+         ".pa-modal-hint has no [hidden] { display: none } rule");
+});
+
+// 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+// (follow-up 16): a peek save that changes whether the browser shortcut runs
+// at the next launch says so under the browser shortcut.
+function loadSaveShortcutWithNext(answer) {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const from = src.indexOf("function saveShortcut(");
+  if (from < 0) throw new Error("index.html no longer defines saveShortcut");
+  const to = src.indexOf("\n}\n", from) + 2;
+  const els = new Map();
+  for (const id of ["peekHotkey", "browserHotkey"]) {
+    const input = new El("input");
+    input.id = id;
+    els.set(id, input);
+    const err = new El("div");
+    err.hidden = true;
+    els.set(id + "Error", err);
+  }
+  const next = new El("div");
+  next.hidden = true;
+  els.set("browserHotkeyNext", next);
+  const sandbox = {
+    document: { getElementById: (id) => els.get(id) ?? null },
+    fetch: () => {
+      const a = answer();
+      if (a.reject) return Promise.reject(new Error("down"));
+      return Promise.resolve({ json: () => Promise.resolve(a.body) });
+    },
+    loadRestartKeys() {},
+    JSON,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(src.slice(from, to), sandbox, { filename: "index.html#saveShortcut" });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  return { sandbox, els, next, settle };
+}
+
+check("a peek save that turns the browser shortcut on says so", async () => {
+  let reply = { body: { ok: true, restart_required: true,
+                        browser_active_after_restart: true,
+                        browser_active_changed: true } };
+  const h = loadSaveShortcutWithNext(() => reply);
+  const peek = h.els.get("peekHotkey");
+  const browser = h.els.get("browserHotkey");
+  peek.value = "ctrl+shift+z";
+  h.sandbox.saveShortcut(peek, "peek_hotkey");
+  await h.settle();
+  assertEqual(h.next.hidden, false, "the change was not shown");
+  assertEqual(h.next.textContent,
+              "The browser shortcut will be active after the next launch.",
+              "the on note is wrong");
+
+  // The other direction, worded as such.
+  reply = { body: { ok: true, restart_required: true,
+                    browser_active_after_restart: false,
+                    browser_active_changed: true } };
+  h.sandbox.saveShortcut(peek, "peek_hotkey");
+  await h.settle();
+  assertEqual(h.next.textContent,
+              "The browser shortcut will be off after the next launch.",
+              "the off note is wrong");
+
+  // No change: the line goes away rather than repeating the last one.
+  reply = { body: { ok: true, restart_required: true,
+                    browser_active_after_restart: true,
+                    browser_active_changed: false } };
+  h.sandbox.saveShortcut(peek, "peek_hotkey");
+  await h.settle();
+  assertEqual(h.next.hidden, true, "an unchanged state kept the line");
+  assertEqual(h.next.textContent, "", "an unchanged state kept the text");
+
+  // The fields only matter on a peek save: a browser save answering them
+  // (it does not) shows nothing, and a refused peek save shows nothing.
+  reply = { body: { ok: true, restart_required: true,
+                    browser_active_after_restart: true,
+                    browser_active_changed: true } };
+  browser.value = "ctrl+alt+b";
+  h.sandbox.saveShortcut(browser, "browser_hotkey");
+  await h.settle();
+  assertEqual(h.next.hidden, true, "a browser save showed the peek-save line");
+  reply = { body: { ok: false, error: "Shortcut needs a modifier (ctrl, shift or alt)",
+                    browser_active_changed: true, browser_active_after_restart: true } };
+  h.sandbox.saveShortcut(peek, "peek_hotkey");
+  await h.settle();
+  assertEqual(h.next.hidden, true, "a refused save showed the line");
 });
 
 check("refreshSettings puts the stored shortcuts on both fields and their data-saved", async () => {

@@ -5665,6 +5665,30 @@ async def api_warmup_status():
     return {"ready": data.warmup_done.is_set()}
 
 
+def _effective_shortcuts(config) -> dict:
+    """The two shortcuts as the window runs them from the stored values, by
+    the rule startup applies (`hotkeys.effective_*`): an invalid peek
+    shortcut runs as the default, and a browser shortcut that is invalid or
+    overlaps the peek shortcut in force is off (""). The Settings dialog
+    shows a note under a field whose stored value is not the one that runs.
+    `browser_hotkey_off_reason` says why a stored browser shortcut is off:
+    "invalid", "overlap", or "" when it is not off or none is stored.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 9)
+    """
+    peek, browser = config.peek_hotkey, config.browser_hotkey
+    effective_browser = hotkeys.effective_browser_hotkey(browser, peek)
+    reason = ""
+    stored = browser.strip().lower() if isinstance(browser, str) else ""
+    if not effective_browser and stored:
+        reason = ("invalid" if hotkeys.hotkey_error(stored) is not None
+                  else "overlap")
+    return {
+        "effective_peek_hotkey": hotkeys.effective_peek_hotkey(peek),
+        "effective_browser_hotkey": effective_browser,
+        "browser_hotkey_off_reason": reason,
+    }
+
+
 @app.get("/api/settings")
 async def api_settings():
     config = load_config()
@@ -5678,6 +5702,7 @@ async def api_settings():
         "peek_hotkey": config.peek_hotkey,
         "peek_mode": config.peek_mode,
         "browser_hotkey": config.browser_hotkey,
+        **_effective_shortcuts(config),
         "port": config.port,
         "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
@@ -6206,9 +6231,23 @@ async def save_setting(request: Request):
             if hotkeys.hotkeys_conflict(value, other):
                 return {"ok": False,
                         "error": "Conflicts with the peek shortcut"}
+    extra = {}
+    if key == "peek_hotkey":
+        # Whether the stored browser shortcut runs at the next launch, under
+        # the new peek shortcut, and whether this save changed that: a stored
+        # browser shortcut that overlapped the old peek shortcut comes on.
+        # (The reverse cannot happen here: a new peek shortcut that overlaps
+        # an active browser shortcut is refused above.)
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 16)
+        before = bool(hotkeys.effective_browser_hotkey(config.browser_hotkey,
+                                                       config.peek_hotkey))
+        after = bool(hotkeys.effective_browser_hotkey(config.browser_hotkey,
+                                                      value))
+        extra = {"browser_active_after_restart": after,
+                 "browser_active_changed": after != before}
     setattr(config, key, value)
     save_config(config)
-    return {"ok": True, "restart_required": key in _RESTART_TO_APPLY}
+    return {"ok": True, "restart_required": key in _RESTART_TO_APPLY, **extra}
 
 
 @app.get("/api/remote-access")

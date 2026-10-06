@@ -5783,7 +5783,7 @@ function refreshNotifyToggle(){
     .then(function(d){if(d)el.classList.toggle('active',!!d.enabled)})
     .catch(function(){});
 }
-function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput){peekInput.value=d.peek_hotkey||'ctrl+shift+z';peekInput.setAttribute('data-saved',peekInput.value)}var browserInput=document.getElementById('browserHotkey');if(browserInput){browserInput.value=d.browser_hotkey||'';browserInput.setAttribute('data-saved',browserInput.value)}['peekHotkeyError','browserHotkeyError'].forEach(function(id){var e=document.getElementById(id);if(e){e.textContent='';e.hidden=true}});var peekModeSel=document.getElementById('peekMode');if(peekModeSel)peekModeSel.value=d.peek_mode==='toggle'?'toggle':'hold';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
+function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput){peekInput.value=d.peek_hotkey||'ctrl+shift+z';peekInput.setAttribute('data-saved',peekInput.value)}var browserInput=document.getElementById('browserHotkey');if(browserInput){browserInput.value=d.browser_hotkey||'';browserInput.setAttribute('data-saved',browserInput.value)}['peekHotkeyError','browserHotkeyError'].forEach(function(id){var e=document.getElementById(id);if(e){e.textContent='';e.hidden=true}});if(typeof renderShortcutNotes==='function')renderShortcutNotes(d);var peekModeSel=document.getElementById('peekMode');if(peekModeSel)peekModeSel.value=d.peek_mode==='toggle'?'toggle':'hold';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){
   fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});
   initProviderFilter();initWorkspaceFilters();
@@ -9369,6 +9369,43 @@ function renderRestartKeys(settings) {
   body.appendChild(list);
   markRestartInputs(pending);
   markTopbarRestart(pending);
+  renderShortcutNotes(settings);
+}
+
+// A note under a shortcut field whose stored value is not the one that runs,
+// from `/api/settings`' `effective_*` fields (the startup rule applied to the
+// stored values): an invalid peek shortcut runs as the default, and a browser
+// shortcut that is invalid or overlaps the peek one is off. Compared after
+// trim and lowercase, as the window parses them. Hidden otherwise, and when
+// the server does not send the fields.
+// 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 9)
+function renderShortcutNotes(settings) {
+  var set = function (id, text) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = !text;
+  };
+  var norm = function (v) {
+    return (v === undefined || v === null) ? '' : String(v).trim().toLowerCase();
+  };
+  settings = settings || {};
+  var peekText = '';
+  if ('effective_peek_hotkey' in settings) {
+    var running = norm(settings.effective_peek_hotkey);
+    if (norm(settings.peek_hotkey) !== running) {
+      peekText = 'Not valid; ' + running + ' is used instead.';
+    }
+  }
+  set('peekHotkeyNote', peekText);
+  var browserText = '';
+  if ('effective_browser_hotkey' in settings && norm(settings.browser_hotkey)
+      && !norm(settings.effective_browser_hotkey)) {
+    browserText = settings.browser_hotkey_off_reason === 'overlap'
+      ? 'Off: overlaps the peek hotkey.'
+      : 'Off: not a valid shortcut.';
+  }
+  set('browserHotkeyNote', browserText);
 }
 
 // The topbar's own reading of `pending`: a dot on the settings gear (so the
@@ -9468,6 +9505,11 @@ function markRestartInputs(keys) {
 // stored value, kept in `data-saved` (set on render, by refreshSettings and on
 // each successful save). Ends in loadRestartKeys for the "on relaunch" badge.
 // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+//
+// A peek save also says whether the stored browser shortcut runs at the next
+// launch; when that changes, a line under the browser shortcut says so. Any
+// later save clears it.
+// 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 16)
 function saveShortcut(input, key) {
   var value = input.value.trim().toLowerCase();
   var err = document.getElementById(input.id + 'Error');
@@ -9476,6 +9518,13 @@ function saveShortcut(input, key) {
     err.textContent = text;
     err.hidden = !text;
   };
+  var nextNote = document.getElementById('browserHotkeyNext');
+  var showNext = function (text) {
+    if (!nextNote) return;
+    nextNote.textContent = text;
+    nextNote.hidden = !text;
+  };
+  showNext('');
   return fetch('/api/save-setting', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -9485,6 +9534,11 @@ function saveShortcut(input, key) {
       input.value = value;
       input.setAttribute('data-saved', value);
       show('');
+      if (key === 'peek_hotkey' && d.browser_active_changed) {
+        showNext(d.browser_active_after_restart
+          ? 'The browser shortcut will be active after the next launch.'
+          : 'The browser shortcut will be off after the next launch.');
+      }
     } else {
       input.value = input.getAttribute('data-saved') || '';
       show((d && d.error) || 'Not saved');
@@ -9583,8 +9637,9 @@ function openSettingsDialog(pane) {
   // A shortcut refusal shown last time is stale once the dialog reopens: the
   // field has already reverted to its stored value.
   // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 review fix 8
+  // The after-save browser shortcut line (follow-up 16) is stale too.
   if (!modal.open) {
-    ['peekHotkeyError', 'browserHotkeyError'].forEach(function (id) {
+    ['peekHotkeyError', 'browserHotkeyError', 'browserHotkeyNext'].forEach(function (id) {
       var e = document.getElementById(id);
       if (e) { e.textContent = ''; e.hidden = true; }
     });

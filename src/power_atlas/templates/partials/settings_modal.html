@@ -45,6 +45,10 @@
               <div class="settings-row-head"><label class="settings-row-title" for="peekHotkey">Peek hotkey</label></div>
               <div class="settings-row-desc">Shows PowerAtlas from anywhere (see Peek mode); double-tap to open it as a window. A modifier (ctrl, shift or alt) plus a key. Takes effect on the next launch.</div>
               <div class="pa-modal-field-error" id="peekHotkeyError" role="alert" hidden></div>
+              <!-- 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+                   (follow-up 9): shown by renderShortcutNotes (index.html)
+                   when the stored shortcut is not the one that runs. -->
+              <div class="pa-modal-hint" id="peekHotkeyNote" hidden></div>
             </div>
             <div class="settings-row-control">
               <div class="hotkey-field" onclick="document.getElementById('peekHotkey').focus()">
@@ -88,6 +92,11 @@
               <div class="settings-row-head"><label class="settings-row-title" for="browserHotkey">Browser shortcut</label></div>
               <div class="settings-row-desc">Opens PowerAtlas in a new browser tab, signed in. Leave empty for none. It may not overlap the peek hotkey (equal it, contain it or be part of it). Takes effect on the next launch.</div>
               <div class="pa-modal-field-error" id="browserHotkeyError" role="alert" hidden></div>
+              <!-- 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5:
+                   the first is renderShortcutNotes' (follow-up 9), the
+                   second saveShortcut's after a peek save (follow-up 16). -->
+              <div class="pa-modal-hint" id="browserHotkeyNote" hidden></div>
+              <div class="pa-modal-hint" id="browserHotkeyNext" role="status" hidden></div>
             </div>
             <div class="settings-row-control">
               <div class="hotkey-field" onclick="document.getElementById('browserHotkey').focus()">

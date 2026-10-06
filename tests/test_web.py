@@ -745,22 +745,29 @@ def test_save_setting_peek_hotkey_normalised_and_unblocked_by_an_off_browser(
         assert mock_save.call_args[0][0].peek_hotkey == "ctrl+alt+b"
 
 
-@pytest.mark.parametrize("peek, browser", [
-    ("ctrl+shift+z", "ctrl+z"),            # inside the peek one in force
-    ("ctrl+shift+z", "ctrl+shift+alt+z"),  # contains it
-    ("nope", "ctrl+shift+z"),              # equals the fallback in force
+@pytest.mark.parametrize("peek, browser, comes_on", [
+    ("ctrl+shift+z", "ctrl+z", False),            # inside the peek one in force
+    ("ctrl+shift+z", "ctrl+shift+alt+z", False),  # contains it
+    ("nope", "ctrl+shift+z", True),               # equals the fallback in force
 ])
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
 def test_save_setting_peek_hotkey_unblocked_by_a_browser_that_is_off_by_conflict(
-        mock_load, mock_save, client, peek, browser):
+        mock_load, mock_save, client, peek, browser, comes_on):
     """Phase 3 review fix 7: a stored browser shortcut that overlaps the peek
     shortcut in force is off at startup (`create_peek`), so it cannot block a
-    new peek shortcut, even one it would overlap."""
+    new peek shortcut, even one it would overlap.
+
+    Phase 5 (follow-up 16) adds the two `browser_active_*` fields to the
+    answer. `comes_on`, derived by hand: `ctrl+z` is inside the new
+    `ctrl+alt+z` and `ctrl+alt+z` is inside `ctrl+shift+alt+z`, so those stay
+    off; `ctrl+shift+z` and `ctrl+alt+z` contain neither, so it comes on."""
     from power_atlas.config import Config
     mock_load.return_value = Config(peek_hotkey=peek, browser_hotkey=browser)
     assert _save_shortcut(client, "peek_hotkey", "ctrl+alt+z") == {
-        "ok": True, "restart_required": True}
+        "ok": True, "restart_required": True,
+        "browser_active_after_restart": comes_on,
+        "browser_active_changed": comes_on}
     assert mock_save.call_args[0][0].peek_hotkey == "ctrl+alt+z"
 
 
@@ -777,6 +784,79 @@ def test_save_setting_peek_hotkey_still_blocked_by_a_browser_in_force(
     assert _save_shortcut(client, "peek_hotkey", "ctrl+alt+z") == {
         "ok": False, "error": "Conflicts with the browser shortcut"}
     mock_save.assert_not_called()
+
+
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+# (follow-ups 9, 16): the shortcuts as they run, and what a peek save does to
+# the browser shortcut at the next launch. Expected values derived by hand
+# from the startup rule (invalid peek -> ctrl+shift+z; a browser shortcut is
+# off when invalid or when either shortcut's keys contain the other's).
+
+@pytest.mark.parametrize("peek, browser, eff_peek, eff_browser, reason", [
+    ("ctrl+alt+p", "ctrl+alt+b", "ctrl+alt+p", "ctrl+alt+b", ""),
+    ("ctrl+alt+p", "", "ctrl+alt+p", "", ""),
+    # A hand-edited value in other case and spacing still runs: no note.
+    ("Ctrl+Alt+P", " Ctrl+Alt+B ", "Ctrl+Alt+P", "ctrl+alt+b", ""),
+    ("ctrl+foo", "ctrl+alt+b", "ctrl+shift+z", "ctrl+alt+b", ""),
+    ("ctrl+alt+p", "ctrl+bogus", "ctrl+alt+p", "", "invalid"),
+    ("ctrl+alt+p", "b", "ctrl+alt+p", "", "invalid"),
+    ("ctrl+alt+p", "ctrl+alt+shift+p", "ctrl+alt+p", "", "overlap"),
+    # Overlaps the default the invalid peek runs as, not the stored text.
+    ("nope", "ctrl+z", "ctrl+shift+z", "", "overlap"),
+    ("nope", "ctrl+alt+z", "ctrl+shift+z", "ctrl+alt+z", ""),
+])
+@patch("power_atlas.web.load_config")
+def test_api_settings_reports_the_shortcuts_in_force(mock_load, client, peek,
+                                                     browser, eff_peek,
+                                                     eff_browser, reason):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(peek_hotkey=peek, browser_hotkey=browser)
+    body = client.get("/api/settings").json()
+    assert body["peek_hotkey"] == peek
+    assert body["browser_hotkey"] == browser
+    assert body["effective_peek_hotkey"] == eff_peek
+    assert body["effective_browser_hotkey"] == eff_browser
+    assert body["browser_hotkey_off_reason"] == reason
+
+
+@pytest.mark.parametrize("peek, browser, sent, after, changed", [
+    # Off because it overlaps the stored peek; the new peek frees it.
+    ("ctrl+b", "ctrl+shift+b", "ctrl+shift+z", True, True),
+    # Off before and after: the new peek overlaps it too (no conflict check
+    # applies, since an off browser shortcut blocks nothing).
+    ("ctrl+b", "ctrl+shift+b", "ctrl+shift+alt+b", False, False),
+    # Active before and after.
+    ("ctrl+shift+z", "ctrl+alt+b", "ctrl+shift+q", True, False),
+    # Invalid stored browser shortcut: off whatever the peek shortcut is.
+    ("ctrl+b", "ctrl+bogus", "ctrl+shift+z", False, False),
+    # None stored.
+    ("ctrl+b", "", "ctrl+shift+z", False, False),
+])
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_peek_hotkey_reports_the_browser_shortcut_after_restart(
+        mock_load, mock_save, client, peek, browser, sent, after, changed):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(peek_hotkey=peek, browser_hotkey=browser)
+    body = _save_shortcut(client, "peek_hotkey", sent)
+    assert body == {"ok": True, "restart_required": True,
+                    "browser_active_after_restart": after,
+                    "browser_active_changed": changed}
+    assert mock_save.call_args[0][0].peek_hotkey == sent
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_browser_hotkey_or_a_refused_peek_has_no_browser_fields(
+        mock_load, mock_save, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(peek_hotkey="ctrl+b",
+                                    browser_hotkey="ctrl+alt+b")
+    assert "browser_active_after_restart" not in _save_shortcut(
+        client, "browser_hotkey", "ctrl+alt+q")
+    refused = _save_shortcut(client, "peek_hotkey", "z")
+    assert refused["ok"] is False
+    assert "browser_active_after_restart" not in refused
 
 
 def test_settings_modal_renders_the_browser_shortcut_row(client):
@@ -1875,7 +1955,11 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "peek_mode", "browser_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
                      "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds",
                      "remote_bind_address", "restart_to_apply", "in_force",
-                     "restart_pending", "local_secret"}
+                     "restart_pending", "local_secret",
+                     # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS
+                     # Phase 5 (follow-up 9): the shortcuts as they run.
+                     "effective_peek_hotkey", "effective_browser_hotkey",
+                     "browser_hotkey_off_reason"}
     assert set(body.keys()) == expected_keys
     assert body["autostart"] is False
     assert "terminal_command" not in body
@@ -13785,7 +13869,11 @@ class TestSettingsSurface:
         assert "peek_hotkey" in _RESTART_TO_APPLY
         body = client.post("/api/save-setting",
                            json={"key": "peek_hotkey", "value": "ctrl+shift+p"}).json()
-        assert body == {"ok": True, "restart_required": True}
+        # The two `browser_active_*` fields: Phase 5 (follow-up 16) adds them
+        # to every peek save; no browser shortcut is stored here, so both False.
+        assert body == {"ok": True, "restart_required": True,
+                        "browser_active_after_restart": False,
+                        "browser_active_changed": False}
 
     def test_peek_mode_says_restart_to_apply(self, client):
         """`peek_mode` is read once, at startup, by the same `create_peek`

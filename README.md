@@ -215,7 +215,10 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   next launch. A shortcut is saved only when it is valid (see the config sample below) and the two
   shortcuts do not overlap: neither may equal the other or contain all of its keys, as
   `ctrl+shift+alt+z` contains `ctrl+shift+z`. A refused value is named under the field, and the field
-  goes back to the saved one. A dot on the
+  goes back to the saved one. A saved shortcut that does not run as stored (a hand-edited
+  `config.toml` value) gets a note under its field: an invalid peek hotkey says which one is used
+  instead, and an invalid or overlapping browser shortcut says it is off. Saving a peek hotkey that
+  turns the browser shortcut on for the next launch says so under the browser shortcut. A dot on the
   gear, and on the section, marks anything that needs attention.
 - Launch-profile management (gear icon in topbar) for window mode, autostart, and profile switching
 - **Notify me** (gear icon in topbar, off by default) tells you when an ACP session finishes a turn
