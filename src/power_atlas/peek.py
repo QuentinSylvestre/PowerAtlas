@@ -152,11 +152,28 @@ _MODIFIER_NAMES = _hotkeys.MODIFIERS
 # Generic VK codes the modifier check asks `GetAsyncKeyState` about: either
 # side of the key counts. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 14)
 _VK_GENERIC = {"shift": 0x10, "ctrl": 0x11, "alt": 0x12}
-# The Alt mask key: an unassigned virtual-key code, as AutoHotkey's default
+# The mask key: an unassigned virtual-key code, as AutoHotkey's default
 # `MenuMaskKey` (vkE8). Sent down and up after the filter suppresses the key
-# of a chord containing alt. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10)
+# of a chord whose modifiers would otherwise reach the user's app as a
+# modifier-only press and release (`_needs_mask`): an Alt one activates the
+# app's menu bar, and a bare Ctrl+Shift (or Alt+Shift) one may switch the
+# keyboard layout.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10);
+# two-modifier chords: follow-up 18
 _VK_MASK = 0xE8
 _KEYEVENTF_KEYUP = 0x2
+
+
+def _needs_mask(chord_keys) -> bool:
+    """Whether a suppressed key-down of this chord is followed by the mask
+    key: the chord contains alt (menu bar), or has two or more modifiers
+    (Windows' optional Ctrl+Shift layout hotkey fires on a modifier-only
+    Ctrl+Shift press and release). A one-modifier chord without alt, such as
+    ctrl+f1, leaves a bare Ctrl press and release, which does nothing.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS follow-up 18
+    """
+    mods = set(chord_keys) & _MODIFIER_NAMES
+    return "alt" in mods or len(mods) >= 2
 
 
 def _real_modifier_down(name: str) -> bool:
@@ -178,7 +195,8 @@ def _real_send_mask_key() -> None:
 
     Injected input cannot reach a window of a higher integrity level (UIPI):
     over an elevated (administrator) foreground window the mask does nothing,
-    and that window's menu bar may still activate on the Alt key-up.
+    and that window's menu bar may still activate on the Alt key-up (or a
+    Ctrl+Shift layout switch fire).
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10);
     UIPI: Phase 5 review (A4)
     """
@@ -337,8 +355,9 @@ class PeekWindow:
         # suppressed too, and the key-up re-arms its chords.
         self._chord_down: dict = {}
         self._esc_down_suppressed = False  # the filter suppressed Esc's key-down
-        # The filter just suppressed the key of a chord containing alt: send
-        # the mask key before returning (follow-up 10).
+        # The filter just suppressed the key of a chord that needs the mask
+        # (`_needs_mask`): send the mask key before returning (follow-ups
+        # 10, 18).
         self._mask_pending = False
         # A failed mask send was logged (once per run; Phase 5 review A2).
         self._mask_warned = False
@@ -1208,21 +1227,22 @@ class PeekWindow:
         if suppress and self._mask_pending:
             # Here, in the hook, rather than on the worker: `keybd_event`
             # only queues the input, and from here the mask in practice
-            # precedes the Alt key-up at the user's app (the worker may lag a
-            # UI-thread timeout behind). Not guaranteed: a hook slow enough
-            # can let an Alt key-up already queued through first. AutoHotkey
-            # also sends it from its hook. Best effort: a failure is logged
-            # by type, once per run (it would repeat on every Alt chord), and
-            # never escapes.
+            # precedes the modifier key-ups at the user's app (the worker may
+            # lag a UI-thread timeout behind). Not guaranteed: a hook slow
+            # enough can let a key-up already queued through first.
+            # AutoHotkey also sends it from its hook. Best effort: a failure
+            # is logged by type, once per run (it would repeat on every
+            # chord), and never escapes.
             # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10);
-            # wording and the once-per-run log: Phase 5 review (A1, A2)
+            # wording and the once-per-run log: Phase 5 review (A1, A2);
+            # two-modifier chords: follow-up 18
             self._mask_pending = False
             try:
                 _send_mask_key()
             except Exception as e:
                 if not self._mask_warned:
                     self._mask_warned = True
-                    log.warning("PowerAtlas window: could not send the Alt "
+                    log.warning("PowerAtlas window: could not send the "
                                 "mask key: %s (not logged again this run)",
                                 type(e).__name__)
         if suppress and listener is not None:
@@ -1233,7 +1253,7 @@ class PeekWindow:
         if vk in _VK_MODIFIERS:
             return False  # modifiers reach `_on_press`/`_on_release`
         if vk == _VK_MASK:
-            # The Alt mask key this filter sent (follow-up 10): passed on to
+            # The mask key this filter sent (follow-ups 10, 18): passed on to
             # the user's app untouched, never a chord key or an event.
             return False
         name = self._vk_to_name(vk)
@@ -1285,7 +1305,8 @@ class PeekWindow:
                 return True  # auto-repeat: suppressed, never an event
             self._triggered[chord] = True
             self._post_press(chord, t)
-            if "alt" in self._chords[chord]:
+            # Once per press: a repeat returned above.
+            if _needs_mask(self._chords[chord]):
                 self._mask_pending = True
             return True
         if self._chord_down.pop(name, None) is not None:
@@ -1710,7 +1731,7 @@ def _win32():
         "GetDpiForWindow": ([H], wt.UINT),
         "GetWindowThreadProcessId": ([H, ctypes.POINTER(wt.DWORD)], wt.DWORD),
         "AttachThreadInput": ([wt.DWORD, wt.DWORD, wt.BOOL], wt.BOOL),
-        # The keyboard filter's modifier check and Alt mask (Phase 5,
+        # The keyboard filter's modifier check and mask key (Phase 5,
         # follow-ups 14 and 10).
         "GetAsyncKeyState": ([ctypes.c_int], ctypes.c_short),
         "keybd_event": ([wt.BYTE, wt.BYTE, wt.DWORD, ctypes.c_size_t], None),

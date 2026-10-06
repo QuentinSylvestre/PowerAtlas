@@ -10,7 +10,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _no_real_keyboard(monkeypatch):
     """No test reads the real keyboard or types into the desktop: the
-    filter's modifier check sees every tracked modifier as down, and the Alt
+    filter's modifier check sees every tracked modifier as down, and the
     mask key is recorded, not sent. Tests that check either override these.
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-ups 10, 14)
     """
@@ -4801,7 +4801,14 @@ class TestAltMask:
     bar. The filter sends a mask key (VK 0xE8, unassigned) right after
     suppressing the chord's key-down, as AutoHotkey does, so the app sees
     Alt+mask and the Alt key-up opens no menu. The filter ignores the mask
-    key it sent."""
+    key it sent.
+
+    Follow-up 18: a chord with two or more modifiers is masked too, alt or
+    not. With Windows' optional Ctrl+Shift layout hotkey on, the default
+    ctrl+shift+z would otherwise leave the user's app a bare Ctrl+Shift
+    press and release, which switches the keyboard layout. A one-modifier
+    chord without alt leaves a bare Ctrl (or Shift) press, which does
+    nothing, and is not masked."""
 
     _VK_F1, _VK_Z, _VK_B = 0x70, 0x5A, 0x42
 
@@ -4829,13 +4836,66 @@ class TestAltMask:
         assert sent == [1, 1]
         assert [e[0] for e in _drain(pw)] == ["press", "press"]
 
-    def test_a_chord_without_alt_sends_none(self, monkeypatch,
-                                            _no_real_keyboard):
+    @pytest.mark.parametrize("chord, held, vk", [
+        ("ctrl+f1", ("ctrl",), 0x70),
+        ("shift+f2", ("shift",), 0x71),
+    ])
+    def test_a_one_modifier_chord_without_alt_sends_none(
+            self, monkeypatch, _no_real_keyboard, chord, held, vk):
+        """Follow-up 18, the lower side of the boundary: one modifier, no
+        alt. (Before follow-up 18 this test used ctrl+shift+z, which the
+        follow-up now masks.)"""
+        import power_atlas.peek as peek_mod
+        sent = _no_real_keyboard
+        pw = self._peek(monkeypatch, chord, held=held)
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, vk, t=10)
+        assert sent == []
+        assert [e[0] for e in _drain(pw)] == ["press"]
+
+    def test_a_ctrl_shift_chord_sends_one_mask_per_press(self, monkeypatch,
+                                                         _no_real_keyboard):
+        """Follow-up 18, the upper side: two modifiers, no alt (the default
+        shortcut). One mask on the press, none on a repeat or the key-up,
+        another on a second press with the modifiers still held."""
         import power_atlas.peek as peek_mod
         sent = _no_real_keyboard
         pw = self._peek(monkeypatch, "ctrl+shift+z", held=("ctrl", "shift"))
         assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=10)
-        assert sent == []
+        assert sent == [1]
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=45)
+        assert sent == [1], "a repeat sends no second mask"
+        assert _feed_filter(pw, peek_mod._WM_KEYUP, self._VK_Z)
+        assert sent == [1], "the key-up sends none"
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=400)
+        assert sent == [1, 1]
+        assert [e[0] for e in _drain(pw)] == ["press", "press"]
+
+    def test_a_two_modifier_browser_chord_without_alt_masks(
+            self, monkeypatch, _no_real_keyboard):
+        """Follow-up 18 applies to either chord: ctrl+shift+b as the browser
+        shortcut beside a one-modifier peek shortcut."""
+        import power_atlas.peek as peek_mod
+        sent = _no_real_keyboard
+        pw = self._peek(monkeypatch, "ctrl+f1", browser="ctrl+shift+b",
+                        held=("ctrl", "shift"))
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_B, t=10)
+        assert sent == [1]
+        assert _drain(pw) == [("browser", 10)]
+
+    @pytest.mark.parametrize("keys, want", [
+        ({"ctrl", "f1"}, False),
+        ({"shift", "f1"}, False),
+        ({"alt", "f1"}, True),
+        ({"ctrl", "shift", "z"}, True),
+        ({"ctrl", "alt", "b"}, True),
+        ({"shift", "alt", "q"}, True),
+        ({"ctrl", "shift", "alt", "k"}, True),
+    ])
+    def test_needs_mask(self, keys, want):
+        """Expected values from follow-up 18: alt, or two or more
+        modifiers."""
+        import power_atlas.peek as peek_mod
+        assert peek_mod._needs_mask(frozenset(keys)) is want
 
     def test_the_browser_chord_masks_too(self, monkeypatch,
                                          _no_real_keyboard):
