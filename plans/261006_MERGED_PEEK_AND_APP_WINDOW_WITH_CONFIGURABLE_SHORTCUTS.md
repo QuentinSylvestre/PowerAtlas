@@ -1,7 +1,7 @@
 # Merged Peek and App Window with Configurable Shortcuts
 
 > **Date**: 2026-10-06
-> **Status**: In Progress — implementation complete; `target=_blank` and the live rotation check left for the user  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phase 5 (follow-up fixes) underway  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Turn the peek overlay into one PowerAtlas window with a peek mode and an app mode, add configurable shortcuts, and offer app window and browser from the tray
 > **Estimated effort**: 1-2 days
@@ -257,7 +257,7 @@ New comments and commits name this plan by slug (`261006_MERGED_PEEK_AND_APP_WIN
 - [x] Smoke log line is `PowerAtlas window ready` (logged only after the readiness gate), not `Peek webview ready`.
 - [x] A unit test feeds a filter whose matching helper raises: no exception escapes and nothing is suppressed; another asserts Esc is suppressed while `_peek_showing` and passes through otherwise; another asserts a second `stop()` does not call `destroy` again.
 - [x] Smoke: PowerAtlas restarted; `orchestrator.log` shows `PowerAtlas window ready` and `Peek hotkey listener started` after the restart; `GET /api/settings` with the `pa_local` cookie returns 200.
-- [ ] Live QA per `## 7) Verification` for SC-1 to SC-4 and SC-8, and a `target=_blank` link opening the default browser; each check is PASS, FAIL, or BLOCKED when the session is locked (BLOCKED items are listed for the user, never ticked as passed). Deferred to Phase 3 (session locked; see the list below).
+- [x] Live QA per `## 7) Verification` for SC-1 to SC-4 and SC-8, and a `target=_blank` link opening the default browser; each check is PASS, FAIL, or BLOCKED when the session is locked (BLOCKED items are listed for the user, never ticked as passed). Deferred to Phase 3 (session locked; see the list below).
 - [x] Update `README.md` tray click line (around 52), doors list (around 60-65, dropping "signs in again each time it is shown") and tray description for Open PowerAtlas / Open in browser and app mode.
 - [x] Update the `tray.py` `_login_url` docstring ("two doors") and the `plans/tests/260701_POWERATLAS.md` rows naming `set_peek_stop_callback`.
 
@@ -336,7 +336,7 @@ Tests: `hotkeys.py` behaviour tested inside `tests/test_peek.py` (a new class th
 - [x] Update `README.md` config sample and settings description with `browser_hotkey` and the validation rule.
 - [x] Update `plans/tests/260701_POWERATLAS.md` "validation only at peek startup" row and its settings allowlist (`peek_mode`, `browser_hotkey`).
 - [x] (deferred from Phase 2) Live QA of Phase 2's Toggle mode on an unlocked desktop: after a restart with `toggle`, injected press then press after 0.8 s hides, and press-press within 0.5 s opens app mode; restore `peek_mode` afterwards.
-- [ ] (deferred from Phase 1) Live QA of Phase 1's SC-1 to SC-4, SC-8, Esc and `target=_blank` checks on an unlocked desktop, using `qa_phase1.py` per `## 7) Verification`; BLOCKED again if the session is still locked. *2026-10-06 09:30: SC-1 to SC-4, SC-8 and the Esc checks PASS live (21/21); only the `target=_blank` link check remains, for the user.*
+- [x] (deferred from Phase 1) Live QA of Phase 1's SC-1 to SC-4, SC-8, Esc and `target=_blank` checks on an unlocked desktop, using `qa_phase1.py` per `## 7) Verification`; BLOCKED again if the session is still locked. *2026-10-06 09:30: SC-1 to SC-4, SC-8 and the Esc checks PASS live (21/21); only the `target=_blank` link check remains, for the user.* *09:45: `target=_blank` PASS in a throwaway pywebview window with the same settings (the link went to the default browser; the window stayed on its page); live rotation check PASS 6/6 (one re-sign after rotation, none on the next show).*
 
 Implementation (2026-10-06, code: a8d9c12)
 Phase 3 is done, and the code is committed as `a8d9c12`. It adds an optional browser shortcut and checks both shortcuts with a single validator, both on save and at startup. New module `src/power_atlas/hotkeys.py` is pure (no pywebview or pynput import) and holds the key-name table (one source of truth, with the 10 added keys checked against pynput 1.8.2), parsing and validation with Esc refused as a shortcut key, the conflict test (equal or one contains the other), and the D-18 chord matcher (most keys wins, a tie goes to peek). In `peek.py` the listener matches against a table of two chords with per-chord auto-repeat and key-up tracking; the Windows filter and the non-Windows path use the same matcher. The browser chord queues a `browser` event; the worker opens a signed-in tab and changes neither the window state nor the double-tap timing, and handles this event even before the window is ready. Modifier release still ends a Hold peek only for the peek chord's own modifiers. At startup `create_peek` falls back to `ctrl+shift+z` for an invalid peek shortcut and turns off a browser shortcut that is invalid or conflicting, with a warning in each case. `Config.browser_hotkey` defaults to `""` (off); `web.py` adds it to `_SETTING_TYPES`, `_RESTART_TO_APPLY` and both payloads; `/api/save-setting` refuses a bad format ("Shortcut …") and a shortcut that overlaps the other one as it actually runs; `__main__.py` passes the value to `create_peek`. The Settings dialog has a Browser shortcut row; both shortcut fields save through `saveShortcut` in `index.html`, which shows the server's error under the field and restores the stored value from `data-saved` on a refusal. README and `plans/tests/260701_POWERATLAS.md` describe the setting and the validation rule.
@@ -366,6 +366,33 @@ Implementation (2026-10-06, code: 14d1c2c)
 The docs and comments now name the doors that mint a login code, as the code ships them: tray **Open in browser**; tray **Open PowerAtlas**, when it falls back to the browser; the browser shortcut; the double-tap's browser fallback off Windows; the PowerAtlas window, at creation and after a local-secret rotation; **Copy login link**. This list replaces the old "tray, peek double-tap, peek webview" wording in four places in `src/power_atlas/web.py`: the `_LOGIN_CODE_MAX_OUTSTANDING` comment, the `pa_local` max-age comment, the `mint_login_code` docstring and the `login_url` docstring. `login_url` no longer claims a fresh code on every show. I checked that Copy login link goes through `tray._login_url` and then `web.login_url`, so "every door calls this through `login_url`" is true. Other edits: `src/power_atlas/__main__.py`: the `_server_url` docstring lists the same doors. `src/power_atlas/peek.py`: the module docstring describes the one pywebview window with peek mode and app mode (Windows only), plus its shortcut listener; the comment above `from .tray import _login_url` lists the window and browser doors. `README.md`: the Linux note says app mode is Windows only, and on Linux the double-tap and tray **Open PowerAtlas** open a signed-in browser with no **Open in browser** item; the tray intro says the icon click opens the browser where app mode is unavailable and that **Open in browser** is listed only where app mode is available; the fallback sentence now reads "pywebview or pynput missing, or not Windows"; the `peek_mode` sample comment says a double-tap opens the browser off Windows. A cold reader can now tell that on Windows a double-tap opens or hides the app window, and on Linux it opens the browser. No code changed. Commits: 521d8b6 and 14d1c2c.
 
 Per-phase review deferred to Step 9: comment, docstring and README edits only across four files (no executable code; verified with `git diff c148d83..14d1c2c -- src`), and Step 9's holistic review covers documentation completeness.
+
+### Phase 5: Follow-up fixes (user request, 2026-10-06) [QA]
+**Goal**: Fix the low-priority follow-ups the user asked for ("Low priority follow ups: fix them"). Follow-up 4 (focus fallback) needs no work: focus passed live. Follow-up 7 (live rotation check) passed live on 2026-10-06. Follow-ups 1-3 are governance and memory proposals that need the user's Save/Skip, not code.
+**File scope**: batch A — `src/power_atlas/peek.py`, `src/power_atlas/tray.py`, new `src/power_atlas/doors.py`, `src/power_atlas/web.py` (only `login_url` door helpers if they move), `tests/test_peek.py`, `tests/test_tray.py`, `tests/test_web.py`; batch B — `src/power_atlas/web.py`, `src/power_atlas/peek.py` (new-window routing only), `src/power_atlas/templates/partials/settings_modal.html`, `src/power_atlas/templates/index.html`, `README.md`, `tests/test_web.py`, `tests/test_peek.py`, `tests/acp_page.test.mjs`.
+**Covers**: SC-6, SC-8, SC-9, SC-10
+
+Batch A (window, hook, logging):
+- Follow-up 5: in the PowerAtlas window, enable WebView2 browser accelerator keys (reload, find) and the default context menu (`CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled`, `AreDefaultContextMenusEnabled`) once `CoreWebView2` exists; never on the UI thread from the hook.
+- Follow-up 8: app mode counts as available only after the window's first `loaded` event (a WebView2 initialization failure leaves app mode unavailable and tray Open uses the browser).
+- Follow-up 10: for chords containing `alt`, send a mask key (an unassigned virtual key, as AutoHotkey does) before the Alt key-up reaches the foreground app, so its menu bar does not activate; never from inside the hook callback if that would block — decide and record where.
+- Follow-up 14: in the Windows filter, confirm the chord's modifiers with `GetAsyncKeyState` before matching, so a modifier key-up lost on the secure desktop cannot leave a stuck modifier that fires a partial chord.
+- Follow-up 15: a periodic health check (worker or a timer, not the hook) that logs a WARNING once if the pynput listener is no longer running.
+- Follow-up 12: move the door helpers (`_login_url`, `_open_in_browser`) from `tray.py` into a neutral module `doors.py` imported by both `tray` and `peek`; keep the source guard `test_the_doors_use_no_other_spelling` meaningful.
+- Follow-up 13: user-facing log lines say "PowerAtlas window" consistently; keep the exact smoke token `Peek hotkey listener started` (section 7 and AGENTS.md rely on it).
+- Follow-up 17: `copy_login_link` logs a `notify` failure with the exception type only.
+- Follow-up 11: add `_press`/`_post` helpers in `tests/test_peek.py` and route new and touched tests through them (no mass rewrite required).
+
+Batch B (sign-in and settings):
+- Follow-up 6: a same-origin link opened as a new window from the PowerAtlas window opens the default browser through a fresh login URL that lands on that page. `/local-auth` accepts an optional `next` that must be a same-origin path in PowerAtlas's own page set (`/`, `/acp` and their query strings; never a scheme, `//`, backslash or other host); anything else lands on `/`. Other links keep going to the browser unchanged. Never log the URL.
+- Follow-up 9: `/api/settings` reports the shortcuts in force (`effective` values) alongside the stored ones; the Settings dialog shows a short note under a shortcut field whose stored value is not the one running.
+- Follow-up 16: saving the peek shortcut returns whether the stored browser shortcut will be active at the next launch; the dialog says so when it changes.
+
+**Exit criteria**:
+- [ ] Batch A committed; tests for each item (fails without the fix where testable); full suite (two parts) and node tests pass; window probe passes.
+- [ ] Batch B committed; tests for each item including `next` refusals (scheme, `//`, backslash, unknown path, encoded variants); full suite and node tests pass.
+- [ ] Live QA on the unlocked desktop: hold, double-tap, X, Esc and the browser shortcut still pass; Ctrl+F and right-click work in app mode; an Alt chord does not activate a foreground app's menu bar (if testable).
+- [ ] README updated where behaviour is user-visible (accelerators and context menu, settings notes, same-origin links).
 
 ## 6) Risk Assessment
 
