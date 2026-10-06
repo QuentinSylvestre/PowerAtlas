@@ -619,12 +619,14 @@ class PeekWindow:
         # `easy_drag=False`: pywebview defaults it on for a frameless window,
         # which makes a drag anywhere in the page move the window, so selecting
         # text moved it. App mode has a real title bar to drag by, and the peek
-        # is never dragged.
+        # is never dragged. `text_select=True`: pywebview defaults it off and
+        # injects `body { user-select: none }`, so no text could be selected.
         self._window = webview.create_window(
             "PowerAtlas",
             _login_url(self._server_url),
             frameless=True,
             easy_drag=False,
+            text_select=True,
             on_top=False,
             hidden=True,
             width=1,

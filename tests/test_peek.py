@@ -3554,6 +3554,9 @@ class TestWindowCreationOptions:
         kwargs = fake.create_window.call_args.kwargs
         assert kwargs.get("frameless") is True
         assert kwargs.get("easy_drag") is False
+        # pywebview's default `text_select=False` injects `user-select: none`
+        # into every page, so nothing could be selected (user report).
+        assert kwargs.get("text_select") is True
 
 
 class TestSignInCookieCheck:
