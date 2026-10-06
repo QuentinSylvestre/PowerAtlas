@@ -1082,7 +1082,7 @@ class TestWindowStateMachine:
         pw, a = self._peek(monkeypatch)
         a.has_app_mode = False
         opened = []
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
         self._press(pw, 1000)
         self._press(pw, 1100)
@@ -1341,7 +1341,7 @@ class TestToggleStateMachine:
         pw, a = self._peek(monkeypatch)
         a.has_app_mode = False
         opened = []
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
         self._press(pw, 1000)
         self._press(pw, 1100)
@@ -1655,7 +1655,7 @@ class TestWindowWorker:
         import power_atlas.peek as peek_mod
         pw = _new_peek(monkeypatch)
         opened = []
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
         assert pw.supports_app_mode is False
         pw.show_app()
@@ -1790,7 +1790,7 @@ class TestResetOverlaysAndBrowserErrors:
             # review fix 11): only the type may reach the log.
             raise RuntimeError("no default browser for " + url)
 
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", no_browser)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", no_browser)
         with caplog.at_level(logging.WARNING, logger="power_atlas"):
             pw._handle(("press", "peek", 1000))
             pw._handle(("press", "peek", 1100))  # must not raise
@@ -2827,7 +2827,7 @@ class TestBrowserEvent:
         pw._signed_gen = web_mod.local_secret_generation()
         opened = []
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
         return peek_mod, pw, pw._adapter, opened
 
     @pytest.mark.parametrize("where", ["hidden", "peek", "app"])
@@ -2871,7 +2871,7 @@ class TestBrowserEvent:
         pw = _two_chord_peek(monkeypatch)
         opened = []
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
         monkeypatch.setattr(pw, "_establish_ready", lambda: None)
         # Drained at tick 1000: both presses are within 1 s, so neither is
         # stale (final review cycle 2, fix 13).
@@ -3534,7 +3534,7 @@ class TestBrowserRateLimit:
         pw = _two_chord_peek(monkeypatch)
         opened = []
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
         monkeypatch.setattr(pw, "_establish_ready", lambda: pw._adapter)
         # The presses are drained before readiness: "now" is the last one,
         # so none is stale (final review cycle 2, fix 13).
@@ -3891,7 +3891,7 @@ class TestMalformedEventKeepsTheWorker:
         pw = _two_chord_peek(monkeypatch)
         opened = []
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
         monkeypatch.setattr(peek_mod, "_event_tick_now", lambda: 100)
         a = _FakeAdapter()
         monkeypatch.setattr(pw, "_establish_ready", lambda: a)
@@ -4046,7 +4046,7 @@ class TestStaleQueuedBrowserPress:
         pw = _two_chord_peek(monkeypatch)
         opened = []
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
         monkeypatch.setattr(peek_mod, "_event_tick_now", lambda: now)
         monkeypatch.setattr(pw, "_establish_ready", lambda: pw._adapter)
         for t in ticks:
@@ -4078,7 +4078,7 @@ class TestStaleQueuedBrowserPress:
         pw = _two_chord_peek(monkeypatch)
         opened = []
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
-        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
         monkeypatch.setattr(peek_mod, "_event_tick_now", lambda: 10**6)
         monkeypatch.setattr(pw, "_establish_ready", lambda: pw._adapter)
         th = threading.Thread(target=pw._window_worker, daemon=True)

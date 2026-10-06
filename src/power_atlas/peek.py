@@ -21,15 +21,16 @@ log = logging.getLogger("power_atlas.peek")
 # whenever it finds itself signed out (a local-secret rotation, or a missing
 # or invalid cookie), and the browser (the browser shortcut, and app mode's
 # browser fallback). The login code in this URL is exchanged for it
-# on first load. The tray's helper, shared rather than copied; it imports `web`
-# lazily, so this module still loads without the web app.
+# on first load. The helper is shared with the tray through `doors`, which
+# imports `web` lazily, so this module still loads without the web app.
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11);
-# door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
-from .tray import _login_url
-# The module, not the function: `_open_in_browser` is looked up at call time so
+# door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4;
+# from `doors`, not `tray`: Phase 5 (follow-up 12)
+from .doors import login_url as _login_url
+# The module, not the function: `open_in_browser` is looked up at call time so
 # the browser door here is the tray's own, patches included.
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
-from . import tray as _tray
+from . import doors as _doors
 # Shortcut names, parsing and validation, shared with the settings write path.
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
 from . import hotkeys as _hotkeys
@@ -821,9 +822,9 @@ class PeekWindow:
             return False
 
     def _open_browser(self) -> None:
-        """The browser door, through the tray's helper. Never logs the URL."""
+        """The browser door, through `doors`. Never logs the URL."""
         try:
-            _tray._open_in_browser(_login_url(self._server_url))
+            _doors.open_in_browser(_login_url(self._server_url))
         except Exception as e:
             log.warning("Peek could not open the browser: %s", type(e).__name__)
 

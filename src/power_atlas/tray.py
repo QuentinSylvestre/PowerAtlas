@@ -5,13 +5,16 @@ import os
 import sys
 import threading
 import time
-import webbrowser
 from pathlib import Path
 
 import pystray
 from PIL import Image, ImageDraw
 
 from .config import Config, CONFIG_DIR, load_config
+# The door helpers, looked up through the module at call time so a patch of
+# `doors.open_in_browser` reaches every tray action.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 12)
+from . import doors
 
 log = logging.getLogger("power_atlas.tray")
 
@@ -19,9 +22,10 @@ _shutdown_event = threading.Event()
 _restart_requested = False
 _icon_instance = None
 # The PowerAtlas window (`peek.PeekWindow`), registered by `__main__`. The tray
-# cannot import `peek` at module level: `peek` imports `_login_url` from here.
+# never imports `peek` (D-15); both import their door helpers from `doors`.
 # It exposes `show_app()`, `stop()` and `supports_app_mode`.
-# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 (D-15)
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 (D-15);
+# doors: Phase 5 (follow-up 12)
 _window_controller = None
 
 
@@ -81,41 +85,6 @@ def _create_icon() -> Image.Image:
         img = Image.new("RGBA", (16, 16), (60, 120, 220, 255))
         ImageDraw.Draw(img).text((3, 1), "P", fill="white")
         return img
-
-
-def _login_url(server_url: str) -> str:
-    """``server_url`` plus a fresh one-time login code, via `web.login_url`.
-
-    Every loopback route needs the `pa_local` cookie, and a door is how a
-    browser gets one: the code in this URL is exchanged for it on first load.
-    Minted in-process — the tray and the server share one process — never
-    through an HTTP route. `web` is imported lazily, like `data` in `on_open`,
-    so importing this module does not pull in the web app.
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
-
-    The one door helper: `peek` imports this function for the window at
-    creation, its sign-in when it is signed out (a rotation, or a missing or
-    invalid cookie) and its browser fallback, rather than keeping a copy of it.
-    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11);
-    door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
-    """
-    from .web import login_url
-    return login_url(server_url)
-
-
-def _open_in_browser(url: str) -> None:
-    try:
-        if sys.platform == "win32":
-            webbrowser.open(url)
-        else:
-            import subprocess as _sp
-            _sp.Popen(["xdg-open", url],
-                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-    except Exception as e:
-        # The type only: `url` carries a live login code, and an exception's
-        # message can quote it.
-        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (11)
-        log.error("Failed to open browser: %s", type(e).__name__)
 
 
 # `OpenClipboard` fails while another process holds the clipboard, which
@@ -189,7 +158,7 @@ def copy_login_link(server_url: str, icon=None) -> str:
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (failure
     branch: Phase 5 review)
     """
-    url = _login_url(server_url)
+    url = doors.login_url(server_url)
     if _copy_to_clipboard(url):
         message, title = ("Paste it into a browser within 2 minutes. It "
                           "works once."), "Login link copied"
@@ -227,7 +196,7 @@ def _build_menu(server_url: str) -> "pystray.Menu":
         _warmup()
         # A fresh login code per open, so the browser lands signed in.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
-        _open_in_browser(_login_url(server_url))
+        doors.open_in_browser(doors.login_url(server_url))
 
     def on_open_app(icon, item):
         if _app_mode_available():

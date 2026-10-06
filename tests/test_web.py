@@ -29486,7 +29486,7 @@ class TestCanonicalLoopbackHost:
     def test_the_doors_use_no_other_spelling(self):
         """No door file carries its own loopback literal or login path."""
         src = Path(__file__).resolve().parent.parent / "src" / "power_atlas"
-        for name in ("tray.py", "peek.py", "__main__.py"):
+        for name in ("doors.py", "tray.py", "peek.py", "__main__.py"):
             text = (src / name).read_text(encoding="utf-8")
             for literal in ('"localhost', "'localhost", '"::1', "[::1]",
                             "/local-auth", "?code="):
@@ -29561,7 +29561,7 @@ class TestLoopbackDoors:
     def test_tray_open(self, local_enabled, monkeypatch, label):
         tray_mod, icon = self._tray_menu(monkeypatch)
         opened = []
-        monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
+        monkeypatch.setattr(tray_mod.doors, "open_in_browser", opened.append)
         icon.menu[label](icon, None)
         assert len(opened) == 1
         _signs_in_in_one_navigation(opened[0], self._SERVER)
@@ -29571,7 +29571,7 @@ class TestLoopbackDoors:
                                               label):
         tray_mod, icon = self._tray_menu(monkeypatch)
         opened = []
-        monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
+        monkeypatch.setattr(tray_mod.doors, "open_in_browser", opened.append)
         monkeypatch.setattr(local_enabled, "login_url",
                             lambda server_url: "sentinel:" + server_url)
         icon.menu[label](icon, None)
@@ -29705,8 +29705,8 @@ class TestLoopbackDoors:
         clock = [1000.0]
         monkeypatch.setattr(peek_mod, "_now", lambda: clock[0])
         urls = []
-        real_open_in_browser = tray_mod._open_in_browser
-        monkeypatch.setattr(tray_mod, "_open_in_browser", urls.append)
+        real_open_in_browser = tray_mod.doors.open_in_browser
+        monkeypatch.setattr(tray_mod.doors, "open_in_browser", urls.append)
         monkeypatch.setattr(tray_mod.time, "sleep", lambda s: None)
         with caplog.at_level(logging.DEBUG), \
                 caplog.at_level(logging.DEBUG, logger="power_atlas"):
@@ -29718,8 +29718,8 @@ class TestLoopbackDoors:
                 raise OSError(f"cannot open {url}")
 
             monkeypatch.setattr(tray_mod.sys, "platform", "win32")
-            monkeypatch.setattr(tray_mod.webbrowser, "open", quoting_failure)
-            door_url = tray_mod._login_url(self._SERVER)
+            monkeypatch.setattr(tray_mod.doors.webbrowser, "open", quoting_failure)
+            door_url = tray_mod.doors.login_url(self._SERVER)
             real_open_in_browser(door_url)
             urls.append(door_url)
             assert "Failed to open browser: OSError" in caplog.text
@@ -29854,7 +29854,7 @@ class TestLoopbackDoors:
         from power_atlas import tray as tray_mod
         peek_mod, pw, window = self._peek(monkeypatch, app_mode=True)
         opened = []
-        monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
+        monkeypatch.setattr(tray_mod.doors, "open_in_browser", opened.append)
         pw._handle(("press", "peek", 1000))
         pw._handle(("press", "peek", 1100))
         assert window.apps == [True]
@@ -29866,7 +29866,7 @@ class TestLoopbackDoors:
         from power_atlas import tray as tray_mod
         peek_mod, pw, window = self._peek(monkeypatch, app_mode=False)
         opened = []
-        monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
+        monkeypatch.setattr(tray_mod.doors, "open_in_browser", opened.append)
         pw._handle(("press", "peek", 1000))
         pw._handle(("press", "peek", 1100))
         assert len(opened) == 1

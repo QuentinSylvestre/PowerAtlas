@@ -95,8 +95,8 @@ def test_open_poweratlas_uses_the_browser_until_the_window_is_ready(
     ctrl = _Controller(ready=False)
     tray_mod, items = _menu(monkeypatch, ctrl)
     opened = []
-    monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
-    monkeypatch.setattr(tray_mod, "_login_url", lambda u: u + "/signed")
+    monkeypatch.setattr(tray_mod.doors, "open_in_browser", opened.append)
+    monkeypatch.setattr(tray_mod.doors, "login_url", lambda u: u + "/signed")
     items[0]["action"](None, None)
     assert opened == ["http://127.0.0.1:4915/signed"]
     assert ctrl.shown == 0
@@ -106,7 +106,7 @@ def test_open_poweratlas_shows_the_app_window_when_ready(monkeypatch):
     ctrl = _Controller(ready=True)
     tray_mod, items = _menu(monkeypatch, ctrl)
     opened = []
-    monkeypatch.setattr(tray_mod, "_open_in_browser", opened.append)
+    monkeypatch.setattr(tray_mod.doors, "open_in_browser", opened.append)
     items[0]["action"](None, None)
     assert ctrl.shown == 1
     assert opened == []
@@ -149,3 +149,23 @@ def test_open_in_browser_visibility_does_not_import_peek(monkeypatch):
     monkeypatch.setitem(sys.modules, "power_atlas.peek", None)
     monkeypatch.delattr(power_atlas, "peek", raising=False)
     assert _visible(items[1]) is True
+
+
+def test_doors_import_neither_web_nor_the_tray():
+    """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+    (follow-up 12): the door helpers live in a neutral module that `tray` and
+    `peek` both import; importing it pulls in neither the web app (minted
+    lazily) nor the tray UI module, and `tray` keeps no copy of them."""
+    import subprocess
+    import sys
+    code = ("import sys, power_atlas.doors as d; "
+            "print(sorted(m for m in ('power_atlas.web', 'power_atlas.tray', "
+            "'power_atlas.peek') if m in sys.modules)); "
+            "print(callable(d.login_url), callable(d.open_in_browser))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split("\n")[:2] == ["[]", "True True"]
+    import power_atlas.tray as tray_mod
+    assert not hasattr(tray_mod, "_login_url")
+    assert not hasattr(tray_mod, "_open_in_browser")
