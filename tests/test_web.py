@@ -148,12 +148,12 @@ def isolated_config(tmp_path, monkeypatch):
     # (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1).
     from power_atlas import data_codex_state as data_codex_state_mod, lock_owner as lock_owner_mod, quiet_log as quiet_log_mod
     monkeypatch.setattr(data_codex_state_mod, "CODEX_STATE_DIR", tmp_path / "codex-home")
-    # Phase 3 (D15): the writer state reads `unknown`, so the folder rule still decides every row;
+    # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3 (D15): the writer state reads `unknown`, so the folder rule still decides every row;
     # the owner lookup has no thread and an empty cache; the tile enumerator starts with no memo.
     monkeypatch.setattr(data_codex_mod, "session_writer_state", lambda sid: "unknown")
     monkeypatch.setattr(lock_owner_mod, "_resolver", lock_owner_mod._Resolver(threads=False, self_test=False))
     monkeypatch.setattr(web_mod, "_codex_enum", {"at": -1e9, "ids": [], "cursor": 0, "cursor_first": 0, "held": set(), "owned": set()})
-    # The turn-end notifier (Phase 5): no real thread, a fresh watcher, and a fresh enabled-flag cache.
+    # The turn-end notifier (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 5): no real thread, a fresh watcher, and a fresh enabled-flag cache.
     monkeypatch.setattr(web_mod, "_TURN_WATCH_THREAD", False)
     monkeypatch.setattr(web_mod, "_turn_watcher", web_mod._CodexTurnWatcher())
     monkeypatch.setattr(web_mod, "_codex_notify_enabled_memo", [-1e9, False])
@@ -32039,7 +32039,7 @@ class TestOverviewLive:
         assert sorted(snap.live_cwd_pairs()) == [("claude-code", "c:\\w"), ("kiro-cli-v3", "c:\\k")]
 
 
-    # --- Codex terminal-held threads (Phase 3, D21) ---
+    # --- Codex terminal-held threads (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3, D21) ---
 
     def test_live_sessions_adds_the_terminal_held_thread_whose_process_runs_in_another_folder(
             self, monkeypatch, store):
@@ -32988,7 +32988,7 @@ class TestOverviewUsage:
         # Codex's sessions folder, redirected like the other three
         # (261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 4).
         monkeypatch.setattr(data_codex, "CODEX_SESSIONS_DIR", roots.codex)
-        # The state database folder, redirected with them (Phase 1 of
+        # The state database folder, redirected with them (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1 of
         # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB).
         from power_atlas import data_codex_state
         self.state_dir = tmp_path / "codex-state"
@@ -33108,7 +33108,7 @@ class TestOverviewUsage:
         assert (cp["sessions_over_80"], cp["sessions_total"]) == (1, 3)
         assert [(p["session_id"], p["peak"]) for p in cp["top"]] == [("sess_a", 85.2), ("sess_b", 30.0)]
 
-    # -- Codex context pressure (Phase 2 of
+    # -- Codex context pressure (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 2 of
     # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB) --
 
     @staticmethod
@@ -34173,7 +34173,7 @@ class TestOverviewUsage:
     def cx_total(days, key):
         return sum(d["tokens"][key] for d in days.values())
 
-    # -- Codex sub-agent threads from the state database (Phase 1 of
+    # -- Codex sub-agent threads from the state database (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1 of
     # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB) --
 
     def state_db(self, rows, wal=True):
@@ -35376,7 +35376,7 @@ class TestOverviewUsage:
 
 
 
-# --- Codex lock owner: the verdict, the live rule, the tile source, diagnostics (Phase 3 of
+# --- Codex lock owner: the verdict, the live rule, the tile source, diagnostics (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3 of
 # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB; D8, D10, D13, D19, D21, D23) ---
 
 _LK_HOST = (500, "ChatGPT.exe")
@@ -35735,7 +35735,7 @@ class TestCodexTileSourceWiring:
 
 
 class TestCodexTurnVerdictWiring:
-    """Phase 4 (D11, D12, D19, D21): a Codex thread a terminal holds carries `working` or `idle` on
+    """261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 4 (D11, D12, D19, D21): a Codex thread a terminal holds carries `working` or `idle` on
     its dashboard row and its Overview tile; nothing else does, and `/api/acp/sessions` is untouched."""
 
     @pytest.fixture
@@ -35831,7 +35831,7 @@ class TestCodexTurnVerdictWiring:
 
 
 class TestCodexTurnBoundaryParity:
-    """Phase 4: the verdict reader and the usage parser agree on where a turn starts and ends. A
+    """261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 4: the verdict reader and the usage parser agree on where a turn starts and ends. A
     turn the usage parser has closed (it adds agent time) is idle to the verdict reader; a turn it
     still holds open is working."""
 
@@ -35923,7 +35923,7 @@ _WS4 = "0000a004-1111-4222-8333-444444444444"
 
 
 class TestCodexTurnWatchTick:
-    """Phase 5 (D13, D20): the notifier tick over an injected world."""
+    """261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 5 (D13, D20): the notifier tick over an injected world."""
 
     @pytest.fixture
     def world(self, tmp_path):
@@ -36299,7 +36299,7 @@ class TestCodexTurnWatchTick:
 
 
 class TestCodexTurnWatcherThread:
-    """Phase 5 (D13, D23): the daemon thread, its heartbeat, its restart and its status."""
+    """261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 5 (D13, D23): the daemon thread, its heartbeat, its restart and its status."""
 
     @pytest.fixture
     def web_mod(self, monkeypatch):
@@ -36502,7 +36502,7 @@ async def _noop_async():
 
 
 class TestCodexEnumeratorOneRunAtATime:
-    """Phase 5 review: the Overview polls and the notifier thread both call the enumerator."""
+    """261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 5 review: the Overview polls and the notifier thread both call the enumerator."""
 
     def test_a_caller_that_finds_a_run_in_progress_takes_the_previous_answer_and_probes_nothing(self, monkeypatch):
         from power_atlas import data_codex, web as web_mod

@@ -7,7 +7,7 @@ files directly (decisions D4 and D6 of
 is the canonical record, and the SQLite catalogue next to it is a private,
 versioned projection that is read only by ``data_codex_state``, as optional
 enrichment (261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB
-Phase 1); nothing here reads it.
+261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 1); nothing here reads it.
 
 OpenAI publishes no stability guarantee for the rollout format, and the files
 are rewritten in place (compaction), can be torn mid-write, and reach tens of

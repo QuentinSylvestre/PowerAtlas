@@ -19551,7 +19551,7 @@ check("dashboard rail: the 60 s refresh picks up a changed resume_locked, in bot
   assertEqual(box.dashRailRefreshStates(fresh({ resume_locked: false })), false, "false and omitted are the same state");
 });
 
-// Phase 4 (D12): a Codex thread a terminal holds carries `working` or `idle`; the dot, the 60 s
+// 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 4 (D12): a Codex thread a terminal holds carries `working` or `idle`; the dot, the 60 s
 // refresh and the metadata strip follow the raw value, never dashRailRowStatus (which turns an
 // empty value into `working`).
 function loadCodexVerdictHelpers() {

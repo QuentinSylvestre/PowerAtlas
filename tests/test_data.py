@@ -4218,7 +4218,7 @@ def _cx_iso(epoch: float) -> str:
 
 
 class TestCodexTurnState:
-    """Phase 4 (D11): `turn_state` is the last of task_started (working), task_complete and
+    """261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 4 (D11): `turn_state` is the last of task_started (working), task_complete and
     turn_aborted (idle), matched on `type` and `payload.type`, None past the tail window and
     None for a working turn whose newest record is older than 30 minutes."""
 
@@ -4471,7 +4471,7 @@ class TestCodexTurnState:
 
 
 class TestCodexNewTurnEnds:
-    """Phase 5 (D13): `new_turn_ends` counts `task_complete` records appended since a state."""
+    """261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 5 (D13): `new_turn_ends` counts `task_complete` records appended since a state."""
 
     SID, CWD = _cx_id(41), "C:\\W"
 

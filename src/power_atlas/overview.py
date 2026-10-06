@@ -1693,7 +1693,7 @@ def _codex_context_pct(info) -> float | None:
     integer (a bool, a string or a negative number gives None). An estimate: the last
     input is the tokens sent in one request, which is what Codex's own indicator tracks,
     not a count of what the model holds. 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB
-    Phase 2"""
+    261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 2"""
     if not isinstance(info, dict):
         return None
     window = info.get("model_context_window")
