@@ -2462,6 +2462,157 @@ class TestWin32ShowPrimitives:
         assert self._shows(u) == []
 
 
+class _FakeController:
+    """`CoreWebView2Controller` stand-in: records `IsVisible` writes into
+    the shared call log, so their order against `ShowWindow` shows."""
+
+    def __init__(self, calls):
+        self._calls = calls
+        self._v = True
+
+    @property
+    def IsVisible(self):
+        return self._v
+
+    @IsVisible.setter
+    def IsVisible(self, v):
+        self._calls.append(("IsVisible", v))
+        self._v = v
+
+
+class _FakeClrType:
+    """A .NET `Type` stand-in: private fields by name, and a base type."""
+
+    def __init__(self, fields, base=None):
+        self.fields = fields
+        self.BaseType = base
+        self.asked = []
+
+    def GetField(self, name, flags):
+        self.asked.append((name, flags))
+        return self.fields.get(name)
+
+
+class _FakeFieldInfo:
+    def __init__(self, value):
+        self.value = value
+
+    def GetValue(self, obj):
+        return self.value
+
+
+class TestHiddenPageVisibility:
+    """After X or an end peek, `ShowWindow(SW_HIDE)` (and `Form.Hide()`)
+    left the WebView2 controller's `IsVisible` True, so the page kept
+    `document.visibilityState == "visible"` while the window was hidden and
+    the pages' poll-pause logic never ran (pixel probe 2026-10-06: form and
+    control `Visible` False, controller `IsVisible` True). Property: hiding
+    sets `IsVisible` False after the window is hidden; every show sets it
+    True after the window is shown; a missing controller field never stops
+    a show or a hide and is logged once.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS hidden-page fix
+    """
+
+    def _adapter(self, monkeypatch, field="direct", controller=True):
+        import types
+        import power_atlas.peek as peek_mod
+        a, u, WP = TestWin32ShowPrimitives()._adapter(monkeypatch)
+        reflection = types.ModuleType("System.Reflection")
+        reflection.BindingFlags = types.SimpleNamespace(Instance=4,
+                                                        NonPublic=32)
+        monkeypatch.setitem(sys.modules, "System.Reflection", reflection)
+        ctl = _FakeController(u.calls) if controller else None
+        info = _FakeFieldInfo(ctl)
+        if field == "direct":
+            t = _FakeClrType({"_coreWebView2Controller": info})
+        elif field == "base":
+            t = _FakeClrType({}, base=_FakeClrType(
+                {"_coreWebView2Controller": info}))
+        else:
+            t = _FakeClrType({}, base=_FakeClrType({}))
+        webview = types.SimpleNamespace(GetType=lambda: t)
+        a._native.browser = types.SimpleNamespace(webview=webview)
+        return a, u, WP, t
+
+    @staticmethod
+    def _seq(u):
+        return [c[:1] + c[2:3] if c[0] == "ShowWindow" else c
+                for c in u.calls if c[0] in ("ShowWindow", "IsVisible",
+                                             "SetWindowPlacement")]
+
+    def test_hide_makes_the_page_hidden_after_the_window(self, monkeypatch):
+        a, u, _, t = self._adapter(monkeypatch)
+        u.visible = True
+        a.hide()
+        assert self._seq(u) == [("ShowWindow", 0), ("IsVisible", False)]
+        assert not u.visible
+        assert t.asked == [("_coreWebView2Controller", 4 | 32)]
+
+    def test_show_peek_makes_the_page_visible_after_the_show(self,
+                                                             monkeypatch):
+        a, u, _, _ = self._adapter(monkeypatch)
+        a.show_peek()
+        assert self._seq(u) == [("ShowWindow", 8), ("IsVisible", True)]
+
+    @pytest.mark.parametrize("focused, cmd", [(True, 5), (False, 8)])
+    def test_first_app_show_makes_the_page_visible(self, monkeypatch,
+                                                   focused, cmd):
+        a, u, _, _ = self._adapter(monkeypatch)
+        a.apply_app(None, focused)
+        assert self._seq(u) == [("ShowWindow", cmd), ("IsVisible", True)]
+
+    def test_a_saved_placement_makes_the_page_visible(self, monkeypatch):
+        a, u, WP, _ = self._adapter(monkeypatch)
+        saved = WP()
+        saved.showCmd = 1
+        a.apply_app(saved, False)
+        assert self._seq(u) == [("SetWindowPlacement", _FakeNative.HWND),
+                                ("IsVisible", True)]
+
+    def test_hide_then_show_round_trips(self, monkeypatch):
+        """Asymmetric sequence: hide, peek, hide, app."""
+        a, u, _, t = self._adapter(monkeypatch)
+        a.hide()
+        a.show_peek()
+        a.hide()
+        a.apply_app(None, True)
+        assert [c[1] for c in u.calls if c[0] == "IsVisible"] == [
+            False, True, False, True]
+        assert len(t.asked) == 1, "the field is looked up once"
+
+    def test_the_field_is_found_on_a_base_type(self, monkeypatch):
+        a, u, _, t = self._adapter(monkeypatch, field="base")
+        a.hide()
+        assert ("IsVisible", False) in u.calls
+        assert t.asked == [("_coreWebView2Controller", 4 | 32)]
+        assert t.BaseType.asked == [("_coreWebView2Controller", 4 | 32)]
+
+    def test_no_controller_yet_is_quiet(self, monkeypatch, caplog):
+        """Before WebView2 initializes the field is null: nothing to do."""
+        a, u, _, _ = self._adapter(monkeypatch, controller=False)
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            a.hide()
+            a.show_peek()
+        assert [c[0] for c in u.calls if c[0] == "ShowWindow"] == [
+            "ShowWindow", "ShowWindow"]
+        assert caplog.records == []
+
+    def test_a_missing_field_never_stops_a_show_or_hide(self, monkeypatch,
+                                                        caplog):
+        a, u, _, _ = self._adapter(monkeypatch, field="missing")
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            a.show_peek()
+            a.hide()
+            a.show_peek()
+            a.hide()
+        assert [c[2] for c in u.calls if c[0] == "ShowWindow"] == [8, 0, 8, 0]
+        assert not u.visible
+        warnings = [r for r in caplog.records
+                    if "could not tell the page" in r.getMessage()]
+        assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+        assert "LookupError" in warnings[0].getMessage()
+
+
 class TestReadinessOffWindows:
     """Fix 13: peek off Windows does not depend on `events.shown`."""
 

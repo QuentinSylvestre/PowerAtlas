@@ -1834,6 +1834,17 @@ class _Win32Window(_CookieReader):
     painted: a blank white window. `Form.Activate()` is also a no-op while
     `Visible` is False. The window is placed while hidden, then shown.
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS blank-window fix
+
+    Hiding never reaches the controller on its own: neither
+    `ShowWindow(SW_HIDE)` nor `Form.Hide()` calls the WebView2 control's
+    `OnVisibleChanged` (WinForms tells a child only when it becomes
+    visible), so the page kept `document.visibilityState == "visible"`
+    and its poll-pause logic never ran (pixel probe 2026-10-06: form and
+    control `Visible` False, controller `IsVisible` True, after X and after
+    an end peek, with either call). `hide` therefore sets the controller's
+    `IsVisible` False itself, and every show sets it True after
+    `ShowWindow` (`_set_page_visible`).
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS hidden-page fix
     """
 
     @property
@@ -1853,6 +1864,46 @@ class _Win32Window(_CookieReader):
         # UI thread only: `FormClosing` is subscribed once, however many
         # readiness attempts the UI thread runs late.
         self._closing_hooked = False
+        # UI thread only: the WebView2 control's private controller field
+        # (found once), and whether a failure to reach it was logged.
+        self._controller_field = None
+        self._page_visible_warned = False
+
+    def _set_page_visible(self, visible: bool) -> None:
+        """On the UI thread: set the WebView2 controller's `IsVisible`, so
+        the page's `document.visibilityState` follows the window (class
+        docstring). The WinForms control keeps the controller in the private
+        field `_coreWebView2Controller` (Microsoft.Web.WebView2.WinForms
+        1.0.3856.49), read by reflection. Best effort: before WebView2 has
+        initialized there is no controller and nothing to do; a missing field
+        or a failing call is logged once per run by type and never raises,
+        so a WebView2 update can only cost the pause, never the show or hide.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS hidden-page fix
+        """
+        try:
+            wv = self._native.browser.webview
+            field = self._controller_field
+            if field is None:
+                from System.Reflection import BindingFlags  # type: ignore[import]
+                flags = BindingFlags.Instance | BindingFlags.NonPublic
+                t = wv.GetType()
+                while t is not None and field is None:
+                    field = t.GetField("_coreWebView2Controller", flags)
+                    t = t.BaseType
+                if field is None:
+                    raise LookupError("no _coreWebView2Controller field")
+                self._controller_field = field
+            ctl = field.GetValue(wv)
+            if ctl is None:
+                return
+            ctl.IsVisible = visible
+        except Exception as e:
+            if not self._page_visible_warned:
+                self._page_visible_warned = True
+                log.warning("PowerAtlas window: could not tell the page it is "
+                            "%s: %s (not logged again this run)",
+                            "shown" if visible else "hidden",
+                            type(e).__name__)
 
     # Bounded UI-thread call.
     def _ui(self, fn, what: str, wait: bool = True, timeout: float | None = None,
@@ -2006,13 +2057,18 @@ class _Win32Window(_CookieReader):
                            _SWP_NOACTIVATE)
             # `ShowWindow`, never `SWP_SHOWWINDOW` (class docstring).
             u.ShowWindow(h, _SW_SHOWNA)
+            self._set_page_visible(True)
             return h
 
         self._keep_hwnd(self._ui(run, "show peek"))
 
     def hide(self) -> None:
         u, _ = _win32()
-        self._ui(lambda: u.ShowWindow(self._h, _SW_HIDE), "hide")
+        def run():
+            u.ShowWindow(self._h, _SW_HIDE)
+            self._set_page_visible(False)
+
+        self._ui(run, "hide")
 
     def apply_app(self, placement, focused: bool):
         """App chrome and placement; returns the placement now in effect."""
@@ -2036,6 +2092,7 @@ class _Win32Window(_CookieReader):
                 u.SetWindowPos(h, _HWND_TOP, x, y, w, hh, _SWP_NOACTIVATE)
                 # `ShowWindow`, never `SWP_SHOWWINDOW` (class docstring).
                 u.ShowWindow(h, _SW_SHOW if focused else _SW_SHOWNA)
+                self._set_page_visible(True)
                 wp = WP()
                 wp.length = ctypes.sizeof(WP)
                 u.GetWindowPlacement(h, ctypes.byref(wp))
@@ -2046,6 +2103,7 @@ class _Win32Window(_CookieReader):
                                        focused)
             if not u.SetWindowPlacement(h, ctypes.byref(wp)):
                 raise OSError(ctypes.get_last_error(), "SetWindowPlacement")
+            self._set_page_visible(True)
             return h, placement
 
         result = self._ui(run, "apply app placement")
