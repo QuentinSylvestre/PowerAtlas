@@ -682,6 +682,34 @@ def test_settings_modal_renders_the_stored_peek_mode(client):
     assert row.index('id="peekMode"') < row.index('class="settings-row ')
 
 
+@pytest.mark.parametrize("on_disk, shown", [
+    (" TOGGLE ", "toggle"), ("Hold", "hold"), ("x", "hold"),
+])
+def test_hand_edited_peek_mode_is_reported_normalised(client, tmp_path,
+                                                      on_disk, shown):
+    """A hand-edited `peek_mode` reaches the dialog in the form `create_peek`
+    runs it: `/api/settings`, the rendered select and the startup snapshot all
+    carry the normalised value, so nothing reads as pending.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2 review"""
+    import power_atlas.web as web_mod
+    from power_atlas.config import load_config
+    (tmp_path / "config.toml").write_text(f'peek_mode = "{on_disk}"\n',
+                                          encoding="utf-8")
+    saved = web_mod._STARTUP_VALUES
+    try:
+        web_mod.set_startup_config(load_config())
+        assert web_mod._STARTUP_VALUES["peek_mode"] == shown
+        settings = client.get("/api/settings").json()
+        assert settings["peek_mode"] == shown
+        assert "peek_mode" not in settings["restart_pending"]
+        page = client.get("/").text
+        other = "hold" if shown == "toggle" else "toggle"
+        assert re.search(rf'<option value="{shown}"\s+selected', page)
+        assert not re.search(rf'<option value="{other}"\s+selected', page)
+    finally:
+        web_mod._STARTUP_VALUES = saved
+
+
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
 def test_save_setting_port_valid(mock_load, mock_save, client):

@@ -5641,6 +5641,36 @@ check("peek_mode is labelled and badges its own row in the Settings dialog", () 
               "the peek_mode badge survived the relaunch that applied it");
 });
 
+check("refreshSettings puts the stored peek_mode on the Settings select", async () => {
+  // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+  // review. `refreshSettings` is one line in index.html, outside the remote
+  // panel's region, so it is extracted on its own and run with only the
+  // elements and globals it touches. Hold first, so a select stuck on its
+  // initial value cannot pass the Toggle assertion.
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const from = src.indexOf("function refreshSettings(");
+  if (from < 0) throw new Error("index.html no longer defines refreshSettings");
+  const to = src.indexOf("\n", from);
+  const select = new El("select");
+  select.value = "hold";
+  let payload = { peek_mode: "toggle" };
+  const sandbox = {
+    document: { getElementById: (id) => (id === "peekMode" ? select : null) },
+    fetch: () => Promise.resolve({ json: () => Promise.resolve(payload) }),
+    refreshNotifyToggle() {},
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(src.slice(from, to), sandbox, { filename: "index.html#refreshSettings" });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  sandbox.refreshSettings();
+  await settle();
+  assertEqual(select.value, "toggle", "a stored Toggle left the select on Hold");
+  payload = { peek_mode: "hold" };
+  sandbox.refreshSettings();
+  await settle();
+  assertEqual(select.value, "hold", "a stored Hold left the select on Toggle");
+});
+
 check("the status pill is the one thing in the topbar that cannot be squeezed", () => {
   // CSS is the code here for the same reason as the check below: this harness
   // has no box model, so the pixel evidence is the browser measurement in the

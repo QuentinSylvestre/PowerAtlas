@@ -43,7 +43,7 @@
           <div class="settings-row peek-hotkey-group">
             <div class="settings-row-text">
               <div class="settings-row-head"><label class="settings-row-title" for="peekHotkey">Peek hotkey</label></div>
-              <div class="settings-row-desc">Hold to peek at PowerAtlas from anywhere; double-tap to open it as a window. Takes effect on the next launch.</div>
+              <div class="settings-row-desc">Shows PowerAtlas from anywhere (see Peek mode); double-tap to open it as a window. Takes effect on the next launch.</div>
             </div>
             <div class="settings-row-control">
               <div class="hotkey-field" onclick="document.getElementById('peekHotkey').focus()">
@@ -71,8 +71,8 @@
             <div class="settings-row-control">
               <select class="port-mode" id="peekMode"
                       onchange="fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_mode',value:this.value})}).then(loadRestartKeys)">
-                <option value="hold" {% if peek_mode != 'toggle' %}selected{% endif %}>Hold to show</option>
-                <option value="toggle" {% if peek_mode == 'toggle' %}selected{% endif %}>Press to show, press again to hide</option>
+                <option value="hold" {% if peek_mode != 'toggle' %}selected{% endif %}>Hold (show while held)</option>
+                <option value="toggle" {% if peek_mode == 'toggle' %}selected{% endif %}>Toggle (press to show, press again to hide)</option>
               </select>
             </div>
           </div>

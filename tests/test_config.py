@@ -421,6 +421,28 @@ def test_peek_mode_wrong_type_gets_default(tmp_path):
     assert cfg.peek_hotkey == "alt+p"  # the other key still loads
 
 
+@pytest.mark.parametrize("on_disk, loaded", [
+    ("TOGGLE", "toggle"), (" Toggle ", "toggle"), ("\tToggle\n", "toggle"),
+    ("HOLD", "hold"), (" hold", "hold"),
+])
+def test_peek_mode_case_and_space_variants_are_normalised(tmp_path, on_disk, loaded):
+    """A hand-edited mode loads in the form `create_peek` runs it, so the
+    settings select and the restart-pending check agree with the runtime.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2 review"""
+    _write_toml(tmp_path, {"peek_mode": on_disk})
+    assert load_config().peek_mode == loaded
+
+
+@pytest.mark.parametrize("on_disk", ["x", "", "   ", "toggled", "hold toggle", "TOG GLE"])
+def test_peek_mode_unknown_value_loads_as_hold(tmp_path, on_disk):
+    """Anything that is not hold or toggle loads as Hold, without raising,
+    and leaves the other keys alone."""
+    _write_toml(tmp_path, {"peek_mode": on_disk, "peek_hotkey": "alt+p"})
+    cfg = load_config()
+    assert cfg.peek_mode == "hold"
+    assert cfg.peek_hotkey == "alt+p"
+
+
 def test_peek_hotkey_round_trip():
     """peek_hotkey persists through save/load cycle with custom value."""
     cfg = Config(peek_hotkey="alt+p")

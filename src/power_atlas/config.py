@@ -807,6 +807,12 @@ def _corrupt(exc: Exception) -> Config:
 _read_errors_logged: set[str] = set()
 
 
+def _normalize_peek_mode(value) -> str:
+    """`peek_mode` as stored on disk -> "hold" or "toggle"; Hold for anything else."""
+    mode = value.strip().lower() if isinstance(value, str) else ""
+    return mode if mode in ("hold", "toggle") else "hold"
+
+
 def load_config() -> Config:
     """Load config from TOML. Missing keys get defaults, unknown keys ignored, wrong types get defaults.
 
@@ -862,6 +868,12 @@ def _load_config_once(final: bool) -> Config | None:
         # Preserve unknown keys so future config additions aren't lost on re-save
         extra = {k: v for k, v in data.items() if k not in fields and k not in _LEGACY_KEYS}
         config = Config(**kwargs)
+        # A hand-edited `peek_mode` ("TOGGLE", " Toggle ", "x") is normalised
+        # here, once, so the settings select, the restart-pending snapshot and
+        # `create_peek` all see the same value: stripped and lowercased, and
+        # Hold for anything that is not hold or toggle. Never raises.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2 review
+        config.peek_mode = _normalize_peek_mode(config.peek_mode)
         # Store as instance attr (not a dataclass field) — object identity constraint:
         # the same Config instance returned by load must be passed to save for extras to persist.
         config._extra = extra
