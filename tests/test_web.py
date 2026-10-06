@@ -29734,6 +29734,68 @@ class TestCanonicalLoopbackHost:
         main_text = (src / "__main__.py").read_text(encoding="utf-8")
         assert '"127.0.0.1"' not in main_text
 
+    @staticmethod
+    def _login_bypasses(text: str) -> list:
+        """Code (not comments or strings) in ``text`` that mints a login
+        outside `doors`: a `mint_login_code` or `login_path` name, or a
+        `login_url` that is not `doors.login_url` / `_doors.login_url` or
+        the `from .doors import login_url` line. `_login_url` (peek's alias
+        of `doors.login_url`) is another name and passes."""
+        import io
+        import tokenize
+        toks = [tk for tk in tokenize.generate_tokens(io.StringIO(text).readline)
+                if tk.type not in (tokenize.COMMENT, tokenize.NL,
+                                   tokenize.NEWLINE, tokenize.INDENT,
+                                   tokenize.DEDENT)]
+        bad = []
+        for i, tk in enumerate(toks):
+            if tk.type != tokenize.NAME:
+                continue
+            if tk.string in ("mint_login_code", "login_path"):
+                bad.append((tk.start[0], tk.string))
+            elif tk.string == "login_url":
+                prev = [x.string for x in toks[max(0, i - 3):i]]
+                if prev[-2:] in (["doors", "."], ["_doors", "."]):
+                    continue
+                if prev[-3:] == [".", "doors", "import"]:
+                    continue
+                bad.append((tk.start[0], tk.string))
+        return bad
+
+    def test_the_guard_catches_a_bypass(self):
+        """The check below is not vacuous: each of these is caught."""
+        for code in ("from .web import login_url\n",
+                     "from . import web\nweb.login_url(s)\n",
+                     "import power_atlas.web as w\nw.mint_login_code()\n",
+                     "from .web import login_path as lp\n",
+                     "login_url(s)\n"):
+            assert self._login_bypasses(code), code
+        for code in ("from .doors import login_url as _login_url\n",
+                     "_login_url(s)\n", "doors.login_url(s, next=n)\n",
+                     "_doors.login_url(s)\n",
+                     "# web.login_url(s) and mint_login_code\n",
+                     "x = 'login_path and web.login_url('\n"):
+            assert not self._login_bypasses(code), code
+
+    def test_only_doors_and_web_mint_a_login(self):
+        """Phase 5 review (A8): every door goes through `doors`; no other
+        module under `src/power_atlas` mints a login code or builds a login
+        path itself (`login_url`, `mint_login_code`, `login_path`)."""
+        src = Path(__file__).resolve().parent.parent / "src" / "power_atlas"
+        files = sorted(f for f in src.rglob("*.py")
+                       if f.name not in ("doors.py", "web.py"))
+        assert any(f.name == "peek.py" for f in files)
+        assert any(f.name == "tray.py" for f in files)
+        found = {}
+        for f in files:
+            bad = self._login_bypasses(f.read_text(encoding="utf-8"))
+            if bad:
+                found[str(f.relative_to(src))] = bad
+        assert found == {}
+        # And the doors do reach `web` for it: the guard is about where.
+        doors_text = (src / "doors.py").read_text(encoding="utf-8")
+        assert "from .web import login_url" in doors_text
+
 
 def _signs_in_in_one_navigation(url: str, server_url: str) -> None:
     """A fresh browser opening ``url`` lands on the dashboard signed in."""

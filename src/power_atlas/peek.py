@@ -29,8 +29,9 @@ log = logging.getLogger("power_atlas.peek")
 # from `doors`, not `tray`: Phase 5 (follow-up 12)
 from .doors import login_url as _login_url
 # The module, not the function: `open_in_browser` is looked up at call time so
-# the browser door here is the tray's own, patches included.
-# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+# the browser door here is `doors.open_in_browser`, patches included.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1;
+# wording: Phase 5 review (A5)
 from . import doors as _doors
 # Shortcut names, parsing and validation, shared with the settings write path.
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
@@ -174,7 +175,12 @@ def _real_send_mask_key() -> None:
     """Type the mask key, down then up (`keybd_event`). It only queues input,
     so it never blocks the hook; the events reach the hook again afterwards,
     and the filter ignores them by their VK.
-    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10)
+
+    Injected input cannot reach a window of a higher integrity level (UIPI):
+    over an elevated (administrator) foreground window the mask does nothing,
+    and that window's menu bar may still activate on the Alt key-up.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10);
+    UIPI: Phase 5 review (A4)
     """
     u, _ = _win32()
     u.keybd_event(_VK_MASK, 0, 0, 0)
@@ -310,6 +316,8 @@ class PeekWindow:
         # The filter just suppressed the key of a chord containing alt: send
         # the mask key before returning (follow-up 10).
         self._mask_pending = False
+        # A failed mask send was logged (once per run; Phase 5 review A2).
+        self._mask_warned = False
         self._release_armed = False  # a press was posted since the last release
         # Written only by the worker, once, when readiness fails; read by the
         # hook. While set the peek chord matches nothing, so its keys reach
@@ -348,9 +356,16 @@ class PeekWindow:
         # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (2, 12)
         self._last_cookie_check = None
         self._last_browser = None
-        # WebView2's browser keys and context menu are on (worker-owned).
-        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 5)
+        # WebView2's browser keys and context menu: turned on at least once
+        # (its INFO line logged), and a failure WARNING logged (worker-owned).
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 5);
+        # the WARNING flag: Phase 5 review (A7)
         self._browser_keys_on = False
+        self._browser_keys_warned = False
+        # The INFO line for app mode waiting on the first page load was
+        # logged (once per run; Phase 5 review A6). Read and written by the
+        # tray thread and the worker; a race costs at most a second line.
+        self._unloaded_noted = False
         # The listener health check (`_check_listener`): `_now()` at the last
         # check, and whether its one WARNING was logged (worker-owned).
         # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 15)
@@ -391,9 +406,37 @@ class PeekWindow:
             if self.supports_app_mode:
                 self._events.put(("show_app",))
             else:
+                if self._only_the_first_load_missing():
+                    self._note_unloaded_fallback()
                 self._open_browser()
         except Exception as e:
             log.warning("PowerAtlas window could not open: %s", type(e).__name__)
+
+    def _only_the_first_load_missing(self) -> bool:
+        """App mode is off only because no page has loaded yet: Windows, the
+        window passed the readiness gate with the Win32 adapter, and WebView2
+        is in use. Never raises; never imports pywebview's WinForms module
+        unless the Win32 adapter (which needs it) is in place."""
+        try:
+            if (sys.platform != "win32" or self._loaded.is_set()
+                    or not self._ready.is_set()
+                    or not isinstance(self._adapter, _Win32Window)):
+                return False
+            from webview.platforms import winforms
+            return bool(winforms.is_chromium)
+        except Exception:
+            return False
+
+    def _note_unloaded_fallback(self) -> None:
+        """One INFO line per run: a tray Open or a double-tap used the
+        browser only because the window has not loaded a page yet.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 review (A6)
+        """
+        if self._unloaded_noted:
+            return
+        self._unloaded_noted = True
+        log.info("PowerAtlas window has not loaded a page yet, so it opens in "
+                 "the browser instead (not logged again this run)")
 
     def start(self, on_main_thread: bool = False) -> None:
         """Start the worker, the hotkey listener and the webview.
@@ -804,7 +847,10 @@ class PeekWindow:
     def _double_tap(self, origin) -> None:
         """The double-tap rule, decided from `tap_origin`, never the current state."""
         if not self._adapter.has_app_mode:
-            # No app mode (non-Windows): the double-tap opens the browser.
+            # No app mode (non-Windows, or no page loaded yet): the
+            # double-tap opens the browser.
+            if self._only_the_first_load_missing():
+                self._note_unloaded_fallback()
             if self._state == PEEK:
                 self._end_peek()
             self._open_browser()
@@ -818,17 +864,35 @@ class PeekWindow:
 
     def _enable_browser_keys(self) -> None:
         """WebView2's browser accelerator keys (reload, find) and default
-        context menu, on, once. pywebview turns both off for `debug=False`,
-        only in `on_webview_ready`, which runs once before the first load; it
-        never sets them again, so one success is enough. A failed attempt
-        (no `CoreWebView2` yet, a timed-out UI call) is retried on the next
-        load. DevTools stay off.
-        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 5)
+        context menu, on. pywebview turns both off for `debug=False` in
+        `on_webview_ready`. The settings belong to the `CoreWebView2`, so a
+        recreated core would lose them; they are set again on every page
+        load instead of once: setting them is idempotent and the UI call is
+        bounded. The
+        first success logs one INFO line; the first failure (no
+        `CoreWebView2` yet, a timed-out UI call, an error) one WARNING, and
+        later failures only DEBUG. DevTools stay off.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 5);
+        every load: Phase 5 review (A7)
         """
-        if self._browser_keys_on:
+        why = "not ready"
+        try:
+            ok = bool(self._adapter.enable_browser_keys())
+        except Exception as e:
+            ok, why = False, type(e).__name__
+        if ok:
+            if not self._browser_keys_on:
+                self._browser_keys_on = True
+                log.info("PowerAtlas window: browser keys and the context "
+                         "menu are on")
             return
-        if self._adapter.enable_browser_keys():
-            self._browser_keys_on = True
+        if not self._browser_keys_warned:
+            self._browser_keys_warned = True
+            log.warning("PowerAtlas window could not turn on its browser keys "
+                        "and context menu (%s); tried again on each page load",
+                        why)
+        else:
+            log.debug("PowerAtlas window: browser keys not set (%s)", why)
 
     # ---- transitions (worker thread only) -----------------------------------
 
@@ -1104,17 +1168,24 @@ class PeekWindow:
             suppress = False
         if suppress and self._mask_pending:
             # Here, in the hook, rather than on the worker: `keybd_event`
-            # only queues the input, and only here is the mask certain to
-            # reach the user's app before the Alt key-up (the worker may lag
-            # a UI-thread timeout behind). AutoHotkey also sends it from its
-            # hook. Best effort: a failure is logged by type and never
-            # escapes. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10)
+            # only queues the input, and from here the mask in practice
+            # precedes the Alt key-up at the user's app (the worker may lag a
+            # UI-thread timeout behind). Not guaranteed: a hook slow enough
+            # can let an Alt key-up already queued through first. AutoHotkey
+            # also sends it from its hook. Best effort: a failure is logged
+            # by type, once per run (it would repeat on every Alt chord), and
+            # never escapes.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10);
+            # wording and the once-per-run log: Phase 5 review (A1, A2)
             self._mask_pending = False
             try:
                 _send_mask_key()
             except Exception as e:
-                log.warning("PowerAtlas window: could not send the Alt mask "
-                            "key: %s", type(e).__name__)
+                if not self._mask_warned:
+                    self._mask_warned = True
+                    log.warning("PowerAtlas window: could not send the Alt "
+                                "mask key: %s (not logged again this run)",
+                                type(e).__name__)
         if suppress and listener is not None:
             listener.suppress_event()
 
@@ -1193,12 +1264,21 @@ class PeekWindow:
         secure desktop: Ctrl+Alt+Del, UAC), and kept it would let a partial
         chord fire. Cheap: only for a key some chord uses, and only the
         modifiers tracked as held (at most three `GetAsyncKeyState` calls).
-        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 14)
+        A check that raises (user32 not bound, the call failing) keeps the
+        modifier, as before this check existed: the filter must not stop
+        matching chords because the keyboard could not be asked. Not logged:
+        it would repeat on every chord key-down inside the hook.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 14);
+        a raising check: Phase 5 review (A3)
         """
         if not any(keys and name in keys for keys in self._chords.values()):
             return
         for m in self._pressed_keys & _MODIFIER_NAMES:
-            if not _modifier_down(m):
+            try:
+                down = _modifier_down(m)
+            except Exception:
+                down = True
+            if not down:
                 self._pressed_keys.discard(m)
 
     def _rearm(self, name: str) -> None:
@@ -1389,7 +1469,7 @@ class _WindowAdapter(Protocol):
 
     def enable_browser_keys(self) -> bool:
         """Turn the browser's own keys and context menu on; False when it
-        could not be done yet (retried on the next page load).
+        could not be done now. Called on every page load.
         261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 5)"""
         ...
 
@@ -1925,7 +2005,8 @@ class _Win32Window(_CookieReader):
     def enable_browser_keys(self) -> bool:
         """On the UI thread, bounded: `AreBrowserAcceleratorKeysEnabled` and
         `AreDefaultContextMenusEnabled` on. False when `CoreWebView2` does
-        not exist yet or the UI thread did not answer."""
+        not exist yet or the UI thread did not answer; logs nothing (it runs
+        on every page load, and the worker logs the first failure)."""
         native = self._native
 
         def run():
@@ -1937,11 +2018,7 @@ class _Win32Window(_CookieReader):
             settings.AreDefaultContextMenusEnabled = True
             return True
 
-        ok = bool(self._ui(run, "enable browser keys"))
-        if ok:
-            log.info("PowerAtlas window: browser keys and the context menu "
-                     "are on")
-        return ok
+        return bool(self._ui(run, "enable browser keys", timed_out=False))
 
     def reload(self, url: str) -> bool:
         """pywebview's `load_url`, bounded. False when it timed out.

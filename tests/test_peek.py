@@ -3846,6 +3846,73 @@ class TestSupportsAppMode:
         pw._on_loaded()
         assert a.has_app_mode is True
 
+    def _unloaded_lines(self, caplog):
+        return [r for r in caplog.records
+                if "has not loaded a page yet" in r.getMessage()]
+
+    def test_the_first_load_fallback_is_logged_once(self, monkeypatch,
+                                                    caplog):
+        """Phase 5 review (A6): a tray Open or a double-tap that uses the
+        browser only because no page has loaded says so at INFO, once per
+        run, whichever comes first."""
+        import types
+        import power_atlas.peek as peek_mod
+        pw = self._win32_peek(monkeypatch)
+        opened = []
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        pw._adapter = peek_mod._Win32Window(pw, types.SimpleNamespace(
+            native=None))
+        pw._ready.set()
+        with caplog.at_level(logging.INFO, logger="power_atlas"):
+            pw.show_app()
+            pw.show_app()
+            pw._double_tap(None)  # the worker's double-tap, no app mode
+        lines = self._unloaded_lines(caplog)
+        assert len(lines) == 1 and lines[0].levelno == logging.INFO
+        assert len(opened) == 3
+        assert _drain(pw) == []
+
+    def test_the_double_tap_logs_it_too(self, monkeypatch, caplog):
+        import types
+        import power_atlas.peek as peek_mod
+        pw = self._win32_peek(monkeypatch)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser",
+                            lambda u: None)
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        pw._adapter = peek_mod._Win32Window(pw, types.SimpleNamespace(
+            native=None))
+        pw._ready.set()
+        with caplog.at_level(logging.INFO, logger="power_atlas"):
+            pw._double_tap(None)
+        assert len(self._unloaded_lines(caplog)) == 1
+
+    @pytest.mark.parametrize("why", ["not ready", "not chromium",
+                                     "not win32", "other adapter", "loaded"])
+    def test_other_reasons_are_not_logged_as_it(self, monkeypatch, caplog,
+                                                why):
+        """Only when the first load is the one thing missing."""
+        import types
+        import power_atlas.peek as peek_mod
+        pw = self._win32_peek(monkeypatch, chromium=(why != "not chromium"))
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser",
+                            lambda u: None)
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        pw._adapter = peek_mod._Win32Window(pw, types.SimpleNamespace(
+            native=None))
+        pw._ready.set()
+        if why == "not ready":
+            pw._ready.clear()
+        elif why == "not win32":
+            monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        elif why == "other adapter":
+            pw._adapter = _FakeAdapter()
+        elif why == "loaded":
+            pw._loaded.set()
+        with caplog.at_level(logging.INFO, logger="power_atlas"):
+            pw.show_app()
+        assert self._unloaded_lines(caplog) == []
+
 
 class TestOneShortcutRule:
     """Final review fix 5: `create_peek` and `PeekWindow` take the shortcut
@@ -4269,7 +4336,10 @@ class TestBrowserKeys:
     browser accelerator keys and default context menu off in
     `on_webview_ready` (edgechromium.py, the only place it sets them). The
     worker turns both on once a page has loaded (`CoreWebView2` exists by
-    then), through a bounded UI-thread call, and never from the hook."""
+    then), through a bounded UI-thread call, and never from the hook. Since
+    the Phase 5 review (A7) it sets them again on every page load, so a
+    recreated WebView2 core gets them back; failures stay quiet after the
+    first WARNING."""
 
     def _run_worker(self, pw, a, before=(), after=()):
         import threading
@@ -4289,19 +4359,26 @@ class TestBrowserKeys:
 
     def test_a_load_before_readiness_is_not_lost(self, monkeypatch):
         """The pre-ready drain drops the `loaded` event; the latch it set
-        still turns the keys on once the window is ready, exactly once."""
+        still turns the keys on once the window is ready. A later load sets
+        them again (A7: once at readiness, once for the load: 2)."""
         pw = _new_peek(monkeypatch)
         a = _FakeAdapter()
         self._run_worker(pw, a, before=[pw._on_loaded],
                          after=[lambda: _post(pw, "loaded")])
-        assert a.browser_keys == 1
+        assert a.browser_keys == 2
         assert pw._browser_keys_on is True
 
-    def test_a_load_after_readiness_turns_them_on(self, monkeypatch):
+    def test_every_load_sets_them_again(self, monkeypatch, caplog):
+        """A7: one call per load (was: once per run), and one INFO line."""
         pw = _new_peek(monkeypatch)
         a = _FakeAdapter()
-        self._run_worker(pw, a, after=[pw._on_loaded, pw._on_loaded])
-        assert a.browser_keys == 1
+        with caplog.at_level(logging.INFO, logger="power_atlas"):
+            self._run_worker(pw, a, after=[pw._on_loaded, pw._on_loaded,
+                                           pw._on_loaded])
+        assert a.browser_keys == 3
+        on = [r for r in caplog.records
+              if "browser keys and the context menu are on" in r.getMessage()]
+        assert len(on) == 1
 
     def test_no_load_no_call(self, monkeypatch):
         pw = _new_peek(monkeypatch)
@@ -4321,8 +4398,37 @@ class TestBrowserKeys:
         a.keys_ok = True
         pw._handle(("loaded",))
         pw._handle(("loaded",))
-        assert a.browser_keys == 2
+        # A7: every load calls (was 2: none after the first success).
+        assert a.browser_keys == 3
         assert pw._browser_keys_on is True
+
+    @pytest.mark.parametrize("failure", ["false", "raise"])
+    def test_failures_warn_once_then_stay_quiet(self, monkeypatch, caplog,
+                                                failure):
+        """A7: the first failure is one WARNING (type only); the next ones
+        are DEBUG, and a raising call never escapes the handler."""
+        pw = _new_peek(monkeypatch)
+        a = _FakeAdapter()
+        if failure == "false":
+            a.keys_ok = False
+        else:
+            def boom():
+                a.browser_keys += 1
+                raise OSError("SECRET-DETAIL")
+            a.enable_browser_keys = boom
+        pw._adapter = a
+        pw._ready.set()
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            for _ in range(4):
+                pw._handle(("loaded",))
+        assert a.browser_keys == 4
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "browser keys" in warnings[0].getMessage()
+        if failure == "raise":
+            assert "OSError" in warnings[0].getMessage()
+        assert "SECRET-DETAIL" not in caplog.text
+        assert pw._browser_keys_on is False
 
     def test_the_win32_adapter_sets_both_settings_on_the_ui_thread(
             self, monkeypatch, caplog):
@@ -4347,15 +4453,34 @@ class TestBrowserKeys:
         a = peek_mod._Win32Window(pw, types.SimpleNamespace(native=native))
         a._native = native
         # No CoreWebView2 yet: nothing set, and the caller retries.
-        assert a.enable_browser_keys() is False
-        native.webview.CoreWebView2 = types.SimpleNamespace(Settings=settings)
-        with caplog.at_level(logging.INFO, logger="power_atlas"):
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            assert a.enable_browser_keys() is False
+            native.webview.CoreWebView2 = types.SimpleNamespace(
+                Settings=settings)
             assert a.enable_browser_keys() is True
         assert settings.AreBrowserAcceleratorKeysEnabled is True
         assert settings.AreDefaultContextMenusEnabled is True
         assert settings.AreDevToolsEnabled is False  # never turned on
         assert len(ran_on_ui) == 2
-        assert "browser keys and the context menu are on" in caplog.text
+        # A7: it runs on every page load, so the adapter logs nothing; the
+        # worker logs the first success and the first failure.
+        assert caplog.records == []
+
+    def test_the_win32_adapter_times_out_quietly(self, monkeypatch, caplog):
+        """A7: a UI thread that does not answer is False, without the
+        bounded call's own WARNING (the worker logs the first failure)."""
+        import types
+        import power_atlas.peek as peek_mod
+        _fake_dotnet(monkeypatch)
+        monkeypatch.setattr(peek_mod, "_UI_TIMEOUT", 0.05)
+        pw = _new_peek(monkeypatch)
+        native = _FakeNative()
+        native.BeginInvoke = lambda action: None  # never runs
+        a = peek_mod._Win32Window(pw, types.SimpleNamespace(native=native))
+        a._native = native
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            assert a.enable_browser_keys() is False
+        assert caplog.records == []
 
     def test_the_portable_adapter_has_nothing_to_do(self, monkeypatch):
         import types
@@ -4495,6 +4620,29 @@ class TestStaleModifiers:
         assert check("alt") is False
         assert asked == [0x11, 0x10, 0x12]
 
+    @pytest.mark.parametrize("where", ["check", "user32"])
+    def test_a_raising_check_keeps_the_modifier(self, monkeypatch, where):
+        """Phase 5 review (A3): a check that raises (or a user32 bind that
+        fails inside it) counts the modifier as down, as before the check
+        existed, so the chord still fires instead of the filter raising."""
+        import power_atlas.peek as peek_mod
+        pw, _ = self._peek(monkeypatch, down=set())
+
+        def boom(*a):
+            raise OSError("no user32")
+
+        if where == "check":
+            monkeypatch.setattr(peek_mod, "_modifier_down", boom)
+        else:
+            monkeypatch.setattr(peek_mod.sys, "platform", "win32")
+            monkeypatch.setattr(peek_mod, "_win32", boom)
+            monkeypatch.setattr(peek_mod, "_modifier_down",
+                                peek_mod._real_modifier_down)
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=50)
+        assert _drain(pw) == [("press", "peek", 50)]
+        assert pw._pressed_keys == {"ctrl", "shift"}
+        assert pw._listener.suppressed == 1
+
     def test_off_windows_the_check_says_down(self, monkeypatch):
         import power_atlas.peek as peek_mod
         monkeypatch.setattr(peek_mod.sys, "platform", "linux")
@@ -4600,6 +4748,31 @@ class TestAltMask:
         assert _drain(pw) == [("press", "peek", 10)]
         assert pw._listener.suppressed == 1
         assert "mask key" in caplog.text and "OSError" in caplog.text
+
+    def test_a_failing_send_is_logged_once_per_run(self, monkeypatch, caplog):
+        """Phase 5 review (A2): the hook would log on every Alt chord; one
+        WARNING per run, type only, and every press still suppressed and
+        posted."""
+        import power_atlas.peek as peek_mod
+        tries = []
+
+        def boom():
+            tries.append(1)
+            raise OSError("SECRET-DETAIL")
+
+        monkeypatch.setattr(peek_mod, "_send_mask_key", boom)
+        pw = self._peek(monkeypatch, "alt+f1", held=("alt",))
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            for t in (10, 300, 600):
+                assert _feed_filter(pw, peek_mod._WM_SYSKEYDOWN, self._VK_F1,
+                                    t=t)
+                assert _feed_filter(pw, peek_mod._WM_SYSKEYUP, self._VK_F1)
+        assert len(tries) == 3, "every press still tries the mask"
+        assert [e[0] for e in _drain(pw)] == ["press"] * 3
+        masks = [r for r in caplog.records if "mask key" in r.getMessage()]
+        assert len(masks) == 1 and masks[0].levelno == logging.WARNING
+        assert "OSError" in masks[0].getMessage()
+        assert "SECRET-DETAIL" not in caplog.text
 
     def test_the_real_send_is_a_down_and_an_up_of_0xe8(self, monkeypatch):
         import power_atlas.peek as peek_mod
