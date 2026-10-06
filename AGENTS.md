@@ -81,8 +81,13 @@ Recipe for live QA of /acp and the dashboard against the running instance. It wo
   no session while the screen is locked, so a launch test finds no rollout. Use the non-interactive
   `codex exec resume <id> "<prompt>"` on a throwaway session instead (add
   `-c 'projects."<cwd>".trust_level="trusted"'` and `-s read-only`). It writes to the same rollout
-  and holds the same writer lock, so the live dot and the Resume gate can be checked with it. Never
-  print the session id or the prompt, and list the throwaway session for cleanup.
+  and holds the same writer lock, so the Resume gate can be checked with it. It cannot check the live
+  dot: its lock holder is a helper process, which the lock-owner rule reads as `other`, so the row
+  shows no dot (measured 2026-10-05). The live dot, the Working/Idle verdict and the turn-end toast
+  need a real terminal session on an unlocked screen:
+  `codex -C <dir> -s read-only -a never -c 'projects."<dir>".trust_level="trusted"' "<prompt>"` in a
+  new console starts a real turn without keystrokes. Append each throwaway session's id to the
+  ledger, never overwrite it, and never print the id or the prompt.
 
 ## Terminology
 
