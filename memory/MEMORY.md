@@ -11,9 +11,9 @@
 
 ### Restarting PowerAtlas from an agent: POST `/api/restart`, then wait for a fresh "Server ready" line
 
-**Why**: Restarts in the Overview plan were done by POSTing `/api/restart` with the `pa_local` cookie plus `Origin`/`Referer` headers; the old process keeps answering for a moment, so a script that polls a static file sees "up" too early (one QA run measured a false 1.6 s "up" time that way).
-**How to apply**: Only restart under a user grant (AGENTS.md); after the POST, wait for a `Server ready` line in `orchestrator.log` stamped after the request, and time startup-dependent checks from that line.
-**Source**: `plans/done/260928-1249_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE.md` § Phase 4 QA notes | **Verified**: 2026-09-28 (session, empirical)
+**Why**: Restarts in the Overview plan were done by POSTing `/api/restart` with the `pa_local` cookie plus `Origin`/`Referer` headers; the old process keeps answering for a moment, so a script that polls a static file sees "up" too early (one QA run measured a false 1.6 s "up" time that way). On 2026-10-05 the user gave a restart permission mid-task ("you can restart whenever, I TOLD YOU"), then declined to make it a standing rule in AGENTS.md and asked instead to be asked once at the start of each piece of work.
+**How to apply**: Ask once, up front, at the start of any PowerAtlas work whether restarts are allowed for the task; a yes covers that task only and is not carried to the next one (AGENTS.md already requires a per-task grant). After the POST, wait for a `Server ready` line in `orchestrator.log` stamped after the request, and time startup-dependent checks from that line.
+**Source**: `plans/done/260928-1249_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE.md` § Phase 4 QA notes + `plans/done/261006-0933_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB.md` § Completion Summary | **Verified**: 2026-10-06 (human:quentin)
 
 ### Driving PowerAtlas's tray and peek doors for live QA on Windows
 
