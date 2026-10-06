@@ -2366,7 +2366,12 @@ class _ShowUser32:
 
     def SetWindowPlacement(self, h, wp):
         self.calls.append(("SetWindowPlacement", h))
-        return True
+        return not self.placement_fails
+
+    placement_fails = False
+
+    def GetForegroundWindow(self):
+        return 0
 
 
 class TestWin32ShowPrimitives:
@@ -2579,6 +2584,48 @@ class TestHiddenPageVisibility:
         assert [c[1] for c in u.calls if c[0] == "IsVisible"] == [
             False, True, False, True]
         assert len(t.asked) == 1, "the field is looked up once"
+
+    def test_app_to_peek_restyle_ends_visible(self, monkeypatch):
+        """`_set_chrome` hides a visible app window with a bare
+        `ShowWindow(SW_HIDE)` (no `IsVisible` write) before the restyle;
+        the peek show that follows leaves the page visible.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final fix 5
+        """
+        import power_atlas.peek as peek_mod
+        a, u, _, _ = self._adapter(monkeypatch)
+        a._chrome = peek_mod.APP
+        u.visible = True
+        a.show_peek()
+        assert self._seq(u) == [("ShowWindow", 0), ("ShowWindow", 8),
+                                ("IsVisible", True)]
+        assert u.visible and a._chrome == peek_mod.PEEK
+
+    def test_a_failed_placement_then_fail_to_hidden_ends_hidden(
+            self, monkeypatch):
+        """An end peek back to app mode whose `SetWindowPlacement` fails
+        falls to HIDDEN (`_fail_to_hidden`), and the page ends hidden too.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final fix 5
+        """
+        import power_atlas.peek as peek_mod
+        a, u, WP, _ = self._adapter(monkeypatch)
+        pw = a._o
+        pw._adapter = a
+        monkeypatch.setattr(pw, "_sign_in_check", lambda: None)
+        saved = WP()
+        saved.showCmd = 1
+        pw._app_placement = saved
+        a._chrome = peek_mod.PEEK
+        u.visible = True
+        pw._state, pw._return_to = peek_mod.PEEK, "app"
+        pw._peek_showing = True
+        u.placement_fails = True
+        with pytest.raises(OSError):
+            pw._end_peek()
+        assert self._seq(u) == [("ShowWindow", 0),
+                                ("SetWindowPlacement", _FakeNative.HWND),
+                                ("ShowWindow", 0), ("IsVisible", False)]
+        assert not u.visible
+        assert pw._state == peek_mod.HIDDEN and not pw._peek_showing
 
     def test_the_field_is_found_on_a_base_type(self, monkeypatch):
         a, u, _, t = self._adapter(monkeypatch, field="base")
