@@ -79,8 +79,7 @@ from anywhere, and leaves the window as it is.
 
 The kiro-cli agent surface lives
 at `/acp` — a workspace-grouped session browser beside a conversation pane, two panes on a desktop and a
-drill-down below 768 px. Reach it from the **ACP** button beside the dashboard's logo, from the *open in
-ACP* action on any kiro-cli session row, or by opening `/acp` directly.
+drill-down below 768 px. Reach it by opening `/acp` directly.
 
 ### Signing in on this machine
 
@@ -359,7 +358,7 @@ accepted as before.
 
 ## Agent sessions (`/acp`)
 
-Reached from the **ACP** button beside the logo in the dashboard topbar, or by opening `/acp` directly.
+Reached by opening `/acp` directly.
 
 `/acp` drives kiro-cli over ACP: one supervised `kiro-cli acp --agent-engine v3` process holds every
 session PowerAtlas opens. The left rail lists workspaces with their sessions — ten workspaces and three sessions each by

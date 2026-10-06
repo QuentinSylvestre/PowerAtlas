@@ -1679,10 +1679,6 @@ def _acp_navigation_ok(request: Request) -> bool:
 
     Copying the POST rule verbatim would break the page. The flows are:
 
-    * the dashboard's row action (``location.href = '/acp?sid=…'``) — a
-      same-origin top-level navigation, which sends **no** ``Origin`` at all
-      (browsers only attach it to navigations that are not GET/HEAD) and a
-      same-origin ``Referer``;
     * a bookmark or a typed address — **neither** header;
     * the page's own ``fetch`` of itself in ``explainRefusedHandshake``
       (renamed by 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL

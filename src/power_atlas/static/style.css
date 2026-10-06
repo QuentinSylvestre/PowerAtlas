@@ -46,38 +46,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
 .refresh-btn:disabled { opacity: 0.5; cursor: wait; }
 .topbar-select:hover { border-color: var(--accent); color: var(--text); }
-/* An <a> wearing one of this file's button/pill classes needs both `display`
-   and underline-removal back, since it gets neither of a <button>'s UA
-   styles — `.topbar-nav-pill` on `/`, `.acp-btn` on `/acp`. */
-.topbar-link { display: inline-flex; align-items: center; text-decoration: none; }
-/* `.topbar-nav` is a bare cross-surface marker, not a visual style of its
-   own (`.topbar-nav-pill` above owns the look on `/`) -- kept alongside it
-   on the same <a> because /acp's stylesheet keys off this exact class name
-   via `:has(.topbar-nav)` (wordmark hiding, its own link's left margin at
-   narrow widths) independent of whatever `/` styles the link with.
-   flex-shrink: 0 is this page's own shrink floor for it: this row has
-   always clipped on the right at narrow widths, and the ACP link -- the
-   one control added to make `/acp` findable -- must not be the thing that
-   quietly gives first. `/acp` overrides this with its own factor via
-   `.acp-btn.topbar-nav` further down, where its row's order of sacrifice
-   is spelled out in full. */
-.topbar-nav { flex-shrink: 0; }
 .trust-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); transition: background 0.2s; }
 .trust-toggle.active .trust-dot, .topbar-toggle.active .trust-dot { background: var(--success); }
 
-/* Topbar redesign: only ACP + Refresh keep a permanent seat in the row;
+/* Topbar redesign: only Refresh keeps a permanent seat in the row;
    Profile/Remote/Autostart/Peek/Port moved into the settings menu below. */
 .topbar-ic { width: 14px; height: 14px; display: block; flex-shrink: 0; }
-/* This is the visual restyle only -- the bare `.topbar-nav` class (with its
-   own flex-shrink:0 and the cross-surface :has() contract /acp's stylesheet
-   keys off) still rides alongside this one on the same <a>, unchanged. */
-.topbar-nav-pill {
-  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
-  font-size: 12px; font-weight: 600; color: var(--accent);
-  background: rgba(108, 140, 255, 0.1); border: 1px solid rgba(108, 140, 255, 0.3);
-  padding: 6px 12px; border-radius: 8px; text-decoration: none;
-}
-.topbar-nav-pill:hover { background: rgba(108, 140, 255, 0.16); }
 .refresh-btn { display: flex; align-items: center; justify-content: center; }
 .refresh-btn.spinning svg { animation: topbar-spin 0.8s linear infinite; }
 @keyframes topbar-spin { to { transform: rotate(360deg); } }
@@ -972,7 +946,7 @@ script { display: none; }
 
 /* Provider filter (inline with search bar): real buttons carrying equal
    visual weight to the search box beside them, not muted tabs -- 8px
-   radius matches .topbar-nav-pill rather than the old 12px, and there is
+   radius rather than the old 12px, and there is
    no longer a 999px full-pill shape anywhere in this row. */
 .provider-filter { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 .provider-filter-btn {
@@ -1095,9 +1069,7 @@ script { display: none; }
 
 /* Agent orchestrator page (/acp) */
 /* The logo at phone width, where the banner is 376 px of a 390 px row. Plain
-   text and deliberately not a link: `.topbar-nav` beside it is the navigation,
-   and a logo that is *also* a control is the ambiguity this pair exists to
-   remove. The 16 px left inset is what the banner gets from the viewport edge
+   text and deliberately not a link. The 16 px left inset is what the banner gets from the viewport edge
    above the breakpoint, restated here because the wordmark has no bleed. */
 .acp-wordmark { color: var(--text-muted); font-size: 13px; font-weight: 600; letter-spacing: -0.2px; padding: 0 4px 0 16px; }
 .acp-title { font-size: 13px; font-weight: 600; letter-spacing: -0.2px; }
@@ -1186,21 +1158,12 @@ script { display: none; }
      3. the status pill, which never shrinks at all. It is the only element on
         the page that says whether the socket is up, and a truncated one is
         worse than none: "conn" is indistinguishable from "connecting".
-   Every selector here resolves on `/acp` only, and the one that had to be
-   *made* to is `.acp-btn.topbar-nav`. `.topbar-nav` alone is the cross-surface
-   link and the dashboard renders it too — and the dashboard's topbar is a
-   fixed ~1250 px row of settings clusters that genuinely does overflow a
-   narrow window, so a bare `.topbar-nav` shrink factor gave it the first thing
-   to collapse: measured at 26 px, an `ACP` pill showing its emoji and no word.
-   `.acp-btn` is this page's button shape and nothing on `/` wears it, so the
-   compound selector is what keeps an order of sacrifice written for this row
-   from being applied to a row it was never measured against. */
+   Every selector here resolves on `/acp` only. */
 .acp-wordmark, .acp-banner { min-width: 0; flex-shrink: 3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The banner is a replaced element: shrinking its box alone would stretch the
    wordmark drawn inside it. `contain` makes the shortfall a scale rather than a
    squeeze, and `left` keeps the logo on the edge it shares with `/`. */
 .acp-banner { object-fit: contain; object-position: left center; }
-.acp-btn.topbar-nav { min-width: 0; flex-shrink: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Decoration, and the last thing here that should cost the row anything — but
    it has to be told that in the right units. Left to wrap it does not overflow
    the row, it grows it: at 768 px "Agent orchestrator" broke across two lines and
@@ -2195,30 +2158,8 @@ body:has(> .acp-shell) { height: 100dvh; }
    - `.acp-banner` is the logo, and `.acp-wordmark` below is the same logo at a
      width where 376 px of banner is most of the row. One or the other is on
      screen at every width, so the page never stops naming its product.
-   - `.acp-title` is decoration and stays droppable.
-
-   What must never appear here is `.topbar-nav`. Whether the dashboard link
-   exists is `local`'s decision, taken in the template, and a viewer's
-   reachability is not something a media query can observe. */
+   - `.acp-title` is decoration and stays droppable. */
 .acp-banner, .acp-title { display: none; }
-/* Below the breakpoint this row cannot hold a logo *and* a link, and that is
-   arithmetic rather than taste. Measured at 390 px with the link present: the
-   bar's min-content was 404 px against a viewport `overflow: hidden` will not
-   scroll, and the 14 px came off the status pill — the one item here that must
-   never be truncated. The costs that cannot move are the drill-down toggle and
-   the status cluster; what is left over is about 26 px, which is one control's
-   worth and not two.
-
-   So below 768 px the link *is* the logo — the arrangement this row carried
-   before the pair was added, and one that was measured to fit. The wordmark is
-   not dropped, it is subsumed: `:has()` keys on whether the link was rendered
-   at all, so the viewer who has no link keeps it. That viewer is the remote
-   one, and this width is really theirs — their row has three items, has always
-   fit, and would lose the product's name for a shortfall it does not have.
-
-   Where `:has()` is unsupported the rule drops and both render, which is the
-   14 px clip and not a blank topbar. */
-.topbar:has(.topbar-nav) .acp-wordmark { display: none; }
 /* The meter's number, dropped here rather than left to be clipped. Once the
    cluster is at the floor above there is not room for both the bar and the
    figure, and a figure that loses its tail is not a smaller reading — it is a
@@ -2227,11 +2168,6 @@ body:has(> .acp-shell) { height: 100dvh; }
    the number was the precision. Restored above the breakpoint, where the row
    is not the one that is short. */
 .acp-context-label { display: none; }
-/* `.topbar` has no left padding — the banner is meant to bleed to the edge, on
-   `/` and here — so whatever leads the row supplies its own inset. That was the
-   wordmark's `padding-left`; with the wordmark subsumed above, the link leads
-   and inherits the job, or it sits flush against the side of the screen. */
-.topbar:has(.topbar-nav) .acp-btn.topbar-nav { margin-left: 16px; }
 /* Below the breakpoint the rail and the conversation are one pane at a time,
    so there is no boundary between them to drag. */
 .acp-rail-resize { display: none; }
@@ -2744,10 +2680,6 @@ mark.rail-hit { background: color-mix(in srgb, var(--accent) 32%, transparent); 
   .acp-banner { display: block; }
   .acp-wordmark { display: none; }
   .acp-title { display: inline; }
-  /* The banner leads again, so it is the banner that bleeds to the edge and
-     the link goes back to being an ordinary item in the row. Same selector as
-     the rule it undoes, so the reset cannot be lost to specificity. */
-  .topbar:has(.topbar-nav) .acp-btn.topbar-nav { margin-left: 0; }
   /* The order of sacrifice inverts here, and both halves of the inversion are
      the same statement: up here the row's biggest item is a 376 px logo and
      the meter is 80 px of reading, so the logo gives and the meter does not.

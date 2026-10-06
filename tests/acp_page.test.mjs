@@ -6198,50 +6198,17 @@ check("the status pill is the one thing in the topbar that cannot be squeezed", 
   // graceful give the shrink factor above was set for.
   assert(/object-fit:\s*contain/.test(body(".acp-banner")),
          "the banner's shortfall is taken as a squeeze rather than a scale");
-  // Step 3. Added with the `Main dashboard` link, which is ~126 px this row
-  // did not have to find before. The selector is compound on purpose: the
-  // dashboard renders `.topbar-nav` too, and a bare-class rule collapsed its
-  // `ACP` pill to 26 px — emoji, no word — in the dashboard's own topbar.
-  const nav = body(".acp-btn.topbar-nav");
-  assert(nav, "the dashboard link's shrink rule is gone, or no longer scoped " +
-              "to this page's button shape");
-  assert(/min-width:\s*0/.test(nav) && /text-overflow:\s*ellipsis/.test(nav),
-         "the dashboard link cannot give way, so once the cluster has reached " +
-         "its floor there is nothing left to take a 320 px window's deficit");
-  assert(/flex-shrink:\s*(?!0\b)[1-9]/.test(nav),
-         "the dashboard link never yields, which puts it ahead of the status " +
-         "pill in the order of sacrifice rather than behind the logo");
   assert(/min-width:\s*\d+px/.test(body(".acp-context-track")),
          "the context meter's track has no floor, so it collapses to nothing " +
          "before the logo has finished giving way");
 });
 
-check("the cross-surface link keeps its label in the dashboard's own topbar", () => {
-  // The stylesheet is shared, and this half of the pair lives on `/` — a row
-  // with a `flex-shrink: 0` banner and three clusters pinned at min-content,
-  // which makes any direct child of it the only thing in the row that can give
-  // way. This link became such a child, and took the whole deficit: measured
-  // at 42 px of a 65 px pill at 1280 px, and 26 px at 1100 px — a robot emoji
-  // and the letter "A". The row has always been wider than a narrow window and
-  // has always clipped on the right when it did not fit; what it must not do
-  // is quietly consume the one control added to make `/acp` findable.
-  const css = fs.readFileSync(STYLESHEET, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-  const rules = [...css.matchAll(/([^{}]*)\{([^{}]*)\}/g)];
-  const bodyOf = (selector) => rules
-    .filter((m) => m[1].split(",").some((s) => s.trim().replace(/\s+/g, " ") === selector))
-    .map((m) => m[2]).join(";");
-  assert(/flex-shrink:\s*0/.test(bodyOf(".topbar-nav")),
-         "`.topbar-nav` has no shrink floor, so on `/` the ACP pill is the " +
-         "only item in the topbar that can give and is truncated to its emoji " +
-         "before any cluster beside it yields a pixel");
-  // The override that keeps `/acp`'s own row working must still outrank it, or
-  // fixing the dashboard freezes the link on the page that has no room for it.
-  assert(/flex-shrink:\s*(?!0\b)[1-9]/.test(bodyOf(".acp-btn.topbar-nav")),
-         "`/acp`'s override is gone, so the link cannot give way on the one " +
-         "row where the order of sacrifice needs it to");
-});
-
-check("the dashboard link is hidden from the remote viewer, not from a narrow window", () => {
+check("the topbar hides only what a wider window renders differently", () => {
+  // This check used to also assert that `.topbar-nav`, the dashboard's ACP
+  // link, was never hidden by width. The link and every `.topbar-nav` rule
+  // were removed at the user's request (the app window already reaches
+  // `/acp`, and the link stranded it there), so only the width-keyed
+  // swaps below remain to pin.
   // CSS is the code here, so this reads the sheet rather than the page: there
   // is no layout engine in this harness and a check on the template alone
   // cannot see a rule that hides what the template rendered.
@@ -6253,14 +6220,8 @@ check("the dashboard link is hidden from the remote viewer, not from a narrow wi
     if (!/display\s*:\s*none/.test(m[2])) continue;
     for (const sel of m[1].split(",")) hidden.push(sel.trim().replace(/\s+/g, " "));
   }
-  assert(!hidden.includes(".topbar-nav"),
-         "`.topbar-nav` is hidden by a rule in the sheet, and the template " +
-         "renders it for every viewer it renders it for at all — so a loopback " +
-         "viewer who merely narrowed a desktop window below 768 px loses the " +
-         "only link back to the dashboard. The width is not the viewer; " +
-         "`local` is, and the template already computes it");
-  // The positive control. Without it this check also passes against a sheet
-  // that hides nothing at all — a different regression, in which the 390 px
+  // The banner must be hidden at narrow widths. A sheet that hides nothing at all
+  // is the regression this catches: the 390 px
   // topbar keeps 376 px of banner and the row it was measured for is gone.
   assert(hidden.includes(".acp-banner"),
          "nothing hides the banner at narrow widths, so the tightest row on " +

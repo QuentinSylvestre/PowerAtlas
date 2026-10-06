@@ -2267,72 +2267,21 @@ class TestAcpBackLinkMatchesReachability:
 _ACP_PATH_FOR_BACKLINK = "/acp"
 
 
-class TestTheDashboardLinksToTheAgentPage:
-    """The other half of the pair above. `/acp` has linked back to `/` since
-    Phase 5b; nothing linked forward, so reaching the agent surface from the
-    dashboard meant knowing the path and typing it — which is how a shipped
-    feature ends up believed absent.
+class TestTheDashboardHasNoAgentPageLink:
+    """The dashboard topbar used to carry an `ACP` link to `/acp`. The user
+    asked for it to be removed: the app window already reaches the agent
+    sessions, and a click on the link from inside the app window left it on
+    `/acp` with no way back to the dashboard."""
 
-    Read off the parsed topbar rather than out of a substring of the page,
-    because a substring pins the text of a line and not its effect. What has to
-    hold is that the anchor is **in the topbar**, that its target is **a route
-    that answers**, and that it is an anchor at all — a `<button>` with
-    `location.href` looks identical in the markup diff and silently drops
-    middle-click, Ctrl-click and "copy link address".
-    """
-
-    _LINK = re.compile(r'<a\b([^>]*\bhref="/acp"[^>]*)>(.*?)</a>', re.S)
-
-    def _topbar(self, client):
+    def test_the_topbar_has_no_link_to_the_agent_page(self, client):
         page = client.get("/").text
         start = page.find('<div class="topbar">')
         end = page.find('<div class="search-area">')
-        assert start >= 0 and end > start, \
-            "the dashboard's topbar could not be located; this check is measuring nothing"
-        return page[start:end]
-
-    def test_the_topbar_carries_a_link_to_the_agent_page(self, client):
-        found = self._LINK.findall(self._topbar(client))
-        assert len(found) == 1, (
-            "the dashboard topbar has no link to /acp, so the agent surface is "
-            "reachable only by typing the path")
-        attrs, label = found[0]
-        assert "topbar-nav-pill" in attrs, (
-            "the link does not wear the topbar's control shape, so it reads as "
-            "stray text beside two pill buttons")
-        assert "aria-label=" in attrs, "the link is unlabelled for a screen reader"
-        assert label.strip(), "the link renders no visible label at all"
-
-    def test_the_link_sits_with_the_logo_and_not_among_the_settings(self, client):
-        """Where it is *is* the feature. This link spent its first life in the
-        right-hand cluster, which is settings and state — launch profile, remote
-        access, autostart, last refresh — and a page link wearing the same pill
-        as four settings reads as a fifth one. `topbar-spacer` is the divider
-        between the two halves, so "before the spacer" is the machine-checkable
-        form of "in the top-left corner, beside the logo", and it does not pin
-        the label, the emoji or the order of the settings beside it."""
-        topbar = self._topbar(client)
-        link = topbar.find('href="/acp"')
-        spacer = topbar.find('class="topbar-spacer"')
-        banner = topbar.find('class="topbar-banner"')
-        assert -1 < banner < link < spacer, (
-            "the /acp link is not between the logo and the spacer; it is back "
-            f"among the settings cluster (banner={banner}, link={link}, "
-            f"spacer={spacer})")
-
-    def test_the_link_points_at_a_route_that_answers(self, raw_client):
-        """The half a substring check cannot make: the href has to name a live
-        route. A typo'd path is a link to a 404 and looks correct in a diff."""
-        href = self._LINK.findall(self._topbar(raw_client))[0][0]
-        target = re.search(r'href="([^"]+)"', href).group(1)
-        assert raw_client.get(target).status_code == 200, \
-            f"the topbar links to {target}, which does not serve"
-
-    def test_the_link_is_absent_from_the_page_it_points_at(self, raw_client):
-        """`/acp` has its own back link and does not need a forward one to
-        itself. This is the positive control for the check above: without it,
-        a page-wide search would pass on `/acp`'s own markup."""
-        assert 'href="/acp"' not in raw_client.get("/acp").text
+        assert start >= 0 and end > start, (
+            "the dashboard's topbar could not be located; this check is measuring nothing")
+        assert 'href="/acp"' not in page[start:end], (
+            "the dashboard topbar links to /acp again, which strands the app "
+            "window on a page with no way back")
 
 
 class TestAcpPageIsNotCacheable:
