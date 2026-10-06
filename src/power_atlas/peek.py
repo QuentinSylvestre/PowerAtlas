@@ -115,6 +115,9 @@ _now = time.monotonic
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (1)
 _COOKIE_READ_ABANDON = 30.0
 _COOKIE_SKIP_WARN_INTERVAL = 300.0
+# How often (seconds) the worker checks that the keyboard listener is still
+# running. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 15)
+_LISTENER_CHECK_INTERVAL = 60.0
 
 _RESET_OVERLAYS_JS = "if(typeof resetOverlays==='function') resetOverlays()"
 
@@ -299,6 +302,11 @@ class PeekWindow:
         # WebView2's browser keys and context menu are on (worker-owned).
         # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 5)
         self._browser_keys_on = False
+        # The listener health check (`_check_listener`): `_now()` at the last
+        # check, and whether its one WARNING was logged (worker-owned).
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 15)
+        self._last_listener_check = None
+        self._listener_warned = False
         self._worker = None
         # `__main__`'s shutdown tail, run by the `stop()` watchdog when the UI
         # loop will not end. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
@@ -534,7 +542,15 @@ class PeekWindow:
                 except Exception as e:
                     self._log_event_error(("loaded",), e)
         while True:
-            ev = self._events.get()
+            # A bounded wait, so an idle worker still runs the listener
+            # check (follow-up 15).
+            try:
+                ev = self._events.get(timeout=_LISTENER_CHECK_INTERVAL)
+            except queue.Empty:
+                ev = None
+            self._check_listener()
+            if ev is None:
+                continue
             try:
                 done = self._control(ev)
                 if done:
@@ -547,6 +563,43 @@ class PeekWindow:
                 self._handle(ev)
             except Exception as e:
                 self._log_event_error(ev, e)
+
+    def _check_listener(self) -> None:
+        """Log one WARNING per run when the keyboard listener has stopped:
+        its thread is dead, or pynput no longer says it is running (an
+        exception in a callback stops it). At most every
+        `_LISTENER_CHECK_INTERVAL` seconds, on the worker, never in the hook.
+        The first call only starts the clock. Silent while stopping, and
+        without a listener (a failed start is logged when it happens).
+        Not caught: Windows removing a hook that took too long
+        (`LowLevelHooksTimeout`) leaves the thread alive and `running` True.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 15)
+        """
+        try:
+            if self._listener_warned or self._stopping:
+                return
+            now = _now()
+            last = self._last_listener_check
+            if last is None or now - last < _LISTENER_CHECK_INTERVAL:
+                if last is None:
+                    self._last_listener_check = now
+                return
+            self._last_listener_check = now
+            listener = self._listener
+            if listener is None:
+                return
+            alive = bool(listener.is_alive())
+            running = bool(listener.running)
+            if alive and running:
+                return
+            self._listener_warned = True
+            log.warning("PowerAtlas window: the hotkey listener has stopped "
+                        "(thread alive: %s, running: %s); the peek and "
+                        "browser shortcuts are off until PowerAtlas restarts",
+                        alive, running)
+        except Exception as e:
+            log.debug("PowerAtlas window: listener check failed: %s",
+                      type(e).__name__)
 
     @staticmethod
     def _log_event_error(ev, e: Exception) -> None:

@@ -4613,3 +4613,117 @@ class TestAltMask:
         monkeypatch.setattr(peek_mod, "_win32", lambda: (_U, None))
         peek_mod._real_send_mask_key()
         assert calls == [(0xE8, 0, 0, 0), (0xE8, 0, 0x2, 0)]
+
+
+class TestListenerHealth:
+    """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+    (follow-up 15): the worker, never the hook, checks the pynput listener
+    every `_LISTENER_CHECK_INTERVAL` seconds and logs one WARNING per run
+    when its thread has died or it no longer says it is running."""
+
+    class _Lst:
+        def __init__(self, alive=True, running=True):
+            self.alive = alive
+            self.running = running
+
+        def is_alive(self):
+            return self.alive
+
+    def _peek(self, monkeypatch, listener):
+        import power_atlas.peek as peek_mod
+        pw = _new_peek(monkeypatch)
+        pw._listener = listener
+        clock = [1000.0]
+        monkeypatch.setattr(peek_mod, "_now", lambda: clock[0])
+        return pw, clock
+
+    def _warnings(self, caplog):
+        return [r for r in caplog.records if r.levelno == logging.WARNING
+                and "hotkey listener" in r.getMessage()]
+
+    @pytest.mark.parametrize("alive,running", [(False, True), (True, False),
+                                               (False, False)])
+    def test_a_stopped_listener_is_reported_once(self, monkeypatch, caplog,
+                                                 alive, running):
+        import power_atlas.peek as peek_mod
+        pw, clock = self._peek(monkeypatch, self._Lst(alive, running))
+        step = peek_mod._LISTENER_CHECK_INTERVAL
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            pw._check_listener()  # the first call only starts the clock
+            assert self._warnings(caplog) == []
+            clock[0] += step - 0.5  # not yet due
+            pw._check_listener()
+            assert self._warnings(caplog) == []
+            clock[0] += 0.5  # due
+            pw._check_listener()
+            assert len(self._warnings(caplog)) == 1
+            for _ in range(3):
+                clock[0] += step
+                pw._check_listener()
+        msgs = [r.getMessage() for r in self._warnings(caplog)]
+        assert len(msgs) == 1
+        assert f"thread alive: {alive}, running: {running}" in msgs[0]
+        assert not msgs[0].startswith("Peek")
+
+    def test_a_healthy_listener_is_silent(self, monkeypatch, caplog):
+        import power_atlas.peek as peek_mod
+        pw, clock = self._peek(monkeypatch, self._Lst())
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            for _ in range(4):
+                pw._check_listener()
+                clock[0] += peek_mod._LISTENER_CHECK_INTERVAL
+        assert self._warnings(caplog) == []
+
+    def test_a_listener_that_dies_later_is_reported(self, monkeypatch,
+                                                    caplog):
+        import power_atlas.peek as peek_mod
+        lst = self._Lst()
+        pw, clock = self._peek(monkeypatch, lst)
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            pw._check_listener()
+            clock[0] += peek_mod._LISTENER_CHECK_INTERVAL
+            pw._check_listener()
+            assert self._warnings(caplog) == []
+            lst.alive = False
+            clock[0] += peek_mod._LISTENER_CHECK_INTERVAL
+            pw._check_listener()
+        assert len(self._warnings(caplog)) == 1
+
+    @pytest.mark.parametrize("why", ["stopping", "no listener"])
+    def test_nothing_is_reported_while_stopping_or_without_one(
+            self, monkeypatch, caplog, why):
+        """`stop()` stops the listener on purpose; a listener that never
+        started was already logged by `_start_listener`."""
+        import power_atlas.peek as peek_mod
+        pw, clock = self._peek(monkeypatch, self._Lst(alive=False))
+        if why == "stopping":
+            pw._stopping = True
+        else:
+            pw._listener = None
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            for _ in range(3):
+                pw._check_listener()
+                clock[0] += peek_mod._LISTENER_CHECK_INTERVAL
+        assert self._warnings(caplog) == []
+
+    def test_the_idle_worker_runs_the_check(self, monkeypatch, caplog):
+        """No event needed: the worker's wait times out and checks."""
+        import threading
+        import time as _t
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_LISTENER_CHECK_INTERVAL", 0.02)
+        pw = _new_peek(monkeypatch)
+        pw._listener = self._Lst(alive=False)
+        a = _FakeAdapter()
+        monkeypatch.setattr(pw, "_establish_ready", lambda: a)
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            t = threading.Thread(target=pw._window_worker, daemon=True)
+            t.start()
+            deadline = _t.monotonic() + 5
+            while not self._warnings(caplog) and _t.monotonic() < deadline:
+                _t.sleep(0.01)
+            _post(pw, "stop")
+            t.join(5)
+        assert not t.is_alive()
+        assert len(self._warnings(caplog)) == 1
+        assert a.calls == []
