@@ -1,6 +1,9 @@
 """Tests for tray icon creation."""
 
+import sys
 from unittest.mock import patch
+
+import pytest
 
 from PIL import Image
 
@@ -169,3 +172,120 @@ def test_doors_import_neither_web_nor_the_tray():
     import power_atlas.tray as tray_mod
     assert not hasattr(tray_mod, "_login_url")
     assert not hasattr(tray_mod, "_open_in_browser")
+
+
+class TestLandingFileOffWindows:
+    """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS
+    follow-up 19: off Windows `xdg-open` would carry the login URL, and its
+    live code, on a command line any local user can read
+    (`/proc/<pid>/cmdline`). The door writes a private page that forwards to
+    the URL, opens its `file://` URL instead, and deletes the file after a
+    delay. Windows keeps `webbrowser.open` (ShellExecute)."""
+
+    URL = "http://127.0.0.1:4915/local-auth?code=Zq7-LANDING-CODE&next=%2Facp"
+    CODE = "Zq7-LANDING-CODE"
+
+    def _doors(self, monkeypatch, tmp_path, popen=None):
+        import subprocess
+        import power_atlas.doors as doors
+        monkeypatch.setattr(doors.sys, "platform", "linux")
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        argv = []
+
+        def fake_popen(args, **kw):
+            argv.append(list(args))
+            if popen is not None:
+                return popen(args)
+            return None
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(doors.webbrowser, "open",
+                            lambda *a, **k: argv.append(["webbrowser", *a]))
+        return doors, argv
+
+    def test_the_url_never_reaches_the_command_line(self, monkeypatch,
+                                                    tmp_path, caplog):
+        import logging
+        from pathlib import Path
+        doors, argv = self._doors(monkeypatch, tmp_path)
+        monkeypatch.setattr(doors, "LANDING_FILE_TTL_S", 30.0)
+        with caplog.at_level(logging.DEBUG):
+            doors.open_in_browser(self.URL)
+        assert len(argv) == 1 and argv[0][0] == "xdg-open"
+        assert len(argv[0]) == 2
+        joined = " ".join(argv[0])
+        assert self.CODE not in joined and "local-auth" not in joined
+        uri = argv[0][1]
+        assert uri.startswith("file:")
+        files = list(tmp_path.iterdir())
+        assert len(files) == 1 and Path(files[0]).as_uri() == uri
+        page = files[0].read_text(encoding="utf-8")
+        # The attribute holds the HTML-escaped URL, the script the JSON one.
+        assert ('content="0;url=http://127.0.0.1:4915/local-auth?code='
+                'Zq7-LANDING-CODE&amp;next=%2Facp"') in page
+        assert ('location.replace("http://127.0.0.1:4915/local-auth?code='
+                'Zq7-LANDING-CODE&next=%2Facp")') in page
+        assert self.CODE not in caplog.text
+        assert str(files[0]) not in caplog.text
+        doors._remove_all_landing_files()
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="POSIX permission bits")
+    def test_the_file_is_private(self, monkeypatch, tmp_path):
+        """0600: `tempfile.mkstemp` documents the file as "readable and
+        writable only by the creating user ID"."""
+        import stat
+        doors, _ = self._doors(monkeypatch, tmp_path)
+        doors.open_in_browser(self.URL)
+        (f,) = list(tmp_path.iterdir())
+        try:
+            assert stat.S_IMODE(f.stat().st_mode) == 0o600
+        finally:
+            doors._remove_all_landing_files()
+
+    def test_the_file_is_removed_after_the_delay(self, monkeypatch, tmp_path):
+        import time
+        doors, _ = self._doors(monkeypatch, tmp_path)
+        monkeypatch.setattr(doors, "LANDING_FILE_TTL_S", 0.2)
+        doors.open_in_browser(self.URL)
+        assert len(list(tmp_path.iterdir())) == 1, "still there at first"
+        deadline = time.monotonic() + 5
+        while list(tmp_path.iterdir()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert list(tmp_path.iterdir()) == []
+        assert doors._landing_files == set()
+
+    def test_a_failed_start_removes_the_file_and_never_retries_with_the_url(
+            self, monkeypatch, tmp_path, caplog):
+        import logging
+
+        def boom(args):
+            raise FileNotFoundError(f"no xdg-open for {args}")
+
+        doors, argv = self._doors(monkeypatch, tmp_path, popen=boom)
+        with caplog.at_level(logging.DEBUG):
+            doors.open_in_browser(self.URL)
+        assert len(argv) == 1, "no second attempt"
+        assert self.CODE not in " ".join(argv[0])
+        assert list(tmp_path.iterdir()) == []
+        assert "FileNotFoundError" in caplog.text
+        assert self.CODE not in caplog.text
+        assert "power-atlas-login-" not in caplog.text
+
+    def test_a_script_breakout_is_escaped(self, monkeypatch, tmp_path):
+        """A `</script>` in the URL cannot close the script element."""
+        doors, _ = self._doors(monkeypatch, tmp_path)
+        doors.open_in_browser("http://127.0.0.1:1/?x=</script><b>")
+        (f,) = list(tmp_path.iterdir())
+        page = f.read_text(encoding="utf-8")
+        doors._remove_all_landing_files()
+        assert page.count("</script>") == 1
+        assert "<b>" not in page
+
+    def test_windows_keeps_webbrowser_open(self, monkeypatch, tmp_path):
+        doors, argv = self._doors(monkeypatch, tmp_path)
+        monkeypatch.setattr(doors.sys, "platform", "win32")
+        doors.open_in_browser(self.URL)
+        assert argv == [["webbrowser", self.URL]]
+        assert list(tmp_path.iterdir()) == []
