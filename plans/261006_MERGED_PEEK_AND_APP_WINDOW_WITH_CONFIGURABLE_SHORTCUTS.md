@@ -356,10 +356,15 @@ QA (Step 5b): live save refusals against the running instance with the `pa_local
 - Grep `README.md` for "peek" and "Open" once more and fix anything the earlier phases missed.
 
 **Exit criteria**:
-- [ ] `grep -n -i "doors\|on every show" src/power_atlas/*.py` shows only wording that matches the shipped openers (each remaining hit read and judged).
-- [ ] Every Phase 4 row of `## 8) Documentation Updates` applied.
-- [ ] README Linux note, doors list, tray list and config sample all match the shipped behaviour (cold read: a fresh reader can say what a double-tap does on Windows and on Linux).
-- [ ] Python suite passes (comment-only edits, run as a guard).
+- [x] `grep -n -i "doors\|on every show" src/power_atlas/*.py` shows only wording that matches the shipped openers (each remaining hit read and judged).
+- [x] Every Phase 4 row of `## 8) Documentation Updates` applied.
+- [x] README Linux note, doors list, tray list and config sample all match the shipped behaviour (cold read: a fresh reader can say what a double-tap does on Windows and on Linux).
+- [x] Python suite passes (comment-only edits, run as a guard).
+
+Implementation (2026-10-06, code: 14d1c2c)
+The docs and comments now name the doors that mint a login code, as the code ships them: tray **Open in browser**; tray **Open PowerAtlas**, when it falls back to the browser; the browser shortcut; the double-tap's browser fallback off Windows; the PowerAtlas window, at creation and after a local-secret rotation; **Copy login link**. This list replaces the old "tray, peek double-tap, peek webview" wording in four places in `src/power_atlas/web.py`: the `_LOGIN_CODE_MAX_OUTSTANDING` comment, the `pa_local` max-age comment, the `mint_login_code` docstring and the `login_url` docstring. `login_url` no longer claims a fresh code on every show. I checked that Copy login link goes through `tray._login_url` and then `web.login_url`, so "every door calls this through `login_url`" is true. Other edits: `src/power_atlas/__main__.py`: the `_server_url` docstring lists the same doors. `src/power_atlas/peek.py`: the module docstring describes the one pywebview window with peek mode and app mode (Windows only), plus its shortcut listener; the comment above `from .tray import _login_url` lists the window and browser doors. `README.md`: the Linux note says app mode is Windows only, and on Linux the double-tap and tray **Open PowerAtlas** open a signed-in browser with no **Open in browser** item; the tray intro says the icon click opens the browser where app mode is unavailable and that **Open in browser** is listed only where app mode is available; the fallback sentence now reads "pywebview or pynput missing, or not Windows"; the `peek_mode` sample comment says a double-tap opens the browser off Windows. A cold reader can now tell that on Windows a double-tap opens or hides the app window, and on Linux it opens the browser. No code changed. Commits: 521d8b6 and 14d1c2c.
+
+Per-phase review deferred to Step 9: comment, docstring and README edits only across four files (no executable code; verified with `git diff c148d83..14d1c2c -- src`), and Step 9's holistic review covers documentation completeness.
 
 ## 6) Risk Assessment
 
@@ -459,6 +464,10 @@ Phase 3 (code `a8d9c12`, `f8e6863`):
 - **Error wording**: "is empty", "cannot use esc, which dismisses the peek", "has an unknown key 'foo'", "needs a modifier (ctrl, shift or alt)", "needs a key besides the modifiers", "has more than one key besides the modifiers", each prefixed "Shortcut ".
 - **The listener log line adds `browser shortcut: <value or off>`.**
 - **Inline errors reuse `.pa-modal-field-error`** (already has a `[hidden]` rule); no `style.css` change. Errors are also cleared when the dialog reopens.
+
+Phase 4 (code `521d8b6`, `14d1c2c`):
+- **Two commits**: the first called the doors "openers"; the fixup restores the project's term "door" (`TestLoopbackDoors`, the `tray.py` door list). No amend.
+- **Edits beyond the listed rows**: README tray intro (icon click opens the browser where app mode is unavailable; Open in browser listed only where app mode is available), the fallback sentence ("pywebview or pynput missing, or not Windows"), and the `peek_mode` sample comment ("the browser off Windows"). The `peek.py` module docstring is longer than the plan's one-liner.
 
 ## Follow-up Work (Deferred)
 
