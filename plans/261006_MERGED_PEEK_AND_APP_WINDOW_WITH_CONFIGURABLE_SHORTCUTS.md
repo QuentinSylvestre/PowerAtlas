@@ -1,7 +1,7 @@
 # Merged Peek and App Window with Configurable Shortcuts
 
 > **Date**: 2026-10-06
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — implementation complete; `target=_blank` and the live rotation check left for the user  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Turn the peek overlay into one PowerAtlas window with a peek mode and an app mode, add configurable shortcuts, and offer app window and browser from the tray
 > **Estimated effort**: 1-2 days
@@ -103,6 +103,7 @@ Make the existing peek pywebview window a single PowerAtlas window with a peek m
 | D-11 `resetOverlays` | Runs only on PEEK → HIDDEN, not on PEEK → APP | Run on every peek end | Accepted at the checkpoint; the app mode keeps its state. |
 | D-12 Platform | App mode Windows only (`supports_app_mode = sys.platform == "win32"`); elsewhere double-tap and tray Open use the browser | GTK chrome switching | Accepted at the checkpoint; WinForms is the only backend probed. |
 | D-13 Signed-out detection (SC-9) | `web.py` keeps a process-local `_local_secret_generation` counter bumped in `set_local_secret`; the window records the generation it last signed in under (read before minting the creation URL) and reloads `_login_url` on any event that ends in PEEK or APP, including tray Open while already in APP, when it differs | Read the HttpOnly cookie with `window.get_cookies()`; inspect the page with `evaluate_js` | Rotation is the only in-run event that invalidates the window's cookie (90-day max age outlives any run). No page round-trip; `evaluate_js` can hang 20 s on an unloaded page. A rotation done inside the window causes one unneeded reload to `/`, accepted. |
+| D-13a Signed-out detection, amended at the final review | Two triggers: the generation check (D-13), plus the window's own `pa_local` cookie read through pywebview `get_cookies()` on a bounded side thread, only after `loaded`, at most every 10 s; an unreadable cookie, no loaded secret, a rotation in progress or another origin count as unknown and never reload | Generation only (D-13 as first written); `evaluate_js` on the page (still rejected) | D-13's premise that rotation is the only in-run event was wrong: a creation code never exchanged (WebView2 slower than the 120 s TTL, or a failed first navigation) or an expired cookie left the window on the gate page for the whole run (final review, Security auditor). `get_cookies` was measured on 2026-10-06 to return the HttpOnly cookie on EdgeChromium in about 12 ms. Supersedes D-13's Rejected column for `get_cookies`. |
 | D-14 Focus test | "Focused" means `user32.GetForegroundWindow() == hwnd`, where `hwnd` is read from `native.Handle` inside `Invoke` after each chrome switch and cached as an int | `native.ContainsFocus` under `Invoke`; reading `native.Handle` from another thread | `Control.Handle` read off the UI thread during a handle recreation could create the HWND on the wrong thread. |
 | D-20 Peek activation | Peek is shown without activating it; Esc is suppressed while a peek shows; on peek end the pre-peek foreground window and z-order are restored | `win.show()` (always activates) | Satisfies SC-3's "same focus state"; the chord and Esc are handled by the global hook, so the peek needs no focus. Behaviour change: typing during a peek goes to the user's app unless they click into the peek; a maximized APP returning from a peek is briefly activated (no non-activating maximized show) and the previous foreground is restored. Added after plan review (cycle 1: A7, S4, R6; cycle 2: Esc suppression). |
 | D-21 Threading | Hook callbacks only update key state, suppress and enqueue; one worker thread owns all window state and calls; other threads enqueue; `stop()` never waits on the worker | Transitions on the listener thread under a shared lock | The filter runs inside the low-level hook; blocking there stalls input and can get the hook removed. Added after plan review (A3, A4, S6, R1-R3). |
@@ -134,7 +135,7 @@ No phase is `[P:N]`: every phase edits `peek.py` or `web.py`, and all share one 
 
 - **The hook decides, the worker acts.** `_win32_event_filter` and `_on_press`/`_on_release` only: update `_pressed_keys` and per-chord `_triggered`; decide whether to suppress; build a small event tuple; `put` it on `self._events` (`queue.SimpleQueue`). They never call pywebview, `native`, `Invoke`, `load_url`, `evaluate_js`, a lock, or the browser.
 - **The filter never lets an exception escape except the suppression.** pynput stops the whole listener on any other exception raised in the filter (`pynput/_util/__init__.py`, `_emitter`). The filter computes its decision inside `try/except Exception` (log the type name; on error: no suppression, no event) and calls `suppress_event()` **after** that `try`, outside any `try`, when the decision says so (`suppress_event()` raises pynput's `SuppressException`, an `Exception` subclass).
-- **One worker thread owns the window.** `PeekWindow` starts a daemon thread `_window_worker` that loops on `self._events` and performs every transition and every pywebview/native call. All state (`_state`, `_return_to`, `_app_placement`, `_tap_origin`, `_last_press`, `_signed_gen`, `_prev_foreground`, `_hwnd`) is read and written only on that thread, with one exception: the worker publishes `_peek_showing` (a plain bool it alone writes) for the hook to read. Each event is handled inside `try/except Exception` that logs `type(e).__name__`, plus `str(e)` for errors from Win32/.NET calls on paths that never handle a URL.
+- **One worker thread owns the window.** `PeekWindow` starts a daemon thread `_window_worker` that loops on `self._events` and performs every transition and every pywebview/native call. All state (`_state`, `_return_to`, `_app_placement`, `_tap_origin`, `_last_press`, `_signed_gen`, `_prev_foreground`, `_hwnd`) is read and written only on that thread, with two exceptions: the worker publishes `_peek_showing` and `_peek_chord_off` (plain bools it alone writes) for the hook to read. `_hwnd` is written only on the worker; UI-thread callables may read it. Each event is handled inside `try/except Exception` that logs `type(e).__name__`, plus `str(e)` for errors from Win32/.NET calls on paths that never handle a URL.
 - **UI-thread calls are bounded.** The worker runs native code with `native.BeginInvoke(...)` and waits on a completion event for up to 2 s; past that it logs a WARNING naming the operation and moves on (a hung UI thread must be visible in the log, not a silent stall).
 - **Every other caller enqueues.** Tray `show_app()`, the `FormClosing` handler and the browser chord post events; none waits for the result.
 - **`stop()` is idempotent and bounded.** The first call sets `_stopping`, stops the listener, posts a `stop` sentinel, and calls `self._window.destroy()` from a daemon thread joined for at most 5 s; later calls return at once. Guarantee: *tray Quit and Restart end the process (and Restart relaunches) within 15 s even if the UI thread hangs.* On a destroy timeout, post `WinForms.Application.Exit()` via `BeginInvoke`; if `webview.start()` has still not returned 5 s later, a watchdog thread runs the same shutdown tail `__main__` runs after `peek.start()` returns. Refactor that tail (after `peek.start(on_main_thread=True)`: stop server, join, restart check, remove PID, release mutex, `logging.shutdown`, relaunch if requested, `_exit_immediately`) into a function the watchdog can call, guarded so it runs once.
@@ -171,7 +172,7 @@ States: **HIDDEN**; **PEEK** (carries `return_to`: `None`, or `"app"` meaning re
 | Modifier release (Hold) | no-op | end peek → HIDDEN | end peek → APP | no-op |
 | Modifier release (Toggle) | no-op | no-op | no-op | no-op |
 | Esc (suppressed while a peek shows) | n/a (passes through, no event) | end peek → HIDDEN | end peek → APP | n/a (passes through, no event) |
-| User close (`FormClosing`, `UserClosing`) | n/a | same as Esc (only reachable after the user clicked into the peek) | same as Esc | save, → HIDDEN |
+| User close (`FormClosing`, `UserClosing`) | hide (a window shown late after a timed-out call) | same as Esc (only reachable after the user clicked into the peek) | same as Esc | save, → HIDDEN |
 | Tray Open PowerAtlas | → APP, focused | → APP, focused | → APP, focused | → APP, focused (restores a minimized window, brings to front) |
 | Tray Open in browser; browser chord | browser | browser | browser | browser |
 
@@ -294,7 +295,7 @@ Tests: `tests/test_peek.py` `TestCreatePeek` (`test_invalid_hotkey_fallback`, `t
 - [x] Python suite command from Phase 1 passes; `node tests/acp_page.test.mjs` passes.
 - [x] Unattended window probe from Phase 1 re-run with `mode="toggle"` events (press, press after 0.8 s, press-press within 0.5 s) and passes.
 - [x] Smoke as in Phase 1.
-- [ ] Live QA: settings modal shows the Peek mode select, saving shows the "on relaunch" badge; after restart with `toggle`, injected press/press hides and press/press-within-0.5 s opens app mode (or BLOCKED if locked); `peek_mode` restored to its previous value afterwards.
+- [x] Live QA: settings modal shows the Peek mode select, saving shows the "on relaunch" badge; after restart with `toggle`, injected press/press hides and press/press-within-0.5 s opens app mode (or BLOCKED if locked); `peek_mode` restored to its previous value afterwards.
 - [x] Update `README.md` config sample (around line 219) with `peek_mode` and the settings section description (around line 178).
 
 Implementation (2026-10-06, code: 315bb5c)
@@ -331,11 +332,11 @@ Tests: `hotkeys.py` behaviour tested inside `tests/test_peek.py` (a new class th
 - [x] Python suite and `node tests/acp_page.test.mjs` pass.
 - [x] `POST /api/save-setting` refuses `peek_hotkey="z"`, `browser_hotkey="ctrl+shift+z"` (equal to peek) and `browser_hotkey="ctrl+shift+alt+z"` (contains peek), and accepts `browser_hotkey=""` (live, with the cookie, against a throwaway config value restored afterwards).
 - [x] Smoke as in Phase 1.
-- [ ] Live QA: with a browser shortcut set and PowerAtlas restarted, injecting it opens a browser tab signed in: the count of `loopback browser signed in with a login code` lines in `orchestrator.log` rises by one (or BLOCKED if locked). Restore the user's original shortcut values afterwards.
+- [x] Live QA: with a browser shortcut set and PowerAtlas restarted, injecting it opens a browser tab signed in: the count of `loopback browser signed in with a login code` lines in `orchestrator.log` rises by one (or BLOCKED if locked). Restore the user's original shortcut values afterwards.
 - [x] Update `README.md` config sample and settings description with `browser_hotkey` and the validation rule.
 - [x] Update `plans/tests/260701_POWERATLAS.md` "validation only at peek startup" row and its settings allowlist (`peek_mode`, `browser_hotkey`).
-- [ ] (deferred from Phase 2) Live QA of Phase 2's Toggle mode on an unlocked desktop: after a restart with `toggle`, injected press then press after 0.8 s hides, and press-press within 0.5 s opens app mode; restore `peek_mode` afterwards.
-- [ ] (deferred from Phase 1) Live QA of Phase 1's SC-1 to SC-4, SC-8, Esc and `target=_blank` checks on an unlocked desktop, using `qa_phase1.py` per `## 7) Verification`; BLOCKED again if the session is still locked.
+- [x] (deferred from Phase 2) Live QA of Phase 2's Toggle mode on an unlocked desktop: after a restart with `toggle`, injected press then press after 0.8 s hides, and press-press within 0.5 s opens app mode; restore `peek_mode` afterwards.
+- [ ] (deferred from Phase 1) Live QA of Phase 1's SC-1 to SC-4, SC-8, Esc and `target=_blank` checks on an unlocked desktop, using `qa_phase1.py` per `## 7) Verification`; BLOCKED again if the session is still locked. *2026-10-06 09:30: SC-1 to SC-4, SC-8 and the Esc checks PASS live (21/21); only the `target=_blank` link check remains, for the user.*
 
 Implementation (2026-10-06, code: a8d9c12)
 Phase 3 is done, and the code is committed as `a8d9c12`. It adds an optional browser shortcut and checks both shortcuts with a single validator, both on save and at startup. New module `src/power_atlas/hotkeys.py` is pure (no pywebview or pynput import) and holds the key-name table (one source of truth, with the 10 added keys checked against pynput 1.8.2), parsing and validation with Esc refused as a shortcut key, the conflict test (equal or one contains the other), and the D-18 chord matcher (most keys wins, a tie goes to peek). In `peek.py` the listener matches against a table of two chords with per-chord auto-repeat and key-up tracking; the Windows filter and the non-Windows path use the same matcher. The browser chord queues a `browser` event; the worker opens a signed-in tab and changes neither the window state nor the double-tap timing, and handles this event even before the window is ready. Modifier release still ends a Hold peek only for the peek chord's own modifiers. At startup `create_peek` falls back to `ctrl+shift+z` for an invalid peek shortcut and turns off a browser shortcut that is invalid or conflicting, with a warning in each case. `Config.browser_hotkey` defaults to `""` (off); `web.py` adds it to `_SETTING_TYPES`, `_RESTART_TO_APPLY` and both payloads; `/api/save-setting` refuses a bad format ("Shortcut …") and a shortcut that overlaps the other one as it actually runs; `__main__.py` passes the value to `create_peek`. The Settings dialog has a Browser shortcut row; both shortcut fields save through `saveShortcut` in `index.html`, which shows the server's error under the field and restores the stored value from `data-saved` on a refusal. README and `plans/tests/260701_POWERATLAS.md` describe the setting and the validation rule.
@@ -444,7 +445,7 @@ Phase 1 review fixes (code `0a73501`):
 - **A failed exit from PEEK lands in HIDDEN** (a transition the state machine does not have): any raising re-place, hide or `resetOverlays` in end peek, or a timed-out app show from PEEK, does a best-effort hide, clears `_peek_showing`, sets HIDDEN and re-raises. Staying in PEEK would keep Esc swallowed system-wide.
 - **Esc key-up follows its key-down**, not `_peek_showing`: a key-up is suppressed exactly when its key-down was, so an Esc pressed before a peek showed passes its key-up through. Known edge: a lost key-up (secure-desktop switch) makes the next Esc key-down count as a repeat once.
 - **Off Windows, a missing `shown` event logs a WARNING and readiness still completes** (`_PortableWindow` needs no form handle). On GTK, pywebview 6.2.1 fires `shown` for hidden windows (`gtk.py` around 205, 369-373, 487-494), so this guards other backends only.
-- **A timed-out Win32 reload logs a WARNING and does not retry**; `_signed_gen` advances and the posted `load_url` runs when the UI thread recovers. `_PortableWindow.reload` keeps the synchronous call.
+- **A timed-out Win32 reload logs a WARNING and does not retry**; `_signed_gen` advances and the posted `load_url` runs when the UI thread recovers. *Superseded at the final review (`95bc4e9`): a timed-out reload returns False, `_signed_gen` stays put, and the next show retries.* `_PortableWindow.reload` keeps the synchronous call.
 - **A timed-out app show** from HIDDEN or APP changes neither state nor placement; from PEEK it falls back to HIDDEN (rule above); inside end peek → APP the state still advances, since the posted re-place normally runs late.
 
 Phase 2 (code `315bb5c`, `c889589`, `41836bf`):
@@ -459,7 +460,7 @@ Phase 3 (code `a8d9c12`, `f8e6863`):
 - **The browser event is handled before readiness** (in the pre-ready drain and the main loop): it needs no window. The plan's readiness gate drops other window events only.
 - **Save-time conflict checks compare against the other shortcut as it runs**: an invalid stored peek shortcut runs as `ctrl+shift+z`; a stored browser shortcut that is invalid, or overlaps the effective peek shortcut, is off (`hotkeys.effective_peek_hotkey`, `effective_browser_hotkey`). `create_peek` and the constructor apply the same rule.
 - **A shortcut has exactly one key besides the modifiers** (`ctrl+a+b` is now refused; the plan's validator allowed several). Startup falls back with a WARNING for a stored value that fails.
-- **Held-key repeat rule**: a key-down for a chord key already held counts as a repeat (suppressed, no event) if it comes within 1.5 s of that key's previous key-down; a longer gap is a new press, so a lost key-up cannot swallow the key permanently.
+- **Held-key repeat rule**: a key-down for a chord key already held counts as a repeat (suppressed, no event) if it comes within 1.5 s (3 s since the final review, `95bc4e9`) of that key's previous key-down; a longer gap is a new press, so a lost key-up cannot swallow the key permanently.
 - **`_triggered` is a per-chord dict**; four test assertions moved from `pw._triggered is False` to `pw._triggered["peek"] is False` (same expected value).
 - **Error wording**: "is empty", "cannot use esc, which dismisses the peek", "has an unknown key 'foo'", "needs a modifier (ctrl, shift or alt)", "needs a key besides the modifiers", "has more than one key besides the modifiers", each prefixed "Shortcut ".
 - **The listener log line adds `browser shortcut: <value or off>`.**
@@ -468,6 +469,17 @@ Phase 3 (code `a8d9c12`, `f8e6863`):
 Phase 4 (code `521d8b6`, `14d1c2c`):
 - **Two commits**: the first called the doors "openers"; the fixup restores the project's term "door" (`TestLoopbackDoors`, the `tray.py` door list). No amend.
 - **Edits beyond the listed rows**: README tray intro (icon click opens the browser where app mode is unavailable; Open in browser listed only where app mode is available), the fallback sentence ("pywebview or pynput missing, or not Windows"), and the `peek_mode` sample comment ("the browser off Windows"). The `peek.py` module docstring is longer than the plan's one-liner.
+
+Final review (code `95bc4e9`):
+- **Signed-out detection extended (D-13a)**: the window also re-signs when its own `pa_local` cookie is missing or invalid (bounded `get_cookies` read, at most every 10 s, only after `loaded`; unknown never reloads; no read without a loaded secret).
+- **Rotation**: `set_local_secret(secret, bump_generation=False)` plus `bump_local_secret_generation()`, called by the rotate route after it clears the outstanding codes, so the code the window mints after a rotation is not wiped. A timed-out reload returns False and is retried on the next show (supersedes the Phase 1 review-fix bullet above).
+- **`stop()` arms the exit watchdog on every path** while `webview.start()` has not returned, including a stop before the form exists; `_run_webview` creates and starts nothing once stopping. The Threading model's "on a destroy timeout" is widened accordingly.
+- **Readiness failure releases the peek chord** (`_peek_chord_off`, a second worker-written field the hook reads) with a WARNING naming the shortcut; the browser shortcut keeps working.
+- **Browser door rate limit**: at most one mint per 500 ms by hook tick; the event is now `("browser", tick)`.
+- **User close in HIDDEN hides** the window (a late show after a timed-out call); `APP` is set before `focus()`; a failed exit to HIDDEN fires `resetOverlays` best-effort once.
+- **Held-key heal gap 3 s** (was 1.5 s) for long accessibility repeat delays.
+- **Single sources**: `hotkeys.effective_*` used by `create_peek` and the constructor; `hotkeys.PEEK_MODES` used by config, web and peek; a `_WindowAdapter` Protocol with a conformance test; `_control(ev)` shared by both worker loops; the tray no longer imports `peek`.
+- **Logging**: `tray._open_in_browser` logs only the exception type.
 
 ## Follow-up Work (Deferred)
 
@@ -479,8 +491,15 @@ Phase 4 (code `521d8b6`, `14d1c2c`):
 6. **Same-origin new-window links.** A PowerAtlas link opened with `target=_blank` from app mode goes to the default browser without a cookie and lands on the gate page. Routing same-origin links through a login URL is a follow-up.
 7. **Live sign-in refresh check** (SC-9) after a real rotation, left for the user because it signs out other browsers.
 8. **WebView2 initialization failure.** pywebview only logs a failed WebView2 init; app mode would then show a blank window instead of falling back to the browser. Detecting it (for example waiting for the first `loaded` event) is a follow-up.
-10. **Settings show the stored shortcut, not the one running.** A hand-edited invalid peek shortcut runs as `ctrl+shift+z` and an invalid or conflicting browser shortcut is off, but the Settings fields show the stored value with no badge; only the log says so. Exposing the effective values in `/api/settings` is a follow-up (Phase 3 review, Low).
-9. **Alt-based shortcuts and the foreground app's menu bar.** With a chord such as `alt+f1`, the user's app sees Alt down and up around the suppressed key and may activate its menu bar. Default and ctrl-based chords are unaffected. Masking (as AutoHotkey does) is a follow-up.
+9. **Settings show the stored shortcut, not the one running.** A hand-edited invalid peek shortcut runs as `ctrl+shift+z` and an invalid or conflicting browser shortcut is off, but the Settings fields show the stored value with no badge; only the log says so. Exposing the effective values in `/api/settings` is a follow-up (Phase 3 review, Low).
+10. **Alt-based shortcuts and the foreground app's menu bar.** With a chord such as `alt+f1`, the user's app sees Alt down and up around the suppressed key and may activate its menu bar. Default and ctrl-based chords are unaffected. Masking (as AutoHotkey does) is a follow-up.
+11. **Shared test helper for worker events.** About 85 tests build `("press","peek",t)` tuples and 366 read `pw._*` internals; a `_press`/`_post` helper would make a hook/worker split or typed events cheap (final review, Architect).
+12. **Door helpers in a neutral module.** `peek` imports `tray._login_url` and `tray._open_in_browser` (private names of the tray UI module); moving them to a neutral module would remove that dependency (final review, Architect).
+13. **Log vocabulary.** Log lines mix "Peek …" and "PowerAtlas window …"; unify with the terminology proposal (Follow-up 1), keeping or updating the `Peek hotkey listener started` smoke token (final review, Architect).
+14. **Stuck modifiers after the secure desktop.** Modifier key-ups lost on the secure desktop (Ctrl+Alt+Del, UAC) leave a modifier in `_pressed_keys`, so a partial chord can fire; checking `GetAsyncKeyState` in the filter would fix it. Predates this plan (final review, Reliability).
+15. **Hook health signal.** Windows removes a low-level hook that exceeds `LowLevelHooksTimeout` without notice; a periodic `listener.running` check or heartbeat WARNING would make that visible (final review, Reliability).
+16. **Tell the user when a peek save turns the browser shortcut on.** A stored browser shortcut that is off because it overlaps the current peek shortcut can become active after the peek shortcut changes; the Settings dialog does not say so (final review, Security auditor; UX only).
+17. **`copy_login_link` notify failure log.** It logs a `notify` exception with `%s`; on a platform with no clipboard the message is the login URL, so a backend that quotes its argument would log a live link. Predates this plan; not changed here (final review cycle 2, Security auditor).
 
 ## Review Log
 
@@ -535,7 +554,7 @@ Same three personas, fresh context. 32 findings before merge; 22 after (4 High, 
 | 1 | High | Readiness gate fired before the form existed, so X could quit PowerAtlas (all three personas). | Fixed -- readiness waits on `events.shown`, then `native` and its handle, then subscribes `FormClosing`; new log line `PowerAtlas window ready`. |
 | 2 | High | Tray `Open in browser` hidden at startup because pystray builds the menu before readiness. | Fixed -- static visibility; readiness decides routing at click time; tested. |
 | 3 | High | HIDDEN x double-tap marked n/a, regressing the whole-chord double-tap. | Fixed -- double-tap rule applies in every state; a third tap resets; tests added. |
-| 4 | High | Non-activating peek sent the dismiss Esc to the user's app. | Fixed -- Esc suppressed while `_peek_showing`; Alt-chord menu-bar side effect recorded as Follow-up 9. |
+| 4 | High | Non-activating peek sent the dismiss Esc to the user's app. | Fixed -- Esc suppressed while `_peek_showing`; Alt-chord menu-bar side effect recorded as Follow-up 10. |
 | 5 | Medium | Restoring a non-foreground APP activated it and left it above the user's app. | Fixed -- non-activating show commands, maximized repaired by the foreground restore, z-order put back. |
 | 6 | Medium | No real-window check for peek from minimized or maximized APP; the two show-without-activate options differ. | Fixed -- normative Win32 primitives; probe steps added. |
 | 7 | Medium | Any non-suppression exception in the filter stops pynput's listener. | Fixed -- decision computed inside `try`, suppression called after it; tested. |
@@ -600,7 +619,7 @@ Mutation testing by the reviewer killed all six targeted mutations (Toggle press
 
 ### 2026-10-06 -- Implementation Review (after Phase 3, persona: Senior engineer (validation lens), Reliability engineer (Windows input hooks))
 
-Implementation health: Green (all code findings fixed in `f8e6863`; one Low moved to Follow-up 10; live injection BLOCKED).
+Implementation health: Green (all code findings fixed in `f8e6863`; one Low moved to Follow-up 9; live injection BLOCKED).
 13 findings after merge (1 High, 2 Medium, 10 Low). One review cycle per the user's override; fixes not re-reviewed.
 
 | # | Severity | Finding (one line) | Resolution (one line) |
@@ -613,14 +632,47 @@ Implementation health: Green (all code findings fixed in `f8e6863`; one Low move
 | 6 | Low | Several non-modifier keys were accepted but might never fire. | Fixed — exactly one non-modifier key required; recorded as a divergence. |
 | 7 | Low | The `browser` branch in `_handle` was unreachable; the log guard tested it directly. | Fixed — branch removed; guard drives the real worker loop. |
 | 8 | Low | Saving the peek shortcut was refused because of a browser shortcut that was not running. | Fixed — same in-force rule as startup. |
-| 9 | Low | Settings showed stored, not running, shortcut values after a hand-edit. | Escalated — recorded as Follow-up 10 for the user. |
+| 9 | Low | Settings showed stored, not running, shortcut values after a hand-edit. | Escalated — recorded as Follow-up 9 for the user. |
 | 10 | Low | Inline errors survived a refresh and a reopen. | Fixed — cleared in `refreshSettings` and on open. |
 | 11 | Low | Config warnings logged raw values with `%s`. | Fixed — `%r`. |
 | 12 | Low | No pure-function test pinned "only the chord's own key matches". | Fixed — two `match_chord` cases. |
 | 13 | Low | A browser press during the 30 s readiness wait is acted on after the wait, one tab per press; smoke ran on the pre-commit tree. | Escalated — noted here for the user; smoke re-run after `f8e6863` passed. |
 
+### 2026-10-06 -- Post-Implementation Review
+
+Overall implementation health: Yellow (no unresolved High; two live checks and several Low follow-ups left for the user).
+Personas: Senior engineer, Reliability engineer (Windows desktop UI and input hooks), Security auditor, Architect. Two review cycles plus a third fix pass (Step 9 may run more than one cycle per the user's override).
+Cycle 1: 39 findings after merge (2 High, 9 Medium, 28 Low), fixed in `95bc4e9` or recorded as Follow-up 11-17. Cycle 2: 22 findings (2 High, both "the plan does not record the fixes"; 4 Medium; 16 Low), fixed in `e443f06` and `9a5cb12`, and the plan record written in this commit.
+QA verification: PASS for 29 live checks on an unlocked desktop (21 Phase 1 hold/double-tap/peek-over-app/X/Esc checks, 8 Toggle and browser-shortcut checks), unattended window probe 35/35 on the final code, smoke after the final restart. Not run: the `target=_blank` link check and the live sign-in refresh after a real rotation (both left for the user).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: App mode, hold peek and tray | pass | PASS | Live checks ran at the end (desktop was locked during the phase); `target=_blank` not exercised. |
+| 2: Peek mode setting | pass | PASS | Settings modal in Playwright 10/10; Toggle live 6/6 at the end. |
+| 3: Browser shortcut and validation | pass | PASS | Live save refusals; browser shortcut live 2/2 at the end. |
+| 4: Documentation and stale comments | pass | SKIP | Comment, docstring and README edits only. |
+
+Final suite on the final code: `tests/test_web.py` 2643 passed, the rest 1873 passed, `node tests/acp_page.test.mjs` 960/960. One run of the non-web part showed a single failure that eight re-runs did not reproduce; its name was not captured (unidentified flake, recorded here).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | [Reliability] Quit or Restart in the first seconds after launch could leave the process alive. | Fixed — watchdog armed on every path while `webview.start()` has not returned (`95bc4e9`). |
+| 2 | High | [Security] A window whose first sign-in never completed stayed on the gate page for the run. | Fixed — own-cookie check added (D-13a) (`95bc4e9`, hardened in `e443f06`). |
+| 3 | High | [Senior, Architect] The plan did not record the final-review changes (D-13, Threading model, section 9). | Fixed — D-13a, Threading model, state table and section 9 updated in this commit. |
+| 4 | Medium | [Reliability] Readiness failure kept the peek chord suppressed while it did nothing. | Fixed — chord released with a WARNING. |
+| 5 | Medium | [Senior] No test pinned `__main__` passing `browser_hotkey`, nor the Hold release rule's modifier filter. | Fixed — AST pin and release test. |
+| 6 | Medium | [Architect] `_hwnd` written on the UI thread; the in-force shortcut rule written three times; no adapter interface. | Fixed — worker-written handle, `hotkeys.effective_*` everywhere, `_WindowAdapter` Protocol. |
+| 7 | Medium | [Reliability] A faulted cookie read could disable the signed-out check for the run. | Fixed — 30 s give-up and a rate-limited WARNING (`e443f06`, `9a5cb12`). |
+| 8 | Medium | [Architect] `peek` imported a private constant from `web`. | Fixed — one public `web.window_signed_in` helper. |
+| 9 | Medium | [Security] The cookie-path re-sign was not covered by the login-link log guard. | Fixed — guard drives that path. |
+| 10 | Low | Rotation races, browser-door rate limit, user close in HIDDEN, focus failure, heal gap, overlays on failure, single sources, tray import, wording, logging (cycle 1 and 2 Lows). | Fixed — see section 9 "Final review" and the two fix commits. |
+| 11 | Low | Test helper, neutral door module, log vocabulary, stuck modifiers, hook health, browser-shortcut activation notice, `copy_login_link` log. | Escalated — recorded as Follow-up 11-17 for the user. |
+
 ## Harness Improvement Opportunities
 
 - `/qdev` Step 5b treats a QA BLOCKED verdict as a hard stop, but an unattended overnight run with a locked desktop BLOCKs every live window check while the unattended probe passes — cost: the orchestrator had to choose between stopping the whole run and overriding the gate; it continued and deferred the checks — suggested change: let a plan declare a locked-session fallback (probe evidence counts, live checks deferred to the user) that keeps auto-continue.
 - `/qdev`'s dirty-tree stop fired on another session's unrelated, disjoint edits while the user was asleep — cost: a judgment call to continue against the letter of the rule — suggested change: allow continuing when the foreign files are disjoint from every remaining phase's scope and all commits are pathspec-scoped, recording the file list.
+- A sub-agent hit the account session limit mid-commit sequence; its last edit was left uncommitted and the orchestrator had to verify and commit it — cost: one interruption and a manual recovery — suggested change: sub-agent briefs could ask for a commit after each numbered fix so an interruption loses at most one fix.
 - `/qexplore` Step 1.5 dispatch had to be restarted when the user asked for a different sub-agent model mid-dispatch — cost: three agents' partial work discarded, about 2 minutes — suggested change: let `/qexplore` read a model preference for exploration sub-agents from memory before dispatch.
