@@ -19406,6 +19406,71 @@ check("dashboard: the metadata strip says Working or Idle for a Codex thread wit
   assert(label("", true).includes("Running"), "no verdict keeps Running");
 });
 
+check("dashboard rail: the 60 s refresh also refreshes an open group the shared listing left lazy", async () => {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const from = src.indexOf("function dashRailIndex(){");
+  const to = src.indexOf("var DASH_RAIL_REFRESH_MS", from);
+  assert(from >= 0 && to > from, "the refresh helpers moved in index.html");
+  const row = (id, provider, extra) => ({ id, provider, availability: "available", status: "", live: false, title: "t", ...extra });
+  const codexRow = row("c1", "codex", { status: "working", live: true });
+  const groups = [
+    { cwd: "C:\\lazy", sessions: [codexRow] },
+    { cwd: "C:\\quiet", sessions: [row("q1", "kiro-cli-v3")] },
+    { cwd: "C:\\covered", sessions: [row("k1", "kiro-cli-v3", { live: true })] },
+    { cwd: "C:\\collapsed", sessions: [] },
+  ];
+  const fetched = [];
+  let renders = 0;
+  const box = {
+    dashRailGroups: groups, dashRailFlat: [], dashRailPinned: [], dashRailGroupPage: 1, dashRailMode: "project",
+    dashRailBusy: false, dashRailFilter: "", DASH_RAIL_GROUP_SIZE: 10, DASH_RAIL_PROJECT_PAGE_SIZE: 10,
+    window: { _activeProvider: "all", _activeTag: "", _activeTimeFilter: "" },
+    dashRailLoadAcp: () => {},
+    dashRenderRail: () => { renders++; },
+    dashRailAvailability: (v) => v || "available",
+    dashRailRowStatus: (v) => v || "working",
+    dashRailTitleText: (s) => s.title,
+    dashRailFetch: (params) => {
+      fetched.push(params);
+      if (params.cwd === "C:\\lazy") {
+        return Promise.resolve({ groups: [{ cwd: "C:\\lazy", sessions: [{ ...codexRow, status: "idle" }] }] });
+      }
+      return Promise.resolve({ groups: [{ cwd: "C:\\covered", sessions: [row("k1", "kiro-cli-v3", { live: true })] },
+                                        { cwd: "C:\\lazy", sessions: [] }], pinned: [] });
+    },
+  };
+  vm.createContext(box);
+  vm.runInContext(src.slice(from, to), box);
+  box.dashRailRefresh();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const cwdFetches = fetched.filter((p) => p.cwd).map((p) => p.cwd);
+  assertEqual(JSON.stringify(cwdFetches), JSON.stringify(["C:\\lazy"]),
+    "only an open group the listing left lazy, holding a live or Codex row, is refreshed on its own");
+  assertEqual(codexRow.status, "idle", "and its row follows the answer");
+  assert(renders >= 1, "the rail is drawn again");
+});
+
+check("dashboard rail: at most three open lazy groups are refreshed on their own per tick", async () => {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const from = src.indexOf("function dashRailIndex(){");
+  const to = src.indexOf("var DASH_RAIL_REFRESH_MS", from);
+  const groups = [1, 2, 3, 4, 5].map((n) => ({ cwd: `C:\\g${n}`, sessions: [{ id: `s${n}`, provider: "codex", availability: "available", status: "idle", live: true, title: "t" }] }));
+  const fetched = [];
+  const box = {
+    dashRailGroups: groups, dashRailFlat: [], dashRailPinned: [], dashRailGroupPage: 1, dashRailMode: "project",
+    dashRailBusy: false, dashRailFilter: "", DASH_RAIL_GROUP_SIZE: 10, DASH_RAIL_PROJECT_PAGE_SIZE: 10,
+    window: { _activeProvider: "all", _activeTag: "", _activeTimeFilter: "" },
+    dashRailLoadAcp: () => {}, dashRenderRail: () => {},
+    dashRailAvailability: (v) => v || "available", dashRailRowStatus: (v) => v || "working", dashRailTitleText: (s) => s.title,
+    dashRailFetch: (params) => { fetched.push(params); return Promise.resolve({ groups: [], pinned: [] }); },
+  };
+  vm.createContext(box);
+  vm.runInContext(src.slice(from, to), box);
+  box.dashRailRefresh();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assertEqual(fetched.filter((p) => p.cwd).length, 3, "a cap on the extra requests");
+});
+
 check("dashboard: the provider maps behind the launcher settings and the New menu list Codex as a terminal provider", () => {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
   const display = src.match(/var _providerBinaryDisplay=\{([^}]*)\};/);

@@ -7940,10 +7940,34 @@ function dashRailRefresh(){
     q: dashRailFilter,
   }).then(function(data){
     var changed = false;
-    (data.groups || []).forEach(function(g){ if (dashRailRefreshStates(g)) changed = true; });
+    var covered = Object.create(null);
+    (data.groups || []).forEach(function(g){
+      if ((g.sessions || []).length) covered[g.cwd] = true;
+      if (dashRailRefreshStates(g)) changed = true;
+    });
     if (dashRailRefreshStates({sessions: data.pinned || []})) changed = true;
     if (changed) dashRenderRail();
+    dashRailRefreshOpenGroups(covered);
   }).catch(function(){});
+}
+// The shared listing leaves a workspace group lazy (no sessions) unless it is pinned, so an open
+// group's rows would keep a stale live dot and status. Refresh up to three open groups the response
+// did not cover, each on its own, when they hold a live row or a Codex row (whose Working or Idle
+// dot moves while a terminal turn runs).
+// 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 4
+function dashRailRefreshOpenGroups(covered){
+  var open = dashRailGroups.filter(function(g){
+    return !covered[g.cwd] && (g.sessions || []).some(function(s){
+      return s.live || s.status || s.provider === 'codex';
+    });
+  }).slice(0, 3);
+  open.forEach(function(g){
+    dashRailFetch({cwd: g.cwd, session_page: 1, session_size: DASH_RAIL_PROJECT_PAGE_SIZE,
+      time_filter: window._activeTimeFilter}).then(function(data){
+      var incoming = (data.groups || [])[0];
+      if (incoming && dashRailRefreshStates(incoming)) dashRenderRail();
+    }).catch(function(){});
+  });
 }
 var DASH_RAIL_REFRESH_MS = 60000;
 function dashRailRefreshSoon(){
