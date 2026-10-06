@@ -27,189 +27,68 @@
   <!-- Settings menu: everything below used to live directly in this row as
        separate pills (Profile / Remote / Autostart / Peek hotkey / Port).
        Moved here so only Refresh -- the one control worth a click without a
-       menu in the way -- keeps a permanent seat in the bar. Every element
-       below keeps its original id/onclick/onchange untouched; only its
-       container and visual treatment changed, so markRestartInputs/
-       loadRestartKeys (further down this file) still find `.peek-hotkey-
-       group` and `.port-group` exactly where they always have. -->
+       menu in the way -- keeps a permanent seat in the bar. -->
   <div class="topbar-settings-wrap">
-    <button id="topbarSettingsBtn" class="topbar-settings-btn" aria-expanded="false" aria-haspopup="true" title="Settings" aria-label="Settings">
+    <button id="topbarSettingsBtn" class="topbar-settings-btn" aria-expanded="false" aria-haspopup="true" aria-controls="topbarSettingsMenu" title="Settings" aria-label="Settings">
       <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.97 7.97 0 0 0 0-2l1.9-1.5-2-3.4-2.2.9a8 8 0 0 0-1.7-1L15 3h-4l-.4 2.9a8 8 0 0 0-1.7 1l-2.2-.9-2 3.4L6.6 11a7.97 7.97 0 0 0 0 2l-1.9 1.5 2 3.4 2.2-.9a8 8 0 0 0 1.7 1L10.6 21h4l.4-2.9a8 8 0 0 0 1.7-1l2.2.9 2-3.4-1.9-1.5Z"/></svg>
       <span id="topbarPendingDot" class="topbar-pending-dot" hidden title="Some settings need a restart to take effect"></span>
     </button>
+    <!-- The quick menu: launch profile, remote access, the two Startup
+         switches, a one-line reading of the permission mode, and the way into
+         the Settings dialog (partials/settings_modal.html), which holds every
+         control that needs explanation. Everything here is one short row, so
+         the menu fits any window; it scrolls inside itself if it ever does not.
+         Moved controls keep their ids, so refreshSettings()/markRestartInputs()
+         and the permission renderers find them in the dialog unchanged. -->
     <div id="topbarSettingsMenu" class="acp-rail-menu topbar-settings-menu" hidden>
-      <div class="topbar-menu-section-label">Profile</div>
-      <button id="profileNameBtn" class="topbar-menu-row" onclick="openProfileModal();closeTopbarSettings()" title="Manage launch profiles (window mode, autostart, terminal)" aria-label="Manage launch profiles">
-        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.97 7.97 0 0 0 0-2l1.9-1.5-2-3.4-2.2.9a8 8 0 0 0-1.7-1L15 3h-4l-.4 2.9a8 8 0 0 0-1.7 1l-2.2-.9-2 3.4L6.6 11a7.97 7.97 0 0 0 0 2l-1.9 1.5 2 3.4 2.2-.9a8 8 0 0 0 1.7 1L10.6 21h4l.4-2.9a8 8 0 0 0 1.7-1l2.2.9 2-3.4-1.9-1.5Z"/></svg>
-        <span class="topbar-menu-label">{{ active_launch_profile.name }}</span>
+      <button id="profileNameBtn" class="topbar-menu-row topbar-menu-row-2line" onclick="openProfileModal();closeTopbarSettings()" title="Manage launch profiles (window mode, autostart, terminal)" aria-label="Manage launch profiles">
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3"/><path d="M13 15h4"/></svg>
+        <span class="topbar-menu-text">
+          <span class="topbar-menu-label">{{ active_launch_profile.name }}</span>
+          <span class="topbar-menu-sub">Launch profile</span>
+        </span>
         <svg class="topbar-ic topbar-menu-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
       </button>
       <button class="topbar-menu-row" onclick="openRemoteModal();closeTopbarSettings()" title="Remote access: the URL and device secret a phone needs, and which settings need a restart" aria-label="Remote access">
-        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/><circle cx="7" cy="6" r=".6" fill="currentColor" stroke="none"/></svg>
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
         <span class="topbar-menu-label">Remote access</span>
         <svg class="topbar-ic topbar-menu-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
       </button>
 
       <div class="topbar-menu-divider"></div>
-      <div class="topbar-menu-section-label">Startup</div>
-      <div id="autostartToggle" class="topbar-menu-row topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" title="Auto-launch PowerAtlas on system startup">
+      <div id="autostartToggle" class="topbar-menu-row topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" tabindex="0" title="Auto-launch PowerAtlas on system startup">
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg>
         <span class="topbar-menu-label">Autostart on login</span>
         <span class="topbar-switch"><span class="topbar-switch-knob"></span></span>
       </div>
-      <div id="notifyToggle" class="topbar-menu-row topbar-toggle{% if notifications_enabled %} active{% endif %}" onclick="toggleNotifications(this)" title="Desktop notification when a turn ends unwatched, an agent needs your approval, or a terminal Codex turn ends">
+      <div id="notifyToggle" class="topbar-menu-row topbar-toggle{% if notifications_enabled %} active{% endif %}" onclick="toggleNotifications(this)" tabindex="0" title="Desktop notification when a turn ends unwatched, an agent needs your approval, or a terminal Codex turn ends">
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
         <span class="topbar-menu-label">Notify me</span>
         <span class="topbar-switch"><span class="topbar-switch-knob"></span></span>
       </div>
-      <div class="topbar-menu-row peek-hotkey-group" title="Global hotkey to show/hide the peek overlay window">
-        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h.01M11 9h.01M15 9h.01M7 13h10"/></svg>
-        <label class="topbar-menu-label peek-label" for="peekHotkey">Peek hotkey</label>
-        <div class="hotkey-field" onclick="document.getElementById('peekHotkey').focus()">
-          <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" placeholder="Press keys…"
-                 onfocus="this.parentElement.classList.add('focused')"
-                 onblur="this.parentElement.classList.remove('focused')"
-                 onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})}).then(loadRestartKeys)">
-          <!-- The `.then(loadRestartKeys)` is load-bearing now that the badge is
-               conditional. This field is the only restart-only control that
-               saves and stays on the page: `savePortAndRestart` restarts and
-               navigates away, and the bind address already refreshes. Without
-               it, saving a hotkey leaves the badge absent until a reload — the
-               field accepting a value and behaving as though nothing happened,
-               which is the exact failure the badge exists to prevent. -->
-        </div>
-      </div>
-      <div class="topbar-menu-row topbar-menu-row-stack port-group">
-        <div class="topbar-menu-row-head">
-          <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v4"/><path d="M15 2v4"/><path d="M6 6h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6Z"/><path d="M12 16v5"/></svg>
-          <label class="topbar-menu-label port-label" for="portMode">Port</label>
-        </div>
-        <div class="topbar-menu-row-controls">
-          <select class="port-mode" id="portMode" onchange="togglePortInput(this.value);markPortDirty()">
-            <option value="random" {% if not port %}selected{% endif %}>Random</option>
-            <option value="static" {% if port %}selected{% endif %}>Static</option>
-          </select>
-          <input type="number" id="portValue" class="port-input" min="1024" max="65535"
-                 aria-label="Port number"
-                 value="{{ port if port else '' }}"
-                 style="display:{% if port %}inline-block{% else %}none{% endif %}"
-                 placeholder="e.g. 49152"
-                 oninput="markPortDirty()"
-                 onkeydown="if(event.key==='Enter')savePort()">
-          <button class="port-randomize" id="portRandomize" onclick="randomizePort()"
-                  aria-label="Randomize port"
-                  style="display:{% if port %}inline-block{% else %}none{% endif %}"
-                  title="Pick a random port">&#x1f504;</button>
-          <button class="port-save-btn" id="portSave" onclick="savePort()"
-                  title="Apply port change (restarts server)"
-                  style="display:{% if port %}inline-block{% else %}none{% endif %}">Apply</button>
-        </div>
-      </div>
 
-      <!-- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1: the permission
-           mode picker, replacing the on/off switch of
-           260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3. Native
-           radios in a radiogroup, so the arrow keys and a screen reader get
-           radio semantics without script. No Jinja initial state:
-           renderAcpPermissions() checks the stored mode from GET
-           /api/acp-permissions on load, and nothing is checked until then.
-           Auto is shown but disabled until its decider exists (D-2). The badge
-           is shown only while the chosen mode is not what a new session would
-           get. `topbar-menu-keep` stops a click in these rows from closing the
-           menu, so the result and any warning stay visible. -->
       <div class="topbar-menu-divider"></div>
-      <div class="topbar-menu-section-label">Agent permissions</div>
-      <!-- Final review (M-4): each mode's description sits under its own
-           radio and stays visible, so the two can be compared before one is
-           chosen (a radio saves on change, arrow keys included). The group
-           and each radio point at the per-option text. The Manual text is
-           redrawn from the stored rules (M-5). -->
-      <div id="acpPermModes" class="acp-perm-modes topbar-menu-keep" role="radiogroup" aria-labelledby="acpPermModesLabel" aria-describedby="acpPermDescYolo acpPermDescManual">
-        <div class="acp-perm-modes-head">
-          <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6Z"/></svg>
-          <span id="acpPermModesLabel" class="topbar-menu-label">Permission mode</span>
-          <span id="acpPermBadge" class="restart-badge" hidden>not in effect</span>
-        </div>
-        <label class="acp-perm-mode" for="acpPermModeYolo"><input type="radio" name="acpPermMode" id="acpPermModeYolo" value="yolo" onchange="setAcpPermissionMode(this)" aria-describedby="acpPermDescYolo"><span>Yolo</span></label>
-        <div id="acpPermDescYolo" class="acp-perm-mode-desc">New sessions run every action without asking, except the Always blocked list, which is refused silently. kiro-cli itself still asks before writes to .git, .vscode, *.code-workspace, .kiro/agents and .kiro/hooks, and blocks writes to .kiroignore and .kiro/settings, in every mode.</div>
-        <label class="acp-perm-mode acp-perm-mode-disabled" for="acpPermModeAuto"><input type="radio" name="acpPermMode" id="acpPermModeAuto" value="auto" disabled aria-describedby="acpPermAutoHint"><span>Auto</span><span id="acpPermAutoHint" class="acp-perm-mode-hint">coming soon — behaves like Manual</span></label>
-        <label class="acp-perm-mode" for="acpPermModeManual"><input type="radio" name="acpPermMode" id="acpPermModeManual" value="manual" onchange="setAcpPermissionMode(this)" aria-describedby="acpPermDescManual"><span>Manual</span></label>
-        <div id="acpPermDescManual" class="acp-perm-mode-desc">The Always blocked list, plus your Manual rules (Edit rules… shows them): what a rule does not allow asks first, and file-tool writes to Protected items always ask.</div>
-      </div>
-      <!-- Final review (H-A): re-applies the mode already chosen. A checked
-           radio sends nothing when clicked again, and every "not in effect"
-           fix names this button. Shown only while something is wrong or a
-           notice is pending; hidden while config.toml cannot be read, where
-           the fix is the file. -->
-      <button type="button" id="acpPermApplyAgain" class="topbar-menu-row topbar-menu-keep acp-perm-apply" onclick="applyAcpPermissionModeAgain()" hidden>
-        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
-        <span class="topbar-menu-label">Apply again</span>
-      </button>
-      <!-- D-35 and final review (M-3, M-6): the notices, each with its own
-           buttons, drawn by renderAcpPermissions(). -->
-      <div id="acpPermNotice" class="topbar-menu-note topbar-menu-warn topbar-menu-keep" role="status" hidden></div>
-      <div id="acpPermUpgrade" class="topbar-menu-note topbar-menu-keep" role="status" hidden></div>
-      <details id="acpPermFloor" class="acp-perm-details topbar-menu-keep">
-        <summary>Always blocked</summary>
-        <div class="topbar-menu-note">Refused silently in every mode, in the ACP sessions PowerAtlas creates with Default. A session reopened from before the Always blocked list was in effect keeps the agent it started with, and is not covered.</div>
-        <div id="acpPermFloorList" class="acp-perm-list"></div>
-      </details>
-      <details id="acpPermProtected" class="acp-perm-details topbar-menu-keep">
-        <summary>Protected <span class="acp-perm-summary-hint">(Manual)</span> <span id="acpPermProtectedCount" class="acp-perm-summary-hint acp-perm-summary-warn" hidden></span></summary>
-        <div class="topbar-menu-note">In Manual, file-tool writes to these always ask, even when writing files is allowed. A link inside one of these folders that points elsewhere is not covered, in a project's own .kiro folder too.</div>
-        <div id="acpPermProtectedList" class="acp-perm-list"></div>
-      </details>
-      <!-- Phase 2: the Manual rule editor (partials/acp_permission_rules_modal.html).
-           Offered in every mode; the hint says when the rules are in force.
-           `topbar-menu-keep`: the menu stays up, the row reading "Loading
-           rules…", until openAcpRulesEditor() has its answer (Phase 2 QA). -->
-      <button type="button" id="acpPermEditRules" class="topbar-menu-row topbar-menu-keep" onclick="openAcpRulesEditor()" aria-describedby="acpPermEditRulesHint">
-        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 12h10"/><path d="M4 18h6"/></svg>
-        <span id="acpPermEditRulesLabel" class="topbar-menu-label">Edit rules…</span>
+      <!-- The permission mode at a glance; the picker itself is in the dialog.
+           renderAcpPermissions() writes the mode name and marks the row while
+           the mode is not working as set. -->
+      <button type="button" id="acpPermSummary" class="topbar-menu-row" onclick="openSettingsDialog('permissions')" aria-describedby="acpPermSummaryValue">
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6Z"/></svg>
+        <span class="topbar-menu-label">Agent permissions</span>
+        <span id="acpPermSummaryValue" class="topbar-menu-value">…</span>
         <svg class="topbar-ic topbar-menu-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
       </button>
-      <div id="acpPermEditRulesHint" class="topbar-menu-note">What runs without asking, what asks and what is blocked, per kind of action. The rules apply when Manual is selected.</div>
-      <div class="topbar-menu-row acp-perm-base-group" title="The kiro-cli agent PowerAtlas builds its own agent from. It is read, never modified; if it is missing, a minimal agent is used instead.">
-        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
-        <label class="topbar-menu-label peek-label" for="acpPermBaseAgent">Base agent</label>
-        <div class="hotkey-field" onclick="document.getElementById('acpPermBaseAgent').focus()">
-          <input type="text" id="acpPermBaseAgent" class="peek-input" value="" placeholder="kiro_default"
-                 maxlength="64" spellcheck="false" autocomplete="off"
-                 onfocus="this.parentElement.classList.add('focused')"
-                 onblur="this.parentElement.classList.remove('focused')"
-                 onchange="saveAcpPermissionBaseAgent(this)">
-        </div>
-      </div>
-      <!-- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL SC-10, D-3: kiro-cli
-           binds a session's agent at session/new and does not pick up a
-           rewrite mid-session (probe P-C), so a change reaches only sessions
-           created afterwards. The derived agent is never deleted any more, so
-           the old "off also reaches running sessions" direction is gone. -->
-      <div id="acpPermScopeNote" class="topbar-menu-note">Changes apply to sessions created afterwards. A reopened session keeps the agent it started with, so it is outside the Always blocked list if PowerAtlas's agent was not in effect when it started. Terminal sessions and task modes such as Spec or Plan are not covered.</div>
-      <div id="acpPermWarn" class="topbar-menu-note topbar-menu-warn" role="status" tabindex="-1" hidden></div>
-
-      <!-- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review
-           (F2, F3): the loopback sign-in. The warning is D-22's "report in
-           settings": renderLocalSecret() fills it from /api/settings'
-           `local_secret` and shows it only while the key is held in memory.
-           The button rotates the local key, which signs every other browser
-           out; it arms on the first click and acts on the second, rather
-           than using window.confirm(). It passes `event` so the click stops
-           short of the document-level closer and the menu stays open on the
-           armed label and on the result note.
-           260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA -->
-      <div class="topbar-menu-divider"></div>
-      <div class="topbar-menu-section-label">Browser sign-in</div>
-      <div id="localSecretWarn" class="topbar-menu-note topbar-menu-warn" role="status" hidden></div>
-      <button id="localSecretRotate" type="button" class="topbar-menu-row topbar-menu-action" onclick="rotateLocalSecret(this, event)" title="Rotate the local sign-in key. Every other browser signed in to PowerAtlas is signed out and must be reopened from the tray; this one stays signed in.">Sign out other browsers (rotate the local key)</button>
-      <div id="localSecretNote" class="topbar-menu-note" role="status" hidden></div>
+      <button type="button" id="topbarAllSettings" class="topbar-menu-row" onclick="openSettingsDialog()">
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10"/><path d="M18 6h2"/><circle cx="16" cy="6" r="2"/><path d="M4 12h4"/><path d="M12 12h8"/><circle cx="10" cy="12" r="2"/><path d="M4 18h12"/><path d="M20 18h0"/><circle cx="18" cy="18" r="2"/></svg>
+        <span class="topbar-menu-label">All settings…</span>
+        <span id="topbarAllSettingsDot" class="topbar-menu-attention" hidden title="Something in Settings needs attention"></span>
+      </button>
 
       <div id="topbarRestartDivider" class="topbar-menu-divider"></div>
       <!-- Stays conditional (markTopbarRestart toggles it): the "why" only
            makes sense while a saved setting genuinely disagrees with the
-           running process. The divider and button above/below it, unlike
-           this note, are no longer gated on that -- see markTopbarRestart's
-           own comment for why a general restart needed a reachable home. -->
+           running process. The button below it is not gated on that -- see
+           markTopbarRestart's own comment for why a general restart needed a
+           reachable home. -->
       <div id="topbarRestartNote" class="topbar-restart-note" hidden>
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 2.5 17a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
         <span id="topbarRestartText"></span>
@@ -8107,7 +7986,7 @@ function dashRailInit(){
 // the icon says the same thing without touching its children.
 function doRefresh(){var btn=document.querySelector('.refresh-btn');btn.disabled=true;btn.classList.add('spinning');fetch('/api/refresh',{method:'POST'}).then(function(r){return r.json()}).then(function(d){document.getElementById('refreshTime').textContent=d.last_refresh;refreshSettings();dashRailReload()}).finally(function(){btn.disabled=false;btn.classList.remove('spinning')})}
 
-// ---- topbar settings menu (Profile/Remote/Autostart/Peek/Port + Restart) --
+// ---- topbar settings menu (Profile/Remote/toggles/All settings + Restart) --
 //
 // Same open/close pattern as the rail's own dashRailSettingsBtn/
 // dashRailSettingsMenu further down this file: a guard flag absorbs the
@@ -8130,35 +8009,41 @@ topbarSettingsBtn.addEventListener('click', function(){
     loadRestartKeys();
   }
 });
-// Whether a click landed in one of the menu's text-entry controls (an input,
-// textarea, select, anything contenteditable, or the `.hotkey-field` box that
-// focuses its input). Closing the menu on those clicks hid the field the user
-// had just focused, so the base-agent and Peek hotkey fields could not be
-// typed into with a mouse. Toggles and buttons still close the menu.
-// Walks parentNode by hand rather than closest() with a selector list.
-// 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
-// Also anything inside a `.topbar-menu-keep` region: the permission mode
-// picker (whose label text is not an input) and the Always blocked and
-// Protected disclosures, which could not be opened while a click on their
-// summary closed the menu. 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1
-function topbarMenuTextEntryClick(target){
-  var entry = false;
-  for (var n = target; n; n = n.parentNode) {
-    if (n === topbarSettingsMenu) return entry;
-    var tag = n.tagName;
-    if (n.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
-        || (n.classList && (n.classList.contains('hotkey-field')
-                            || n.classList.contains('topbar-menu-keep')))) entry = true;
-  }
-  return false;
-}
-document.addEventListener('click', function(e){
+// Every row in the menu is a button or a switch, and each one either acts or
+// opens a dialog, so any click closes the menu. The text fields, radios and
+// disclosures that once had to keep it open live in the Settings dialog now.
+document.addEventListener('click', function(){
   if (topbarMenuGuard) { topbarMenuGuard = false; return; }
-  if (e && topbarMenuTextEntryClick(e.target)) return;
   if (!topbarSettingsMenu.hidden) closeTopbarSettings();
 });
+// Escape closes the menu and gives the focus back to the gear; the arrow keys
+// step through its buttons and switches, wrapping at either end. The two
+// Startup switches are focusable rows, so Enter or Space flips them as a
+// click does.
 document.addEventListener('keydown', function(e){
-  if (e.key === 'Escape' && !topbarSettingsMenu.hidden) closeTopbarSettings();
+  if (topbarSettingsMenu.hidden) return;
+  var t = e.target;
+  if ((e.key === 'Enter' || e.key === ' ') && t && t.classList
+      && t.classList.contains('topbar-toggle') && topbarSettingsMenu.contains(t)) {
+    e.preventDefault();
+    t.click();
+    return;
+  }
+  if (e.key === 'Escape') {
+    closeTopbarSettings();
+    if (topbarSettingsBtn.focus) topbarSettingsBtn.focus();
+    return;
+  }
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  var rows = Array.prototype.filter.call(
+    topbarSettingsMenu.querySelectorAll('button.topbar-menu-row, .topbar-toggle, .topbar-restart-btn'),
+    function (r) { return !r.hidden; });
+  if (!rows.length) return;
+  e.preventDefault();
+  var at = rows.indexOf(document.activeElement);
+  var next = e.key === 'ArrowDown' ? at + 1 : at - 1;
+  if (at < 0) next = e.key === 'ArrowDown' ? 0 : rows.length - 1;
+  rows[(next + rows.length) % rows.length].focus();
 });
 // Fires the same /api/restart the port-change flow already uses
 // (savePortAndRestart), just without a setting to save first. Reuses
@@ -8831,6 +8716,7 @@ function deleteLauncher(){
 })();
 </script>
 {% include "partials/launch_profile_modal.html" %}
+{% include "partials/settings_modal.html" %}
 {% include "partials/acp_permission_rules_modal.html" %}
 <script>
 var _launchProfiles={{launch_profiles|tojson}};
@@ -9492,6 +9378,10 @@ function _syncTopbarDot() {
   if (_topbarDotPerm) why.push(_topbarDotPerm);
   if (_topbarDotSecret) why.push(_topbarDotSecret);
   dot.title = why.join('. ');
+  // Inside the menu, the same reasons point at the Settings dialog, where
+  // both sections live; a pending restart has its own note above Restart.
+  var inSettings = document.getElementById('topbarAllSettingsDot');
+  if (inSettings) inSettings.hidden = !(_topbarDotPerm || _topbarDotSecret);
 }
 function markTopbarRestart(pending) {
   var dot = document.getElementById('topbarPendingDot');
@@ -9509,7 +9399,7 @@ function markTopbarRestart(pending) {
   }
 }
 
-// The two keys with a live control in the topbar. Without this the hotkey field
+// The two keys with a live control in the Settings dialog. Without this the hotkey field
 // accepts a new value, saves it, and behaves as though nothing happened until
 // the next launch — which is the same lie the API side was fixed for.
 //
@@ -9535,7 +9425,8 @@ function markRestartInputs(keys) {
       badge = document.createElement('span');
       badge.className = 'restart-badge';
       badge.textContent = 'on relaunch';
-      host.appendChild(badge);
+      // Beside the row's title in the Settings dialog, not after its control.
+      (host.querySelector('.settings-row-head') || host).appendChild(badge);
     }
     badge.title = 'Saved, but not in force: this value is read once at startup, '
                 + 'so it takes effect on the next launch of PowerAtlas.';
@@ -9557,6 +9448,92 @@ function openRemoteModal() {
   loadRemoteAccess();
   loadRestartKeys();
   document.getElementById('remoteModal').showModal();
+}
+
+// ---- the Settings dialog (partials/settings_modal.html) --------------------
+//
+// Opened from the topbar menu, on the section asked for or on the one shown
+// last. The section list is an ARIA tablist: Up/Down (and Home/End) move
+// between sections and show each as the focus reaches it.
+var SETTINGS_PANES = ['general', 'permissions', 'signin'];
+var _settingsPane = 'general';
+var _settingsWired = false;
+
+function _settingsPaneId(pane) {
+  return pane.charAt(0).toUpperCase() + pane.slice(1);
+}
+
+function showSettingsPane(pane, focusTab) {
+  if (SETTINGS_PANES.indexOf(pane) < 0) pane = 'general';
+  _settingsPane = pane;
+  SETTINGS_PANES.forEach(function (p) {
+    var tab = document.getElementById('settingsTab' + _settingsPaneId(p));
+    var panel = document.getElementById('settingsPane' + _settingsPaneId(p));
+    var on = p === pane;
+    if (tab) {
+      tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      tab.tabIndex = on ? 0 : -1;
+      if (on && focusTab && tab.focus) tab.focus();
+    }
+    if (panel) {
+      panel.hidden = !on;
+      if (on) panel.scrollTop = 0;
+    }
+  });
+}
+
+function _settingsWire(modal) {
+  if (_settingsWired) return;
+  _settingsWired = true;
+  SETTINGS_PANES.forEach(function (p, i) {
+    var tab = document.getElementById('settingsTab' + _settingsPaneId(p));
+    if (!tab) return;
+    tab.addEventListener('click', function () { showSettingsPane(p, true); });
+    tab.addEventListener('keydown', function (e) {
+      var to = null;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') to = (i + 1) % SETTINGS_PANES.length;
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') to = (i - 1 + SETTINGS_PANES.length) % SETTINGS_PANES.length;
+      else if (e.key === 'Home') to = 0;
+      else if (e.key === 'End') to = SETTINGS_PANES.length - 1;
+      if (to === null) return;
+      e.preventDefault();
+      showSettingsPane(SETTINGS_PANES[to], true);
+    });
+  });
+  // A click on the backdrop lands on the <dialog> itself: the shell fills it,
+  // so any click inside the panel has a descendant as its target.
+  modal.addEventListener('click', function (e) {
+    if (e.target === modal) closeSettingsDialog();
+  });
+  // Back to the gear, whatever closed the dialog: the menu row that opened it
+  // is hidden by then, so the browser's own focus return would land on <body>.
+  modal.addEventListener('close', function () {
+    var gear = document.getElementById('topbarSettingsBtn');
+    if (gear && gear.focus) gear.focus();
+  });
+}
+
+function openSettingsDialog(pane) {
+  var modal = document.getElementById('settingsModal');
+  if (!modal) return;
+  if (typeof closeTopbarSettings === 'function') closeTopbarSettings();
+  _settingsWire(modal);
+  showSettingsPane(pane || _settingsPane, false);
+  loadRestartKeys();
+  loadAcpPermissions();
+  if (!modal.open) modal.showModal();
+  var tab = document.getElementById('settingsTab' + _settingsPaneId(_settingsPane));
+  if (tab && tab.focus) tab.focus();
+}
+
+function closeSettingsDialog() {
+  var modal = document.getElementById('settingsModal');
+  if (modal && modal.open) modal.close();
+}
+
+function _settingsDialogOpen() {
+  var modal = document.getElementById('settingsModal');
+  return !!(modal && modal.open);
 }
 
 // ---- ACP permission mode ---------------------------------------------------
@@ -9925,10 +9902,9 @@ function _acpPermCheckedRadio() {
  *  left the focus on <body>. Put it on the checked mode instead, or, when
  *  `preferWarn` and the section still shows a warning, on that warning (a
  *  live region, so its new text is also announced). Checked when the answer
- *  arrives, so a menu closed meanwhile is left alone. */
+ *  arrives, so a Settings dialog closed meanwhile is left alone. */
 function _acpPermFocusAfter(preferWarn) {
-  var menu = document.getElementById('topbarSettingsMenu');
-  if (!menu || menu.hidden) return;
+  if (!_settingsDialogOpen()) return;
   var warn = document.getElementById('acpPermWarn');
   if (preferWarn && warn && !warn.hidden && warn.textContent) {
     warn.focus();
@@ -10040,12 +10016,33 @@ function renderAcpPermissions(d) {
   _topbarDotPerm = attention
     ? 'The permission mode is not working as set; see Agent permissions' : '';
   _syncTopbarDot();
+  _acpPermPaintSummary(configError ? '' : _acpPermModeName(d.mode), attention);
+}
+
+/** The topbar menu's one-line reading of the permission mode, and the
+ *  attention dot on the dialog's Agent permissions section. An empty `mode`
+ *  means it is not known. */
+function _acpPermPaintSummary(mode, attention) {
+  var value = document.getElementById('acpPermSummaryValue');
+  if (value) {
+    value.textContent = mode || 'Unknown';
+    value.classList.toggle('topbar-menu-value-warn', !!attention || !mode);
+  }
+  var row = document.getElementById('acpPermSummary');
+  if (row) {
+    row.title = attention || !mode
+      ? 'The permission mode is not working as set. Open Agent permissions for details.'
+      : 'Permission mode for new ACP sessions: ' + mode;
+  }
+  var dot = document.getElementById('settingsTabPermissionsDot');
+  if (dot) dot.hidden = !attention && !!mode;
 }
 
 /** G10: the state could not be read. No mode is checked — Yolo would claim a
  *  posture nobody checked. */
 function _acpPermRenderUnread() {
   _acpPermSetMode(null);
+  _acpPermPaintSummary('', true);
   var badge = document.getElementById('acpPermBadge');
   if (badge) badge.hidden = true;
   var warn = document.getElementById('acpPermWarn');
@@ -10765,9 +10762,11 @@ function openAcpRulesEditor() {
     _acpRulesSetOpening(false);
     if (typeof closeTopbarSettings === 'function') closeTopbarSettings();
   };
-  // U5: the gear, not the menu row this was clicked from, which the menu
-  // hides as the dialog opens.
-  _acpRulesOpener = document.getElementById('topbarSettingsBtn') || null;
+  // U5: the control the editor was opened from. Edit rules and the notices'
+  // Review rules sit in the Settings dialog, which stays open under the
+  // editor; anything else falls back to the gear.
+  _acpRulesOpener = (_settingsDialogOpen() && document.getElementById('acpPermEditRules'))
+    || document.getElementById('topbarSettingsBtn') || null;
   return fetch('/api/acp-permissions')
     .then(function (r) {
       if (!r || !r.ok) throw new Error('HTTP ' + (r && r.status));
@@ -10872,11 +10871,12 @@ function saveAcpRules() {
         closeAcpRulesEditor();
         renderAcpPermissions(d);
         if (typeof d.warning === 'string' && d.warning) _acpPermToast(d.warning);
-        // Phase 2 QA: back to the gear here too, not only from the `close`
+        // Phase 2 QA: back to the opener here too, not only from the `close`
         // listener (U5), which in Chrome left the focus on <body> after a
-        // save. Looked up afresh, the captured node as the fallback.
-        var gear = document.getElementById('topbarSettingsBtn') || opener;
-        if (gear && gear.focus) gear.focus();
+        // save. The gear is looked up afresh when that is the opener.
+        var back = _settingsDialogOpen() ? opener
+          : (document.getElementById('topbarSettingsBtn') || opener);
+        if (back && back.focus) back.focus();
         return;
       }
       var detail = d && d.detail && typeof d.detail === 'object' ? d.detail : null;
@@ -10924,6 +10924,8 @@ function renderLocalSecret(settings) {
   _topbarDotSecret = show
     ? 'The browser sign-in key is held in memory only; see Browser sign-in' : '';
   _syncTopbarDot();
+  var tabDot = document.getElementById('settingsTabSigninDot');
+  if (tabDot) tabDot.hidden = !show;
 }
 
 function _localSecretWarnText(ls) {
@@ -10937,7 +10939,7 @@ function _localSecretWarnText(ls) {
 }
 
 var LOCAL_SECRET_ARM_MS = 5000;
-var _LOCAL_SECRET_ROTATE_LABEL = 'Sign out other browsers (rotate the local key)';
+var _LOCAL_SECRET_ROTATE_LABEL = 'Sign out others';
 var _localSecretArmSeq = 0;
 var _localSecretArmed = 0;  // the arming's token; 0 while not armed
 
@@ -10952,7 +10954,7 @@ function _localSecretNote(text, warn) {
   if (!note) return;
   note.hidden = !text;
   note.textContent = text;
-  note.classList.toggle('topbar-menu-warn', !!warn);
+  note.classList.toggle('settings-alert-warn', !!warn);
 }
 
 /** Rotate the local key: signs out every other browser. The first click only
@@ -10961,19 +10963,13 @@ function _localSecretNote(text, warn) {
  *  control needs no modal and cannot be dismissed by a stray Enter. Disarmed
  *  by a token rather than clearTimeout, so a stale timer from an earlier
  *  arming can never disarm a newer one. */
-function rotateLocalSecret(btn, ev) {
-  // The topbar menu's document-level click handler closes the menu on any
-  // click. Letting this one through closed it on the arming click, so the
-  // "Click again" label rendered into a closed menu and a user who reopened it
-  // and clicked again rotated without ever seeing the confirmation step.
-  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
-  if (ev && ev.stopPropagation) ev.stopPropagation();
+function rotateLocalSecret(btn) {
   if (!btn || btn.disabled) return;
   if (!_localSecretArmed) {
     var token = ++_localSecretArmSeq;
     _localSecretArmed = token;
     btn.classList.add('armed');
-    btn.textContent = 'Click again to sign out every other browser';
+    btn.textContent = 'Click again to confirm';
     _localSecretNote('', false);
     setTimeout(function () {
       if (_localSecretArmed === token) _localSecretDisarm(btn);

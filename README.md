@@ -173,6 +173,10 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 - A filter box narrows the workspaces rail to matching names/titles as you type (client-side, over whatever pages are currently loaded — paginate or clear the filter to reach the rest)
 - Custom launchers with inline args editing and one-click execution
 - Global launch profiles with configurable Windows Terminal profile and terminal command
+- Settings (gear icon in topbar): a short menu with the launch profile, remote access, **Autostart on
+  login**, **Notify me** and the current permission mode. **All settings…** opens the Settings dialog,
+  whose sections are General (peek hotkey, port), Agent permissions and Browser sign-in. A dot on the
+  gear, and on the section, marks anything that needs attention.
 - Launch-profile management (gear icon in topbar) for window mode, autostart, and profile switching
 - **Notify me** (gear icon in topbar, off by default) tells you when an ACP session finishes a turn
   or stops waiting for your approval, so you do not have to keep the page in front of you. Two
@@ -191,7 +195,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   when it ends), and a burst of turn ends in one check is coalesced (at most 3 toasts per thread and 6 per check). Threads in a hidden workspace, on a network
   path, held by the desktop app or VS Code, or run as sub-agents send nothing. `codex_diagnostics.turn_watch`
   in the dashboard sessions response (`ok`, `stalled` or `off`) shows whether the check is running
-- **Agent permissions** (gear icon in topbar) sets the permission mode for ACP sessions PowerAtlas
+- **Agent permissions** (gear icon in topbar, then the Settings dialog) sets the permission mode for ACP sessions PowerAtlas
   creates: **Yolo** (the default; nothing asks, except a short Always blocked list that is refused in
   every mode) or **Manual** (common read-only actions run, everything else asks). **Auto** is shown but
   not yet selectable. **Edit rules…** opens Manual's rule editor. See *Tool permissions* under
@@ -235,7 +239,7 @@ acp_prompt_silence_seconds = 1800  # 60-86400. A turn is cancelled after this mu
                                   # streaming is never cut off. A 24-hour absolute ceiling still
                                   # applies, so one chunk per window cannot run forever.
 
-# ACP permission mode. Set from the settings menu's "Agent permissions" section, without a restart.
+# ACP permission mode. Set from the Settings dialog's "Agent permissions" section, without a restart.
 # A hand edit of the mode (or the rules) takes effect when the next new Default session is started, and
 # the dashboard then says the mode changed outside it; task-mode sessions (Spec, Plan, ...) are never
 # affected. A hand edit of the base agent takes effect the same way, and the dashboard says the base agent
@@ -245,7 +249,7 @@ acp_permission_base_agent = "kiro_default"  # the kiro-cli agent PowerAtlas's ow
 # acp_permission_rules holds Manual's rules. Edit them with "Edit rules…" under Agent permissions
 # rather than by hand: the editor checks every pattern, while a hand-edited table is repaired on load
 # (a missing row gets the default rules, an unreadable default asks, an invalid allow pattern is
-# dropped, and an invalid block pattern stops the rules from being applied) and the settings menu says
+# dropped, and an invalid block pattern stops the rules from being applied) and the Settings dialog says
 # what it changed. An older config's `acp_permissions_enabled = true` becomes "manual", `false`
 # becomes "yolo".
 
@@ -449,8 +453,8 @@ created from the dashboard's workspace sparkle menu.
 
 **Tool permissions follow the permission mode.** The agent runs kiro-cli's v3 engine without
 `--trust-all-tools`; the two are incompatible, and the flag is never passed. What a session may do
-without asking is set by the **Agent permissions** section of the settings menu (gear icon in the
-topbar). PowerAtlas writes a derived agent, `~/.kiro/agents/poweratlas-acp.md`, in every mode. It is a
+without asking is set by the **Agent permissions** section of the Settings dialog (gear icon in the
+topbar, then **Agent permissions** or **All settings…**). PowerAtlas writes a derived agent, `~/.kiro/agents/poweratlas-acp.md`, in every mode. It is a
 copy of the **base agent** (the field below the modes, `kiro_default` unless you change it; a minimal
 agent is used if that file does not exist) with one `permissions:` block that PowerAtlas compiles from
 the mode. Default sessions bind that agent. The base agent file is never modified, so terminal kiro-cli
@@ -509,7 +513,7 @@ saved and a warning says they are not yet in effect.
 **Always blocked**, in every mode, is refused silently with kiro-cli's own denial text: reading SSH,
 AWS, Azure and gcloud credential folders, kiro-cli's token files and PowerAtlas's own sign-in
 secrets; shell commands that mention those names; and file-tool writes to PowerAtlas's derived agent
-and to kiro-cli's settings and workspace-roots folders. The settings menu lists every pattern. The
+and to kiro-cli's settings and workspace-roots folders. The Settings dialog lists every pattern. The
 lists include the common Windows 8.3 short spellings (`SSH~1`), but not every alias: a link to one of
 those folders, or an unusual short name, is not covered. The shell part catches common accidents, not
 a determined command: it also blocks harmless commands such as `ssh -i ~/.ssh/key`.
@@ -520,14 +524,14 @@ the default commands are exact: `git log --oneline` asks. A `*` in a command pat
 an output redirection such as `git status > notes.txt`, which writes that file with no write check.
 Write rules cover kiro-cli's file-writing tools only; a shell redirection writes any path unchecked. And
 a rule matches a symlink's target, so a link inside a Protected folder that points elsewhere is not
-protected: the settings menu counts such links under each Protected item.
+protected: the Settings dialog counts such links under each Protected item.
 
 A mode change applies to sessions created afterwards; kiro-cli keeps a running session on the rules it
 started with. A reopened session keeps the agent it started with too, so a session that started while
 PowerAtlas's derived agent was not in effect (or before it existed) is outside the Always blocked list
 when it is reopened. Terminal sessions and the other task modes (Spec, Plan and so on) are not covered.
 
-The settings menu shows what each mode does under its own option, so the two can be compared before one
+The Settings dialog shows what each mode does on its own card, so the two can be compared before one
 is chosen; the Manual text is drawn from your own rules. If the derived agent cannot be written, or the
 whole file on disk is not what the current settings and base agent would produce — for example
 because a file of that name that PowerAtlas did not write is in the way, or a key was added beside
@@ -539,7 +543,7 @@ that is already selected does nothing when clicked). A missing file, or one Powe
 has since changed, is also written again automatically the next time a session is created.
 
 If `config.toml` is changed while PowerAtlas runs, or while it is stopped, the next new session (or the
-next start) picks the change up and the settings menu says what changed outside the dashboard: the
+next start) picks the change up and the Settings dialog says what changed outside the dashboard: the
 mode, Manual's rules or the base agent. It says so too when the derived agent file itself was edited
 and PowerAtlas rewrote it, and when the base agent file changed and new sessions now use it. The notice
 offers **Review rules** and **Acknowledge**, and it is kept across a restart (in
@@ -727,8 +731,8 @@ re-key the surface around you). Rotation issues a new secret and invalidates **e
 once — there is no per-device revocation, so each remaining device must re-enter the new secret.
 
 **Signing out other browsers on this machine.** The loopback cookie, `pa_local`, has its own secret
-and its own revocation. In the settings menu (gear icon), *Browser sign-in* has a **Sign out other
-browsers (rotate the local key)** button. The first click arms it and the second, within five seconds,
+and its own revocation. In the Settings dialog (gear icon, then **All settings…**), *Browser sign-in* has a
+**Sign out others** button, which rotates the local key. The first click arms it and the second, within five seconds,
 issues a new local secret: every other browser's cookie stops verifying, their open `/acp`
 connections are closed, and each must be reopened from the tray. The browser you pressed it from gets
 a fresh cookie in the same response and stays signed in. Use it if a `pa_local` cookie may have leaked,

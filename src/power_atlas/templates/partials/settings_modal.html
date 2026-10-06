@@ -1,0 +1,215 @@
+<!-- The Settings dialog, opened from the topbar menu's "All settings…" and
+     "Agent permissions" rows (openSettingsDialog). A section list on the left,
+     one scrolling pane on the right, so the dialog fits any window however
+     long a section grows. Every control keeps the id (and, for the two
+     restart-only rows, the class) it had in the old dropdown, so
+     refreshSettings(), markRestartInputs() and the permission and sign-in
+     renderers find it here unchanged. -->
+<dialog class="pa-modal settings-modal" id="settingsModal" aria-labelledby="settingsTitle">
+  <div class="settings-shell">
+    <nav class="settings-nav" aria-labelledby="settingsTitle">
+      <h3 class="settings-title" id="settingsTitle">Settings</h3>
+      <div class="settings-tabs" role="tablist" aria-orientation="vertical" aria-labelledby="settingsTitle">
+        <button type="button" role="tab" class="settings-tab" id="settingsTabGeneral" data-pane="general" aria-controls="settingsPaneGeneral" aria-selected="true">
+          <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h.01M11 9h.01M15 9h.01M7 13h10"/></svg>
+          <span>General</span>
+        </button>
+        <button type="button" role="tab" class="settings-tab" id="settingsTabPermissions" data-pane="permissions" aria-controls="settingsPanePermissions" aria-selected="false" tabindex="-1">
+          <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6Z"/></svg>
+          <span>Agent permissions</span>
+          <span id="settingsTabPermissionsDot" class="topbar-menu-attention" hidden title="The permission mode is not working as set"></span>
+        </button>
+        <button type="button" role="tab" class="settings-tab" id="settingsTabSignin" data-pane="signin" aria-controls="settingsPaneSignin" aria-selected="false" tabindex="-1">
+          <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="m10.8 12.2 8.2-8.2"/><path d="m16 7 3 3"/><path d="m14 9 2 2"/></svg>
+          <span>Browser sign-in</span>
+          <span id="settingsTabSigninDot" class="topbar-menu-attention" hidden title="The sign-in key is held in memory only"></span>
+        </button>
+      </div>
+    </nav>
+
+    <div class="settings-main">
+      <button type="button" class="modal-close settings-close" aria-label="Close" onclick="closeSettingsDialog()">&times;</button>
+
+      <!-- General: the two values read once at startup. markRestartInputs()
+           finds each row by its class and appends its "on relaunch" badge to
+           the row's title line. -->
+      <section class="settings-pane" id="settingsPaneGeneral" role="tabpanel" aria-labelledby="settingsTabGeneral" tabindex="0">
+        <header class="settings-pane-head">
+          <h4 class="settings-pane-title">General</h4>
+          <p class="settings-pane-intro">How PowerAtlas starts and where it listens. Both are read at startup.</p>
+        </header>
+
+        <div class="settings-card">
+          <div class="settings-row peek-hotkey-group">
+            <div class="settings-row-text">
+              <div class="settings-row-head"><label class="settings-row-title" for="peekHotkey">Peek hotkey</label></div>
+              <div class="settings-row-desc">Shows or hides the peek overlay window from anywhere. Takes effect on the next launch.</div>
+            </div>
+            <div class="settings-row-control">
+              <div class="hotkey-field" onclick="document.getElementById('peekHotkey').focus()">
+                <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" placeholder="Press keys…"
+                       onfocus="this.parentElement.classList.add('focused')"
+                       onblur="this.parentElement.classList.remove('focused')"
+                       onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})}).then(loadRestartKeys)">
+                <!-- The `.then(loadRestartKeys)` is load-bearing: this field
+                     is the only restart-only control that saves and stays on
+                     the page (savePortAndRestart restarts and navigates
+                     away). Without it, saving a hotkey leaves the "on
+                     relaunch" badge absent until a reload. -->
+              </div>
+            </div>
+          </div>
+          <div class="settings-row settings-row-stack port-group">
+            <div class="settings-row-text">
+              <div class="settings-row-head"><label class="settings-row-title" for="portMode">Port</label></div>
+              <div class="settings-row-desc">Random picks a free port at each launch. Static keeps one, so bookmarks and a phone's saved link keep working. Applying restarts PowerAtlas.</div>
+            </div>
+            <div class="settings-row-control port-controls">
+              <select class="port-mode" id="portMode" onchange="togglePortInput(this.value);markPortDirty()">
+                <option value="random" {% if not port %}selected{% endif %}>Random</option>
+                <option value="static" {% if port %}selected{% endif %}>Static</option>
+              </select>
+              <input type="number" id="portValue" class="port-input" min="1024" max="65535"
+                     aria-label="Port number"
+                     value="{{ port if port else '' }}"
+                     style="display:{% if port %}inline-block{% else %}none{% endif %}"
+                     placeholder="e.g. 49152"
+                     oninput="markPortDirty()"
+                     onkeydown="if(event.key==='Enter')savePort()">
+              <button type="button" class="port-randomize" id="portRandomize" onclick="randomizePort()"
+                      aria-label="Randomize port" title="Pick a random port"
+                      style="display:{% if port %}inline-block{% else %}none{% endif %}"><svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="M4 4l5 5"/></svg></button>
+              <button type="button" class="port-save-btn" id="portSave" onclick="savePort()"
+                      title="Apply port change (restarts server)"
+                      style="display:{% if port %}inline-block{% else %}none{% endif %}">Apply</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Agent permissions: the permission mode picker
+           (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1) as cards.
+           Native radios in a radiogroup, so the arrow keys and a screen reader
+           get radio semantics without script; each card's label is stretched
+           over the card, so the whole card is the target. No Jinja initial
+           state: renderAcpPermissions() checks the stored mode from GET
+           /api/acp-permissions, and nothing is checked until then. Auto is
+           shown but disabled until its decider exists (D-2). Each mode's
+           description stays visible, so the modes can be compared before one
+           is chosen (final review M-4); the Manual text is redrawn from the
+           stored rules (M-5). -->
+      <section class="settings-pane" id="settingsPanePermissions" role="tabpanel" aria-labelledby="settingsTabPermissions" tabindex="0" hidden>
+        <header class="settings-pane-head">
+          <h4 class="settings-pane-title">Agent permissions <span id="acpPermBadge" class="restart-badge" hidden>not in effect</span></h4>
+          <p class="settings-pane-intro">What the ACP sessions PowerAtlas creates with Default may do without asking.</p>
+        </header>
+
+        <!-- The warning, the notices (D-35, final review M-3 and M-6, each
+             with its own buttons, drawn by renderAcpPermissions()) and Apply
+             again (final review H-A), which re-applies the mode already
+             chosen: a checked radio sends nothing when clicked again, and
+             every "not in effect" fix names this button. -->
+        <div id="acpPermWarn" class="settings-alert settings-alert-warn" role="status" tabindex="-1" hidden></div>
+        <div id="acpPermNotice" class="settings-alert settings-alert-warn" role="status" hidden></div>
+        <div id="acpPermUpgrade" class="settings-alert" role="status" hidden></div>
+        <button type="button" id="acpPermApplyAgain" class="settings-btn settings-btn-warn acp-perm-apply" onclick="applyAcpPermissionModeAgain()" hidden>
+          <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+          Apply again
+        </button>
+
+        <h5 class="settings-group-title" id="acpPermModesLabel">Permission mode</h5>
+        <div id="acpPermModes" class="acp-perm-modes" role="radiogroup" aria-labelledby="acpPermModesLabel" aria-describedby="acpPermDescYolo acpPermDescManual">
+          <div class="acp-perm-card">
+            <label class="acp-perm-mode" for="acpPermModeYolo"><input type="radio" name="acpPermMode" id="acpPermModeYolo" value="yolo" onchange="setAcpPermissionMode(this)" aria-describedby="acpPermDescYolo"><span class="acp-perm-mode-name">Yolo</span></label>
+            <div id="acpPermDescYolo" class="acp-perm-mode-desc">New sessions run every action without asking, except the Always blocked list, which is refused silently. kiro-cli itself still asks before writes to .git, .vscode, *.code-workspace, .kiro/agents and .kiro/hooks, and blocks writes to .kiroignore and .kiro/settings, in every mode.</div>
+          </div>
+          <div class="acp-perm-card acp-perm-card-disabled">
+            <label class="acp-perm-mode acp-perm-mode-disabled" for="acpPermModeAuto"><input type="radio" name="acpPermMode" id="acpPermModeAuto" value="auto" disabled aria-describedby="acpPermAutoHint"><span class="acp-perm-mode-name">Auto</span><span id="acpPermAutoHint" class="acp-perm-mode-hint">coming soon — behaves like Manual</span></label>
+          </div>
+          <div class="acp-perm-card">
+            <label class="acp-perm-mode" for="acpPermModeManual"><input type="radio" name="acpPermMode" id="acpPermModeManual" value="manual" onchange="setAcpPermissionMode(this)" aria-describedby="acpPermDescManual"><span class="acp-perm-mode-name">Manual</span></label>
+            <div id="acpPermDescManual" class="acp-perm-mode-desc">The Always blocked list, plus your Manual rules (Edit rules… shows them): what a rule does not allow asks first, and file-tool writes to Protected items always ask.</div>
+          </div>
+        </div>
+
+        <h5 class="settings-group-title">Rules and agent</h5>
+        <div class="settings-card">
+          <!-- Phase 2: the Manual rule editor (partials/acp_permission_rules_modal.html),
+               offered in every mode; the description says when the rules are
+               in force. It opens over this dialog, and the row reads
+               "Loading rules…" until openAcpRulesEditor() has its answer. -->
+          <div class="settings-row">
+            <div class="settings-row-text">
+              <span class="settings-row-title">Manual rules</span>
+              <div id="acpPermEditRulesHint" class="settings-row-desc">What runs without asking, what asks and what is blocked, per kind of action. The rules apply when Manual is selected.</div>
+            </div>
+            <div class="settings-row-control">
+              <button type="button" id="acpPermEditRules" class="settings-btn" onclick="openAcpRulesEditor()" aria-describedby="acpPermEditRulesHint"><span id="acpPermEditRulesLabel">Edit rules…</span></button>
+            </div>
+          </div>
+          <div class="settings-row acp-perm-base-group">
+            <div class="settings-row-text">
+              <label class="settings-row-title" for="acpPermBaseAgent">Base agent</label>
+              <div class="settings-row-desc">The kiro-cli agent PowerAtlas builds its own agent from. It is read, never modified; if it is missing, a minimal agent is used instead.</div>
+            </div>
+            <div class="settings-row-control">
+              <div class="hotkey-field" onclick="document.getElementById('acpPermBaseAgent').focus()">
+                <input type="text" id="acpPermBaseAgent" class="peek-input" value="" placeholder="kiro_default"
+                       maxlength="64" spellcheck="false" autocomplete="off"
+                       onfocus="this.parentElement.classList.add('focused')"
+                       onblur="this.parentElement.classList.remove('focused')"
+                       onchange="saveAcpPermissionBaseAgent(this)">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h5 class="settings-group-title">Reference</h5>
+        <details id="acpPermFloor" class="acp-perm-details settings-card">
+          <summary>Always blocked</summary>
+          <div class="acp-perm-details-body">
+            <p class="settings-row-desc">Refused silently in every mode, in the ACP sessions PowerAtlas creates with Default. A session reopened from before the Always blocked list was in effect keeps the agent it started with, and is not covered.</p>
+            <div id="acpPermFloorList" class="acp-perm-list"></div>
+          </div>
+        </details>
+        <details id="acpPermProtected" class="acp-perm-details settings-card">
+          <summary>Protected <span class="acp-perm-summary-hint">(Manual)</span> <span id="acpPermProtectedCount" class="acp-perm-summary-hint acp-perm-summary-warn" hidden></span></summary>
+          <div class="acp-perm-details-body">
+            <p class="settings-row-desc">In Manual, file-tool writes to these always ask, even when writing files is allowed. A link inside one of these folders that points elsewhere is not covered, in a project's own .kiro folder too.</p>
+            <div id="acpPermProtectedList" class="acp-perm-list"></div>
+          </div>
+        </details>
+        <!-- SC-10, D-3: kiro-cli binds a session's agent at session/new and
+             does not pick up a rewrite mid-session (probe P-C), so a change
+             reaches only sessions created afterwards. -->
+        <p id="acpPermScopeNote" class="settings-footnote">Changes apply to sessions created afterwards. A reopened session keeps the agent it started with, so it is outside the Always blocked list if PowerAtlas's agent was not in effect when it started. Terminal sessions and task modes such as Spec or Plan are not covered.</p>
+      </section>
+
+      <!-- Browser sign-in (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+           final review F2, F3). The warning is D-22's "report in settings":
+           renderLocalSecret() shows it only while the key is held in memory.
+           The button rotates the local key, which signs every other browser
+           out; it arms on the first click and acts on the second, rather than
+           using window.confirm(). -->
+      <section class="settings-pane" id="settingsPaneSignin" role="tabpanel" aria-labelledby="settingsTabSignin" tabindex="0" hidden>
+        <header class="settings-pane-head">
+          <h4 class="settings-pane-title">Browser sign-in</h4>
+          <p class="settings-pane-intro">Browsers sign in with a login code PowerAtlas mints when it opens its own window or when the tray's Copy login link is used.</p>
+        </header>
+        <div id="localSecretWarn" class="settings-alert settings-alert-warn" role="status" hidden></div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-row-text">
+              <span class="settings-row-title">Sign out other browsers</span>
+              <div class="settings-row-desc">Rotates the local sign-in key. Every other browser signed in to PowerAtlas must be reopened from the tray; this one stays signed in.</div>
+            </div>
+            <div class="settings-row-control">
+              <button id="localSecretRotate" type="button" class="settings-btn settings-btn-danger" onclick="rotateLocalSecret(this)">Sign out others</button>
+            </div>
+          </div>
+        </div>
+        <div id="localSecretNote" class="settings-alert" role="status" hidden></div>
+      </section>
+    </div>
+  </div>
+</dialog>

@@ -4778,6 +4778,10 @@ check("render() refuses a tag nobody taught it instead of deleting it", () => {
 
 const INDEX_TEMPLATE = path.join(
   HERE, "..", "src", "power_atlas", "templates", "index.html");
+// The Settings dialog the topbar menu opens, included by index.html; the
+// permission, Peek hotkey, Port and sign-in rows live here.
+const SETTINGS_TEMPLATE = path.join(
+  HERE, "..", "src", "power_atlas", "templates", "partials", "settings_modal.html");
 const STYLESHEET = path.join(
   HERE, "..", "src", "power_atlas", "static", "style.css");
 
@@ -4938,6 +4942,14 @@ function loadPanel(opts = {}) {
   topbarMenu.hidden = true;
   byId.set("topbarSettingsBtn", topbarBtn);
   byId.set("topbarSettingsMenu", topbarMenu);
+  // The Settings dialog that holds the permission and sign-in sections. It
+  // starts closed, as in the markup; a check that needs the section on screen
+  // opens it.
+  const settingsModal = new El("dialog");
+  settingsModal.open = false;
+  settingsModal.showModal = () => { settingsModal.open = true; };
+  settingsModal.close = () => { settingsModal.open = false; settingsModal.dispatch("close", {}); };
+  byId.set("settingsModal", settingsModal);
   // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 2 QA: the "Edit
   // rules…" row and its label, marked busy while the editor's read is out.
   byId.set("acpPermEditRules", new El("button"));
@@ -5022,7 +5034,7 @@ function loadPanel(opts = {}) {
   return {
     sandbox, body, restartBody, modal, hosts,
     toasts, fetches, confirms, clipboard, timers, domReady,
-    topbarBtn, topbarMenu,
+    topbarBtn, topbarMenu, settingsModal,
     /** A click reaching the document: every document-level click listener
      *  runs, as a bubbling click with nothing stopping it would reach them. */
     fireDoc(type, ev) {
@@ -12374,12 +12386,13 @@ check("rules editor: a refused save stays open with the server's reason; a saved
 
 check("rules editor: the dialog is on the dashboard only and carries its names and footer (SC-7, SC-10)", () => {
   const idx = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const settings = fs.readFileSync(SETTINGS_TEMPLATE, "utf8");
   assert(idx.includes('{% include "partials/acp_permission_rules_modal.html" %}'), "index.html does not include the editor");
-  assert(/id="acpPermEditRules"[^>]*onclick="openAcpRulesEditor\(\)/.test(idx), "no Edit rules control in the settings menu");
-  // Phase 2 QA: the menu stays up, showing "Loading rules…", until the read answers.
-  assert(/id="acpPermEditRules" class="[^"]*\btopbar-menu-keep\b/.test(idx), "a click on Edit rules closes the menu before it can show it is loading");
-  assert(!/id="acpPermEditRules"[^>]*closeTopbarSettings/.test(idx), "Edit rules closes the menu before its read answers");
-  assert(/The rules apply when Manual is selected/.test(idx), "the Edit rules control does not say when rules apply");
+  assert(idx.includes('{% include "partials/settings_modal.html" %}'), "index.html does not include the Settings dialog");
+  assert(/id="acpPermEditRules"[^>]*onclick="openAcpRulesEditor\(\)/.test(settings), "no Edit rules control in the Settings dialog");
+  // Phase 2 QA: the row stays up, showing "Loading rules…", until the read answers.
+  assert(!/id="acpPermEditRules"[^>]*closeSettingsDialog/.test(settings), "Edit rules closes the dialog before its read answers");
+  assert(/The rules apply when Manual is selected/.test(settings), "the Edit rules control does not say when rules apply");
   const acp = fs.readFileSync(path.join(HERE, "..", "src", "power_atlas", "templates", "acp.html"), "utf8");
   assert(!acp.includes("acp_permission_rules_modal") && !acp.includes("openAcpRulesEditor"),
     "/acp, which a remote client can open, carries the rule editor");
@@ -12610,8 +12623,8 @@ check("settings: the Protected summary counts the linked items not covered (U13)
   q.sandbox.renderAcpPermissions(permState({ protected_links: {} }));
   assertEqual(q.sandbox.document.getElementById("acpPermProtectedCount").hidden, true,
     "a count shows with no linked items");
-  const idx = fs.readFileSync(INDEX_TEMPLATE, "utf8");
-  assert(/<summary>Protected[^\n]*id="acpPermProtectedCount"/.test(idx), "the count is not in the summary");
+  const settings = fs.readFileSync(SETTINGS_TEMPLATE, "utf8");
+  assert(/<summary>Protected[^\n]*id="acpPermProtectedCount"/.test(settings), "the count is not in the summary");
 });
 
 // ---- Browser sign-in: the local key --------------------------------------
@@ -12685,14 +12698,13 @@ check("settings: the markup wires the rotation button and the sign-in rows the s
   // The script above is driven through `loadPanel`'s stand-ins; this pins the
   // real markup to the same ids and handler, so a renamed id or a dropped
   // onclick cannot leave a button that does nothing.
-  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const src = fs.readFileSync(SETTINGS_TEMPLATE, "utf8");
   const btn = src.match(/<button id="localSecretRotate"[^>]*>([^<]*)<\/button>/);
-  assert(btn, "index.html has no #localSecretRotate button");
-  // `event` is load-bearing: rotateLocalSecret stops it short of the topbar
-  // menu's document-level closer (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA).
-  assert(/onclick="rotateLocalSecret\(this, event\)"/.test(btn[0]),
-    `the button does not call rotateLocalSecret(this, event): ${btn[0]}`);
-  assert(/Sign out other browsers/.test(btn[1]), `unexpected label: ${btn[1]}`);
+  assert(btn, "the Settings dialog has no #localSecretRotate button");
+  assert(/onclick="rotateLocalSecret\(this\)"/.test(btn[0]),
+    `the button does not call rotateLocalSecret(this): ${btn[0]}`);
+  assert(/Sign out others/.test(btn[1]), `unexpected label: ${btn[1]}`);
+  assert(/Sign out other browsers/.test(src), "the sign-in row does not say what the button does");
   assert(/type="button"/.test(btn[0]), "the button must not default to submit");
   for (const id of ["localSecretWarn", "localSecretNote"]) {
     const el = src.match(new RegExp(`<div id="${id}"[^>]*>`));
@@ -12701,132 +12713,93 @@ check("settings: the markup wires the rotation button and the sign-in rows the s
   }
 });
 
-check("settings: a real click on 'Sign out other browsers' keeps the menu open on the armed label and on the result (final QA)", async () => {
-  // The QA found the arming click closed the menu: the document-level closer
-  // saw it, so "Click again" rendered into a closed menu and the natural
-  // re-click after reopening rotated with no confirmation seen. Driven as a
-  // browser delivers a click: the button's own inline handler, taken from the
-  // markup, then every document-level click listener unless it stopped
-  // propagation.
-  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
-  const p = loadPanel({ topbarMenu: true, answer: (url) => url === "/api/local-secret/rotate"
-    ? { body: { ok: true, reissued: true, message: "x" } } : { body: {} } });
-  const $ = (id) => p.sandbox.document.getElementById(id);
-  const btn = $("localSecretRotate");
-  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
-  const onclick = src.match(/<button id="localSecretRotate"[^>]*onclick="([^"]*)"/)[1];
-  const inline = vm.runInContext(`(function (event) { ${onclick} })`, p.sandbox);
-  function click(el, handler) {
-    let stopped = false;
-    const ev = { type: "click", target: el, stopPropagation() { stopped = true; } };
-    handler.call(el, ev);
-    if (!stopped) p.fireDoc("click", ev);
-    return stopped;
-  }
-  const menuOpen = () => !p.topbarMenu.hidden
-    && p.topbarBtn.getAttribute("aria-expanded") === "true";
-  // Open the menu through the gear's real listener; its click then bubbles to
-  // the closer, which the guard absorbs.
-  click(p.topbarBtn, (ev) => p.topbarBtn.dispatch("click", ev));
-  assert(menuOpen(), "the gear did not open the menu");
-  // The closer is live: a click elsewhere closes the menu. Reopen for the check.
-  p.fireDoc("click", { type: "click" });
-  assert(!menuOpen(), "a click outside the menu did not close it; the check below would prove nothing");
-  click(p.topbarBtn, (ev) => p.topbarBtn.dispatch("click", ev));
-
-  click(btn, inline);
-  assert(menuOpen(), "the arming click closed the settings menu");
-  assert(btn.classList.contains("armed") && /click again/i.test(btn.textContent),
-    `the open menu does not show the armed label: ${btn.textContent}`);
-  assertEqual(p.fetches.filter((f) => f.url === "/api/local-secret/rotate").length, 0,
-    "the arming click rotated the key");
-
-  click(btn, inline);
-  await p.settle();
-  assert(menuOpen(), "the rotating click closed the settings menu");
-  const note = $("localSecretNote");
-  assertEqual(note.hidden, false, "the result note is not shown");
-  assert(/this browser stays signed in/i.test(note.textContent),
-    `the open menu does not show the result: ${note.textContent}`);
-});
-
-check("settings: clicking into the menu's text fields keeps it open; a toggle or an outside click still closes it (final QA)", () => {
-  // The QA observed in Chromium that a click in the base-agent or Peek hotkey
-  // field reached the document-level closer, which hid the field just focused.
-  // Driven through the real topbar wiring with the click's target, as a
-  // bubbling click delivers it.
-  // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+check("settings: the topbar menu opens on the gear, closes on any click, and Escape gives the focus back to the gear", () => {
+  // Every row in the menu acts or opens a dialog, so any click closes it; the
+  // text fields and disclosures that once had to keep it open moved into the
+  // Settings dialog. Driven through the real topbar wiring.
   const p = loadPanel({ topbarMenu: true });
-  const $ = (id) => p.sandbox.document.getElementById(id);
-  // The markup's nesting: menu > .topbar-menu-row > .hotkey-field > input.
-  function fieldInMenu(input) {
-    const row = new El("div");
-    row.className = "topbar-menu-row";
-    const box = new El("div");
-    box.className = "hotkey-field";
-    box.appendChild(input);
-    row.appendChild(box);
-    p.topbarMenu.appendChild(row);
-    return box;
-  }
-  const baseAgent = $("acpPermBaseAgent");
-  const baseBox = fieldInMenu(baseAgent);
-  const peek = new El("input");
-  const peekBox = fieldInMenu(peek);
-  // A Startup-style toggle row (the permission toggle it used to be was
-  // replaced by the mode picker, 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL).
-  const toggle = new El("div");
-  toggle.className = "topbar-menu-row topbar-toggle";
-  p.topbarMenu.appendChild(toggle);
-  // The mode picker's label text and the Always blocked disclosure's
-  // summary are not inputs; `.topbar-menu-keep` keeps the menu open on them.
-  const modes = new El("div");
-  modes.className = "acp-perm-modes topbar-menu-keep";
-  const modeLabel = new El("label");
-  const modeText = new El("span");
-  modeLabel.appendChild(modeText);
-  modes.appendChild(modeLabel);
-  p.topbarMenu.appendChild(modes);
-  const floor = new El("details");
-  floor.className = "acp-perm-details topbar-menu-keep";
-  const summary = new El("summary");
-  floor.appendChild(summary);
-  p.topbarMenu.appendChild(floor);
-  const outside = new El("div");
   const menuOpen = () => !p.topbarMenu.hidden
     && p.topbarBtn.getAttribute("aria-expanded") === "true";
   const open = () => {
-    if (menuOpen()) return;
     const ev = { type: "click", target: p.topbarBtn, stopPropagation() {} };
     p.topbarBtn.dispatch("click", ev);
     p.fireDoc("click", ev);
     assert(menuOpen(), "the gear did not open the menu");
   };
-  const clickOn = (target) => p.fireDoc("click", { type: "click", target, stopPropagation() {} });
+  open();
+  const row = new El("button");
+  p.topbarMenu.appendChild(row);
+  p.fireDoc("click", { type: "click", target: row });
+  assert(!menuOpen(), "a click on a menu row did not close the menu");
+  open();
+  p.fireDoc("click", { type: "click", target: new El("div") });
+  assert(!menuOpen(), "an outside click did not close the menu");
+  open();
+  ACTIVE = row;
+  p.fireDoc("keydown", { key: "Escape", preventDefault() {} });
+  assert(!menuOpen(), "Escape did not close the menu");
+  assert(ACTIVE === p.topbarBtn, "Escape did not give the focus back to the gear");
+  // The markup: only rows that act, nothing typed into, nothing disclosed.
+  const idx = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const from = idx.indexOf('<div id="topbarSettingsMenu"');
+  const to = idx.indexOf('id="topbarRestartDivider"', from);
+  assert(from >= 0 && to > from, "the topbar menu markup was not found");
+  const menu = idx.slice(from, to);
+  assert(!/<(input|select|textarea|details)\b/.test(menu), "the topbar menu holds a field or a disclosure again");
+  assert(/onclick="openSettingsDialog\('permissions'\)"/.test(menu), "the menu has no way to the permission section");
+  assert(/onclick="openSettingsDialog\(\)"/.test(menu), "the menu has no All settings row");
+});
 
-  open();
-  clickOn(baseAgent);
-  assert(menuOpen(), "clicking into the base-agent field closed the settings menu");
-  clickOn(baseBox);
-  assert(menuOpen(), "clicking the base-agent field's box closed the settings menu");
-  clickOn(peek);
-  assert(menuOpen(), "clicking into the Peek hotkey field closed the settings menu");
-  clickOn(peekBox);
-  assert(menuOpen(), "clicking the Peek hotkey field's box closed the settings menu");
-  clickOn(modeText);
-  assert(menuOpen(), "clicking a permission mode's label closed the settings menu");
-  clickOn(summary);
-  assert(menuOpen(), "opening the Always blocked list closed the settings menu");
-
-  clickOn(outside);
-  assert(!menuOpen(), "an outside click no longer closes the settings menu");
-  open();
-  // An input that is not in the menu is an outside click too.
-  clickOn(new El("input"));
-  assert(!menuOpen(), "a click in a text field outside the menu kept it open");
-  open();
-  clickOn(toggle);
-  assert(!menuOpen(), "a toggle click no longer closes the menu, unlike the Startup toggles");
+check("settings: the Settings dialog opens on the section asked for, and the menu's summary reads the mode", async () => {
+  const p = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: permState({ mode: "manual" }) } : { body: {} } });
+  const $ = (id) => p.sandbox.document.getElementById(id);
+  // The dialog's section tabs and panes, the menu's summary row and the
+  // section's dot, looked up by id before the harness's own elements.
+  const tabs = {}, panes = {};
+  for (const name of ["General", "Permissions", "Signin"]) {
+    tabs[name] = new El("button");
+    panes[name] = new El("section");
+  }
+  const ids = new Map();
+  for (const name of Object.keys(tabs)) {
+    ids.set("settingsTab" + name, tabs[name]);
+    ids.set("settingsPane" + name, panes[name]);
+  }
+  const value = new El("span");
+  const summaryRow = new El("button");
+  const permDot = new El("span");
+  ids.set("acpPermSummaryValue", value);
+  ids.set("acpPermSummary", summaryRow);
+  ids.set("settingsTabPermissionsDot", permDot);
+  const base = p.sandbox.document.getElementById;
+  p.sandbox.document.getElementById = (id) => ids.get(id) ?? base(id);
+  p.sandbox.openSettingsDialog("permissions");
+  assertEqual(p.settingsModal.open, true, "the dialog did not open");
+  assertEqual(tabs.Permissions.getAttribute("aria-selected"), "true", "the permission section is not selected");
+  assertEqual(tabs.General.getAttribute("aria-selected"), "false", "General stayed selected");
+  assertEqual(panes.Permissions.hidden, false, "the permission section is hidden");
+  assertEqual(panes.General.hidden, true, "General is shown beside it");
+  assert(ACTIVE === tabs.Permissions, "the focus is not on the selected section");
+  assert(p.fetches.some((f) => f.url === "/api/acp-permissions"), "opening did not read the permission mode");
+  await p.settle();
+  assertEqual(value.textContent, "Manual", "the menu's summary does not read the mode");
+  assertEqual(value.classList.contains("topbar-menu-value-warn"), false, "a healthy mode is marked");
+  assertEqual(permDot.hidden, true, "a healthy mode shows the section's dot");
+  p.sandbox.renderAcpPermissions(permState({ mode: "manual", in_effect: false, state: "absent" }));
+  assert(value.classList.contains("topbar-menu-value-warn"), "a mode not in effect is not marked in the menu");
+  assertEqual(permDot.hidden, false, "a mode not in effect shows no dot on its section");
+  // Closing gives the focus back to the gear; reopening without a section
+  // returns to the one shown last.
+  p.sandbox.closeSettingsDialog();
+  assertEqual(p.settingsModal.open, false, "the dialog did not close");
+  assert(ACTIVE === p.topbarBtn, "closing did not give the focus back to the gear");
+  p.sandbox.openSettingsDialog();
+  assertEqual(tabs.Permissions.getAttribute("aria-selected"), "true", "reopening forgot the section shown last");
+  // Arrow keys move between sections.
+  tabs.Permissions.dispatch("keydown", { key: "ArrowDown", preventDefault() {} });
+  assertEqual(tabs.Signin.getAttribute("aria-selected"), "true", "ArrowDown did not move to the next section");
+  tabs.Signin.dispatch("keydown", { key: "ArrowDown", preventDefault() {} });
+  assertEqual(tabs.General.getAttribute("aria-selected"), "true", "ArrowDown did not wrap to the first section");
 });
 
 check("settings: a refused rotation says so and does not claim success (F3)", async () => {
@@ -12846,10 +12819,10 @@ check("settings: the permission rows are a radio group with Auto disabled, and s
   // Static markup, which the panel harness does not render; asserted on the
   // template source, anchored on the rows' own ids.
   // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 1 (SC-1, SC-10, D-2).
-  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
-  const from = src.indexOf('id="acpPermModes"');
-  const to = src.indexOf('id="topbarRestartDivider"', from);
-  assert(from >= 0 && to > from, "the permission rows are not in the settings menu");
+  const src = fs.readFileSync(SETTINGS_TEMPLATE, "utf8");
+  const from = src.indexOf('id="settingsPanePermissions"');
+  const to = src.indexOf('</section>', from);
+  assert(from >= 0 && to > from, "the permission rows are not in the Settings dialog");
   const rows = src.slice(from, to);
   const group = /<div id="acpPermModes"[^>]*>/.exec(src)[0];
   assert(group.includes('role="radiogroup"'), "the mode picker is not a radiogroup");
@@ -12875,7 +12848,7 @@ check("settings: the permission rows are a radio group with Auto disabled, and s
   assert(/id="acpPermNotice"/.test(rows), "there is no outside-change notice (D-35)");
   assert(/id="acpPermBaseAgent"/.test(rows), "there is no base-agent input");
   assert(!/acpPermToggle|role="switch"/.test(rows), "the old on/off switch is still in the rows");
-  assert(!/querySelector\(['"]\.topbar-toggle/.test(src),
+  assert(!/querySelector\(['"]\.topbar-toggle/.test(fs.readFileSync(INDEX_TEMPLATE, "utf8")),
     "a `.topbar-toggle` class query is back — it matches the Startup toggles first");
 });
 
@@ -20417,9 +20390,9 @@ check("settings: Apply again is offered only while something is wrong, and posts
   assertEqual(p.fetches.length, sent, "Apply again posted with no mode checked");
   assert(p.toasts.some((t) => t.includes("Choose a permission mode first")), "no mode checked went unexplained");
   // The markup: a real button, in the Agent permissions section.
-  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const src = fs.readFileSync(SETTINGS_TEMPLATE, "utf8");
   assert(/<button type="button" id="acpPermApplyAgain"[^>]*onclick="applyAcpPermissionModeAgain\(\)"[^>]*hidden>/.test(src),
-    "index.html has no hidden Apply again button wired to applyAcpPermissionModeAgain()");
+    "the Settings dialog has no hidden Apply again button wired to applyAcpPermissionModeAgain()");
 });
 
 check("settings: an outside change says what changed and offers Review rules and Acknowledge (final review, M-3, EU14)", async () => {
@@ -20495,7 +20468,7 @@ check("settings: Apply again keeps the focus in the section (QA 2026-09-25)", as
   let answer = Object.assign({ ok: true }, permState({ mode: "manual" }));
   const p = loadPanel({ answer: (url) => url === "/api/acp-permissions" ? { body: answer } : { body: {} } });
   const $ = (id) => p.sandbox.document.getElementById(id);
-  $("topbarSettingsMenu").hidden = false;
+  $("settingsModal").open = true;
   const broken = permState({ mode: "manual", in_effect: false, state: "absent" });
   // Success, now in effect: the checked radio.
   p.sandbox.renderAcpPermissions(broken);
@@ -20518,16 +20491,16 @@ check("settings: Apply again keeps the focus in the section (QA 2026-09-25)", as
   p.sandbox.applyAcpPermissionModeAgain();
   await p.settle();
   assert(ACTIVE === $("acpPermApplyAgain"), "a refused Apply again moved the focus");
-  // Menu closed while the answer was out: nothing moves.
+  // Dialog closed while the answer was out: nothing moves.
   answer = Object.assign({ ok: true }, permState({ mode: "manual" }));
   p.sandbox.renderAcpPermissions(broken);
   ACTIVE = null;
   p.sandbox.applyAcpPermissionModeAgain();
-  $("topbarSettingsMenu").hidden = true;
+  $("settingsModal").open = false;
   await p.settle();
-  assertEqual(ACTIVE, null, "the focus moved while the menu was closed");
+  assertEqual(ACTIVE, null, "the focus moved while the Settings dialog was closed");
   // The warning can take the focus in a browser.
-  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const src = fs.readFileSync(SETTINGS_TEMPLATE, "utf8");
   assert(/<div id="acpPermWarn"[^>]*tabindex="-1"/.test(src), "#acpPermWarn is not focusable");
 });
 
@@ -20535,7 +20508,7 @@ check("settings: Acknowledge moves the focus to the checked mode (QA 2026-09-25)
   let answer = Object.assign({ ok: true }, permState({ mode: "yolo" }));
   const p = loadPanel({ answer: (url) => url === "/api/acp-permissions/acknowledge" ? { body: answer } : { body: {} } });
   const $ = (id) => p.sandbox.document.getElementById(id);
-  $("topbarSettingsMenu").hidden = false;
+  $("settingsModal").open = true;
   const pending = permState({ mode: "yolo", posture_notice: { mode: "yolo", what: "mode", detected_at: "t" } });
   p.sandbox.renderAcpPermissions(pending);
   let ack = $("acpPermNotice").querySelectorAll("button").pop();
