@@ -66,11 +66,11 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Source**: Session 2026-08-18 (ACP session rename goal) — file-watch confirmed zero kiro-cli rewrites; atomic vs non-atomic write difference confirmed via PowerAtlas API | **Verified**: 2026-09-28 (sweep, grep)
 
 
-### pywebview main-thread + pynput Ctrl-code quirks on Windows
+### pywebview + WebView2 quirks on Windows: main thread, Ctrl codes, frameless defaults, visibility
 
-**Why**: Two non-obvious platform behaviors caused runtime bugs despite passing unit tests: (1) pywebview enforces main-thread execution on Windows too (not just Linux/GTK) — `webview.start()` raises `WebViewException` from any non-main thread, and (2) pynput reports ASCII control codes (0x01–0x1a) instead of letter chars when Ctrl is held on Windows (e.g. Ctrl+Z → `\x1a`, not `'z'`).
-**How to apply**: When working with pywebview, always use the main thread regardless of platform. When processing pynput key events with Ctrl held, normalize control codes back to letters via `chr(ord(ch) + ord('a') - 1)`.
-**Source**: `plans/done/260630-1607_PEEK_WINDOW.md` — post-implementation empirical testing | **Verified**: 2026-06-30
+**Why**: Each of these caused a user-visible bug despite passing unit tests: (1) pywebview enforces main-thread execution on Windows too (not just Linux/GTK) — `webview.start()` raises `WebViewException` from any non-main thread; (2) pynput reports ASCII control codes (0x01–0x1a) instead of letter chars when Ctrl is held on Windows (e.g. Ctrl+Z → `\x1a`, not `'z'`); (3) a frameless pywebview window gets `easy_drag=True` (any drag in the page moves the window) and `text_select=False` (`body { user-select: none }`); (4) showing a hidden pywebview form with `SetWindowPos(SWP_SHOWWINDOW)` never tells WinForms it is visible, so WebView2 never paints (a blank white window, 2026-10-06), and hiding with `ShowWindow(SW_HIDE)` leaves the page reporting `visible`.
+**How to apply**: Use the main thread for pywebview regardless of platform; normalize Ctrl control codes back to letters via `chr(ord(ch) + ord('a') - 1)`; pass `easy_drag=False, text_select=True` to a frameless window users read; show hidden forms with `ShowWindow`/`SetWindowPlacement` and set the WebView2 controller's `IsVisible` on hide and show; check pixels, not just page state, in window QA.
+**Source**: `plans/done/260630-1607_PEEK_WINDOW.md` — post-implementation empirical testing + `plans/done/261006-1307_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS.md` § 9 ("User-reported blank window", "After the final record") | **Verified**: 2026-10-06 (session, artifact-check)
 
 
 
