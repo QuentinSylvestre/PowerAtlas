@@ -7,6 +7,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _no_real_keyboard(monkeypatch):
+    """No test reads the real keyboard or types into the desktop: the
+    filter's modifier check sees every tracked modifier as down, and the Alt
+    mask key is recorded, not sent. Tests that check either override these.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-ups 10, 14)
+    """
+    import power_atlas.peek as peek_mod
+    sent = []
+    monkeypatch.setattr(peek_mod, "_modifier_down", lambda name: True,
+                        raising=False)
+    monkeypatch.setattr(peek_mod, "_send_mask_key", lambda: sent.append(1),
+                        raising=False)
+    return sent
+
+
 def _make_key(char=None, name=None):
     """Create a mock key object mimicking pynput key events."""
     key = MagicMock()
@@ -388,9 +404,10 @@ class _Listener:
 
 
 class _KbData:
-    def __init__(self, vk, t=0):
+    def __init__(self, vk, t=0, flags=0):
         self.vkCode = vk
         self.time = t
+        self.flags = flags
 
 
 class TestWin32Filter:
@@ -4377,3 +4394,222 @@ class TestBrowserKeys:
         pw._run_webview()
         assert [o[0] for o in order] == ["subscribe", "start"]
         assert order[0][1] == pw._on_loaded
+
+
+def _feed_filter(pw, msg, vk, t=0, flags=0):
+    """One event through the Windows filter; True when it was suppressed."""
+    try:
+        pw._win32_event_filter(msg, _KbData(vk, t, flags))
+    except _Suppress:
+        return True
+    return False
+
+
+class TestStaleModifiers:
+    """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+    (follow-up 14): a modifier key-up lost on the secure desktop leaves the
+    modifier in `_pressed_keys`. Before matching a chord key-down, the filter
+    asks the keyboard (`GetAsyncKeyState`, generic VK) about each tracked
+    modifier and drops the ones that are up, so a partial chord never
+    fires."""
+
+    _VK_Z, _VK_Q, _VK_ESC = 0x5A, 0x51, 0x1B
+
+    def _peek(self, monkeypatch, down, held=("ctrl", "shift")):
+        import power_atlas.peek as peek_mod
+        pw = _new_peek(monkeypatch)
+        pw._adapter = _FakeAdapter()
+        pw._listener = _Listener()
+        pw._pressed_keys.update(held)
+        asked = []
+
+        def modifier_down(name):
+            asked.append(name)
+            return name in down
+
+        monkeypatch.setattr(peek_mod, "_modifier_down", modifier_down)
+        return pw, asked
+
+    def test_a_stale_ctrl_does_not_fire_a_partial_chord(self, monkeypatch):
+        """Tracked: ctrl and shift. Really down: shift only. `z` is then
+        shift+z, not ctrl+shift+z: it passes, posts nothing, and only the
+        stale modifier is dropped."""
+        import power_atlas.peek as peek_mod
+        pw, asked = self._peek(monkeypatch, down={"shift"})
+        assert not _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=50)
+        assert _drain(pw) == []
+        assert pw._pressed_keys == {"shift"}
+        assert sorted(asked) == ["ctrl", "shift"]
+
+    def test_a_stale_shift_is_dropped_too(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, _ = self._peek(monkeypatch, down={"ctrl"})
+        assert not _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=50)
+        assert pw._pressed_keys == {"ctrl"}
+        assert _drain(pw) == []
+
+    def test_modifiers_really_down_fire_the_chord(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, _ = self._peek(monkeypatch, down={"ctrl", "shift"})
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=50)
+        assert _drain(pw) == [("press", "peek", 50)]
+        assert pw._pressed_keys == {"ctrl", "shift"}
+
+    def test_only_tracked_modifiers_are_asked(self, monkeypatch):
+        """Cheap: alt is not tracked, so it is not asked about; a key that is
+        in no chord asks nothing at all."""
+        import power_atlas.peek as peek_mod
+        pw, asked = self._peek(monkeypatch, down={"ctrl", "shift", "alt"})
+        _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Q, t=10)
+        assert asked == []
+        _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=20)
+        assert sorted(asked) == ["ctrl", "shift"]
+
+    def test_a_key_up_and_esc_ask_nothing(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, asked = self._peek(monkeypatch, down=set())
+        _feed_filter(pw, peek_mod._WM_KEYUP, self._VK_Z)
+        _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_ESC)
+        assert asked == []
+        assert pw._pressed_keys == {"ctrl", "shift"}
+
+    def test_the_real_check_reads_the_generic_vk_high_bit(self, monkeypatch):
+        """`GetAsyncKeyState` with VK_CONTROL (0x11), VK_SHIFT (0x10) and
+        VK_MENU (0x12); down is the high bit (0x8000), not the low
+        "pressed since last call" bit."""
+        import power_atlas.peek as peek_mod
+        states = {0x11: -0x8000, 0x10: 0x0001, 0x12: 0x0000}
+        asked = []
+
+        class _U:
+            @staticmethod
+            def GetAsyncKeyState(vk):
+                asked.append(vk)
+                return states[vk]
+
+        monkeypatch.setattr(peek_mod.sys, "platform", "win32")
+        monkeypatch.setattr(peek_mod, "_win32", lambda: (_U, None))
+        check = peek_mod._real_modifier_down
+        assert check("ctrl") is True
+        assert check("shift") is False
+        assert check("alt") is False
+        assert asked == [0x11, 0x10, 0x12]
+
+    def test_off_windows_the_check_says_down(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        monkeypatch.setattr(peek_mod, "_win32",
+                            lambda: (_ for _ in ()).throw(AssertionError))
+        assert peek_mod._real_modifier_down("ctrl") is True
+
+
+class TestAltMask:
+    """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+    (follow-up 10): with a chord containing alt, the user's app sees Alt
+    down and Alt up around the suppressed key and would activate its menu
+    bar. The filter sends a mask key (VK 0xE8, unassigned) right after
+    suppressing the chord's key-down, as AutoHotkey does, so the app sees
+    Alt+mask and the Alt key-up opens no menu. The filter ignores the mask
+    key it sent."""
+
+    _VK_F1, _VK_Z, _VK_B = 0x70, 0x5A, 0x42
+
+    def _peek(self, monkeypatch, peek, browser="", held=()):
+        pw = _two_chord_peek(monkeypatch, peek=peek, browser=browser)
+        pw._listener = _Listener()
+        pw._pressed_keys.update(held)
+        return pw
+
+    def test_an_alt_chord_sends_one_mask_per_press(self, monkeypatch,
+                                                   _no_real_keyboard):
+        import power_atlas.peek as peek_mod
+        sent = _no_real_keyboard
+        pw = self._peek(monkeypatch, "alt+f1", held=("alt",))
+        assert _feed_filter(pw, peek_mod._WM_SYSKEYDOWN, self._VK_F1, t=10)
+        assert sent == [1]
+        # Auto-repeat: suppressed, no second mask.
+        assert _feed_filter(pw, peek_mod._WM_SYSKEYDOWN, self._VK_F1, t=40)
+        assert sent == [1]
+        # The key-up: suppressed, no mask (Alt is still down).
+        assert _feed_filter(pw, peek_mod._WM_SYSKEYUP, self._VK_F1)
+        assert sent == [1]
+        # A second press with Alt still held: another mask.
+        assert _feed_filter(pw, peek_mod._WM_SYSKEYDOWN, self._VK_F1, t=300)
+        assert sent == [1, 1]
+        assert [e[0] for e in _drain(pw)] == ["press", "press"]
+
+    def test_a_chord_without_alt_sends_none(self, monkeypatch,
+                                            _no_real_keyboard):
+        import power_atlas.peek as peek_mod
+        sent = _no_real_keyboard
+        pw = self._peek(monkeypatch, "ctrl+shift+z", held=("ctrl", "shift"))
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=10)
+        assert sent == []
+
+    def test_the_browser_chord_masks_too(self, monkeypatch,
+                                         _no_real_keyboard):
+        import power_atlas.peek as peek_mod
+        sent = _no_real_keyboard
+        pw = self._peek(monkeypatch, "ctrl+shift+z", browser="ctrl+alt+b",
+                        held=("ctrl", "alt"))
+        assert _feed_filter(pw, peek_mod._WM_SYSKEYDOWN, self._VK_B, t=10)
+        assert sent == [1]
+        assert _drain(pw) == [("browser", 10)]
+
+    def test_a_key_that_passes_sends_none(self, monkeypatch,
+                                          _no_real_keyboard):
+        """Alt+F1 with the peek chord alt+f2: F1 is not a chord key."""
+        import power_atlas.peek as peek_mod
+        sent = _no_real_keyboard
+        pw = self._peek(monkeypatch, "alt+f2", held=("alt",))
+        assert not _feed_filter(pw, peek_mod._WM_SYSKEYDOWN, self._VK_F1)
+        assert sent == []
+
+    @pytest.mark.parametrize("flags", [0, 0x10])
+    def test_the_mask_key_is_ignored(self, monkeypatch, _no_real_keyboard,
+                                     flags):
+        """Its key-down and key-up pass untouched and change nothing,
+        whether or not Windows marks them injected."""
+        import power_atlas.peek as peek_mod
+        sent = _no_real_keyboard
+        pw = self._peek(monkeypatch, "alt+f1", held=("alt",))
+        before = (set(pw._pressed_keys), dict(pw._triggered),
+                  dict(pw._chord_down))
+        for msg in (peek_mod._WM_SYSKEYDOWN, peek_mod._WM_SYSKEYUP):
+            assert not _feed_filter(pw, msg, peek_mod._VK_MASK, flags=flags)
+        assert (set(pw._pressed_keys), dict(pw._triggered),
+                dict(pw._chord_down)) == before
+        assert _drain(pw) == [] and sent == []
+        assert peek_mod._VK_MASK == 0xE8
+        assert peek_mod._VK_MASK not in peek_mod._hotkeys.VK_NAMES
+
+    def test_a_failing_send_still_suppresses_and_posts(self, monkeypatch,
+                                                       caplog):
+        """The mask is best effort: a raising send is logged by type and
+        never escapes the filter (pynput would stop the listener)."""
+        import power_atlas.peek as peek_mod
+
+        def boom():
+            raise OSError("send failed")
+
+        monkeypatch.setattr(peek_mod, "_send_mask_key", boom)
+        pw = self._peek(monkeypatch, "alt+f1", held=("alt",))
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            assert _feed_filter(pw, peek_mod._WM_SYSKEYDOWN, self._VK_F1,
+                                t=10)
+        assert _drain(pw) == [("press", "peek", 10)]
+        assert pw._listener.suppressed == 1
+        assert "mask key" in caplog.text and "OSError" in caplog.text
+
+    def test_the_real_send_is_a_down_and_an_up_of_0xe8(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        calls = []
+
+        class _U:
+            @staticmethod
+            def keybd_event(vk, scan, flags, extra):
+                calls.append((vk, scan, flags, extra))
+
+        monkeypatch.setattr(peek_mod, "_win32", lambda: (_U, None))
+        peek_mod._real_send_mask_key()
+        assert calls == [(0xE8, 0, 0, 0), (0xE8, 0, 0x2, 0)]

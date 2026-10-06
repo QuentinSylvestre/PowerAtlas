@@ -144,6 +144,43 @@ _VK_MODIFIERS = frozenset({
     0x10, 0x11, 0x12,  # VK_SHIFT, VK_CONTROL, VK_MENU (generic)
 })
 _MODIFIER_NAMES = _hotkeys.MODIFIERS
+# Generic VK codes the modifier check asks `GetAsyncKeyState` about: either
+# side of the key counts. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 14)
+_VK_GENERIC = {"shift": 0x10, "ctrl": 0x11, "alt": 0x12}
+# The Alt mask key: an unassigned virtual-key code, as AutoHotkey's default
+# `MenuMaskKey` (vkE8). Sent down and up after the filter suppresses the key
+# of a chord containing alt. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10)
+_VK_MASK = 0xE8
+_KEYEVENTF_KEYUP = 0x2
+
+
+def _real_modifier_down(name: str) -> bool:
+    """Whether the keyboard says modifier `name` is down now (the high bit of
+    `GetAsyncKeyState` for its generic VK). Off Windows there is no filter,
+    and the answer is always yes.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 14)
+    """
+    if sys.platform != "win32":
+        return True
+    u, _ = _win32()
+    return bool(u.GetAsyncKeyState(_VK_GENERIC[name]) & 0x8000)
+
+
+def _real_send_mask_key() -> None:
+    """Type the mask key, down then up (`keybd_event`). It only queues input,
+    so it never blocks the hook; the events reach the hook again afterwards,
+    and the filter ignores them by their VK.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10)
+    """
+    u, _ = _win32()
+    u.keybd_event(_VK_MASK, 0, 0, 0)
+    u.keybd_event(_VK_MASK, 0, _KEYEVENTF_KEYUP, 0)
+
+
+# The two keyboard seams the filter calls, looked up at call time (tests
+# replace them so they never read the real keyboard or type into it).
+_modifier_down = _real_modifier_down
+_send_mask_key = _real_send_mask_key
 
 
 def _tick_now() -> int:
@@ -218,6 +255,9 @@ class PeekWindow:
         # suppressed too, and the key-up re-arms its chords.
         self._chord_down: dict = {}
         self._esc_down_suppressed = False  # the filter suppressed Esc's key-down
+        # The filter just suppressed the key of a chord containing alt: send
+        # the mask key before returning (follow-up 10).
+        self._mask_pending = False
         self._release_armed = False  # a press was posted since the last release
         # Written only by the worker, once, when readiness fails; read by the
         # hook. While set the peek chord matches nothing, so its keys reach
@@ -900,6 +940,12 @@ class PeekWindow:
             # echoing ^Z repeatedly).
             if sys.platform == "win32":
                 kwargs["win32_event_filter"] = self._win32_event_filter
+                # Bind user32 now, not on the first chord inside the hook.
+                try:
+                    _win32()
+                except Exception as e:
+                    log.warning("PowerAtlas window: user32 is not "
+                                "available: %s", type(e).__name__)
             self._listener = keyboard.Listener(**kwargs)
             self._listener.daemon = True
             self._listener.start()
@@ -924,11 +970,25 @@ class PeekWindow:
         # fire, and an AttributeError here would escape the filter.
         # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 review fix 12
         listener = self._listener
+        self._mask_pending = False
         try:
             suppress = self._filter_decide(msg, data.vkCode, data.time)
         except Exception as e:
             log.warning("PowerAtlas window: hotkey filter error: %s", type(e).__name__)
             suppress = False
+        if suppress and self._mask_pending:
+            # Here, in the hook, rather than on the worker: `keybd_event`
+            # only queues the input, and only here is the mask certain to
+            # reach the user's app before the Alt key-up (the worker may lag
+            # a UI-thread timeout behind). AutoHotkey also sends it from its
+            # hook. Best effort: a failure is logged by type and never
+            # escapes. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 10)
+            self._mask_pending = False
+            try:
+                _send_mask_key()
+            except Exception as e:
+                log.warning("PowerAtlas window: could not send the Alt mask "
+                            "key: %s", type(e).__name__)
         if suppress and listener is not None:
             listener.suppress_event()
 
@@ -936,6 +996,10 @@ class PeekWindow:
         """Update key state, post an event, and say whether to suppress."""
         if vk in _VK_MODIFIERS:
             return False  # modifiers reach `_on_press`/`_on_release`
+        if vk == _VK_MASK:
+            # The Alt mask key this filter sent (follow-up 10): passed on to
+            # the user's app untouched, never a chord key or an event.
+            return False
         name = self._vk_to_name(vk)
         if not name:
             return False
@@ -976,6 +1040,7 @@ class PeekWindow:
                 # The key-up was never seen: a new press.
                 del self._chord_down[name]
                 self._rearm(name)
+            self._drop_stale_modifiers(name)
             chord = self._matches_chord(name)
             if chord is None:
                 return False
@@ -984,6 +1049,8 @@ class PeekWindow:
                 return True  # auto-repeat: suppressed, never an event
             self._triggered[chord] = True
             self._post_press(chord, t)
+            if "alt" in self._chords[chord]:
+                self._mask_pending = True
             return True
         if self._chord_down.pop(name, None) is not None:
             # The chord key's key-up: suppress it like its key-down, and
@@ -993,6 +1060,20 @@ class PeekWindow:
             self._rearm(name)
             return True
         return False
+
+    def _drop_stale_modifiers(self, name: str) -> None:
+        """Before a chord key-down is matched: forget each tracked modifier
+        the keyboard says is up. Its key-up was lost (it went up on the
+        secure desktop: Ctrl+Alt+Del, UAC), and kept it would let a partial
+        chord fire. Cheap: only for a key some chord uses, and only the
+        modifiers tracked as held (at most three `GetAsyncKeyState` calls).
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 14)
+        """
+        if not any(keys and name in keys for keys in self._chords.values()):
+            return
+        for m in self._pressed_keys & _MODIFIER_NAMES:
+            if not _modifier_down(m):
+                self._pressed_keys.discard(m)
 
     def _rearm(self, name: str) -> None:
         """Clear `_triggered` for every chord that has `name` as a key."""
@@ -1384,6 +1465,10 @@ def _win32():
         "GetDpiForWindow": ([H], wt.UINT),
         "GetWindowThreadProcessId": ([H, ctypes.POINTER(wt.DWORD)], wt.DWORD),
         "AttachThreadInput": ([wt.DWORD, wt.DWORD, wt.BOOL], wt.BOOL),
+        # The keyboard filter's modifier check and Alt mask (Phase 5,
+        # follow-ups 14 and 10).
+        "GetAsyncKeyState": ([ctypes.c_int], ctypes.c_short),
+        "keybd_event": ([wt.BYTE, wt.BYTE, wt.DWORD, ctypes.c_size_t], None),
     }
     for name, (args, res) in sigs.items():
         fn = getattr(u, name)
