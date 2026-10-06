@@ -4794,6 +4794,126 @@ class TestStaleModifiers:
         assert peek_mod._real_modifier_down("ctrl") is True
 
 
+class TestEatenModifiers:
+    """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS
+    follow-up 20: a modifier another program's hook ate after ours saw it
+    (remote desktop, VM, remapper) never sets the async key state, so the
+    stale-modifier check alone would drop it and stop the shortcut over that
+    app. The check now drops a modifier only when the keyboard says it is up
+    AND the filter's own last key-down for it (repeats included) is more
+    than 2000 ms older than the chord key-down. Ages are hook ticks
+    (`KBDLLHOOKSTRUCT.time`), compared modulo 2**32. VK values from
+    winuser.h: VK_LCONTROL 0xA2, VK_RCONTROL 0xA3, VK_LSHIFT 0xA0, 'Z'
+    0x5A."""
+
+    _VK_Z, _LCTRL, _RCTRL, _LSHIFT = 0x5A, 0xA2, 0xA3, 0xA0
+
+    def _peek(self, monkeypatch, down=frozenset()):
+        """Ctrl and shift tracked as held; the keyboard says `down`."""
+        import power_atlas.peek as peek_mod
+        pw = _new_peek(monkeypatch)
+        pw._adapter = _FakeAdapter()
+        pw._listener = _Listener()
+        pw._pressed_keys.update({"ctrl", "shift"})
+        asked = []
+
+        def modifier_down(name):
+            asked.append(name)
+            return name in down
+
+        monkeypatch.setattr(peek_mod, "_modifier_down", modifier_down)
+        return pw, asked
+
+    def _mods_down(self, pw, *pairs):
+        import power_atlas.peek as peek_mod
+        for vk, t in pairs:
+            assert not _feed_filter(pw, peek_mod._WM_KEYDOWN, vk, t=t)
+
+    def test_recent_eaten_modifiers_still_fire_the_chord(self, monkeypatch):
+        """Both key-downs were seen by our hook moments ago; the keyboard
+        says neither is down (another hook ate them). The chord fires and
+        the keyboard is not even asked."""
+        import power_atlas.peek as peek_mod
+        pw, asked = self._peek(monkeypatch)
+        self._mods_down(pw, (self._LCTRL, 1000), (self._LSHIFT, 1400))
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=2900)
+        assert _drain(pw) == [("press", "peek", 2900)]
+        assert pw._pressed_keys == {"ctrl", "shift"}
+        assert asked == []
+
+    def test_only_the_old_modifier_is_dropped(self, monkeypatch):
+        """Ctrl down at 1000, shift at 2500, z at 3100: ctrl is 2100 ms old
+        and dropped, shift 600 ms old and kept, so z is shift+z and passes
+        with no event."""
+        import power_atlas.peek as peek_mod
+        pw, asked = self._peek(monkeypatch)
+        self._mods_down(pw, (self._LCTRL, 1000), (self._LSHIFT, 2500))
+        assert not _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=3100)
+        assert _drain(pw) == []
+        assert pw._pressed_keys == {"shift"}
+        assert asked == ["ctrl"]
+
+    @pytest.mark.parametrize("z_at, fires", [
+        (2999, True),   # 1999 ms: kept
+        (3000, True),   # exactly 2000 ms: kept (dropped only when older)
+        (3001, False),  # 2001 ms: dropped
+    ])
+    def test_both_sides_of_the_threshold(self, monkeypatch, z_at, fires):
+        import power_atlas.peek as peek_mod
+        pw, _ = self._peek(monkeypatch)
+        # Shift is fresh in every case; only ctrl's age varies.
+        self._mods_down(pw, (self._LCTRL, 1000), (self._LSHIFT, z_at - 10))
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z,
+                            t=z_at) is fires
+        assert bool(_drain(pw)) is fires
+        assert ("ctrl" in pw._pressed_keys) is fires
+
+    def test_an_old_modifier_the_keyboard_says_is_down_is_kept(
+            self, monkeypatch):
+        """The age alone never drops: held still for 5 s and really down."""
+        import power_atlas.peek as peek_mod
+        pw, _ = self._peek(monkeypatch, down={"ctrl", "shift"})
+        self._mods_down(pw, (self._LCTRL, 1000), (self._LSHIFT, 1200))
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=6000)
+        assert _drain(pw) == [("press", "peek", 6000)]
+
+    def test_repeats_keep_a_held_modifier_fresh(self, monkeypatch):
+        """Ctrl went down at 0 and auto-repeated until 2900; the last
+        key-down counts, so at 3100 it is 200 ms old."""
+        import power_atlas.peek as peek_mod
+        pw, _ = self._peek(monkeypatch)
+        self._mods_down(pw, *[(self._LCTRL, t) for t in (0, 500, 1700, 2900)])
+        self._mods_down(pw, (self._LSHIFT, 3000))
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=3100)
+        assert [e[0] for e in _drain(pw)] == ["press"]
+
+    @pytest.mark.parametrize("z_at, fires", [(0x500, True), (0x900, False)])
+    def test_the_age_wraps_with_the_tick(self, monkeypatch, z_at, fires):
+        """Ctrl down at 0xFFFFFF00, just before GetTickCount wraps: z at
+        0x500 is 0x600 = 1536 ms later (kept), at 0x900 2560 ms (dropped)."""
+        import power_atlas.peek as peek_mod
+        pw, _ = self._peek(monkeypatch)
+        self._mods_down(pw, (self._LCTRL, 0xFFFFFF00), (self._LSHIFT, z_at - 5))
+        assert _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z,
+                            t=z_at) is fires
+
+    def test_the_right_hand_key_counts_and_a_key_up_forgets(self,
+                                                            monkeypatch):
+        """Right Ctrl records "ctrl" too. Its key-up removes the tick, so a
+        ctrl still tracked afterwards (a lost `_on_release`) counts as old
+        and is checked against the keyboard again."""
+        import power_atlas.peek as peek_mod
+        pw, asked = self._peek(monkeypatch)
+        self._mods_down(pw, (self._RCTRL, 1000), (self._LSHIFT, 1100))
+        assert pw._modifier_tick == {"ctrl": 1000, "shift": 1100}
+        assert not _feed_filter(pw, peek_mod._WM_KEYUP, self._RCTRL, t=1200)
+        assert pw._modifier_tick == {"shift": 1100}
+        assert not _feed_filter(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=1300)
+        assert asked == ["ctrl"]
+        assert pw._pressed_keys == {"shift"}
+        assert _drain(pw) == []
+
+
 class TestAltMask:
     """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
     (follow-up 10): with a chord containing alt, the user's app sees Alt

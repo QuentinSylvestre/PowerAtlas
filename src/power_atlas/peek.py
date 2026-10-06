@@ -91,6 +91,14 @@ _REPEAT_GAP_MS = 3000
 # open mints a login code, and a burst must not cycle the 64-code store.
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (12)
 _BROWSER_MIN_GAP_MS = 500
+# The stale-modifier check drops a tracked modifier the keyboard says is up
+# only when the filter's own last key-down for it (repeats included) is more
+# than this many milliseconds older than the chord key-down. A key-up lost on
+# the secure desktop leaves a key-down seconds old; a modifier another
+# program's hook ate after ours saw it (remote desktop, VM, remapper) never
+# sets the async state, but while the user holds it its key-down is recent.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS follow-up 20
+_STALE_MODIFIER_MS = 2000
 # A browser press still queued when the window becomes ready is dropped once
 # it is older than this: a press made during a slow startup must not open a
 # tab many seconds later. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (13)
@@ -149,6 +157,13 @@ _VK_MODIFIERS = frozenset({
     0x10, 0x11, 0x12,  # VK_SHIFT, VK_CONTROL, VK_MENU (generic)
 })
 _MODIFIER_NAMES = _hotkeys.MODIFIERS
+# Modifier VK (either side, or generic) to its name, for the key-down ticks
+# the stale-modifier check reads (follow-up 20).
+_VK_MODIFIER_NAME = {
+    0xA0: "shift", 0xA1: "shift", 0x10: "shift",
+    0xA2: "ctrl", 0xA3: "ctrl", 0x11: "ctrl",
+    0xA4: "alt", 0xA5: "alt", 0x12: "alt",
+}
 # Generic VK codes the modifier check asks `GetAsyncKeyState` about: either
 # side of the key counts. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 14)
 _VK_GENERIC = {"shift": 0x10, "ctrl": 0x11, "alt": 0x12}
@@ -355,6 +370,9 @@ class PeekWindow:
         # suppressed too, and the key-up re-arms its chords.
         self._chord_down: dict = {}
         self._esc_down_suppressed = False  # the filter suppressed Esc's key-down
+        # Hook tick of the filter's last key-down per modifier name (repeats
+        # refresh it; its key-up removes it). Hook thread only (follow-up 20).
+        self._modifier_tick: dict = {}
         # The filter just suppressed the key of a chord that needs the mask
         # (`_needs_mask`): send the mask key before returning (follow-ups
         # 10, 18).
@@ -1251,7 +1269,15 @@ class PeekWindow:
     def _filter_decide(self, msg, vk: int, t: int) -> bool:
         """Update key state, post an event, and say whether to suppress."""
         if vk in _VK_MODIFIERS:
-            return False  # modifiers reach `_on_press`/`_on_release`
+            # Modifiers reach `_on_press`/`_on_release`; the filter only notes
+            # when it last saw each one go down (follow-up 20).
+            mod = _VK_MODIFIER_NAME.get(vk)
+            if mod is not None:
+                if msg in (_WM_KEYDOWN, _WM_SYSKEYDOWN):
+                    self._modifier_tick[mod] = t & _TICK_MASK
+                else:
+                    self._modifier_tick.pop(mod, None)
+            return False
         if vk == _VK_MASK:
             # The mask key this filter sent (follow-ups 10, 18): passed on to
             # the user's app untouched, never a chord key or an event.
@@ -1296,7 +1322,7 @@ class PeekWindow:
                 # The key-up was never seen: a new press.
                 del self._chord_down[name]
                 self._rearm(name)
-            self._drop_stale_modifiers(name)
+            self._drop_stale_modifiers(name, t)
             chord = self._matches_chord(name)
             if chord is None:
                 return False
@@ -1318,12 +1344,23 @@ class PeekWindow:
             return True
         return False
 
-    def _drop_stale_modifiers(self, name: str) -> None:
-        """Before a chord key-down is matched: forget each tracked modifier
-        the keyboard says is up. Its key-up was lost (it went up on the
-        secure desktop: Ctrl+Alt+Del, UAC), and kept it would let a partial
-        chord fire. Cheap: only for a key some chord uses, and only the
-        modifiers tracked as held (at most three `GetAsyncKeyState` calls).
+    def _drop_stale_modifiers(self, name: str, t: int) -> None:
+        """Before a chord key-down is matched (hook tick `t`): forget each
+        tracked modifier the keyboard says is up and whose last key-down the
+        filter saw more than `_STALE_MODIFIER_MS` before `t`. Its key-up was
+        lost (it went up on the secure desktop: Ctrl+Alt+Del, UAC), and kept
+        it would let a partial chord fire. Cheap: only for a key some chord
+        uses, and only the modifiers tracked as held (at most three
+        `GetAsyncKeyState` calls).
+
+        The age condition keeps a modifier another program's hook ate after
+        ours saw it (remote desktop, VM, remapper): the async state never
+        says it is down, but its key-down (or its latest repeat) is recent
+        while the user holds it. A modifier with no key-down tick (tracked
+        before the filter saw it) counts as old. Residual: a modifier held
+        still for more than 2 s before the chord key, in such an app, is
+        still dropped.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS follow-up 20
         A check that raises (user32 not bound, the call failing) keeps the
         modifier, as before this check existed: the filter must not stop
         matching chords because the keyboard could not be asked. Not logged:
@@ -1334,12 +1371,17 @@ class PeekWindow:
         if not any(keys and name in keys for keys in self._chords.values()):
             return
         for m in self._pressed_keys & _MODIFIER_NAMES:
+            seen = self._modifier_tick.get(m)
+            if (seen is not None
+                    and ((t - seen) & _TICK_MASK) <= _STALE_MODIFIER_MS):
+                continue  # held moments ago by our own hook's account
             try:
                 down = _modifier_down(m)
             except Exception:
                 down = True
             if not down:
                 self._pressed_keys.discard(m)
+                self._modifier_tick.pop(m, None)
 
     def _rearm(self, name: str) -> None:
         """Clear `_triggered` for every chord that has `name` as a key."""
