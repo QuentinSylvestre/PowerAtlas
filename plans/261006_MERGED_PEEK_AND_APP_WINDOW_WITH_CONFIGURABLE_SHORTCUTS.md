@@ -1,7 +1,7 @@
 # Merged Peek and App Window with Configurable Shortcuts
 
 > **Date**: 2026-10-06
-> **Status**: In Progress — Phase 5 (follow-up fixes) underway  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — all phases implemented; a few live checks left for the user (Follow-up 21)  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Turn the peek overlay into one PowerAtlas window with a peek mode and an app mode, add configurable shortcuts, and offer app window and browser from the tray
 > **Estimated effort**: 1-2 days
@@ -133,7 +133,7 @@ No phase is `[P:N]`: every phase edits `peek.py` or `web.py`, and all share one 
 ### Threading model (normative for Phases 1-3)
 <!-- resolves cycle-1 findings 1-3, 14, 20, 21 and cycle-2 findings 1, 4, 5, 6, 9, 12 -->
 
-- **The hook decides, the worker acts.** `_win32_event_filter` and `_on_press`/`_on_release` only: update `_pressed_keys` and per-chord `_triggered`; decide whether to suppress; build a small event tuple; `put` it on `self._events` (`queue.SimpleQueue`). They never call pywebview, `native`, `Invoke`, `load_url`, `evaluate_js`, a lock, or the browser.
+- **The hook decides, the worker acts.** `_win32_event_filter` and `_on_press`/`_on_release` only: update `_pressed_keys` and per-chord `_triggered`; decide whether to suppress; build a small event tuple; `put` it on `self._events` (`queue.SimpleQueue`). They never call pywebview, `native`, `Invoke`, `load_url`, `evaluate_js`, a lock, or the browser. Since Phase 5 the Windows filter also makes two non-blocking user32 calls: `GetAsyncKeyState` to drop stale modifiers before matching, and `keybd_event` to send the Alt mask key.
 - **The filter never lets an exception escape except the suppression.** pynput stops the whole listener on any other exception raised in the filter (`pynput/_util/__init__.py`, `_emitter`). The filter computes its decision inside `try/except Exception` (log the type name; on error: no suppression, no event) and calls `suppress_event()` **after** that `try`, outside any `try`, when the decision says so (`suppress_event()` raises pynput's `SuppressException`, an `Exception` subclass).
 - **One worker thread owns the window.** `PeekWindow` starts a daemon thread `_window_worker` that loops on `self._events` and performs every transition and every pywebview/native call. All state (`_state`, `_return_to`, `_app_placement`, `_tap_origin`, `_last_press`, `_signed_gen`, `_prev_foreground`, `_hwnd`) is read and written only on that thread, with two exceptions: the worker publishes `_peek_showing` and `_peek_chord_off` (plain bools it alone writes) for the hook to read. `_hwnd` is written only on the worker; UI-thread callables may read it. Each event is handled inside `try/except Exception` that logs `type(e).__name__`, plus `str(e)` for errors from Win32/.NET calls on paths that never handle a URL.
 - **UI-thread calls are bounded.** The worker runs native code with `native.BeginInvoke(...)` and waits on a completion event for up to 2 s; past that it logs a WARNING naming the operation and moves on (a hung UI thread must be visible in the log, not a silent stall).
@@ -389,10 +389,15 @@ Batch B (sign-in and settings):
 - Follow-up 16: saving the peek shortcut returns whether the stored browser shortcut will be active at the next launch; the dialog says so when it changes.
 
 **Exit criteria**:
-- [ ] Batch A committed; tests for each item (fails without the fix where testable); full suite (two parts) and node tests pass; window probe passes.
-- [ ] Batch B committed; tests for each item including `next` refusals (scheme, `//`, backslash, unknown path, encoded variants); full suite and node tests pass.
+- [x] Batch A committed; tests for each item (fails without the fix where testable); full suite (two parts) and node tests pass; window probe passes.
+- [x] Batch B committed; tests for each item including `next` refusals (scheme, `//`, backslash, unknown path, encoded variants); full suite and node tests pass.
 - [ ] Live QA on the unlocked desktop: hold, double-tap, X, Esc and the browser shortcut still pass; Ctrl+F and right-click work in app mode; an Alt chord does not activate a foreground app's menu bar (if testable).
-- [ ] README updated where behaviour is user-visible (accelerators and context menu, settings notes, same-origin links).
+- [x] README updated where behaviour is user-visible (accelerators and context menu, settings notes, same-origin links).
+
+Implementation (2026-10-06, code: 557570c, 08755df, 636413e)
+Batch A (`2d19b83`, `be89504`, `74a6e00`, `972f55a`, `557570c`): door helpers moved to `doors.py`; `_press`/`_post` test helpers; "PowerAtlas window" log vocabulary (keeping `Peek hotkey listener started`); `copy_login_link` notify failure logged by type; a first-load latch gates app mode; WebView2 accelerator keys and the context menu turned on (DevTools stay off); `GetAsyncKeyState` drops stale modifiers before matching; the Alt mask key (VK 0xE8) is sent from the hook for alt chords; a 60 s listener health check. Batch B (`ca2d9d4`, `da7ba50`, `278b292`, `08755df`): clipboard failure logged by type; `/local-auth` accepts a validated `next` (`/` or `/acp` with a query; refusals land on `/`; read after the code is spent; never logged) and a shim in pywebview's EdgeChromium module sends same-origin new-window links through a fresh login URL; `/api/settings` reports the shortcuts startup will run and the Settings dialog notes a stored value that is not the one used; a peek save reports whether the browser shortcut will be active after the next launch. Review fixes (`213fbf8`, `636413e`): mask comment and once-per-run failure log, fail-safe modifier check, UIPI caveat, an INFO line when app mode waits for the first load, browser keys re-applied on every load, a guard that only `doors.py` and `web.py` mint login codes, the shim signs a link only when the window's own page is same-origin and at most once per second, the landing query drops `code` and `next`, extra refusal rows, `sid=` examples, node tests for the note wiring, and future-tense notes while a restart is pending.
+
+QA (Phase 5): suites green after `636413e` (`tests/test_web.py` 2713 passed; the rest 1952 passed; node 966/966); window probe 35/35. Live (14:00 approx., user consent): with the final code and `browser_hotkey=ctrl+alt+b`, the Alt chord did not activate a menu bar and fired the browser door once; Phase 1's suite passed 18/21. The 3 failures and the Alt-tap control failed because the test window could not take the foreground from Microsoft Teams, which the user was using (a harness limit, not a product failure; the same checks passed at 09:30 on an idle desktop). So the Alt-mask result is inconclusive (its control did not run), and Ctrl+F and right-click were verified only by reading the WebView2 settings back in a probe, not by use. Settings restored (`browser_hotkey` off). Per the user's choice, both B6 wording behaviours are kept (browser note in the future tense while either shortcut is pending; no `restart_pending` list means present tense).
 
 ## 6) Risk Assessment
 
@@ -508,6 +513,21 @@ Final review (code `95bc4e9`):
 - **Single sources**: `hotkeys.effective_*` used by `create_peek` and the constructor; `hotkeys.PEEK_MODES` used by config, web and peek; a `_WindowAdapter` Protocol with a conformance test; `_control(ev)` shared by both worker loops; the tray no longer imports `peek`.
 - **Logging**: `tray._open_in_browser` logs only the exception type.
 
+Phase 5 batch A (code `2d19b83`, `be89504`, `74a6e00`, `972f55a`, `557570c`):
+- **Alt mask key sent from inside the hook** (follow-up 10): VK 0xE8 down and up via `keybd_event`, after the decision and before `suppress_event()`, on the first suppressed key-down of a chord containing alt; ignored by our filter by VK (not by `LLKHF_INJECTED`, so injected QA chords still fire). The hook is the only place the mask reliably precedes the Alt key-up; the worker can lag. `keybd_event` only queues input.
+- **Stale modifiers** (follow-up 14): `GetAsyncKeyState` confirms tracked modifiers before a chord key-down matches; a dropped modifier posts no `release` (a stuck Hold peek still ends on the next modifier release or Esc).
+- **First-load latch** (follow-up 8): `_loaded` is set by pywebview's `loaded` handler, subscribed before `webview.start`; `supports_app_mode` and the Win32 adapter's `has_app_mode` both require it, so before the first load a double-tap or tray Open uses the browser.
+- **Browser keys and context menu on** (follow-up 5) in both modes; DevTools stay off (`debug=False`).
+- **Listener health check** (follow-up 15) every 60 s on the worker; it cannot see a hook Windows removed for exceeding `LowLevelHooksTimeout`.
+- **`doors.py`** (follow-up 12) holds `login_url` and `open_in_browser`; `peek` keeps a `_login_url` alias.
+- **Log vocabulary** (follow-up 13): "PowerAtlas window …", keeping `Peek hotkey listener started` and "Peek shortcut".
+
+Phase 5 review fixes and batch B (code `da7ba50`, `278b292`, `213fbf8`, `636413e`):
+- **`next` landing set** is `/` and `/acp` (with a query); `/remote-auth` is deliberately excluded; the landing query drops `code` and `next` and passes other keys through unvalidated beyond printable ASCII.
+- **New-window routing** replaces the `webbrowser` global inside pywebview's already-loaded `edgechromium` module once, at readiness, with a shim; a link opened before readiness, or from a page on another origin, or within 1 s of the previous signed link, goes to the browser unsigned.
+- **Settings notes** describe what the next launch will run (`effective_*` from the stored values), in the future tense while a restart is pending; `browser_active_changed` compares with the previously stored peek shortcut, so a second save before restarting clears the note (accepted as designed).
+- **Browser keys** are re-applied on every page load (a recreated WebView2 core would otherwise lose them).
+
 ## Follow-up Work (Deferred)
 
 1. **Terminology proposal for `AGENTS.md`.** Proposed entries: **PowerAtlas window** (the single pywebview window; not "peek window" for the whole, not a separate "app window"), **peek mode** and **app mode** (its two presentations). Needs the user's Save / Skip / Edit; the user was away during planning.
@@ -528,6 +548,11 @@ Final review (code `95bc4e9`):
 16. **Tell the user when a peek save turns the browser shortcut on.** A stored browser shortcut that is off because it overlaps the current peek shortcut can become active after the peek shortcut changes; the Settings dialog does not say so (final review, Security auditor; UX only).
 17. **`copy_login_link` notify failure log.** It logs a `notify` exception with `%s`; on a platform with no clipboard the message is the login URL, so a backend that quotes its argument would log a live link. Predates this plan; not changed here (final review cycle 2, Security auditor).
 
+18. **Ctrl+Shift layout switch.** With Windows' optional Ctrl+Shift keyboard-layout hotkey on, the default `ctrl+shift+z` leaves a bare Ctrl+Shift press and release that may switch the layout; sending the mask for ctrl+shift chords too would avoid it (Phase 5 review, Reliability; predates Phase 5).
+19. **Linux login URL on the `xdg-open` command line** is readable by other local users via `/proc/<pid>/cmdline` within the 120 s code lifetime; outside the same-user threat model. Predates this plan (Phase 5 review, Security).
+20. **Modifiers eaten by another program's hook** (remote desktop, VM, remapper) never set the async key state, so the stale-modifier check may stop a shortcut firing over that app [unverified]; check live with such a window in front (Phase 5 review, Reliability).
+21. **Live checks left from Phase 5** (need an idle desktop, or the user at the keyboard): Ctrl+F and right-click in app mode; an Alt chord over an app with a classic menu bar (the automated control could not run while another app held the foreground); a same-origin link opened from the app window landing signed in on that page.
+22. **Flaky Codex writer-lock test** `tests/test_data.py::TestCodexWriterLock::test_two_threads_with_a_busy_coordination_file_each_stay_inside_one_retry_budget` failed intermittently during this plan's runs; it belongs to the Codex plan's code and was not touched here.
 ## Review Log
 
 ### 2026-10-06 -- Plan Review cycle 1 (via /qplan)
@@ -697,9 +722,30 @@ Final suite on the final code: `tests/test_web.py` 2643 passed, the rest 1873 pa
 | 10 | Low | Rotation races, browser-door rate limit, user close in HIDDEN, focus failure, heal gap, overlays on failure, single sources, tray import, wording, logging (cycle 1 and 2 Lows). | Fixed — see section 9 "Final review" and the two fix commits. |
 | 11 | Low | Test helper, neutral door module, log vocabulary, stuck modifiers, hook health, browser-shortcut activation notice, `copy_login_link` log. | Escalated — recorded as Follow-up 11-17 for the user. |
 
+### 2026-10-06 -- Implementation Review (after Phase 5, persona: Reliability engineer, Security auditor (batch A); Security auditor, Senior engineer (batch B))
+
+Implementation health: Green for code (no High or Medium code findings; all fixed Lows in `213fbf8`, `636413e`); live QA partly inconclusive (harness could not take the foreground).
+Batch A: 15 findings (0 High, 1 Medium, 14 Low). Batch B: 7 findings (0 High, 0 Medium, 7 Low). One review cycle per the user's override.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | [Reliability] The hook's new user32 calls and the mask decision were not recorded in the plan. | Fixed — Threading model and section 9 updated. |
+| 2 | Low | [Reliability] Mask failures logged from the hook on every chord. | Fixed — once per run. |
+| 3 | Low | [Reliability] A raising `GetAsyncKeyState` would disable every shortcut. | Fixed — treat the modifier as down. |
+| 4 | Low | [Reliability] No log when app mode waits for the first page load; browser keys lost if WebView2 recreates its core. | Fixed — one INFO line; keys re-applied on every load. |
+| 5 | Low | [Reliability] Mask comment overclaimed; UIPI caveat missing; stale doors comment. | Fixed — wording and docstrings. |
+| 6 | Low | [Security] Nothing stopped a new module from minting login codes outside `doors`/`web`. | Fixed — tokenizer guard test. |
+| 7 | Low | [Security] Same-origin routing ignored the opener's origin; no rate limit. | Fixed — opener must be same-origin; one signed link per second. |
+| 8 | Low | [Security] Landing query could carry `code`/`next`. | Fixed — dropped. |
+| 9 | Low | [Security, Senior] Missing refusal rows; `session=` examples; untested note wiring. | Fixed — rows, `sid=`, two node tests. |
+| 10 | Low | [Senior] Notes spoke in the present tense while a restart was pending. | Fixed — future tense while pending. |
+| 11 | Low | [Senior] `browser_active_changed` clears on a second save before restart. | User: accepted — the user kept both B6 wording choices ("yes", 2026-10-06). |
+| 12 | Low | [Reliability] Ctrl+Shift layout switch, eaten modifiers; [Security] Linux `xdg-open` command line; `peek` binds `login_url` at import. | Escalated — Follow-ups 18-20; the import binding kept for the window probe's patching. |
+
 ## Harness Improvement Opportunities
 
 - `/qdev` Step 5b treats a QA BLOCKED verdict as a hard stop, but an unattended overnight run with a locked desktop BLOCKs every live window check while the unattended probe passes — cost: the orchestrator had to choose between stopping the whole run and overriding the gate; it continued and deferred the checks — suggested change: let a plan declare a locked-session fallback (probe evidence counts, live checks deferred to the user) that keeps auto-continue.
 - `/qdev`'s dirty-tree stop fired on another session's unrelated, disjoint edits while the user was asleep — cost: a judgment call to continue against the letter of the rule — suggested change: allow continuing when the foreign files are disjoint from every remaining phase's scope and all commits are pathspec-scoped, recording the file list.
+- Live key-injection QA assumes the test window can take the foreground; with the user active in another app (Teams), Windows refused it and the focusing click landed in the user's app — cost: three false FAILs, an inconclusive control, and a stray click in the user's window — suggested change: QA scripts check that the target window really is foreground before injecting, and stop with BLOCKED instead of clicking when another app holds it.
 - A sub-agent hit the account session limit mid-commit sequence; its last edit was left uncommitted and the orchestrator had to verify and commit it — cost: one interruption and a manual recovery — suggested change: sub-agent briefs could ask for a commit after each numbered fix so an interruption loses at most one fix.
 - `/qexplore` Step 1.5 dispatch had to be restarted when the user asked for a different sub-agent model mid-dispatch — cost: three agents' partial work discarded, about 2 minutes — suggested change: let `/qexplore` read a model preference for exploration sub-agents from memory before dispatch.
