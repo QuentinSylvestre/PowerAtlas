@@ -811,10 +811,10 @@ def _run_foreground() -> None:
 
     # The same "read once at startup" values, snapshotted so the settings panel
     # can tell what this process is running from what is merely on disk.
-    # Deliberately outside the `acp_module` guard above: three of the seven keys
-    # are ACP's, but `port`, `peek_hotkey`, `peek_mode` and `remote_bind_address`
-    # are not, and an ACP import failure must not leave the panel unable to say
-    # what is in force for the other four. Before the server binds, so nothing can
+    # Deliberately outside the `acp_module` guard above: three of the eight keys
+    # are ACP's, but `port`, `peek_hotkey`, `peek_mode`, `browser_hotkey` and
+    # `remote_bind_address` are not, and an ACP import failure must not leave the
+    # panel unable to say what is in force for the other five. Before the server binds, so nothing can
     # serve `/api/settings` ahead of the snapshot.
     from .web import set_startup_config
     set_startup_config(config)
@@ -899,7 +899,8 @@ def _run_foreground() -> None:
     from .web import set_restart_callback
     set_restart_callback(trigger_restart)
 
-    peek = create_peek(server_url, config.peek_hotkey, config.peek_mode)
+    peek = create_peek(server_url, config.peek_hotkey, config.peek_mode,
+                       config.browser_hotkey)
 
     # The shutdown sequence, once. Besides the normal path below, the
     # PowerAtlas window's `stop()` watchdog runs it when the UI loop will not

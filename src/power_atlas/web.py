@@ -47,6 +47,7 @@ from .config import (load_config, save_config, ConfigUnreadableError,
                      ACP_PERMISSION_MODES)
 from . import agent_profile, autostart, data, data_codex, data_codex_state, icons, launcher, lock_owner, notifications, presence
 from . import overview
+from . import hotkeys
 from . import quiet_log
 from . import permission_rows
 from .status_classifier import get_semantic_status, SemanticStatus
@@ -2707,6 +2708,7 @@ async def index(request: Request):
         "launchers": _launchers_without_env(config.custom_launchers),
         "peek_hotkey": config.peek_hotkey,
         "peek_mode": config.peek_mode,
+        "browser_hotkey": config.browser_hotkey,
         "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
         "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
@@ -5537,6 +5539,7 @@ async def api_settings():
         "launch_profiles": [asdict(p) for p in config.launch_profiles],
         "peek_hotkey": config.peek_hotkey,
         "peek_mode": config.peek_mode,
+        "browser_hotkey": config.browser_hotkey,
         "port": config.port,
         "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
@@ -5833,6 +5836,9 @@ _SETTING_TYPES: dict[str, type] = {
     # "hold" or "toggle", refused otherwise on the write path below.
     # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
     "peek_mode": str,
+    # "" (off) or a shortcut; both shortcuts are checked by `hotkeys` on the
+    # write path below. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+    "browser_hotkey": str,
     "default_directory": str,
     "pinned_folders": list,
     "pinned_sessions": list,
@@ -5869,9 +5875,9 @@ _RESTART_TO_APPLY = frozenset({
     "port", "acp_max_sessions", "acp_idle_ttl_seconds",
     "acp_prompt_silence_seconds", "remote_bind_address",
     # `peek_hotkey` is consumed once, at startup, by
-    # `create_peek(server_url, config.peek_hotkey, config.peek_mode)`;
-    # `PeekWindow.__init__` parses it into `self._trigger_keys` and nothing
-    # re-reads or re-registers it afterwards. `index.html` offers a live input for it, so omitting it
+    # `create_peek(server_url, config.peek_hotkey, config.peek_mode,
+    # config.browser_hotkey)`; `PeekWindow.__init__` parses it into its chord
+    # table and nothing re-reads or re-registers it afterwards. `index.html` offers a live input for it, so omitting it
     # here made the endpoint answer `restart_required: False` for a key that
     # genuinely needs one — a field that is positively wrong is worse than no
     # field, because the user acts on it.
@@ -5880,6 +5886,9 @@ _RESTART_TO_APPLY = frozenset({
     # keeps it for the run, and the settings dialog offers a live select.
     # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
     "peek_mode",
+    # `browser_hotkey` too: it is the second entry of the same chord table.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+    "browser_hotkey",
 })
 
 # The restart-only values as this process actually read them, captured once
@@ -5952,7 +5961,7 @@ async def save_setting(request: Request):
     if bounds is not None and not (bounds[0] <= value <= bounds[1]):
         return {"ok": False,
                 "error": f"{key} must be between {bounds[0]} and {bounds[1]}"}
-    # String-specific validation (applies to peek_hotkey, default_directory)
+    # String-specific validation (applies to every str key)
     if expected_type is str:
         if len(value) > 512:
             return {"ok": False, "error": f"{key} too long (max 512 chars)"}
@@ -6033,6 +6042,31 @@ async def save_setting(request: Request):
         value = value.strip().lower()
         if value not in ("hold", "toggle"):
             return {"ok": False, "error": "Peek mode must be hold or toggle"}
+    if key in ("peek_hotkey", "browser_hotkey"):
+        # Format and conflict checks before the value is persisted; before
+        # this an invalid peek shortcut surfaced only as a startup fallback.
+        # The conflict is checked against the other shortcut as the window
+        # would run it: an invalid stored peek shortcut runs as the default,
+        # and an invalid stored browser shortcut is off.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+        value = value.strip().lower()
+        if key == "peek_hotkey":
+            problem = hotkeys.hotkey_error(value)
+            if problem is not None:
+                return {"ok": False, "error": f"Shortcut {problem}"}
+            other = config.browser_hotkey
+            if (hotkeys.hotkey_error(other) is None
+                    and hotkeys.hotkeys_conflict(value, other)):
+                return {"ok": False,
+                        "error": "Conflicts with the browser shortcut"}
+        elif value:
+            problem = hotkeys.hotkey_error(value)
+            if problem is not None:
+                return {"ok": False, "error": f"Shortcut {problem}"}
+            other = hotkeys.effective_peek_hotkey(config.peek_hotkey)
+            if hotkeys.hotkeys_conflict(value, other):
+                return {"ok": False,
+                        "error": "Conflicts with the peek shortcut"}
     setattr(config, key, value)
     save_config(config)
     return {"ok": True, "restart_required": key in _RESTART_TO_APPLY}

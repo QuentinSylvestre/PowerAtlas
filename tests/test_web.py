@@ -619,6 +619,150 @@ class TestSaveSettingAllowlist:
         mock_save.assert_called_once()
 
 
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3:
+# both shortcuts are checked on the write path, for format and for overlap
+# with the other one (SC-7). Expected errors come from the plan's wording.
+
+def _save_shortcut(client, key, value):
+    return client.post("/api/save-setting", json={"key": key, "value": value},
+                       headers={"Origin": "http://127.0.0.1"}).json()
+
+
+@pytest.mark.parametrize("sent, problem", [
+    ("z", "needs a modifier"),
+    ("ctrl+shift", "needs a key"),
+    ("ctrl+foo", "unknown key 'foo'"),
+    ("ctrl+esc", "esc"),
+    ("", "empty"),
+])
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_peek_hotkey_bad_format_refused(mock_load, mock_save,
+                                                     client, sent, problem):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    body = _save_shortcut(client, "peek_hotkey", sent)
+    assert body["ok"] is False
+    assert body["error"].startswith("Shortcut ")
+    assert problem in body["error"]
+    mock_save.assert_not_called()
+
+
+@pytest.mark.parametrize("sent", ["b", "ctrl+bogus", "alt", "ctrl+esc"])
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_browser_hotkey_bad_format_refused(mock_load, mock_save,
+                                                        client, sent):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    body = _save_shortcut(client, "browser_hotkey", sent)
+    assert body["ok"] is False and body["error"].startswith("Shortcut ")
+    mock_save.assert_not_called()
+
+
+@pytest.mark.parametrize("sent", [
+    "ctrl+shift+z",        # equal
+    " Shift+CTRL+Z ",      # equal, another order and case
+    "ctrl+shift+alt+z",    # contains the peek shortcut
+])
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_browser_hotkey_conflicting_refused(mock_load, mock_save,
+                                                         client, sent):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(peek_hotkey="ctrl+shift+z")
+    assert _save_shortcut(client, "browser_hotkey", sent) == {
+        "ok": False, "error": "Conflicts with the peek shortcut"}
+    mock_save.assert_not_called()
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_browser_hotkey_inside_the_peek_one_refused(
+        mock_load, mock_save, client):
+    """Nested the other way: the peek shortcut contains the browser one."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(peek_hotkey="ctrl+shift+alt+p")
+    assert _save_shortcut(client, "browser_hotkey", "ctrl+alt+p") == {
+        "ok": False, "error": "Conflicts with the peek shortcut"}
+    mock_save.assert_not_called()
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_browser_hotkey_checked_against_the_peek_in_force(
+        mock_load, mock_save, client):
+    """An invalid stored peek shortcut runs as ctrl+shift+z, so that is the
+    one a browser shortcut must not overlap."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(peek_hotkey="nope")
+    body = _save_shortcut(client, "browser_hotkey", "ctrl+shift+z")
+    assert body["error"] == "Conflicts with the peek shortcut"
+    mock_save.assert_not_called()
+
+
+@pytest.mark.parametrize("sent, stored", [
+    ("", ""), ("   ", ""), ("Ctrl+Alt+B", "ctrl+alt+b"),
+    # Same key, other modifiers: neither contains the other.
+    ("ctrl+alt+z", "ctrl+alt+z"),
+])
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_browser_hotkey_accepted(mock_load, mock_save, client,
+                                              sent, stored):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(peek_hotkey="ctrl+shift+z")
+    assert _save_shortcut(client, "browser_hotkey", sent) == {
+        "ok": True, "restart_required": True}
+    assert mock_save.call_args[0][0].browser_hotkey == stored
+
+
+@pytest.mark.parametrize("sent", ["ctrl+alt+b", "b+alt+ctrl+shift", "alt+b"])
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_peek_hotkey_conflicting_refused(mock_load, mock_save,
+                                                      client, sent):
+    """Equal to, containing, or inside the stored browser shortcut."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(browser_hotkey="ctrl+alt+b")
+    assert _save_shortcut(client, "peek_hotkey", sent) == {
+        "ok": False, "error": "Conflicts with the browser shortcut"}
+    mock_save.assert_not_called()
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_peek_hotkey_normalised_and_unblocked_by_an_off_browser(
+        mock_load, mock_save, client):
+    """With no browser shortcut (or an invalid stored one, which is off at
+    startup) there is nothing to conflict with."""
+    from power_atlas.config import Config
+    for browser in ("", "b"):
+        mock_load.return_value = Config(browser_hotkey=browser)
+        assert _save_shortcut(client, "peek_hotkey", " Ctrl+Alt+B ")["ok"]
+        assert mock_save.call_args[0][0].peek_hotkey == "ctrl+alt+b"
+
+
+def test_settings_modal_renders_the_browser_shortcut_row(client):
+    """The row the badge code and saveShortcut look for: the input inside
+    `.browser-hotkey-group`, its error line, and `data-saved` matching the
+    stored value."""
+    page = client.get("/").text
+    row = page.split('class="settings-row browser-hotkey-group"', 1)[1]
+    row = row.split('class="settings-row ', 1)[0]
+    assert 'id="browserHotkey"' in row
+    assert 'id="browserHotkeyError"' in row
+    assert 'value="" data-saved=""' in row
+    assert "saveShortcut(this,'browser_hotkey')" in row
+    assert client.post("/api/save-setting",
+                       json={"key": "browser_hotkey",
+                             "value": "ctrl+alt+b"}).json()["ok"]
+    page = client.get("/").text
+    assert 'value="ctrl+alt+b" data-saved="ctrl+alt+b"' in page
+    peek_row = page.split('class="settings-row peek-hotkey-group"', 1)[1]
+    assert 'id="peekHotkeyError"' in peek_row.split('class="settings-row ', 1)[0]
+
+
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2:
 # `peek_mode` is "hold" or "toggle", normalised and refused on the write path.
 
@@ -1690,7 +1834,9 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     resp = client.get("/api/settings")
     assert resp.status_code == 200
     body = resp.json()
-    expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "peek_mode", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
+    # `browser_hotkey`: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+    # puts it in both payloads.
+    expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "peek_mode", "browser_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
                      "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds",
                      "remote_bind_address", "restart_to_apply", "in_force",
                      "restart_pending", "local_secret"}
@@ -1712,6 +1858,7 @@ def test_api_settings_reflects_config_values(mock_load, mock_autostart, client):
         active_launch_profile="prod",
         peek_hotkey="ctrl+shift+z",
         peek_mode="toggle",
+        browser_hotkey="ctrl+alt+b",
         port=8080,
         provider_settings={
             "kiro-cli": {"default_args": "-a", "color": "#ff0000", "enabled": True},
@@ -1729,6 +1876,7 @@ def test_api_settings_reflects_config_values(mock_load, mock_autostart, client):
     assert body["launch_profiles"][0]["terminal_command"] == "wt.exe"
     assert body["peek_hotkey"] == "ctrl+shift+z"
     assert body["peek_mode"] == "toggle"
+    assert body["browser_hotkey"] == "ctrl+alt+b"
     assert body["port"] == 8080
     assert body["provider_settings"]["kiro-cli"]["default_args"] == "-a"
     assert body["provider_settings"]["kiro-cli"]["color"] == "#ff0000"
@@ -13587,8 +13735,9 @@ class TestSettingsSurface:
 
     def test_peek_hotkey_says_restart_to_apply(self, client):
         """`peek_hotkey` is read once, at startup:
-        `create_peek(server_url, config.peek_hotkey, config.peek_mode)` hands it to
-        `PeekWindow.__init__`, which parses it into `self._trigger_keys`.
+        `create_peek(server_url, config.peek_hotkey, config.peek_mode,
+        config.browser_hotkey)` hands it to `PeekWindow.__init__`, which
+        parses it into its chord table.
         Nothing re-reads the config or re-registers the listener afterwards,
         while `index.html` offers a live input for it.
 
@@ -13623,6 +13772,30 @@ class TestSettingsSurface:
             assert "peek_mode" in settings["restart_pending"]
             assert settings["in_force"]["peek_mode"] == "hold"
             assert settings["peek_mode"] == "toggle"
+        finally:
+            web_mod._STARTUP_VALUES = saved
+
+    def test_browser_hotkey_says_restart_to_apply(self, client):
+        """`browser_hotkey` is the second chord of the same table, read by the
+        same `create_peek` call: a save reports the restart and reads as
+        pending against the startup snapshot (off, by default).
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+        """
+        import power_atlas.web as web_mod
+        from power_atlas.config import load_config
+        assert "browser_hotkey" in web_mod._RESTART_TO_APPLY
+        saved = web_mod._STARTUP_VALUES
+        try:
+            web_mod.set_startup_config(load_config())
+            assert web_mod._STARTUP_VALUES["browser_hotkey"] == ""
+            body = client.post("/api/save-setting",
+                               json={"key": "browser_hotkey",
+                                     "value": "ctrl+alt+b"}).json()
+            assert body == {"ok": True, "restart_required": True}
+            settings = client.get("/api/settings").json()
+            assert "browser_hotkey" in settings["restart_pending"]
+            assert settings["in_force"]["browser_hotkey"] == ""
+            assert settings["browser_hotkey"] == "ctrl+alt+b"
         finally:
             web_mod._STARTUP_VALUES = saved
 
@@ -29372,8 +29545,8 @@ class TestLoopbackDoors:
                                             caplog):
         """No door logs its link: "Copy login link" (every branch), tray Open
         PowerAtlas (browser fallback) and Open in browser, the peek double-tap
-        where there is no app mode, and the window's sign-in reload after a
-        rotation. At DEBUG for every logger, `power_atlas.*` included, no
+        where there is no app mode, the browser shortcut (Phase 3), and the
+        window's sign-in reload after a rotation. At DEBUG for every logger, `power_atlas.*` included, no
         record carries the login path, the ``code=`` field or the code itself.
         260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (all
         doors but Copy login link: Phase 5 review); openers since
@@ -29403,11 +29576,14 @@ class TestLoopbackDoors:
             # The double-tap without app mode opens the browser.
             pw._handle(("press", "peek", 1000))
             pw._handle(("press", "peek", 1100))
+            # The browser shortcut (Phase 3) opens a signed-in tab.
+            pw._handle(("browser",))
             # A rotation, then the next show signs the window in again.
             local_enabled.set_local_secret("Q" * 43)
             pw._handle(("press", "peek", 9000))
             urls.extend(window.reloads)
-        assert len(urls) == 7
+        # Seven openers before Phase 3, plus the browser shortcut.
+        assert len(urls) == 8
         assert len(window.reloads) == 1
         records = "\n".join(r.getMessage() for r in caplog.records)
         for text in (caplog.text, records):

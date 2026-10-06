@@ -18,6 +18,9 @@ from .tray import _login_url
 # the browser door here is the tray's own, patches included.
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
 from . import tray as _tray
+# Shortcut names, parsing and validation, shared with the settings write path.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+from . import hotkeys as _hotkeys
 
 
 def _clamp_pywebview_logger() -> None:
@@ -96,7 +99,7 @@ _VK_MODIFIERS = frozenset({
     0xA4, 0xA5,  # VK_LMENU, VK_RMENU (Alt)
     0x10, 0x11, 0x12,  # VK_SHIFT, VK_CONTROL, VK_MENU (generic)
 })
-_MODIFIER_NAMES = frozenset({"ctrl", "shift", "alt"})
+_MODIFIER_NAMES = _hotkeys.MODIFIERS
 
 
 def _tick_now() -> int:
@@ -112,7 +115,7 @@ class PeekWindow:
     """
 
     def __init__(self, server_url: str, hotkey: str = "ctrl+shift+z",
-                 mode: str = HOLD):
+                 mode: str = HOLD, browser_hotkey: str = ""):
         if not _AVAILABLE:
             raise RuntimeError(f"Peek unavailable: {_IMPORT_ERROR}")
         self._server_url = server_url
@@ -122,11 +125,23 @@ class PeekWindow:
         self._mode = mode
         self._window = None
         self._listener = None
+        self._browser_hotkey = browser_hotkey
         # Hook-side state: read and written only by the listener thread.
+        # The chord table: "peek" always, "browser" None when off. Matching
+        # picks among them per D-18 (`hotkeys.match_chord`).
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
         self._trigger_keys = self._parse_hotkey(hotkey)
+        self._chords: dict = {
+            "peek": self._trigger_keys,
+            "browser": (self._parse_hotkey(browser_hotkey)
+                        if browser_hotkey else None),
+        }
         self._pressed_keys: set = set()
-        self._triggered = False  # the peek chord's key is down (auto-repeat guard)
-        self._chord_key_down = False  # the filter suppressed the chord key's key-down
+        # Per chord: its key is down (auto-repeat guard).
+        self._triggered = {"peek": False, "browser": False}
+        # Key name -> the chord whose key-down the filter suppressed, so its
+        # key-up is suppressed too and re-arms that chord.
+        self._chord_down: dict = {}
         self._esc_down_suppressed = False  # the filter suppressed Esc's key-down
         self._release_armed = False  # a press was posted since the last release
         # Shared plumbing.
@@ -304,6 +319,11 @@ class PeekWindow:
                 break
             if ev[0] == "stop":
                 return
+            if ev[0] == "browser":
+                # The browser shortcut needs no window: honoured even before
+                # readiness. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+                self._open_browser()
+                continue
             log.debug("PowerAtlas window: dropped %s before ready", ev[0])
         if adapter is not None:
             self._adapter = adapter
@@ -313,6 +333,11 @@ class PeekWindow:
             ev = self._events.get()
             if ev[0] == "stop":
                 return
+            if ev[0] == "browser":
+                # Needs no window, so it works even when readiness failed.
+                # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+                self._open_browser()
+                continue
             if not self._ready.is_set():
                 log.debug("PowerAtlas window not ready; dropped %s", ev[0])
                 continue
@@ -393,6 +418,11 @@ class PeekWindow:
                 self._to_hidden()
         elif kind == "show_app":
             self._to_app_focused()
+        elif kind == "browser":
+            # The browser shortcut: a signed-in browser tab; the window state,
+            # the double-tap timing and `tap_origin` are left alone.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+            self._open_browser()
 
     def _on_peek_press(self, t: int) -> None:
         last = self._last_press
@@ -578,8 +608,9 @@ class PeekWindow:
             self._listener = keyboard.Listener(**kwargs)
             self._listener.daemon = True
             self._listener.start()
-            log.info("Peek hotkey listener started (hotkey: %s, mode: %s)",
-                     self._hotkey, self._mode)
+            log.info("Peek hotkey listener started (hotkey: %s, mode: %s, "
+                     "browser shortcut: %s)", self._hotkey, self._mode,
+                     self._browser_hotkey or "off")
         except Exception as e:
             log.warning("Failed to start hotkey listener: %s", e)
             self._listener = None
@@ -636,55 +667,46 @@ class PeekWindow:
             self._events.put(("esc",))
             return True
         if is_down:
-            if not self._matches_chord(name):
+            chord = self._matches_chord(name)
+            if chord is None:
                 return False
-            self._chord_key_down = True
-            if self._triggered:
+            self._chord_down[name] = chord
+            if self._triggered[chord]:
                 return True  # auto-repeat: suppressed, never an event
-            self._triggered = True
-            self._post_press(t & _TICK_MASK)
+            self._triggered[chord] = True
+            self._post_press(chord, t & _TICK_MASK)
             return True
-        if self._chord_key_down and name in self._trigger_keys:
+        chord = self._chord_down.pop(name, None)
+        if chord is not None:
             # The chord key's key-up: suppress it like its key-down, and
             # re-arm so a second tap with modifiers held is a new press.
-            self._chord_key_down = False
-            self._triggered = False
+            self._triggered[chord] = False
             return True
         return False
 
-    def _matches_chord(self, name: str) -> bool:
-        """The key is the chord's own non-modifier key and its modifiers are held."""
-        keys = self._trigger_keys
-        if name not in keys or name in _MODIFIER_NAMES:
-            return False
-        return keys.issubset(self._pressed_keys | {name})
+    def _matches_chord(self, name: str) -> str | None:
+        """The chord a key-down of `name` fires, or None (D-18).
 
-    def _post_press(self, t: int) -> None:
+        A chord matches when `name` is its own non-modifier key and its other
+        keys are held; with two matches the one with more keys wins, and a tie
+        goes to the peek chord. One function for the Windows filter and the
+        portable `_on_press`.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+        """
+        return _hotkeys.match_chord(self._chords, name, self._pressed_keys)
+
+    def _post_press(self, chord: str, t: int) -> None:
+        if chord == "browser":
+            # Not armed for `release`: modifier release stays tied to the peek.
+            self._events.put(("browser",))
+            return
         self._release_armed = True
         self._events.put(("press", "peek", t))
 
     @staticmethod
     def _vk_to_name(vk: int) -> str | None:
-        """Map a Windows VK code to our normalized key name."""
-        # Letters A-Z: VK 0x41-0x5A
-        if 0x41 <= vk <= 0x5A:
-            return chr(vk).lower()
-        # Digits 0-9: VK 0x30-0x39
-        if 0x30 <= vk <= 0x39:
-            return chr(vk)
-        # F-keys: VK 0x70-0x87
-        if 0x70 <= vk <= 0x87:
-            return f"f{vk - 0x6F}"
-        # Common special keys
-        _SPECIAL = {
-            0x1B: "esc", 0x20: "space", 0x09: "tab", 0x0D: "enter",
-            0x08: "backspace", 0x2E: "delete", 0x24: "home", 0x23: "end",
-            0x21: "page_up", 0x22: "page_down",
-            0xBF: "/", 0xBE: ".", 0xBC: ",", 0xBA: ";",
-            0xBB: "=", 0xBD: "-", 0xDB: "[", 0xDD: "]", 0xDC: "\\",
-            0xC0: "`", 0xDE: "'",
-        }
-        return _SPECIAL.get(vk)
+        """Map a Windows VK code to our normalized key name (`hotkeys.VK_NAMES`)."""
+        return _hotkeys.VK_NAMES.get(vk)
 
     def _on_press(self, key) -> None:
         """Track pressed keys; off Windows also post chord presses and Esc.
@@ -700,14 +722,15 @@ class PeekWindow:
             if sys.platform == "win32" or not normalized:
                 return
             if normalized == "esc":
-                if self._triggered or self._peek_showing:
-                    self._triggered = False
+                if self._triggered["peek"] or self._peek_showing:
+                    self._triggered["peek"] = False
                     self._pressed_keys.clear()
                     self._events.put(("esc",))
                 return
-            if self._matches_chord(normalized) and not self._triggered:
-                self._triggered = True
-                self._post_press(_tick_now())
+            chord = self._matches_chord(normalized)
+            if chord is not None and not self._triggered[chord]:
+                self._triggered[chord] = True
+                self._post_press(chord, _tick_now())
         except Exception as e:
             log.warning("Peek key press handler error: %s", type(e).__name__)
 
@@ -719,12 +742,15 @@ class PeekWindow:
                 self._pressed_keys.discard(normalized)
             if not normalized:
                 return
-            if normalized in self._trigger_keys and normalized not in _MODIFIER_NAMES:
-                # The chord key's key-up re-arms the chord on every platform.
-                self._triggered = False
+            # A chord key's key-up re-arms its chord on every platform, and so
+            # does the release of one of its modifiers.
+            for cid, keys in self._chords.items():
+                if keys and normalized in keys:
+                    self._triggered[cid] = False
+            if normalized not in _MODIFIER_NAMES:
                 return
-            if normalized in self._trigger_keys and normalized in _MODIFIER_NAMES:
-                self._triggered = False
+            if normalized in self._trigger_keys:
+                # Only the peek chord's modifiers end a Hold peek.
                 if self._release_armed or self._peek_showing:
                     self._release_armed = False
                     self._events.put(("release",))
@@ -732,9 +758,9 @@ class PeekWindow:
             log.warning("Peek key release handler error: %s", type(e).__name__)
 
     @staticmethod
-    def _parse_hotkey(hotkey: str) -> set[str]:
-        """Parse 'ctrl+shift+z' into {'ctrl', 'shift', 'z'}."""
-        return {part.strip().lower() for part in hotkey.split("+") if part.strip()}
+    def _parse_hotkey(hotkey: str) -> frozenset[str]:
+        """Parse 'ctrl+shift+z' into {'ctrl', 'shift', 'z'} (`hotkeys.parse_hotkey`)."""
+        return _hotkeys.parse_hotkey(hotkey)
 
     @staticmethod
     def _normalize_key(key) -> str | None:
@@ -1235,29 +1261,46 @@ class _Win32Window:
 
 
 def create_peek(server_url: str, hotkey: str = "ctrl+shift+z",
-                mode: str = HOLD) -> PeekWindow | None:
+                mode: str = HOLD, browser_hotkey: str = "") -> PeekWindow | None:
     """Factory: create PeekWindow if available, else log warning and return None.
 
     An unknown `mode` (a hand-edited config.toml; the settings write path
     refuses one) logs a warning and uses Hold.
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
+
+    Both shortcuts go through `hotkeys.hotkey_error`, the validator the
+    settings write path uses: an invalid peek shortcut falls back to
+    ctrl+shift+z, and an invalid browser shortcut, or one that equals or
+    contains the peek shortcut in force (or is contained by it), is turned
+    off. Each logs a WARNING naming the problem.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
     """
     if not is_available():
         log.warning("Peek window disabled: %s", _IMPORT_ERROR)
         return None
-    _KNOWN_MODIFIERS = {"ctrl", "shift", "alt"}
-    parts = {p.strip().lower() for p in hotkey.split("+") if p.strip()}
-    modifiers = parts & _KNOWN_MODIFIERS
-    non_modifiers = parts - _KNOWN_MODIFIERS
-    if not modifiers or not non_modifiers:
-        log.warning("Invalid peek_hotkey '%s' (need modifier+key). Falling back to ctrl+shift+z", hotkey)
-        hotkey = "ctrl+shift+z"
+    problem = _hotkeys.hotkey_error(hotkey)
+    if problem is not None:
+        log.warning("Invalid peek_hotkey '%s' (%s). Falling back to %s",
+                    hotkey, problem, _hotkeys.DEFAULT_PEEK_HOTKEY)
+        hotkey = _hotkeys.DEFAULT_PEEK_HOTKEY
+    browser = browser_hotkey.strip().lower() if isinstance(browser_hotkey, str) else ""
+    if browser:
+        problem = _hotkeys.hotkey_error(browser)
+        if problem is not None:
+            log.warning("Invalid browser_hotkey '%s' (%s). The browser "
+                        "shortcut is off", browser_hotkey, problem)
+            browser = ""
+        elif _hotkeys.hotkeys_conflict(browser, hotkey):
+            log.warning("browser_hotkey '%s' conflicts with the peek shortcut "
+                        "'%s'. The browser shortcut is off", browser_hotkey,
+                        hotkey)
+            browser = ""
     normalized = mode.strip().lower() if isinstance(mode, str) else ""
     if normalized not in _PEEK_MODES:
         log.warning("Invalid peek_mode '%s' (need hold or toggle). Falling back to hold", mode)
         normalized = HOLD
     try:
-        return PeekWindow(server_url, hotkey, normalized)
+        return PeekWindow(server_url, hotkey, normalized, browser)
     except Exception as e:
         log.warning("Peek window disabled: %s", e)
         return None

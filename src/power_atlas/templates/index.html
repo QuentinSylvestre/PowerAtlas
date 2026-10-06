@@ -5783,7 +5783,7 @@ function refreshNotifyToggle(){
     .then(function(d){if(d)el.classList.toggle('active',!!d.enabled)})
     .catch(function(){});
 }
-function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var peekModeSel=document.getElementById('peekMode');if(peekModeSel)peekModeSel.value=d.peek_mode==='toggle'?'toggle':'hold';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
+function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput){peekInput.value=d.peek_hotkey||'ctrl+shift+z';peekInput.setAttribute('data-saved',peekInput.value)}var browserInput=document.getElementById('browserHotkey');if(browserInput){browserInput.value=d.browser_hotkey||'';browserInput.setAttribute('data-saved',browserInput.value)}var peekModeSel=document.getElementById('peekMode');if(peekModeSel)peekModeSel.value=d.peek_mode==='toggle'?'toggle':'hold';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){
   fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});
   initProviderFilter();initWorkspaceFilters();
@@ -9307,6 +9307,7 @@ var _RESTART_KEY_LABELS = {
   port: 'Server port',
   peek_hotkey: 'Peek hotkey',
   peek_mode: 'Peek mode',
+  browser_hotkey: 'Browser shortcut',
   remote_bind_address: 'Remote bind address',
   acp_max_sessions: 'ACP: maximum concurrent sessions',
   acp_idle_ttl_seconds: 'ACP: idle session TTL (seconds)',
@@ -9443,7 +9444,7 @@ function markRestartInputs(keys) {
   // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2: the
   // peek mode select is a third live restart-only control.
   var owners = {peek_hotkey: 'peek-hotkey-group', peek_mode: 'peek-mode-group',
-                port: 'port-group'};
+                browser_hotkey: 'browser-hotkey-group', port: 'port-group'};
   Object.keys(owners).forEach(function (key) {
     var host = document.querySelector('.' + owners[key]);
     if (!host) return;
@@ -9459,6 +9460,39 @@ function markRestartInputs(keys) {
     badge.title = 'Saved, but not in force: this value is read once at startup, '
                 + 'so it takes effect on the next launch of PowerAtlas.';
   });
+}
+
+// The two shortcut fields in the Settings dialog save through here. The
+// server validates (format, and no overlap with the other shortcut); a refusal
+// shows its `error` in the row's error line and puts the field back to the
+// stored value, kept in `data-saved` (set on render, by refreshSettings and on
+// each successful save). Ends in loadRestartKeys for the "on relaunch" badge.
+// 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+function saveShortcut(input, key) {
+  var value = input.value.trim().toLowerCase();
+  var err = document.getElementById(input.id + 'Error');
+  var show = function (text) {
+    if (!err) return;
+    err.textContent = text;
+    err.hidden = !text;
+  };
+  return fetch('/api/save-setting', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({key: key, value: value})
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    if (d && d.ok) {
+      input.value = value;
+      input.setAttribute('data-saved', value);
+      show('');
+    } else {
+      input.value = input.getAttribute('data-saved') || '';
+      show((d && d.error) || 'Not saved');
+    }
+  }).catch(function () {
+    input.value = input.getAttribute('data-saved') || '';
+    show('Not saved: PowerAtlas did not answer');
+  }).then(loadRestartKeys);
 }
 
 function loadRestartKeys() {

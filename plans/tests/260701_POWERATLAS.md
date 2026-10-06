@@ -315,9 +315,9 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 ### 2.21 Peek hotkey save
 - **what**: topbar input saves `peek_hotkey` (lowercased) on change.
 - **how-to-reach**: edit peek input; `POST /api/save-setting key=peek_hotkey`. *(pa_local)*
-- **probes**: valid combo persists; invalid syntax accepted by API (validation only at peek startup → fallback); requires restart to rebind the live listener.
-- **oracle**: lowercased value persisted.
-- **risks**: no syntax validation at save; rebind needs restart.
+- **probes**: valid combo persists; since 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 invalid syntax is refused on save (`hotkeys.hotkey_error`: no modifier, no key, an unknown key, or esc; error `Shortcut <problem>`), and so is a value that equals, contains or is contained by the stored `browser_hotkey` (`Conflicts with the browser shortcut`); `browser_hotkey` the same way against the peek hotkey in force (`Conflicts with the peek shortcut`), with `""` accepted as off; the dialog shows the error under the field and reverts it to `data-saved`; requires restart to rebind the live listener (both keys).
+- **oracle**: trimmed, lowercased value persisted only when valid; refusals write nothing.
+- **risks**: a hand-edited config.toml bypasses the save check, so `create_peek` repeats it at startup (peek falls back to ctrl+shift+z, browser turns off, each with a WARNING); rebind needs restart.
 
 ### 2.22 Settings page form save
 - **what**: `/settings` full form saves terminal + pinned folders (pipe-joined hidden field).
@@ -327,7 +327,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **risks**: H1; read-modify-write clobbers concurrent edits.
 
 ### 2.23 save-setting allowlist endpoint
-- **what**: `POST /api/save-setting` writes only allowlisted keys with type checks. The allowlist is `port`, `peek_hotkey`, `default_directory`, `pinned_folders`, `pinned_sessions` and — added 2026-08-01 — `acp_max_sessions`, `acp_idle_ttl_seconds`, `acp_prompt_silence_seconds`, `remote_bind_address`. The three `acp_*` keys carry inclusive integer bounds (1–16, 300–86400, 60–7200); `remote_bind_address` is validated as an IP literal and, on first enable, creates the device secret in the same call. The response now carries `restart_required`, true for every key read once at startup (`port`, the three `acp_*`, `remote_bind_address`, `peek_hotkey`).
+- **what**: `POST /api/save-setting` writes only allowlisted keys with type checks. The allowlist is `port`, `peek_hotkey`, `peek_mode`, `browser_hotkey` (both added 2026-10-06), `default_directory`, `pinned_folders`, `pinned_sessions` and — added 2026-08-01 — `acp_max_sessions`, `acp_idle_ttl_seconds`, `acp_prompt_silence_seconds`, `remote_bind_address`. The three `acp_*` keys carry inclusive integer bounds (1–16, 300–86400, 60–7200); `remote_bind_address` is validated as an IP literal and, on first enable, creates the device secret in the same call. The response now carries `restart_required`, true for every key read once at startup (`port`, the three `acp_*`, `remote_bind_address`, `peek_hotkey`, `peek_mode`, `browser_hotkey`).
 - **how-to-reach**: `POST /api/save-setting {key, value}`. *(pa_local)*
 - **probes**: valid key/type saved; unknown key rejected; wrong type rejected; **bool rejected before the int check** (`isinstance(True, int)` is true in Python); list with non-str element rejected; `pinned_folders` as list[str] accepted → re-introduces legacy shape (H1); each `acp_*` bound rejected one past each end and accepted at each end; `remote_bind_address` rejected for `0.0.0.0`, `::`, `::0`, `::ffff:0.0.0.0`, a loopback literal, a hostname, a bracketed form and a zone id; `remote_bind_address` set while `port = 0` rejected with a named error; whitespace-only address persisted as `""` rather than verbatim; `restart_required` true for `peek_hotkey` (it was answering false — a field that is positively wrong is worse than no field).
 - **oracle**: `{ok:true, restart_required:bool}` on success; `{ok:false,error}` otherwise, with the error naming the key and its permitted range.

@@ -95,6 +95,11 @@ class Config:
     # "hold" or "toggle"; read once at startup by `create_peek`.
     # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
     peek_mode: str = "hold"
+    # The browser shortcut: "" (off, the default) or a chord such as
+    # "ctrl+shift+b" that opens a signed-in browser tab. Read once at startup
+    # by `create_peek`, which turns it off when it is invalid or conflicts
+    # with the peek shortcut. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+    browser_hotkey: str = ""
     default_directory: str = ""  # Global fallback for provider launches without workspace selection
     active_launch_profile: str = "default"
     launch_profiles: list[LaunchProfile] = field(default_factory=lambda: [LaunchProfile()])

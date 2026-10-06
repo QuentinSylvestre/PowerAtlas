@@ -443,6 +443,28 @@ def test_peek_mode_unknown_value_loads_as_hold(tmp_path, on_disk):
     assert cfg.peek_hotkey == "alt+p"
 
 
+def test_browser_hotkey_defaults_to_off(tmp_path):
+    """An older config.toml without `browser_hotkey` loads with it off.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3"""
+    assert Config().browser_hotkey == ""
+    _write_toml(tmp_path, {"peek_hotkey": "alt+z"})
+    assert load_config().browser_hotkey == ""
+
+
+def test_browser_hotkey_round_trip():
+    save_config(Config(browser_hotkey="ctrl+alt+b", peek_hotkey="alt+p"))
+    cfg = load_config()
+    assert cfg.browser_hotkey == "ctrl+alt+b"
+    assert cfg.peek_hotkey == "alt+p"
+
+
+def test_browser_hotkey_wrong_type_gets_default(tmp_path):
+    _write_toml(tmp_path, {"browser_hotkey": 7, "peek_hotkey": "alt+p"})
+    cfg = load_config()
+    assert cfg.browser_hotkey == ""
+    assert cfg.peek_hotkey == "alt+p"
+
+
 def test_peek_hotkey_round_trip():
     """peek_hotkey persists through save/load cycle with custom value."""
     cfg = Config(peek_hotkey="alt+p")

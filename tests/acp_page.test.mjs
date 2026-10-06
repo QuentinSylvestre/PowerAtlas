@@ -4964,6 +4964,8 @@ function loadPanel(opts = {}) {
     [".peek-hotkey-group", new El("div")],
     // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
     [".peek-mode-group", new El("div")],
+    // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+    [".browser-hotkey-group", new El("div")],
     [".port-group", new El("div")],
   ]);
   ACTIVE = null;
@@ -5669,6 +5671,168 @@ check("refreshSettings puts the stored peek_mode on the Settings select", async 
   sandbox.refreshSettings();
   await settle();
   assertEqual(select.value, "hold", "a stored Hold left the select on Toggle");
+});
+
+check("browser_hotkey is labelled and badges its own row in the Settings dialog", () => {
+  // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3. The
+  // label text is asserted directly: the panel falls back to the raw key, so a
+  // row count alone would pass with the label deleted.
+  const p = loadPanel();
+  p.sandbox.renderRestartKeys({
+    restart_to_apply: ["port", "peek_hotkey", "peek_mode", "browser_hotkey"],
+    restart_pending: ["browser_hotkey"],
+    in_force: { port: 4915, peek_hotkey: "ctrl+shift+z", peek_mode: "hold",
+                browser_hotkey: "" },
+    port: 4915,
+    peek_hotkey: "ctrl+shift+z",
+    peek_mode: "hold",
+    browser_hotkey: "ctrl+alt+b",
+  });
+  const named = p.rows().map((r) => r.querySelector(".remote-restart-key").textContent);
+  assertEqual(named[3], "Browser shortcut", "browser_hotkey rendered without its label");
+  const badge = p.badge(".browser-hotkey-group");
+  assert(badge, "a pending browser_hotkey put no badge on .browser-hotkey-group");
+  assertEqual(badge.textContent, "on relaunch", "the browser_hotkey badge says nothing");
+  assertEqual(p.badge(".peek-hotkey-group"), null,
+              "a pending browser_hotkey badged the peek hotkey row");
+  assertEqual(p.badge(".peek-mode-group"), null,
+              "a pending browser_hotkey badged the peek mode row");
+  p.sandbox.renderRestartKeys({
+    restart_to_apply: ["port", "peek_hotkey", "peek_mode", "browser_hotkey"],
+    restart_pending: [],
+    in_force: { port: 4915, peek_hotkey: "ctrl+shift+z", peek_mode: "hold",
+                browser_hotkey: "ctrl+alt+b" },
+    port: 4915,
+    peek_hotkey: "ctrl+shift+z",
+    peek_mode: "hold",
+    browser_hotkey: "ctrl+alt+b",
+  });
+  assertEqual(p.badge(".browser-hotkey-group"), null,
+              "the browser_hotkey badge survived the relaunch that applied it");
+});
+
+// 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3:
+// `saveShortcut` (index.html), what both shortcut fields call on change, run
+// on its own with the elements and globals it touches.
+function loadSaveShortcut(answer) {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const from = src.indexOf("function saveShortcut(");
+  if (from < 0) throw new Error("index.html no longer defines saveShortcut");
+  const to = src.indexOf("\n}\n", from) + 2;
+  const input = new El("input");
+  input.id = "browserHotkey";
+  const err = new El("div");
+  err.hidden = true;
+  const posts = [];
+  let restartLoads = 0;
+  const sandbox = {
+    document: { getElementById: (id) => (id === "browserHotkeyError" ? err : null) },
+    fetch: (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      const a = answer();
+      if (a.reject) return Promise.reject(new Error("down"));
+      return Promise.resolve({ json: () => Promise.resolve(a.body) });
+    },
+    loadRestartKeys() { restartLoads += 1; },
+    JSON,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(src.slice(from, to), sandbox, { filename: "index.html#saveShortcut" });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  return { sandbox, input, err, posts, settle, restartLoads: () => restartLoads };
+}
+
+check("saveShortcut shows a refusal in the row and puts the stored value back", async () => {
+  let reply = { body: { ok: false, error: "Conflicts with the peek shortcut" } };
+  const h = loadSaveShortcut(() => reply);
+  h.input.setAttribute("data-saved", "ctrl+alt+b");
+  h.input.value = " Ctrl+Shift+Z ";
+  h.sandbox.saveShortcut(h.input, "browser_hotkey");
+  await h.settle();
+  assertEqual(h.posts.length, 1, "nothing was posted");
+  assertEqual(h.posts[0].url, "/api/save-setting", "posted to the wrong route");
+  assertEqual(JSON.stringify(h.posts[0].body),
+              JSON.stringify({ key: "browser_hotkey", value: "ctrl+shift+z" }),
+              "the value was not trimmed and lowercased, or the key is wrong");
+  assertEqual(h.input.value, "ctrl+alt+b", "a refused value stayed in the field");
+  assertEqual(h.err.hidden, false, "the refusal was not shown");
+  assertEqual(h.err.textContent, "Conflicts with the peek shortcut",
+              "the server's error was not shown as sent");
+  assertEqual(h.restartLoads(), 1, "the restart badge was not refreshed");
+
+  // A good save clears the error and becomes the new stored value.
+  reply = { body: { ok: true, restart_required: true } };
+  h.input.value = "Ctrl+Alt+P";
+  h.sandbox.saveShortcut(h.input, "browser_hotkey");
+  await h.settle();
+  assertEqual(h.input.value, "ctrl+alt+p", "the saved value was not shown normalised");
+  assertEqual(h.input.getAttribute("data-saved"), "ctrl+alt+p",
+              "data-saved was not updated on a successful save");
+  assertEqual(h.err.hidden, true, "the old error stayed after a successful save");
+  assertEqual(h.err.textContent, "", "the old error text stayed");
+
+  // A later refusal now reverts to that newer value, not the first one.
+  reply = { body: { ok: false, error: "Shortcut needs a modifier (ctrl, shift or alt)" } };
+  h.input.value = "z";
+  h.sandbox.saveShortcut(h.input, "browser_hotkey");
+  await h.settle();
+  assertEqual(h.input.value, "ctrl+alt+p", "the revert used a stale stored value");
+  assertEqual(h.err.hidden, false, "the second refusal was not shown");
+
+  // No answer at all: reverted, and the row says it was not saved.
+  reply = { reject: true };
+  h.input.value = "ctrl+alt+q";
+  h.sandbox.saveShortcut(h.input, "browser_hotkey");
+  await h.settle();
+  assertEqual(h.input.value, "ctrl+alt+p", "an unanswered save stayed in the field");
+  assert(/Not saved/.test(h.err.textContent), "an unanswered save said nothing");
+  assertEqual(h.restartLoads(), 4, "loadRestartKeys did not run after every save");
+});
+
+check("both shortcut fields save through saveShortcut", () => {
+  // The modal partial wires the handler; a field that kept its own inline
+  // fetch would bypass the error line and the revert.
+  const modal = fs.readFileSync(path.join(path.dirname(INDEX_TEMPLATE),
+                                          "partials", "settings_modal.html"), "utf8");
+  for (const [id, key] of [["peekHotkey", "peek_hotkey"], ["browserHotkey", "browser_hotkey"]]) {
+    const at = modal.indexOf(`id="${id}"`);
+    assert(at >= 0, `the modal has no #${id}`);
+    const tag = modal.slice(at, modal.indexOf(">", at));
+    assert(tag.includes(`saveShortcut(this,'${key}')`), `#${id} does not save through saveShortcut`);
+    assert(tag.includes("data-saved="), `#${id} has no data-saved for the revert`);
+    assert(modal.includes(`id="${id}Error"`), `#${id} has no error line`);
+  }
+});
+
+check("refreshSettings puts the stored shortcuts on both fields and their data-saved", async () => {
+  // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3. The
+  // stored value is also the revert target, so both must follow the payload.
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const from = src.indexOf("function refreshSettings(");
+  const to = src.indexOf("\n", from);
+  const peek = new El("input");
+  const browser = new El("input");
+  let payload = { peek_hotkey: "alt+p", browser_hotkey: "ctrl+alt+b" };
+  const sandbox = {
+    document: { getElementById: (id) => ({ peekHotkey: peek, browserHotkey: browser }[id] || null) },
+    fetch: () => Promise.resolve({ json: () => Promise.resolve(payload) }),
+    refreshNotifyToggle() {},
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(src.slice(from, to), sandbox, { filename: "index.html#refreshSettings" });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  sandbox.refreshSettings();
+  await settle();
+  assertEqual(peek.value, "alt+p", "the peek hotkey field was not set");
+  assertEqual(peek.getAttribute("data-saved"), "alt+p", "the peek hotkey data-saved was not set");
+  assertEqual(browser.value, "ctrl+alt+b", "the browser shortcut field was not set");
+  assertEqual(browser.getAttribute("data-saved"), "ctrl+alt+b",
+              "the browser shortcut data-saved was not set");
+  payload = { peek_hotkey: "ctrl+shift+z", browser_hotkey: "" };
+  sandbox.refreshSettings();
+  await settle();
+  assertEqual(browser.value, "", "an emptied browser shortcut stayed in the field");
+  assertEqual(browser.getAttribute("data-saved"), "", "data-saved kept the old browser shortcut");
 });
 
 check("the status pill is the one thing in the topbar that cannot be squeezed", () => {

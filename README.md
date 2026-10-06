@@ -68,6 +68,8 @@ double-tap opens app mode in either setting. A double-tap while
 the window is in app mode and focused hides it. The window shows the page you left in either mode; it
 is not reset to the dashboard. Where app mode is unavailable (pywebview missing, or not Windows), tray
 **Open PowerAtlas** and the double-tap open the browser instead, and **Open in browser** is not listed.
+An optional **Browser shortcut** (off by default) opens PowerAtlas in a new browser tab, signed in,
+from anywhere, and leaves the window as it is.
 
 The kiro-cli agent surface lives
 at `/acp` — a workspace-grouped session browser beside a conversation pane, two panes on a desktop and a
@@ -82,6 +84,7 @@ one of its doors:
 
 - the tray's **Open in browser** item, and **Open PowerAtlas** where it opens the browser;
 - a double-tap of the peek hotkey, where it opens the browser;
+- the browser shortcut, when one is set;
 - the PowerAtlas window, whose built-in browser is signed in when it is created and again after the
   local secret is rotated.
 
@@ -196,8 +199,12 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 - Global launch profiles with configurable Windows Terminal profile and terminal command
 - Settings (gear icon in topbar): a short menu with the launch profile, remote access, **Autostart on
   login**, **Notify me** and the current permission mode. **All settings…** opens the Settings dialog,
-  whose sections are General (peek hotkey, peek mode Hold or Toggle, port), Agent permissions and
-  Browser sign-in. The peek hotkey and peek mode take effect on the next launch. A dot on the
+  whose sections are General (peek hotkey, peek mode Hold or Toggle, browser shortcut, port), Agent
+  permissions and Browser sign-in. The peek hotkey, peek mode and browser shortcut take effect on the
+  next launch. A shortcut is saved only when it is valid (see the config sample below) and the two
+  shortcuts do not overlap: neither may equal the other or contain all of its keys, as
+  `ctrl+shift+alt+z` contains `ctrl+shift+z`. A refused value is named under the field, and the field
+  goes back to the saved one. A dot on the
   gear, and on the section, marks anything that needs attention.
 - Launch-profile management (gear icon in topbar) for window mode, autostart, and profile switching
 - **Notify me** (gear icon in topbar, off by default) tells you when an ACP session finishes a turn
@@ -238,7 +245,16 @@ port = 0  # 0 = random (default), or set e.g. 8080 for a fixed port.
           # A fixed non-zero port is REQUIRED when remote_bind_address is set: a phone cannot
           # bookmark an OS-assigned port, and with 0 the two listeners would be given different
           # numbers. The combination is rejected with a named error rather than half-applied.
-peek_hotkey = "ctrl+shift+z"  # global overlay hotkey (modifier+key format)
+peek_hotkey = "ctrl+shift+z"  # global overlay hotkey: at least one modifier (ctrl, shift, alt) plus
+                              # keys from: a-z, 0-9, f1-f24, space, tab, enter, backspace, delete,
+                              # insert, home, end, page_up, page_down, up, down, left, right, pause,
+                              # print_screen, scroll_lock, num_lock, menu, and / . , ; = - [ ] \ ` '
+                              # (esc is not allowed: it dismisses the peek). Anything else falls back
+                              # to ctrl+shift+z at startup, with a warning in the log naming the key.
+browser_hotkey = ""  # "" = off (the default), or a shortcut in the same format that opens a new
+                     # signed-in browser tab. Refused on save, and turned off at startup with a
+                     # warning, when it is invalid or overlaps peek_hotkey (equal, or one contains
+                     # the other). Read at startup.
 peek_mode = "hold"  # "hold": shown while the hotkey is held; "toggle": a press shows it, the next
                     # press hides it. A double-tap opens the app window either way. Read at startup;
                     # an unknown value falls back to "hold" with a warning in the log.

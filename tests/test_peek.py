@@ -142,7 +142,8 @@ class TestCreatePeek:
 
         captured_args = {}
 
-        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold",
+                      browser_hotkey=""):
             captured_args["server_url"] = server_url
             captured_args["hotkey"] = hotkey
             captured_args["mode"] = mode
@@ -164,7 +165,8 @@ class TestCreatePeek:
 
         captured_args = {}
 
-        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold",
+                      browser_hotkey=""):
             captured_args["server_url"] = server_url
             captured_args["hotkey"] = hotkey
             captured_args["mode"] = mode
@@ -186,7 +188,8 @@ class TestCreatePeek:
 
         captured_args = {}
 
-        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold",
+                      browser_hotkey=""):
             captured_args["server_url"] = server_url
             captured_args["hotkey"] = hotkey
             captured_args["mode"] = mode
@@ -208,7 +211,8 @@ class TestCreatePeek:
 
         monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
 
-        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold",
+                      browser_hotkey=""):
             raise RuntimeError("Something broke")
 
         monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
@@ -224,7 +228,8 @@ class TestCreatePeek:
         monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
         captured = {}
 
-        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold"):
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold",
+                      browser_hotkey=""):
             captured["mode"] = mode
             captured["hotkey"] = hotkey
 
@@ -304,7 +309,7 @@ class TestHotkeyStateMachine:
         _drain(pw)
         pw._on_release(_make_key(name="ctrl_l"))
         assert _drain(pw) == [("release",)]
-        assert pw._triggered is False
+        assert pw._triggered["peek"] is False  # per-chord since Phase 3 (D-18)
 
     def test_a_modifier_release_with_no_press_posts_nothing(self, monkeypatch):
         """Every Ctrl the user types would otherwise wake the worker."""
@@ -321,7 +326,7 @@ class TestHotkeyStateMachine:
         _drain(pw)
         pw._on_press(_make_key(name="esc"))
         assert _drain(pw) == [("esc",)]
-        assert pw._triggered is False
+        assert pw._triggered["peek"] is False  # per-chord since Phase 3 (D-18)
         assert pw._pressed_keys == set()  # cleared on escape
 
     def test_partial_combo_does_not_trigger(self, monkeypatch):
@@ -330,7 +335,7 @@ class TestHotkeyStateMachine:
         pw._on_press(_make_key(char="z"))
         # Missing shift — should not trigger
         assert _drain(pw) == []
-        assert pw._triggered is False
+        assert pw._triggered["peek"] is False  # per-chord since Phase 3 (D-18)
 
     def test_auto_repeat_is_not_an_event(self, monkeypatch):
         pw = self._make_peek(monkeypatch)
@@ -451,7 +456,7 @@ class TestWin32Filter:
         pw = self._peek(monkeypatch)
         self._feed(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=10)
         assert self._feed(pw, peek_mod._WM_KEYUP, self._VK_Z)
-        assert pw._triggered is False
+        assert pw._triggered["peek"] is False  # per-chord since Phase 3 (D-18)
         self._feed(pw, peek_mod._WM_KEYDOWN, self._VK_Z, t=200)
         assert [e[2] for e in _drain(pw)] == [10, 200]
 
@@ -2360,3 +2365,414 @@ class TestShutdownTailOnce:
         assert not t2.is_alive()
         t1.join(3)
         assert len(errors) == 1
+
+
+# ---- 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 ----
+
+
+class TestHotkeysModule:
+    """`hotkeys.py`: names, parsing, validation and conflicts (SC-7), and the
+    D-18 chord choice. Expected values come from the plan (Phase 3 bullets,
+    D-18) and the Win32 virtual-key table, not from running the code.
+    """
+
+    # The plan's additions, with their Win32 VK codes; the names match
+    # `pynput.keyboard.Key` member names (checked against pynput 1.8.2).
+    @pytest.mark.parametrize("vk, name", [
+        (0x26, "up"), (0x28, "down"), (0x25, "left"), (0x27, "right"),
+        (0x2D, "insert"), (0x13, "pause"), (0x2C, "print_screen"),
+        (0x91, "scroll_lock"), (0x90, "num_lock"), (0x5D, "menu"),
+        # And a sample of the table `_vk_to_name` had before.
+        (0x41, "a"), (0x5A, "z"), (0x30, "0"), (0x39, "9"), (0x70, "f1"),
+        (0x87, "f24"), (0x1B, "esc"), (0xBF, "/"), (0xDE, "'"),
+    ])
+    def test_vk_names(self, vk, name):
+        from power_atlas import hotkeys
+        from power_atlas.peek import PeekWindow
+        assert hotkeys.VK_NAMES[vk] == name
+        assert PeekWindow._vk_to_name(vk) == name
+
+    def test_unknown_vk_has_no_name(self):
+        from power_atlas.peek import PeekWindow
+        assert PeekWindow._vk_to_name(0xA6) is None  # VK_BROWSER_BACK
+        assert PeekWindow._vk_to_name(0x5B) is None  # VK_LWIN
+
+    def test_every_key_name_is_accepted_and_esc_is_not(self):
+        from power_atlas import hotkeys
+        names = set(hotkeys.VK_NAMES.values())
+        assert len(names) == len(hotkeys.VK_NAMES), "a name maps two VK codes"
+        for name in names - {"esc"}:
+            assert hotkeys.hotkey_error(f"ctrl+{name}") is None, name
+            assert hotkeys.hotkey_error(f"alt+shift+{name}") is None, name
+        assert "esc" not in hotkeys.KEY_NAMES
+        assert "esc" in hotkeys.hotkey_error("ctrl+esc")
+
+    @pytest.mark.parametrize("hotkey, fragment", [
+        ("z", "needs a modifier"),
+        ("f5", "needs a modifier"),
+        ("ctrl+shift", "needs a key"),
+        ("ctrl", "needs a key"),
+        ("ctrl+foo", "unknown key 'foo'"),
+        ("win+z", "unknown key 'win'"),
+        ("ctrl+shift+ctrl_l", "unknown key 'ctrl_l'"),
+        ("", "empty"),
+        (" + ", "empty"),
+    ])
+    def test_invalid(self, hotkey, fragment):
+        from power_atlas import hotkeys
+        problem = hotkeys.hotkey_error(hotkey)
+        assert problem is not None and fragment in problem
+
+    @pytest.mark.parametrize("hotkey", [
+        "ctrl+shift+z", " Ctrl + Shift + Z ", "alt+f1", "ctrl+alt+up",
+        "shift+print_screen", "ctrl+a+b", "ctrl+shift+/",
+    ])
+    def test_valid(self, hotkey):
+        from power_atlas import hotkeys
+        assert hotkeys.hotkey_error(hotkey) is None
+
+    @pytest.mark.parametrize("a, b, conflict", [
+        ("ctrl+shift+z", "ctrl+shift+z", True),
+        ("ctrl+shift+z", "SHIFT+ctrl+Z", True),          # equal, other spelling
+        ("ctrl+shift+z", "ctrl+shift+alt+z", True),      # a inside b
+        ("ctrl+shift+alt+z", "ctrl+shift+z", True),      # b inside a
+        ("alt+z", "ctrl+alt+z", True),
+        ("ctrl+shift+z", "ctrl+alt+z", False),           # same key, not nested
+        ("ctrl+shift+z", "ctrl+shift+b", False),
+        ("alt+z", "ctrl+shift+z", False),
+        ("ctrl+shift+z", "", False),                     # off
+        ("", "", False),
+    ])
+    def test_conflict(self, a, b, conflict):
+        from power_atlas import hotkeys
+        assert hotkeys.hotkeys_conflict(a, b) is conflict
+        assert hotkeys.hotkeys_conflict(b, a) is conflict
+
+    def test_effective_peek_hotkey(self):
+        from power_atlas import hotkeys
+        assert hotkeys.effective_peek_hotkey("alt+p") == "alt+p"
+        assert hotkeys.effective_peek_hotkey("nope") == "ctrl+shift+z"
+        assert hotkeys.effective_peek_hotkey("ctrl+esc") == "ctrl+shift+z"
+
+    # D-18: most keys wins; a tie goes to the peek chord.
+    @pytest.mark.parametrize("peek, browser, held, key, expected", [
+        ("alt+z", "ctrl+shift+z", {"ctrl", "shift", "alt"}, "z", "browser"),
+        ("ctrl+shift+z", "alt+z", {"ctrl", "shift", "alt"}, "z", "peek"),
+        ("ctrl+shift+z", "ctrl+alt+z", {"ctrl", "shift", "alt"}, "z", "peek"),
+        ("ctrl+alt+z", "ctrl+shift+z", {"ctrl", "shift", "alt"}, "z", "peek"),
+        ("ctrl+shift+z", "ctrl+alt+z", {"ctrl", "alt"}, "z", "browser"),
+        ("ctrl+shift+z", "ctrl+alt+b", {"ctrl", "alt"}, "z", None),
+        ("ctrl+shift+z", "ctrl+alt+b", {"ctrl", "alt"}, "b", "browser"),
+        ("ctrl+shift+z", None, {"ctrl", "shift"}, "z", "peek"),
+        ("ctrl+shift+z", None, {"ctrl", "shift"}, "shift", None),
+    ])
+    def test_match_chord(self, peek, browser, held, key, expected):
+        from power_atlas import hotkeys
+        chords = {"peek": hotkeys.parse_hotkey(peek),
+                  "browser": hotkeys.parse_hotkey(browser) if browser else None}
+        assert hotkeys.match_chord(chords, key, held) == expected
+
+    def test_the_tie_goes_to_peek_whatever_the_table_order(self):
+        from power_atlas import hotkeys
+        chords = {"browser": hotkeys.parse_hotkey("ctrl+alt+z"),
+                  "peek": hotkeys.parse_hotkey("ctrl+shift+z")}
+        assert hotkeys.match_chord(chords, "z",
+                                   {"ctrl", "shift", "alt"}) == "peek"
+
+    def test_hotkeys_imports_no_ui_library(self):
+        """`web.py` imports it, so it must load without pywebview or pynput."""
+        import ast
+        import inspect
+        from power_atlas import hotkeys
+        tree = ast.parse(inspect.getsource(hotkeys))
+        imported = {n.names[0].name.split(".")[0] for n in ast.walk(tree)
+                    if isinstance(n, ast.Import)}
+        imported |= {(n.module or "").split(".")[0] for n in ast.walk(tree)
+                     if isinstance(n, ast.ImportFrom)}
+        assert not imported & {"webview", "pynput"}
+
+
+def _two_chord_peek(monkeypatch, peek="ctrl+shift+z", browser="ctrl+alt+b",
+                    mode="hold"):
+    import power_atlas.peek as peek_mod
+    monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+    pw = peek_mod.PeekWindow("http://127.0.0.1:4915", peek, mode, browser)
+    pw._adapter = _FakeAdapter()
+    return pw
+
+
+class TestTwoChordFilter:
+    """The Windows filter with a peek and a browser chord (D-18, per-chord
+    `_triggered`)."""
+
+    _VK = {"z": 0x5A, "b": 0x42}
+
+    def _peek(self, monkeypatch, held, **kw):
+        pw = _two_chord_peek(monkeypatch, **kw)
+        pw._listener = _Listener()
+        pw._pressed_keys.update(held)
+        return pw
+
+    def _feed(self, pw, msg, key, t=0):
+        try:
+            pw._win32_event_filter(msg, _KbData(self._VK[key], t))
+        except _Suppress:
+            return True
+        return False
+
+    def test_the_browser_chord_posts_browser_and_is_suppressed(
+            self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw = self._peek(monkeypatch, ("ctrl", "alt"))
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "b", t=500)
+        assert _drain(pw) == [("browser",)]
+        assert pw._triggered == {"peek": False, "browser": True}
+        # Auto-repeat: suppressed, no event.
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "b", t=530)
+        assert _drain(pw) == []
+        # Its key-up is suppressed and re-arms the browser chord only.
+        assert self._feed(pw, peek_mod._WM_KEYUP, "b")
+        assert pw._triggered == {"peek": False, "browser": False}
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "b", t=900)
+        assert _drain(pw) == [("browser",)]
+        assert pw._adapter.calls == [], "the hook never touches the window"
+
+    def test_the_larger_chord_wins(self, monkeypatch):
+        """Peek alt+z, browser ctrl+shift+z, all three modifiers held: the
+        browser chord has more keys (D-18)."""
+        import power_atlas.peek as peek_mod
+        pw = self._peek(monkeypatch, ("ctrl", "shift", "alt"),
+                        peek="alt+z", browser="ctrl+shift+z")
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=10)
+        assert _drain(pw) == [("browser",)]
+        assert pw._triggered["peek"] is False
+
+    def test_the_larger_chord_wins_the_other_way(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw = self._peek(monkeypatch, ("ctrl", "shift", "alt"),
+                        peek="ctrl+shift+z", browser="alt+z")
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=10)
+        assert _drain(pw) == [("press", "peek", 10)]
+        assert pw._triggered["browser"] is False
+
+    def test_a_tie_goes_to_peek(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw = self._peek(monkeypatch, ("ctrl", "shift", "alt"),
+                        peek="ctrl+shift+z", browser="ctrl+alt+z")
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=10)
+        assert _drain(pw) == [("press", "peek", 10)]
+
+    def test_same_key_other_modifiers_picks_by_modifiers(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw = self._peek(monkeypatch, ("ctrl", "alt"),
+                        peek="ctrl+shift+z", browser="ctrl+alt+z")
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=10)
+        assert _drain(pw) == [("browser",)]
+
+    def test_no_browser_chord_lets_its_keys_through(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw = self._peek(monkeypatch, ("ctrl", "alt"), browser="")
+        assert pw._chords["browser"] is None
+        assert not self._feed(pw, peek_mod._WM_KEYDOWN, "b")
+        assert not self._feed(pw, peek_mod._WM_KEYUP, "b")
+        assert _drain(pw) == []
+
+
+class TestTwoChordPortable:
+    """The same rules through `_on_press`/`_on_release` (non-Windows)."""
+
+    def _peek(self, monkeypatch, **kw):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        return _two_chord_peek(monkeypatch, **kw)
+
+    def test_the_browser_chord_posts_browser_once(self, monkeypatch):
+        pw = self._peek(monkeypatch)
+        for k in (_make_key(name="ctrl_l"), _make_key(name="alt_l"),
+                  _make_key(char="b"), _make_key(char="b")):
+            pw._on_press(k)
+        assert _drain(pw) == [("browser",)]
+
+    def test_the_larger_chord_wins(self, monkeypatch):
+        pw = self._peek(monkeypatch, peek="alt+z", browser="ctrl+shift+z")
+        for k in (_make_key(name="ctrl_l"), _make_key(name="shift_l"),
+                  _make_key(name="alt_l"), _make_key(char="z")):
+            pw._on_press(k)
+        assert _drain(pw) == [("browser",)]
+
+    def test_a_browser_press_never_arms_release(self, monkeypatch):
+        """Ctrl is a modifier of both chords; releasing it after a browser
+        press is not the end of a peek (modifier release stays tied to the
+        peek chord)."""
+        pw = self._peek(monkeypatch)
+        for k in (_make_key(name="ctrl_l"), _make_key(name="alt_l"),
+                  _make_key(char="b")):
+            pw._on_press(k)
+        assert _drain(pw) == [("browser",)]
+        pw._on_release(_make_key(char="b"))
+        pw._on_release(_make_key(name="ctrl_l"))
+        assert _drain(pw) == []
+
+    def test_a_peek_press_then_release_still_posts_release(self, monkeypatch):
+        pw = self._peek(monkeypatch)
+        for k in (_make_key(name="ctrl_l"), _make_key(name="shift_l"),
+                  _make_key(char="z")):
+            pw._on_press(k)
+        assert [e[0] for e in _drain(pw)] == ["press"]
+        pw._on_release(_make_key(name="ctrl_l"))
+        assert _drain(pw) == [("release",)]
+
+    def test_the_browser_key_up_rearms_only_the_browser_chord(self,
+                                                             monkeypatch):
+        pw = self._peek(monkeypatch, peek="ctrl+shift+z", browser="ctrl+alt+b")
+        for k in (_make_key(name="ctrl_l"), _make_key(name="shift_l"),
+                  _make_key(char="z"), _make_key(name="alt_l"),
+                  _make_key(char="b")):
+            pw._on_press(k)
+        assert pw._triggered == {"peek": True, "browser": True}
+        pw._on_release(_make_key(char="b"))
+        assert pw._triggered == {"peek": True, "browser": False}
+
+
+class TestBrowserEvent:
+    """The worker's `browser` event: a signed-in tab, nothing else (SC-6)."""
+
+    def _peek(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        from power_atlas import web as web_mod
+        pw = _two_chord_peek(monkeypatch)
+        pw._ready.set()
+        pw._signed_gen = web_mod.local_secret_generation()
+        opened = []
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        return peek_mod, pw, pw._adapter, opened
+
+    @pytest.mark.parametrize("where", ["hidden", "peek", "app"])
+    def test_opens_the_browser_and_leaves_the_window(self, monkeypatch,
+                                                     where):
+        peek_mod, pw, a, opened = self._peek(monkeypatch)
+        if where == "peek":
+            pw._handle(("press", "peek", 1000))
+        elif where == "app":
+            pw._handle(("show_app",))
+        state, placement = pw._state, pw._app_placement
+        a.calls.clear()
+        pw._handle(("browser",))
+        assert opened == ["http://127.0.0.1:4915/signed"]
+        assert a.window_calls() == []
+        assert (pw._state, pw._app_placement) == (state, placement)
+
+    def test_a_browser_press_between_two_taps_keeps_the_double_tap(
+            self, monkeypatch):
+        """It does not touch the double-tap timing: peek, browser, peek
+        within 0.5 s is still a double-tap (here: app mode)."""
+        peek_mod, pw, a, opened = self._peek(monkeypatch)
+        pw._handle(("press", "peek", 1000))
+        pw._handle(("browser",))
+        pw._handle(("press", "peek", 1300))
+        assert pw._state == peek_mod.APP
+        assert len(opened) == 1
+
+    def test_honoured_before_and_without_readiness(self, monkeypatch):
+        """The browser needs no window: a press during startup, or after a
+        failed readiness gate, still opens it; window events are dropped."""
+        import threading
+        import power_atlas.peek as peek_mod
+        pw = _two_chord_peek(monkeypatch)
+        opened = []
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(pw, "_establish_ready", lambda: None)
+        for ev in (("browser",), ("press", "peek", 1), ("show_app",),
+                   ("browser",), ("stop",)):
+            pw._events.put(ev)
+        t = threading.Thread(target=pw._window_worker, daemon=True)
+        t.start()
+        t.join(5)
+        assert not t.is_alive()
+        assert len(opened) == 2
+        assert not pw._ready.is_set()
+        assert pw._adapter.calls == []
+
+
+class TestCreatePeekBrowserShortcut:
+    """`create_peek` validates the browser shortcut with the save-time
+    validator and turns it off, with a WARNING, when it is invalid or
+    overlaps the peek shortcut in force."""
+
+    def _capture(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        captured = {}
+
+        def mock_init(self, server_url, hotkey="ctrl+shift+z", mode="hold",
+                      browser_hotkey=""):
+            captured.update(hotkey=hotkey, browser=browser_hotkey)
+
+        monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
+        return peek_mod, captured
+
+    def test_defaults_to_off(self, monkeypatch):
+        peek_mod, captured = self._capture(monkeypatch)
+        assert peek_mod.create_peek("http://x", "ctrl+shift+z", "hold")
+        assert captured["browser"] == ""
+
+    @pytest.mark.parametrize("given, passed", [
+        ("ctrl+alt+b", "ctrl+alt+b"),
+        (" Ctrl+Alt+B ", "ctrl+alt+b"),
+        ("ctrl+alt+z", "ctrl+alt+z"),  # same key, not nested
+    ])
+    def test_a_valid_one_is_passed_through(self, monkeypatch, caplog, given,
+                                           passed):
+        peek_mod, captured = self._capture(monkeypatch)
+        with caplog.at_level("WARNING", logger="power_atlas.peek"):
+            assert peek_mod.create_peek("http://x", "ctrl+shift+z", "hold",
+                                        given)
+        assert captured == {"hotkey": "ctrl+shift+z", "browser": passed}
+        assert not caplog.records
+
+    @pytest.mark.parametrize("given", ["b", "ctrl+bogus", "ctrl+esc", "alt"])
+    def test_an_invalid_one_is_off_with_a_warning(self, monkeypatch, caplog,
+                                                  given):
+        peek_mod, captured = self._capture(monkeypatch)
+        with caplog.at_level("WARNING", logger="power_atlas.peek"):
+            assert peek_mod.create_peek("http://x", "ctrl+shift+z", "hold",
+                                        given)
+        assert captured == {"hotkey": "ctrl+shift+z", "browser": ""}
+        assert any("browser_hotkey" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("peek, given", [
+        ("ctrl+shift+z", "shift+ctrl+z"),       # equal
+        ("ctrl+shift+z", "ctrl+shift+alt+z"),   # contains the peek one
+        ("ctrl+shift+alt+p", "alt+p"),          # inside the peek one
+        ("nope", "ctrl+shift+z"),               # equals the fallback in force
+    ])
+    def test_a_conflicting_one_is_off_with_a_warning(self, monkeypatch, caplog,
+                                                     peek, given):
+        peek_mod, captured = self._capture(monkeypatch)
+        with caplog.at_level("WARNING", logger="power_atlas.peek"):
+            assert peek_mod.create_peek("http://x", peek, "hold", given)
+        assert captured["browser"] == ""
+        assert any("conflicts" in r.getMessage() for r in caplog.records)
+
+    def test_an_unknown_peek_key_falls_back_naming_it(self, monkeypatch,
+                                                      caplog):
+        """R12: a stored peek shortcut with a key outside `VK_NAMES` falls
+        back to ctrl+shift+z, and the warning names the rejected key."""
+        peek_mod, captured = self._capture(monkeypatch)
+        with caplog.at_level("WARNING", logger="power_atlas.peek"):
+            assert peek_mod.create_peek("http://x", "ctrl+media_next")
+        assert captured["hotkey"] == "ctrl+shift+z"
+        assert "media_next" in caplog.text
+
+    def test_the_real_window_builds_its_chord_table(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        pw = peek_mod.create_peek("http://x", "ctrl+shift+z", "hold",
+                                  "ctrl+alt+b")
+        assert pw._chords == {"peek": {"ctrl", "shift", "z"},
+                              "browser": {"ctrl", "alt", "b"}}
+        pw = peek_mod.create_peek("http://x", "ctrl+shift+z", "hold",
+                                  "ctrl+shift+z")
+        assert pw._chords["browser"] is None

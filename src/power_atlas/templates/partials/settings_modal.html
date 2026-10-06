@@ -43,17 +43,19 @@
           <div class="settings-row peek-hotkey-group">
             <div class="settings-row-text">
               <div class="settings-row-head"><label class="settings-row-title" for="peekHotkey">Peek hotkey</label></div>
-              <div class="settings-row-desc">Shows PowerAtlas from anywhere (see Peek mode); double-tap to open it as a window. Takes effect on the next launch.</div>
+              <div class="settings-row-desc">Shows PowerAtlas from anywhere (see Peek mode); double-tap to open it as a window. A modifier (ctrl, shift or alt) plus a key. Takes effect on the next launch.</div>
+              <div class="pa-modal-field-error" id="peekHotkeyError" role="alert" hidden></div>
             </div>
             <div class="settings-row-control">
               <div class="hotkey-field" onclick="document.getElementById('peekHotkey').focus()">
-                <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" placeholder="Press keys…"
+                <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" data-saved="{{ peek_hotkey }}" placeholder="Press keys…"
                        onfocus="this.parentElement.classList.add('focused')"
                        onblur="this.parentElement.classList.remove('focused')"
-                       onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})}).then(loadRestartKeys)">
-                <!-- The `.then(loadRestartKeys)` is load-bearing: this field
-                     and the peek mode select are the restart-only controls that save and stay on
-                     the page (savePortAndRestart restarts and navigates
+                       onchange="saveShortcut(this,'peek_hotkey')">
+                <!-- saveShortcut (index.html) ends in loadRestartKeys, which
+                     is load-bearing: the shortcut fields and the peek mode
+                     select are the restart-only controls that save and stay
+                     on the page (savePortAndRestart restarts and navigates
                      away). Without it, saving a hotkey leaves the "on
                      relaunch" badge absent until a reload. -->
               </div>
@@ -74,6 +76,26 @@
                 <option value="hold" {% if peek_mode != 'toggle' %}selected{% endif %}>Hold (show while held)</option>
                 <option value="toggle" {% if peek_mode == 'toggle' %}selected{% endif %}>Toggle (press to show, press again to hide)</option>
               </select>
+            </div>
+          </div>
+          <!-- 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3.
+               Restart-only like the peek hotkey and saved the same way. Empty
+               is off. The server refuses an invalid shortcut or one that
+               overlaps the peek hotkey; the refusal shows in the row and the
+               field goes back to the stored value. -->
+          <div class="settings-row browser-hotkey-group">
+            <div class="settings-row-text">
+              <div class="settings-row-head"><label class="settings-row-title" for="browserHotkey">Browser shortcut</label></div>
+              <div class="settings-row-desc">Opens PowerAtlas in a new browser tab, signed in. Leave empty for none. It may not equal or contain the peek hotkey. Takes effect on the next launch.</div>
+              <div class="pa-modal-field-error" id="browserHotkeyError" role="alert" hidden></div>
+            </div>
+            <div class="settings-row-control">
+              <div class="hotkey-field" onclick="document.getElementById('browserHotkey').focus()">
+                <input type="text" id="browserHotkey" class="peek-input" value="{{ browser_hotkey }}" data-saved="{{ browser_hotkey }}" placeholder="Off"
+                       onfocus="this.parentElement.classList.add('focused')"
+                       onblur="this.parentElement.classList.remove('focused')"
+                       onchange="saveShortcut(this,'browser_hotkey')">
+              </div>
             </div>
           </div>
           <div class="settings-row settings-row-stack port-group">
