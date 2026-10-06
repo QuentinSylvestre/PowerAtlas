@@ -352,6 +352,10 @@ enabled = false  # opt-in: an OS toast when an ACP turn ends or needs approval, 
 Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hotkey listener requires X11 (Wayland is not supported).
 App mode is Windows only: on Linux, a double-tap of the peek hotkey and tray **Open PowerAtlas** open
 PowerAtlas in the browser, signed in, and the tray has no separate **Open in browser** item.
+The browser is started with `xdg-open`, so the one-time login code is briefly visible on its command
+line to other users of the machine. PowerAtlas therefore accepts the code on Linux only over a
+connection opened by your own user (read from `/proc/net/tcp`); when that cannot be told, the code is
+accepted as before.
 
 ## Agent sessions (`/acp`)
 

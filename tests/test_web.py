@@ -28848,6 +28848,265 @@ class TestLoginNext:
         assert c.get("/api/settings").status_code == 200
 
 
+class TestProcNetTcpOwner:
+    """`_proc_net_tcp_owner`: which uid opened a connection, from the text of
+    `/proc/net/tcp` or `/proc/net/tcp6`. Fixture rows are written by hand
+    from the kernel's format (proc(5)): an IPv4 address is one 32-bit word
+    and an IPv6 address four, each printed in host byte order (little-endian
+    here), the port in plain hex. 127.0.0.2 is `0200007F`, 127.0.0.1 is
+    `0100007F`, port 4915 is `1333`, 50000 is `C350`, 50001 is `C351`.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final fix 1
+    """
+
+    HEADER = ("  sl  local_address rem_address   st tx_queue rx_queue tr "
+              "tm->when retrnsmt   uid  timeout inode")
+    TCP = "\n".join([
+        HEADER,
+        # PowerAtlas's listener (uid 1000).
+        "   0: 0100007F:1333 00000000:0000 0A 00000000:00000000 00:00000000 "
+        "00000000  1000        0 11111 1 0000000000000000 100 0 0 10 0",
+        # PowerAtlas's accepted socket: local and remote swapped (uid 1000).
+        "   1: 0100007F:1333 0200007F:C350 01 00000000:00000000 00:00000000 "
+        "00000000  1000        0 22222 1 0000000000000000 20 4 30 10 -1",
+        # A TIME_WAIT row on the same tuple, owned by nobody (uid 0).
+        "   2: 0200007F:C350 0100007F:1333 06 00000000:00000000 03:00000F9E "
+        "00000000     0        0 0 3 0000000000000000",
+        # The browser's socket: 127.0.0.2:50000 -> 127.0.0.1:4915 (uid 1001).
+        "   3: 0200007F:C350 0100007F:1333 01 00000000:00000000 00:00000000 "
+        "00000000  1001        0 33333 1 0000000000000000 20 4 30 10 -1",
+    ])
+    TCP6 = "\n".join([
+        HEADER,
+        # [::1]:50001 -> [::1]:4915, uid 1002.
+        "   0: 00000000000000000000000001000000:C351 "
+        "00000000000000000000000001000000:1333 01 00000000:00000000 "
+        "00:00000000 00000000  1002        0 44444 1 0000000000000000",
+        # [::ffff:127.0.0.2]:50002 -> [::ffff:127.0.0.1]:4915, uid 1003.
+        "   1: 0000000000000000FFFF00000200007F:C352 "
+        "0000000000000000FFFF00000100007F:1333 01 00000000:00000000 "
+        "00:00000000 00000000  1003        0 55555 1 0000000000000000",
+    ])
+
+    @staticmethod
+    def _ep(addr, port):
+        import ipaddress
+        from power_atlas import web as web_mod
+        return (web_mod._plain_ip(ipaddress.ip_address(addr)), port)
+
+    def _owner(self, text, local, remote, byteorder="little"):
+        from power_atlas import web as web_mod
+        return web_mod._proc_net_tcp_owner(text, self._ep(*local),
+                                           self._ep(*remote), byteorder)
+
+    def test_ipv4_client_row_not_the_server_row(self):
+        assert self._owner(self.TCP, ("127.0.0.2", 50000),
+                           ("127.0.0.1", 4915)) == 1001
+
+    def test_direction_matters(self):
+        """The swapped query finds PowerAtlas's own accepted socket."""
+        assert self._owner(self.TCP, ("127.0.0.1", 4915),
+                           ("127.0.0.2", 50000)) == 1000
+
+    def test_byte_order_is_host_order(self):
+        """Read as big-endian, `0200007F` is 2.0.0.127, so nothing matches;
+        a big-endian host prints 127.0.0.2 as `7F000002`."""
+        assert self._owner(self.TCP, ("127.0.0.2", 50000),
+                           ("127.0.0.1", 4915), "big") is None
+        be = ("   0: 7F000002:C350 7F000001:1333 01 00000000:00000000 "
+              "00:00000000 00000000  1004        0 1 1 0")
+        assert self._owner(be, ("127.0.0.2", 50000), ("127.0.0.1", 4915),
+                           "big") == 1004
+
+    def test_ipv6(self):
+        assert self._owner(self.TCP6, ("::1", 50001), ("::1", 4915)) == 1002
+
+    @pytest.mark.parametrize("client, server", [
+        ("127.0.0.2", "127.0.0.1"),
+        ("::ffff:127.0.0.2", "::ffff:127.0.0.1"),
+        ("::ffff:127.0.0.2", "127.0.0.1"),
+    ])
+    def test_ipv4_mapped_ipv6(self, client, server):
+        assert self._owner(self.TCP6, (client, 50002), (server, 4915)) == 1003
+
+    def test_mapped_query_finds_a_plain_ipv4_row(self):
+        """A dual-stack listener reports the client as `::ffff:…` while the
+        browser's own socket is a `/proc/net/tcp` row."""
+        assert self._owner(self.TCP, ("::ffff:127.0.0.2", 50000),
+                           ("127.0.0.1", 4915)) == 1001
+
+    @pytest.mark.parametrize("local, remote", [
+        (("127.0.0.2", 50001), ("127.0.0.1", 4915)),   # other port
+        (("127.0.0.3", 50000), ("127.0.0.1", 4915)),   # other address
+        (("127.0.0.2", 50000), ("127.0.0.1", 4916)),   # other server port
+        (("::1", 50000), ("::1", 4915)),               # other family
+    ])
+    def test_missing_row(self, local, remote):
+        assert self._owner(self.TCP, local, remote) is None
+
+    def test_time_wait_and_listen_rows_are_ignored(self):
+        only_wait = "\n".join(self.TCP.splitlines()[:4])
+        assert self._owner(only_wait, ("127.0.0.2", 50000),
+                           ("127.0.0.1", 4915)) is None
+
+    def test_two_uids_on_one_tuple_is_undecided(self):
+        dup = self.TCP + "\n" + (
+            "   4: 0200007F:C350 0100007F:1333 01 00000000:00000000 "
+            "00:00000000 00000000  1005        0 66666 1 0")
+        assert self._owner(dup, ("127.0.0.2", 50000),
+                           ("127.0.0.1", 4915)) is None
+
+    @pytest.mark.parametrize("line", [
+        "",
+        "garbage",
+        "   3: 0200007F:C350 0100007F:1333 01",                 # short
+        "   3: 0200007F:C350 0100007F:1333 01 a b c 1001x d",   # bad uid
+        "   3: 0200007F:C350 0100007F:1333 01 a b c ² d",       # non-ASCII digit
+        "   3: 0x00007F:C350 0100007F:1333 01 a b c 1001 d",    # bad address
+        "   3: 0200007F:C35 0100007F:1333 01 a b c 1001 d",     # short port
+        "   3: 0200007F 0100007F:1333 01 a b c 1001 d",         # no port
+        "   3: 0200007F00:C350 0100007F:1333 01 a b c 1001 d",  # 10 hex digits
+    ])
+    def test_malformed_lines_are_skipped(self, line):
+        # Each malformed line comes before a valid row for another tuple, so a
+        # parser that stops at the first bad line also fails here.
+        good = ("   9: 0200007F:C351 0100007F:1333 01 00000000:00000000 "
+                "00:00000000 00000000  1006        0 1 1 0")
+        text = self.HEADER + "\n" + line + "\n" + good
+        assert self._owner(text, ("127.0.0.2", 50000),
+                           ("127.0.0.1", 4915)) is None
+        assert self._owner(text, ("127.0.0.2", 50001),
+                           ("127.0.0.1", 4915)) == 1006
+
+    @pytest.mark.skipif(sys.byteorder != "little",
+                        reason="fixture rows are little-endian")
+    def test_login_peer_uid_reads_both_files(self, monkeypatch, tmp_path):
+        from power_atlas import web as web_mod
+        tcp = tmp_path / "tcp"
+        tcp6 = tmp_path / "tcp6"
+        tcp.write_text(self.TCP)
+        tcp6.write_text(self.TCP6)
+        monkeypatch.setattr(web_mod, "_PROC_NET_TCP_FILES",
+                            (str(tmp_path / "absent"), str(tcp), str(tcp6)))
+        assert web_mod._login_peer_uid(("127.0.0.2", 50000),
+                                       ("127.0.0.1", 4915)) == 1001
+        assert web_mod._login_peer_uid(("::1", 50001), ("::1", 4915)) == 1002
+        assert web_mod._login_peer_uid(("::1", 50009), ("::1", 4915)) is None
+
+    @pytest.mark.parametrize("client, server", [
+        (("testclient", 50000), ("127.0.0.1", 4915)),
+        (("127.0.0.2", 50000), ("testserver", 80)),
+        (None, ("127.0.0.1", 4915)),
+        (("127.0.0.2", 50000), None),
+        (("127.0.0.2",), ("127.0.0.1", 4915)),
+    ])
+    def test_login_peer_uid_undecided_endpoints(self, client, server,
+                                                monkeypatch):
+        from power_atlas import web as web_mod
+
+        def never(*a, **k):
+            raise AssertionError("no file is read for an unusable endpoint")
+
+        monkeypatch.setattr(web_mod, "_proc_net_tcp_owner", never)
+        assert web_mod._login_peer_uid(client, server) is None
+
+
+class TestLoginCodeBoundToUserOnLinux:
+    """On Linux `/local-auth` refuses a code presented over a connection
+    another user's process opened, before the code is consumed, and allows
+    it when that cannot be told. Windows and macOS never look.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final fix 1
+    """
+
+    ME = 1000
+
+    def _linux(self, monkeypatch, web_mod, owner):
+        seen = []
+
+        def peer_uid(client, server):
+            seen.append((client, server))
+            return owner[0]
+
+        monkeypatch.setattr(web_mod.sys, "platform", "linux")
+        monkeypatch.setattr(web_mod.os, "getuid", lambda: self.ME,
+                            raising=False)
+        monkeypatch.setattr(web_mod, "_login_peer_uid", peer_uid)
+        return seen
+
+    def test_another_users_connection_is_refused_and_the_code_survives(
+            self, local_enabled, client, monkeypatch, caplog):
+        web_mod = local_enabled
+        owner = [self.ME + 1]
+        seen = self._linux(monkeypatch, web_mod, owner)
+        code = web_mod.mint_login_code()
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            refused = client.get(web_mod.login_path(code),
+                                 follow_redirects=False)
+        assert refused.status_code == 403
+        assert "user running PowerAtlas" in refused.text
+        assert not [h for h in refused.headers.get_list("set-cookie")
+                    if h.startswith("pa_local=")]
+        assert code not in caplog.text
+        assert code not in web_mod._login_failures, "never throttles the owner"
+        assert seen and seen[0][0][0] == "127.0.0.1"
+        assert seen[0][1][0] == "127.0.0.1"
+        # Not burned: the owner's own connection still trades it.
+        owner[0] = self.ME
+        ok = client.get(web_mod.login_path(code), follow_redirects=False)
+        assert ok.status_code == 303
+        assert _local_cookie_from(ok)
+
+    def test_root_is_another_user(self, local_enabled, client, monkeypatch):
+        web_mod = local_enabled
+        self._linux(monkeypatch, web_mod, [0])
+        resp = client.get(web_mod.login_path(web_mod.mint_login_code()),
+                          follow_redirects=False)
+        assert resp.status_code == 403
+
+    def test_undecided_is_allowed_and_logged_without_the_code(
+            self, local_enabled, client, monkeypatch, caplog):
+        web_mod = local_enabled
+        self._linux(monkeypatch, web_mod, [None])
+        code = web_mod.mint_login_code()
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            resp = client.get(web_mod.login_path(code),
+                              follow_redirects=False)
+        assert resp.status_code == 303
+        lines = [r for r in caplog.records
+                 if "could not tell which user" in r.getMessage()]
+        assert len(lines) == 1 and lines[0].levelno == logging.DEBUG
+        assert code not in caplog.text
+
+    def test_own_connection_is_allowed(self, local_enabled, client,
+                                       monkeypatch):
+        web_mod = local_enabled
+        self._linux(monkeypatch, web_mod, [self.ME])
+        resp = client.get(web_mod.login_path(web_mod.mint_login_code()),
+                          follow_redirects=False)
+        assert resp.status_code == 303
+
+    @pytest.mark.parametrize("platform", ["win32", "darwin"])
+    def test_other_platforms_never_look(self, local_enabled, client,
+                                        monkeypatch, platform):
+        web_mod = local_enabled
+
+        def never(*a, **k):
+            raise AssertionError("looked up the peer's user off Linux")
+
+        monkeypatch.setattr(web_mod.sys, "platform", platform)
+        monkeypatch.setattr(web_mod, "_login_peer_uid", never)
+        resp = client.get(web_mod.login_path(web_mod.mint_login_code()),
+                          follow_redirects=False)
+        assert resp.status_code == 303
+
+    def test_a_malformed_code_is_refused_before_the_lookup(
+            self, local_enabled, client, monkeypatch):
+        web_mod = local_enabled
+        seen = self._linux(monkeypatch, web_mod, [self.ME + 1])
+        resp = client.get(web_mod.login_path("short"), follow_redirects=False)
+        assert resp.status_code == 400
+        assert seen == []
+
+
 class TestLoginCodeExchange:
     """`mint_login_code` (in-process) and `GET /local-auth` (D-16, D-21)."""
 

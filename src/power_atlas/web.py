@@ -2277,6 +2277,91 @@ def _is_remote_peer(peer: str | None) -> bool:
         return True
 
 
+# Which local user opened a loopback connection, from `/proc/net/tcp{,6}`
+# (Linux only; `local_auth_exchange` uses it to bind a login code to the user
+# running PowerAtlas). 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final fix 1
+_PROC_NET_TCP_FILES = ("/proc/net/tcp", "/proc/net/tcp6")
+_TCP_ESTABLISHED = "01"
+_PROC_NET_ENDPOINT_RE = re.compile(
+    r"([0-9A-Fa-f]{8}|[0-9A-Fa-f]{32}):([0-9A-Fa-f]{4})")
+
+
+def _plain_ip(addr):
+    """An IPv4-mapped IPv6 address as its IPv4 address; any other unchanged.
+    A dual-stack listener reports `::ffff:127.0.0.1` for a client whose own
+    socket is a plain IPv4 row, so both sides are compared in this form."""
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped if mapped is not None else addr
+
+
+def _proc_net_endpoint(field: str, byteorder: str):
+    """`HEX:PORT` from a `/proc/net/tcp{,6}` row -> (address, port).
+
+    The kernel prints an IPv4 address as one 32-bit word, and an IPv6 address
+    as four, each in host byte order (`0100007F` is 127.0.0.1 on a
+    little-endian host); the port is a plain big-endian hex number. Raises
+    ValueError on anything else.
+    """
+    m = _PROC_NET_ENDPOINT_RE.fullmatch(field)
+    if m is None:
+        raise ValueError("not a /proc/net/tcp endpoint")
+    host = m.group(1)
+    raw = b"".join(int(host[i:i + 8], 16).to_bytes(4, byteorder)
+                   for i in range(0, len(host), 8))
+    return _plain_ip(ipaddress.ip_address(raw)), int(m.group(2), 16)
+
+
+def _proc_net_tcp_owner(text: str, local, remote,
+                        byteorder: str = sys.byteorder) -> int | None:
+    """The uid of the established socket in ``text`` (a `/proc/net/tcp` or
+    `/proc/net/tcp6` listing) whose own endpoint is ``local`` and whose peer
+    is ``remote``, each an (`ipaddress` address, port) pair with IPv4-mapped
+    addresses already made plain (`_plain_ip`). None when no row, or more than
+    one uid, matches. Pure.
+
+    Direction matters: a loopback connection has two rows, and the server's
+    accepted socket (local and remote swapped) belongs to PowerAtlas itself.
+    Malformed rows and the header are skipped.
+    """
+    found = set()
+    for line in text.splitlines():
+        f = line.split()
+        if (len(f) < 8 or f[3] != _TCP_ESTABLISHED
+                or not (f[7].isascii() and f[7].isdigit())):
+            continue
+        try:
+            row_local = _proc_net_endpoint(f[1], byteorder)
+            row_remote = _proc_net_endpoint(f[2], byteorder)
+        except ValueError:
+            continue
+        if row_local == local and row_remote == remote:
+            found.add(int(f[7]))
+    return found.pop() if len(found) == 1 else None
+
+
+def _login_peer_uid(client, server) -> int | None:
+    """Linux: the uid of the process side of this connection, from the
+    socket whose own endpoint is ``client`` (`scope["client"]`) and whose
+    peer is ``server`` (`scope["server"]`). None when that cannot be told:
+    an endpoint that is not an address, an unreadable file, no matching row.
+    """
+    try:
+        local = (_plain_ip(ipaddress.ip_address(client[0])), int(client[1]))
+        remote = (_plain_ip(ipaddress.ip_address(server[0])), int(server[1]))
+    except (TypeError, ValueError, IndexError):
+        return None
+    for path in _PROC_NET_TCP_FILES:
+        try:
+            with open(path, encoding="ascii", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        uid = _proc_net_tcp_owner(text, local, remote)
+        if uid is not None:
+            return uid
+    return None
+
+
 # Lowercase substrings that identify a mobile browser's User-Agent string.
 # Used by `_is_mobile_ua` to gate `ACP_CAN_DELETE` in the `/acp` template.
 # Advisory only — this affects whether the \u22ef menu is *rendered*, not whether
@@ -5166,6 +5251,26 @@ async def local_auth_exchange(request: Request):
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
         _warn_login_refused("no usable local secret", logging.ERROR)
         return _local_auth_refusal("PowerAtlas has no usable local secret.", 503)
+    # Linux: off Windows a door hands the URL to `xdg-open` on its command
+    # line, where another local user can read the live code. Refuse a code
+    # presented over a connection that user's process opened. Before the code
+    # is consumed, so a foreign attempt does not burn it; and not a recorded
+    # failure, since the backoff is keyed by code and would then lock the real
+    # user out of their own link. Undecided (no /proc, no matching row) is
+    # allowed, as before this check.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final fix 1
+    client = request.scope.get("client")
+    if (sys.platform.startswith("linux")
+            and not _is_remote_peer((client or (None,))[0])):
+        owner = _login_peer_uid(client, request.scope.get("server"))
+        if owner is None:
+            log.debug("login-code exchange: could not tell which user opened "
+                      "the connection; allowed")
+        elif owner != os.getuid():
+            _warn_login_refused("connection opened by another user")
+            return _local_auth_refusal(
+                "That sign-in link can only be used by the user running "
+                "PowerAtlas.", 403)
     if not _consume_login_code(supplied):
         _record_exchange_failure(supplied, _login_failures)
         _warn_login_refused("unknown, expired or already-used code")
