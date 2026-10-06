@@ -53,8 +53,10 @@ def parse_hotkey(hotkey: str) -> frozenset[str]:
 def hotkey_error(hotkey: str) -> str | None:
     """None when `hotkey` is a valid shortcut, else the problem in a few words.
 
-    Valid: at least one modifier, at least one other key, and every token a
-    known modifier or key name.
+    Valid: at least one modifier, exactly one other key, and every token a
+    known modifier or key name. A chord fires on its one non-modifier key
+    (Threading model), so a second one would leave it unable to fire.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 review fix 5
     """
     if not isinstance(hotkey, str):
         return "is not text"
@@ -65,11 +67,13 @@ def hotkey_error(hotkey: str) -> str | None:
         if key == "esc":
             return "cannot use esc, which dismisses the peek"
         if key not in MODIFIERS and key not in KEY_NAMES:
-            return f"has an unknown key '{key}'"
+            return f"has an unknown key {key!r}"
     if not keys & MODIFIERS:
         return "needs a modifier (ctrl, shift or alt)"
     if not keys - MODIFIERS:
         return "needs a key besides the modifiers"
+    if len(keys - MODIFIERS) > 1:
+        return "has more than one key besides the modifiers"
     return None
 
 
@@ -89,6 +93,25 @@ def effective_peek_hotkey(hotkey: str) -> str:
     """The peek shortcut the window actually runs: the stored one, or the
     default when the stored one is invalid (and `create_peek` warns)."""
     return hotkey if hotkey_error(hotkey) is None else DEFAULT_PEEK_HOTKEY
+
+
+def effective_browser_hotkey(browser: str, peek: str) -> str:
+    """The browser shortcut the window actually runs, normalised, or "" (off).
+
+    Off when the stored value is empty or invalid, or when it overlaps the
+    peek shortcut in force (`effective_peek_hotkey(peek)`). The settings
+    write path uses it; `create_peek` applies the same rule with a warning
+    for each case.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 review fix 7
+    """
+    if not isinstance(browser, str):
+        return ""
+    browser = browser.strip().lower()
+    if not browser or hotkey_error(browser) is not None:
+        return ""
+    if hotkeys_conflict(browser, effective_peek_hotkey(peek)):
+        return ""
+    return browser
 
 
 def match_chord(chords: dict, key: str, held) -> str | None:

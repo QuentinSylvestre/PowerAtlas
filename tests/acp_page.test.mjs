@@ -5812,9 +5812,19 @@ check("refreshSettings puts the stored shortcuts on both fields and their data-s
   const to = src.indexOf("\n", from);
   const peek = new El("input");
   const browser = new El("input");
+  // A refusal left on both error lines is cleared when the fields are
+  // rewritten (Phase 3 review fix 8).
+  const peekErr = new El("div");
+  const browserErr = new El("div");
+  for (const e of [peekErr, browserErr]) {
+    e.textContent = "Shortcut needs a modifier (ctrl, shift or alt)";
+    e.hidden = false;
+  }
   let payload = { peek_hotkey: "alt+p", browser_hotkey: "ctrl+alt+b" };
   const sandbox = {
-    document: { getElementById: (id) => ({ peekHotkey: peek, browserHotkey: browser }[id] || null) },
+    document: { getElementById: (id) => ({ peekHotkey: peek, browserHotkey: browser,
+                                           peekHotkeyError: peekErr,
+                                           browserHotkeyError: browserErr }[id] || null) },
     fetch: () => Promise.resolve({ json: () => Promise.resolve(payload) }),
     refreshNotifyToggle() {},
   };
@@ -5828,6 +5838,10 @@ check("refreshSettings puts the stored shortcuts on both fields and their data-s
   assertEqual(browser.value, "ctrl+alt+b", "the browser shortcut field was not set");
   assertEqual(browser.getAttribute("data-saved"), "ctrl+alt+b",
               "the browser shortcut data-saved was not set");
+  for (const [name, e] of [["peek", peekErr], ["browser", browserErr]]) {
+    assertEqual(e.hidden, true, `the ${name} shortcut error stayed visible`);
+    assertEqual(e.textContent, "", `the ${name} shortcut error kept its text`);
+  }
   payload = { peek_hotkey: "ctrl+shift+z", browser_hotkey: "" };
   sandbox.refreshSettings();
   await settle();

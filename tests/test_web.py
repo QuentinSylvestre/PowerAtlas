@@ -634,6 +634,8 @@ def _save_shortcut(client, key, value):
     ("ctrl+foo", "unknown key 'foo'"),
     ("ctrl+esc", "esc"),
     ("", "empty"),
+    # Phase 3 review fix 5: one key besides the modifiers.
+    ("ctrl+a+b", "more than one key besides the modifiers"),
 ])
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
@@ -741,6 +743,40 @@ def test_save_setting_peek_hotkey_normalised_and_unblocked_by_an_off_browser(
         mock_load.return_value = Config(browser_hotkey=browser)
         assert _save_shortcut(client, "peek_hotkey", " Ctrl+Alt+B ")["ok"]
         assert mock_save.call_args[0][0].peek_hotkey == "ctrl+alt+b"
+
+
+@pytest.mark.parametrize("peek, browser", [
+    ("ctrl+shift+z", "ctrl+z"),            # inside the peek one in force
+    ("ctrl+shift+z", "ctrl+shift+alt+z"),  # contains it
+    ("nope", "ctrl+shift+z"),              # equals the fallback in force
+])
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_peek_hotkey_unblocked_by_a_browser_that_is_off_by_conflict(
+        mock_load, mock_save, client, peek, browser):
+    """Phase 3 review fix 7: a stored browser shortcut that overlaps the peek
+    shortcut in force is off at startup (`create_peek`), so it cannot block a
+    new peek shortcut, even one it would overlap."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(peek_hotkey=peek, browser_hotkey=browser)
+    assert _save_shortcut(client, "peek_hotkey", "ctrl+alt+z") == {
+        "ok": True, "restart_required": True}
+    assert mock_save.call_args[0][0].peek_hotkey == "ctrl+alt+z"
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_peek_hotkey_still_blocked_by_a_browser_in_force(
+        mock_load, mock_save, client):
+    """The other side of fix 7: a browser shortcut that is in force (valid,
+    no overlap with the current peek one) still blocks an overlapping peek
+    shortcut."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(peek_hotkey="alt+p",
+                                    browser_hotkey="ctrl+z")
+    assert _save_shortcut(client, "peek_hotkey", "ctrl+alt+z") == {
+        "ok": False, "error": "Conflicts with the browser shortcut"}
+    mock_save.assert_not_called()
 
 
 def test_settings_modal_renders_the_browser_shortcut_row(client):
@@ -29576,8 +29612,10 @@ class TestLoopbackDoors:
             # The double-tap without app mode opens the browser.
             pw._handle(("press", "peek", 1000))
             pw._handle(("press", "peek", 1100))
-            # The browser shortcut (Phase 3) opens a signed-in tab.
-            pw._handle(("browser",))
+            # The browser shortcut (Phase 3) opens a signed-in tab, through
+            # the real path: the hook's post, then the worker loop (review
+            # fix 6; `_handle` has no `browser` branch).
+            self._browser_through_worker(pw, window)
             # A rotation, then the next show signs the window in again.
             local_enabled.set_local_secret("Q" * 43)
             pw._handle(("press", "peek", 9000))
@@ -29591,6 +29629,19 @@ class TestLoopbackDoors:
             assert "code=" not in text
             for url in urls:
                 assert url.rsplit("=", 1)[1] not in text
+
+    @staticmethod
+    def _browser_through_worker(pw, window):
+        import threading
+        pw._ready.clear()
+        pw._establish_ready = lambda: window
+        t = threading.Thread(target=pw._window_worker, daemon=True)
+        t.start()
+        assert pw._ready.wait(5)
+        pw._post_press("browser", 0)
+        pw._events.put(("stop",))
+        t.join(5)
+        assert not t.is_alive()
 
     class _DoorWindow:
         """A window adapter for the peek doors: records reloads and app

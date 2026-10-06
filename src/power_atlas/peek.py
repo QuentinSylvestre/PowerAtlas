@@ -64,6 +64,12 @@ def is_available() -> bool:
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
 _DOUBLE_TAP_MS = 500
 _TICK_MASK = 0xFFFFFFFF
+# A key-down of a chord key whose key-down the filter already suppressed is an
+# auto-repeat only while repeats keep coming. Windows' repeat delay is at most
+# about 1 s, so a longer gap means the key-up was never seen (for example the
+# key went up on the secure desktop) and this is a new press.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 review fix 1
+_REPEAT_GAP_MS = 1500
 
 # How long the worker waits for a callable posted to the UI thread. Past it, a
 # WARNING names the operation and the worker moves on: a hung UI thread must
@@ -125,7 +131,18 @@ class PeekWindow:
         self._mode = mode
         self._window = None
         self._listener = None
-        self._browser_hotkey = browser_hotkey
+        # The browser chord is validated here too, not only in `create_peek`:
+        # an invalid one, or one that overlaps the peek chord, is off (D-18
+        # assumes conflicting chords never run together).
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 review fix 4
+        browser = (browser_hotkey.strip().lower()
+                   if isinstance(browser_hotkey, str) else "")
+        if browser and (_hotkeys.hotkey_error(browser) is not None
+                        or _hotkeys.hotkeys_conflict(browser, hotkey)):
+            log.warning("Browser shortcut %r is invalid or overlaps the peek "
+                        "shortcut %r; it is off", browser_hotkey, hotkey)
+            browser = ""
+        self._browser_hotkey = browser
         # Hook-side state: read and written only by the listener thread.
         # The chord table: "peek" always, "browser" None when off. Matching
         # picks among them per D-18 (`hotkeys.match_chord`).
@@ -133,14 +150,14 @@ class PeekWindow:
         self._trigger_keys = self._parse_hotkey(hotkey)
         self._chords: dict = {
             "peek": self._trigger_keys,
-            "browser": (self._parse_hotkey(browser_hotkey)
-                        if browser_hotkey else None),
+            "browser": self._parse_hotkey(browser) if browser else None,
         }
         self._pressed_keys: set = set()
         # Per chord: its key is down (auto-repeat guard).
         self._triggered = {"peek": False, "browser": False}
-        # Key name -> the chord whose key-down the filter suppressed, so its
-        # key-up is suppressed too and re-arms that chord.
+        # Key name -> (chord, tick of its last key-down) for a chord key whose
+        # key-down the filter suppressed: its repeats and its key-up are
+        # suppressed too, and the key-up re-arms its chords.
         self._chord_down: dict = {}
         self._esc_down_suppressed = False  # the filter suppressed Esc's key-down
         self._release_armed = False  # a press was posted since the last release
@@ -418,11 +435,9 @@ class PeekWindow:
                 self._to_hidden()
         elif kind == "show_app":
             self._to_app_focused()
-        elif kind == "browser":
-            # The browser shortcut: a signed-in browser tab; the window state,
-            # the double-tap timing and `tap_origin` are left alone.
-            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
-            self._open_browser()
+        # `browser` never reaches here: both worker loops open the browser
+        # before readiness is checked, leaving the window state, the
+        # double-tap timing and `tap_origin` alone.
 
     def _on_peek_press(self, t: int) -> None:
         last = self._last_press
@@ -666,23 +681,44 @@ class PeekWindow:
             self._esc_down_suppressed = True
             self._events.put(("esc",))
             return True
+        t &= _TICK_MASK
         if is_down:
+            held = self._chord_down.get(name)
+            if held is not None:
+                if ((t - held[1]) & _TICK_MASK) <= _REPEAT_GAP_MS:
+                    # Auto-repeat of a suppressed chord key: suppressed and
+                    # never an event, whatever the modifiers do meanwhile, so
+                    # the user's app never gets a key-down without its key-up
+                    # (or the reverse) and the held key never switches chords.
+                    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 review fix 1
+                    self._chord_down[name] = (held[0], t)
+                    return True
+                # The key-up was never seen: a new press.
+                del self._chord_down[name]
+                self._rearm(name)
             chord = self._matches_chord(name)
             if chord is None:
                 return False
-            self._chord_down[name] = chord
+            self._chord_down[name] = (chord, t)
             if self._triggered[chord]:
                 return True  # auto-repeat: suppressed, never an event
             self._triggered[chord] = True
-            self._post_press(chord, t & _TICK_MASK)
+            self._post_press(chord, t)
             return True
-        chord = self._chord_down.pop(name, None)
-        if chord is not None:
+        if self._chord_down.pop(name, None) is not None:
             # The chord key's key-up: suppress it like its key-down, and
-            # re-arm so a second tap with modifiers held is a new press.
-            self._triggered[chord] = False
+            # re-arm every chord the key belongs to (as `_on_release` does)
+            # so a second tap with modifiers held is a new press.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 review fix 3
+            self._rearm(name)
             return True
         return False
+
+    def _rearm(self, name: str) -> None:
+        """Clear `_triggered` for every chord that has `name` as a key."""
+        for cid, keys in self._chords.items():
+            if keys and name in keys:
+                self._triggered[cid] = False
 
     def _matches_chord(self, name: str) -> str | None:
         """The chord a key-down of `name` fires, or None (D-18).
@@ -744,9 +780,7 @@ class PeekWindow:
                 return
             # A chord key's key-up re-arms its chord on every platform, and so
             # does the release of one of its modifiers.
-            for cid, keys in self._chords.items():
-                if keys and normalized in keys:
-                    self._triggered[cid] = False
+            self._rearm(normalized)
             if normalized not in _MODIFIER_NAMES:
                 return
             if normalized in self._trigger_keys:
@@ -1280,24 +1314,24 @@ def create_peek(server_url: str, hotkey: str = "ctrl+shift+z",
         return None
     problem = _hotkeys.hotkey_error(hotkey)
     if problem is not None:
-        log.warning("Invalid peek_hotkey '%s' (%s). Falling back to %s",
+        log.warning("Invalid peek_hotkey %r (%s). Falling back to %s",
                     hotkey, problem, _hotkeys.DEFAULT_PEEK_HOTKEY)
         hotkey = _hotkeys.DEFAULT_PEEK_HOTKEY
     browser = browser_hotkey.strip().lower() if isinstance(browser_hotkey, str) else ""
     if browser:
         problem = _hotkeys.hotkey_error(browser)
         if problem is not None:
-            log.warning("Invalid browser_hotkey '%s' (%s). The browser "
+            log.warning("Invalid browser_hotkey %r (%s). The browser "
                         "shortcut is off", browser_hotkey, problem)
             browser = ""
         elif _hotkeys.hotkeys_conflict(browser, hotkey):
-            log.warning("browser_hotkey '%s' conflicts with the peek shortcut "
-                        "'%s'. The browser shortcut is off", browser_hotkey,
+            log.warning("browser_hotkey %r conflicts with the peek shortcut "
+                        "%r. The browser shortcut is off", browser_hotkey,
                         hotkey)
             browser = ""
     normalized = mode.strip().lower() if isinstance(mode, str) else ""
     if normalized not in _PEEK_MODES:
-        log.warning("Invalid peek_mode '%s' (need hold or toggle). Falling back to hold", mode)
+        log.warning("Invalid peek_mode %r (need hold or toggle). Falling back to hold", mode)
         normalized = HOLD
     try:
         return PeekWindow(server_url, hotkey, normalized, browser)

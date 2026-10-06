@@ -6047,16 +6047,17 @@ async def save_setting(request: Request):
         # this an invalid peek shortcut surfaced only as a startup fallback.
         # The conflict is checked against the other shortcut as the window
         # would run it: an invalid stored peek shortcut runs as the default,
-        # and an invalid stored browser shortcut is off.
-        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
+        # and a stored browser shortcut is off when it is invalid or overlaps
+        # the peek shortcut in force (the rule `create_peek` applies).
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 (review fix 7)
         value = value.strip().lower()
         if key == "peek_hotkey":
             problem = hotkeys.hotkey_error(value)
             if problem is not None:
                 return {"ok": False, "error": f"Shortcut {problem}"}
-            other = config.browser_hotkey
-            if (hotkeys.hotkey_error(other) is None
-                    and hotkeys.hotkeys_conflict(value, other)):
+            other = hotkeys.effective_browser_hotkey(config.browser_hotkey,
+                                                     config.peek_hotkey)
+            if other and hotkeys.hotkeys_conflict(value, other):
                 return {"ok": False,
                         "error": "Conflicts with the browser shortcut"}
         elif value:

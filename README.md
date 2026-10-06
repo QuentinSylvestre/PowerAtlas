@@ -246,7 +246,7 @@ port = 0  # 0 = random (default), or set e.g. 8080 for a fixed port.
           # bookmark an OS-assigned port, and with 0 the two listeners would be given different
           # numbers. The combination is rejected with a named error rather than half-applied.
 peek_hotkey = "ctrl+shift+z"  # global overlay hotkey: at least one modifier (ctrl, shift, alt) plus
-                              # keys from: a-z, 0-9, f1-f24, space, tab, enter, backspace, delete,
+                              # exactly one key from: a-z, 0-9, f1-f24, space, tab, enter, backspace, delete,
                               # insert, home, end, page_up, page_down, up, down, left, right, pause,
                               # print_screen, scroll_lock, num_lock, menu, and / . , ; = - [ ] \ ` '
                               # (esc is not allowed: it dismisses the peek). Anything else falls back
