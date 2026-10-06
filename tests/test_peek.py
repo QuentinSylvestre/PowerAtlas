@@ -4727,3 +4727,128 @@ class TestListenerHealth:
         assert not t.is_alive()
         assert len(self._warnings(caplog)) == 1
         assert a.calls == []
+
+
+class TestNewWindowRouting:
+    """A link opened as a new window from the PowerAtlas window: one to the
+    server's own origin goes to the browser through a login URL that lands on
+    that page; any other goes to the real `webbrowser.open`, unchanged.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+    """
+
+    SERVER = "http://127.0.0.1:4915"
+
+    class _RealBrowser:
+        def __init__(self):
+            self.opened = []
+            self.name = "real"
+
+        def open(self, url, *args, **kwargs):
+            self.opened.append((url, args, kwargs))
+            return True
+
+    def _shim(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, _ = _ready_peek(monkeypatch)
+        real = self._RealBrowser()
+        logins, opened = [], []
+
+        def fake_login_url(server_url, next=None):
+            logins.append((server_url, next))
+            return f"LOGIN<{next}>"
+
+        monkeypatch.setattr(peek_mod._doors, "login_url", fake_login_url)
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
+        shim = peek_mod._NewWindowBrowser(real, self.SERVER, pw._same_origin)
+        return shim, real, logins, opened
+
+    @pytest.mark.parametrize("url, target", [
+        ("http://127.0.0.1:4915/acp?session=x", "/acp?session=x"),
+        ("http://127.0.0.1:4915/", "/"),
+        ("http://127.0.0.1:4915", "/"),
+        ("http://127.0.0.1:4915/acp#frag", "/acp"),
+        # WebView2 hands over the unescaped URI: a raw space is re-encoded.
+        ("http://127.0.0.1:4915/acp?q=a b", "/acp?q=a%20b"),
+    ])
+    def test_same_origin_goes_through_a_login_url(self, monkeypatch, url,
+                                                  target):
+        shim, real, logins, opened = self._shim(monkeypatch)
+        assert shim.open(url) is True
+        assert logins == [(self.SERVER, target)]
+        assert opened == [f"LOGIN<{target}>"]
+        assert real.opened == []
+
+    @pytest.mark.parametrize("url", [
+        "https://evil.example/acp",
+        "http://localhost:4915/acp",      # another host spelling
+        "http://127.0.0.1:4916/acp",      # another port
+        "https://127.0.0.1:4915/acp",     # another scheme
+        "mailto:someone@example.com",
+    ])
+    def test_other_links_go_to_the_real_browser_unchanged(self, monkeypatch,
+                                                          url):
+        shim, real, logins, opened = self._shim(monkeypatch)
+        shim.open(url, 2, True)
+        assert real.opened == [(url, (2, True), {})]
+        assert logins == [] and opened == []
+
+    def test_other_attributes_are_the_real_modules(self, monkeypatch):
+        shim, real, _, _ = self._shim(monkeypatch)
+        assert shim.name == "real"
+
+    def test_a_failure_logs_the_type_only(self, monkeypatch, caplog):
+        import power_atlas.peek as peek_mod
+        shim, real, _, _ = self._shim(monkeypatch)
+        url = "http://127.0.0.1:4915/acp?session=SECRETSESSION"
+
+        def quoting(u):
+            raise OSError(f"cannot open {u}")
+
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", quoting)
+        with caplog.at_level(logging.DEBUG):
+            assert shim.open(url) is True
+        assert "could not open a link in the browser: OSError" in caplog.text
+        assert "SECRETSESSION" not in caplog.text
+        assert "LOGIN" not in caplog.text
+        assert real.opened == []
+
+    def test_installed_once_into_pywebviews_module(self, monkeypatch):
+        import types
+        import power_atlas.peek as peek_mod
+        pw, _ = _ready_peek(monkeypatch)
+        fake = types.ModuleType(peek_mod._NEW_WINDOW_MODULE)
+        real = self._RealBrowser()
+        fake.webbrowser = real
+        monkeypatch.setitem(sys.modules, peek_mod._NEW_WINDOW_MODULE, fake)
+        pw._route_new_windows()
+        shim = fake.webbrowser
+        assert isinstance(shim, peek_mod._NewWindowBrowser)
+        assert shim._real is real
+        pw._route_new_windows()
+        assert fake.webbrowser is shim, "a shim is never wrapped in a shim"
+
+    def test_absent_module_is_not_imported(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, _ = _ready_peek(monkeypatch)
+        monkeypatch.delitem(sys.modules, peek_mod._NEW_WINDOW_MODULE,
+                            raising=False)
+        pw._route_new_windows()
+        assert peek_mod._NEW_WINDOW_MODULE not in sys.modules
+
+    def test_the_worker_installs_it_at_readiness(self, monkeypatch):
+        import threading
+        import types
+        import power_atlas.peek as peek_mod
+        pw = _new_peek(monkeypatch)
+        fake = types.ModuleType(peek_mod._NEW_WINDOW_MODULE)
+        fake.webbrowser = self._RealBrowser()
+        monkeypatch.setitem(sys.modules, peek_mod._NEW_WINDOW_MODULE, fake)
+        monkeypatch.setattr(pw, "_establish_ready", lambda: _FakeAdapter())
+        pw._ready.clear()
+        t = threading.Thread(target=pw._window_worker, daemon=True)
+        t.start()
+        assert pw._ready.wait(5)
+        pw._events.put(("stop",))
+        t.join(5)
+        assert not t.is_alive()
+        assert isinstance(fake.webbrowser, peek_mod._NewWindowBrowser)

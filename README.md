@@ -93,10 +93,14 @@ one of its doors:
 - the browser shortcut, when one is set;
 - the PowerAtlas window, whose built-in browser is signed in when it is created, and again when it
   is shown after the local secret was rotated or when it finds itself signed out (it checks its own
-  cookie at most every 10 seconds).
+  cookie at most every 10 seconds);
+- on Windows, a PowerAtlas link that the window opens as a new window (a link that would open a new
+  tab): it opens in your default browser, signed in, on that page when it is the dashboard or `/acp`,
+  and on the dashboard otherwise. Links to other sites open in the browser unchanged.
 
 Each door puts a fresh **login code** in the URL it opens. The browser exchanges that code once for a
-cookie, `pa_local`, and lands on the dashboard. The code works exactly once and expires after 120
+cookie, `pa_local`, and lands on the dashboard (or, for a link from the window, on the page it
+pointed to). The code works exactly once and expires after 120
 seconds. The cookie is HttpOnly and lasts 90 days.
 
 The tray also has **Copy login link**, for a second browser or any deliberate re-entry. It copies a

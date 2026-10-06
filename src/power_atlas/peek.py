@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 log = logging.getLogger("power_atlas.peek")
 
@@ -200,6 +200,54 @@ def _event_tick_now() -> int:
         import ctypes
         return ctypes.windll.kernel32.GetTickCount() & _TICK_MASK
     return _tick_now()
+
+
+# pywebview's module that answers a new-window request (`target=_blank`,
+# `window.open`) by calling its module-global `webbrowser.open(uri)`.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+_NEW_WINDOW_MODULE = "webview.platforms.edgechromium"
+# What `quote` leaves alone when it re-encodes a new-window path-and-query:
+# all of printable ASCII but the space. WebView2 hands the URI over in its
+# unescaped form, so a space or a non-ASCII character may arrive raw.
+_PRINTABLE_ASCII = "".join(chr(c) for c in range(0x21, 0x7F))
+
+
+class _NewWindowBrowser:
+    """Stands in for the `webbrowser` module inside pywebview's EdgeChromium
+    module, without forking its handler: `open(url)` sends a link to the
+    server's own origin (scheme, host and port, compared literally) to the
+    default browser through a fresh login URL that lands on that page, and
+    every other link to the real `webbrowser.open`. Any other attribute is
+    the real module's. Never logs a URL.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+    """
+
+    def __init__(self, real, server_url: str, same_origin) -> None:
+        self._real = real
+        self._server_url = server_url
+        self._same_origin = same_origin
+
+    def open(self, url, *args, **kwargs):
+        try:
+            same = self._same_origin(url)
+        except Exception:
+            same = False
+        if not same:
+            return self._real.open(url, *args, **kwargs)
+        try:
+            parts = urlsplit(url)
+            target = quote(parts.path or "/", safe=_PRINTABLE_ASCII)
+            if parts.query:
+                target += "?" + quote(parts.query, safe=_PRINTABLE_ASCII)
+            _doors.open_in_browser(_doors.login_url(self._server_url,
+                                                    next=target))
+        except Exception as e:
+            log.warning("PowerAtlas window could not open a link in the "
+                        "browser: %s", type(e).__name__)
+        return True
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
 
 class PeekWindow:
@@ -534,6 +582,7 @@ class PeekWindow:
             self._adapter = adapter
             self._ready.set()
             log.info("PowerAtlas window ready")
+            self._route_new_windows()
             if self._loaded.is_set():
                 # A `loaded` event that came before readiness was dropped
                 # with the others; the latch it set is not.
@@ -971,6 +1020,29 @@ class PeekWindow:
                 b.scheme.lower(), b.netloc.lower())
         except Exception:
             return False
+
+    def _route_new_windows(self) -> None:
+        """Put `_NewWindowBrowser` in place of the `webbrowser` module that
+        pywebview's EdgeChromium handler calls, so a same-origin link opened
+        as a new window lands in the browser signed in. Worker, after
+        readiness: the form exists by then, so pywebview has already imported
+        that module; it is looked up, never imported here (importing it loads
+        the .NET runtime). Absent (no EdgeChromium) means nothing to do. Once
+        per module: a second call finds the shim and leaves it.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+        """
+        try:
+            module = sys.modules.get(_NEW_WINDOW_MODULE)
+            if module is None:
+                return
+            current = getattr(module, "webbrowser", None)
+            if current is None or isinstance(current, _NewWindowBrowser):
+                return
+            module.webbrowser = _NewWindowBrowser(current, self._server_url,
+                                                  self._same_origin)
+        except Exception as e:
+            log.warning("PowerAtlas window: same-origin links will open the "
+                        "browser signed out: %s", type(e).__name__)
 
     def _open_browser(self) -> None:
         """The browser door, through `doors`. Never logs the URL."""

@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
 import jinja2 as _jinja2
 
@@ -2159,9 +2159,60 @@ def mint_login_code() -> str:
     return code
 
 
-def login_path(code: str) -> str:
-    """The path-and-query a door opens: `_LOCAL_AUTH_PATH` plus the code."""
-    return f"{_LOCAL_AUTH_PATH}?code={code}"
+def login_path(code: str, next: str | None = None) -> str:
+    """The path-and-query a door opens: `_LOCAL_AUTH_PATH` plus the code.
+
+    ``next``, when given, is the page the exchange lands on instead of `/`
+    (a same-origin link opened as a new window from the PowerAtlas window).
+    It is added only when `_login_next_target` accepts it and the whole query
+    stays within `_LOCAL_AUTH_MAX_QUERY`, so a door never builds a link the
+    exchange refuses: an unusable ``next`` is dropped and the link lands on `/`.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+    """
+    path = f"{_LOCAL_AUTH_PATH}?code={code}"
+    target = _login_next_target(next) if next else None
+    if target and target != "/":
+        extra = f"&next={quote(target, safe='')}"
+        query_len = len(path) - len(_LOCAL_AUTH_PATH) - 1 + len(extra)
+        if query_len <= _LOCAL_AUTH_MAX_QUERY:
+            path += extra
+    return path
+
+
+# The pages a login code may land on through `next`: the dashboard and /acp.
+# Not `_LOCAL_PAGE_PATHS`, which also holds `/remote-auth`, the remote device
+# sign-in form, never what a link inside PowerAtlas meant.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+_LOGIN_NEXT_PATHS = frozenset({"/", _ACP_PATH})
+# Longest `next` accepted, in characters as it arrives (decoded once by the
+# query parser). Past it the exchange lands on `/`.
+_LOGIN_NEXT_MAX = 256
+
+
+def _login_next_target(value) -> str | None:
+    """The landing path-and-query for a `next` value, or None (land on `/`).
+
+    Accepted: a path in `_LOGIN_NEXT_PATHS`, with an optional query kept and
+    any fragment dropped. Refused, in the value as given and once more after
+    percent-decoding: a leading ``//``, a backslash, a control character; and
+    in the value as given, anything outside printable ASCII (so the Location
+    header is plain ASCII), a scheme or a host. The result is rebuilt from the
+    parsed parts, never echoed.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+    """
+    if not isinstance(value, str) or not value or len(value) > _LOGIN_NEXT_MAX:
+        return None
+    if any(not ("\x21" <= ch <= "\x7e") for ch in value):
+        return None
+    for text in (value, unquote(value)):
+        if "\\" in text or text.startswith("//") or not text.startswith("/"):
+            return None
+        if any(ch < "\x20" or "\x7f" <= ch <= "\x9f" for ch in text):
+            return None
+    parts = urlsplit(value)
+    if parts.scheme or parts.netloc or parts.path not in _LOGIN_NEXT_PATHS:
+        return None
+    return parts.path + (f"?{parts.query}" if parts.query else "")
 
 
 def _consume_login_code(supplied: str) -> bool:
@@ -2659,7 +2710,7 @@ class LoopbackCredentialGate:
 app.add_middleware(LoopbackCredentialGate)
 
 
-def login_url(server_url: str) -> str:
+def login_url(server_url: str, next: str | None = None) -> str:
     """The URL a door opens: ``server_url`` plus a freshly minted login code.
 
     The one builder every door uses — tray Open in browser, tray Open
@@ -2669,16 +2720,18 @@ def login_url(server_url: str) -> str:
     show: the window keeps its page) — so none of them assembles the
     path by hand. ``server_url`` is built by `__main__` from `LOOPBACK_HOST`.
     With no local secret there is no code to mint; the bare URL is returned
-    and the gate's page tells the user why.
+    and the gate's page tells the user why. ``next`` is the page to land on
+    after the exchange (see `login_path`); never logged.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5;
-    door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
+    door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4;
+    ``next``: Phase 5 (follow-up 6)
     """
     code = mint_login_code()
     if not code:
         log.error("no usable local secret; opening %s without a login code",
                   server_url)
         return server_url
-    return f"{server_url.rstrip('/')}{login_path(code)}"
+    return f"{server_url.rstrip('/')}{login_path(code, next)}"
 
 
 # The per-launch page-embedded `/ws/acp` token that used to live here is
@@ -5055,7 +5108,8 @@ def _local_auth_refusal(message: str, status_code: int) -> HTMLResponse:
 
 @app.get(_LOCAL_AUTH_PATH)
 async def local_auth_exchange(request: Request):
-    """Trade a one-time login code for the loopback cookie, then go to `/`.
+    """Trade a one-time login code for the loopback cookie, then go to `/`
+    (or to the page an accepted `next` names, see `_login_next_target`).
 
     Script-free and self-contained for the same reason `remote_auth_page` is.
     A GET because a door opens it as a URL; there is no body to bound, so the
@@ -5097,12 +5151,17 @@ async def local_auth_exchange(request: Request):
         return _local_auth_refusal(
             "That sign-in link has expired or was already used.", 403)
     _login_failures.pop(supplied, None)
-    # 303 so the browser GETs `/` and the code leaves the address bar and the
-    # history entry the user will see. `no-referrer` keeps the (now dead) code
-    # out of any Referer the landing page sends.
+    # Where to land: `next` if it is one of PowerAtlas's own pages, else `/`.
+    # Read only now, after the code is spent, so it never bears on the
+    # exchange's checks, throttle or log lines; it is never logged.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+    landing = _login_next_target(dict(pairs).get("next")) or "/"
+    # 303 so the browser GETs the landing page and the code leaves the address
+    # bar and the history entry the user will see. `no-referrer` keeps the
+    # (now dead) code out of any Referer the landing page sends.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
     response = Response(status_code=303, headers={
-        "Location": "/", "Cache-Control": "no-store",
+        "Location": landing, "Cache-Control": "no-store",
         "Referrer-Policy": "no-referrer"})
     _set_local_cookie(response)
     log.info("loopback browser signed in with a login code")

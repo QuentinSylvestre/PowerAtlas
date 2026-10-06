@@ -16,17 +16,23 @@ import webbrowser
 log = logging.getLogger("power_atlas.doors")
 
 
-def login_url(server_url: str) -> str:
+def login_url(server_url: str, next: str | None = None) -> str:
     """``server_url`` plus a fresh one-time login code, via `web.login_url`.
+
+    ``next`` is a same-origin path-and-query to land on after sign-in
+    (`web.login_path` keeps it only when the exchange would accept it).
 
     Minted in-process — the tray, the window and the server share one
     process — never through an HTTP route. `web` is imported lazily, so
     importing this module does not pull in the web app.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5; moved from
-    `tray._login_url`: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 12)
+    `tray._login_url`: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 12);
+    ``next``: Phase 5 (follow-up 6)
     """
     from .web import login_url as _mint_login_url
-    return _mint_login_url(server_url)
+    if next is None:
+        return _mint_login_url(server_url)
+    return _mint_login_url(server_url, next=next)
 
 
 def open_in_browser(url: str) -> None:

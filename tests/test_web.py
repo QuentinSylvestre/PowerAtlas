@@ -28581,6 +28581,158 @@ class TestLocalCookie:
         assert web_mod.make_local_cookie() == ""
 
 
+class TestLoginNext:
+    """`/local-auth?code=…&next=…` lands on `next` only when it is one of
+    PowerAtlas's own pages (`/`, `/acp`, with a query); anything else lands
+    on `/`, and `next` never bears on the exchange or the log.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+    """
+
+    _SERVER = "http://127.0.0.1:4915"
+
+    @staticmethod
+    def _exchange(web_mod, client, next_value, code=None):
+        """Send ``next_value`` as `next` exactly (encoded once on the wire,
+        so the server's query parser hands back this string)."""
+        from urllib.parse import quote
+        code = code or web_mod.mint_login_code()
+        path = (f"{web_mod._LOCAL_AUTH_PATH}?code={code}"
+                f"&next={quote(next_value, safe='')}")
+        return client.get(path, follow_redirects=False)
+
+    @pytest.mark.parametrize("next_value", [
+        "//evil.example",
+        "//evil.example/acp",
+        "/\\evil",
+        "/\\/evil.example",
+        "https://evil",
+        "http://127.0.0.1:4915/acp",
+        "javascript:alert(1)",
+        "/%2F%2Fevil",
+        "/%2f/evil.example",
+        "/%5Cevil",
+        "/acp?x=%5C",
+        "/%09/evil.example",
+        "/api/settings",
+        "/remote-auth",
+        "/local-auth",
+        "/ACP",
+        "/acp/",
+        "acp",
+        "",
+        "/acp?x=\r\nSet-Cookie: a=b",
+        "/acp?x=%0d%0aSet-Cookie:a=b",
+        "/acp?x=%00",
+        "/acp?x=%7f",
+        "/acp?x=a b",
+        "/acp?x=café",
+        "/acp?x=" + "a" * 250,
+    ])
+    def test_refused_next_lands_on_root_and_still_signs_in(
+            self, local_enabled, client, next_value):
+        resp = self._exchange(local_enabled, client, next_value)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/"
+        _, value = _local_cookie_from(resp)
+        assert local_enabled._local_cookie_ok(_local_scope(value))
+
+    @pytest.mark.parametrize("next_value, landing", [
+        ("/acp?session=x", "/acp?session=x"),
+        ("/acp", "/acp"),
+        ("/", "/"),
+        ("/?view=overview", "/?view=overview"),
+        ("/acp?session=x#frag", "/acp?session=x"),
+        ("/acp?q=a%20b&r=%C3%A9", "/acp?q=a%20b&r=%C3%A9"),
+    ])
+    def test_accepted_next_lands_there(self, local_enabled, client,
+                                       next_value, landing):
+        resp = self._exchange(local_enabled, client, next_value)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == landing
+
+    def test_length_boundary(self, local_enabled, client):
+        """256 characters as received is the longest `next` accepted."""
+        assert local_enabled._LOGIN_NEXT_MAX == 256
+        at = "/acp?x=" + "a" * (256 - len("/acp?x="))
+        over = at + "a"
+        assert len(at) == 256
+        assert self._exchange(local_enabled, client, at).headers[
+            "location"] == at
+        assert self._exchange(local_enabled, client, over).headers[
+            "location"] == "/"
+
+    def test_next_does_not_rescue_a_bad_code_and_is_never_logged(
+            self, local_enabled, client, caplog):
+        marker = "/acp?session=NEXTMARKER"
+        with caplog.at_level(logging.DEBUG):
+            bad = self._exchange(local_enabled, client, marker, code="A" * 43)
+            good = self._exchange(local_enabled, client, marker)
+            refused = self._exchange(local_enabled, client,
+                                     "//evil.example/NEXTMARKER")
+        assert bad.status_code == 403
+        assert "location" not in bad.headers
+        assert not [h for h in bad.headers.get_list("set-cookie")
+                    if h.startswith("pa_local=")]
+        assert good.headers["location"] == marker
+        assert refused.headers["location"] == "/"
+        # PowerAtlas's own records; the test client's `httpx` logger prints
+        # every request URL it sends, which is the test, not the server.
+        ours = [r for r in caplog.records
+                if not r.name.startswith(("httpx", "httpcore"))]
+        assert any("signed in with a login code" in r.getMessage()
+                   for r in ours)
+        for r in ours:
+            assert "NEXTMARKER" not in r.getMessage()
+            assert "NEXTMARKER" not in str(r.args)
+
+    def test_login_path_with_next(self, local_enabled):
+        web_mod = local_enabled
+        code = "C" * 43
+        assert web_mod.login_path(code, "/acp?session=x") == (
+            "/local-auth?code=" + code + "&next=%2Facp%3Fsession%3Dx")
+        plain = "/local-auth?code=" + code
+        for refused in ("//evil.example", "https://evil", "/api/settings",
+                        "/", "", None):
+            assert web_mod.login_path(code, refused) == plain
+        assert web_mod.login_path(code) == plain
+
+    def test_login_path_drops_a_next_that_would_overflow_the_query(
+            self, local_enabled, client):
+        """A door never builds a link the exchange refuses for length: a
+        `next` the exchange would accept but whose encoding pushes the query
+        past `_LOCAL_AUTH_MAX_QUERY` is dropped (lands on `/`)."""
+        web_mod = local_enabled
+        code = "C" * 43
+        plain = web_mod.login_path(code)
+        # `&` encodes to three characters: 5 + 251 * 3 is past 512.
+        overflowing = "/acp?" + "&" * 251
+        assert web_mod._login_next_target(overflowing) == overflowing
+        assert web_mod.login_path(code, overflowing) == plain
+        # A long `next` that fits is kept, and its link signs in at once.
+        fitting = "/acp?x=" + "y" * 249
+        kept = web_mod.login_path(code, fitting)
+        assert kept != plain
+        query = kept.split("?", 1)[1]
+        assert len(query) <= web_mod._LOCAL_AUTH_MAX_QUERY
+        fresh = web_mod.mint_login_code()
+        resp = client.get(web_mod.login_path(fresh, fitting),
+                          follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == fitting
+
+    def test_door_login_url_lands_on_next(self, local_enabled):
+        """`doors.login_url(server, next=…)` opens signed in, on that page."""
+        from power_atlas import doors
+        url = doors.login_url(self._SERVER, next="/acp?session=x")
+        assert url.startswith(self._SERVER + "/local-auth?code=")
+        c = TestClient(app, base_url=self._SERVER, client=_LOOPBACK_PEER)
+        del c.headers["cookie"]
+        resp = c.get(url[len(self._SERVER):], follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/acp?session=x"
+        assert c.get("/api/settings").status_code == 200
+
+
 class TestLoginCodeExchange:
     """`mint_login_code` (in-process) and `GET /local-auth` (D-16, D-21)."""
 
@@ -29781,20 +29933,31 @@ class TestLoopbackDoors:
             clock[0] += 10.5
             pw._handle(("press", "peek", 30000))
             urls.extend(window.reloads)
+            # A same-origin link opened as a new window from the PowerAtlas
+            # window: a login URL that lands on that page (Phase 5,
+            # follow-up 6), through the real `doors.login_url`.
+            shim = peek_mod._NewWindowBrowser(None, self._SERVER,
+                                              pw._same_origin)
+            assert shim.open(self._SERVER + "/acp?session=x") is True
         # Seven openers before Phase 3, plus the browser shortcut, plus the
         # real door's failure branch (final review fix 11), plus the two
         # sign-in reloads (rotation, then the cookie path), plus the failing
         # notification (Phase 5, follow-up 17: one more door branch, 10 -> 11),
         # plus the clipboard failure that quotes its text (Phase 5 batch B:
-        # one more door branch, 11 -> 12).
-        assert len(urls) == 12
+        # one more door branch, 11 -> 12), plus the same-origin new-window
+        # link (follow-up 6: one more door, 12 -> 13).
+        assert len(urls) == 13
         assert len(window.reloads) == 2
+        assert "next=%2Facp%3Fsession%3Dx" in urls[-1]
+        from urllib.parse import parse_qs, urlsplit
+        codes = [parse_qs(urlsplit(u).query)["code"][0] for u in urls]
+        assert all(len(c) == 43 for c in codes)
         records = "\n".join(r.getMessage() for r in caplog.records)
         for text in (caplog.text, records):
             assert "/local-auth" not in text
             assert "code=" not in text
-            for url in urls:
-                assert url.rsplit("=", 1)[1] not in text
+            for code in codes:
+                assert code not in text
 
     @staticmethod
     def _browser_through_worker(pw, window):
