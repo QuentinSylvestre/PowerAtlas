@@ -185,7 +185,12 @@ def _needs_mask(chord_keys) -> bool:
     (Windows' optional Ctrl+Shift layout hotkey fires on a modifier-only
     Ctrl+Shift press and release). A one-modifier chord without alt, such as
     ctrl+f1, leaves a bare Ctrl press and release, which does nothing.
-    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS follow-up 18
+
+    The foreground app sees the mask as an injected key-down and key-up of
+    VK 0xE8 with scan code 0 (`keybd_event`, `LLKHF_INJECTED`): an app or
+    hook that logs or acts on raw input can notice it.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS follow-up 18;
+    the scan code: final fix 6
     """
     mods = set(chord_keys) & _MODIFIER_NAMES
     return "alt" in mods or len(mods) >= 2
