@@ -14154,6 +14154,22 @@ class TestBindSockets:
                          "run_tray, args=(server_url, config)"):
             assert fragment in source, fragment
 
+    def test_create_peek_gets_every_shortcut_setting(self):
+        """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final
+        review fix 7: the whole call, so dropping `config.peek_mode` or
+        `config.browser_hotkey` (both read only here) fails a test."""
+        import ast
+        source =Path(self._main().__file__).read_text(encoding="utf-8")
+        calls = [n for n in ast.walk(ast.parse(source))
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "create_peek"]
+        assert len(calls) == 1
+        (call,) = calls
+        assert not call.keywords
+        assert [ast.unparse(a) for a in call.args] == [
+            "server_url", "config.peek_hotkey", "config.peek_mode",
+            "config.browser_hotkey"]
+
     def test_server_url_comes_from_the_loopback_socket(self):
         """With two sockets, `server.servers[0].sockets[0]` is merely whichever
         bound first. It feeds `create_peek` and `run_tray`."""
@@ -28849,6 +28865,42 @@ class TestLocalSecretRotation:
         # Codes minted before the rotation no longer open anything.
         assert pending not in web_mod._login_codes
 
+    def test_the_window_generation_moves_only_after_the_codes_clear(
+            self, rotation_ready, client, monkeypatch):
+        """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final
+        review fix 16: the PowerAtlas window mints a code as soon as it sees
+        the generation move. Were the bump before the clear, that code would
+        be wiped and the window left on the gate page. So: unchanged when the
+        codes are cleared, one higher once the route returns, and a code
+        minted at the bump still exchanges."""
+        web_mod = rotation_ready
+        before = web_mod.local_secret_generation()
+        seen_at_clear = []
+        window_codes = []
+
+        class _Codes(dict):
+            def clear(inner):
+                seen_at_clear.append(web_mod.local_secret_generation())
+                super().clear()
+
+        monkeypatch.setattr(web_mod, "_login_codes", _Codes())
+        real_bump = web_mod.bump_local_secret_generation
+
+        def bump_then_window_mints():
+            real_bump()
+            window_codes.append(web_mod.mint_login_code())
+
+        monkeypatch.setattr(web_mod, "bump_local_secret_generation",
+                            bump_then_window_mints)
+        resp = client.post("/api/local-secret/rotate",
+                           headers={"Cookie":
+                                    f"pa_local={web_mod.make_local_cookie()}"})
+        assert resp.json()["ok"] is True
+        assert seen_at_clear == [before]
+        assert web_mod.local_secret_generation() == before + 1
+        assert len(window_codes) == 1
+        assert web_mod._consume_login_code(window_codes[0]) is True
+
     def test_caller_without_a_valid_cookie_gets_nothing(self, rotation_ready,
                                                         client):
         """Otherwise the rotate route would be a mint for any local process."""
@@ -29592,10 +29644,24 @@ class TestLoopbackDoors:
         tray_mod, icon = self._tray_menu(monkeypatch)
         peek_mod, pw, window = self._peek(monkeypatch, app_mode=False)
         urls = []
+        real_open_in_browser = tray_mod._open_in_browser
         monkeypatch.setattr(tray_mod, "_open_in_browser", urls.append)
         monkeypatch.setattr(tray_mod.time, "sleep", lambda s: None)
         with caplog.at_level(logging.DEBUG), \
                 caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            # The real browser door meets a failure whose message quotes the
+            # URL: only the type may reach the log.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS
+            # final review fix 11
+            def quoting_failure(url, *args, **kwargs):
+                raise OSError(f"cannot open {url}")
+
+            monkeypatch.setattr(tray_mod.sys, "platform", "win32")
+            monkeypatch.setattr(tray_mod.webbrowser, "open", quoting_failure)
+            door_url = tray_mod._login_url(self._SERVER)
+            real_open_in_browser(door_url)
+            urls.append(door_url)
+            assert "Failed to open browser: OSError" in caplog.text
             # Copy login link: no clipboard, a failed clipboard, a copied one.
             monkeypatch.setattr(tray_mod.sys, "platform", "linux")
             urls.append(tray_mod.copy_login_link(self._SERVER, icon))
@@ -29620,8 +29686,9 @@ class TestLoopbackDoors:
             local_enabled.set_local_secret("Q" * 43)
             pw._handle(("press", "peek", 9000))
             urls.extend(window.reloads)
-        # Seven openers before Phase 3, plus the browser shortcut.
-        assert len(urls) == 8
+        # Seven openers before Phase 3, plus the browser shortcut, plus the
+        # real door's failure branch (final review fix 11).
+        assert len(urls) == 9
         assert len(window.reloads) == 1
         records = "\n".join(r.getMessage() for r in caplog.records)
         for text in (caplog.text, records):
@@ -29687,6 +29754,10 @@ class TestLoopbackDoors:
 
         def reload(self, url):
             self.reloads.append(url)
+            return True
+
+        def read_cookie(self):
+            return None  # unknown: never triggers a re-sign
 
     def _peek(self, monkeypatch, app_mode=True):
         """A ready PowerAtlas window over a recording adapter, signed in
@@ -29790,6 +29861,30 @@ class TestLoopbackDoors:
         pw._handle(("press", "peek", 5000))
         assert len(window.reloads) == 1
         _signs_in_in_one_navigation(window.reloads[0], self._SERVER)
+
+    def test_the_pure_cookie_validator(self, local_enabled, monkeypatch):
+        """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final
+        review fix 2: `local_cookie_value_ok` is `_local_cookie_ok` without
+        the request scope, for the window's own cookie."""
+        import time as _t
+        web_mod = local_enabled
+        good = web_mod.make_local_cookie()
+        subject, stamp, sig = good.split(".")
+        flipped = f"{subject}.{stamp}.{'A' if sig[0] != 'A' else 'B'}{sig[1:]}"
+        expired = web_mod.make_local_cookie(
+            issued_at=int(_t.time()) - web_mod.LOCAL_COOKIE_MAX_AGE_SECONDS - 5)
+        assert web_mod.local_cookie_value_ok(good) is True
+        for bad in (flipped, f"device.{stamp}.{sig}", expired, "", None,
+                    "x" * 161, good + "."):
+            assert web_mod.local_cookie_value_ok(bad) is False, bad
+        # Agrees with the scope check it was lifted from.
+        for value in (good, flipped, expired):
+            assert (web_mod.local_cookie_value_ok(value)
+                    == web_mod._local_cookie_ok(_local_scope(value)))
+        assert web_mod.local_secret_loaded() is True
+        monkeypatch.setattr(web_mod, "_LOCAL_SECRET", "")
+        assert web_mod.local_secret_loaded() is False
+        assert web_mod.local_cookie_value_ok(good) is False
 
     def test_set_local_secret_bumps_the_generation(self, local_enabled):
         """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS

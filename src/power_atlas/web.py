@@ -1930,8 +1930,9 @@ _LOCAL_COOKIE_SUBJECT = "loopback"
 # browser, the browser shortcut, the browser fallbacks) mints a fresh code, and
 # so a fresh cookie, on every open, so the ceiling bounds only a browser nobody
 # has re-entered from PowerAtlas in three months. The PowerAtlas window keeps
-# its cookie across shows and signs in again only at creation and after a
-# local-secret rotation.
+# its cookie across shows and signs in again only at creation and when it
+# finds itself signed out (a local-secret rotation, or a missing or invalid
+# cookie, checked at most every 10 s).
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4;
 # door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
 LOCAL_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 3600
@@ -1952,19 +1953,36 @@ def local_secret_generation() -> int:
     return _local_secret_generation
 
 
-def set_local_secret(secret: str) -> None:
+def set_local_secret(secret: str, *, bump_generation: bool = True) -> None:
     """Load the local secret, mirroring `set_remote_secret`.
 
     ``""`` restores the fail-closed state. A value shorter than
     ``REMOTE_SECRET_MIN_LEN`` is refused rather than trusted.
+
+    ``bump_generation=False`` is for the rotate route, which bumps it itself
+    once the old login codes are cleared (`bump_local_secret_generation`).
     """
-    global _LOCAL_SECRET, _local_secret_generation
+    global _LOCAL_SECRET
     value = (secret or "").strip()
     if value and len(value) < REMOTE_SECRET_MIN_LEN:
         log.error("local secret is shorter than %d characters; no loopback "
                   "cookie will verify", REMOTE_SECRET_MIN_LEN)
         value = ""
     _LOCAL_SECRET = value
+    if bump_generation:
+        bump_local_secret_generation()
+
+
+def bump_local_secret_generation() -> None:
+    """Tell the PowerAtlas window its cookie's key changed (D-13).
+
+    A rotation calls it only after clearing the outstanding login codes: the
+    window reacts to the bump by minting a code, and a code minted before the
+    clear would be wiped with the old ones, leaving the window on the gate
+    page with nothing to retry.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (16)
+    """
+    global _local_secret_generation
     _local_secret_generation += 1
 
 
@@ -1988,11 +2006,31 @@ def _local_cookie_ok(scope) -> bool:
     bytes. The wall-clock stamp and its future-skew bound are inherited from the
     device cookie on purpose (R-18): a skewed clock costs one fresh mint.
     """
+    return local_cookie_value_ok(_scope_cookie(scope, _LOCAL_COOKIE_NAME))
+
+
+def local_secret_loaded() -> bool:
+    """Whether a local secret is in effect, so a login code can be minted.
+
+    The PowerAtlas window asks before re-signing: with no secret a re-sign
+    mints nothing and only reloads the gate page.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (2)
+    """
+    return bool(_LOCAL_SECRET)
+
+
+def local_cookie_value_ok(raw) -> bool:
+    """Whether ``raw`` is a valid, unexpired `pa_local` value under the
+    current local key. `_local_cookie_ok`'s rules, without the request scope.
+
+    Pure, never raises, never logs: the PowerAtlas window passes the value it
+    read from its own cookie jar (a live credential).
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (2)
+    """
     secret = _LOCAL_SECRET
     if not secret or len(secret) < REMOTE_SECRET_MIN_LEN:
         return False
-    raw = _scope_cookie(scope, _LOCAL_COOKIE_NAME)
-    if not raw or len(raw) > 160:
+    if not isinstance(raw, str) or not raw or len(raw) > 160:
         return False
     subject, sep_a, rest = raw.partition(".")
     issued_at, sep_b, sig = rest.partition(".")
@@ -2045,8 +2083,8 @@ _LOGIN_CODE_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _LOGIN_CODE_TTL_SECONDS = 120.0
 # A code is minted by tray Open in browser, tray Open PowerAtlas when it falls
 # back to the browser, the browser shortcut, the double-tap's browser fallback
-# off Windows, the PowerAtlas window at creation and after a local-secret
-# rotation, and "Copy login link"; 64 outstanding codes is far past any real
+# off Windows, the PowerAtlas window at creation and when it is signed out,
+# and "Copy login link"; 64 outstanding codes is far past any real
 # use, and past it the oldest is evicted rather than the store growing.
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4;
 # door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
@@ -2078,8 +2116,8 @@ def mint_login_code() -> str:
     Every door calls this, through `login_url`, and appends ``?code=`` to
     `_LOCAL_AUTH_PATH`: tray Open in browser, tray Open PowerAtlas when it falls
     back to the browser, the browser shortcut, the double-tap's browser
-    fallback off Windows, the PowerAtlas window at creation and after a
-    local-secret rotation, and "Copy login link". Returns ``""`` when there is
+    fallback off Windows, the PowerAtlas window at creation and when it is
+    signed out, and "Copy login link". Returns ``""`` when there is
     no local secret, because a code would exchange for a cookie that verifies
     nowhere.
     door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
@@ -2602,8 +2640,8 @@ def login_url(server_url: str) -> str:
     The one builder every door uses — tray Open in browser, tray Open
     PowerAtlas when it falls back to the browser, the browser shortcut, the
     double-tap's browser fallback off Windows, "Copy login link", and the
-    PowerAtlas window at creation and after a local-secret rotation (not on
-    every show: the window keeps its page) — so none of them assembles the
+    PowerAtlas window at creation and when it is signed out (not on every
+    show: the window keeps its page) — so none of them assembles the
     path by hand. ``server_url`` is built by `__main__` from `LOOPBACK_HOST`.
     With no local secret there is no code to mint; the bare URL is returned
     and the gate's page tells the user why.
@@ -6056,7 +6094,7 @@ async def save_setting(request: Request):
         # would otherwise only surface as a startup warning and a silent Hold.
         # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
         value = value.strip().lower()
-        if value not in ("hold", "toggle"):
+        if value not in hotkeys.PEEK_MODES:
             return {"ok": False, "error": "Peek mode must be hold or toggle"}
     if key in ("peek_hotkey", "browser_hotkey"):
         # Format and conflict checks before the value is persisted; before
@@ -6199,7 +6237,10 @@ async def api_local_secret_rotate(request: Request, response: Response,
         return {"ok": False,
                 "error": f"Could not write {local_secret_status()['path']}; "
                          "the previous local secret is still in effect"}
-    set_local_secret(secret)
+    # The generation is bumped only after the clear below: the PowerAtlas
+    # window mints a code when it sees the bump, and that code must survive.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (16)
+    set_local_secret(secret, bump_generation=False)
     # Codes minted under the old secret would otherwise still exchange for a
     # cookie; clearing them makes "rotate" mean every old way in is closed.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
@@ -6212,6 +6253,7 @@ async def api_local_secret_rotate(request: Request, response: Response,
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
     with _login_codes_lock:
         _login_codes.clear()
+    bump_local_secret_generation()
     reissued = _set_local_cookie(response)
     # Open sockets outlive the key they were admitted under; close them.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F3)

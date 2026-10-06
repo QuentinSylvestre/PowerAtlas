@@ -41,20 +41,18 @@ def _stop_window() -> None:
 
 
 def _app_mode_possible() -> bool:
-    """Static facts only: Windows, a window registered, peek importable.
+    """Static facts only: Windows and a window registered.
 
     Decides whether **Open in browser** is listed. pystray on Windows builds
     the menu once at setup, before the window is ready, so readiness cannot
-    decide visibility; it decides routing at click time instead.
-    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
+    decide visibility; it decides routing at click time instead. A window is
+    registered only when `create_peek` built one, which needs peek's
+    dependencies, so asking `peek.is_available()` here added nothing but the
+    tray-to-peek import D-15 avoids.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1;
+    import dropped: final review (21)
     """
-    if sys.platform != "win32" or _window_controller is None:
-        return False
-    try:
-        from . import peek
-        return peek.is_available()
-    except Exception:
-        return False
+    return sys.platform == "win32" and _window_controller is not None
 
 
 def _app_mode_available() -> bool:
@@ -96,8 +94,8 @@ def _login_url(server_url: str) -> str:
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5
 
     The one door helper: `peek` imports this function for the window at
-    creation, its sign-in after a rotation and its browser fallback, rather
-    than keeping a copy of it.
+    creation, its sign-in when it is signed out (a rotation, or a missing or
+    invalid cookie) and its browser fallback, rather than keeping a copy of it.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11);
     door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
     """
@@ -114,7 +112,10 @@ def _open_in_browser(url: str) -> None:
             _sp.Popen(["xdg-open", url],
                       stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
     except Exception as e:
-        log.error("Failed to open browser: %s", e)
+        # The type only: `url` carries a live login code, and an exception's
+        # message can quote it.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (11)
+        log.error("Failed to open browser: %s", type(e).__name__)
 
 
 # `OpenClipboard` fails while another process holds the clipboard, which

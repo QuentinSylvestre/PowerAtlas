@@ -136,3 +136,16 @@ def test_quit_and_restart_stop_the_window_once_each(monkeypatch):
     assert _Stoppable.stops == 2 and _Icon.stopped == 2
     assert tray_mod.restart_requested() is True
     assert tray_mod.get_shutdown_event().is_set()
+
+
+def test_open_in_browser_visibility_does_not_import_peek(monkeypatch):
+    """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final
+    review fix 21: a registered window is all it takes (one exists only when
+    peek's dependencies loaded), so the tray never imports `peek` here (the
+    import D-15 avoids). With `peek` unimportable it is still listed."""
+    import sys
+    _, items = _menu(monkeypatch, _Controller(ready=False))
+    import power_atlas
+    monkeypatch.setitem(sys.modules, "power_atlas.peek", None)
+    monkeypatch.delattr(power_atlas, "peek", raising=False)
+    assert _visible(items[1]) is True

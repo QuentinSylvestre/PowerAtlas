@@ -87,8 +87,9 @@ one of its doors:
 - the tray's **Open in browser** item, and **Open PowerAtlas** where it opens the browser;
 - a double-tap of the peek hotkey, where it opens the browser;
 - the browser shortcut, when one is set;
-- the PowerAtlas window, whose built-in browser is signed in when it is created and again after the
-  local secret is rotated.
+- the PowerAtlas window, whose built-in browser is signed in when it is created, and again when it
+  is shown after the local secret was rotated or when it finds itself signed out (it checks its own
+  cookie at most every 10 seconds).
 
 Each door puts a fresh **login code** in the URL it opens. The browser exchanges that code once for a
 cookie, `pa_local`, and lands on the dashboard. The code works exactly once and expires after 120
@@ -259,8 +260,7 @@ browser_hotkey = ""  # "" = off (the default), or a shortcut in the same format 
                      # the other). Read at startup.
 peek_mode = "hold"  # "hold": shown while the hotkey is held; "toggle": a press shows it, the next
                     # press hides it. A double-tap opens the app window either way (the browser off
-                    # Windows). Read at startup; an unknown value falls back to "hold" with a
-                    # warning in the log.
+                    # Windows). Read at startup; any other value is read as "hold".
 default_directory = ""  # Global fallback directory for provider launches without workspace selection
 pinned_folders = []
 pinned_sessions = []

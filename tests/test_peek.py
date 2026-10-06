@@ -589,6 +589,11 @@ class _FakeAdapter:
         self.fg = fg
         self.live = _Placement("live-0")
         self.default = _Placement("default")
+        # What `read_cookie` answers: None (unknown) unless a test sets it.
+        # Reads are counted apart from `calls`, which tests compare whole.
+        self.cookie = None
+        self.cookie_reads = 0
+        self.reload_ok = True
 
     def foreground(self):
         self.calls.append(("foreground",))
@@ -634,6 +639,11 @@ class _FakeAdapter:
 
     def reload(self, url):
         self.calls.append(("reload", url))
+        return self.reload_ok
+
+    def read_cookie(self):
+        self.cookie_reads += 1
+        return self.cookie
 
     def names(self):
         return [c[0] for c in self.calls]
@@ -830,10 +840,16 @@ class TestWindowStateMachine:
         pw._handle(("user_close",))
         assert pw._state == peek_mod.APP
 
-    def test_user_close_while_hidden_does_nothing(self, monkeypatch):
+    def test_user_close_while_hidden_hides(self, monkeypatch):
+        """Final review fix 13 (was "does nothing"): a window shown late,
+        after an app show's wait timed out, is visible while the state says
+        HIDDEN. A user close hides it in every state."""
+        import power_atlas.peek as peek_mod
         pw, a = self._peek(monkeypatch)
         pw._handle(("user_close",))
-        assert a.calls == []
+        assert a.window_calls() == [("hide",)]
+        assert pw._state == peek_mod.HIDDEN
+        assert pw._peek_showing is False
 
     def test_x_after_a_resize_restores_the_newer_placement(self, monkeypatch):
         pw, a = self._peek(monkeypatch)
@@ -1757,7 +1773,9 @@ class TestResetOverlaysAndBrowserErrors:
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
 
         def no_browser(url):
-            raise RuntimeError("no default browser")
+            # The message quotes the URL, as a real failure may (final
+            # review fix 11): only the type may reach the log.
+            raise RuntimeError("no default browser for " + url)
 
         monkeypatch.setattr(peek_mod._tray, "_open_in_browser", no_browser)
         with caplog.at_level(logging.WARNING, logger="power_atlas"):
@@ -2547,7 +2565,9 @@ class TestTwoChordFilter:
         import power_atlas.peek as peek_mod
         pw = self._peek(monkeypatch, ("ctrl", "alt"))
         assert self._feed(pw, peek_mod._WM_KEYDOWN, "b", t=500)
-        assert _drain(pw) == [("browser",)]
+        # The event carries its tick for the worker's rate limit (final
+        # review fix 12).
+        assert _drain(pw) == [("browser", 500)]
         assert pw._triggered == {"peek": False, "browser": True}
         # Auto-repeat: suppressed, no event.
         assert self._feed(pw, peek_mod._WM_KEYDOWN, "b", t=530)
@@ -2556,7 +2576,7 @@ class TestTwoChordFilter:
         assert self._feed(pw, peek_mod._WM_KEYUP, "b")
         assert pw._triggered == {"peek": False, "browser": False}
         assert self._feed(pw, peek_mod._WM_KEYDOWN, "b", t=900)
-        assert _drain(pw) == [("browser",)]
+        assert _drain(pw) == [("browser", 900)]
         assert pw._adapter.calls == [], "the hook never touches the window"
 
     def test_the_larger_chord_wins(self, monkeypatch):
@@ -2566,7 +2586,7 @@ class TestTwoChordFilter:
         pw = self._peek(monkeypatch, ("ctrl", "shift", "alt"),
                         peek="alt+z", browser="ctrl+shift+z")
         assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=10)
-        assert _drain(pw) == [("browser",)]
+        assert _drain(pw) == [("browser", 10)]
         assert pw._triggered["peek"] is False
 
     def test_the_larger_chord_wins_the_other_way(self, monkeypatch):
@@ -2589,7 +2609,7 @@ class TestTwoChordFilter:
         pw = self._peek(monkeypatch, ("ctrl", "alt"),
                         peek="ctrl+shift+z", browser="ctrl+alt+z")
         assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=10)
-        assert _drain(pw) == [("browser",)]
+        assert _drain(pw) == [("browser", 10)]
 
     def _release(self, pw, name):
         pw._on_release(_make_key(name=name))
@@ -2638,7 +2658,7 @@ class TestTwoChordFilter:
         assert pw._triggered == {"peek": False, "browser": False}
         assert pw._chord_down == {}
         assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=900)
-        assert _drain(pw) == [("browser",)]
+        assert _drain(pw) == [("browser", 900)]
         assert self._feed(pw, peek_mod._WM_KEYUP, "z")
         self._release(pw, "alt_l")
         self._press_mod(pw, "shift_l")
@@ -2662,20 +2682,27 @@ class TestTwoChordFilter:
         """Phase 3 review fix 1: if a chord key's key-up never reaches the
         hook (it went up on the secure desktop), a key-down after a gap no
         auto-repeat leaves is a new press, not a repeat: plain Z reaches the
-        app, and the chord fires again."""
+        app, and the chord fires again. The gap is 3000 ms since final
+        review fix 15 (Filter Keys repeat delays reach about 2 s; it was
+        1500, which those delays crossed), so both sides of 3000 are fed."""
         import power_atlas.peek as peek_mod
         pw = self._peek(monkeypatch, ("ctrl", "shift"))
         assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=100)
-        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=100 + 1500)
-        _drain(pw)
+        assert _drain(pw) == [("press", "peek", 100)]
+        # A 2 s Filter Keys delay, then exactly 3000: still repeats, so
+        # suppressed and never a second press.
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=100 + 2000)
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=100 + 2000 + 3000)
+        assert _drain(pw) == []
         # Key-up lost; modifiers lost too.
         pw._pressed_keys.clear()
-        assert not self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=100 + 1500 + 1501)
+        assert not self._feed(pw, peek_mod._WM_KEYDOWN, "z",
+                              t=100 + 2000 + 3000 + 3001)
         assert not self._feed(pw, peek_mod._WM_KEYUP, "z")
         assert _drain(pw) == []
         pw._pressed_keys.update(("ctrl", "shift"))
-        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=9000)
-        assert _drain(pw) == [("press", "peek", 9000)]
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=20000)
+        assert _drain(pw) == [("press", "peek", 20000)]
 
     def test_the_repeat_gap_wraps_with_the_tick(self, monkeypatch):
         """The gap is measured modulo 2**32 ms, like the double-tap."""
@@ -2689,8 +2716,10 @@ class TestTwoChordFilter:
         assert _drain(pw) == []
         # Across the wrap with a gap past the limit: a new press (Shift is up,
         # so Z alone passes). Unmasked, the gap would be negative: a repeat.
+        # 0x1100 ms = 4352, past the 3000 ms limit of final review fix 15
+        # (the old 0x900 = 2304 was past only the old 1500).
         pw._chord_down["z"] = ("peek", 0xFFFFFF00)
-        assert not self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=0x800)
+        assert not self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=0x1000)
 
     def test_no_browser_chord_lets_its_keys_through(self, monkeypatch):
         import power_atlas.peek as peek_mod
@@ -2714,14 +2743,14 @@ class TestTwoChordPortable:
         for k in (_make_key(name="ctrl_l"), _make_key(name="alt_l"),
                   _make_key(char="b"), _make_key(char="b")):
             pw._on_press(k)
-        assert _drain(pw) == [("browser",)]
+        assert [e[0] for e in _drain(pw)] == ["browser"]
 
     def test_the_larger_chord_wins(self, monkeypatch):
         pw = self._peek(monkeypatch, peek="alt+z", browser="ctrl+shift+z")
         for k in (_make_key(name="ctrl_l"), _make_key(name="shift_l"),
                   _make_key(name="alt_l"), _make_key(char="z")):
             pw._on_press(k)
-        assert _drain(pw) == [("browser",)]
+        assert [e[0] for e in _drain(pw)] == ["browser"]
 
     def test_a_browser_press_never_arms_release(self, monkeypatch):
         """Ctrl is a modifier of both chords; releasing it after a browser
@@ -2731,7 +2760,7 @@ class TestTwoChordPortable:
         for k in (_make_key(name="ctrl_l"), _make_key(name="alt_l"),
                   _make_key(char="b")):
             pw._on_press(k)
-        assert _drain(pw) == [("browser",)]
+        assert [e[0] for e in _drain(pw)] == ["browser"]
         pw._on_release(_make_key(char="b"))
         pw._on_release(_make_key(name="ctrl_l"))
         assert _drain(pw) == []
@@ -2817,7 +2846,7 @@ class TestBrowserEvent:
         """Only the worker loops open the browser; `_handle` has no branch for
         it (it was unreachable)."""
         peek_mod, pw, a, opened = self._peek(monkeypatch)
-        pw._handle(("browser",))
+        pw._handle(("browser", 0))
         assert opened == []
 
     def test_honoured_before_and_without_readiness(self, monkeypatch):
@@ -2830,8 +2859,9 @@ class TestBrowserEvent:
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
         monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
         monkeypatch.setattr(pw, "_establish_ready", lambda: None)
-        for ev in (("browser",), ("press", "peek", 1), ("show_app",),
-                   ("browser",), ("stop",)):
+        # Ticks 1000 ms apart: past the 500 ms rate limit (final review 12).
+        for ev in (("browser", 0), ("press", "peek", 1), ("show_app",),
+                   ("browser", 1000), ("stop",)):
             pw._events.put(ev)
         t = threading.Thread(target=pw._window_worker, daemon=True)
         t.start()
@@ -2961,3 +2991,695 @@ class TestCreatePeekBrowserShortcut:
         pw = peek_mod.create_peek("http://x", "ctrl+shift+z", "hold",
                                   "ctrl+shift+z")
         assert pw._chords["browser"] is None
+
+
+# ---- 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review
+
+def _ready_peek(monkeypatch, fg=OTHER_APP, **kw):
+    """A ready window over `_FakeAdapter`, signed in under the current
+    generation."""
+    import power_atlas.peek as peek_mod
+    from power_atlas import web as web_mod
+    monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+    pw = peek_mod.PeekWindow("http://127.0.0.1:4915", "ctrl+shift+z", **kw)
+    pw._adapter = _FakeAdapter(fg=fg)
+    pw._ready.set()
+    pw._signed_gen = web_mod.local_secret_generation()
+    return pw, pw._adapter
+
+
+class TestStopOnEveryPath:
+    """Final review fix 1: `stop()` arms the exit watchdog whenever
+    `webview.start()` has not returned, not only after a hung destroy. A
+    destroy that returns at once (pywebview has no form yet, so it never ends
+    `start()`), one that raises, and no window at all each leave `start()`
+    blocking the main thread unless the watchdog runs the shutdown tail."""
+
+    def _stop(self, monkeypatch, window):
+        import threading
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_DESTROY_TIMEOUT", 0.05)
+        monkeypatch.setattr(peek_mod, "_EXIT_WATCHDOG", 0.05)
+        pw = _new_peek(monkeypatch)
+        pw._window = window
+        tail = threading.Event()
+        pw.shutdown_tail = tail.set
+        pw.stop()
+        return pw, tail
+
+    def test_a_prompt_destroy_without_start_returning_runs_the_tail(
+            self, monkeypatch):
+        win = MagicMock()
+        win.native = None
+        pw, tail = self._stop(monkeypatch, win)
+        win.destroy.assert_called_once()
+        assert tail.wait(5), "start() never returns, so the tail must run"
+
+    def test_a_raising_destroy_runs_the_tail(self, monkeypatch):
+        win = MagicMock()
+        win.native = None
+        win.destroy.side_effect = RuntimeError("no instance")
+        pw, tail = self._stop(monkeypatch, win)
+        assert tail.wait(5)
+
+    def test_no_window_yet_runs_the_tail(self, monkeypatch):
+        pw, tail = self._stop(monkeypatch, None)
+        assert tail.wait(5)
+
+    def test_a_healthy_stop_runs_no_tail(self, monkeypatch):
+        """The destroy ends the UI loop: `start()` returns, the watchdog
+        stands down and the main thread runs the tail itself."""
+        import threading
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_EXIT_WATCHDOG", 0.3)
+        pw = _new_peek(monkeypatch)
+        win = MagicMock()
+        win.native = None
+        win.destroy.side_effect = lambda: pw._start_returned.set()
+        pw._window = win
+        tail = threading.Event()
+        pw.shutdown_tail = tail.set
+        pw.stop()
+        assert not tail.wait(0.8)
+
+    def test_a_stop_before_creation_starts_nothing(self, monkeypatch):
+        """`stop()` first: `_run_webview` creates no window and never enters
+        `webview.start()`, so the main thread goes straight to its tail."""
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_EXIT_WATCHDOG", 0.05)
+        pw = _new_peek(monkeypatch)
+        pw.stop()
+        fake = MagicMock()
+        monkeypatch.setattr(peek_mod, "webview", fake, raising=False)
+        pw._run_webview()
+        fake.create_window.assert_not_called()
+        fake.start.assert_not_called()
+        assert pw._start_returned.is_set()
+
+    def test_a_stop_between_creation_and_start_skips_start(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw = _new_peek(monkeypatch)
+        fake = MagicMock()
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+
+        def create(*a, **kw):
+            pw._stopping = True  # `stop()` lands right here
+            return MagicMock()
+
+        fake.create_window.side_effect = create
+        monkeypatch.setattr(peek_mod, "webview", fake, raising=False)
+        pw._run_webview()
+        fake.start.assert_not_called()
+        assert pw._start_returned.is_set()
+
+
+class TestSignInCookieCheck:
+    """Final review fix 2: before a show the window reads its own `pa_local`
+    cookie, at most every 10 s, and re-signs when it is missing or invalid.
+    It never reloads a window whose cookie is valid or unreadable, nor when
+    no local secret is loaded (a re-sign could not fix that)."""
+
+    SECRET = "S" * 43
+
+    def _peek(self, monkeypatch, cookie, secret=SECRET):
+        import power_atlas.peek as peek_mod
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_LOCAL_SECRET", secret)
+        pw, a = _ready_peek(monkeypatch)
+        a.cookie = cookie
+        clock = [1000.0]
+        monkeypatch.setattr(peek_mod, "_now", lambda: clock[0])
+        minted = []
+
+        def fake_login_url(u):
+            minted.append(u)
+            return f"{u}/signed/{len(minted)}"
+
+        monkeypatch.setattr(peek_mod, "_login_url", fake_login_url)
+        return peek_mod, web_mod, pw, a, clock
+
+    @staticmethod
+    def _reloads(a):
+        return [c for c in a.calls if c[0] == "reload"]
+
+    def test_a_missing_cookie_re_signs_before_the_show(self, monkeypatch):
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, "")
+        pw._handle(("press", "peek", 1000))
+        assert self._reloads(a) == [("reload", "http://127.0.0.1:4915/signed/1")]
+        assert a.names().index("reload") < a.names().index("show_peek")
+
+    def test_a_valid_cookie_is_never_reloaded(self, monkeypatch):
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, None)
+        a.cookie = web_mod.make_local_cookie()
+        pw._handle(("press", "peek", 1000))
+        pw._handle(("release",))
+        clock[0] += 60
+        pw._handle(("show_app",))
+        assert a.cookie_reads == 2
+        assert self._reloads(a) == []
+
+    @pytest.mark.parametrize("damage", ["signature", "subject", "expired"])
+    def test_an_invalid_cookie_re_signs(self, monkeypatch, damage):
+        import time as _t
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, None)
+        good = web_mod.make_local_cookie()
+        subject, stamp, sig = good.split(".")
+        if damage == "signature":
+            bad = f"{subject}.{stamp}.{'A' if sig[0] != 'A' else 'B'}{sig[1:]}"
+        elif damage == "subject":
+            bad = f"device.{stamp}.{sig}"
+        else:
+            old = int(_t.time()) - web_mod.LOCAL_COOKIE_MAX_AGE_SECONDS - 60
+            bad = web_mod.make_local_cookie(issued_at=old)
+        assert bad != good
+        a.cookie = bad
+        pw._handle(("show_app",))
+        assert len(self._reloads(a)) == 1
+
+    def test_a_cookie_signed_under_another_key_re_signs(self, monkeypatch):
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, None)
+        monkeypatch.setattr(web_mod, "_LOCAL_SECRET", "T" * 43)
+        a.cookie = web_mod.make_local_cookie()
+        monkeypatch.setattr(web_mod, "_LOCAL_SECRET", self.SECRET)
+        pw._handle(("press", "peek", 1000))
+        assert len(self._reloads(a)) == 1
+
+    def test_an_unreadable_cookie_is_left_alone(self, monkeypatch):
+        """None: the page is still loading or the UI thread is busy."""
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, None)
+        pw._handle(("press", "peek", 1000))
+        assert a.cookie_reads == 1
+        assert self._reloads(a) == []
+
+    def test_without_a_local_secret_nothing_is_read_or_reloaded(
+            self, monkeypatch):
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, "", secret="")
+        pw._handle(("press", "peek", 1000))
+        assert a.cookie_reads == 0
+        assert self._reloads(a) == []
+
+    def test_the_check_runs_at_most_every_ten_seconds(self, monkeypatch):
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, "")
+        pw._handle(("press", "peek", 1000))
+        pw._handle(("release",))
+        assert len(self._reloads(a)) == 1
+        clock[0] += 9.999  # still inside the interval
+        pw._handle(("press", "peek", 20000))
+        pw._handle(("release",))
+        assert a.cookie_reads == 1 and len(self._reloads(a)) == 1
+        clock[0] += 0.001  # exactly 10 s after the first check
+        pw._handle(("press", "peek", 40000))
+        assert a.cookie_reads == 2 and len(self._reloads(a)) == 2
+
+    def test_a_hide_does_not_check(self, monkeypatch):
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, "")
+        pw._handle(("press", "peek", 1000))
+        clock[0] += 60
+        a.calls.clear()
+        pw._handle(("release",))
+        assert self._reloads(a) == []
+
+    def test_a_rotation_reload_comes_first_and_resets_the_interval(
+            self, monkeypatch):
+        """D-13's reload is not rate-limited, and the cookie is not read
+        right after it (the new page is still loading)."""
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, "")
+        pw._signed_gen = -1
+        pw._handle(("press", "peek", 1000))
+        assert len(self._reloads(a)) == 1
+        assert a.cookie_reads == 0
+
+
+class TestSignInReloadResult:
+    """Final review fix 16: `_signed_gen` advances only when the reload is
+    known to have run. A timed-out reload (False) is retried on the next
+    show."""
+
+    def test_a_timed_out_reload_is_retried(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        from power_atlas import web as web_mod
+        pw, a = _ready_peek(monkeypatch)
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        gen = web_mod.local_secret_generation()
+        pw._signed_gen = gen - 1
+        a.reload_ok = False
+        pw._handle(("press", "peek", 1000))
+        pw._handle(("release",))
+        assert pw._signed_gen == gen - 1
+        a.reload_ok = True
+        pw._handle(("press", "peek", 9000))
+        pw._handle(("release",))
+        assert pw._signed_gen == gen
+        pw._handle(("press", "peek", 20000))
+        assert [c[0] for c in a.calls].count("reload") == 2
+
+    def test_win32_reload_reports_a_timeout(self, monkeypatch):
+        import threading
+        import types
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_UI_TIMEOUT", 0.05)
+        release = threading.Event()
+        try:
+            hung = peek_mod._Win32Window(
+                None, types.SimpleNamespace(load_url=lambda u: release.wait(5)))
+            assert hung.reload("http://x/signed") is False
+        finally:
+            release.set()
+        ok = peek_mod._Win32Window(
+            None, types.SimpleNamespace(load_url=lambda u: None))
+        assert ok.reload("http://x/signed") is True
+
+
+class TestCookieReader:
+    """`read_cookie`, shared by both adapters: bounded, off the worker,
+    never waiting on an unloaded page, never logging the value."""
+
+    VALUE = "loopback.1700000000.SECRETSIG"
+
+    def _win(self, loaded=True, cookies=None, get=None):
+        import threading
+        import types
+        from http.cookies import SimpleCookie
+        ev = threading.Event()
+        if loaded:
+            ev.set()
+        win = types.SimpleNamespace(events=types.SimpleNamespace(loaded=ev))
+        calls = []
+
+        def get_cookies():
+            calls.append(1)
+            if get is not None:
+                return get()
+            out = []
+            for name, value in (cookies or {}).items():
+                c = SimpleCookie()
+                c[name] = value
+                c[name]["httponly"] = True
+                out.append(c)
+            return out
+
+        win.get_cookies = get_cookies
+        return win, calls
+
+    @pytest.mark.parametrize("cls", ["_Win32Window", "_PortableWindow"])
+    def test_reads_the_pa_local_value(self, cls, caplog):
+        import power_atlas.peek as peek_mod
+        win, calls = self._win(cookies={"other": "x", "pa_local": self.VALUE})
+        a = getattr(peek_mod, cls)(None, win)
+        with caplog.at_level(logging.DEBUG):
+            assert a.read_cookie() == self.VALUE
+        assert "SECRETSIG" not in caplog.text
+
+    def test_no_pa_local_is_empty(self):
+        import power_atlas.peek as peek_mod
+        win, calls = self._win(cookies={"other": "x"})
+        assert peek_mod._Win32Window(None, win).read_cookie() == ""
+
+    def test_an_unloaded_page_is_not_asked(self):
+        import power_atlas.peek as peek_mod
+        win, calls = self._win(loaded=False, cookies={"pa_local": self.VALUE})
+        assert peek_mod._Win32Window(None, win).read_cookie() is None
+        assert calls == []
+
+    def test_a_raising_read_is_unknown_and_logs_the_type_only(self, caplog):
+        import power_atlas.peek as peek_mod
+
+        def broken():
+            raise RuntimeError("cookie " + self.VALUE)
+
+        win, calls = self._win(get=broken)
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            assert peek_mod._Win32Window(None, win).read_cookie() is None
+        assert "RuntimeError" in caplog.text
+        assert "SECRETSIG" not in caplog.text
+
+    def test_a_hung_read_is_bounded_and_not_doubled(self, monkeypatch, caplog):
+        import threading
+        import time as _t
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_UI_TIMEOUT", 0.1)
+        release = threading.Event()
+        win, calls = self._win(get=lambda: release.wait(5) and [])
+        a = peek_mod._Win32Window(None, win)
+        try:
+            t0 = _t.monotonic()
+            with caplog.at_level(logging.WARNING, logger="power_atlas"):
+                assert a.read_cookie() is None
+            assert _t.monotonic() - t0 < 2
+            assert "did not read the window's cookies" in caplog.text
+            # The first read is still stuck: no second thread.
+            assert a.read_cookie() is None
+            assert len(calls) == 1
+        finally:
+            release.set()
+
+
+class TestPeekChordOffWhenNotReady:
+    """Final review fix 3: when readiness fails nothing would act on the
+    peek chord, so the filter stops suppressing it (the keystroke reaches
+    the user's app), a WARNING says the peek shortcut is off, and the
+    browser chord keeps working."""
+
+    _VK = {"z": 0x5A, "b": 0x42}
+
+    def _feed(self, pw, msg, key, t=0):
+        try:
+            pw._win32_event_filter(msg, _KbData(self._VK[key], t))
+        except _Suppress:
+            return True
+        return False
+
+    def _run_worker(self, pw):
+        import threading
+        t = threading.Thread(target=pw._window_worker, daemon=True)
+        t.start()
+        return t
+
+    def test_failed_readiness_turns_the_peek_chord_off(self, monkeypatch,
+                                                       caplog):
+        import power_atlas.peek as peek_mod
+        pw = _two_chord_peek(monkeypatch)
+        pw._listener = _Listener()
+        monkeypatch.setattr(pw, "_establish_ready", lambda: None)
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            t = self._run_worker(pw)
+            pw._events.put(("stop",))
+            t.join(5)
+        assert not t.is_alive()
+        assert "peek shortcut (ctrl+shift+z) is off" in caplog.text
+        assert "browser shortcut still works" in caplog.text
+        # Ctrl+Shift+Z now reaches the app whole, and posts nothing.
+        pw._pressed_keys.update(("ctrl", "shift"))
+        assert not self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=100)
+        assert not self._feed(pw, peek_mod._WM_KEYUP, "z")
+        assert _drain(pw) == []
+        # The browser chord still fires and is suppressed.
+        pw._pressed_keys.clear()
+        pw._pressed_keys.update(("ctrl", "alt"))
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "b", t=200)
+        assert _drain(pw) == [("browser", 200)]
+
+    def test_portable_peek_chord_is_off_too(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        pw = _two_chord_peek(monkeypatch)
+        pw._peek_chord_off = True
+        for k in (_make_key(name="ctrl_l"), _make_key(name="shift_l"),
+                  _make_key(char="z")):
+            pw._on_press(k)
+        assert _drain(pw) == []
+
+    def test_a_successful_readiness_keeps_it_on(self, monkeypatch, caplog):
+        import power_atlas.peek as peek_mod
+        pw = _two_chord_peek(monkeypatch)
+        a = _FakeAdapter()
+        monkeypatch.setattr(pw, "_establish_ready", lambda: a)
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            t = self._run_worker(pw)
+            assert pw._ready.wait(5)
+            pw._events.put(("stop",))
+            t.join(5)
+        assert pw._peek_chord_off is False
+        assert "is off" not in caplog.text
+        pw._listener = _Listener()
+        pw._pressed_keys.update(("ctrl", "shift"))
+        assert self._feed(pw, peek_mod._WM_KEYDOWN, "z", t=100)
+        assert _drain(pw) == [("press", "peek", 100)]
+
+
+class TestBrowserRateLimit:
+    """Final review fix 12: at most one browser tab (one login code) per
+    500 ms from the browser chord, timed by the hook's tick."""
+
+    def _run(self, monkeypatch, ticks):
+        import threading
+        import power_atlas.peek as peek_mod
+        pw = _two_chord_peek(monkeypatch)
+        opened = []
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(pw, "_establish_ready", lambda: pw._adapter)
+        for t in ticks:
+            pw._events.put(("browser", t))
+        pw._events.put(("stop",))
+        th = threading.Thread(target=pw._window_worker, daemon=True)
+        th.start()
+        th.join(5)
+        assert not th.is_alive()
+        return len(opened)
+
+    def test_both_sides_of_the_boundary(self, monkeypatch, caplog):
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            # 1000 opens; 1200 and 1499 are inside 500 ms of it; 1500 opens;
+            # 1999 is inside 500 ms of 1500; 2000 opens.
+            n = self._run(monkeypatch, [1000, 1200, 1499, 1500, 1999, 2000])
+        assert n == 3
+        assert "dropped a press within 500 ms" in caplog.text
+
+    def test_a_burst_opens_once(self, monkeypatch):
+        assert self._run(monkeypatch, list(range(5000, 5400, 10))) == 1
+
+    def test_the_tick_wrap(self, monkeypatch):
+        # 0xFFFFFF00 then 0x100: 512 ms apart across the wrap, so both open;
+        # unmasked the gap would be negative. 0x10 is 272 ms after: dropped.
+        assert self._run(monkeypatch, [0xFFFFFF00, 0x100]) == 2
+        assert self._run(monkeypatch, [0xFFFFFF00, 0x10]) == 1
+
+
+class TestFocusFailureAfterAppShow:
+    """Final review fix 14: once `apply_app` has put on app chrome, a raising
+    `focus()` must not leave the state PEEK (the filter would then swallow
+    Esc system-wide)."""
+
+    def test_from_a_peek(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a = _ready_peek(monkeypatch)
+        pw._handle(("press", "peek", 1000))
+
+        def broken():
+            raise OSError(5, "Access is denied")
+
+        monkeypatch.setattr(a, "focus", broken)
+        with pytest.raises(OSError):
+            pw._handle(("show_app",))
+        assert (pw._state, pw._return_to) == (peek_mod.APP, None)
+        assert pw._peek_showing is False
+
+
+class TestFailToHiddenResetsOverlays:
+    """Final review fix 17: a failed exit from a peek over HIDDEN still
+    fires `resetOverlays` (D-11: PEEK -> HIDDEN), once, without waiting; a
+    peek over APP keeps its page."""
+
+    def test_a_timed_out_app_show_from_a_peek_resets(self, monkeypatch):
+        pw, a = _ready_peek(monkeypatch)
+        pw._handle(("press", "peek", 1000))
+        a.calls.clear()
+        monkeypatch.setattr(a, "apply_app", lambda p, focused: None)
+        pw._handle(("show_app",))
+        assert a.window_calls() == [("reset_overlays",), ("hide",)]
+
+    def test_a_raising_hide_on_end_peek_resets_once(self, monkeypatch):
+        pw, a = _ready_peek(monkeypatch)
+        pw._handle(("press", "peek", 1000))
+        a.calls.clear()
+        orig_hide = a.hide
+
+        def broken():
+            orig_hide()
+            raise OSError(5, "denied")
+
+        monkeypatch.setattr(a, "hide", broken)
+        with pytest.raises(OSError):
+            pw._handle(("esc",))
+        assert [c[0] for c in a.calls].count("reset_overlays") == 1
+
+    def test_a_failed_return_to_app_does_not_reset(self, monkeypatch):
+        pw, a = _ready_peek(monkeypatch)
+        pw._handle(("show_app",))
+        pw._handle(("press", "peek", 1000))
+        a.calls.clear()
+
+        def broken(placement, focused):
+            raise OSError(1400, "Invalid window handle")
+
+        monkeypatch.setattr(a, "apply_app", broken)
+        with pytest.raises(OSError):
+            pw._handle(("release",))
+        assert ("reset_overlays",) not in a.calls
+
+
+class TestReadinessDeadline:
+    """Final review fix 18: one readiness timeout covers creation and
+    `shown`: time spent waiting for creation is taken off the `shown` wait."""
+
+    def test_the_shown_wait_gets_what_is_left(self, monkeypatch):
+        import threading
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        monkeypatch.setattr(peek_mod, "_READY_TIMEOUT", 1.0)
+        pw = _new_peek(monkeypatch)
+        win = MagicMock()
+        win.events.shown.wait.return_value = True
+        pw._window = win
+        threading.Timer(0.4, pw._window_created.set).start()
+        assert pw._establish_ready() is not None
+        (timeout,), _ = win.events.shown.wait.call_args
+        assert 0 <= timeout <= 0.7
+
+
+class TestHandleKeptOnTheWorker:
+    """Final review fix 4: the chrome switch reads the new HWND on the UI
+    thread and hands it back; only the worker writes `_hwnd`."""
+
+    def _adapter(self, monkeypatch):
+        import threading
+        import types
+        import power_atlas.peek as peek_mod
+        forms = _fake_dotnet(monkeypatch)
+        forms.FormBorderStyle = types.SimpleNamespace(Sizable="sizable",
+                                                      **{"None": "none"})
+        forms.Screen = types.SimpleNamespace(PrimaryScreen=types.SimpleNamespace(
+            Bounds=types.SimpleNamespace(X=0, Y=0, Width=800, Height=600)))
+
+        class U:
+            def __getattr__(self, name):
+                return lambda *a: 0
+
+        monkeypatch.setattr(peek_mod, "_win32", lambda: (U(), None))
+        pw = _new_peek(monkeypatch)
+        pw._hwnd = 0x1111
+        seen = {}
+        worker = threading.current_thread()
+
+        class Native:
+            FormBorderStyle = None
+            Handle = types.SimpleNamespace(ToInt64=lambda: 0x2222)
+
+            def BeginInvoke(self, action):
+                def ui():
+                    action()
+                    seen["hwnd_on_ui"] = pw._hwnd
+                    seen["ui_is_worker"] = threading.current_thread() is worker
+                th = threading.Thread(target=ui)
+                th.start()
+                th.join()
+
+        a = peek_mod._Win32Window(pw, types.SimpleNamespace(native=None))
+        a._native = Native()
+        return pw, a, seen
+
+    def test_show_peek(self, monkeypatch):
+        pw, a, seen = self._adapter(monkeypatch)
+        a.show_peek()
+        # The UI thread switched the chrome but left `_hwnd` alone; the
+        # worker cached the new handle once the callable returned it.
+        assert seen == {"hwnd_on_ui": 0x1111, "ui_is_worker": False}
+        assert pw._hwnd == 0x2222
+
+    def test_a_timed_out_switch_keeps_the_handle(self, monkeypatch):
+        pw, a, seen = self._adapter(monkeypatch)
+        a._ui = lambda fn, what, **kw: None  # the UI thread never answered
+        a.show_peek()
+        assert a.apply_app(None, focused=True) is None
+        assert pw._hwnd == 0x1111
+
+
+class TestAdapterProtocol:
+    """Final review fix 6: one declared adapter interface; both real
+    adapters and the test fake expose every member the worker calls."""
+
+    def test_every_adapter_has_every_member(self):
+        import power_atlas.peek as peek_mod
+        proto = peek_mod._WindowAdapter
+        members = ({n for n in vars(proto) if not n.startswith("_")}
+                   | set(proto.__annotations__))
+        assert {"has_app_mode", "show_peek", "apply_app", "reload",
+                "read_cookie"} <= members
+        for cls in (peek_mod._Win32Window, peek_mod._PortableWindow,
+                    _FakeAdapter):
+            missing = sorted(m for m in members if not hasattr(cls, m))
+            assert missing == [], (cls.__name__, missing)
+
+
+class TestReleaseOfAnotherModifier:
+    """Final review fix 7: only a modifier of the peek chord ends a Hold
+    peek; releasing Alt (not in ctrl+shift+z, but in the browser chord)
+    posts nothing."""
+
+    def test_alt_release_does_not_end_a_hold_peek(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "linux")
+        pw = _two_chord_peek(monkeypatch, peek="ctrl+shift+z",
+                             browser="alt+b")
+        for k in (_make_key(name="alt_l"), _make_key(name="ctrl_l"),
+                  _make_key(name="shift_l"), _make_key(char="z")):
+            pw._on_press(k)
+        assert [e[0] for e in _drain(pw)] == ["press"]
+        assert pw._release_armed is True
+        pw._on_release(_make_key(name="alt_l"))
+        assert _drain(pw) == []
+        pw._on_release(_make_key(name="ctrl_l"))
+        assert _drain(pw) == [("release",)]
+
+
+class TestSupportsAppMode:
+    """Final review fix 8: app mode needs WebView2 (`winforms.is_chromium`)."""
+
+    @pytest.mark.parametrize("chromium", [True, False])
+    def test_follows_is_chromium(self, monkeypatch, chromium):
+        import types
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod.sys, "platform", "win32")
+        winforms = types.ModuleType("webview.platforms.winforms")
+        winforms.is_chromium = chromium
+        platforms = types.ModuleType("webview.platforms")
+        platforms.winforms = winforms
+        monkeypatch.setitem(sys.modules, "webview.platforms", platforms)
+        monkeypatch.setitem(sys.modules, "webview.platforms.winforms", winforms)
+        if "webview" in sys.modules:
+            monkeypatch.setattr(sys.modules["webview"], "platforms", platforms,
+                                raising=False)
+        pw = _new_peek(monkeypatch)
+        pw._ready.set()
+        assert pw.supports_app_mode is chromium
+        pw._ready.clear()
+        assert pw.supports_app_mode is False
+
+
+class TestOneShortcutRule:
+    """Final review fix 5: `create_peek` and `PeekWindow` take the shortcut
+    in force from `hotkeys`, not from a copy of its rule; fix 19: the peek
+    modes are defined once."""
+
+    def test_both_call_the_hotkeys_helpers(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        calls = []
+
+        def eff_browser(browser, peek):
+            calls.append(("browser", browser, peek))
+            return "alt+q"
+
+        def eff_peek(hotkey):
+            calls.append(("peek", hotkey))
+            return "ctrl+shift+y"
+
+        monkeypatch.setattr(peek_mod._hotkeys, "effective_browser_hotkey",
+                            eff_browser)
+        monkeypatch.setattr(peek_mod._hotkeys, "effective_peek_hotkey",
+                            eff_peek)
+        pw = peek_mod.create_peek("http://x", "ctrl+shift+z", "hold",
+                                  "ctrl+alt+b")
+        assert pw._hotkey == "ctrl+shift+y"
+        assert pw._browser_hotkey == "alt+q"
+        assert ("peek", "ctrl+shift+z") in calls
+        assert ("browser", "ctrl+alt+b", "ctrl+shift+y") in calls
+
+    def test_peek_modes_are_defined_once(self):
+        import power_atlas.config as config_mod
+        import power_atlas.hotkeys as hotkeys_mod
+        import power_atlas.peek as peek_mod
+        assert config_mod.PEEK_MODES is hotkeys_mod.PEEK_MODES
+        assert peek_mod._PEEK_MODES is hotkeys_mod.PEEK_MODES
+        assert (peek_mod.HOLD, peek_mod.TOGGLE) == ("hold", "toggle")

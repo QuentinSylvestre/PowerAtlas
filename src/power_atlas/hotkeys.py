@@ -8,6 +8,11 @@ save without loading either.
 
 DEFAULT_PEEK_HOTKEY = "ctrl+shift+z"
 
+# The values `peek_mode` may take, defined once for the config loader, the
+# settings write path and the window. The first is the default.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (19)
+PEEK_MODES = ("hold", "toggle")
+
 MODIFIERS = frozenset({"ctrl", "shift", "alt"})
 
 
@@ -100,8 +105,8 @@ def effective_browser_hotkey(browser: str, peek: str) -> str:
 
     Off when the stored value is empty or invalid, or when it overlaps the
     peek shortcut in force (`effective_peek_hotkey(peek)`). The settings
-    write path uses it; `create_peek` applies the same rule with a warning
-    for each case.
+    write path, `create_peek` and `PeekWindow` all call it; the last two only
+    add a warning when it turns a stored value off.
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 review fix 7
     """
     if not isinstance(browser, str):

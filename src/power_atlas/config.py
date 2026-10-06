@@ -17,6 +17,9 @@ from pathlib import Path
 
 import tomli_w
 
+# Pure, no UI imports. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (19)
+from .hotkeys import PEEK_MODES
+
 log = logging.getLogger(__name__)
 
 
@@ -815,7 +818,7 @@ _read_errors_logged: set[str] = set()
 def _normalize_peek_mode(value) -> str:
     """`peek_mode` as stored on disk -> "hold" or "toggle"; Hold for anything else."""
     mode = value.strip().lower() if isinstance(value, str) else ""
-    return mode if mode in ("hold", "toggle") else "hold"
+    return mode if mode in PEEK_MODES else PEEK_MODES[0]
 
 
 def load_config() -> Config:
