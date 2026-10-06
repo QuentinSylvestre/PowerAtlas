@@ -528,6 +528,14 @@ Phase 5 review fixes and batch B (code `da7ba50`, `278b292`, `213fbf8`, `636413e
 - **Settings notes** describe what the next launch will run (`effective_*` from the stored values), in the future tense while a restart is pending; `browser_active_changed` compares with the previously stored peek shortcut, so a second save before restarting clears the note (accepted as designed).
 - **Browser keys** are re-applied on every page load (a recreated WebView2 core would otherwise lose them).
 
+User-reported blank window (code `4cb0085`, 2026-10-06):
+- **Symptom**: after a restart, the first app show (and a peek from hidden before any app show) was a blank white window although the page had loaded and signed in.
+- **Cause**: the show primitives used `SetWindowPos(... SWP_SHOWWINDOW)`, which sends no `WM_SHOWWINDOW`, so WinForms kept `Visible` False and the WebView2 control never turned its controller visible (pywebview creates the form hidden). The Phase 1 probes checked page state and child rects, not pixels.
+- **Rule now**: a hidden window is positioned with `SetWindowPos` without `SWP_SHOWWINDOW` and shown with `ShowWindow` (`SW_SHOWNA` for the peek and unfocused shows, `SW_SHOW` for a focused app show) or `SetWindowPlacement`. This supersedes the "show peek" and first-use "apply app placement" primitives above. The same fix makes `Form.Activate()` effective again (it is a no-op while `Visible` is False), one cause of "could not take the foreground".
+- **Verification**: a pixel probe (`PrintWindow` with `PW_RENDERFULLCONTENT`) checks the page colour after nine transitions: 2/9 white before, 9/9 painted after.
+
+Flaky test (code `8c848b0`): `TestCodexWriterLock::test_two_threads_with_a_busy_coordination_file_each_stay_inside_one_retry_budget` flagged a sleep while *any* thread held the probe lock; it now flags only the sleeping thread's own hold (product code correct; 0/200 failures after, the original bug reintroduced fails 10/10).
+
 ## Follow-up Work (Deferred)
 
 1. **Terminology proposal for `AGENTS.md`.** Proposed entries: **PowerAtlas window** (the single pywebview window; not "peek window" for the whole, not a separate "app window"), **peek mode** and **app mode** (its two presentations). Needs the user's Save / Skip / Edit; the user was away during planning.
@@ -552,7 +560,7 @@ Phase 5 review fixes and batch B (code `da7ba50`, `278b292`, `213fbf8`, `636413e
 19. **Linux login URL on the `xdg-open` command line** is readable by other local users via `/proc/<pid>/cmdline` within the 120 s code lifetime; outside the same-user threat model. Predates this plan (Phase 5 review, Security).
 20. **Modifiers eaten by another program's hook** (remote desktop, VM, remapper) never set the async key state, so the stale-modifier check may stop a shortcut firing over that app [unverified]; check live with such a window in front (Phase 5 review, Reliability).
 21. **Live checks left from Phase 5** (need an idle desktop, or the user at the keyboard): Ctrl+F and right-click in app mode; an Alt chord over an app with a classic menu bar (the automated control could not run while another app held the foreground); a same-origin link opened from the app window landing signed in on that page.
-22. **Flaky Codex writer-lock test** `tests/test_data.py::TestCodexWriterLock::test_two_threads_with_a_busy_coordination_file_each_stay_inside_one_retry_budget` failed intermittently during this plan's runs; it belongs to the Codex plan's code and was not touched here.
+22. *(Fixed in `8c848b0`.)* **Flaky Codex writer-lock test** `tests/test_data.py::TestCodexWriterLock::test_two_threads_with_a_busy_coordination_file_each_stay_inside_one_retry_budget` failed intermittently during this plan's runs; it belongs to the Codex plan's code and was not touched here.
 ## Review Log
 
 ### 2026-10-06 -- Plan Review cycle 1 (via /qplan)
