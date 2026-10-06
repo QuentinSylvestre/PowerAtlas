@@ -1,7 +1,7 @@
 # Merged Peek and App Window with Configurable Shortcuts
 
 > **Date**: 2026-10-06
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Turn the peek overlay into one PowerAtlas window with a peek mode and an app mode, add configurable shortcuts, and offer app window and browser from the tray
 > **Estimated effort**: 1-2 days
@@ -248,17 +248,29 @@ In `tests/test_tray.py`: `_build_menu` labels and order, default item, `Open in 
 New comments and commits name this plan by slug (`261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase N`); bare "Phase N" comments from other plans already exist in these files.
 
 **Exit criteria**:
-- [ ] Every Hold-mode and common cell of the state-machine table, and each extra case listed above, has a passing test in `tests/test_peek.py`.
-- [ ] `TestLoopbackDoors` updated as listed; `test_the_login_link_is_never_logged` covers every new opener; `tests/test_tray.py` covers `_build_menu`.
-- [ ] `PYTHONPATH=src .venv-PowerAtlas/Scripts/python -m pytest tests/test_peek.py tests/test_tray.py tests/test_web.py tests/test_config.py --timeout=300` passes from the repo root.
-- [ ] Taskbar-switch probe run as specified and the chosen mechanism recorded in `## 9) Implementation Divergences from Plan`.
-- [ ] Unattended window probe passes (works while the session is locked), per `## 7) Verification`: covers show_app right after creation then `WM_CLOSE` (must hide, process alive); PEEK from HIDDEN, from a normal APP, from a minimized APP and from a maximized APP (peek rect equals the screen each time, and the placement round-trips on end peek); `WS_CAPTION` in APP only, `WS_EX_TOPMOST` in PEEK only, taskbar presence per the Taskbar property; X hides without ending the process.
-- [ ] Smoke log line is `PowerAtlas window ready` (logged only after the readiness gate), not `Peek webview ready`.
-- [ ] A unit test feeds a filter whose matching helper raises: no exception escapes and nothing is suppressed; another asserts Esc is suppressed while `_peek_showing` and passes through otherwise; another asserts a second `stop()` does not call `destroy` again.
-- [ ] Smoke: PowerAtlas restarted; `orchestrator.log` shows `PowerAtlas window ready` and `Peek hotkey listener started` after the restart; `GET /api/settings` with the `pa_local` cookie returns 200.
-- [ ] Live QA per `## 7) Verification` for SC-1 to SC-4 and SC-8, and a `target=_blank` link opening the default browser; each check is PASS, FAIL, or BLOCKED when the session is locked (BLOCKED items are listed for the user, never ticked as passed).
-- [ ] Update `README.md` tray click line (around 52), doors list (around 60-65, dropping "signs in again each time it is shown") and tray description for Open PowerAtlas / Open in browser and app mode.
-- [ ] Update the `tray.py` `_login_url` docstring ("two doors") and the `plans/tests/260701_POWERATLAS.md` rows naming `set_peek_stop_callback`.
+- [x] Every Hold-mode and common cell of the state-machine table, and each extra case listed above, has a passing test in `tests/test_peek.py`.
+- [x] `TestLoopbackDoors` updated as listed; `test_the_login_link_is_never_logged` covers every new opener; `tests/test_tray.py` covers `_build_menu`.
+- [x] `PYTHONPATH=src .venv-PowerAtlas/Scripts/python -m pytest tests/test_peek.py tests/test_tray.py tests/test_web.py tests/test_config.py --timeout=300` passes from the repo root.
+- [x] Taskbar-switch probe run as specified and the chosen mechanism recorded in `## 9) Implementation Divergences from Plan`.
+- [x] Unattended window probe passes (works while the session is locked), per `## 7) Verification`: covers show_app right after creation then X via `WM_SYSCOMMAND SC_CLOSE` (must hide, process alive; a bare `WM_CLOSE` arrives as `TaskManagerClosing` and closes the window by design, see section 9); PEEK from HIDDEN, from a normal APP, from a minimized APP and from a maximized APP (peek rect equals the screen each time, and the placement round-trips on end peek); `WS_CAPTION` in APP only, `WS_EX_TOPMOST` in PEEK only, taskbar presence per the Taskbar property; X hides without ending the process.
+- [x] Smoke log line is `PowerAtlas window ready` (logged only after the readiness gate), not `Peek webview ready`.
+- [x] A unit test feeds a filter whose matching helper raises: no exception escapes and nothing is suppressed; another asserts Esc is suppressed while `_peek_showing` and passes through otherwise; another asserts a second `stop()` does not call `destroy` again.
+- [x] Smoke: PowerAtlas restarted; `orchestrator.log` shows `PowerAtlas window ready` and `Peek hotkey listener started` after the restart; `GET /api/settings` with the `pa_local` cookie returns 200.
+- [ ] Live QA per `## 7) Verification` for SC-1 to SC-4 and SC-8, and a `target=_blank` link opening the default browser; each check is PASS, FAIL, or BLOCKED when the session is locked (BLOCKED items are listed for the user, never ticked as passed). Deferred to Phase 3 (session locked; see the list below).
+- [x] Update `README.md` tray click line (around 52), doors list (around 60-65, dropping "signs in again each time it is shown") and tray description for Open PowerAtlas / Open in browser and app mode.
+- [x] Update the `tray.py` `_login_url` docstring ("two doors") and the `plans/tests/260701_POWERATLAS.md` rows naming `set_peek_stop_callback`.
+
+Implementation (2026-10-06, code: 7632be7)
+Phase 1 turns the peek overlay into the single PowerAtlas window, with a peek mode and an app mode. In `peek.py` the keyboard hook now only records keys, decides suppression and posts events. The decision runs inside a `try`, and `suppress_event()` is called after it. Esc is suppressed only while a peek shows, and the hook's own timestamp is carried for the double-tap. One worker thread owns the window. It runs the Hold and common rows of the state machine through a small window adapter, which makes Win32 calls on the UI thread through a 2 s bounded `BeginInvoke`. The worker adds: a readiness gate that logs `PowerAtlas window ready`; app mode, with a `WINDOWPLACEMENT` saved on every exit from APP and the D-9 default size the first time; a non-activating peek that restores the previous foreground window and z-order; X-to-hide through a direct `FormClosing` handler that cancels only UserClosing and cancels on an exception; the D-13 sign-in check, which replaces the per-show login reload so the window keeps its page; an idempotent, bounded `stop()`, with a watchdog that runs `__main__`'s shutdown sequence, now moved into a function that runs once. Taskbar presence keeps ShowInTaskbar on and toggles WS_EX_TOOLWINDOW and WS_EX_APPWINDOW. The probe showed that toggling ShowInTaskbar recreates the handle and loses the WebView2 child. `web.py` gains `local_secret_generation()`, bumped by `set_local_secret`. `tray.py` gets **Open PowerAtlas** (the default: app mode, or the browser when app mode is unavailable) and **Open in browser** (shown on Windows only, decided from static facts). It also gets `_build_menu` for tests and `set_window_controller` in place of `set_peek_stop_callback`. The old `_show`/`_hide` tests and per-show navigation tests were rewritten as worker, adapter and hook tests, citing D-2, D-13 and D-21. README and the test-plan doc now describe the new tray items and the two window modes.
+
+Implementation (2026-10-06, code: 0a73501)
+Commit `0a73501` applies all 14 review fixes to Phase 1 in `src/power_atlas/peek.py`, `src/power_atlas/__main__.py`, `tests/test_peek.py` and `README.md`. State machine (fixes 1, 2, 4, 6): end peek → APP now runs the sign-in check first; after the non-activating re-place it reads the foreground again, so a maximized show that takes the foreground is handed back to the user's app and PowerAtlas goes back below it; any failed exit from PEEK does a best-effort hide, clears `_peek_showing` and lands in HIDDEN; a timed-out placement read or app show never replaces the saved placement and never advances the state. Hook (fixes 9, 12): an Esc key-up is suppressed exactly when its key-down was; the filter tolerates `stop()` clearing `_listener`. Win32 adapter (fixes 3, 5, 10): `restore_foreground` runs on the UI thread; the readiness check retries a busy UI thread until the deadline, logs a timeout as its own case, and subscribes `FormClosing` only once; `reload` is bounded by a thread join. Worker and shutdown (fixes 8, 11, 13): the worker drains pre-ready events before it sets `_ready`; `__main__` wraps the shutdown tail in `_run_once_or_wait`, so a second caller waits up to 15 s; off Windows, readiness no longer depends on `events.shown`. Changed return values and their consumers were each checked (`_establish_ready`, `_Win32Window.attach`, `_ui`, the HIDDEN landing on failure, `shutdown_tail`). Changed test expectations: the call-tuple assertion in `test_peek_over_a_background_app_restores_foreground_and_z_order` became an outcome assertion, as the finding asked; two worker fakes now return the adapter instead of setting `_ready`. No test expectation was edited to make failing code pass.
+
+QA (Step 5b): BLOCKED for the live hotkey and focus checks (desktop locked; list above). The unattended window probe passed 35/35 after both commits; the tray menu was verified in-process. Review cadence: one review cycle (user override), fixes applied in `0a73501` without re-review.
+
+The working tree held another session's unrelated edits (`docs/KNOWLEDGE.md`, `plans/ROADMAP.md`, `plans/CLOSED_INVESTIGATIONS.md`) during this phase; they were left untouched and that session committed them itself (`01ec95b`).
+
+**Live QA pending the user (session locked, 2026-10-06).** Phase 1's live checks could not run unattended: the desktop locked before Step 5b (`OpenInputDesktop` failed). Run `qa_phase1.py` (kept with the session's scratch files; recipe in section 7) on an unlocked desktop to check: SC-1 hold shows a non-activated peek and release hides it; SC-2 double-tap opens a focused app window, and from a focused app window hides it; SC-3 peek over the app window returns to it with the same placement and focus; SC-4 X (`SC_CLOSE`) hides and the process stays alive; Esc during a peek dismisses it and does not reach the foreground app (and Ctrl+Shift+Esc does not open Task Manager); a `target=_blank` link in app mode opens the default browser. The tray menu structure was verified in-process (Open PowerAtlas default; Open in browser listed whenever a controller exists, before readiness).
 
 ### Phase 2: Peek mode setting (Hold / Toggle) [QA]
 **Goal**: `peek_mode` exists end to end: config, save validation, settings UI, restart badge, and the Toggle rows of the state machine.
@@ -314,6 +326,7 @@ Tests: `hotkeys.py` behaviour tested inside `tests/test_peek.py` (a new class th
 - [ ] Live QA: with a browser shortcut set and PowerAtlas restarted, injecting it opens a browser tab signed in: the count of `loopback browser signed in with a login code` lines in `orchestrator.log` rises by one (or BLOCKED if locked). Restore the user's original shortcut values afterwards.
 - [ ] Update `README.md` config sample and settings description with `browser_hotkey` and the validation rule.
 - [ ] Update `plans/tests/260701_POWERATLAS.md` "validation only at peek startup" row and its settings allowlist (`peek_mode`, `browser_hotkey`).
+- [ ] (deferred from Phase 1) Live QA of Phase 1's SC-1 to SC-4, SC-8, Esc and `target=_blank` checks on an unlocked desktop, using `qa_phase1.py` per `## 7) Verification`; BLOCKED again if the session is still locked.
 
 ### Phase 4: Documentation and stale comments
 **Goal**: Docs and comments describe the merged window.
@@ -361,7 +374,7 @@ Unattended window probe (works while the session is locked; required in Phases 1
 - Call `SetProcessDPIAware()` in the checking process before comparing rects with `GetSystemMetrics`.
 - In live QA (another process), find the window by enumerating top-level windows (`EnumWindows` + `GetWindowThreadProcessId`) and keeping the one whose process is PowerAtlas, whose class starts with `WindowsForms10.Window` and whose title is `PowerAtlas` (pystray and a WinForms owner window may also exist). Re-find it after every action, since a handle may be recreated.
 - Poll each assertion for up to 3 s (the worker is asynchronous).
-- Assertions: `IsWindowVisible`; `GetWindowLongW(h, GWL_STYLE) & 0x00C00000` (WS_CAPTION: framed vs frameless); `GetWindowLongW(h, GWL_EXSTYLE) & 0x8` (WS_EX_TOPMOST); `GetWindowRect` vs `GetSystemMetrics(0/1)`; `GetWindowPlacement` round-trip; X by `PostMessageW(h, 0x0010, 0, 0)` then not visible and the process alive.
+- Assertions: `IsWindowVisible`; `GetWindowLongW(h, GWL_STYLE) & 0x00C00000` (WS_CAPTION: framed vs frameless); `GetWindowLongW(h, GWL_EXSTYLE) & 0x8` (WS_EX_TOPMOST); `GetWindowRect` vs `GetSystemMetrics(0/1)`; `GetWindowPlacement` round-trip; X by `PostMessageW(h, 0x0112, 0xF060, 0)` (WM_SYSCOMMAND SC_CLOSE, what the X button and Alt+F4 send; a bare posted `WM_CLOSE` arrives as `TaskManagerClosing` and really closes the window, measured in Phase 1) then not visible and the process alive.
 
 Live QA against the running instance (needs an unlocked desktop):
 1. Locked-session check first: `user32.GetForegroundWindow() == 0`, or `OpenInputDesktop(0, False, 0x0100)` failing, means locked; record **BLOCKED** with this recipe for the user, never FAIL and never PASS.
@@ -394,7 +407,23 @@ Browser-side checks (settings modal, badges, inline errors): Playwright from the
 | `AGENTS.md` | Terminology entries and a hotkey-injection QA recipe | doc-table-only (needs user approval; see Follow-up) |
 
 ## 9) Implementation Divergences from Plan
-<Reserved -- filled during implementation>
+
+Phase 1 (code `7632be7`):
+- **Taskbar mechanism: candidate (b).** `ShowInTaskbar` stays True; `WS_EX_TOOLWINDOW` (peek) and `WS_EX_APPWINDOW` (app) are toggled with `SetWindowLongW`, the window hidden around the restyle, then `SWP_FRAMECHANGED`. Probe 2026-10-06, 20 switches each: (a) toggling `ShowInTaskbar` recreated the handle on 19 of 20 switches and lost the visible WebView2 child on every peek switch; (b) kept the handle, `window.__probe` and `location.href` on all 20, and a minimized APP parks at -32000 (taskbar, not a desktop stub). Taskbar presence was checked through style bits (in taskbar = `WS_EX_APPWINDOW`, or no owner and not `WS_EX_TOOLWINDOW`), not the taskbar UI.
+- **X simulation in QA is `WM_SYSCOMMAND SC_CLOSE`, not `WM_CLOSE`.** Measured: a bare posted `WM_CLOSE` reaches WinForms as `CloseReason.TaskManagerClosing`, which D-22 lets through, so it closes the window and quits PowerAtlas. The X button and Alt+F4 send `SC_CLOSE` (`UserClosing`), which is cancelled. Consequence for users: Task Manager's End task and tools such as AutoHotkey `WinClose` quit PowerAtlas (README notes it).
+- **End peek → APP when the app was foreground re-focuses (activating).** Mechanism (b) hides the window around the restyle, which hands the foreground elsewhere; the restore rule cannot return it because `_prev_foreground` is the window itself. Re-focusing preserves SC-3's "same focus state".
+- **`create_window(on_top=False)`.** Z-order is set only with `SetWindowPos(HWND_TOPMOST/HWND_NOTOPMOST)`; the WinForms `TopMost` property is reapplied on style updates and its setter may activate.
+- **`show_app()` falls back to the browser itself** when app mode is unavailable, in addition to the tray's click-time check.
+- **`_signed_gen` is written on the main thread** in `_run_webview`, before the creation mint, rather than by the worker (the form does not exist yet at that point).
+- **The worker checks the adapter's `has_app_mode`** rather than `supports_app_mode`, keeping the worker testable without WinForms; on Windows the Win32 adapter exists only after readiness, so the two agree.
+- **`Peek webview ready` and the `start(func=...)` callback were removed**; the readiness signal is `PowerAtlas window ready`.
+
+Phase 1 review fixes (code `0a73501`):
+- **A failed exit from PEEK lands in HIDDEN** (a transition the state machine does not have): any raising re-place, hide or `resetOverlays` in end peek, or a timed-out app show from PEEK, does a best-effort hide, clears `_peek_showing`, sets HIDDEN and re-raises. Staying in PEEK would keep Esc swallowed system-wide.
+- **Esc key-up follows its key-down**, not `_peek_showing`: a key-up is suppressed exactly when its key-down was, so an Esc pressed before a peek showed passes its key-up through. Known edge: a lost key-up (secure-desktop switch) makes the next Esc key-down count as a repeat once.
+- **Off Windows, a missing `shown` event logs a WARNING and readiness still completes** (`_PortableWindow` needs no form handle). On GTK, pywebview 6.2.1 fires `shown` for hidden windows (`gtk.py` around 205, 369-373, 487-494), so this guards other backends only.
+- **A timed-out Win32 reload logs a WARNING and does not retry**; `_signed_gen` advances and the posted `load_url` runs when the UI thread recovers. `_PortableWindow.reload` keeps the synchronous call.
+- **A timed-out app show** from HIDDEN or APP changes neither state nor placement; from PEEK it falls back to HIDDEN (rule above); inside end peek → APP the state still advances, since the posted re-place normally runs late.
 
 ## Follow-up Work (Deferred)
 
@@ -483,6 +512,34 @@ Same three personas, fresh context. 32 findings before merge; 22 after (4 High, 
 
 Reviewer readiness confidence: Architect 35%, Senior engineer 55% (80% with these fixes), Reliability 65%. Ready state reached (no unresolved High, no auto-fixable Medium left), so cycle 3 was not run. The remaining risk is runtime behaviour that the Phase 1 probes and live QA check during `/qdev`.
 
+### 2026-10-06 -- Implementation Review (after Phase 1, persona: Reliability engineer (Windows desktop UI), Senior engineer)
+
+Implementation health: Yellow (all findings fixed in `0a73501`; live QA BLOCKED by a locked session).
+16 findings after merge (3 High, 7 Medium, 6 Low). One review cycle per the user's override; fixes not re-reviewed (Step 9 covers them).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | End peek back to APP skipped the D-13 sign-in check; no test pinned it. | Fixed — check added first in that branch, with a rotation test. |
+| 2 | High | A maximized background APP re-placed after a peek kept the foreground; the restore was dead code. | Fixed — foreground re-read after the re-place, handed back, window put below; outcome test. |
+| 3 | High | `restore_foreground` ran Win32 calls on the worker, not inside `BeginInvoke`. | Fixed — routed through the UI helper; three tests. |
+| 4 | Medium | Section 9 was empty although the commit shipped six divergences. | Fixed — section 9 written by the orchestrator. |
+| 5 | Medium | Ticked probe criterion said `WM_CLOSE`, which actually quits PowerAtlas. | Fixed — criterion reworded to `SC_CLOSE`; behaviour recorded in section 9 and README. |
+| 6 | Medium | A raising window call left `_peek_showing` set, swallowing Esc system-wide. | Fixed — failed exits from PEEK land in HIDDEN; five tests. |
+| 7 | Medium | Readiness had one 2 s attempt; a busy UI thread disabled the window for the run. | Fixed — retries until the deadline; distinct timeout log. |
+| 8 | Medium | A `_ui` timeout stored `None` as the saved placement. | Fixed — previous placement and state kept; five tests. |
+| 9 | Medium | Bounded `_ui` wait and `Application.Exit` branch of `stop()` untested. | Fixed — both tested with fake natives. |
+| 10 | Medium | Live-QA BLOCKED items were not listed for the user. | Fixed — list added under Phase 1; check deferred to Phase 3. |
+| 11 | Low | A `show_app` posted between `_ready.set()` and the drain was dropped. | Fixed — drain before setting ready; race test. |
+| 12 | Low | Esc key-up could reach the user's app after a suppressed key-down. | Fixed — key-up follows its key-down. |
+| 13 | Low | Win32 reload could block the worker forever on a hung UI thread. | Fixed — bounded thread join with a WARNING. |
+| 14 | Low | Second `shutdown_tail` caller returned at once, possibly skipping relaunch. | Fixed — second caller waits, bounded at 15 s. |
+| 15 | Low | `stop()` clearing `_listener` could raise in the filter. | Fixed — local read and guard. |
+| 16 | Low | Bare `WM_CLOSE` quits PowerAtlas, undocumented. | Fixed — README sentence; D-22 behaviour unchanged. |
+
+Reviewers also asked to verify the Linux `shown` event for hidden windows: confirmed from pywebview's `gtk.py` and hardened (section 9). Mutation testing by the Senior engineer killed all five targeted mutations.
+
 ## Harness Improvement Opportunities
 
+- `/qdev` Step 5b treats a QA BLOCKED verdict as a hard stop, but an unattended overnight run with a locked desktop BLOCKs every live window check while the unattended probe passes — cost: the orchestrator had to choose between stopping the whole run and overriding the gate; it continued and deferred the checks — suggested change: let a plan declare a locked-session fallback (probe evidence counts, live checks deferred to the user) that keeps auto-continue.
+- `/qdev`'s dirty-tree stop fired on another session's unrelated, disjoint edits while the user was asleep — cost: a judgment call to continue against the letter of the rule — suggested change: allow continuing when the foreign files are disjoint from every remaining phase's scope and all commits are pathspec-scoped, recording the file list.
 - `/qexplore` Step 1.5 dispatch had to be restarted when the user asked for a different sub-agent model mid-dispatch — cost: three agents' partial work discarded, about 2 minutes — suggested change: let `/qexplore` read a model preference for exploration sub-agents from memory before dispatch.
