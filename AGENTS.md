@@ -89,6 +89,17 @@ Recipe for live QA of /acp and the dashboard against the running instance. It wo
   new console starts a real turn without keystrokes. Append each throwaway session's id to the
   ledger, never overwrite it, and never print the id or the prompt. A throwaway `codex exec` in a
   scratch folder also needs `--skip-git-repo-check`.
+- **Global shortcuts and the PowerAtlas window.** Inject keys with `pynput.keyboard.Controller` from a
+  separate process (the hook does not ignore injected keys). Find the window with `EnumWindows`: the
+  PowerAtlas process, class starting `WindowsForms10.Window`, title `PowerAtlas`; re-find it after
+  every action and poll each check for up to 3 s. Read caption (`WS_CAPTION`), topmost
+  (`WS_EX_TOPMOST`), rect and `GetForegroundWindow()` with ctypes after `SetProcessDPIAware()`. Check
+  that the page is painted, not just loaded: capture the window with `PrintWindow(hwnd, hdc, 2)` and
+  test a centre pixel. Simulate X with `WM_SYSCOMMAND SC_CLOSE`; a bare `WM_CLOSE` arrives as Task
+  Manager's close and quits PowerAtlas. A locked desktop (`OpenInputDesktop` fails) blocks injection:
+  record BLOCKED. If another app holds the foreground, a test window cannot take it, so check the
+  target is foreground before injecting and stop rather than click; ask the user to clear the
+  desktop first.
 
 ## Terminology
 
@@ -96,7 +107,8 @@ Project-specific terms. Each entry names the rejected synonyms too, so a future 
 re-litigate a settled word. General programming vocabulary does not belong here.
 
 - **login code** — the one-time credential PowerAtlas mints into the URL when it opens its own web UI
-  (tray, peek double-tap, peek webview) or when the tray's **Copy login link** is used, exchanged
+  (tray **Open PowerAtlas** and **Open in browser**, the browser shortcut, the PowerAtlas window at
+  creation and when it is signed out) or when the tray's **Copy login link** is used, exchanged
   exactly once for the loopback session cookie `pa_local`.
   **Not "nonce"**: `_acp_csp` in `web.py` already uses that word for the per-response CSP nonce, and
   the two appear within a few lines of each other. **Not "token"**: `_ACP_TOKEN` meant a different,
@@ -140,3 +152,11 @@ re-litigate a settled word. General programming vocabulary does not belong here.
   `thread_spawn` (spawned by another thread) and `guardian` (a review thread). **Not "child session"**.
   Counted by lifetime total per thread, as an upper bound that includes context inherited at spawn.
 - **guardian review thread** — a sub-agent thread of kind `guardian`. **Not "reviewer session"**.
+- **PowerAtlas window** — the single pywebview window PowerAtlas opens itself, shown in peek mode or
+  app mode. **Not "peek window"** for the whole thing, and **not "app window"** as a separate object:
+  there is one window. Settled 2026-10-06,
+  `plans/261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS.md`.
+- **peek mode** — the PowerAtlas window shown by the peek shortcut: frameless, on top, full screen,
+  off the taskbar, without taking focus. **Not "overlay"** as a mode name in UI text.
+- **app mode** — the PowerAtlas window as a normal framed taskbar window, opened by a double-tap of
+  the peek shortcut or tray **Open PowerAtlas**. Windows only.
