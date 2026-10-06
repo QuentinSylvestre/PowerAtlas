@@ -9379,6 +9379,13 @@ function renderRestartKeys(settings) {
 // trim and lowercase, as the window parses them. Hidden otherwise, and when
 // the server does not send the fields.
 // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 9)
+//
+// While a restart is pending for the key (`restart_pending`), the shortcut in
+// force is still the old one, so the note speaks of the next launch instead.
+// The browser shortcut's fate also depends on the peek shortcut, so either
+// key pending puts its note in the future tense. An absent `restart_pending`
+// counts as nothing pending: the note then describes the stored values.
+// Phase 5 review (B6)
 function renderShortcutNotes(settings) {
   var set = function (id, text) {
     var el = document.getElementById(id);
@@ -9390,20 +9397,24 @@ function renderShortcutNotes(settings) {
     return (v === undefined || v === null) ? '' : String(v).trim().toLowerCase();
   };
   settings = settings || {};
+  var pending = Array.isArray(settings.restart_pending) ? settings.restart_pending : [];
+  var peekPending = pending.indexOf('peek_hotkey') >= 0;
+  var browserPending = peekPending || pending.indexOf('browser_hotkey') >= 0;
   var peekText = '';
   if ('effective_peek_hotkey' in settings) {
     var running = norm(settings.effective_peek_hotkey);
     if (norm(settings.peek_hotkey) !== running) {
-      peekText = 'Not valid; ' + running + ' is used instead.';
+      peekText = 'Not valid; ' + running + (peekPending
+        ? ' will be used at the next launch.' : ' is used instead.');
     }
   }
   set('peekHotkeyNote', peekText);
   var browserText = '';
   if ('effective_browser_hotkey' in settings && norm(settings.browser_hotkey)
       && !norm(settings.effective_browser_hotkey)) {
-    browserText = settings.browser_hotkey_off_reason === 'overlap'
-      ? 'Off: overlaps the peek hotkey.'
-      : 'Off: not a valid shortcut.';
+    browserText = (browserPending ? 'Off at the next launch: ' : 'Off: ')
+      + (settings.browser_hotkey_off_reason === 'overlap'
+        ? 'overlaps the peek hotkey.' : 'not a valid shortcut.');
   }
   set('browserHotkeyNote', browserText);
 }

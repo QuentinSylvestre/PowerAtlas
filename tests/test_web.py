@@ -28715,6 +28715,17 @@ class TestLoginNext:
         "/acp?x=a b",
         "/acp?x=café",
         "/acp?x=" + "a" * 250,
+        # Phase 5 review (B3): decodes to U+0085, a C1 control character.
+        "/acp?x=%C2%85",
+        # A double-encoded `//`: once decoded it is still not a page.
+        "/%252F%252Fevil",
+        "%252F%252Fevil",
+        "/%252F%252Fevil.example/acp",
+        # A scheme or host in any case, and the default-port spelling.
+        "HTTP://127.0.0.1:4915/acp",
+        "http://127.0.0.1/acp",
+        "//127.0.0.1:4915@evil/acp",
+        "//x@127.0.0.1:4915/acp",
     ])
     def test_refused_next_lands_on_root_and_still_signs_in(
             self, local_enabled, client, next_value):
@@ -28725,12 +28736,22 @@ class TestLoginNext:
         assert local_enabled._local_cookie_ok(_local_scope(value))
 
     @pytest.mark.parametrize("next_value, landing", [
-        ("/acp?session=x", "/acp?session=x"),
+        ("/acp?sid=x", "/acp?sid=x"),
         ("/acp", "/acp"),
         ("/", "/"),
         ("/?view=overview", "/?view=overview"),
-        ("/acp?session=x#frag", "/acp?session=x"),
+        ("/acp?sid=x#frag", "/acp?sid=x"),
         ("/acp?q=a%20b&r=%C3%A9", "/acp?q=a%20b&r=%C3%A9"),
+        # Phase 5 review (B2): the exchange's own keys are dropped from the
+        # landing query; every other parameter is kept as given.
+        ("/acp?sid=a&code=X&next=//evil", "/acp?sid=a"),
+        ("/acp?code=X", "/acp"),
+        ("/acp?next=/acp&sid=a", "/acp?sid=a"),
+        ("/acp?c%6Fde=X&sid=a", "/acp?sid=a"),   # the key decoded once
+        ("/acp?code&sid=a", "/acp?sid=a"),        # a key without a value
+        ("/?next=/acp", "/"),
+        ("/acp?sid=a&codex=1&nextx=2&x=code", "/acp?sid=a&codex=1&nextx=2&x=code"),
+        ("/acp?sid=a&&b=", "/acp?sid=a&&b="),     # kept byte for byte
     ])
     def test_accepted_next_lands_there(self, local_enabled, client,
                                        next_value, landing):
@@ -28751,7 +28772,7 @@ class TestLoginNext:
 
     def test_next_does_not_rescue_a_bad_code_and_is_never_logged(
             self, local_enabled, client, caplog):
-        marker = "/acp?session=NEXTMARKER"
+        marker = "/acp?sid=NEXTMARKER"
         with caplog.at_level(logging.DEBUG):
             bad = self._exchange(local_enabled, client, marker, code="A" * 43)
             good = self._exchange(local_enabled, client, marker)
@@ -28776,8 +28797,14 @@ class TestLoginNext:
     def test_login_path_with_next(self, local_enabled):
         web_mod = local_enabled
         code = "C" * 43
-        assert web_mod.login_path(code, "/acp?session=x") == (
-            "/local-auth?code=" + code + "&next=%2Facp%3Fsession%3Dx")
+        assert web_mod.login_path(code, "/acp?sid=x") == (
+            "/local-auth?code=" + code + "&next=%2Facp%3Fsid%3Dx")
+        # Phase 5 review (B2): a target that only carried reserved keys
+        # reduces to the page; one that reduces to `/` adds no `next`.
+        assert web_mod.login_path(code, "/acp?code=Y&next=/") == (
+            "/local-auth?code=" + code + "&next=%2Facp")
+        assert web_mod.login_path(code, "/?code=Y") == (
+            "/local-auth?code=" + code)
         plain = "/local-auth?code=" + code
         for refused in ("//evil.example", "https://evil", "/api/settings",
                         "/", "", None):
@@ -28811,13 +28838,13 @@ class TestLoginNext:
     def test_door_login_url_lands_on_next(self, local_enabled):
         """`doors.login_url(server, next=…)` opens signed in, on that page."""
         from power_atlas import doors
-        url = doors.login_url(self._SERVER, next="/acp?session=x")
+        url = doors.login_url(self._SERVER, next="/acp?sid=x")
         assert url.startswith(self._SERVER + "/local-auth?code=")
         c = TestClient(app, base_url=self._SERVER, client=_LOOPBACK_PEER)
         del c.headers["cookie"]
         resp = c.get(url[len(self._SERVER):], follow_redirects=False)
         assert resp.status_code == 303
-        assert resp.headers["location"] == "/acp?session=x"
+        assert resp.headers["location"] == "/acp?sid=x"
         assert c.get("/api/settings").status_code == 200
 
 
@@ -30087,9 +30114,10 @@ class TestLoopbackDoors:
             # A same-origin link opened as a new window from the PowerAtlas
             # window: a login URL that lands on that page (Phase 5,
             # follow-up 6), through the real `doors.login_url`.
-            shim = peek_mod._NewWindowBrowser(None, self._SERVER,
-                                              pw._same_origin)
-            assert shim.open(self._SERVER + "/acp?session=x") is True
+            shim = peek_mod._NewWindowBrowser(
+                None, self._SERVER, pw._same_origin,
+                lambda: self._SERVER + "/acp")
+            assert shim.open(self._SERVER + "/acp?sid=x") is True
         # Seven openers before Phase 3, plus the browser shortcut, plus the
         # real door's failure branch (final review fix 11), plus the two
         # sign-in reloads (rotation, then the cookie path), plus the failing
@@ -30099,7 +30127,7 @@ class TestLoopbackDoors:
         # link (follow-up 6: one more door, 12 -> 13).
         assert len(urls) == 13
         assert len(window.reloads) == 2
-        assert "next=%2Facp%3Fsession%3Dx" in urls[-1]
+        assert "next=%2Facp%3Fsid%3Dx" in urls[-1]
         from urllib.parse import parse_qs, urlsplit
         codes = [parse_qs(urlsplit(u).query)["code"][0] for u in urls]
         assert all(len(c) == 43 for c in codes)

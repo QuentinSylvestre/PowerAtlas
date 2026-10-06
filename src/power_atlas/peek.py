@@ -213,6 +213,9 @@ def _event_tick_now() -> int:
 # `window.open`) by calling its module-global `webbrowser.open(uri)`.
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
 _NEW_WINDOW_MODULE = "webview.platforms.edgechromium"
+# At most one login minted per this many seconds for new-window links
+# (`_now()` clock). Phase 5 review (B1)
+_NEW_WINDOW_MIN_GAP = 1.0
 # What `quote` leaves alone when it re-encodes a new-window path-and-query:
 # all of printable ASCII but the space. WebView2 hands the URI over in its
 # unescaped form, so a space or a non-ASCII character may arrive raw.
@@ -226,21 +229,42 @@ class _NewWindowBrowser:
     default browser through a fresh login URL that lands on that page, and
     every other link to the real `webbrowser.open`. Any other attribute is
     the real module's. Never logs a URL.
-    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+
+    Signed only when the page that asked is PowerAtlas's own: the window's
+    current URL (`current_url()`, read without waiting, since this runs on
+    the UI thread) must be same-origin too. Another site the window has
+    navigated to could otherwise open PowerAtlas links signed in; its links
+    go to the real browser unchanged, as does a URL that cannot be read. And
+    at most one login per `_NEW_WINDOW_MIN_GAP` seconds: a page opening
+    windows in a loop gets unsigned tabs after the first (DEBUG line).
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6);
+    opener check and rate limit: Phase 5 review (B1)
     """
 
-    def __init__(self, real, server_url: str, same_origin) -> None:
+    def __init__(self, real, server_url: str, same_origin,
+                 current_url) -> None:
         self._real = real
         self._server_url = server_url
         self._same_origin = same_origin
+        self._current_url = current_url
+        self._last_login = None  # `_now()` at the last login minted
 
     def open(self, url, *args, **kwargs):
         try:
-            same = self._same_origin(url)
+            same = (self._same_origin(url)
+                    and self._same_origin(self._current_url()))
         except Exception:
             same = False
         if not same:
             return self._real.open(url, *args, **kwargs)
+        now = _now()
+        last = self._last_login
+        if last is not None and now - last < _NEW_WINDOW_MIN_GAP:
+            log.debug("PowerAtlas window: a link opened within %.0f s of the "
+                      "last signed one goes to the browser unsigned",
+                      _NEW_WINDOW_MIN_GAP)
+            return self._real.open(url, *args, **kwargs)
+        self._last_login = now
         try:
             parts = urlsplit(url)
             target = quote(parts.path or "/", safe=_PRINTABLE_ASCII)
@@ -1086,6 +1110,20 @@ class PeekWindow:
         except Exception:
             return False
 
+    def _window_url(self) -> str | None:
+        """The page the window shows now, as pywebview last recorded it
+        (`native.browser.url`, set on every navigation), or None. A plain
+        attribute read: never `win.get_current_url()`, which waits for the
+        page to load and is called from the UI thread here (Threading
+        model). Never raises.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 review (B1)
+        """
+        try:
+            url = self._window.native.browser.url
+            return None if url is None else str(url)
+        except Exception:
+            return None
+
     def _route_new_windows(self) -> None:
         """Put `_NewWindowBrowser` in place of the `webbrowser` module that
         pywebview's EdgeChromium handler calls, so a same-origin link opened
@@ -1104,7 +1142,8 @@ class PeekWindow:
             if current is None or isinstance(current, _NewWindowBrowser):
                 return
             module.webbrowser = _NewWindowBrowser(current, self._server_url,
-                                                  self._same_origin)
+                                                  self._same_origin,
+                                                  self._window_url)
         except Exception as e:
             log.warning("PowerAtlas window: same-origin links will open the "
                         "browser signed out: %s", type(e).__name__)

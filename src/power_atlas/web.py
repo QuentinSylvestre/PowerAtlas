@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, unquote_plus, urlparse, urlsplit
 
 import jinja2 as _jinja2
 
@@ -2191,6 +2191,8 @@ _LOGIN_NEXT_PATHS = frozenset({"/", _ACP_PATH})
 # Longest `next` accepted, in characters as it arrives (decoded once by the
 # query parser). Past it the exchange lands on `/`.
 _LOGIN_NEXT_MAX = 256
+# Query keys a landing URL never keeps: the login exchange's own. Phase 5 review (B2)
+_LOGIN_NEXT_RESERVED = frozenset({"code", "next"})
 
 
 def _login_next_target(value) -> str | None:
@@ -2202,7 +2204,15 @@ def _login_next_target(value) -> str | None:
     in the value as given, anything outside printable ASCII (so the Location
     header is plain ASCII), a scheme or a host. The result is rebuilt from the
     parsed parts, never echoed.
-    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6)
+
+    The landing query loses its `code` and `next` parameters (the key
+    compared after one percent-decoding, as the landing page's parser reads
+    it), so a landing URL never carries a login code or chains another
+    `next`. Every other parameter is kept exactly as given. The rest of the
+    query is not validated beyond the printable-ASCII and control-character
+    checks above: the landing pages read their own parameters.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 6);
+    reserved keys: Phase 5 review (B2)
     """
     if not isinstance(value, str) or not value or len(value) > _LOGIN_NEXT_MAX:
         return None
@@ -2216,7 +2226,13 @@ def _login_next_target(value) -> str | None:
     parts = urlsplit(value)
     if parts.scheme or parts.netloc or parts.path not in _LOGIN_NEXT_PATHS:
         return None
-    return parts.path + (f"?{parts.query}" if parts.query else "")
+    # Split on `&` and rejoined untouched, not re-encoded through
+    # `parse_qsl`/`urlencode`, so kept parameters (empty ones included) stay
+    # byte for byte. Only `&` separates, as Starlette's parser does.
+    kept = [pair for pair in parts.query.split("&")
+            if unquote_plus(pair.split("=", 1)[0]) not in _LOGIN_NEXT_RESERVED]
+    query = "&".join(kept)
+    return parts.path + (f"?{query}" if query else "")
 
 
 def _consume_login_code(supplied: str) -> bool:

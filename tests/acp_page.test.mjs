@@ -5869,6 +5869,75 @@ check("a shortcut field whose stored value does not run carries a note", () => {
   assertEqual(note("browserHotkeyNote").hidden, true, "a note drawn without the fields");
 });
 
+// Phase 5 review (B6): while a restart is pending for the key, the old
+// shortcut still runs, so the note speaks of the next launch. The browser
+// note follows either key, since the browser shortcut's fate depends on the
+// peek one.
+check("a shortcut note speaks of the next launch while a restart is pending", () => {
+  const p = loadPanel();
+  const note = (id) => p.sandbox.document.getElementById(id);
+  const draw = (fields) => p.sandbox.renderRestartKeys({
+    restart_to_apply: ["peek_hotkey", "browser_hotkey"], in_force: {}, ...fields });
+  const bad = { peek_hotkey: "ctrl+foo", effective_peek_hotkey: "ctrl+shift+z",
+                browser_hotkey: "ctrl+z", effective_browser_hotkey: "",
+                browser_hotkey_off_reason: "overlap" };
+
+  draw({ ...bad, restart_pending: ["peek_hotkey"] });
+  assertEqual(note("peekHotkeyNote").textContent,
+              "Not valid; ctrl+shift+z will be used at the next launch.",
+              "a pending peek shortcut was described as running");
+  assertEqual(note("browserHotkeyNote").textContent,
+              "Off at the next launch: overlaps the peek hotkey.",
+              "a pending peek shortcut left the browser note in the present");
+
+  // Only the browser key pending: the peek note stays in the present.
+  draw({ ...bad, restart_pending: ["browser_hotkey"] });
+  assertEqual(note("peekHotkeyNote").textContent,
+              "Not valid; ctrl+shift+z is used instead.",
+              "another key pending moved the peek note to the future");
+  assertEqual(note("browserHotkeyNote").textContent,
+              "Off at the next launch: overlaps the peek hotkey.",
+              "a pending browser shortcut was described as off now");
+
+  // Nothing pending: the present, for both.
+  draw({ ...bad, restart_pending: [], browser_hotkey: "ctrl+bogus",
+         browser_hotkey_off_reason: "invalid" });
+  assertEqual(note("peekHotkeyNote").textContent,
+              "Not valid; ctrl+shift+z is used instead.", "the present-tense peek note");
+  assertEqual(note("browserHotkeyNote").textContent, "Off: not a valid shortcut.",
+              "the present-tense browser note");
+  // A pending restart for some other key changes nothing here.
+  draw({ ...bad, restart_pending: ["port"] });
+  assertEqual(note("peekHotkeyNote").textContent,
+              "Not valid; ctrl+shift+z is used instead.", "a pending port moved the peek note");
+});
+
+// Phase 5 review (B5): reopening the dialog clears the after-save browser
+// shortcut line, as it does the two error lines.
+check("opening the Settings dialog clears a visible after-save browser shortcut line", () => {
+  const p = loadPanel();
+  const next = new El("div");
+  next.textContent = "The browser shortcut will be off after the next launch.";
+  next.hidden = false;
+  const errs = { peekHotkeyError: new El("div"), browserHotkeyError: new El("div") };
+  for (const e of Object.values(errs)) { e.textContent = "Not saved"; e.hidden = false; }
+  const base = p.sandbox.document.getElementById;
+  p.sandbox.document.getElementById = (id) =>
+    id === "browserHotkeyNext" ? next : (errs[id] ?? base(id));
+  p.sandbox.openSettingsDialog();
+  assertEqual(p.settingsModal.open, true, "the dialog did not open");
+  assertEqual(next.hidden, true, "the after-save line stayed visible");
+  assertEqual(next.textContent, "", "the after-save line kept its text");
+  for (const [id, e] of Object.entries(errs)) {
+    assertEqual(e.hidden, true, `#${id} stayed visible`);
+  }
+  // Already open: nothing is cleared (a line drawn by a save just now).
+  next.textContent = "The browser shortcut will be active after the next launch.";
+  next.hidden = false;
+  p.sandbox.openSettingsDialog();
+  assertEqual(next.hidden, false, "an open dialog lost a line drawn just now");
+});
+
 check("the shortcut notes exist in the modal and keep a [hidden] rule", () => {
   const modal = fs.readFileSync(SETTINGS_TEMPLATE, "utf8");
   for (const [row, id] of [["peek-hotkey-group", "peekHotkeyNote"],
@@ -6020,6 +6089,53 @@ check("refreshSettings puts the stored shortcuts on both fields and their data-s
   await settle();
   assertEqual(browser.value, "", "an emptied browser shortcut stayed in the field");
   assertEqual(browser.getAttribute("data-saved"), "", "data-saved kept the old browser shortcut");
+});
+
+// Phase 5 review (B5): `refreshSettings` draws the shortcut notes from the
+// same payload, with the real `renderShortcutNotes`.
+check("refreshSettings draws the shortcut notes from the effective_* fields", async () => {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const from = src.indexOf("function refreshSettings(");
+  const to = src.indexOf("\n", from);
+  const nFrom = src.indexOf("function renderShortcutNotes(");
+  if (nFrom < 0) throw new Error("index.html no longer defines renderShortcutNotes");
+  const nTo = src.indexOf("\n}\n", nFrom) + 2;
+  const els = new Map();
+  for (const id of ["peekHotkey", "browserHotkey"]) els.set(id, new El("input"));
+  for (const id of ["peekHotkeyNote", "browserHotkeyNote"]) {
+    const e = new El("div");
+    e.hidden = true;
+    els.set(id, e);
+  }
+  let payload = { peek_hotkey: "ctrl+foo", effective_peek_hotkey: "ctrl+shift+z",
+                  browser_hotkey: "ctrl+z", effective_browser_hotkey: "",
+                  browser_hotkey_off_reason: "overlap", restart_pending: [] };
+  const sandbox = {
+    document: { getElementById: (id) => els.get(id) ?? null },
+    fetch: () => Promise.resolve({ json: () => Promise.resolve(payload) }),
+    refreshNotifyToggle() {},
+    Array,
+    String,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(src.slice(nFrom, nTo), sandbox, { filename: "index.html#renderShortcutNotes" });
+  vm.runInContext(src.slice(from, to), sandbox, { filename: "index.html#refreshSettings" });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  sandbox.refreshSettings();
+  await settle();
+  assertEqual(els.get("peekHotkeyNote").hidden, false, "refreshSettings drew no peek note");
+  assertEqual(els.get("peekHotkeyNote").textContent,
+              "Not valid; ctrl+shift+z is used instead.", "the peek note is wrong");
+  assertEqual(els.get("browserHotkeyNote").textContent, "Off: overlaps the peek hotkey.",
+              "the browser note is wrong");
+  // Fixed values: the notes go away on the next refresh.
+  payload = { peek_hotkey: "ctrl+shift+z", effective_peek_hotkey: "ctrl+shift+z",
+              browser_hotkey: "ctrl+alt+b", effective_browser_hotkey: "ctrl+alt+b",
+              browser_hotkey_off_reason: "", restart_pending: [] };
+  sandbox.refreshSettings();
+  await settle();
+  assertEqual(els.get("peekHotkeyNote").hidden, true, "the peek note outlived the fix");
+  assertEqual(els.get("browserHotkeyNote").hidden, true, "the browser note outlived the fix");
 });
 
 check("the status pill is the one thing in the topbar that cannot be squeezed", () => {
