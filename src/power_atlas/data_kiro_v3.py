@@ -79,6 +79,26 @@ def _ensure_sess_prefix(session_id: str) -> str:
     return session_id if session_id.startswith("sess_") else f"sess_{session_id}"
 
 
+def _is_subagent_session(data: dict) -> bool:
+    """True when a parsed session.json belongs to a sub-agent, not a user session.
+
+    A workflow node or a delegated sub-agent gets a full ``sess_<uuid>/`` folder
+    of its own in the same hash dir as its parent (first seen 2026-10-06,
+    kiro-cli 2.28.0). ``rootConversationId`` names the user-facing session that
+    started it; a top-level session has no such field. The test is "set and not
+    this session's own id", so a session that names itself as its root still
+    counts as top-level. See docs/KNOWLEDGE.md, "kiro-cli v3 sub-agent sessions".
+
+    Every directory scan in this module that turns session.json files into
+    listing rows (`_cwd_to_sessions`, `refresh_stale_entries_for_cwd`) applies
+    this, so the rail, the workspace counts and the overview never see a child.
+    Lookups by id (`_find_v3_session_dir`, `find_session_workspace`) do not:
+    a child stays reachable by its id.
+    """
+    root = data.get("rootConversationId")
+    return isinstance(root, str) and bool(root) and root != data.get("id")
+
+
 # ---------------------------------------------------------------------------
 # Module-level index cache
 #
@@ -236,6 +256,8 @@ def _cwd_to_sessions() -> tuple[dict[str, list[tuple[str, str]]], dict[str, tupl
                         with session_json.open(encoding="utf-8-sig", errors="replace") as f:
                             data = json.loads(f.read())
                         if not isinstance(data, dict):
+                            continue
+                        if _is_subagent_session(data):
                             continue
                         wp = data.get("workspacePaths")
                         if not isinstance(wp, list) or not wp:
@@ -774,6 +796,11 @@ def refresh_stale_entries_for_cwd(
                 with session_json.open(encoding="utf-8-sig", errors="replace") as f:
                     data = json.loads(f.read())
                 if not isinstance(data, dict):
+                    continue
+                # A sub-agent's folder is never tracked (see
+                # _is_subagent_session), so it stays in new_dirs on every call;
+                # without this skip it would force a stale reload forever.
+                if _is_subagent_session(data):
                     continue
                 wp = data.get("workspacePaths")
                 if not isinstance(wp, list) or not wp:

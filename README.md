@@ -130,7 +130,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 
 - Auto-discovers workspaces from kiro-cli, Claude Code, Codex, and Kiro IDE session data
   - Kiro IDE sessions: `%APPDATA%\Kiro\User\globalStorage\...` (Windows) / `~/.config/Kiro/User/globalStorage/...` (Linux)
-  - kiro-cli v3 sessions: `~/.kiro/sessions/<workspace-hash>/sess_*/`
+  - kiro-cli v3 sessions: `~/.kiro/sessions/<workspace-hash>/sess_*/`. Sub-agent and workflow-node sessions (a `rootConversationId` that is not their own id) are not listed
   - Codex sessions: `~/.codex/sessions/` (`$CODEX_HOME/sessions` when `CODEX_HOME` is set). Sessions started from the Codex CLI, the VS Code extension and the desktop app are listed; sub-agent threads and archived sessions are not
 - Unified provider-launcher system with extracted icons and configurable colors. A provider whose binary has no embedded icon (Codex, kiro-cli) gets a terminal glyph drawn in its color; Codex's default color is white
 - Inline provider filter next to the workspaces rail

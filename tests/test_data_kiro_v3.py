@@ -39,6 +39,7 @@ def _make_session(
     updated_at: str = "2026-01-02T00:00:00Z",
     agent_mode: str = "kiro_default",
     messages: list[str] | None = None,
+    root_conversation_id: str | None = None,
 ) -> tuple[Path, Path]:
     """Create a minimal v3 session directory with session.json + optional messages.jsonl.
 
@@ -51,17 +52,17 @@ def _make_session(
     sess_dir.mkdir(parents=True, exist_ok=True)
 
     session_json = sess_dir / "session.json"
-    session_json.write_text(
-        json.dumps({
-            "id": session_id,
-            "title": title,
-            "workspacePaths": [cwd],
-            "createdAt": created_at,
-            "lastModifiedAt": updated_at,
-            "agentMode": agent_mode,
-        }),
-        encoding="utf-8",
-    )
+    body = {
+        "id": session_id,
+        "title": title,
+        "workspacePaths": [cwd],
+        "createdAt": created_at,
+        "lastModifiedAt": updated_at,
+        "agentMode": agent_mode,
+    }
+    if root_conversation_id is not None:
+        body["rootConversationId"] = root_conversation_id
+    session_json.write_text(json.dumps(body), encoding="utf-8")
 
     messages_jsonl = sess_dir / "messages.jsonl"
     if messages is not None:
@@ -1427,6 +1428,69 @@ class TestLoadSessionsSkipsStagedDeletes:
 
         assert sessions == []
 
+
+
+class TestSubagentSessionsAreNotListed:
+    """kiro-cli 2.28.0 gives each workflow node / sub-agent a full session folder
+    next to its parent's, linked only by `rootConversationId`. Those folders must
+    not reach the rail, the workspace counts or the overview (2026-10-06: 67 of
+    376 stores on the dev machine were children, 61 of them under one parent)."""
+
+    def _parent_and_child(self, root, cwd="C:\\Work"):
+        _make_session(root, "h1", "sess_parent", cwd, updated_at="2026-06-01T10:00:00Z")
+        _make_session(root, "h1", "sess_child", cwd, updated_at="2026-06-09T10:00:00Z",
+                      title="phase4 - domain", agent_mode="semantic_reviewer",
+                      root_conversation_id="sess_parent")
+
+    def test_child_is_not_in_load_sessions(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        self._parent_and_child(root)
+
+        sessions, file_stats = dv3.load_sessions("C:\\Work")
+
+        assert [s.session_id for s in sessions] == ["sess_parent"]
+        assert not any("sess_child" in k for k in file_stats)
+
+    def test_child_is_not_counted_and_does_not_set_recency(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        self._parent_and_child(root)
+
+        (cwd, count, updated), = dv3.discover_workspaces()
+
+        assert (cwd, count, updated) == ("C:\\Work", 1, "2026-06-01T10:00:00Z")
+
+    def test_a_session_naming_itself_as_root_is_top_level(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        _make_session(root, "h1", "sess_self", "C:\\Work", root_conversation_id="sess_self")
+
+        sessions, _ = dv3.load_sessions("C:\\Work")
+
+        assert [s.session_id for s in sessions] == ["sess_self"]
+
+    def test_a_child_does_not_force_a_stale_reload_on_every_call(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        self._parent_and_child(root)
+        _, file_stats = dv3.load_sessions("C:\\Work")
+        norm = dv3._normalize_path("C:\\Work")
+
+        assert dv3.refresh_stale_entries_for_cwd(norm, file_stats) is False
+
+    def test_a_child_is_still_found_by_id(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        self._parent_and_child(root)
+
+        assert dv3.find_session_workspace("sess_child") == "C:\\Work"
+        assert dv3._find_v3_session_dir("sess_child") is not None
 
 
 # --- data.get_full_transcript dispatch for kiro-cli-v3 ---
