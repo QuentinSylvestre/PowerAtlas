@@ -18,7 +18,7 @@ from pathlib import Path
 import tomli_w
 
 # Pure, no UI imports. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (19)
-from .hotkeys import PEEK_MODES
+from .hotkeys import DEFAULT_PEEK_MODE, PEEK_MODES
 
 log = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class Config:
     peek_hotkey: str = "ctrl+shift+z"
     # "hold" or "toggle"; read once at startup by `create_peek`.
     # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
-    peek_mode: str = "hold"
+    peek_mode: str = DEFAULT_PEEK_MODE
     # The browser shortcut: "" (off, the default) or a chord such as
     # "ctrl+shift+b" that opens a signed-in browser tab. Read once at startup
     # by `create_peek`, which turns it off when it is invalid or conflicts
@@ -818,7 +818,7 @@ _read_errors_logged: set[str] = set()
 def _normalize_peek_mode(value) -> str:
     """`peek_mode` as stored on disk -> "hold" or "toggle"; Hold for anything else."""
     mode = value.strip().lower() if isinstance(value, str) else ""
-    return mode if mode in PEEK_MODES else PEEK_MODES[0]
+    return mode if mode in PEEK_MODES else DEFAULT_PEEK_MODE
 
 
 def load_config() -> Config:

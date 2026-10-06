@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from typing import Protocol
+from urllib.parse import urlsplit
 
 log = logging.getLogger("power_atlas.peek")
 
@@ -87,6 +88,10 @@ _REPEAT_GAP_MS = 3000
 # open mints a login code, and a burst must not cycle the 64-code store.
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (12)
 _BROWSER_MIN_GAP_MS = 500
+# A browser press still queued when the window becomes ready is dropped once
+# it is older than this: a press made during a slow startup must not open a
+# tab many seconds later. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (13)
+_BROWSER_STALE_MS = 1000
 
 # How long the worker waits for a callable posted to the UI thread. Past it, a
 # WARNING names the operation and the worker moves on: a hung UI thread must
@@ -101,6 +106,14 @@ _EXIT_WATCHDOG = 5.0
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (2)
 _SIGN_IN_CHECK_INTERVAL = 10.0
 _now = time.monotonic
+# A cookie read still running after this many seconds is given up on and a
+# new read may start (one more daemon thread): pywebview's `get_cookies()`
+# never returns when WebView2's `GetCookiesAsync` task faults, and without
+# this the check would stay off for the run. While reads are skipped a
+# WARNING says so, at most once per `_COOKIE_SKIP_WARN_INTERVAL` seconds.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (1)
+_COOKIE_READ_ABANDON = 30.0
+_COOKIE_SKIP_WARN_INTERVAL = 300.0
 
 _RESET_OVERLAYS_JS = "if(typeof resetOverlays==='function') resetOverlays()"
 
@@ -112,9 +125,10 @@ HIDDEN, PEEK, APP = "hidden", "peek", "app"
 # held and ends when a chord modifier is released. Toggle: a press shows it and
 # the next press ends it; modifier release does nothing.
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2;
-# defined once in `hotkeys`: final review (19)
+# defined once in `hotkeys`: final review (19); by name: final review cycle 2 (12)
 _PEEK_MODES = _hotkeys.PEEK_MODES
-HOLD, TOGGLE = _PEEK_MODES
+HOLD = _hotkeys.HOLD
+TOGGLE = _hotkeys.TOGGLE
 
 # Win32 message constants seen by the keyboard filter.
 _WM_KEYDOWN = 0x0100
@@ -135,6 +149,18 @@ def _tick_now() -> int:
     return int(time.monotonic() * 1000) & _TICK_MASK
 
 
+def _event_tick_now() -> int:
+    """Now, on the clock the posted presses carry: `GetTickCount` on Windows
+    (the hook's `KBDLLHOOKSTRUCT.time`; `time.monotonic()` there is
+    QueryPerformanceCounter, measured ~35 ms apart), `_tick_now()` elsewhere.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (13)
+    """
+    if sys.platform == "win32":
+        import ctypes
+        return ctypes.windll.kernel32.GetTickCount() & _TICK_MASK
+    return _tick_now()
+
+
 class PeekWindow:
     """The PowerAtlas window and its global shortcut listener.
 
@@ -148,6 +174,14 @@ class PeekWindow:
         if not _AVAILABLE:
             raise RuntimeError(f"Peek unavailable: {_IMPORT_ERROR}")
         self._server_url = server_url
+        # The peek chord in force, as `create_peek` computes it: an invalid
+        # one is the default here too, never a chord that cannot fire.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (10)
+        effective = _hotkeys.effective_peek_hotkey(hotkey)
+        if effective != hotkey:
+            log.warning("Peek shortcut %r is invalid; using %s", hotkey,
+                        effective)
+            hotkey = effective
         self._hotkey = hotkey
         # Set once here and only read afterwards (restart-to-apply, D-6).
         # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2
@@ -200,7 +234,7 @@ class PeekWindow:
         # Written only by the worker; read by the keyboard filter (Esc).
         self._peek_showing = False
         # Worker-owned state.
-        self._adapter = None
+        self._adapter: "_WindowAdapter | None" = None
         self._state = HIDDEN
         self._return_to = None
         self._app_placement = None
@@ -253,10 +287,20 @@ class PeekWindow:
             on_main_thread: If True, webview.start() is called on the
                 current thread (blocks). If False, starts on a new thread.
         """
-        self._worker = threading.Thread(target=self._window_worker,
-                                        name="power-atlas-window", daemon=True)
-        self._worker.start()
-        self._start_listener()
+        # A `stop()` that already ran leaves nothing to start: no worker, no
+        # keyboard hook. The listener starts under the stop lock, so a
+        # `stop()` racing this call either comes first (and this returns) or
+        # finds the listener and stops it.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (14)
+        with self._stop_lock:
+            if self._stopping:
+                self._start_returned.set()
+                return
+            self._worker = threading.Thread(target=self._window_worker,
+                                            name="power-atlas-window",
+                                            daemon=True)
+            self._worker.start()
+            self._start_listener()
         if on_main_thread:
             self._run_webview()  # blocks
         else:
@@ -391,7 +435,13 @@ class PeekWindow:
                 ev = self._events.get_nowait()
             except queue.Empty:
                 break
-            done = self._control(ev)
+            # A malformed event is logged and skipped; it never ends the
+            # worker. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (7)
+            try:
+                done = self._control(ev, queued=True)
+            except Exception as e:
+                self._log_event_error(ev, e)
+                continue
             if done:
                 return
             if done is None:
@@ -402,32 +452,42 @@ class PeekWindow:
             log.info("PowerAtlas window ready")
         while True:
             ev = self._events.get()
-            done = self._control(ev)
-            if done:
-                return
-            if done is not None:
-                continue
-            if not self._ready.is_set():
-                log.debug("PowerAtlas window not ready; dropped %s", ev[0])
-                continue
             try:
+                done = self._control(ev)
+                if done:
+                    return
+                if done is not None:
+                    continue
+                if not self._ready.is_set():
+                    log.debug("PowerAtlas window not ready; dropped %s", ev[0])
+                    continue
                 self._handle(ev)
             except Exception as e:
-                # No URL reaches this line: the sign-in reload and the browser
-                # door catch their own errors and log only the type.
-                log.warning("PowerAtlas window: %s failed: %s: %s",
-                            ev[0], type(e).__name__, e)
+                self._log_event_error(ev, e)
 
-    def _control(self, ev: tuple) -> bool | None:
+    @staticmethod
+    def _log_event_error(ev, e: Exception) -> None:
+        # No URL reaches this line: the sign-in reload and the browser door
+        # catch their own errors and log only the type.
+        kind = ev[0] if isinstance(ev, tuple) and ev else type(ev).__name__
+        log.warning("PowerAtlas window: %s failed: %s: %s",
+                    kind, type(e).__name__, e)
+
+    def _control(self, ev: tuple, queued: bool = False) -> bool | None:
         """`stop` and `browser`, handled alike before and after readiness.
 
-        Returns True for `stop` (the worker ends), False for a handled
-        `browser`, None for a window event. The browser shortcut needs no
-        window, so it works before readiness and when readiness failed; it
-        leaves the window state, the double-tap timing and `tap_origin` alone.
-        At most one tab per `_BROWSER_MIN_GAP_MS`, timed by the press's tick.
+        Returns True for `stop` (the worker ends), False for a `browser`
+        event (opened or dropped), None for a window event. The browser
+        shortcut needs no window, so a press during startup or after a failed
+        readiness gate still opens it; it leaves the window state, the
+        double-tap timing and `tap_origin` alone. At most one tab per
+        `_BROWSER_MIN_GAP_MS`, timed by the press's tick. A press drained from
+        the queue when the worker first runs (`queued`) is dropped when it is
+        older than `_BROWSER_STALE_MS`, so a press made during a slow startup
+        never opens a tab long after.
         261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3;
-        one helper and the rate limit: final review (12, 20)
+        one helper and the rate limit: final review (12, 20); stale presses:
+        final review cycle 2 (13)
         """
         kind = ev[0]
         if kind == "stop":
@@ -435,6 +495,14 @@ class PeekWindow:
         if kind != "browser":
             return None
         t = ev[1] & _TICK_MASK
+        if queued:
+            # Masked, so the tick wrap is handled; a press "from the future"
+            # (age past half the range) is not called stale.
+            age = (_event_tick_now() - t) & _TICK_MASK
+            if _BROWSER_STALE_MS < age < 0x80000000:
+                log.debug("Browser shortcut: dropped a press made %d ms "
+                          "before the window was ready", age)
+                return False
         last = self._last_browser
         if last is not None and ((t - last) & _TICK_MASK) < _BROWSER_MIN_GAP_MS:
             log.debug("Browser shortcut: dropped a press within %d ms of the "
@@ -575,11 +643,15 @@ class PeekWindow:
         self._app_was_foreground = self._adapter.is_foreground()
 
     def _to_peek(self, return_to) -> None:
-        self._sign_in_check()
         self._prev_foreground = self._adapter.foreground()
         self._adapter.show_peek()
         self._peek_showing = True
         self._state, self._return_to = PEEK, return_to
+        # After the show, so a cookie read (up to 2 s) never delays a peek; a
+        # re-sign reloads the shown page, which a peek tolerates. The APP
+        # paths keep theirs before the show.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (6)
+        self._sign_in_check()
 
     def _fail_to_hidden(self, reset_fired: bool = False) -> None:
         """A failed exit from PEEK: best-effort hide, then HIDDEN.
@@ -630,8 +702,11 @@ class PeekWindow:
                     a.put_below(self._prev_foreground)
                 self._state, self._return_to = APP, None
             else:
-                fired = True
+                # Fired only once the call returned: a raising one did not
+                # fire, so `_fail_to_hidden` tries it once more.
+                # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (11)
                 a.fire_reset_overlays()
+                fired = True
                 pa_fg = a.is_foreground()
                 a.hide()
                 self._peek_showing = False
@@ -684,19 +759,23 @@ class PeekWindow:
         self._adapter.focus()
 
     def _sign_in_check(self) -> None:
-        """Before a show: sign the window in again when it is signed out.
+        """Sign the window in again when it is signed out.
 
         D-13: after a rotation (the local-secret generation changed). And,
         at most every `_SIGN_IN_CHECK_INTERVAL` seconds, when the window's
-        own `pa_local` cookie is missing or no longer valid: its creation
-        code was never exchanged (WebView2 slower than the code's TTL, or a
-        failed first navigation), or the cookie expired. A signed-in window
-        is never reloaded: an unreadable cookie (page still loading, UI
-        thread busy) counts as signed in, and so does every case where no
-        local secret is loaded, since a re-sign could not fix that.
+        own cookie jar has no valid `pa_local` (`web.window_signed_in`): its
+        creation code was never exchanged (WebView2 slower than the code's
+        TTL, or a failed first navigation), or the cookie expired. A
+        signed-in window is never reloaded, and neither is one whose answer
+        is unknown: a jar that cannot be read now (page still loading, UI
+        thread busy), no local secret loaded, a rotation under way, or a
+        window that has navigated to another origin (its jar is that
+        origin's, so a missing `pa_local` there says nothing).
         `_signed_gen` advances only when the reload is known to have run.
+        Before the show on the APP paths, after it on the peek path.
         261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1;
-        cookie check and reload result: final review (2, 16)
+        cookie check and reload result: final review (2, 16); one web
+        helper, origin check, order: final review cycle 2 (2, 5, 6)
         """
         try:
             from . import web as _web
@@ -711,10 +790,15 @@ class PeekWindow:
             if last is not None and now - last < _SIGN_IN_CHECK_INTERVAL:
                 return
             self._last_cookie_check = now
-            if not _web.local_secret_loaded():
+            read = self._adapter.read_cookies()
+            if read is None:
                 return
-            value = self._adapter.read_cookie()
-            if value is None or _web.local_cookie_value_ok(value):
+            cookies, url = read
+            if _web.window_signed_in(cookies) is not False:
+                return
+            if not self._same_origin(url):
+                log.debug("PowerAtlas window is on another origin; its "
+                          "sign-in is not checked")
                 return
             log.info("PowerAtlas window is signed out; signing it in again")
             self._adapter.reload(_login_url(self._server_url))
@@ -722,6 +806,19 @@ class PeekWindow:
             # The URL carries a live login code, so only the type is logged.
             log.warning("PowerAtlas window could not sign in again: %s",
                         type(e).__name__)
+
+    def _same_origin(self, url) -> bool:
+        """Whether `url` has the server's scheme, host and port, compared
+        literally (`localhost` is not `127.0.0.1`). Anything missing or
+        unparseable is not."""
+        try:
+            if not isinstance(url, str) or not url:
+                return False
+            a, b = urlsplit(url), urlsplit(self._server_url)
+            return (a.scheme.lower(), a.netloc.lower()) == (
+                b.scheme.lower(), b.netloc.lower())
+        except Exception:
+            return False
 
     def _open_browser(self) -> None:
         """The browser door, through the tray's helper. Never logs the URL."""
@@ -994,7 +1091,11 @@ class _WindowAdapter(Protocol):
 
     def hide(self) -> None: ...
 
-    def apply_app(self, placement, focused: bool): ...
+    def apply_app(self, placement, focused: bool) -> object | None:
+        """App chrome and `placement` (None: the D-9 default). Returns the
+        placement now in effect, or None when the UI thread did not answer
+        in time (the window did not change)."""
+        ...
 
     def focus(self) -> None: ...
 
@@ -1005,32 +1106,45 @@ class _WindowAdapter(Protocol):
     def fire_reset_overlays(self) -> None: ...
 
     def reload(self, url: str) -> bool:
-        """Load `url`; False only when it is not known to have run."""
+        """Load `url`; False only when it is not known to have run.
+
+        `_PortableWindow.reload` is not bounded: it calls pywebview's
+        `load_url` on the worker and always returns True (off Windows a
+        hung UI thread would stall the worker here).
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (15)
+        """
         ...
 
-    def read_cookie(self) -> str | None:
-        """The window's `pa_local` value, "" when it has none, None when
-        that cannot be told now."""
+    def read_cookies(self) -> "tuple[list, str | None] | None":
+        """The window's cookie jar (pywebview's `get_cookies()`, a list of
+        `SimpleCookie`) and the URL it was read for, or None when that
+        cannot be told now."""
         ...
 
 
 class _CookieReader:
-    """`read_cookie` for both adapters: pywebview's `get_cookies()`, bounded.
+    """`read_cookies` for both adapters: pywebview's `get_cookies()`, bounded.
 
     It reaches HttpOnly cookies (WebView2's cookie manager; measured on
     pywebview 6.2.1), but it waits up to 20 s for the page and marshals with
     a synchronous `Form.Invoke`, so it never runs on the worker or inside a
     UI-thread callable: a short-lived thread runs it, joined for at most 2 s,
-    like `reload`. A page that has not finished loading is not asked at all,
-    and a read still running from an earlier check blocks a second one.
-    Returns None whenever the answer is unknown. Never logs the value.
-    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (2)
+    like `reload`. A page that has not finished loading is not asked at all.
+    A read still running from an earlier check blocks a second one for
+    `_COOKIE_READ_ABANDON` seconds; past that it is given up on, since a
+    faulted `GetCookiesAsync` never releases pywebview's wait. The current
+    URL is read on the same thread (WebView2 reads the jar for that URL).
+    Returns None whenever the answer is unknown. Never logs a cookie.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (2);
+    the jar, the URL and the abandon: final review cycle 2 (1, 2, 5)
     """
 
     _win = None
     _cookie_thread = None
+    _cookie_started = 0.0
+    _cookie_skip_warned = None
 
-    def read_cookie(self) -> str | None:
+    def read_cookies(self) -> "tuple[list, str | None] | None":
         win = self._win
         try:
             if not win.events.loaded.is_set():
@@ -1039,23 +1153,25 @@ class _CookieReader:
             return None
         prev = self._cookie_thread
         if prev is not None and prev.is_alive():
-            return None
-        from .web import _LOCAL_COOKIE_NAME as name
+            stuck_for = _now() - self._cookie_started
+            if stuck_for < _COOKIE_READ_ABANDON:
+                self._warn_skipped("an earlier read is still running")
+                return None
+            self._warn_skipped(f"an earlier read has hung for "
+                               f"{stuck_for:.0f} s; starting another")
         box: dict = {}
 
         def run():
             try:
-                value = ""
-                for cookie in win.get_cookies() or ():
-                    if name in cookie:
-                        value = cookie[name].value
-                box["v"] = value
+                url = win.get_current_url()
+                box["v"] = (list(win.get_cookies() or ()), url)
             except Exception as e:
                 box["e"] = type(e).__name__
 
         t = threading.Thread(target=run, name="power-atlas-cookies",
                              daemon=True)
         self._cookie_thread = t
+        self._cookie_started = _now()
         t.start()
         t.join(_UI_TIMEOUT)
         if t.is_alive():
@@ -1067,6 +1183,17 @@ class _CookieReader:
                         box["e"])
             return None
         return box.get("v")
+
+    def _warn_skipped(self, why: str) -> None:
+        """A WARNING that sign-in checks are being skipped, at most once per
+        `_COOKIE_SKIP_WARN_INTERVAL`."""
+        now = _now()
+        last = self._cookie_skip_warned
+        if last is not None and now - last < _COOKIE_SKIP_WARN_INTERVAL:
+            return
+        self._cookie_skip_warned = now
+        log.warning("PowerAtlas window: cookie reads are being skipped (%s); "
+                    "the signed-out check is paused", why)
 
 
 class _PortableWindow(_CookieReader):
@@ -1353,7 +1480,9 @@ class _Win32Window(_CookieReader):
         261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (4)
         """
         if self._chrome == mode:
-            return self._h
+            # The handle as it is now, like the switch below, not the cache.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (8)
+            return int(self._native.Handle.ToInt64())
         import System.Windows.Forms as WinForms  # type: ignore[import]
         u, _ = _win32()
         native = self._native

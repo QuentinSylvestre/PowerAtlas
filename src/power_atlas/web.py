@@ -1945,6 +1945,12 @@ LOCAL_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 3600
 # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1 (D-13)
 _local_secret_generation = 0
 
+# True from just before the rotate route swaps the local secret until it has
+# bumped the generation (in a `finally`). Meanwhile `window_signed_in`
+# answers unknown, so the window mints no code the rotation would then wipe.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (4)
+_local_secret_rotating = False
+
 
 def local_secret_generation() -> int:
     """How many times `set_local_secret` has run in this process.
@@ -2009,22 +2015,41 @@ def _local_cookie_ok(scope) -> bool:
     return local_cookie_value_ok(_scope_cookie(scope, _LOCAL_COOKIE_NAME))
 
 
-def local_secret_loaded() -> bool:
-    """Whether a local secret is in effect, so a login code can be minted.
+def window_signed_in(cookies) -> bool | None:
+    """Whether the PowerAtlas window's cookie jar holds a valid `pa_local`.
 
-    The PowerAtlas window asks before re-signing: with no secret a re-sign
-    mints nothing and only reloads the gate page.
-    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (2)
+    ``cookies`` is what pywebview's `get_cookies()` returns: a list of
+    `http.cookies.SimpleCookie`. True when it holds a valid, unexpired
+    `pa_local`; False when it holds none or an invalid one; None (unknown,
+    so the window must not re-sign) when the jar could not be read
+    (``None``), when no local secret is loaded (a re-sign would mint
+    nothing and only reload the gate page), or while a rotation is under
+    way (a code minted now would be wiped by the rotation's clear).
+    The one helper the window calls for this check, so the cookie's name
+    and rules stay here. Never raises and never logs: the value is a live
+    credential.
+    261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (2, 4)
     """
-    return bool(_LOCAL_SECRET)
+    if cookies is None or not _LOCAL_SECRET or _local_secret_rotating:
+        return None
+    value = None
+    try:
+        for cookie in cookies:
+            if _LOCAL_COOKIE_NAME in cookie:
+                value = cookie[_LOCAL_COOKIE_NAME].value
+    except Exception:
+        return None
+    if value is None:
+        return False
+    return local_cookie_value_ok(value)
 
 
 def local_cookie_value_ok(raw) -> bool:
     """Whether ``raw`` is a valid, unexpired `pa_local` value under the
     current local key. `_local_cookie_ok`'s rules, without the request scope.
 
-    Pure, never raises, never logs: the PowerAtlas window passes the value it
-    read from its own cookie jar (a live credential).
+    Pure, never raises, never logs: `window_signed_in` passes the value the
+    PowerAtlas window read from its own cookie jar (a live credential).
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (2)
     """
     secret = _LOCAL_SECRET
@@ -6240,20 +6265,28 @@ async def api_local_secret_rotate(request: Request, response: Response,
     # The generation is bumped only after the clear below: the PowerAtlas
     # window mints a code when it sees the bump, and that code must survive.
     # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (16)
-    set_local_secret(secret, bump_generation=False)
-    # Codes minted under the old secret would otherwise still exchange for a
-    # cookie; clearing them makes "rotate" mean every old way in is closed.
-    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
-    #
-    # Known race, accepted: a code a door minted moments before the rotation
-    # is cleared too, so a browser still opening from that door lands on the
-    # "expired or already used" page and has to be reopened from the tray.
-    # Accepted in favour of the security property — after a rotation no way in
-    # issued before it remains.
-    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
-    with _login_codes_lock:
-        _login_codes.clear()
-    bump_local_secret_generation()
+    # The window's cookie check stands down from the swap to the bump: a code
+    # it minted in between would be wiped by the clear.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2 (4)
+    global _local_secret_rotating
+    _local_secret_rotating = True
+    try:
+        set_local_secret(secret, bump_generation=False)
+        # Codes minted under the old secret would otherwise still exchange for a
+        # cookie; clearing them makes "rotate" mean every old way in is closed.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
+        #
+        # Known race, accepted: a code a door minted moments before the rotation
+        # is cleared too, so a browser still opening from that door lands on the
+        # "expired or already used" page and has to be reopened from the tray.
+        # Accepted in favour of the security property — after a rotation no way in
+        # issued before it remains.
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4 review
+        with _login_codes_lock:
+            _login_codes.clear()
+        bump_local_secret_generation()
+    finally:
+        _local_secret_rotating = False
     reissued = _set_local_cookie(response)
     # Open sockets outlive the key they were admitted under; close them.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F3)

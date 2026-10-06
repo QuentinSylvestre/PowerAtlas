@@ -589,9 +589,12 @@ class _FakeAdapter:
         self.fg = fg
         self.live = _Placement("live-0")
         self.default = _Placement("default")
-        # What `read_cookie` answers: None (unknown) unless a test sets it.
-        # Reads are counted apart from `calls`, which tests compare whole.
+        # The window's `pa_local`: None (the jar cannot be read: unknown)
+        # unless a test sets it, "" for a jar without one. `url` is the page
+        # the jar was read for. Reads are counted apart from `calls`, which
+        # tests compare whole.
         self.cookie = None
+        self.url = "http://127.0.0.1:4915/acp"
         self.cookie_reads = 0
         self.reload_ok = True
 
@@ -641,9 +644,19 @@ class _FakeAdapter:
         self.calls.append(("reload", url))
         return self.reload_ok
 
-    def read_cookie(self):
+    def read_cookies(self):
+        from http.cookies import SimpleCookie
         self.cookie_reads += 1
-        return self.cookie
+        if self.cookie is None:
+            return None
+        other = SimpleCookie()
+        other["other"] = "x"
+        jar = [other]
+        if self.cookie:
+            c = SimpleCookie()
+            c["pa_local"] = self.cookie
+            jar.append(c)
+        return jar, self.url
 
     def names(self):
         return [c[0] for c in self.calls]
@@ -1824,8 +1837,9 @@ class TestSignInGeneration:
         pw._handle(("press", "peek", 5000))
         reloads = [c for c in a.calls if c[0] == "reload"]
         assert reloads == [("reload", "http://127.0.0.1:4915/signed/1")]
-        # Reloaded before the window showed.
-        assert a.names().index("reload") < a.names().index("show_peek")
+        # Reloaded after the peek showed (final review cycle 2, fix 6: the
+        # check no longer delays a peek).
+        assert a.names().index("reload") > a.names().index("show_peek")
 
     def test_tray_open_while_in_app_checks_too(self, monkeypatch):
         pw, a, web_mod, minted = self._peek(monkeypatch)
@@ -2859,6 +2873,9 @@ class TestBrowserEvent:
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
         monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
         monkeypatch.setattr(pw, "_establish_ready", lambda: None)
+        # Drained at tick 1000: both presses are within 1 s, so neither is
+        # stale (final review cycle 2, fix 13).
+        monkeypatch.setattr(peek_mod, "_event_tick_now", lambda: 1000)
         # Ticks 1000 ms apart: past the 500 ms rate limit (final review 12).
         for ev in (("browser", 0), ("press", "peek", 1), ("show_app",),
                    ("browser", 1000), ("stop",)):
@@ -3122,11 +3139,29 @@ class TestSignInCookieCheck:
     def _reloads(a):
         return [c for c in a.calls if c[0] == "reload"]
 
-    def test_a_missing_cookie_re_signs_before_the_show(self, monkeypatch):
+    def test_a_missing_cookie_re_signs_after_a_peek_shows(self, monkeypatch):
+        """Final review cycle 2, fix 6: on the peek path the check runs after
+        the show, so a cookie read never delays a peek."""
         peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, "")
+        reads_at_show = []
+        orig_show = a.show_peek
+
+        def show_peek():
+            reads_at_show.append(a.cookie_reads)
+            orig_show()
+
+        a.show_peek = show_peek
         pw._handle(("press", "peek", 1000))
         assert self._reloads(a) == [("reload", "http://127.0.0.1:4915/signed/1")]
-        assert a.names().index("reload") < a.names().index("show_peek")
+        assert a.names().index("reload") > a.names().index("show_peek")
+        assert reads_at_show == [0] and a.cookie_reads == 1
+
+    def test_a_missing_cookie_re_signs_before_an_app_show(self, monkeypatch):
+        """The APP paths keep their check before the window is placed."""
+        peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, "")
+        pw._handle(("show_app",))
+        assert len(self._reloads(a)) == 1
+        assert a.names().index("reload") < a.names().index("apply_app")
 
     def test_a_valid_cookie_is_never_reloaded(self, monkeypatch):
         peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, None)
@@ -3171,11 +3206,12 @@ class TestSignInCookieCheck:
         assert a.cookie_reads == 1
         assert self._reloads(a) == []
 
-    def test_without_a_local_secret_nothing_is_read_or_reloaded(
-            self, monkeypatch):
+    def test_without_a_local_secret_nothing_is_reloaded(self, monkeypatch):
+        """No secret: `web.window_signed_in` answers unknown, so nothing is
+        reloaded. The jar may be read first: the one web helper decides
+        (final review cycle 2, fix 2), so the read count is not pinned."""
         peek_mod, web_mod, pw, a, clock = self._peek(monkeypatch, "", secret="")
         pw._handle(("press", "peek", 1000))
-        assert a.cookie_reads == 0
         assert self._reloads(a) == []
 
     def test_the_check_runs_at_most_every_ten_seconds(self, monkeypatch):
@@ -3251,10 +3287,20 @@ class TestSignInReloadResult:
 
 
 class TestCookieReader:
-    """`read_cookie`, shared by both adapters: bounded, off the worker,
+    """`read_cookies`, shared by both adapters: bounded, off the worker,
     never waiting on an unloaded page, never logging the value."""
 
     VALUE = "loopback.1700000000.SECRETSIG"
+    URL = "http://127.0.0.1:4915/acp"
+
+    @staticmethod
+    def _pa_local(read):
+        """The `pa_local` value in a `read_cookies()` result, "" if none."""
+        jar, url = read
+        for c in jar:
+            if "pa_local" in c:
+                return c["pa_local"].value
+        return ""
 
     def _win(self, loaded=True, cookies=None, get=None):
         import threading
@@ -3263,7 +3309,8 @@ class TestCookieReader:
         ev = threading.Event()
         if loaded:
             ev.set()
-        win = types.SimpleNamespace(events=types.SimpleNamespace(loaded=ev))
+        win = types.SimpleNamespace(events=types.SimpleNamespace(loaded=ev),
+                                    get_current_url=lambda: self.URL)
         calls = []
 
         def get_cookies():
@@ -3287,18 +3334,21 @@ class TestCookieReader:
         win, calls = self._win(cookies={"other": "x", "pa_local": self.VALUE})
         a = getattr(peek_mod, cls)(None, win)
         with caplog.at_level(logging.DEBUG):
-            assert a.read_cookie() == self.VALUE
+            read = a.read_cookies()
+        assert self._pa_local(read) == self.VALUE
+        assert read[1] == self.URL
         assert "SECRETSIG" not in caplog.text
 
     def test_no_pa_local_is_empty(self):
         import power_atlas.peek as peek_mod
         win, calls = self._win(cookies={"other": "x"})
-        assert peek_mod._Win32Window(None, win).read_cookie() == ""
+        assert self._pa_local(
+            peek_mod._Win32Window(None, win).read_cookies()) == ""
 
     def test_an_unloaded_page_is_not_asked(self):
         import power_atlas.peek as peek_mod
         win, calls = self._win(loaded=False, cookies={"pa_local": self.VALUE})
-        assert peek_mod._Win32Window(None, win).read_cookie() is None
+        assert peek_mod._Win32Window(None, win).read_cookies() is None
         assert calls == []
 
     def test_a_raising_read_is_unknown_and_logs_the_type_only(self, caplog):
@@ -3309,7 +3359,7 @@ class TestCookieReader:
 
         win, calls = self._win(get=broken)
         with caplog.at_level(logging.WARNING, logger="power_atlas"):
-            assert peek_mod._Win32Window(None, win).read_cookie() is None
+            assert peek_mod._Win32Window(None, win).read_cookies() is None
         assert "RuntimeError" in caplog.text
         assert "SECRETSIG" not in caplog.text
 
@@ -3324,12 +3374,76 @@ class TestCookieReader:
         try:
             t0 = _t.monotonic()
             with caplog.at_level(logging.WARNING, logger="power_atlas"):
-                assert a.read_cookie() is None
+                assert a.read_cookies() is None
             assert _t.monotonic() - t0 < 2
             assert "did not read the window's cookies" in caplog.text
             # The first read is still stuck: no second thread.
-            assert a.read_cookie() is None
+            assert a.read_cookies() is None
             assert len(calls) == 1
+        finally:
+            release.set()
+
+    def test_a_read_hung_past_30_s_is_given_up_on(self, monkeypatch, caplog):
+        """Final review cycle 2, fix 1: a faulted `GetCookiesAsync` never
+        releases pywebview's wait, so the read thread never ends. Within 30 s
+        of its start a second read is refused; past 30 s a new read starts,
+        so the signed-out check is not off for the rest of the run."""
+        import threading
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_UI_TIMEOUT", 0.05)
+        clock = [500.0]
+        monkeypatch.setattr(peek_mod, "_now", lambda: clock[0])
+        release = threading.Event()
+        hang = [True]
+
+        def get():
+            if hang[0]:
+                release.wait(10)
+            return []
+
+        win, calls = self._win(get=get)
+        a = peek_mod._Win32Window(None, win)
+        try:
+            assert a.read_cookies() is None  # hangs
+            clock[0] += 29.9
+            assert a.read_cookies() is None
+            assert len(calls) == 1, "refused inside 30 s"
+            clock[0] += 0.2  # 30.1 s after the stuck read started
+            hang[0] = False
+            assert a.read_cookies() == ([], self.URL)
+            assert len(calls) == 2, "a new read past 30 s"
+        finally:
+            release.set()
+
+    def test_skipped_reads_warn_at_most_every_five_minutes(self, monkeypatch,
+                                                          caplog):
+        import threading
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_UI_TIMEOUT", 0.05)
+        clock = [500.0]
+        monkeypatch.setattr(peek_mod, "_now", lambda: clock[0])
+        release = threading.Event()
+        win, calls = self._win(get=lambda: release.wait(10) and [])
+        a = peek_mod._Win32Window(None, win)
+        msg = "cookie reads are being skipped"
+        try:
+            with caplog.at_level(logging.WARNING, logger="power_atlas"):
+                a.read_cookies()  # the stuck read; not a skip
+                assert caplog.text.count(msg) == 0
+                clock[0] += 1
+                a.read_cookies()  # skipped: warns
+                clock[0] += 1
+                a.read_cookies()  # skipped again: quiet
+                assert caplog.text.count(msg) == 1
+                # Abandoned at 30 s and restarted: each restart is a fresh
+                # stuck read; skips keep counting against one 5 min window.
+                for _ in range(9):  # 9 x 30.5 s = 274.5 s after the warning
+                    clock[0] += 30.5
+                    a.read_cookies()
+                assert caplog.text.count(msg) == 1
+                clock[0] += 30.5  # 305 s after the first warning
+                a.read_cookies()
+                assert caplog.text.count(msg) == 2
         finally:
             release.set()
 
@@ -3419,6 +3533,9 @@ class TestBrowserRateLimit:
         monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
         monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
         monkeypatch.setattr(pw, "_establish_ready", lambda: pw._adapter)
+        # The presses are drained before readiness: "now" is the last one,
+        # so none is stale (final review cycle 2, fix 13).
+        monkeypatch.setattr(peek_mod, "_event_tick_now", lambda: ticks[-1])
         for t in ticks:
             pw._events.put(("browser", t))
         pw._events.put(("stop",))
@@ -3595,7 +3712,7 @@ class TestAdapterProtocol:
         members = ({n for n in vars(proto) if not n.startswith("_")}
                    | set(proto.__annotations__))
         assert {"has_app_mode", "show_peek", "apply_app", "reload",
-                "read_cookie"} <= members
+                "read_cookies"} <= members
         for cls in (peek_mod._Win32Window, peek_mod._PortableWindow,
                     _FakeAdapter):
             missing = sorted(m for m in members if not hasattr(cls, m))
@@ -3683,3 +3800,334 @@ class TestOneShortcutRule:
         assert config_mod.PEEK_MODES is hotkeys_mod.PEEK_MODES
         assert peek_mod._PEEK_MODES is hotkeys_mod.PEEK_MODES
         assert (peek_mod.HOLD, peek_mod.TOGGLE) == ("hold", "toggle")
+        # By name, not by position (final review cycle 2, fix 12).
+        assert peek_mod.HOLD is hotkeys_mod.HOLD
+        assert peek_mod.TOGGLE is hotkeys_mod.TOGGLE
+        assert hotkeys_mod.PEEK_MODES == (hotkeys_mod.HOLD, hotkeys_mod.TOGGLE)
+        assert hotkeys_mod.DEFAULT_PEEK_MODE == "hold"
+        assert config_mod.Config().peek_mode == hotkeys_mod.DEFAULT_PEEK_MODE
+        assert config_mod._normalize_peek_mode("x") == "hold"
+
+
+# ---- 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review cycle 2
+
+class TestSignInOrigin:
+    """Fix 5: WebView2 reads the jar for the current URL, so a window that
+    navigated in place to another origin has no `pa_local` there without
+    being signed out. Only the server's own scheme, host and port count."""
+
+    SECRET = "S" * 43
+
+    def _run(self, monkeypatch, url):
+        import power_atlas.peek as peek_mod
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_LOCAL_SECRET", self.SECRET)
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        pw, a = _ready_peek(monkeypatch)
+        a.cookie = ""
+        a.url = url
+        pw._handle(("show_app",))
+        return [c for c in a.calls if c[0] == "reload"]
+
+    @pytest.mark.parametrize("url", [
+        "http://127.0.0.1:4915/acp",
+        "http://127.0.0.1:4915/local-auth?x=1",
+        "HTTP://127.0.0.1:4915/",
+    ])
+    def test_the_servers_origin_re_signs(self, monkeypatch, url):
+        assert len(self._run(monkeypatch, url)) == 1
+
+    @pytest.mark.parametrize("url", [
+        "http://127.0.0.1:4916/acp",       # another port
+        "http://localhost:4915/acp",       # another host name
+        "https://127.0.0.1:4915/acp",      # another scheme
+        "http://127.0.0.1/acp",            # no port
+        "https://example.com/4915",
+        None, "", "about:blank",
+    ])
+    def test_another_or_unknown_origin_is_left_alone(self, monkeypatch, url):
+        assert self._run(monkeypatch, url) == []
+
+
+class TestSignInReloadNeverLogsTheUrl:
+    """Fix 3: a cookie-path re-sign whose reload raises with the URL in its
+    message logs the exception type only."""
+
+    def test_a_raising_reload_logs_the_type_only(self, monkeypatch, caplog):
+        import power_atlas.peek as peek_mod
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_LOCAL_SECRET", "S" * 43)
+        url = "http://127.0.0.1:4915/local-auth?code=SECRETCODE123"
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: url)
+        pw, a = _ready_peek(monkeypatch)
+        a.cookie = ""
+
+        def reload(u):
+            a.calls.append(("reload", u))
+            raise RuntimeError(f"navigation to {u} failed")
+
+        a.reload = reload
+        with caplog.at_level(logging.DEBUG):
+            pw._handle(("press", "peek", 1000))
+        assert ("reload", url) in a.calls, "the cookie path re-signed"
+        assert "could not sign in again: RuntimeError" in caplog.text
+        records = "\n".join(r.getMessage() for r in caplog.records)
+        for text in (caplog.text, records):
+            assert "SECRETCODE123" not in text
+            assert "code=" not in text and "/local-auth" not in text
+
+
+class TestMalformedEventKeepsTheWorker:
+    """Fix 7: `_control` runs inside the loops' try, so a malformed event is
+    logged and skipped, and later events still run, before and after
+    readiness."""
+
+    def test_before_and_after_readiness(self, monkeypatch, caplog):
+        import threading
+        import power_atlas.peek as peek_mod
+        pw = _two_chord_peek(monkeypatch)
+        opened = []
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod, "_event_tick_now", lambda: 100)
+        a = _FakeAdapter()
+        monkeypatch.setattr(pw, "_establish_ready", lambda: a)
+        pw._events.put(("browser",))  # no tick: IndexError in `_control`
+        pw._events.put(("browser", 100))
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            t = threading.Thread(target=pw._window_worker, daemon=True)
+            t.start()
+            assert pw._ready.wait(5)
+            pw._events.put(("browser",))
+            pw._events.put(("browser", 5000))
+            pw._events.put(("stop",))
+            t.join(5)
+        assert not t.is_alive()
+        assert len(opened) == 2
+        assert caplog.text.count("browser failed: IndexError") == 2
+
+
+class TestChromeHandleUnchangedMode:
+    """Fix 8: the unchanged-mode branch of `_set_chrome` returns the handle
+    as it is now, not the cached one."""
+
+    def test_returns_the_fresh_handle(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        pw, a, seen = TestHandleKeptOnTheWorker()._adapter(monkeypatch)
+        a._chrome = peek_mod.PEEK
+        assert pw._hwnd == 0x1111
+        a.show_peek()
+        assert pw._hwnd == 0x2222
+
+
+class TestAdapterProtocolCoversTheWorker:
+    """Fix 9: every member the worker reads off its adapter is declared in
+    `_WindowAdapter`. Source check over `self._adapter.<name>` and over
+    locals bound to `self._adapter`."""
+
+    def test_every_used_member_is_declared(self):
+        import ast
+        import inspect
+        import power_atlas.peek as peek_mod
+        tree = ast.parse(inspect.getsource(peek_mod.PeekWindow))
+
+        def is_self_adapter(node):
+            return (isinstance(node, ast.Attribute) and node.attr == "_adapter"
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self")
+
+        used = set()
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            aliases = {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                       and is_self_adapter(n.value)
+                       for t in n.targets if isinstance(t, ast.Name)}
+            for n in ast.walk(fn):
+                if not isinstance(n, ast.Attribute):
+                    continue
+                if is_self_adapter(n.value) or (
+                        isinstance(n.value, ast.Name) and n.value.id in aliases):
+                    used.add(n.attr)
+        proto = peek_mod._WindowAdapter
+        declared = ({n for n in vars(proto) if not n.startswith("_")}
+                    | set(proto.__annotations__))
+        # The check sees the worker's real calls, aliases included.
+        assert {"show_peek", "apply_app", "read_cookies", "reload",
+                "fire_reset_overlays", "restore_foreground"} <= used
+        assert sorted(used - declared) == []
+
+    def test_annotations(self):
+        import inspect
+        import power_atlas.peek as peek_mod
+        ann = peek_mod._WindowAdapter.apply_app.__annotations__
+        assert ann["return"] == (object | None)
+        init = inspect.getsource(peek_mod.PeekWindow.__init__)
+        assert 'self._adapter: "_WindowAdapter | None" = None' in init
+
+
+class TestConstructorPeekHotkey:
+    """Fix 10: `PeekWindow` applies the peek shortcut in force, as
+    `create_peek` does: an invalid one becomes the default."""
+
+    @pytest.mark.parametrize("bad", ["ctrl+shift", "z", "ctrl+shift+nope",
+                                     "ctrl+esc"])
+    def test_an_invalid_peek_shortcut_is_the_default(self, monkeypatch,
+                                                      caplog, bad):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            pw = peek_mod.PeekWindow("http://x", bad)
+        assert pw._hotkey == "ctrl+shift+z"
+        assert pw._trigger_keys == {"ctrl", "shift", "z"}
+        assert pw._chords["peek"] == {"ctrl", "shift", "z"}
+        assert "is invalid" in caplog.text
+
+    def test_a_valid_one_is_kept(self, monkeypatch, caplog):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+        with caplog.at_level(logging.WARNING, logger="power_atlas"):
+            pw = peek_mod.PeekWindow("http://x", "alt+q", browser_hotkey="ctrl+alt+b")
+        assert pw._hotkey == "alt+q"
+        assert pw._chords == {"peek": {"alt", "q"},
+                              "browser": {"ctrl", "alt", "b"}}
+        assert caplog.text == ""
+
+
+class TestResetFiredOnlyWhenItReturned:
+    """Fix 11: `_end_peek` counts `resetOverlays` as fired only once the call
+    returned, so a raising one is tried again by `_fail_to_hidden`."""
+
+    def test_a_reset_that_raises_once_is_retried(self, monkeypatch):
+        pw, a = _ready_peek(monkeypatch)
+        pw._handle(("press", "peek", 1000))
+        a.calls.clear()
+        attempts = []
+
+        def flaky():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("no form")
+            a.calls.append(("reset_overlays",))
+
+        monkeypatch.setattr(a, "fire_reset_overlays", flaky)
+        with pytest.raises(RuntimeError):
+            pw._handle(("esc",))
+        assert len(attempts) == 2
+        assert a.calls.count(("reset_overlays",)) == 1
+
+    def test_a_reset_that_returned_is_not_fired_again(self, monkeypatch):
+        pw, a = _ready_peek(monkeypatch)
+        pw._handle(("press", "peek", 1000))
+        a.calls.clear()
+        orig_hide = a.hide
+
+        def broken():
+            orig_hide()
+            raise OSError(5, "denied")
+
+        monkeypatch.setattr(a, "hide", broken)
+        with pytest.raises(OSError):
+            pw._handle(("esc",))
+        assert a.calls.count(("reset_overlays",)) == 1
+
+
+class TestStaleQueuedBrowserPress:
+    """Fix 13: a browser press still queued when the worker first drains is
+    dropped once older than 1 s, with a DEBUG line; a fresh one opens. The
+    age is masked, so the tick wrap is handled."""
+
+    def _run(self, monkeypatch, now, ticks, caplog=None):
+        import threading
+        import power_atlas.peek as peek_mod
+        pw = _two_chord_peek(monkeypatch)
+        opened = []
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod, "_event_tick_now", lambda: now)
+        monkeypatch.setattr(pw, "_establish_ready", lambda: pw._adapter)
+        for t in ticks:
+            pw._events.put(("browser", t))
+        pw._events.put(("stop",))
+        th = threading.Thread(target=pw._window_worker, daemon=True)
+        th.start()
+        th.join(5)
+        assert not th.is_alive()
+        return len(opened)
+
+    def test_both_sides_of_one_second(self, monkeypatch, caplog):
+        with caplog.at_level(logging.DEBUG, logger="power_atlas"):
+            assert self._run(monkeypatch, 11000, [9999]) == 0  # 1001 ms old
+        assert "dropped a press made 1001 ms before" in caplog.text
+        assert self._run(monkeypatch, 11000, [10000]) == 1  # 1000 ms old
+
+    def test_the_tick_wrap(self, monkeypatch):
+        # 0xFFFFFF00 is 0x300 (768 ms) before 0x200 across the wrap: fresh.
+        assert self._run(monkeypatch, 0x200, [0xFFFFFF00]) == 1
+        # 0xFFFFF000 is 0x1200 (4608 ms) before 0x200: stale.
+        assert self._run(monkeypatch, 0x200, [0xFFFFF000]) == 0
+
+    def test_only_the_drain_drops_stale_presses(self, monkeypatch):
+        """After readiness a press is never judged by age (the main loop
+        gets it as it happens)."""
+        import threading
+        import power_atlas.peek as peek_mod
+        pw = _two_chord_peek(monkeypatch)
+        opened = []
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        monkeypatch.setattr(peek_mod._tray, "_open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod, "_event_tick_now", lambda: 10**6)
+        monkeypatch.setattr(pw, "_establish_ready", lambda: pw._adapter)
+        th = threading.Thread(target=pw._window_worker, daemon=True)
+        th.start()
+        assert pw._ready.wait(5)
+        pw._events.put(("browser", 0))
+        pw._events.put(("stop",))
+        th.join(5)
+        assert len(opened) == 1
+
+    def test_the_event_clock_is_the_hook_clock_on_windows(self, monkeypatch):
+        import ctypes
+        import power_atlas.peek as peek_mod
+        if sys.platform != "win32":
+            pytest.skip("GetTickCount is Windows only")
+        before = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+        now = peek_mod._event_tick_now()
+        after = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+        assert ((now - before) & 0xFFFFFFFF) <= ((after - before) & 0xFFFFFFFF)
+
+
+class TestStartAfterStop:
+    """Fix 14: `start()` after `stop()` starts nothing: no worker, no
+    keyboard hook, no webview."""
+
+    def test_start_after_stop_starts_nothing(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_EXIT_WATCHDOG", 0.05)
+        built = []
+        monkeypatch.setattr(peek_mod, "keyboard",
+                            MagicMock(Listener=lambda **kw: built.append(kw)),
+                            raising=False)
+        pw = _new_peek(monkeypatch)
+        ran = []
+        monkeypatch.setattr(pw, "_run_webview", lambda: ran.append(1))
+        pw.stop()
+        pw.start(on_main_thread=True)
+        assert built == []
+        assert pw._worker is None
+        assert pw._listener is None
+        assert ran == []
+        assert pw._start_returned.is_set()
+
+    def test_start_before_stop_starts_the_listener(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        listener = MagicMock()
+        monkeypatch.setattr(peek_mod, "keyboard",
+                            MagicMock(Listener=lambda **kw: listener),
+                            raising=False)
+        pw = _new_peek(monkeypatch)
+        monkeypatch.setattr(pw, "_window_worker", lambda: None)
+        monkeypatch.setattr(pw, "_run_webview", lambda: None)
+        pw.start(on_main_thread=True)
+        assert pw._listener is listener
+        listener.start.assert_called_once()

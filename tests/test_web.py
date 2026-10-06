@@ -28901,6 +28901,62 @@ class TestLocalSecretRotation:
         assert len(window_codes) == 1
         assert web_mod._consume_login_code(window_codes[0]) is True
 
+    def test_the_window_check_stands_down_during_the_rotation(
+            self, rotation_ready, client, monkeypatch):
+        """Final review cycle 2, fix 4: from the secret swap to the bump the
+        window's cookie check answers unknown (a code it minted would be
+        wiped by the clear); before and after, it does not."""
+        web_mod = rotation_ready
+        seen = {}
+        real_set = web_mod.set_local_secret
+        real_bump = web_mod.bump_local_secret_generation
+
+        class _Codes(dict):
+            def clear(inner):
+                seen["at_clear"] = web_mod.window_signed_in([])
+                super().clear()
+
+        def set_secret(secret, **kw):
+            seen["at_swap"] = web_mod._local_secret_rotating
+            real_set(secret, **kw)
+
+        def bump():
+            seen["at_bump"] = web_mod.window_signed_in([])
+            real_bump()
+
+        monkeypatch.setattr(web_mod, "_login_codes", _Codes())
+        monkeypatch.setattr(web_mod, "set_local_secret", set_secret)
+        monkeypatch.setattr(web_mod, "bump_local_secret_generation", bump)
+        assert web_mod.window_signed_in([]) is False
+        resp = client.post("/api/local-secret/rotate",
+                           headers={"Cookie":
+                                    f"pa_local={web_mod.make_local_cookie()}"})
+        assert resp.json()["ok"] is True
+        assert seen == {"at_swap": True, "at_clear": None, "at_bump": None}
+        assert web_mod._local_secret_rotating is False
+        assert web_mod.window_signed_in([]) is False
+
+    def test_the_rotation_flag_clears_when_the_bump_raises(
+            self, rotation_ready, client, monkeypatch):
+        web_mod = rotation_ready
+        real_bump = web_mod.bump_local_secret_generation
+        raised = []
+
+        def broken():
+            # Raises once, in the route; the fixture's teardown bumps too.
+            if not raised:
+                raised.append(1)
+                raise RuntimeError("bump failed")
+            real_bump()
+
+        monkeypatch.setattr(web_mod, "bump_local_secret_generation", broken)
+        with pytest.raises(RuntimeError):
+            client.post("/api/local-secret/rotate",
+                        headers={"Cookie":
+                                 f"pa_local={web_mod.make_local_cookie()}"})
+        assert raised == [1]
+        assert web_mod._local_secret_rotating is False
+
     def test_caller_without_a_valid_cookie_gets_nothing(self, rotation_ready,
                                                         client):
         """Otherwise the rotate route would be a mint for any local process."""
@@ -29639,10 +29695,15 @@ class TestLoopbackDoors:
         260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5 (all
         doors but Copy login link: Phase 5 review); openers since
         261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1,
-        no longer the per-show navigation, which is gone (D-13)
+        no longer the per-show navigation, which is gone (D-13); the
+        cookie-path re-sign: final review cycle 2 (3)
         """
         tray_mod, icon = self._tray_menu(monkeypatch)
         peek_mod, pw, window = self._peek(monkeypatch, app_mode=False)
+        # The sign-in check's clock, so the cookie-path re-sign below runs
+        # (final review cycle 2, fix 3).
+        clock = [1000.0]
+        monkeypatch.setattr(peek_mod, "_now", lambda: clock[0])
         urls = []
         real_open_in_browser = tray_mod._open_in_browser
         monkeypatch.setattr(tray_mod, "_open_in_browser", urls.append)
@@ -29685,11 +29746,19 @@ class TestLoopbackDoors:
             # A rotation, then the next show signs the window in again.
             local_enabled.set_local_secret("Q" * 43)
             pw._handle(("press", "peek", 9000))
+            pw._handle(("release",))
+            # The window finds itself signed out (no `pa_local` in its jar)
+            # once the 10 s check interval has passed: the cookie path
+            # re-signs it. Final review cycle 2, fix 3.
+            window.signed_out = True
+            clock[0] += 10.5
+            pw._handle(("press", "peek", 30000))
             urls.extend(window.reloads)
         # Seven openers before Phase 3, plus the browser shortcut, plus the
-        # real door's failure branch (final review fix 11).
-        assert len(urls) == 9
-        assert len(window.reloads) == 1
+        # real door's failure branch (final review fix 11), plus the two
+        # sign-in reloads (rotation, then the cookie path).
+        assert len(urls) == 10
+        assert len(window.reloads) == 2
         records = "\n".join(r.getMessage() for r in caplog.records)
         for text in (caplog.text, records):
             assert "/local-auth" not in text
@@ -29720,6 +29789,8 @@ class TestLoopbackDoors:
             self.has_app_mode = app_mode
             self.reloads = []
             self.apps = []
+            # Unknown (no re-sign) until a test says the jar has no cookie.
+            self.signed_out = False
 
         def foreground(self):
             return None
@@ -29756,8 +29827,11 @@ class TestLoopbackDoors:
             self.reloads.append(url)
             return True
 
-        def read_cookie(self):
-            return None  # unknown: never triggers a re-sign
+        def read_cookies(self):
+            if not self.signed_out:
+                return None  # unknown: never triggers a re-sign
+            # A jar without `pa_local`, read on the server's own origin.
+            return [], "http://127.0.0.1:4915/"
 
     def _peek(self, monkeypatch, app_mode=True):
         """A ready PowerAtlas window over a recording adapter, signed in
@@ -29881,10 +29955,60 @@ class TestLoopbackDoors:
         for value in (good, flipped, expired):
             assert (web_mod.local_cookie_value_ok(value)
                     == web_mod._local_cookie_ok(_local_scope(value)))
-        assert web_mod.local_secret_loaded() is True
         monkeypatch.setattr(web_mod, "_LOCAL_SECRET", "")
-        assert web_mod.local_secret_loaded() is False
         assert web_mod.local_cookie_value_ok(good) is False
+
+    @staticmethod
+    def _jar(**cookies):
+        """What pywebview's `get_cookies()` returns: one `SimpleCookie` per
+        cookie."""
+        from http.cookies import SimpleCookie
+        out = []
+        for name, value in cookies.items():
+            c = SimpleCookie()
+            c[name] = value
+            out.append(c)
+        return out
+
+    def test_window_signed_in(self, local_enabled, monkeypatch, caplog):
+        """Final review cycle 2, fix 2: the one helper the window asks.
+        True for a valid `pa_local`, False for none or an invalid one, None
+        (unknown) for an unreadable jar or no secret; it never logs."""
+        web_mod = local_enabled
+        good = web_mod.make_local_cookie()
+        subject, stamp, sig = good.split(".")
+        flipped = f"{subject}.{stamp}.{'A' if sig[0] != 'A' else 'B'}{sig[1:]}"
+        with caplog.at_level(logging.DEBUG):
+            # Found among other cookies, before and after them.
+            assert web_mod.window_signed_in(
+                self._jar(other="x", pa_local=good)) is True
+            assert web_mod.window_signed_in(
+                self._jar(pa_local=good, zz="y")) is True
+            assert web_mod.window_signed_in(self._jar(other="x")) is False
+            assert web_mod.window_signed_in([]) is False
+            assert web_mod.window_signed_in(
+                self._jar(pa_local=flipped, other="x")) is False
+            # Another cookie holding a valid value is not `pa_local`.
+            assert web_mod.window_signed_in(self._jar(pa_device=good)) is False
+            assert web_mod.window_signed_in(None) is None
+            assert web_mod.window_signed_in(object()) is None  # not a jar
+            monkeypatch.setattr(web_mod, "_LOCAL_SECRET", "")
+            assert web_mod.window_signed_in(self._jar(pa_local=good)) is None
+            assert web_mod.window_signed_in([]) is None
+        assert sig not in caplog.text
+
+    def test_window_signed_in_is_unknown_during_a_rotation(self,
+                                                           local_enabled,
+                                                           monkeypatch):
+        """Final review cycle 2, fix 4: between the secret swap and the
+        generation bump a code the window minted would be wiped, so the
+        helper answers unknown while the rotate route has its flag set."""
+        web_mod = local_enabled
+        assert web_mod.window_signed_in([]) is False
+        monkeypatch.setattr(web_mod, "_local_secret_rotating", True)
+        assert web_mod.window_signed_in([]) is None
+        assert web_mod.window_signed_in(
+            self._jar(pa_local=web_mod.make_local_cookie())) is None
 
     def test_set_local_secret_bumps_the_generation(self, local_enabled):
         """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS

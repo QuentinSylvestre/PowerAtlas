@@ -9,9 +9,13 @@ save without loading either.
 DEFAULT_PEEK_HOTKEY = "ctrl+shift+z"
 
 # The values `peek_mode` may take, defined once for the config loader, the
-# settings write path and the window. The first is the default.
-# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (19)
-PEEK_MODES = ("hold", "toggle")
+# settings write path and the window, each by name.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (19);
+# named constants: final review cycle 2 (12)
+HOLD = "hold"
+TOGGLE = "toggle"
+DEFAULT_PEEK_MODE = HOLD
+PEEK_MODES = (HOLD, TOGGLE)
 
 MODIFIERS = frozenset({"ctrl", "shift", "alt"})
 
