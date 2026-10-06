@@ -29733,6 +29733,19 @@ class TestLoopbackDoors:
             monkeypatch.setitem(sys.modules, "win32clipboard",
                                 self._failing_clipboard(0, []))
             urls.append(tray_mod.copy_login_link(self._SERVER, icon))
+            # A notification backend that fails quoting its message, on the
+            # no-clipboard branch where the message is the link: only the
+            # type may reach the log.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 17)
+            def quoting_notify(message, title=None):
+                raise OSError(f"cannot show {message!r}")
+
+            monkeypatch.setattr(tray_mod.sys, "platform", "linux")
+            monkeypatch.setattr(icon, "notify", quoting_notify)
+            urls.append(tray_mod.copy_login_link(self._SERVER, icon))
+            assert ("Could not display the login link notification: OSError"
+                    in caplog.text)
+            monkeypatch.setattr(tray_mod.sys, "platform", "win32")
             # Tray Open PowerAtlas (no window: the browser) and Open in browser.
             icon.menu["Open PowerAtlas"](icon, None)
             icon.menu["Open in browser"](icon, None)
@@ -29756,8 +29769,9 @@ class TestLoopbackDoors:
             urls.extend(window.reloads)
         # Seven openers before Phase 3, plus the browser shortcut, plus the
         # real door's failure branch (final review fix 11), plus the two
-        # sign-in reloads (rotation, then the cookie path).
-        assert len(urls) == 10
+        # sign-in reloads (rotation, then the cookie path), plus the failing
+        # notification (Phase 5, follow-up 17: one more door branch, 10 -> 11).
+        assert len(urls) == 11
         assert len(window.reloads) == 2
         records = "\n".join(r.getMessage() for r in caplog.records)
         for text in (caplog.text, records):

@@ -173,7 +173,7 @@ class PeekWindow:
     def __init__(self, server_url: str, hotkey: str = "ctrl+shift+z",
                  mode: str = HOLD, browser_hotkey: str = ""):
         if not _AVAILABLE:
-            raise RuntimeError(f"Peek unavailable: {_IMPORT_ERROR}")
+            raise RuntimeError(f"PowerAtlas window unavailable: {_IMPORT_ERROR}")
         self._server_url = server_url
         # The peek chord in force, as `create_peek` computes it: an invalid
         # one is the default here too, never a chord that cannot fire.
@@ -328,7 +328,7 @@ class PeekWindow:
             if self._listener:
                 self._listener.stop()
         except Exception as e:
-            log.warning("Peek hotkey listener did not stop: %s", type(e).__name__)
+            log.warning("PowerAtlas window: hotkey listener did not stop: %s", type(e).__name__)
         self._listener = None
         self._events.put(("stop",))
         win = self._window
@@ -826,7 +826,7 @@ class PeekWindow:
         try:
             _doors.open_in_browser(_login_url(self._server_url))
         except Exception as e:
-            log.warning("Peek could not open the browser: %s", type(e).__name__)
+            log.warning("PowerAtlas window could not open the browser: %s", type(e).__name__)
 
     # ---- keyboard hook (listener thread) ------------------------------------
 
@@ -849,7 +849,7 @@ class PeekWindow:
                      "browser shortcut: %s)", self._hotkey, self._mode,
                      self._browser_hotkey or "off")
         except Exception as e:
-            log.warning("Failed to start hotkey listener: %s", e)
+            log.warning("PowerAtlas window: hotkey listener failed to start: %s", e)
             self._listener = None
 
     def _win32_event_filter(self, msg, data) -> None:
@@ -869,7 +869,7 @@ class PeekWindow:
         try:
             suppress = self._filter_decide(msg, data.vkCode, data.time)
         except Exception as e:
-            log.warning("Peek hotkey filter error: %s", type(e).__name__)
+            log.warning("PowerAtlas window: hotkey filter error: %s", type(e).__name__)
             suppress = False
         if suppress and listener is not None:
             listener.suppress_event()
@@ -995,7 +995,7 @@ class PeekWindow:
                 self._triggered[chord] = True
                 self._post_press(chord, _tick_now())
         except Exception as e:
-            log.warning("Peek key press handler error: %s", type(e).__name__)
+            log.warning("PowerAtlas window: key press handler error: %s", type(e).__name__)
 
     def _on_release(self, key) -> None:
         """Post a release when a peek chord modifier goes up. Never raises."""
@@ -1016,7 +1016,7 @@ class PeekWindow:
                     self._release_armed = False
                     self._events.put(("release",))
         except Exception as e:
-            log.warning("Peek key release handler error: %s", type(e).__name__)
+            log.warning("PowerAtlas window: key release handler error: %s", type(e).__name__)
 
     @staticmethod
     def _parse_hotkey(hotkey: str) -> frozenset[str]:
@@ -1686,7 +1686,7 @@ def create_peek(server_url: str, hotkey: str = "ctrl+shift+z",
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
     """
     if not is_available():
-        log.warning("Peek window disabled: %s", _IMPORT_ERROR)
+        log.warning("PowerAtlas window disabled: %s", _IMPORT_ERROR)
         return None
     # The rule is `hotkeys`'s (one place, shared with the settings write
     # path); only the warnings are here.
@@ -1713,5 +1713,5 @@ def create_peek(server_url: str, hotkey: str = "ctrl+shift+z",
     try:
         return PeekWindow(server_url, hotkey, normalized, browser)
     except Exception as e:
-        log.warning("Peek window disabled: %s", e)
+        log.warning("PowerAtlas window disabled: %s", e)
         return None

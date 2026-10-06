@@ -683,6 +683,19 @@ def _drain(pw):
             return out
 
 
+# Worker-event helpers, for tests written or touched since Phase 5: one place
+# builds the event tuples, so a change of their shape is one edit.
+# 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 11)
+def _press(pw, t):
+    """A peek press at tick `t`, handled now on the calling thread."""
+    pw._handle(("press", "peek", t))
+
+
+def _post(pw, kind, *args):
+    """Queue a worker event, as the hook, the tray or pywebview would."""
+    pw._events.put((kind, *args))
+
+
 OTHER_APP = 0x7777  # the user's app, foreground before a peek
 
 
@@ -4134,3 +4147,50 @@ class TestStartAfterStop:
         pw.start(on_main_thread=True)
         assert pw._listener is listener
         listener.start.assert_called_once()
+
+
+class TestLogVocabulary:
+    """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+    (follow-up 13): log lines call the window "PowerAtlas window", never
+    "Peek ...", except the smoke token `Peek hotkey listener started` (section
+    7 and AGENTS.md grep for it) and "Peek shortcut", the setting's name."""
+
+    _ALLOWED = ("Peek hotkey listener started", "Peek shortcut ")
+
+    def _log_messages(self):
+        import ast
+        import inspect
+        import power_atlas.peek as peek_mod
+        tree = ast.parse(inspect.getsource(peek_mod))
+        out = []
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id == "log" and n.args):
+                first = n.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value,
+                                                                  str):
+                    out.append(first.value)
+                elif isinstance(first, ast.JoinedStr):
+                    out.append("".join(v.value for v in first.values
+                                       if isinstance(v, ast.Constant)))
+        return out
+
+    def test_no_line_says_peek_for_the_window(self):
+        messages = self._log_messages()
+        assert len(messages) > 30  # the scan sees the module's log calls
+        bad = [m for m in messages if m.startswith("Peek")
+               and not m.startswith(self._ALLOWED)]
+        assert bad == []
+
+    def test_the_smoke_token_is_kept(self):
+        assert any(m.startswith("Peek hotkey listener started (")
+                   for m in self._log_messages())
+
+    def test_the_unavailable_error_names_the_window(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", False)
+        monkeypatch.setattr(peek_mod, "_IMPORT_ERROR", "no pynput")
+        with pytest.raises(RuntimeError,
+                           match="^PowerAtlas window unavailable: no pynput$"):
+            peek_mod.PeekWindow("http://127.0.0.1:4915")

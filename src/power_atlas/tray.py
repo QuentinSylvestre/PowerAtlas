@@ -172,7 +172,11 @@ def copy_login_link(server_url: str, icon=None) -> str:
         try:
             icon.notify(message, title)
         except Exception as e:
-            log.error("Could not display the login link notification: %s", e)
+            # The type only: on a platform with no clipboard the message is
+            # the login link, and a backend's exception can quote it.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 17)
+            log.error("Could not display the login link notification: %s",
+                      type(e).__name__)
     return url
 
 
