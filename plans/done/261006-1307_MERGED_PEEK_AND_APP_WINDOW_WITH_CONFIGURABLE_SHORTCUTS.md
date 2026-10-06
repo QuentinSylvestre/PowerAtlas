@@ -1,10 +1,27 @@
 # Merged Peek and App Window with Configurable Shortcuts
 
 > **Date**: 2026-10-06
-> **Status**: In Progress — implementation and live QA complete; ready for /qclose  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-10-06 13:07
 > **Scope**: Turn the peek overlay into one PowerAtlas window with a peek mode and an app mode, add configurable shortcuts, and offer app window and browser from the tray
 > **Estimated effort**: 1-2 days
+
+
+## Completion Summary
+
+PowerAtlas now has one PowerAtlas window with two modes: peek mode (the peek shortcut, Hold or Toggle, frameless and non-activating) and app mode (a double-tap or tray **Open PowerAtlas**: a framed, focused taskbar window that keeps its page). The tray offers **Open in browser**, an optional browser shortcut opens a signed-in tab, and shortcut settings are validated on save and at startup. Phase 5 then fixed every low-priority follow-up at the user's request, and later user reports fixed a blank first show (`4cb0085`), page drags moving the window (`1ab5a42`) and blocked text selection (`5077ddd`). Final suites: Python and node green; live QA on the user's desktop passed (hold, double-tap, peek over app, X, Esc, Toggle, browser shortcut, Alt mask, painting, context menu, find bar, rotation re-sign).
+
+### Acknowledged at archival
+
+- Pending live check — Follow-up 20: the stale-modifier fix was never checked live over a remote-desktop or VM window. **Accepted**.
+- Pending live check — Follow-up 19: the Linux sign-in owner check has never run on a Linux machine (it fails open when it cannot decide). **Accepted**.
+- Pending live check — a same-origin link opened from the app window landing signed in on that page was never checked live (unit tests and a security review cover it). **Accepted**.
+- `/qdev` QA BLOCKED is a hard stop even when an unattended probe passed on a locked desktop. **Accepted (harness opportunity): let a plan declare a locked-session fallback.**
+- `/qdev` dirty-tree stop fired on another session's disjoint edits. **Accepted (harness opportunity): allow continuing when foreign files are disjoint and commits are pathspec-scoped.**
+- Window probes checked page state, not pixels, so a blank window shipped. **Accepted (harness opportunity): pixel check for rendered surfaces (already in this project's `AGENTS.md`).**
+- Key-injection QA clicked into the user's app when another app held the foreground. **Accepted (harness opportunity): check foreground before injecting; stop rather than click (already in this project's `AGENTS.md`).**
+- A sub-agent hit the session limit mid-sequence and left an uncommitted edit. **Accepted (harness opportunity): commit after each numbered fix.**
+- `/qexplore` dispatch restarted for a mid-dispatch model change. **Skipped (harness opportunity): already handled by the project memory entry for Sonnet exploration sub-agents.**
 
 ---
 
@@ -545,25 +562,29 @@ Follow-ups 18-20 and later review fixes (code `3f9923c`, `3b55e95`, `5b708a2`, `
 - **Web notifications inside the window**: `/acp`'s `maybeNotify` returns early inside the PowerAtlas window (`window.pywebview` or `window.chrome.webview`), so a hidden window does not duplicate the server's desktop toast.
 - **Linux door (follow-up 19)**: a private landing file (`7cea218`) was tried and reverted in `eb219d9` because snap-packaged browsers cannot read it. The URL goes to `xdg-open` as before, and on Linux `/local-auth` instead refuses a code redeemed over a loopback connection owned by another user (socket uid from `/proc/net/tcp`/`tcp6`, checked before the code is consumed, recording no failure; undecidable → accepted with a DEBUG line). Not tested on Linux.
 
+After the final record (code `1ab5a42`, `5077ddd`, and `00474d5` outside this plan's scope):
+- **Window options**: `easy_drag=False` (pywebview's default made any drag in the page move the frameless window, so selecting text moved it) and `text_select=True` (pywebview's default injected `body { user-select: none }`, so no text could be selected). Both user-reported; a throwaway window confirmed `user-select: none` with the defaults and `auto` with the fix.
+- **Dashboard ACP link removed** at the user's request (`00474d5`, `feat(dashboard)`): redundant with the app window, and it stranded the window on `/acp`. The dead `.topbar-nav*` CSS and its tests went with it; README no longer mentions the link or the old "open in ACP" row action (removed earlier in `5f3d0a7`).
+
 ## Follow-up Work (Deferred)
 
-1. **Terminology proposal for `AGENTS.md`.** Proposed entries: **PowerAtlas window** (the single pywebview window; not "peek window" for the whole, not a separate "app window"), **peek mode** and **app mode** (its two presentations). Needs the user's Save / Skip / Edit; the user was away during planning.
-2. **Stale opener lists outside the code.** `AGENTS.md § Terminology` ("login code" entry) and the `memory/MEMORY.md` entry on driving the tray and peek doors both describe the double-tap as opening a browser. Propose edits to the user; both need approval.
-3. **QA recipe for `AGENTS.md § Verification Setup`.** The pynput-injection plus ctypes window checks in section 7, once proven by `/qdev`. Needs user approval (governance file).
-4. **R4 focus fallback**, if the Phase 1 focus property cannot be met.
-5. **Browser shortcuts inside the window.** pywebview runs with `debug=False`, which turns off WebView2 accelerator keys and the context menu: no F5/Ctrl+R reload, no Ctrl+F, no right-click copy/paste menu in app mode. Accepted for now; enabling them in app mode is a follow-up.
-6. **Same-origin new-window links.** A PowerAtlas link opened with `target=_blank` from app mode goes to the default browser without a cookie and lands on the gate page. Routing same-origin links through a login URL is a follow-up.
-7. **Live sign-in refresh check** (SC-9) after a real rotation, left for the user because it signs out other browsers.
-8. **WebView2 initialization failure.** pywebview only logs a failed WebView2 init; app mode would then show a blank window instead of falling back to the browser. Detecting it (for example waiting for the first `loaded` event) is a follow-up.
-9. **Settings show the stored shortcut, not the one running.** A hand-edited invalid peek shortcut runs as `ctrl+shift+z` and an invalid or conflicting browser shortcut is off, but the Settings fields show the stored value with no badge; only the log says so. Exposing the effective values in `/api/settings` is a follow-up (Phase 3 review, Low).
-10. **Alt-based shortcuts and the foreground app's menu bar.** With a chord such as `alt+f1`, the user's app sees Alt down and up around the suppressed key and may activate its menu bar. Default and ctrl-based chords are unaffected. Masking (as AutoHotkey does) is a follow-up.
-11. **Shared test helper for worker events.** About 85 tests build `("press","peek",t)` tuples and 366 read `pw._*` internals; a `_press`/`_post` helper would make a hook/worker split or typed events cheap (final review, Architect).
-12. **Door helpers in a neutral module.** `peek` imports `tray._login_url` and `tray._open_in_browser` (private names of the tray UI module); moving them to a neutral module would remove that dependency (final review, Architect).
-13. **Log vocabulary.** Log lines mix "Peek …" and "PowerAtlas window …"; unify with the terminology proposal (Follow-up 1), keeping or updating the `Peek hotkey listener started` smoke token (final review, Architect).
-14. **Stuck modifiers after the secure desktop.** Modifier key-ups lost on the secure desktop (Ctrl+Alt+Del, UAC) leave a modifier in `_pressed_keys`, so a partial chord can fire; checking `GetAsyncKeyState` in the filter would fix it. Predates this plan (final review, Reliability).
-15. **Hook health signal.** Windows removes a low-level hook that exceeds `LowLevelHooksTimeout` without notice; a periodic `listener.running` check or heartbeat WARNING would make that visible (final review, Reliability).
-16. **Tell the user when a peek save turns the browser shortcut on.** A stored browser shortcut that is off because it overlaps the current peek shortcut can become active after the peek shortcut changes; the Settings dialog does not say so (final review, Security auditor; UX only).
-17. **`copy_login_link` notify failure log.** It logs a `notify` exception with `%s`; on a platform with no clipboard the message is the login URL, so a backend that quotes its argument would log a live link. Predates this plan; not changed here (final review cycle 2, Security auditor).
+1. *(Saved by the user 2026-10-06; `93b8478`.)* **Terminology proposal for `AGENTS.md`.** Proposed entries: **PowerAtlas window** (the single pywebview window; not "peek window" for the whole, not a separate "app window"), **peek mode** and **app mode** (its two presentations). Needs the user's Save / Skip / Edit; the user was away during planning.
+2. *(Saved by the user 2026-10-06; `93b8478`.)* **Stale opener lists outside the code.** `AGENTS.md § Terminology` ("login code" entry) and the `memory/MEMORY.md` entry on driving the tray and peek doors both describe the double-tap as opening a browser. Propose edits to the user; both need approval.
+3. *(Saved by the user 2026-10-06; `93b8478`.)* **QA recipe for `AGENTS.md § Verification Setup`.** The pynput-injection plus ctypes window checks in section 7, once proven by `/qdev`. Needs user approval (governance file).
+4. *(Not needed: focus passed live 2026-10-06.)* **R4 focus fallback**, if the Phase 1 focus property cannot be met.
+5. *(Fixed in Phase 5, `74a6e00`; Ctrl+F and right-click verified live.)* **Browser shortcuts inside the window.** pywebview runs with `debug=False`, which turns off WebView2 accelerator keys and the context menu: no F5/Ctrl+R reload, no Ctrl+F, no right-click copy/paste menu in app mode. Accepted for now; enabling them in app mode is a follow-up.
+6. *(Fixed in Phase 5, `da7ba50`, `636413e`; not tested live.)* **Same-origin new-window links.** A PowerAtlas link opened with `target=_blank` from app mode goes to the default browser without a cookie and lands on the gate page. Routing same-origin links through a login URL is a follow-up.
+7. *(Done live 2026-10-06, 6/6.)* **Live sign-in refresh check** (SC-9) after a real rotation, left for the user because it signs out other browsers.
+8. *(Fixed in Phase 5, `74a6e00`.)* **WebView2 initialization failure.** pywebview only logs a failed WebView2 init; app mode would then show a blank window instead of falling back to the browser. Detecting it (for example waiting for the first `loaded` event) is a follow-up.
+9. *(Fixed in Phase 5, `278b292`.)* **Settings show the stored shortcut, not the one running.** A hand-edited invalid peek shortcut runs as `ctrl+shift+z` and an invalid or conflicting browser shortcut is off, but the Settings fields show the stored value with no badge; only the log says so. Exposing the effective values in `/api/settings` is a follow-up (Phase 3 review, Low).
+10. *(Fixed in Phase 5, `972f55a`; verified live 5/5.)* **Alt-based shortcuts and the foreground app's menu bar.** With a chord such as `alt+f1`, the user's app sees Alt down and up around the suppressed key and may activate its menu bar. Default and ctrl-based chords are unaffected. Masking (as AutoHotkey does) is a follow-up.
+11. *(Fixed in Phase 5, `be89504`.)* **Shared test helper for worker events.** About 85 tests build `("press","peek",t)` tuples and 366 read `pw._*` internals; a `_press`/`_post` helper would make a hook/worker split or typed events cheap (final review, Architect).
+12. *(Fixed in Phase 5, `2d19b83`.)* **Door helpers in a neutral module.** `peek` imports `tray._login_url` and `tray._open_in_browser` (private names of the tray UI module); moving them to a neutral module would remove that dependency (final review, Architect).
+13. *(Fixed in Phase 5, `be89504`.)* **Log vocabulary.** Log lines mix "Peek …" and "PowerAtlas window …"; unify with the terminology proposal (Follow-up 1), keeping or updating the `Peek hotkey listener started` smoke token (final review, Architect).
+14. *(Fixed in Phase 5, `972f55a`.)* **Stuck modifiers after the secure desktop.** Modifier key-ups lost on the secure desktop (Ctrl+Alt+Del, UAC) leave a modifier in `_pressed_keys`, so a partial chord can fire; checking `GetAsyncKeyState` in the filter would fix it. Predates this plan (final review, Reliability).
+15. *(Fixed in Phase 5, `557570c`; cannot see a hook Windows removed silently.)* **Hook health signal.** Windows removes a low-level hook that exceeds `LowLevelHooksTimeout` without notice; a periodic `listener.running` check or heartbeat WARNING would make that visible (final review, Reliability).
+16. *(Fixed in Phase 5, `278b292`.)* **Tell the user when a peek save turns the browser shortcut on.** A stored browser shortcut that is off because it overlaps the current peek shortcut can become active after the peek shortcut changes; the Settings dialog does not say so (final review, Security auditor; UX only).
+17. *(Fixed in Phase 5, `be89504`.)* **`copy_login_link` notify failure log.** It logs a `notify` exception with `%s`; on a platform with no clipboard the message is the login URL, so a backend that quotes its argument would log a live link. Predates this plan; not changed here (final review cycle 2, Security auditor).
 
 18. *(Fixed in `3f9923c`.)* **Ctrl+Shift layout switch.** With Windows' optional Ctrl+Shift keyboard-layout hotkey on, the default `ctrl+shift+z` leaves a bare Ctrl+Shift press and release that may switch the layout; sending the mask for ctrl+shift chords too would avoid it (Phase 5 review, Reliability; predates Phase 5).
 19. *(Addressed in `eb219d9`: redemption bound to the user's uid.)* **Linux login URL on the `xdg-open` command line** is readable by other local users via `/proc/<pid>/cmdline` within the 120 s code lifetime; outside the same-user threat model. Predates this plan (Phase 5 review, Security).
@@ -609,7 +630,7 @@ Personas: Architect (gap-critic lens), Senior engineer, Reliability engineer (Wi
 | 27 | Low | Generation read order vs creation mint unstated (R19). | Fixed -- read before minting. |
 | 28 | Low | `AttachThreadInput` thread and cleanup unstated (R20). | Fixed -- inside `Invoke`, detached in `finally`. |
 | 29 | Low | Tray menu had no test seam (A14). | Fixed -- `_build_menu(server_url)`. |
-| 30 | Low | `debug=False` disables reload, find and context menu; same-origin `_blank` links hit the gate (A18, S15, R21). | Escalated -- recorded as Follow-up 5 and 6. |
+| 30 | Low | `debug=False` disables reload, find and context menu; same-origin `_blank` links hit the gate (A18, S15, R21). | Fixed — Phase 5 (follow-ups 5, 6), at the user's request "Low priority follow ups: fix them". |
 | 31 | Low | Gate command lacked `PYTHONPATH=src`; refused input value behaviour unstated; misleading source-pin note (A16, S18, S17). | Fixed -- command updated; input reverts to the stored value; note corrected. |
 
 Doc-impact sub-agent: 12 uncovered hits added to section 8 and the phase exit criteria (README tray click line, `web.py` door docstrings, `peek.py`/`tray.py` door comments, the test-plan doc); `AGENTS.md` and `memory/MEMORY.md` hits recorded as Follow-up 2 (need user approval).
@@ -701,11 +722,11 @@ Implementation health: Green (all code findings fixed in `f8e6863`; one Low move
 | 6 | Low | Several non-modifier keys were accepted but might never fire. | Fixed — exactly one non-modifier key required; recorded as a divergence. |
 | 7 | Low | The `browser` branch in `_handle` was unreachable; the log guard tested it directly. | Fixed — branch removed; guard drives the real worker loop. |
 | 8 | Low | Saving the peek shortcut was refused because of a browser shortcut that was not running. | Fixed — same in-force rule as startup. |
-| 9 | Low | Settings showed stored, not running, shortcut values after a hand-edit. | Escalated — recorded as Follow-up 9 for the user. |
+| 9 | Low | Settings showed stored, not running, shortcut values after a hand-edit. | Fixed — Phase 5 (follow-up 9, `278b292`), at the user's request. |
 | 10 | Low | Inline errors survived a refresh and a reopen. | Fixed — cleared in `refreshSettings` and on open. |
 | 11 | Low | Config warnings logged raw values with `%s`. | Fixed — `%r`. |
 | 12 | Low | No pure-function test pinned "only the chord's own key matches". | Fixed — two `match_chord` cases. |
-| 13 | Low | A browser press during the 30 s readiness wait is acted on after the wait, one tab per press; smoke ran on the pre-commit tree. | Escalated — noted here for the user; smoke re-run after `f8e6863` passed. |
+| 13 | Low | A browser press during the 30 s readiness wait is acted on after the wait, one tab per press; smoke ran on the pre-commit tree. | Fixed — presses older than 1 s are dropped at drain time (`e443f06`); smoke re-run passed. |
 
 ### 2026-10-06 -- Post-Implementation Review
 
@@ -737,7 +758,7 @@ Final suite on the final code: `tests/test_web.py` 2643 passed, the rest 1873 pa
 | 8 | Medium | [Architect] `peek` imported a private constant from `web`. | Fixed — one public `web.window_signed_in` helper. |
 | 9 | Medium | [Security] The cookie-path re-sign was not covered by the login-link log guard. | Fixed — guard drives that path. |
 | 10 | Low | Rotation races, browser-door rate limit, user close in HIDDEN, focus failure, heal gap, overlays on failure, single sources, tray import, wording, logging (cycle 1 and 2 Lows). | Fixed — see section 9 "Final review" and the two fix commits. |
-| 11 | Low | Test helper, neutral door module, log vocabulary, stuck modifiers, hook health, browser-shortcut activation notice, `copy_login_link` log. | Escalated — recorded as Follow-up 11-17 for the user. |
+| 11 | Low | Test helper, neutral door module, log vocabulary, stuck modifiers, hook health, browser-shortcut activation notice, `copy_login_link` log. | Fixed — Phase 5 batch A, at the user's request. |
 
 ### 2026-10-06 -- Implementation Review (after Phase 5, persona: Reliability engineer, Security auditor (batch A); Security auditor, Senior engineer (batch B))
 
@@ -757,7 +778,7 @@ Batch A: 15 findings (0 High, 1 Medium, 14 Low). Batch B: 7 findings (0 High, 0 
 | 9 | Low | [Security, Senior] Missing refusal rows; `session=` examples; untested note wiring. | Fixed — rows, `sid=`, two node tests. |
 | 10 | Low | [Senior] Notes spoke in the present tense while a restart was pending. | Fixed — future tense while pending. |
 | 11 | Low | [Senior] `browser_active_changed` clears on a second save before restart. | User: accepted — the user kept both B6 wording choices ("yes", 2026-10-06). |
-| 12 | Low | [Reliability] Ctrl+Shift layout switch, eaten modifiers; [Security] Linux `xdg-open` command line; `peek` binds `login_url` at import. | Escalated — Follow-ups 18-20; the import binding kept for the window probe's patching. |
+| 12 | Low | [Reliability] Ctrl+Shift layout switch, eaten modifiers; [Security] Linux `xdg-open` command line; `peek` binds `login_url` at import. | Fixed — follow-ups 18-20 (`3f9923c`, `3b55e95`, `eb219d9`) at the user's request; the import binding kept. |
 
 ### 2026-10-06 -- Implementation Review (after the blank-window fix and follow-ups 18-20, persona: Reliability engineer with a security check)
 
