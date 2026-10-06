@@ -1926,14 +1926,14 @@ _LOCAL_COOKIE_NAME = "pa_local"
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
 _LOCAL_COOKIE_SUBJECT = "loopback"
 
-# 90 days, the device cookie's figure. Every browser opener (tray Open in
+# 90 days, the device cookie's figure. Every browser door (tray Open in
 # browser, the browser shortcut, the browser fallbacks) mints a fresh code, and
 # so a fresh cookie, on every open, so the ceiling bounds only a browser nobody
 # has re-entered from PowerAtlas in three months. The PowerAtlas window keeps
 # its cookie across shows and signs in again only at creation and after a
 # local-secret rotation.
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4;
-# openers: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
+# door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
 LOCAL_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 3600
 
 
@@ -2049,7 +2049,7 @@ _LOGIN_CODE_TTL_SECONDS = 120.0
 # rotation, and "Copy login link"; 64 outstanding codes is far past any real
 # use, and past it the oldest is evicted rather than the store growing.
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4;
-# opener list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
+# door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
 _LOGIN_CODE_MAX_OUTSTANDING = 64
 # The clock the TTL is measured on (D-21, R-18): monotonic, because the codes
 # are process-local and wall time only adds NTP and sleep corrections. A module
@@ -2075,14 +2075,14 @@ def _purge_expired_login_codes(now: float) -> None:
 def mint_login_code() -> str:
     """Return a fresh single-use login code. **In-process only — never a route.**
 
-    Every opener calls this, through `login_url`, and appends ``?code=`` to
+    Every door calls this, through `login_url`, and appends ``?code=`` to
     `_LOCAL_AUTH_PATH`: tray Open in browser, tray Open PowerAtlas when it falls
     back to the browser, the browser shortcut, the double-tap's browser
     fallback off Windows, the PowerAtlas window at creation and after a
     local-secret rotation, and "Copy login link". Returns ``""`` when there is
     no local secret, because a code would exchange for a cookie that verifies
     nowhere.
-    opener list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
+    door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
     """
     if not _LOCAL_SECRET:
         return ""
@@ -2599,7 +2599,7 @@ app.add_middleware(LoopbackCredentialGate)
 def login_url(server_url: str) -> str:
     """The URL a door opens: ``server_url`` plus a freshly minted login code.
 
-    The one builder every opener uses — tray Open in browser, tray Open
+    The one builder every door uses — tray Open in browser, tray Open
     PowerAtlas when it falls back to the browser, the browser shortcut, the
     double-tap's browser fallback off Windows, "Copy login link", and the
     PowerAtlas window at creation and after a local-secret rotation (not on
@@ -2608,7 +2608,7 @@ def login_url(server_url: str) -> str:
     With no local secret there is no code to mint; the bare URL is returned
     and the gate's page tells the user why.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5;
-    opener list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
+    door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
     """
     code = mint_login_code()
     if not code:

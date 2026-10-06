@@ -15,13 +15,13 @@ import time
 
 log = logging.getLogger("power_atlas.peek")
 
-# Every opener here needs the `pa_local` cookie: the window at creation and
+# Every door here needs the `pa_local` cookie: the window at creation and
 # after a local-secret rotation, and the browser (the browser shortcut, and
 # app mode's browser fallback). The login code in this URL is exchanged for it
 # on first load. The tray's helper, shared rather than copied; it imports `web`
 # lazily, so this module still loads without the web app.
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final review (F11);
-# opener list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
+# door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
 from .tray import _login_url
 # The module, not the function: `_open_in_browser` is looked up at call time so
 # the browser door here is the tray's own, patches included.

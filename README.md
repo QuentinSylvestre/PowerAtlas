@@ -69,7 +69,7 @@ double-tap opens app mode in either setting. A double-tap while
 the window is in app mode and focused hides it. The window shows the page you left in either mode; it
 is not reset to the dashboard. Where app mode is unavailable (pywebview or pynput missing, or not Windows), tray
 **Open PowerAtlas** opens the browser instead, and **Open in browser** is not listed. On Linux a
-double-tap of the peek hotkey also opens the browser; peek mode itself works as on Windows.
+double-tap of the peek hotkey also opens the browser; Linux keeps peek mode.
 An optional **Browser shortcut** (off by default) opens PowerAtlas in a new browser tab, signed in,
 from anywhere, and leaves the window as it is.
 
@@ -258,8 +258,9 @@ browser_hotkey = ""  # "" = off (the default), or a shortcut in the same format 
                      # warning, when it is invalid or overlaps peek_hotkey (equal, or one contains
                      # the other). Read at startup.
 peek_mode = "hold"  # "hold": shown while the hotkey is held; "toggle": a press shows it, the next
-                    # press hides it. A double-tap opens the app window either way. Read at startup;
-                    # an unknown value falls back to "hold" with a warning in the log.
+                    # press hides it. A double-tap opens the app window either way (the browser off
+                    # Windows). Read at startup; an unknown value falls back to "hold" with a
+                    # warning in the log.
 default_directory = ""  # Global fallback directory for provider launches without workspace selection
 pinned_folders = []
 pinned_sessions = []

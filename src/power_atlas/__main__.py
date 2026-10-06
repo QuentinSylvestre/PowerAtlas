@@ -419,11 +419,11 @@ def _loopback_host() -> str:
 
 
 def _server_url(port: int) -> str:
-    """The base URL every opener builds its login URL from: the tray's Open
+    """The base URL every door builds its login URL from: the tray's Open
     PowerAtlas, Open in browser and Copy login link, and the PowerAtlas
     window, its browser shortcut and its double-tap browser fallback.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 5;
-    opener list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
+    door list: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 4
     """
     return f"http://{_loopback_host()}:{port}"
 
