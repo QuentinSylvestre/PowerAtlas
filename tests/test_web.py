@@ -29733,6 +29733,20 @@ class TestLoopbackDoors:
             monkeypatch.setitem(sys.modules, "win32clipboard",
                                 self._failing_clipboard(0, []))
             urls.append(tray_mod.copy_login_link(self._SERVER, icon))
+            # A clipboard whose failure quotes the text it was given: only
+            # the type may reach the log.
+            # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (batch B)
+            quoting_clip = self._failing_clipboard(0, [])
+
+            def quoting_set(text, fmt):
+                raise OSError(f"cannot copy {text}")
+
+            quoting_clip.SetClipboardText = quoting_set
+            monkeypatch.setitem(sys.modules, "win32clipboard", quoting_clip)
+            urls.append(tray_mod.copy_login_link(self._SERVER, icon))
+            assert ("Could not copy the login link to the clipboard after "
+                    f"{tray_mod._CLIPBOARD_ATTEMPTS} attempts: OSError"
+                    in caplog.text)
             # A notification backend that fails quoting its message, on the
             # no-clipboard branch where the message is the link: only the
             # type may reach the log.
@@ -29770,8 +29784,10 @@ class TestLoopbackDoors:
         # Seven openers before Phase 3, plus the browser shortcut, plus the
         # real door's failure branch (final review fix 11), plus the two
         # sign-in reloads (rotation, then the cookie path), plus the failing
-        # notification (Phase 5, follow-up 17: one more door branch, 10 -> 11).
-        assert len(urls) == 11
+        # notification (Phase 5, follow-up 17: one more door branch, 10 -> 11),
+        # plus the clipboard failure that quotes its text (Phase 5 batch B:
+        # one more door branch, 11 -> 12).
+        assert len(urls) == 12
         assert len(window.reloads) == 2
         records = "\n".join(r.getMessage() for r in caplog.records)
         for text in (caplog.text, records):

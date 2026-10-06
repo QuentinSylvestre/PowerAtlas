@@ -137,8 +137,11 @@ def _copy_to_clipboard(text: str) -> bool:
             return True
         except Exception as e:
             error = e
+    # The type only: a clipboard backend's message can quote ``text``, the
+    # live login link.
+    # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (batch B)
     log.error("Could not copy the login link to the clipboard after %d "
-              "attempts: %s", _CLIPBOARD_ATTEMPTS, error)
+              "attempts: %s", _CLIPBOARD_ATTEMPTS, type(error).__name__)
     return False
 
 
