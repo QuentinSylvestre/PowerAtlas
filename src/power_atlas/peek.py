@@ -228,6 +228,12 @@ class PeekWindow:
         # Shared plumbing.
         self._events: queue.SimpleQueue = queue.SimpleQueue()
         self._ready = threading.Event()
+        # Set by pywebview's `loaded` handler (`_on_loaded`, its own thread)
+        # on the first page load and never cleared, unlike `events.loaded`,
+        # which every navigation clears. A WebView2 that failed to initialize
+        # never loads a page, so app mode waits for it.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 8)
+        self._loaded = threading.Event()
         self._window_created = threading.Event()
         self._start_returned = threading.Event()
         self._stop_lock = threading.Lock()
@@ -250,6 +256,9 @@ class PeekWindow:
         # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS final review (2, 12)
         self._last_cookie_check = None
         self._last_browser = None
+        # WebView2's browser keys and context menu are on (worker-owned).
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 5)
+        self._browser_keys_on = False
         self._worker = None
         # `__main__`'s shutdown tail, run by the `stop()` watchdog when the UI
         # loop will not end. 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
@@ -259,9 +268,17 @@ class PeekWindow:
 
     @property
     def supports_app_mode(self) -> bool:
-        """Windows, the window passed the readiness gate, and WebView2 is in use."""
+        """Windows, the window passed the readiness gate, it has loaded a
+        page, and WebView2 is in use.
+
+        A WebView2 initialization failure, which pywebview only logs, never
+        loads a page, so app mode stays unavailable and tray Open uses the
+        browser instead of showing a blank window.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 8)
+        """
         try:
-            if sys.platform != "win32" or not self._ready.is_set():
+            if (sys.platform != "win32" or not self._ready.is_set()
+                    or not self._loaded.is_set()):
                 return False
             from webview.platforms import winforms
             return bool(winforms.is_chromium)
@@ -400,12 +417,30 @@ class PeekWindow:
             width=1,
             height=1,
         )
+        # Before `start`, so the first load cannot come first.
+        # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-ups 5, 8)
+        try:
+            self._window.events.loaded += self._on_loaded
+        except Exception as e:
+            log.warning("PowerAtlas window: cannot watch its page loads, so "
+                        "app mode stays unavailable: %s", type(e).__name__)
         self._window_created.set()
         try:
             if not self._stopping:
                 webview.start(debug=False)
         finally:
             self._start_returned.set()
+
+    def _on_loaded(self) -> None:
+        """pywebview's `loaded` handler, on a thread of its own: the
+        first-load latch and an event for the worker, nothing else.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-ups 5, 8)
+        """
+        try:
+            self._loaded.set()
+            self._events.put(("loaded",))
+        except Exception:
+            pass
 
     # ---- worker -------------------------------------------------------------
 
@@ -451,6 +486,13 @@ class PeekWindow:
             self._adapter = adapter
             self._ready.set()
             log.info("PowerAtlas window ready")
+            if self._loaded.is_set():
+                # A `loaded` event that came before readiness was dropped
+                # with the others; the latch it set is not.
+                try:
+                    self._enable_browser_keys()
+                except Exception as e:
+                    self._log_event_error(("loaded",), e)
         while True:
             ev = self._events.get()
             try:
@@ -589,6 +631,8 @@ class PeekWindow:
                 self._to_hidden()
         elif kind == "show_app":
             self._to_app_focused()
+        elif kind == "loaded":
+            self._enable_browser_keys()
         # `browser` never reaches here: `_control` handles it in both worker
         # loops, before readiness is checked.
 
@@ -628,6 +672,20 @@ class PeekWindow:
             self._to_hidden()
         else:
             self._to_app_focused()
+
+    def _enable_browser_keys(self) -> None:
+        """WebView2's browser accelerator keys (reload, find) and default
+        context menu, on, once. pywebview turns both off for `debug=False`,
+        only in `on_webview_ready`, which runs once before the first load; it
+        never sets them again, so one success is enough. A failed attempt
+        (no `CoreWebView2` yet, a timed-out UI call) is retried on the next
+        load. DevTools stay off.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 5)
+        """
+        if self._browser_keys_on:
+            return
+        if self._adapter.enable_browser_keys():
+            self._browser_keys_on = True
 
     # ---- transitions (worker thread only) -----------------------------------
 
@@ -1122,6 +1180,12 @@ class _WindowAdapter(Protocol):
         cannot be told now."""
         ...
 
+    def enable_browser_keys(self) -> bool:
+        """Turn the browser's own keys and context menu on; False when it
+        could not be done yet (retried on the next page load).
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 5)"""
+        ...
+
 
 class _CookieReader:
     """`read_cookies` for both adapters: pywebview's `get_cookies()`, bounded.
@@ -1259,6 +1323,10 @@ class _PortableWindow(_CookieReader):
         self._win.load_url(url)
         return True
 
+    def enable_browser_keys(self) -> bool:
+        # The WebView2 settings are Windows only; nothing to do here.
+        return True
+
 
 # ---- Win32 adapter ---------------------------------------------------------
 
@@ -1366,7 +1434,14 @@ class _Win32Window(_CookieReader):
     261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 1
     """
 
-    has_app_mode = True
+    @property
+    def has_app_mode(self) -> bool:
+        """After the first page load only, like `supports_app_mode`, so the
+        double-tap opens the browser rather than a blank window when WebView2
+        failed to initialize.
+        261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5 (follow-up 8)
+        """
+        return self._o._loaded.is_set()
 
     def __init__(self, owner: PeekWindow, win):
         self._o = owner
@@ -1635,6 +1710,27 @@ class _Win32Window(_CookieReader):
                 pass
 
         self._ui(run, "resetOverlays", wait=False)
+
+    def enable_browser_keys(self) -> bool:
+        """On the UI thread, bounded: `AreBrowserAcceleratorKeysEnabled` and
+        `AreDefaultContextMenusEnabled` on. False when `CoreWebView2` does
+        not exist yet or the UI thread did not answer."""
+        native = self._native
+
+        def run():
+            core = native.webview.CoreWebView2
+            if core is None:
+                return False
+            settings = core.Settings
+            settings.AreBrowserAcceleratorKeysEnabled = True
+            settings.AreDefaultContextMenusEnabled = True
+            return True
+
+        ok = bool(self._ui(run, "enable browser keys"))
+        if ok:
+            log.info("PowerAtlas window: browser keys and the context menu "
+                     "are on")
+        return ok
 
     def reload(self, url: str) -> bool:
         """pywebview's `load_url`, bounded. False when it timed out.

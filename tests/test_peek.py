@@ -597,6 +597,11 @@ class _FakeAdapter:
         self.url = "http://127.0.0.1:4915/acp"
         self.cookie_reads = 0
         self.reload_ok = True
+        # `enable_browser_keys` calls, counted apart from `calls`; `keys_ok`
+        # is what it returns (False: `CoreWebView2` not there yet).
+        # Phase 5 (follow-up 5)
+        self.browser_keys = 0
+        self.keys_ok = True
 
     def foreground(self):
         self.calls.append(("foreground",))
@@ -643,6 +648,10 @@ class _FakeAdapter:
     def reload(self, url):
         self.calls.append(("reload", url))
         return self.reload_ok
+
+    def enable_browser_keys(self):
+        self.browser_keys += 1
+        return self.keys_ok
 
     def read_cookies(self):
         from http.cookies import SimpleCookie
@@ -3759,8 +3768,8 @@ class TestReleaseOfAnotherModifier:
 class TestSupportsAppMode:
     """Final review fix 8: app mode needs WebView2 (`winforms.is_chromium`)."""
 
-    @pytest.mark.parametrize("chromium", [True, False])
-    def test_follows_is_chromium(self, monkeypatch, chromium):
+    @staticmethod
+    def _win32_peek(monkeypatch, chromium=True):
         import types
         import power_atlas.peek as peek_mod
         monkeypatch.setattr(peek_mod.sys, "platform", "win32")
@@ -3773,11 +3782,52 @@ class TestSupportsAppMode:
         if "webview" in sys.modules:
             monkeypatch.setattr(sys.modules["webview"], "platforms", platforms,
                                 raising=False)
-        pw = _new_peek(monkeypatch)
+        return _new_peek(monkeypatch)
+
+    @pytest.mark.parametrize("chromium", [True, False])
+    def test_follows_is_chromium(self, monkeypatch, chromium):
+        pw = self._win32_peek(monkeypatch, chromium)
         pw._ready.set()
+        # A page has loaded (Phase 5, follow-up 8), so only `is_chromium`
+        # and readiness decide here.
+        pw._loaded.set()
         assert pw.supports_app_mode is chromium
         pw._ready.clear()
         assert pw.supports_app_mode is False
+
+    def test_needs_a_first_page_load(self, monkeypatch):
+        """Phase 5 (follow-up 8): a WebView2 that failed to initialize never
+        loads a page, so ready and Chromium are not enough; tray Open and
+        `show_app` then use the browser."""
+        import power_atlas.peek as peek_mod
+        pw = self._win32_peek(monkeypatch)
+        pw._ready.set()
+        assert pw.supports_app_mode is False
+        opened = []
+        monkeypatch.setattr(peek_mod._doors, "open_in_browser", opened.append)
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        pw.show_app()
+        assert opened == ["http://127.0.0.1:4915/signed"]
+        assert _drain(pw) == []
+        # pywebview's `loaded` handler: the latch, and an event for the
+        # worker. Later loads (the latch already set) keep app mode on.
+        pw._on_loaded()
+        assert pw.supports_app_mode is True
+        assert _drain(pw) == [("loaded",)]
+        pw.show_app()
+        assert _drain(pw) == [("show_app",)]
+
+    def test_the_double_tap_needs_a_first_page_load_too(self, monkeypatch):
+        """The Win32 adapter's `has_app_mode` follows the same latch, so the
+        worker's double-tap opens the browser, not a blank window, until a
+        page has loaded (follow-up 8)."""
+        import types
+        import power_atlas.peek as peek_mod
+        pw = _new_peek(monkeypatch)
+        a = peek_mod._Win32Window(pw, types.SimpleNamespace(native=None))
+        assert a.has_app_mode is False
+        pw._on_loaded()
+        assert a.has_app_mode is True
 
 
 class TestOneShortcutRule:
@@ -4194,3 +4244,136 @@ class TestLogVocabulary:
         with pytest.raises(RuntimeError,
                            match="^PowerAtlas window unavailable: no pynput$"):
             peek_mod.PeekWindow("http://127.0.0.1:4915")
+
+
+class TestBrowserKeys:
+    """261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 5
+    (follow-up 5): pywebview runs with `debug=False`, which turns WebView2's
+    browser accelerator keys and default context menu off in
+    `on_webview_ready` (edgechromium.py, the only place it sets them). The
+    worker turns both on once a page has loaded (`CoreWebView2` exists by
+    then), through a bounded UI-thread call, and never from the hook."""
+
+    def _run_worker(self, pw, a, before=(), after=()):
+        import threading
+        from power_atlas import web as web_mod
+        pw._signed_gen = web_mod.local_secret_generation()
+        for ev in before:
+            ev()
+        pw._establish_ready = lambda: a
+        t = threading.Thread(target=pw._window_worker, daemon=True)
+        t.start()
+        assert pw._ready.wait(5)
+        for ev in after:
+            ev()
+        _post(pw, "stop")
+        t.join(5)
+        assert not t.is_alive()
+
+    def test_a_load_before_readiness_is_not_lost(self, monkeypatch):
+        """The pre-ready drain drops the `loaded` event; the latch it set
+        still turns the keys on once the window is ready, exactly once."""
+        pw = _new_peek(monkeypatch)
+        a = _FakeAdapter()
+        self._run_worker(pw, a, before=[pw._on_loaded],
+                         after=[lambda: _post(pw, "loaded")])
+        assert a.browser_keys == 1
+        assert pw._browser_keys_on is True
+
+    def test_a_load_after_readiness_turns_them_on(self, monkeypatch):
+        pw = _new_peek(monkeypatch)
+        a = _FakeAdapter()
+        self._run_worker(pw, a, after=[pw._on_loaded, pw._on_loaded])
+        assert a.browser_keys == 1
+
+    def test_no_load_no_call(self, monkeypatch):
+        pw = _new_peek(monkeypatch)
+        a = _FakeAdapter()
+        self._run_worker(pw, a)
+        assert a.browser_keys == 0
+        assert pw._browser_keys_on is False
+
+    def test_a_failed_attempt_is_retried_on_the_next_load(self, monkeypatch):
+        pw = _new_peek(monkeypatch)
+        a = _FakeAdapter()
+        a.keys_ok = False
+        pw._adapter = a
+        pw._ready.set()
+        pw._handle(("loaded",))
+        assert pw._browser_keys_on is False
+        a.keys_ok = True
+        pw._handle(("loaded",))
+        pw._handle(("loaded",))
+        assert a.browser_keys == 2
+        assert pw._browser_keys_on is True
+
+    def test_the_win32_adapter_sets_both_settings_on_the_ui_thread(
+            self, monkeypatch, caplog):
+        import types
+        import power_atlas.peek as peek_mod
+        _fake_dotnet(monkeypatch)
+        pw = _new_peek(monkeypatch)
+        native = _FakeNative()
+        ran_on_ui = []
+        settings = types.SimpleNamespace(
+            AreBrowserAcceleratorKeysEnabled=False,
+            AreDefaultContextMenusEnabled=False,
+            AreDevToolsEnabled=False)
+        native.webview = types.SimpleNamespace(CoreWebView2=None)
+        orig = native.BeginInvoke
+
+        def begin(action):
+            ran_on_ui.append(1)
+            orig(action)
+
+        native.BeginInvoke = begin
+        a = peek_mod._Win32Window(pw, types.SimpleNamespace(native=native))
+        a._native = native
+        # No CoreWebView2 yet: nothing set, and the caller retries.
+        assert a.enable_browser_keys() is False
+        native.webview.CoreWebView2 = types.SimpleNamespace(Settings=settings)
+        with caplog.at_level(logging.INFO, logger="power_atlas"):
+            assert a.enable_browser_keys() is True
+        assert settings.AreBrowserAcceleratorKeysEnabled is True
+        assert settings.AreDefaultContextMenusEnabled is True
+        assert settings.AreDevToolsEnabled is False  # never turned on
+        assert len(ran_on_ui) == 2
+        assert "browser keys and the context menu are on" in caplog.text
+
+    def test_the_portable_adapter_has_nothing_to_do(self, monkeypatch):
+        import types
+        import power_atlas.peek as peek_mod
+        pw = _new_peek(monkeypatch)
+        a = peek_mod._PortableWindow(pw, types.SimpleNamespace())
+        assert a.enable_browser_keys() is True
+
+    def test_run_webview_watches_page_loads(self, monkeypatch):
+        """The handler is attached before `webview.start`, so the first
+        load cannot come before it."""
+        import types
+        import power_atlas.peek as peek_mod
+        pw = _new_peek(monkeypatch)
+        order = []
+
+        class _Loaded:
+            def __iadd__(self, handler):
+                order.append(("subscribe", handler))
+                return self
+
+        win = types.SimpleNamespace(events=types.SimpleNamespace(
+            loaded=_Loaded()))
+
+        class _Webview:
+            @staticmethod
+            def create_window(*a, **kw):
+                return win
+
+            @staticmethod
+            def start(**kw):
+                order.append(("start",))
+
+        monkeypatch.setattr(peek_mod, "webview", _Webview, raising=False)
+        monkeypatch.setattr(peek_mod, "_login_url", lambda u: u + "/signed")
+        pw._run_webview()
+        assert [o[0] for o in order] == ["subscribe", "start"]
+        assert order[0][1] == pw._on_loaded

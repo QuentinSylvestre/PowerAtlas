@@ -67,8 +67,12 @@ setting on **Toggle** instead of **Hold** (the default), you do not hold the hot
 mode and the next press ends it, back to hidden or to app mode; releasing the keys does nothing. A
 double-tap opens app mode in either setting. A double-tap while
 the window is in app mode and focused hides it. The window shows the page you left in either mode; it
-is not reset to the dashboard. Where app mode is unavailable (pywebview or pynput missing, or not Windows), tray
-**Open PowerAtlas** opens the browser instead, and **Open in browser** is not listed. On Linux a
+is not reset to the dashboard. On Windows the window has the browser's own keys (F5 or Ctrl+R to reload,
+Ctrl+F to find) and its right-click menu (copy, paste) once its first page has loaded, in both modes;
+developer tools stay off. Where app mode is unavailable (pywebview or pynput missing, or not Windows), tray
+**Open PowerAtlas** opens the browser instead, and **Open in browser** is not listed. Until the window
+has loaded its first page, and for the whole run if WebView2 failed to start, tray **Open PowerAtlas**
+and the double-tap open the browser too. On Linux a
 double-tap of the peek hotkey also opens the browser; Linux keeps peek mode.
 An optional **Browser shortcut** (off by default) opens PowerAtlas in a new browser tab, signed in,
 from anywhere, and leaves the window as it is.
