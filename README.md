@@ -49,8 +49,9 @@ rather than adding the venv's `Scripts`/`bin` directory itself — that director
 "<checkout>\.venv-PowerAtlas\Scripts\python.exe" -m power_atlas %*
 ```
 
-The app starts as a system tray icon. Click it to open the PowerAtlas window. The tray menu has **Open
-PowerAtlas** (the default, also the icon click), **Open in browser**, **Copy login link**, **Logs**,
+The app starts as a system tray icon. Click it to open the PowerAtlas window (the browser, where app
+mode is unavailable; see below). The tray menu has **Open PowerAtlas** (the default, also the icon
+click), **Open in browser** (only where app mode is available), **Copy login link**, **Logs**,
 **Restart** and **Quit**.
 
 On Windows the PowerAtlas window is one desktop window with two modes. **App mode** is a normal framed
@@ -66,8 +67,9 @@ setting on **Toggle** instead of **Hold** (the default), you do not hold the hot
 mode and the next press ends it, back to hidden or to app mode; releasing the keys does nothing. A
 double-tap opens app mode in either setting. A double-tap while
 the window is in app mode and focused hides it. The window shows the page you left in either mode; it
-is not reset to the dashboard. Where app mode is unavailable (pywebview missing, or not Windows), tray
-**Open PowerAtlas** and the double-tap open the browser instead, and **Open in browser** is not listed.
+is not reset to the dashboard. Where app mode is unavailable (pywebview or pynput missing, or not Windows), tray
+**Open PowerAtlas** opens the browser instead, and **Open in browser** is not listed. On Linux a
+double-tap of the peek hotkey also opens the browser; peek mode itself works as on Windows.
 An optional **Browser shortcut** (off by default) opens PowerAtlas in a new browser tab, signed in,
 from anywhere, and leaves the window as it is.
 
@@ -334,6 +336,8 @@ enabled = false  # opt-in: an OS toast when an ACP turn ends or needs approval, 
 ```
 
 Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hotkey listener requires X11 (Wayland is not supported).
+App mode is Windows only: on Linux, a double-tap of the peek hotkey and tray **Open PowerAtlas** open
+PowerAtlas in the browser, signed in, and the tray has no separate **Open in browser** item.
 
 ## Agent sessions (`/acp`)
 
