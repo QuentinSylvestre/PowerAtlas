@@ -328,14 +328,22 @@ QA (Step 5b): unattended window probe in toggle mode PASS 36/36 (press, press af
 Tests: `hotkeys.py` behaviour tested inside `tests/test_peek.py` (a new class there, no new file), including `esc` refused and every `VK_NAMES` value accepted; `test_the_login_link_is_never_logged` (`tests/test_web.py`) extended to the browser chord; `test_web.py` save refusals (bad format, equal, nested, empty browser accepted), payload keys; `test_config.py` `browser_hotkey` default and round trip; `test_peek.py` two-chord matching per D-18 and startup disabling of a conflicting browser chord; `TestCreatePeek` asserts `browser_hotkey` pass-through and that an invalid or conflicting one is disabled with a warning; `acp_page.test.mjs` extends its `hosts` map with `.browser-hotkey-group` and asserts the "Browser shortcut" label and badge directly, and the inline error and revert if the harness can drive the modal's `onchange` (record in Divergences if it cannot).
 
 **Exit criteria**:
-- [ ] Python suite and `node tests/acp_page.test.mjs` pass.
-- [ ] `POST /api/save-setting` refuses `peek_hotkey="z"`, `browser_hotkey="ctrl+shift+z"` (equal to peek) and `browser_hotkey="ctrl+shift+alt+z"` (contains peek), and accepts `browser_hotkey=""` (live, with the cookie, against a throwaway config value restored afterwards).
-- [ ] Smoke as in Phase 1.
+- [x] Python suite and `node tests/acp_page.test.mjs` pass.
+- [x] `POST /api/save-setting` refuses `peek_hotkey="z"`, `browser_hotkey="ctrl+shift+z"` (equal to peek) and `browser_hotkey="ctrl+shift+alt+z"` (contains peek), and accepts `browser_hotkey=""` (live, with the cookie, against a throwaway config value restored afterwards).
+- [x] Smoke as in Phase 1.
 - [ ] Live QA: with a browser shortcut set and PowerAtlas restarted, injecting it opens a browser tab signed in: the count of `loopback browser signed in with a login code` lines in `orchestrator.log` rises by one (or BLOCKED if locked). Restore the user's original shortcut values afterwards.
-- [ ] Update `README.md` config sample and settings description with `browser_hotkey` and the validation rule.
-- [ ] Update `plans/tests/260701_POWERATLAS.md` "validation only at peek startup" row and its settings allowlist (`peek_mode`, `browser_hotkey`).
+- [x] Update `README.md` config sample and settings description with `browser_hotkey` and the validation rule.
+- [x] Update `plans/tests/260701_POWERATLAS.md` "validation only at peek startup" row and its settings allowlist (`peek_mode`, `browser_hotkey`).
 - [ ] (deferred from Phase 2) Live QA of Phase 2's Toggle mode on an unlocked desktop: after a restart with `toggle`, injected press then press after 0.8 s hides, and press-press within 0.5 s opens app mode; restore `peek_mode` afterwards.
 - [ ] (deferred from Phase 1) Live QA of Phase 1's SC-1 to SC-4, SC-8, Esc and `target=_blank` checks on an unlocked desktop, using `qa_phase1.py` per `## 7) Verification`; BLOCKED again if the session is still locked.
+
+Implementation (2026-10-06, code: a8d9c12)
+Phase 3 is done, and the code is committed as `a8d9c12`. It adds an optional browser shortcut and checks both shortcuts with a single validator, both on save and at startup. New module `src/power_atlas/hotkeys.py` is pure (no pywebview or pynput import) and holds the key-name table (one source of truth, with the 10 added keys checked against pynput 1.8.2), parsing and validation with Esc refused as a shortcut key, the conflict test (equal or one contains the other), and the D-18 chord matcher (most keys wins, a tie goes to peek). In `peek.py` the listener matches against a table of two chords with per-chord auto-repeat and key-up tracking; the Windows filter and the non-Windows path use the same matcher. The browser chord queues a `browser` event; the worker opens a signed-in tab and changes neither the window state nor the double-tap timing, and handles this event even before the window is ready. Modifier release still ends a Hold peek only for the peek chord's own modifiers. At startup `create_peek` falls back to `ctrl+shift+z` for an invalid peek shortcut and turns off a browser shortcut that is invalid or conflicting, with a warning in each case. `Config.browser_hotkey` defaults to `""` (off); `web.py` adds it to `_SETTING_TYPES`, `_RESTART_TO_APPLY` and both payloads; `/api/save-setting` refuses a bad format ("Shortcut …") and a shortcut that overlaps the other one as it actually runs; `__main__.py` passes the value to `create_peek`. The Settings dialog has a Browser shortcut row; both shortcut fields save through `saveShortcut` in `index.html`, which shows the server's error under the field and restores the stored value from `data-saved` on a refusal. README and `plans/tests/260701_POWERATLAS.md` describe the setting and the validation rule.
+
+Implementation (2026-10-06, code: f8e6863)
+Commit f8e6863 applies all ten Phase 3 review fixes. The main fix is to the Windows keyboard filter. Once the filter has suppressed a chord key's key-down, it now treats every further key-down of that key as a repeat: suppressed, with no event, until the key's key-up. Each key's down/up pair therefore stays whole whatever order the modifiers are released in, and a held key can no longer switch to another chord. If the key-up is lost, a gap over 1.5 s counts as a new press, so the key cannot stay swallowed. A key-up now re-arms every chord that contains the key. The constructor turns off an invalid or overlapping browser chord, and a shortcut must have exactly one key besides the modifiers. Saving the peek shortcut now uses the same rule as startup to decide whether the stored browser shortcut is in force. The unreachable `browser` branch in `_handle` is gone, and the login-link log guard now runs through the real worker loop. Stale shortcut errors are cleared when the settings refresh and when the dialog reopens. Config warnings quote raw values with `%r`. The four required test files and the full suite pass, the node suite passes, and the mutation checks confirm the new tests fail without the fixes. PowerAtlas was restarted once, and the log shows the hotkey listener started and the window ready.
+
+QA (Step 5b): live save refusals against the running instance with the `pa_local` cookie (implementer, before `a8d9c12` was committed, on the same tree): `peek_hotkey="z"` → `{ok:false, "Shortcut needs a modifier (ctrl, shift or alt)"}`; `browser_hotkey="ctrl+shift+z"` → `{ok:false, "Conflicts with the peek shortcut"}`; `browser_hotkey="ctrl+shift+alt+z"` → `{ok:false, "Conflicts with the peek shortcut"}`; `browser_hotkey=""` → `{ok:true, restart_required:true}`; afterwards `restart_pending` was empty and the values equalled the originals (config.toml now carries an explicit `browser_hotkey = ""`). Smoke PASS before and after `f8e6863` (listener line with `browser shortcut: off`, then `PowerAtlas window ready`). Unattended window probe re-run by the orchestrator on `a8d9c12`: PASS 35/35. Injected browser-shortcut live check BLOCKED (desktop locked); recipe: set `browser_hotkey` (for example `ctrl+alt+b`), restart, inject it with `pynput.keyboard.Controller`, check that the count of `loopback browser signed in with a login code` lines rises by one, then set it back to `""`.
 
 ### Phase 4: Documentation and stale comments
 **Goal**: Docs and comments describe the merged window.
@@ -442,6 +450,16 @@ Phase 2 (code `315bb5c`, `c889589`, `41836bf`):
 - **Extra comment-fix commit `c889589`** (startup-snapshot comment counts) because amending is banned; two stale template comments updated.
 - **Settings copy differs from the plan's verbatim text**: option labels "Hold (show while held)" and "Toggle (press to show, press again to hide)"; the hotkey row reads "Shows PowerAtlas from anywhere (see Peek mode); double-tap to open it as a window. Takes effect on the next launch." The plan's "Hold to peek…" was wrong in Toggle mode (review finding).
 
+Phase 3 (code `a8d9c12`, `f8e6863`):
+- **The browser event is handled before readiness** (in the pre-ready drain and the main loop): it needs no window. The plan's readiness gate drops other window events only.
+- **Save-time conflict checks compare against the other shortcut as it runs**: an invalid stored peek shortcut runs as `ctrl+shift+z`; a stored browser shortcut that is invalid, or overlaps the effective peek shortcut, is off (`hotkeys.effective_peek_hotkey`, `effective_browser_hotkey`). `create_peek` and the constructor apply the same rule.
+- **A shortcut has exactly one key besides the modifiers** (`ctrl+a+b` is now refused; the plan's validator allowed several). Startup falls back with a WARNING for a stored value that fails.
+- **Held-key repeat rule**: a key-down for a chord key already held counts as a repeat (suppressed, no event) if it comes within 1.5 s of that key's previous key-down; a longer gap is a new press, so a lost key-up cannot swallow the key permanently.
+- **`_triggered` is a per-chord dict**; four test assertions moved from `pw._triggered is False` to `pw._triggered["peek"] is False` (same expected value).
+- **Error wording**: "is empty", "cannot use esc, which dismisses the peek", "has an unknown key 'foo'", "needs a modifier (ctrl, shift or alt)", "needs a key besides the modifiers", "has more than one key besides the modifiers", each prefixed "Shortcut ".
+- **The listener log line adds `browser shortcut: <value or off>`.**
+- **Inline errors reuse `.pa-modal-field-error`** (already has a `[hidden]` rule); no `style.css` change. Errors are also cleared when the dialog reopens.
+
 ## Follow-up Work (Deferred)
 
 1. **Terminology proposal for `AGENTS.md`.** Proposed entries: **PowerAtlas window** (the single pywebview window; not "peek window" for the whole, not a separate "app window"), **peek mode** and **app mode** (its two presentations). Needs the user's Save / Skip / Edit; the user was away during planning.
@@ -452,6 +470,7 @@ Phase 2 (code `315bb5c`, `c889589`, `41836bf`):
 6. **Same-origin new-window links.** A PowerAtlas link opened with `target=_blank` from app mode goes to the default browser without a cookie and lands on the gate page. Routing same-origin links through a login URL is a follow-up.
 7. **Live sign-in refresh check** (SC-9) after a real rotation, left for the user because it signs out other browsers.
 8. **WebView2 initialization failure.** pywebview only logs a failed WebView2 init; app mode would then show a blank window instead of falling back to the browser. Detecting it (for example waiting for the first `loaded` event) is a follow-up.
+10. **Settings show the stored shortcut, not the one running.** A hand-edited invalid peek shortcut runs as `ctrl+shift+z` and an invalid or conflicting browser shortcut is off, but the Settings fields show the stored value with no badge; only the log says so. Exposing the effective values in `/api/settings` is a follow-up (Phase 3 review, Low).
 9. **Alt-based shortcuts and the foreground app's menu bar.** With a chord such as `alt+f1`, the user's app sees Alt down and up around the suppressed key and may activate its menu bar. Default and ctrl-based chords are unaffected. Masking (as AutoHotkey does) is a follow-up.
 
 ## Review Log
@@ -569,6 +588,27 @@ Implementation health: Green (all findings fixed in `41836bf` or the plan; live 
 | 5 | Low | Nothing tested `refreshSettings` setting `#peekMode`. | Fixed — node check drives the line in a sandbox. |
 
 Mutation testing by the reviewer killed all six targeted mutations (Toggle press return target, release no-op, Hold press no-op, save refusal, restart label, badge owner).
+
+### 2026-10-06 -- Implementation Review (after Phase 3, persona: Senior engineer (validation lens), Reliability engineer (Windows input hooks))
+
+Implementation health: Green (all code findings fixed in `f8e6863`; one Low moved to Follow-up 10; live injection BLOCKED).
+13 findings after merge (1 High, 2 Medium, 10 Low). One review cycle per the user's override; fixes not re-reviewed.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Releasing a modifier before the chord key leaked repeated key-downs while the key-up stayed suppressed (since Phase 1). | Fixed — a held chord key's key-downs stay suppressed until its key-up, with a 1.5 s lost-key-up heal. |
+| 2 | Medium | No filter-path test covered a modifier release mid-hold or a chord switch while held. | Fixed — four filter tests, mutation-checked. |
+| 3 | Medium | The plan had no Phase 3 notes, divergences or evidence for the live save refusals. | Fixed — notes, QA evidence and section 9 written by the orchestrator. |
+| 4 | Low | A chord switch mid-hold re-armed only the new chord. | Fixed — key-up re-arms every chord containing the key. |
+| 5 | Low | The constructor accepted an unvalidated browser chord. | Fixed — invalid or overlapping chord disabled with a WARNING. |
+| 6 | Low | Several non-modifier keys were accepted but might never fire. | Fixed — exactly one non-modifier key required; recorded as a divergence. |
+| 7 | Low | The `browser` branch in `_handle` was unreachable; the log guard tested it directly. | Fixed — branch removed; guard drives the real worker loop. |
+| 8 | Low | Saving the peek shortcut was refused because of a browser shortcut that was not running. | Fixed — same in-force rule as startup. |
+| 9 | Low | Settings showed stored, not running, shortcut values after a hand-edit. | Escalated — recorded as Follow-up 10 for the user. |
+| 10 | Low | Inline errors survived a refresh and a reopen. | Fixed — cleared in `refreshSettings` and on open. |
+| 11 | Low | Config warnings logged raw values with `%s`. | Fixed — `%r`. |
+| 12 | Low | No pure-function test pinned "only the chord's own key matches". | Fixed — two `match_chord` cases. |
+| 13 | Low | A browser press during the 30 s readiness wait is acted on after the wait, one tab per press; smoke ran on the pre-commit tree. | Escalated — noted here for the user; smoke re-run after `f8e6863` passed. |
 
 ## Harness Improvement Opportunities
 
