@@ -5234,15 +5234,39 @@ class TestCodexWriterLock:
         assert not [e for e in locks.events if e[1] == f"{self.SID}.lock"]
 
     @_needs_os_locks
-    def test_two_threads_with_a_busy_coordination_file_each_stay_inside_one_retry_budget(self, locks):
+    def test_two_threads_with_a_busy_coordination_file_each_stay_inside_one_retry_budget(
+            self, locks, monkeypatch):
         ids = (_cx_id(51), _cx_id(52))
         for sid in ids:
             _cx_lockfile(locks, sid)
         sleeps, violations, results = [], [], {}
 
+        class OwnedLock:
+            """The probe lock, recording which thread holds it. `locked()` alone is
+            process-wide: it is also True while the *other* thread probes, which is allowed."""
+
+            def __init__(self):
+                self._lock, self.owner = threading.Lock(), None
+
+            def acquire(self, blocking=True, timeout=-1):
+                got = self._lock.acquire(blocking, timeout)
+                if got:
+                    self.owner = threading.get_ident()
+                return got
+
+            def release(self):
+                self.owner = None
+                self._lock.release()
+
+            def locked(self):
+                return self._lock.locked()
+
+        probe_lock = OwnedLock()
+        monkeypatch.setattr(data_codex, "_probe_lock", probe_lock)
+
         def fake_sleep(seconds):
             sleeps.append(seconds)
-            if data_codex._probe_lock.locked():
+            if probe_lock.owner == threading.get_ident():
                 violations.append("slept while holding the process-wide probe lock")
 
         def run(sid):
