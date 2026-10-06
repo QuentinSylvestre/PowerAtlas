@@ -1155,10 +1155,14 @@ class _CookieReader:
         if prev is not None and prev.is_alive():
             stuck_for = _now() - self._cookie_started
             if stuck_for < _COOKIE_READ_ABANDON:
-                self._warn_skipped("an earlier read is still running")
+                self._warn_rate_limited(
+                    "PowerAtlas window: cookie reads are being skipped (an "
+                    "earlier read is still running); the signed-out check "
+                    "is paused")
                 return None
-            self._warn_skipped(f"an earlier read has hung for "
-                               f"{stuck_for:.0f} s; starting another")
+            self._warn_rate_limited(
+                f"PowerAtlas window: a cookie read has hung for "
+                f"{stuck_for:.0f} s; giving up on it and reading again")
         box: dict = {}
 
         def run():
@@ -1184,16 +1188,15 @@ class _CookieReader:
             return None
         return box.get("v")
 
-    def _warn_skipped(self, why: str) -> None:
-        """A WARNING that sign-in checks are being skipped, at most once per
-        `_COOKIE_SKIP_WARN_INTERVAL`."""
+    def _warn_rate_limited(self, message: str) -> None:
+        """A WARNING about a stuck cookie read, skipped or given up on: at
+        most one per `_COOKIE_SKIP_WARN_INTERVAL`, shared by both."""
         now = _now()
         last = self._cookie_skip_warned
         if last is not None and now - last < _COOKIE_SKIP_WARN_INTERVAL:
             return
         self._cookie_skip_warned = now
-        log.warning("PowerAtlas window: cookie reads are being skipped (%s); "
-                    "the signed-out check is paused", why)
+        log.warning("%s", message)
 
 
 class _PortableWindow(_CookieReader):

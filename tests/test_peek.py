@@ -3425,25 +3425,28 @@ class TestCookieReader:
         release = threading.Event()
         win, calls = self._win(get=lambda: release.wait(10) and [])
         a = peek_mod._Win32Window(None, win)
-        msg = "cookie reads are being skipped"
+        # Skips and give-ups share one 5 min limit.
+        skip, gave_up = "cookie reads are being skipped", "giving up on it"
         try:
             with caplog.at_level(logging.WARNING, logger="power_atlas"):
                 a.read_cookies()  # the stuck read; not a skip
-                assert caplog.text.count(msg) == 0
+                assert skip not in caplog.text
                 clock[0] += 1
                 a.read_cookies()  # skipped: warns
                 clock[0] += 1
                 a.read_cookies()  # skipped again: quiet
-                assert caplog.text.count(msg) == 1
-                # Abandoned at 30 s and restarted: each restart is a fresh
-                # stuck read; skips keep counting against one 5 min window.
+                assert caplog.text.count(skip) == 1
+                # Given up on at 30 s and read again: each new read is a
+                # fresh stuck one; the give-ups stay inside the same 5 min.
                 for _ in range(9):  # 9 x 30.5 s = 274.5 s after the warning
                     clock[0] += 30.5
                     a.read_cookies()
-                assert caplog.text.count(msg) == 1
+                assert caplog.text.count(skip) == 1
+                assert gave_up not in caplog.text
                 clock[0] += 30.5  # 305 s after the first warning
                 a.read_cookies()
-                assert caplog.text.count(msg) == 2
+                assert caplog.text.count(gave_up) == 1
+                assert caplog.text.count(skip) == 1
         finally:
             release.set()
 
