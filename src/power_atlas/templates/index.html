@@ -2492,6 +2492,7 @@ function dashConnect(onReady){
     // (acp.html:5360-5371).
     if (_dashSteerPending) {
       dashPromptInput.value = _dashSteerPending;
+      updateDashPromptHighlight();
       _dashSteerPending = null;
       dashPromptInput.disabled = false;
       dashSendModeBtn.disabled = false;
@@ -2770,7 +2771,7 @@ function updateDashPromptHighlight() {
   var _escaped = tokens.map(function (t) {
     return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   });
-  var _pattern = new RegExp('(' + _escaped.join('|') + ')(?=\\s|$)', 'g');
+  var _pattern = new RegExp('(?:^|(?<=\\s))(' + _escaped.join('|') + ')(?=\\s|$)', 'g');
   var _lastIndex = 0;
   var _match;
   _pattern.lastIndex = 0;
@@ -3454,6 +3455,7 @@ function dashRemoveAttachment(index) {
     );
   }
   dashPromptInput.value = renum;
+  dashRefreshComposerControls();
   dashRenderTray();
 }
 
@@ -4427,6 +4429,7 @@ function dashHandle(frame){
           addMessage('note', 'Queued prompt not restored — you typed a new prompt while disconnected.');
         } else {
           dashPromptInput.value = _dashReconnectQueueSnapshot.text;
+          updateDashPromptHighlight();
           addMessage('note', 'The turn finished while disconnected — your queued prompt was not sent. Restored to the prompt box.');
         }
       }

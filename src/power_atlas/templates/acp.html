@@ -1382,7 +1382,7 @@
     var escaped = tokens.map(function (t) {
       return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     });
-    var pattern = new RegExp('(' + escaped.join('|') + ')(?=\\s|$)', 'g');
+    var pattern = new RegExp('(?:^|(?<=\\s))(' + escaped.join('|') + ')(?=\\s|$)', 'g');
     var lastIndex = 0;
     var match;
     pattern.lastIndex = 0;
@@ -1735,6 +1735,7 @@
       );
     }
     promptInput.value = renum;
+    autoGrowPrompt();
     renderTray();
   }
 
