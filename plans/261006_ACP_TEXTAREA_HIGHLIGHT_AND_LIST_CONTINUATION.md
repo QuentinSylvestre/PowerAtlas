@@ -1,6 +1,6 @@
 # ACP Textarea: Skill Highlight + List Continuation
 
-**Status**: In Progress
+**Status**: Complete
 **Plan slug**: 261006_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION
 
 ---
@@ -190,7 +190,7 @@ Code-tracing trio dispatched. Sub-agent findings confirmed:
 ---
 
 > **Date**: 2026-10-06
-> **Status**: Draft
+> **Status**: Complete
 > **Scope**: Skill/command highlight overlay + Shift+Enter list continuation in both textarea instances
 > **Estimated effort**: ~0.5 day
 
@@ -722,3 +722,27 @@ Cycle cap: 1 (per user preference). Remaining findings: Low only (all accepted).
 | 5 | Low | Test names drift from plan spec (minor identifier differences) | User: accepted — coverage equivalent |
 | 6 | Low | `(\S*?)` prefix accepts broader input than plan examples (e.g. `v1.2.`) | User: accepted — superset of spec; matches note in plan's Risk table |
 | 7 | Low | URL no-match was identified as a risk case but had no regression test | Fixed — `shiftEnterUrlLineNoContinue` added in `36034b6` |
+
+### 2026-10-07 — Post-Implementation Review (Step 9)
+
+Overall implementation health: **Green**.
+Personas: Architect, Senior Engineer, End-User Advocate, Reliability Engineer.
+Cycle 1: 2 Medium, 5 Low → all Mediums fixed in `0ad9397`. Cycle 2: no new findings — ready state reached.
+QA verification: **PASS** (10 browser checks, headless Chromium against live :4915 instance).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Highlight overlay | pass (975→985) | PASS | Verified DOM, CSS, overlay render, caret-color, selection, placeholder |
+| 2: List continuation | pass (975→985) | PASS | Verified `1. item\n2. ` insertion + cursor position via page.evaluate |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `updateDashPromptHighlight()` had zero behavioral test (SC-5 highlight parity unverified) | Fixed — `dashHighlightRendersMatchedToken` added in `0ad9397` |
+| 2 | Medium | `setSessionSkills`/`setSessionCommands`/`resetCommandPalette` mutated catalogue globals without re-rendering overlay (stale highlight on fast-typist session-open path) | Fixed — overlay resync calls added at 5 acp.html + 6 index.html sites in `0ad9397` |
+| 3 | Low | Session change (`releaseSession()`) didn't re-sync overlay (covered by M2 fix) | Fixed via M2 |
+| 4 | Low | `}/**` cosmetic nit in index.html | Fixed in `0ad9397` |
+| 5 | Low | Test-count accounting drift in plan notes | User: accepted — suite total correct (985), bookkeeping only |
+| 6 | Low | Mirror duplication of overlay functions across pages | User: accepted — established repo convention; no shared host for page-local IIFE code |
+| 7 | Low | Overlay vs textarea word-break alignment unverifiable in harness | Orchestrator: proposed-accept — deferred to /qclose Playwright alignment check at both breakpoints |
