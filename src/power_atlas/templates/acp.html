@@ -271,11 +271,14 @@
         </div>
         <ul role="presentation"></ul>
       </div>
-      <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
-                placeholder="Prompt the agent — Shift+Enter for a new line, Enter sends on desktop, Ctrl+V to attach an image"
-                aria-label="Prompt"
-                aria-haspopup="listbox" aria-controls="acpCmdDropdown"
-                aria-expanded="false"></textarea>
+      <div class="acp-prompt-wrap">
+        <div class="acp-prompt-hl" id="acpPromptHl" aria-hidden="true"></div>
+        <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
+                  placeholder="Prompt the agent — Shift+Enter for a new line, Enter sends on desktop, Ctrl+V to attach an image"
+                  aria-label="Prompt"
+                  aria-haspopup="listbox" aria-controls="acpCmdDropdown"
+                  aria-expanded="false"></textarea>
+      </div>
       <button class="acp-btn acp-icon-btn" id="acpSend" type="button" disabled
               aria-label="Start">
         <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -597,6 +600,7 @@
   var subStatusEl = document.getElementById('acpSubStatus');
   var subTranscriptEl = document.getElementById('acpSubTranscript');
   var promptInput = document.getElementById('acpPrompt');
+  var promptHlEl = document.getElementById('acpPromptHl');
   var composerEl = document.getElementById('acpComposer');
   var trayEl = document.getElementById('acpTray');
   var sendBtn = document.getElementById('acpSend');
@@ -731,6 +735,8 @@
   // before either's own declaration further down; both are hoisted function
   // declarations.
   window.removeAllCrewPanels = removeAllCrewPanels;
+  // Test hook: lets tests/acp_page.test.mjs exercise the autoGrowPrompt->overlay sync path.
+  window._testAutoGrowPrompt = autoGrowPrompt;
   window.closeSubagentView = closeSubagentView;
   var closeBtn = document.getElementById('acpClose');
   // contextEl/contextFill/contextLabel: see the initContextDom() call above —
@@ -1345,12 +1351,67 @@
   // reads it before appending: the composer takes its new height out of the
   // transcript above it, so somebody reading the bottom of a conversation would
   // otherwise be pushed off it by their own typing.
+  /**
+   * Rebuild the highlight overlay to match the current promptInput.value.
+   * Uses createElement+textContent (never innerHTML) -- XSS-safe (no HTML
+   * parsing of user text) and compatible with the test harness, which throws
+   * on any innerHTML access. A /token is highlighted only when it exactly
+   * matches a bare name in sessionCommands or sessionSkills AND is followed by
+   * whitespace or end-of-value.
+   */
+  function updatePromptHighlight() {
+    if (!promptHlEl) return;
+    var text = promptInput.value;
+    var tokens = [];
+    var i;
+    for (i = 0; i < sessionCommands.length; i++) {
+      if (sessionCommands[i].name) tokens.push('/' + sessionCommands[i].name);
+    }
+    for (i = 0; i < sessionSkills.length; i++) {
+      if (sessionSkills[i].name) tokens.push('/' + sessionSkills[i].name);
+    }
+    promptHlEl.textContent = '';
+    if (tokens.length === 0 || !text) {
+      var plain = document.createElement('span');
+      plain.textContent = text;
+      promptHlEl.appendChild(plain);
+      return;
+    }
+    // Longest first so /qp cannot match before /qplan.
+    tokens.sort(function (a, b) { return b.length - a.length; });
+    var escaped = tokens.map(function (t) {
+      return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    });
+    var pattern = new RegExp('(' + escaped.join('|') + ')(?=\\s|$)', 'g');
+    var lastIndex = 0;
+    var match;
+    pattern.lastIndex = 0;
+    while ((match = pattern.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        var pre = document.createElement('span');
+        pre.textContent = text.slice(lastIndex, match.index);
+        promptHlEl.appendChild(pre);
+      }
+      var hl = document.createElement('span');
+      hl.className = 'acp-prompt-hl-match';
+      hl.textContent = match[1];
+      promptHlEl.appendChild(hl);
+      lastIndex = match.index + match[1].length;
+    }
+    if (lastIndex < text.length) {
+      var post = document.createElement('span');
+      post.textContent = text.slice(lastIndex);
+      promptHlEl.appendChild(post);
+    }
+  }
+
   function autoGrowPrompt() {
     var stick = stuckToBottom();
     promptInput.style.height = 'auto';
     promptInput.style.height =
       (promptInput.scrollHeight + PROMPT_BORDER_PX) + 'px';
     if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    updatePromptHighlight(); // keep overlay in sync with every value change
   }
 
   /* ---- image attachments ------------------------------------------------
@@ -6083,6 +6144,10 @@
   // and it fires *after* the value has changed, which is what `scrollHeight`
   // has to see. On `keydown` the box still holds the previous value, so the
   // height would trail the content by one keystroke.
+  // Keep the highlight overlay aligned when the textarea scrolls at max-height.
+  promptInput.addEventListener('scroll', function () {
+    if (promptHlEl) promptHlEl.scrollTop = promptInput.scrollTop;
+  });
   promptInput.addEventListener('input', function() {
     autoGrowPrompt();
     // Show Queue+Steer when the user types during a turn; show Stop when they

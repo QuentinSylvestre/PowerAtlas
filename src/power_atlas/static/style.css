@@ -1929,6 +1929,29 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 
 .acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; position: relative; }
 .acp-composer-row { display: flex; gap: 8px; align-items: stretch; position: relative; }
+/* Highlight-overlay wrapper -- takes the flex:1 slot formerly held by .acp-prompt */
+.acp-prompt-wrap { flex: 1; position: relative; }
+/* Overlay div: sits behind the transparent textarea, same metrics.
+   inset:1px offsets inside .acp-prompt's 1px border so content areas align. */
+.acp-prompt-hl {
+  position: absolute;
+  inset: 1px;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--surface);
+  border-radius: calc(var(--radius-sm) - 1px);
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  color: var(--text);
+  box-sizing: border-box;
+}
+/* Highlighted /token background */
+.acp-prompt-hl-match { background: color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 2px; }
 /* v3's `steer_status` echo (SC-3) — transient text near the composer, styled
    like `.acp-picker-note`'s small transient status line. */
 .acp-steer-status { min-height: 15px; font-size: 11px; line-height: 1.35; color: var(--text-muted); }
@@ -1963,8 +1986,9 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
    scales the whole viewport in — measured on this exact element, since it is
    focused by every prompt sent. The desktop-sized override undoes it above
    the breakpoint where no such browser is in play. */
-.acp-prompt { flex: 1; min-height: 44px; max-height: 258px; resize: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 16px; line-height: 1.5; padding: 8px 10px; }
+.acp-prompt { width: 100%; min-height: 44px; max-height: 258px; resize: none; background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: transparent; caret-color: var(--text); position: relative; z-index: 1; font-family: inherit; font-size: 16px; line-height: 1.5; padding: 8px 10px; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }
+.acp-prompt::selection { color: var(--text); }
 /* Icon-only send/stop/steer buttons — square, icon centered, no text visible.
    The SVG inherits currentColor and is sized to feel balanced at 20px button. */
 .acp-icon-btn {
@@ -2721,6 +2745,7 @@ mark.rail-hit { background: color-mix(in srgb, var(--accent) 32%, transparent); 
      denser sizes these two carried before that fix, now that the reason for
      the larger one no longer applies. */
   .acp-prompt { font-size: 13px; }
+  .acp-prompt-hl { font-size: 13px; }
   .acp-rail-search { font-size: 12px; }
 }
 

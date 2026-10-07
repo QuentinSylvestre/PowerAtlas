@@ -453,11 +453,14 @@
           </div>
           <ul role="presentation"></ul>
         </div>
-        <textarea class="acp-prompt" id="dashPromptInput" rows="2" spellcheck="false"
-                  placeholder="Prompt this agent — Enter to send, Shift+Enter for a new line"
-                  aria-label="Prompt"
-                  aria-haspopup="listbox" aria-controls="dashCmdDropdown"
-                  aria-expanded="false"></textarea>
+        <div class="acp-prompt-wrap">
+          <div class="acp-prompt-hl" id="dashPromptHl" aria-hidden="true"></div>
+          <textarea class="acp-prompt" id="dashPromptInput" rows="2" spellcheck="false"
+                    placeholder="Prompt this agent — Enter to send, Shift+Enter for a new line"
+                    aria-label="Prompt"
+                    aria-haspopup="listbox" aria-controls="dashCmdDropdown"
+                    aria-expanded="false"></textarea>
+        </div>
         <button class="acp-btn acp-icon-btn" id="dashSendBtn" type="button" disabled
                 aria-label="Send">
           <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -2592,6 +2595,7 @@ var dashComposerEl = document.getElementById('dashComposer');
 // acp.html's own trayEl (acp.html:588).
 var dashTrayEl = document.getElementById('dashTray');
 var dashPromptInput = document.getElementById('dashPromptInput');
+var dashPromptHlEl = document.getElementById('dashPromptHl');
 var dashSendBtn = document.getElementById('dashSendBtn');
 var dashComposerNote = document.getElementById('dashComposerNote');
 var dashCloseBtn = document.getElementById('dashCloseSession');
@@ -2738,6 +2742,55 @@ function dashRefreshComposerControls(){
   dashStopBtn.disabled = !_dashTurnActive || _dashStopInProgress;
   // Queue+Steer wrapper: visible during turn only when textarea has text.
   dashQueueSteerEl.hidden = !_dashTurnActive || !hasText;
+  updateDashPromptHighlight(); // keep overlay in sync with every value change
+}/**
+ * Rebuild the dashboard highlight overlay -- mirrors updatePromptHighlight()
+ * in acp.html. Uses createElement+textContent (never innerHTML) -- XSS-safe
+ * and compatible with the test harness, which throws on any innerHTML access.
+ */
+function updateDashPromptHighlight() {
+  if (!dashPromptHlEl) return;
+  var text = dashPromptInput.value;
+  var tokens = [];
+  var i;
+  for (i = 0; i < sessionCommands.length; i++) {
+    if (sessionCommands[i].name) tokens.push('/' + sessionCommands[i].name);
+  }
+  for (i = 0; i < sessionSkills.length; i++) {
+    if (sessionSkills[i].name) tokens.push('/' + sessionSkills[i].name);
+  }
+  dashPromptHlEl.textContent = '';
+  if (tokens.length === 0 || !text) {
+    var _plain = document.createElement('span');
+    _plain.textContent = text;
+    dashPromptHlEl.appendChild(_plain);
+    return;
+  }
+  tokens.sort(function (a, b) { return b.length - a.length; });
+  var _escaped = tokens.map(function (t) {
+    return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  });
+  var _pattern = new RegExp('(' + _escaped.join('|') + ')(?=\\s|$)', 'g');
+  var _lastIndex = 0;
+  var _match;
+  _pattern.lastIndex = 0;
+  while ((_match = _pattern.exec(text)) !== null) {
+    if (_match.index > _lastIndex) {
+      var _pre = document.createElement('span');
+      _pre.textContent = text.slice(_lastIndex, _match.index);
+      dashPromptHlEl.appendChild(_pre);
+    }
+    var _hl = document.createElement('span');
+    _hl.className = 'acp-prompt-hl-match';
+    _hl.textContent = _match[1];
+    dashPromptHlEl.appendChild(_hl);
+    _lastIndex = _match.index + _match[1].length;
+  }
+  if (_lastIndex < text.length) {
+    var _post = document.createElement('span');
+    _post.textContent = text.slice(_lastIndex);
+    dashPromptHlEl.appendChild(_post);
+  }
 }
 /** Show (or clear) the transient composer-area steer status line (SC5,
  *  v3's `steer_status` frame) -- mirrors acp.html's setSteerStatus()
@@ -2857,6 +2910,10 @@ dashPromptInput.addEventListener('keydown', function(e){
       dashSendPrompt();
     }
   }
+});
+// Keep the highlight overlay aligned when the textarea scrolls at max-height.
+dashPromptInput.addEventListener('scroll', function () {
+  if (dashPromptHlEl) dashPromptHlEl.scrollTop = dashPromptInput.scrollTop;
 });
 dashPromptInput.addEventListener('input', function(){
   dashRefreshComposerControls();

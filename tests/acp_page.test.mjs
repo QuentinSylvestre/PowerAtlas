@@ -10427,6 +10427,115 @@ check("loadedButNoMatchHidesDropdown", (tpl) => {
     "dropdown should be hidden when filter matches nothing so Enter can send the prompt");
 });
 
+// ---- Phase 1: skill/command highlight overlay (261006_ACP_TEXTAREA_HIGHLIGHT) ----
+// The overlay (#acpPromptHl) is a visual-only layer behind the transparent
+// textarea. updatePromptHighlight() rebuilds it with createElement+textContent
+// (never innerHTML) wrapping each exact /token match in an .acp-prompt-hl-match
+// span. All matching happens through the live `input` listener, which calls
+// autoGrowPrompt() -> updatePromptHighlight().
+
+// highlightRendersMatchedToken: a known /skill is wrapped in a highlight span.
+check("highlightRendersMatchedToken", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qexplore", description: "explore" }] },
+  });
+  page.el("acpPrompt").value = "/qexplore";
+  page.el("acpPrompt").dispatch("input");
+  const hits = page.el("acpPromptHl").querySelectorAll(".acp-prompt-hl-match");
+  assertEqual(hits.length, 1,
+    "exactly one /qexplore token should be highlighted; got " + hits.length);
+  assertEqual(hits[0].textContent, "/qexplore",
+    "the highlight span should contain the full token; got " + hits[0].textContent);
+});
+
+// highlightDoesNotHighlightUnknownToken: an unknown /token is left plain, and
+// a known token NOT followed by whitespace/EOL is not matched either (the
+// lookahead discriminator). This fails a naive implementation that matches the
+// token anywhere, or that highlights every /word.
+check("highlightDoesNotHighlightUnknownToken", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qexplore", description: "e" }] },
+  });
+  // /foo is unknown; /qexploreX is a known name immediately followed by a
+  // non-whitespace char, so the (?=\s|$) lookahead must reject it.
+  page.el("acpPrompt").value = "/foo /qexploreX";
+  page.el("acpPrompt").dispatch("input");
+  const hits = page.el("acpPromptHl").querySelectorAll(".acp-prompt-hl-match");
+  assertEqual(hits.length, 0,
+    "neither an unknown token nor a known name glued to more text should " +
+    "highlight; got " + hits.length);
+});
+
+// highlightScansFullText: two /qexplore tokens on separate lines both
+// highlight (full-text scan, SC-2), and the longest-first sort means /qp does
+// not pre-empt /qplan. Fails an implementation that only matches the last
+// token, or that sorts short-first.
+check("highlightScansFullText", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [
+      { name: "qexplore", description: "e" },
+      { name: "qp", description: "short" },
+      { name: "qplan", description: "long" },
+    ] },
+  });
+  page.el("acpPrompt").value = "/qexplore first\n/qexplore then /qplan";
+  page.el("acpPrompt").dispatch("input");
+  const hits = page.el("acpPromptHl").querySelectorAll(".acp-prompt-hl-match")
+    .map((s) => s.textContent);
+  assertEqual(hits.length, 3,
+    "both /qexplore tokens and the /qplan token should highlight; got " +
+    JSON.stringify(hits));
+  assert(hits.includes("/qplan"),
+    "/qplan must be matched whole, not pre-empted by /qp; got " +
+    JSON.stringify(hits));
+  assert(!hits.includes("/qp"),
+    "/qp must not match inside /qplan (longest-first sort); got " +
+    JSON.stringify(hits));
+});
+
+// highlightSyncScrollUpdatesOverlay: the scroll listener keeps the overlay's
+// scrollTop in lockstep with the textarea's.
+check("highlightSyncScrollUpdatesOverlay", (tpl) => {
+  const { page } = connected(tpl);
+  page.el("acpPrompt").scrollTop = 50;
+  page.el("acpPrompt").dispatch("scroll");
+  assertEqual(page.el("acpPromptHl").scrollTop, 50,
+    "the overlay scrollTop should follow the textarea's; got " +
+    page.el("acpPromptHl").scrollTop);
+});
+
+// highlightUpdatesViaAutoGrow: a programmatic value change synced through
+// autoGrowPrompt() (the ~12-site coverage hook, exposed as the test hook
+// window._testAutoGrowPrompt) is reflected in the overlay. Fails an
+// implementation that only updates the overlay from the input listener.
+check("highlightUpdatesViaAutoGrow", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qexplore", description: "e" }] },
+  });
+  // No input event dispatched — the value is set programmatically, as the ~12
+  // restore/insert sites in acp.html do, then autoGrowPrompt() runs.
+  page.el("acpPrompt").value = "/qexplore";
+  assertEqual(
+    page.el("acpPromptHl").querySelectorAll(".acp-prompt-hl-match").length, 0,
+    "fixture: overlay not yet synced before autoGrowPrompt()");
+  assert(typeof page.sandbox._testAutoGrowPrompt === "function",
+    "page did not expose _testAutoGrowPrompt — the autoGrow test hook is missing");
+  page.sandbox._testAutoGrowPrompt();
+  const hits = page.el("acpPromptHl").querySelectorAll(".acp-prompt-hl-match");
+  assertEqual(hits.length, 1,
+    "autoGrowPrompt() must sync the overlay for programmatic value changes; " +
+    "got " + hits.length);
+  assertEqual(hits[0].textContent, "/qexplore",
+    "the synced highlight should contain the token; got " + hits[0].textContent);
+});
 // Test 10: copyButtonPresentForLabeledCodeBlocks
 // A fenced block with a language label produces a .acp-md-copy button.
 check("copyButtonPresentForLabeledCodeBlocks", (tpl) => {
@@ -14185,6 +14294,10 @@ function loadDashPicker(opts = {}) {
     // outside the extracted regions.
     dashComposerEl: new El("div"),
     dashPromptInput: new El("input"),
+    // Overlay stand-in for the highlight layer: updateDashPromptHighlight()
+    // reads dashPromptHlEl as a free global, exactly as the composer-controls
+    // region expects (the real var declaration lives outside any run region).
+    dashPromptHlEl: new El("div"),
     dashSendBtn: new El("button"),
     // Stop's click handler calls this after a successful cancel send (SC5,
     // Phase 3) -- mirrors acp.html's own railRefreshSoon() call, stubbed the
@@ -17628,6 +17741,7 @@ async function dashHeldAttachFixture() {
     send: (type, payload, sid) => { sent.push({ type, sid }); return true; },
     dashComposerEl: new El("div"),
     dashPromptInput: new El("textarea"),
+    dashPromptHlEl: new El("div"),
     dashSendBtn: new El("button"),
     dashSetComposerNote: () => {},
     dashRefreshComposerControls: () => {},
