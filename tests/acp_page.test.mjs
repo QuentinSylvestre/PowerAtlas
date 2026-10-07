@@ -10558,18 +10558,24 @@ check("shiftEnterAtEndOfListLineContinues", (tpl) => {
 // shiftEnterMidLineDoesNotContinue: cursor mid-line (offset 3, not end-of-line)
 // so the branch's _pos === _lineEnd guard is false; the value is unchanged (the
 // browser's default newline would fire in a real browser, but the harness
-// mutates nothing).
+// mutates nothing). Also verifies preventDefault was NOT called — if the
+// branch incorrectly called preventDefault before the end-of-line guard it
+// would suppress the browser newline even though no continuation fires.
 check("shiftEnterMidLineDoesNotContinue", (tpl) => {
   const { page } = connected(tpl);
   const prompt = page.el("acpPrompt");
   prompt.value = "1. item";
   prompt.selectionStart = prompt.selectionEnd = 3;
+  let prevented = false;
   prompt.dispatch("keydown", {
-    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,
+    preventDefault() { prevented = true; },
   });
   assertEqual(prompt.value, "1. item",
     "Shift+Enter mid-line must not continue the list; got " +
     JSON.stringify(prompt.value));
+  assertEqual(prevented, false,
+    "Shift+Enter mid-line must not call preventDefault (would suppress browser newline)");
 });
 
 // shiftEnterOnEmptyPrefixLineContinues: a bare prefix '3. ' (no item text)
@@ -10587,17 +10593,21 @@ check("shiftEnterOnEmptyPrefixLineContinues", (tpl) => {
 });
 
 // shiftEnterNonListLineNoEffect: a non-list line ('hello') never matches, so
-// the value is unchanged.
+// the value is unchanged. Also verifies preventDefault was NOT called.
 check("shiftEnterNonListLineNoEffect", (tpl) => {
   const { page } = connected(tpl);
   const prompt = page.el("acpPrompt");
   prompt.value = "hello";
   prompt.selectionStart = prompt.selectionEnd = 5;
+  let prevented = false;
   prompt.dispatch("keydown", {
-    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,
+    preventDefault() { prevented = true; },
   });
   assertEqual(prompt.value, "hello",
     "a non-list line must not be modified; got " + JSON.stringify(prompt.value));
+  assertEqual(prevented, false,
+    "Shift+Enter on a non-list line must not call preventDefault");
 });
 
 // shiftEnterPreservesIndent: leading whitespace in the matched prefix is
@@ -10641,6 +10651,46 @@ check("dashShiftEnterContinues", () => {
   assertEqual(p.sandbox.dashPromptInput.value, "1. x\n2. ",
     "the dashboard composer should continue a list on Shift+Enter; got " +
     JSON.stringify(p.sandbox.dashPromptInput.value));
+});
+
+// dashShiftEnterMidLineDoesNotContinue: dashboard mirror of the mid-line guard.
+// Cursor mid-line → branch does not fire → value unchanged and preventDefault
+// was NOT called.
+check("dashShiftEnterMidLineDoesNotContinue", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "1. item";
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 3;
+  let prevented = false;
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "1. item",
+    "dashboard Shift+Enter mid-line must not continue the list; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+  assertEqual(prevented, false,
+    "dashboard Shift+Enter mid-line must not call preventDefault");
+});
+
+// shiftEnterUrlLineNoContinue: a URL-like line ('http://1.example.com') has a
+// digit before a colon but the colon is not followed by a space, so the regex
+// does not match and no continuation fires. Locks in the non-match behavior
+// against future regex edits.
+check("shiftEnterUrlLineNoContinue", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "http://1.example.com";
+  prompt.selectionStart = prompt.selectionEnd = 20;
+  let prevented = false;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assertEqual(prompt.value, "http://1.example.com",
+    "a URL line must not trigger list continuation; got " +
+    JSON.stringify(prompt.value));
+  assertEqual(prevented, false,
+    "URL line must not call preventDefault");
 });
 
 // Test 10: copyButtonPresentForLabeledCodeBlocks
