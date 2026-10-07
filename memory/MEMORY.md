@@ -489,3 +489,21 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 - "_supervisor_v3 getattr silent null — rename singletons by string ref too" — declined 2026-09-17
 - "Large removal plans accumulate sub-agent pull-forwards — add import-check exit criterion per phase" — declined 2026-09-17
 - "4-persona high-effort holistic review catches cross-module silent regressions that per-phase review misses" — declined 2026-09-17
+
+### `autoGrowPrompt()` and `dashRefreshComposerControls()` are the choke points for all programmatic textarea value changes
+
+**Why**: These two functions are called at every site where `promptInput.value =` or `dashPromptInput.value =` is set programmatically (~12 sites in acp.html, ~18 in index.html — steer-restore, queue-restore, reconnect, send-clear, image renumber, etc.). Hooking new behavior into these functions covers all sites atomically without enumerating each one. The overlay sync was fixed this way: `updatePromptHighlight()` as the last line of `autoGrowPrompt()` and `updateDashPromptHighlight()` as the last line of `dashRefreshComposerControls()`. A per-phase review missed several restore paths and they were caught only in Step 9.
+**How to apply**: When implementing any feature that must react to every textarea value change, add the behavior to the END of `autoGrowPrompt()` (acp.html) and `dashRefreshComposerControls()` (index.html). Do not enumerate the assignment sites — new ones are added over time.
+**Source**: `plans/done/261007-1013_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION.md` Step 9 M2 finding | **Verified**: 2026-10-07 (session)
+
+### Transparent textarea overlay pattern for inline token highlighting
+
+**Why**: A `<textarea>` can't hold HTML markup. When inline highlighting is needed (e.g. skill/command tokens), the established pattern is: wrapper div (`flex:1; position:relative`), overlay div (`position:absolute; inset:1px; pointer-events:none; overflow:hidden; same font/padding/line-height as textarea`), textarea (`background:transparent; color:transparent; caret-color:var(--text); z-index:1`). `inset:1px` aligns the overlay's content area inside the textarea's 1px border — without it, the overlay is 2px wider and text wraps differently, causing misalignment. Add `.acp-prompt::selection { color:var(--text) }` to restore selection-glyph visibility. Scroll sync required: `textarea.addEventListener('scroll', () => overlay.scrollTop = textarea.scrollTop)`. Overlay content must use `createElement+textContent+appendChild` — never `innerHTML` (AGENTS.md prohibits it in this harness).
+**How to apply**: Use this pattern for any future in-textarea visual enrichment. The overlay renders the full textarea value using `createElement+textContent` spans; matched tokens get an additional `.acp-prompt-hl-match` class. Update on every `input` event and on `autoGrowPrompt()`/`dashRefreshComposerControls()` calls (see previous entry) to keep overlay in sync with all value-change paths.
+**Source**: `plans/done/261007-1013_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION.md` Phase 1 | **Verified**: 2026-10-07 (session, browser QA: 10/10 checks pass)
+
+### `sessionSkills`/`sessionCommands` globals change mid-session — any rendering feature must also re-render on catalogue arrival
+
+**Why**: `sessionSkills` and `sessionCommands` are populated from server-pushed `skills`/`commands` frames that arrive a few seconds after `session/new`. Any feature that renders from these globals must also hook the frame handlers and catalogue-clear sites: each `setSessionSkills(...)`/`setSessionCommands(...)` call in the page, and each `resetCommandPalette()` call site. The highlight overlay initially missed these (~5 acp.html + ~6 index.html sites), leaving stale or missing highlights until the next keystroke. The gap was caught only in Step 9 cycle 1.
+**How to apply**: When writing a feature that reads `sessionSkills` or `sessionCommands`, add re-render calls at: each `setSessionSkills`/`setSessionCommands` invocation and each `resetCommandPalette()` call site. Grep `acp.html` and `index.html` for `setSessionSkills\|setSessionCommands\|resetCommandPalette` to find all sites.
+**Source**: `plans/done/261007-1013_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION.md` Step 9 M2 finding, fixed in `0ad9397` | **Verified**: 2026-10-07 (session)
