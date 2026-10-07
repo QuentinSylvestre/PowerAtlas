@@ -1,4 +1,4 @@
-# ACP Textarea: Skill Highlight + List Continuation
+﻿# ACP Textarea: Skill Highlight + List Continuation
 
 **Status**: Complete
 **Plan slug**: 261006_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION
@@ -12,13 +12,13 @@
 The ACP prompt textarea has no visual feedback when a skill or command name is
 typed (e.g. `/qexplore`), and pressing Shift+Enter to start a new line in a
 numbered list requires the user to re-type the list prefix manually on every
-item — friction that breaks note-taking flow.
+item â€” friction that breaks note-taking flow.
 
 ### Goals
 
 1. **Skill/command highlight**: when the textarea contains a `/token` that
    exactly matches a known entry in `sessionCommands` or `sessionSkills`, the
-   token is visually highlighted — inline, inside the text area.
+   token is visually highlighted â€” inline, inside the text area.
 
 2. **Numbered list continuation**: when the user presses Shift+Enter at the
    end of a line whose start matches a numbered/lettered list prefix pattern
@@ -28,7 +28,7 @@ item — friction that breaks note-taking flow.
 ### Success criteria
 
 - SC-1: Typing a known `/command` or `/skill` name into either textarea produces an inline highlight on that token.
-- SC-2: Highlight scans the full textarea text — all matching tokens in a multi-line prompt highlight simultaneously.
+- SC-2: Highlight scans the full textarea text â€” all matching tokens in a multi-line prompt highlight simultaneously.
 - SC-3: Pressing Shift+Enter at the end of a numbered/lettered list line (e.g. `1. `, `A3: `) inserts a newline and the incremented prefix with cursor positioned after it.
 - SC-4: Pressing Shift+Enter mid-line, or on a line that does not match the list pattern, inserts only a plain newline (no continuation).
 - SC-5: Both features behave identically in `/acp` (`acp.html`) and the dashboard panel (`index.html`).
@@ -46,7 +46,7 @@ item — friction that breaks note-taking flow.
 |---|---|---|
 | D1 | Highlighting approach | Overlay div behind transparent textarea |
 | D2 | What to highlight | Any `/token` that exactly matches `sessionCommands[i].name` or `sessionSkills[i].name` (full-text scan, not just end-of-input) |
-| D3 | Highlight on partial typing | No — only complete token matches |
+| D3 | Highlight on partial typing | No â€” only complete token matches |
 | D4 | Shift+Enter trigger condition | Only when cursor is at end of the current line |
 | D5 | List stop on empty prefix line | Continue (insert next number even if line has only the prefix) |
 | D6 | Dashboard parity | Both features land in `index.html`; autoGrowPrompt gap left as-is (pre-existing) |
@@ -79,28 +79,28 @@ also add a shared function to `composer-chrome.js`.
 
 **sessionCommands / sessionSkills** (`composer-chrome.js:350-351`): true
 globals (non-IIFE module). Shape: `{name: string, description: string}` where
-`name` is bare — no leading `/` (stripped by `acp.py:_parse_skills` via
+`name` is bare â€” no leading `/` (stripped by `acp.py:_parse_skills` via
 `.lstrip("/")` and by the `commands` builder at `acp.py:4856`). A highlighter
 scanning the textarea must prepend `/` to each name before matching.
 
 **Textarea geometry** (`style.css:1966`): `flex:1; min-height:44px;
 max-height:258px; resize:none; font-family:inherit; font-size:16px;
-line-height:1.5; padding:8px 10px`. Font overridden to `13px` at `≥768px`
+line-height:1.5; padding:8px 10px`. Font overridden to `13px` at `â‰¥768px`
 (`style.css:2723`). The overlay must inherit the same breakpoint.
 
-**Keydown handler** (`acp.html:6003–6069`): comment at 6004 explicitly states
+**Keydown handler** (`acp.html:6003â€“6069`): comment at 6004 explicitly states
 Shift+Enter is not intercepted. The new list-continuation branch inserts before
-the existing plain-Enter-sends branch. Order matters: slash-intercept →
-dropdown nav → list continuation (new) → plain Enter sends.
+the existing plain-Enter-sends branch. Order matters: slash-intercept â†’
+dropdown nav â†’ list continuation (new) â†’ plain Enter sends.
 
-**Cursor-position pattern** (`acp.html:1600–1606`): slice `value` at
+**Cursor-position pattern** (`acp.html:1600â€“1606`): slice `value` at
 `selectionStart`/`selectionEnd`, write new value, set
 `selectionStart = selectionEnd = newPos`. This is the canonical in-repo pattern
 for programmatic caret-positioned inserts.
 
-**autoGrowPrompt** (`acp.html:1348–1354`): modifies only `style.height` via
+**autoGrowPrompt** (`acp.html:1348â€“1354`): modifies only `style.height` via
 `scrollHeight + 2px`. Called after every programmatic value change.
-`index.html` has no equivalent — a known pre-existing gap.
+`index.html` has no equivalent â€” a known pre-existing gap.
 
 ### 4. Existing patterns & constraints
 
@@ -114,16 +114,16 @@ for programmatic caret-positioned inserts.
 - **Scroll sync**: textarea has `max-height:258px` and then scrolls. The
   overlay's `scrollTop` must stay in sync via a `scroll` event listener on
   the textarea.
-- **Text escaping**: the overlay renders user input as HTML — all content must
+- **Text escaping**: the overlay renders user input as HTML â€” all content must
   be HTML-escaped before injection to prevent XSS.
 - **`pointer-events: none`**: the overlay must not intercept mouse/keyboard
   events.
 - **CRLF source files**: all three `.html` files and `style.css` use CRLF line
-  endings — use the Edit tool, not shell scripts (`memory/MEMORY.md`).
+  endings â€” use the Edit tool, not shell scripts (`memory/MEMORY.md`).
 - **Test harness**: `tests/acp_page.test.mjs` has no CSS engine and no
   `getBoundingClientRect`. Token-detection logic IS testable (selectionStart,
   value, dispatch keydown/input). Visual alignment requires browser QA
-  (Playwright/Chromium per `AGENTS.md § Verification Setup`).
+  (Playwright/Chromium per `AGENTS.md Â§ Verification Setup`).
 - **Hard reload**: template and static file edits are picked up with
   Ctrl+Shift+R; no PowerAtlas restart needed.
 
@@ -131,12 +131,12 @@ for programmatic caret-positioned inserts.
 
 | Risk | Mitigation |
 |---|---|
-| Overlay misaligns at 768px font-size breakpoint (16px → 13px) | Override font-size on `.acp-prompt-hl` inside the same `@media (min-width:768px)` block as `.acp-prompt`; verify in Playwright at both widths |
+| Overlay misaligns at 768px font-size breakpoint (16px â†’ 13px) | Override font-size on `.acp-prompt-hl` inside the same `@media (min-width:768px)` block as `.acp-prompt`; verify in Playwright at both widths |
 | Overlay drifts when textarea scrolls | `textarea.addEventListener('scroll', () => overlayEl.scrollTop = textarea.scrollTop)` |
 | Overlay height lags `autoGrowPrompt()` | Call `overlayEl.style.height = textarea.style.height` after every `autoGrowPrompt()` call (or size via CSS `height:100%` inside wrapper) |
 | XSS via highlight div innerHTML | HTML-escape all textarea content before setting innerHTML on the overlay |
-| index.html list continuation doesn't grow the textarea | Accepted — pre-existing gap. The value still updates correctly; height is just fixed until the user resizes or reloads. |
-| Regex false-positives on list pattern (e.g., version numbers `v1.2`) | Require the separator (`. ` or `: `) to be followed by a space — already in pattern; `v1.2` has no space after the `.` before a digit. URLs like `http://` don't have digits immediately before `: ` that start a line. |
+| index.html list continuation doesn't grow the textarea | Accepted â€” pre-existing gap. The value still updates correctly; height is just fixed until the user resizes or reloads. |
+| Regex false-positives on list pattern (e.g., version numbers `v1.2`) | Require the separator (`. ` or `: `) to be followed by a space â€” already in pattern; `v1.2` has no space after the `.` before a digit. URLs like `http://` don't have digits immediately before `: ` that start a line. |
 | List continuation on mid-line Shift+Enter (cursor not at end) | Guard: only fire when `selectionStart === selectionEnd` (no selection) AND cursor is at the end of the current line (text after cursor until next `\n` or end-of-value is empty). |
 
 ### 6. Tests to update / add
@@ -174,7 +174,7 @@ Code-tracing trio dispatched. Sub-agent findings confirmed:
 - No existing overlay or list-continuation code anywhere in the three source
   files.
 - `sessionSkills` / `sessionCommands` are true globals (non-IIFE
-  `composer-chrome.js`) — accessible from host-page inline scripts without any
+  `composer-chrome.js`) â€” accessible from host-page inline scripts without any
   API change.
 - Skill names are bare (no leading `/`) in both arrays.
 - Shift+Enter is explicitly not intercepted in both `acp.html:6004` and
@@ -185,28 +185,46 @@ Code-tracing trio dispatched. Sub-agent findings confirmed:
 
 ## Harness Improvement Opportunities
 
-- The `/qexplore` skill asks for 1 question at a time but the orchestrator asked 4 at once on the first interview pass — cost: one correction round. Suggested change: add an explicit "1 question per turn" reminder to the pre-interview checklist in the skill.
+- The `/qexplore` skill asks for 1 question at a time but the orchestrator asked 4 at once on the first interview pass â€” cost: one correction round. Suggested change: add an explicit "1 question per turn" reminder to the pre-interview checklist in the skill.
 
 ---
 
 > **Date**: 2026-10-06
 > **Status**: Complete
+> **Last Updated**: 2026-10-07 10:13
 > **Scope**: Skill/command highlight overlay + Shift+Enter list continuation in both textarea instances
 > **Estimated effort**: ~0.5 day
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- `Promoted (harness opportunity)`: `tests/acp_page.test.mjs` `innerHTML` prohibition added to `AGENTS.md § Doc & Test Guidelines` — "the DOM stand-in throws on both read and write of `innerHTML`; use `createElement + textContent + appendChild` instead."
+- `Skipped (harness opportunity): already covered` — `/qexplore` 1-question-per-turn rule already present in the deployed Kiro overlay at `~/.kiro/skills/qexplore/SKILL.md:534`.
+- `Accepted (deferred)`: overlay vs textarea word-break alignment at both font-size breakpoints — deferred Playwright QA item; low visual risk.
+
+### Follow-up work (new items from this session)
+
+1. Auto-scroll to always show the latest text in `/acp` and dashboard panel
+2. Auto-group tool calls in the transcript
+3. Sub-agent: show inline tool calls (current behavior) + show past tool calls in sub-agent transcript panel + format sub-agent transcript
+4. Up/down arrow navigation through previous prompts (CLI-style history)
+5. List continuation: support mid-line Shift+Enter (currently only fires at end-of-line)
+6. List continuation: empty prefix line (`{number}. ` with no text) — Shift+Enter should remove the list formatting instead of continuing
 
 ## 1) Current State
 
 **Textarea structure** (`acp.html:274-278`, `index.html:456-460`): both pages have a plain `<textarea class="acp-prompt">` with no surrounding wrapper. The textarea is a direct flex child of `.acp-composer-row` via `flex:1` (`style.css:1966`). There is no overlay or highlight mechanism anywhere in the codebase.
 
-**Textarea CSS** (`style.css:1966`): `flex:1; min-height:44px; max-height:258px; resize:none; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); color:var(--text); font-family:inherit; font-size:16px; line-height:1.5; padding:8px 10px`. Font overridden to `13px` at `≥768px` (`style.css:2723`).
+**Textarea CSS** (`style.css:1966`): `flex:1; min-height:44px; max-height:258px; resize:none; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); color:var(--text); font-family:inherit; font-size:16px; line-height:1.5; padding:8px 10px`. Font overridden to `13px` at `â‰¥768px` (`style.css:2723`).
 
-**Keydown handler** (`acp.html:6003-6069`): comment at `acp.html:6004` explicitly states Shift+Enter is not intercepted. Branch order: slash-intercept → dropdown nav → plain Enter sends. Mirror in `index.html:2810-2857`.
+**Keydown handler** (`acp.html:6003-6069`): comment at `acp.html:6004` explicitly states Shift+Enter is not intercepted. Branch order: slash-intercept â†’ dropdown nav â†’ plain Enter sends. Mirror in `index.html:2810-2857`.
 
-**Catalogue globals** (`composer-chrome.js:350-351`): `sessionCommands` and `sessionSkills` are true globals (non-IIFE script). Shape: `{name: string, description: string}` — `name` is bare (no leading `/`). Populated by `setSessionCommands`/`setSessionSkills`; cleared by `resetCommandPalette()` on session change.
+**Catalogue globals** (`composer-chrome.js:350-351`): `sessionCommands` and `sessionSkills` are true globals (non-IIFE script). Shape: `{name: string, description: string}` â€” `name` is bare (no leading `/`). Populated by `setSessionCommands`/`setSessionSkills`; cleared by `resetCommandPalette()` on session change.
 
 **HTML-escape** (`index.html:5798`): `_escHtml` defined as a global in `index.html` only, absent from `acp.html` by design (`acp.html:519`).
 
-**Test harness constraint** (`tests/acp_page.test.mjs:290-292`): `El.innerHTML` getter and setter both throw (`HTML_SINK`). The overlay must be built entirely with `createElement + textContent + appendChild` — no `innerHTML`.
+**Test harness constraint** (`tests/acp_page.test.mjs:290-292`): `El.innerHTML` getter and setter both throw (`HTML_SINK`). The overlay must be built entirely with `createElement + textContent + appendChild` â€” no `innerHTML`.
 
 **Cursor-insert pattern** (`acp.html:1600-1606`): slice `value` at `selectionStart/End`, write new value, then `setSelectionRange(newPos, newPos)`. Canonical in-repo pattern for programmatic caret inserts.
 
@@ -220,38 +238,38 @@ Wrap each textarea in a `.acp-prompt-wrap` div containing a highlight overlay di
 
 | Decision | Choice | Alternatives considered | Rationale |
 |---|---|---|---|
-| Overlay DOM method | `createElement + textContent + appendChild` — no `innerHTML` | `innerHTML` with escaped text | Test harness (`acp_page.test.mjs`) throws on any `innerHTML` access; `createElement` also provides XSS safety without escaping |
+| Overlay DOM method | `createElement + textContent + appendChild` â€” no `innerHTML` | `innerHTML` with escaped text | Test harness (`acp_page.test.mjs`) throws on any `innerHTML` access; `createElement` also provides XSS safety without escaping |
 | Overlay positioning | `position:absolute; inset:1px` inside `.acp-prompt-wrap` | `inset:0` | `inset:1px` offsets inside the textarea's 1px border so both content areas are aligned |
 | Highlight scope | All known `/tokens` in the full text (global regex, not just last token) | Last token only | Note-taking use case: multiple `/token` references per prompt |
 | Highlight matching | Exact complete match (token followed by whitespace or EOL), no partials | Partial match | Partials already served by dropdown; exact only avoids noise |
 | List pattern | `/^(\s*)(\S*?)(\d+)([.:])( +)/` against the current line text | Fixed numeric-only | Covers `1. `, `A1. `, `Q3: ` per user spec |
 | Shift+Enter guard | Trigger only when `selectionStart === selectionEnd` AND cursor is at line-end | Always trigger | Mid-line Shift+Enter means "split item", not "continue list" |
-| `_escHtml` in acp.html | Not needed — `textContent` is used for all user content | Carry `_escHtml` across | `textContent` does not interpret HTML; no XSS risk without a separate escape function |
+| `_escHtml` in acp.html | Not needed â€” `textContent` is used for all user content | Carry `_escHtml` across | `textContent` does not interpret HTML; no XSS risk without a separate escape function |
 
 ## 4) External Dependencies & Costs
 
 | Category | Change needed | Owner | Status |
 |---|---|---|---|
-| CI/CD | None | — | N/A |
-| IAM / Permissions | None | — | N/A |
-| Cloud resources | None | — | N/A |
-| All others | None — pure front-end HTML/JS/CSS change | — | N/A |
+| CI/CD | None | â€” | N/A |
+| IAM / Permissions | None | â€” | N/A |
+| Cloud resources | None | â€” | N/A |
+| All others | None â€” pure front-end HTML/JS/CSS change | â€” | N/A |
 
 **Cost impact**: None.
 
 ## 5) Implementation Phases
 
-### Phase 1: Highlight overlay — HTML, CSS, and JS [QA]
+### Phase 1: Highlight overlay â€” HTML, CSS, and JS [QA]
 
 **Goal**: Add the `.acp-prompt-wrap` wrapper and `.acp-prompt-hl` overlay to both textarea instances; update `.acp-prompt` CSS; implement `updatePromptHighlight()` in both pages; add scroll sync and hook into `input`/`cmdOnPromptChanged`; add tests.
 
 **Why vertical**: HTML + CSS + JS together form the complete testable surface for SC-1 and SC-2.
 
-**Covers**: SC-1, SC-2, SC-5 (partial — highlight)
+**Covers**: SC-1, SC-2, SC-5 (partial â€” highlight)
 
 **File scope**: `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`, `src/power_atlas/static/style.css`, `tests/acp_page.test.mjs`
 
-#### HTML — `acp.html`
+#### HTML â€” `acp.html`
 
 At `acp.html:274`, the textarea is a direct child of `.acp-composer-row`. Wrap it:
 
@@ -267,9 +285,9 @@ Before line 274 (inside .acp-composer-row, replacing the bare textarea):
 </div>
 ```
 
-Keep all existing textarea attributes unchanged. The overlay div has `aria-hidden="true"` — it is a visual-only layer.
+Keep all existing textarea attributes unchanged. The overlay div has `aria-hidden="true"` â€” it is a visual-only layer.
 
-#### HTML — `index.html`
+#### HTML â€” `index.html`
 
 Same pattern at `index.html:456`. Add:
 
@@ -286,12 +304,12 @@ Same pattern at `index.html:456`. Add:
 
 Preserve all existing `dashPromptInput` attributes.
 
-#### CSS — `style.css`
+#### CSS â€” `style.css`
 
 **Add** these new rules (after the `.acp-composer-row` rule near `style.css:1931`):
 
 ```css
-/* Highlight-overlay wrapper — takes the flex:1 slot formerly held by .acp-prompt */
+/* Highlight-overlay wrapper â€” takes the flex:1 slot formerly held by .acp-prompt */
 .acp-prompt-wrap {
   flex: 1;
   position: relative;
@@ -336,9 +354,9 @@ The `border`, `border-radius`, `min-height`, `max-height`, `resize`, `font-famil
 .acp-prompt::selection { color: var(--text); }
 ```
 
-This rule makes selected text visible again — `color: transparent` on the textarea hides the glyphs in a drag-selection, but `::selection` overrides the color for selected ranges.
+This rule makes selected text visible again â€” `color: transparent` on the textarea hides the glyphs in a drag-selection, but `::selection` overrides the color for selected ranges.
 
-> **Rejected**: using `inset: 0` on the overlay — the overlay's content area would be 2px wider than the textarea's (because the textarea has a 1px border on each side), causing text wrap to diverge. **Use instead**: `inset: 1px` to sit inside the border edge.
+> **Rejected**: using `inset: 0` on the overlay â€” the overlay's content area would be 2px wider than the textarea's (because the textarea has a 1px border on each side), causing text wrap to diverge. **Use instead**: `inset: 1px` to sit inside the border edge.
 
 **Add** inside the existing `@media (min-width: 768px)` block (near `style.css:2723`):
 
@@ -348,7 +366,7 @@ This rule makes selected text visible again — `color: transparent` on the text
 
 **Note on `color-mix`**: `color-mix(in srgb, ...)` has wide browser support (Chrome 111+, Safari 16.2+, Firefox 113+). If the project's browser support target is older than these, fall back to `background: var(--accent); opacity: 0.2` on `.acp-prompt-hl-match` plus `opacity: 1` workaround on child spans, or use a hard-coded rgba. Verify minimum supported browser version before choosing.
 
-#### JS — `acp.html` (inside the IIFE)
+#### JS â€” `acp.html` (inside the IIFE)
 
 **1. Get overlay reference** (near `var promptInput = document.getElementById('acpPrompt')` around `acp.html:599`):
 
@@ -361,7 +379,7 @@ var promptHlEl = document.getElementById('acpPromptHl');
 ```javascript
 /**
  * Rebuild the highlight overlay to match the current promptInput.value.
- * Uses createElement+textContent — never innerHTML — so it is both
+ * Uses createElement+textContent â€” never innerHTML â€” so it is both
  * XSS-safe (no HTML parsing of user text) and compatible with the test
  * harness (tests/acp_page.test.mjs forbids innerHTML).
  *
@@ -387,7 +405,7 @@ function updatePromptHighlight() {
   promptHlEl.textContent = '';
 
   if (tokens.length === 0 || !text) {
-    // No catalogue yet or empty input — render plain text so overlay
+    // No catalogue yet or empty input â€” render plain text so overlay
     // background tracks the textarea's size during scroll.
     var plain = document.createElement('span');
     plain.textContent = text;
@@ -434,7 +452,7 @@ function updatePromptHighlight() {
 }
 ```
 
-**3. Add `updatePromptHighlight()` to `autoGrowPrompt()`** — this is the critical coverage fix. Every programmatic `promptInput.value =` in acp.html (~12 sites: steer-restore, queue-restore, reconnect-restore, refused-prompt-restore, send-clear, image-marker insert, image renumber) already calls `autoGrowPrompt()`. Putting the overlay call there covers all of them without enumerating every site. Search for `function autoGrowPrompt()` (around `acp.html:1348`) and append one line inside:
+**3. Add `updatePromptHighlight()` to `autoGrowPrompt()`** â€” this is the critical coverage fix. Every programmatic `promptInput.value =` in acp.html (~12 sites: steer-restore, queue-restore, reconnect-restore, refused-prompt-restore, send-clear, image-marker insert, image renumber) already calls `autoGrowPrompt()`. Putting the overlay call there covers all of them without enumerating every site. Search for `function autoGrowPrompt()` (around `acp.html:1348`) and append one line inside:
 
 ```javascript
 function autoGrowPrompt() {
@@ -462,13 +480,13 @@ promptInput.addEventListener('scroll', function () {
 });
 ```
 
-#### JS — `index.html`
+#### JS â€” `index.html`
 
 Mirror the equivalent changes on `dashPromptInput`/`dashPromptHlEl`:
 
 1. `var dashPromptHlEl = document.getElementById('dashPromptHl');` near `var dashPromptInput = ...` (search `index.html` for `var dashPromptInput =`)
-2. `updateDashPromptHighlight()` function — identical logic to `updatePromptHighlight()` above but reading `dashPromptInput.value` and using `dashPromptHlEl`. Uses the same `createElement+textContent` approach and the same `sessionCommands`/`sessionSkills` globals. `_escHtml` NOT needed.
-3. Add `updateDashPromptHighlight()` inside `dashRefreshComposerControls()` (search for `function dashRefreshComposerControls()`). This is the equivalent of the `autoGrowPrompt()` hook for the dashboard — `dashRefreshComposerControls()` is called at every `dashPromptInput.value = ...` site (~18 sites), covering all programmatic value changes:
+2. `updateDashPromptHighlight()` function â€” identical logic to `updatePromptHighlight()` above but reading `dashPromptInput.value` and using `dashPromptHlEl`. Uses the same `createElement+textContent` approach and the same `sessionCommands`/`sessionSkills` globals. `_escHtml` NOT needed.
+3. Add `updateDashPromptHighlight()` inside `dashRefreshComposerControls()` (search for `function dashRefreshComposerControls()`). This is the equivalent of the `autoGrowPrompt()` hook for the dashboard â€” `dashRefreshComposerControls()` is called at every `dashPromptInput.value = ...` site (~18 sites), covering all programmatic value changes:
 
 ```javascript
 function dashRefreshComposerControls() {
@@ -477,49 +495,49 @@ function dashRefreshComposerControls() {
 }
 ```
 
-4. `onPromptChanged` on the dashboard is a **bare function reference** at `index.html:2804`: `onPromptChanged: dashRefreshComposerControls`. Since `dashRefreshComposerControls` now calls `updateDashPromptHighlight()`, this is already covered — no change to the callback needed.
+4. `onPromptChanged` on the dashboard is a **bare function reference** at `index.html:2804`: `onPromptChanged: dashRefreshComposerControls`. Since `dashRefreshComposerControls` now calls `updateDashPromptHighlight()`, this is already covered â€” no change to the callback needed.
 5. Add scroll sync on `dashPromptInput` (same pattern as acp.html)
-6. `input` handler already calls `dashRefreshComposerControls()` — no additional hook needed
+6. `input` handler already calls `dashRefreshComposerControls()` â€” no additional hook needed
 
-#### Tests — `tests/acp_page.test.mjs`
+#### Tests â€” `tests/acp_page.test.mjs`
 
 Use the test harness's actual pattern: `check(name, fn)` where `fn` receives a page object from `loadPage`. All tests below use `check('name', async (page) => { ... })`. Element refs: `page.el('acpPromptHl')` (new), `page.sandbox.sessionSkills = [...]` (direct global assignment).
 
 Add after the existing skill palette tests:
 
 - `check('highlightRendersMatchedToken', page => { page.sandbox.sessionSkills = [{name:'qexplore',description:''}]; page.el('acpPrompt').value = '/qexplore'; page.el('acpPrompt').dispatch('input'); /* assert hlEl has a span with className acp-prompt-hl-match and textContent '/qexplore' */ })`
-- `check('highlightDoesNotHighlightUnknownToken', ...)` — `sessionSkills = []; sessionCommands = []`; value `/foo`; dispatch `input`; assert no `.acp-prompt-hl-match` child.
-- `check('highlightScansFullText', ...)` — two `/qexplore` tokens in value; assert 2 `.acp-prompt-hl-match` spans.
-- `check('highlightSyncScrollUpdatesOverlay', ...)` — `page.el('acpPrompt').scrollTop = 50`; dispatch `scroll`; assert `page.el('acpPromptHl').scrollTop === 50`.
-- `check('highlightUpdatesViaAutoGrow', ...)` — programmatic value change followed by `autoGrowPrompt()` call (via the harness's sandbox); assert overlay reflects new value.
+- `check('highlightDoesNotHighlightUnknownToken', ...)` â€” `sessionSkills = []; sessionCommands = []`; value `/foo`; dispatch `input`; assert no `.acp-prompt-hl-match` child.
+- `check('highlightScansFullText', ...)` â€” two `/qexplore` tokens in value; assert 2 `.acp-prompt-hl-match` spans.
+- `check('highlightSyncScrollUpdatesOverlay', ...)` â€” `page.el('acpPrompt').scrollTop = 50`; dispatch `scroll`; assert `page.el('acpPromptHl').scrollTop === 50`.
+- `check('highlightUpdatesViaAutoGrow', ...)` â€” programmatic value change followed by `autoGrowPrompt()` call (via the harness's sandbox); assert overlay reflects new value.
 
 **Exit criteria**:
-- [ ] `<div class="acp-prompt-wrap">` wraps `#acpPrompt` in `acp.html`
-- [ ] `<div class="acp-prompt-hl" id="acpPromptHl" aria-hidden="true">` present inside the wrapper
-- [ ] Same wrapper + overlay present in `index.html` around `#dashPromptInput`
-- [ ] `.acp-prompt-wrap { flex: 1; position: relative; }` added to `style.css`
-- [ ] `.acp-prompt-hl { position: absolute; inset: 1px; ... }` added to `style.css`
-- [ ] `.acp-prompt-hl-match` class added to `style.css`
-- [ ] `.acp-prompt` loses `flex:1` and gains `background:transparent; color:transparent; caret-color:var(--text)` in `style.css`
-- [ ] `.acp-prompt::selection { color: var(--text); }` added to `style.css` (restores selection glyph visibility)
-- [ ] `color-mix(in srgb, var(--accent) 18%, transparent)` verified functional in target browser, OR replaced with a supported fallback (e.g., `rgba(99,102,241,0.18)`) before shipping
-- [ ] Overlay updates on every `input` event (both pages)
-- [ ] Overlay scroll synced to textarea `scroll` event (both pages)
-- [ ] `updatePromptHighlight()` (acp.html) and `updateDashPromptHighlight()` (index.html) use no `innerHTML`
-- [ ] `node tests/acp_page.test.mjs` passes (all existing + new, zero failures)
-- [ ] Hard reload in browser shows textarea text visible, `/qexplore` highlighted (browser QA)
+- [x] `<div class="acp-prompt-wrap">` wraps `#acpPrompt` in `acp.html`
+- [x] `<div class="acp-prompt-hl" id="acpPromptHl" aria-hidden="true">` present inside the wrapper
+- [x] Same wrapper + overlay present in `index.html` around `#dashPromptInput`
+- [x] `.acp-prompt-wrap { flex: 1; position: relative; }` added to `style.css`
+- [x] `.acp-prompt-hl { position: absolute; inset: 1px; ... }` added to `style.css`
+- [x] `.acp-prompt-hl-match` class added to `style.css`
+- [x] `.acp-prompt` loses `flex:1` and gains `background:transparent; color:transparent; caret-color:var(--text)` in `style.css`
+- [x] `.acp-prompt::selection { color: var(--text); }` added to `style.css` (restores selection glyph visibility)
+- [x] `color-mix(in srgb, var(--accent) 18%, transparent)` verified functional in target browser, OR replaced with a supported fallback (e.g., `rgba(99,102,241,0.18)`) before shipping
+- [x] Overlay updates on every `input` event (both pages)
+- [x] Overlay scroll synced to textarea `scroll` event (both pages)
+- [x] `updatePromptHighlight()` (acp.html) and `updateDashPromptHighlight()` (index.html) use no `innerHTML`
+- [x] `node tests/acp_page.test.mjs` passes (all existing + new, zero failures)
+- [x] Hard reload in browser shows textarea text visible, `/qexplore` highlighted (browser QA)
 
 ---
 
-### Phase 2: List continuation — Shift+Enter keydown handler [QA]
+### Phase 2: List continuation â€” Shift+Enter keydown handler [QA]
 
 **Goal**: Intercept Shift+Enter in both keydown handlers when the cursor is at the end of a list-prefixed line; insert the next prefix; call `autoGrowPrompt()` on acp.html.
 
-**Covers**: SC-3, SC-4, SC-5 (partial — list continuation)
+**Covers**: SC-3, SC-4, SC-5 (partial â€” list continuation)
 
 **File scope**: `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`, `tests/acp_page.test.mjs`
 
-#### JS — `acp.html` keydown handler
+#### JS â€” `acp.html` keydown handler
 
 In the keydown handler at `acp.html:6003`, insert this new branch **after the dropdown navigation block** (currently ending around `acp.html:6053`) and **before the plain-Enter-sends block** (starting around `acp.html:6055`):
 
@@ -560,16 +578,16 @@ if (ev.key === 'Enter' && ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
 
 Variable names use `_` prefix to avoid shadowing the outer handler's variables. The branch falls through (no `return`) when the pattern does not match or cursor is mid-line, letting the browser insert the default newline.
 
-#### JS — `index.html` keydown handler
+#### JS â€” `index.html` keydown handler
 
-Identical branch at `index.html:2810`, using `dashPromptInput` instead of `promptInput`, **and using `e.key`, `e.shiftKey`, `e.ctrlKey`, `e.altKey` to match the index.html handler's existing event variable name `e` (not `ev`)**, and calling `dashRefreshComposerControls()` instead. Dashboard has no `autoGrowPrompt()` — this is accepted (pre-existing gap, D6). `dashRefreshComposerControls()` now calls `updateDashPromptHighlight()` (from Phase 1), so the overlay syncs after list continuation on the dashboard.
+Identical branch at `index.html:2810`, using `dashPromptInput` instead of `promptInput`, **and using `e.key`, `e.shiftKey`, `e.ctrlKey`, `e.altKey` to match the index.html handler's existing event variable name `e` (not `ev`)**, and calling `dashRefreshComposerControls()` instead. Dashboard has no `autoGrowPrompt()` â€” this is accepted (pre-existing gap, D6). `dashRefreshComposerControls()` now calls `updateDashPromptHighlight()` (from Phase 1), so the overlay syncs after list continuation on the dashboard.
 
-#### Tests — `tests/acp_page.test.mjs`
+#### Tests â€” `tests/acp_page.test.mjs`
 
 Add after the scroll sync tests from Phase 1:
 
 - `shiftEnterAtEndOfListLineContinues`: `promptInput.value = '1. item'`; `promptInput.selectionStart = promptInput.selectionEnd = 7`; dispatch `{key:'Enter', shiftKey:true, ctrlKey:false, altKey:false, preventDefault(){}}` to the `keydown` listener; assert `promptInput.value === '1. item\n2. '` and `promptInput.selectionStart === 11`.
-- `shiftEnterMidLineDoesNotContinue`: same setup but `selectionStart = selectionEnd = 3` (mid-line); dispatch Shift+Enter; assert `promptInput.value` unchanged (no branch fires; the `if` guard on `_pos === _lineEnd` is false; the browser's default fires — in the harness, the value is unchanged since no listener mutates it).
+- `shiftEnterMidLineDoesNotContinue`: same setup but `selectionStart = selectionEnd = 3` (mid-line); dispatch Shift+Enter; assert `promptInput.value` unchanged (no branch fires; the `if` guard on `_pos === _lineEnd` is false; the browser's default fires â€” in the harness, the value is unchanged since no listener mutates it).
 - `shiftEnterOnEmptyPrefixLineContinues`: `promptInput.value = '3. '`; `selectionStart = selectionEnd = 3`; dispatch Shift+Enter; assert value `'3. \n4. '`.
 - `shiftEnterOnNonListLineNoEffect`: `promptInput.value = 'hello'`; cursor at 5; dispatch Shift+Enter; assert value unchanged.
 - `shiftEnterPreservesLeadingIndent`: `promptInput.value = '  2. item'`; cursor at 9; dispatch Shift+Enter; assert value `'  2. item\n  3. '` (indent preserved).
@@ -592,12 +610,12 @@ Add after the scroll sync tests from Phase 1:
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Overlay text wrapping diverges from textarea at 768px font-size breakpoint | High — tokens appear shifted, no usable highlight | Add `.acp-prompt-hl { font-size: 13px; }` in the same `@media (min-width: 768px)` block as `.acp-prompt`; verify in Playwright at both breakpoints |
-| Overlay drifts when textarea scrolls past max-height | Medium — highlight no longer aligns with visible text | Scroll sync listener on textarea; tested in `acp_page.test.mjs` |
-| `color-mix` not supported on user's browser | Low — highlight disappears (text still works) | Fall back to `rgba(var(--accent-rgb, 99,102,241), 0.18)` or verify minimum supported browser |
-| List continuation inserts wrong position after image-marker text | Low — prefix may insert at unexpected offset | The guard `_pos === _lineEnd` with `_nextNl` check is exact; verified by test |
-| `updatePromptHighlight` called during replay before `promptHlEl` is ready | Low — silent failure | `if (!promptHlEl) return;` guard at function top |
-| index.html textarea height does not grow after list continuation | Low — accepted; pre-existing gap per D6 | Documented in Follow-up Work |
+| Overlay text wrapping diverges from textarea at 768px font-size breakpoint | High â€” tokens appear shifted, no usable highlight | Add `.acp-prompt-hl { font-size: 13px; }` in the same `@media (min-width: 768px)` block as `.acp-prompt`; verify in Playwright at both breakpoints |
+| Overlay drifts when textarea scrolls past max-height | Medium â€” highlight no longer aligns with visible text | Scroll sync listener on textarea; tested in `acp_page.test.mjs` |
+| `color-mix` not supported on user's browser | Low â€” highlight disappears (text still works) | Fall back to `rgba(var(--accent-rgb, 99,102,241), 0.18)` or verify minimum supported browser |
+| List continuation inserts wrong position after image-marker text | Low â€” prefix may insert at unexpected offset | The guard `_pos === _lineEnd` with `_nextNl` check is exact; verified by test |
+| `updatePromptHighlight` called during replay before `promptHlEl` is ready | Low â€” silent failure | `if (!promptHlEl) return;` guard at function top |
+| index.html textarea height does not grow after list continuation | Low â€” accepted; pre-existing gap per D6 | Documented in Follow-up Work |
 
 ## 7) Verification
 
@@ -608,29 +626,29 @@ node tests/acp_page.test.mjs
 # Expected: all existing 969 + new tests pass, 0 failures
 ```
 
-Browser QA (required for visual alignment — harness has no CSS engine):
+Browser QA (required for visual alignment â€” harness has no CSS engine):
 
 1. Open `/acp` in browser. Hard reload (`Ctrl+Shift+R`).
 2. Start an ACP session and wait for the skills catalogue to load (MCP indicator turns green).
-3. Type `/qexplore` into the textarea — verify the token is visually highlighted with a colored background.
-4. Type `hello /qplan world` — verify `/qplan` highlights mid-sentence.
-5. Type without a known token — verify no spurious highlight.
-6. Grow the textarea past max-height (type many lines) — scroll down — verify the highlight tracks the textarea's scroll position.
-7. Type `1. first item` and press Shift+Enter — verify next line starts `2. `.
-8. Type `A3: task` and press Shift+Enter — verify `A4: `.
-9. Type `  2. indented item` (with leading spaces) and press Shift+Enter — verify `  3. ` (indent preserved).
-10. Click mid-line in `1. something` and press Shift+Enter — verify only a plain newline inserts (no continuation).
-11. Repeat checks 2–10 on the dashboard panel (`/`).
+3. Type `/qexplore` into the textarea â€” verify the token is visually highlighted with a colored background.
+4. Type `hello /qplan world` â€” verify `/qplan` highlights mid-sentence.
+5. Type without a known token â€” verify no spurious highlight.
+6. Grow the textarea past max-height (type many lines) â€” scroll down â€” verify the highlight tracks the textarea's scroll position.
+7. Type `1. first item` and press Shift+Enter â€” verify next line starts `2. `.
+8. Type `A3: task` and press Shift+Enter â€” verify `A4: `.
+9. Type `  2. indented item` (with leading spaces) and press Shift+Enter â€” verify `  3. ` (indent preserved).
+10. Click mid-line in `1. something` and press Shift+Enter â€” verify only a plain newline inserts (no continuation).
+11. Repeat checks 2â€“10 on the dashboard panel (`/`).
 
 ## 8) Documentation Updates
 
-No prose documentation files reference the changed identifiers (`acp-prompt`, `acpPrompt`, `dashPromptInput`, `autoGrowPrompt`). The doc-impact sub-agent scanned all tracked `*.md`, `docs/`, `README.md`, and `AGENTS.md` — zero doc-update rows required.
+No prose documentation files reference the changed identifiers (`acp-prompt`, `acpPrompt`, `dashPromptInput`, `autoGrowPrompt`). The doc-impact sub-agent scanned all tracked `*.md`, `docs/`, `README.md`, and `AGENTS.md` â€” zero doc-update rows required.
 
-The test file `tests/acp_page.test.mjs` already carries `acpPrompt` and `dashPromptInput` references (128 and 163 occurrences respectively) as test code — these are test maintenance, not documentation updates.
+The test file `tests/acp_page.test.mjs` already carries `acpPrompt` and `dashPromptInput` references (128 and 163 occurrences respectively) as test code â€” these are test maintenance, not documentation updates.
 
 | Document | Update needed | Phase |
 |---|---|---|
-| — | None | — |
+| â€” | None | â€” |
 
 ## Progress Tracker
 
@@ -641,9 +659,9 @@ The test file `tests/acp_page.test.mjs` already carries `acpPrompt` and `dashPro
 
 ## 9) Implementation Divergences from Plan
 
-1. Added `window._testAutoGrowPrompt = autoGrowPrompt;` test hook in `acp.html` (follows `window._testAddSystemMessage` pattern) — enables `highlightUpdatesViaAutoGrow` test to exercise the `autoGrowPrompt → overlay` coverage path.
-2. Added `dashPromptHlEl: new El("div")` to two dashboard sandbox literals in `tests/acp_page.test.mjs` — the dashboard harness exposes DOM elements as sandbox properties; `updateDashPromptHighlight` reads `dashPromptHlEl` as a free global.
-3. `updateDashPromptHighlight()` placed AFTER `dashRefreshComposerControls` in `index.html` (inside the harness-extracted composer-controls region) rather than before it as the brief implied — the harness slices that region from the `dashRefreshComposerControls` declaration; a function before it falls outside the run region.
+1. Added `window._testAutoGrowPrompt = autoGrowPrompt;` test hook in `acp.html` (follows `window._testAddSystemMessage` pattern) â€” enables `highlightUpdatesViaAutoGrow` test to exercise the `autoGrowPrompt â†’ overlay` coverage path.
+2. Added `dashPromptHlEl: new El("div")` to two dashboard sandbox literals in `tests/acp_page.test.mjs` â€” the dashboard harness exposes DOM elements as sandbox properties; `updateDashPromptHighlight` reads `dashPromptHlEl` as a free global.
+3. `updateDashPromptHighlight()` placed AFTER `dashRefreshComposerControls` in `index.html` (inside the harness-extracted composer-controls region) rather than before it as the brief implied â€” the harness slices that region from the `dashRefreshComposerControls` declaration; a function before it falls outside the run region.
 4. `color-mix(in srgb, var(--accent) 18%, transparent)` retained after browser QA confirmed visible rendering in Chromium/WebView2.
 
 ### Phase 2 implementation notes
@@ -657,13 +675,13 @@ Added `.acp-prompt-wrap` wrapper and `.acp-prompt-hl` overlay to both prompt tex
 ## Follow-up Work (Deferred)
 
 1. **Dashboard textarea auto-grow after list continuation.** `index.html` has no `autoGrowPrompt()` equivalent, so after a list continuation the textarea height stays at its previous value. Accepted per D6. Source: risk table row 5.
-2. **`color-mix` browser support check.** Verify the project's minimum supported browser version against `color-mix(in srgb, ...)` (Chrome 111+, Safari 16.2+, Firefox 113+) before shipping Phase 1 — now moved to Phase 1 exit criteria. Source: risk table row 3.
+2. **`color-mix` browser support check.** Verify the project's minimum supported browser version against `color-mix(in srgb, ...)` (Chrome 111+, Safari 16.2+, Firefox 113+) before shipping Phase 1 â€” now moved to Phase 1 exit criteria. Source: risk table row 3.
 3. **Ctrl+Z undo for list continuation.** Programmatic `.value =` wipes the browser's undo stack, so Ctrl+Z after a list continuation may not cleanly undo the inserted prefix. `document.execCommand('insertText')` preserves undo but is deprecated. Accepted as-is; revisit if users raise it. Source: review finding #9.
 4. **List continuation on mobile.** Shift+Enter is unavailable on most virtual keyboards, so list continuation is a desktop-only feature. No action needed unless mobile ACP usage becomes a priority. Source: review finding #10.
 
 ## Review Log
 
-### 2026-10-06 — Implementation Review (after Phase 1, personas: Architect, Senior Engineer, End-User Advocate, Reliability Engineer)
+### 2026-10-06 â€” Implementation Review (after Phase 1, personas: Architect, Senior Engineer, End-User Advocate, Reliability Engineer)
 
 Implementation health: Green (all Highs and Mediums resolved).
 Cycle cap: 1 (per user preference). Remaining findings: Low only.
@@ -671,43 +689,43 @@ Cycle cap: 1 (per user preference). Remaining findings: Low only.
 
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
-| 1 | High | Dashboard steer-restore and reconnect-queue-restore set `dashPromptInput.value` without overlay sync — restored text invisible | Fixed — `updateDashPromptHighlight()` added at both sites in fix commit `7074810` |
-| 2 | Medium | `removeAttachment()` (both pages) sets value without triggering overlay — stale overlay after image removal | Fixed — `autoGrowPrompt()`/`dashRefreshComposerControls()` added at renumber sites in `7074810` |
-| 3 | Medium | `color:transparent` textarea with no `::placeholder` rule — placeholder text invisible in empty state | Fixed — `.acp-prompt::placeholder { color: var(--text-dim, ...) }` added in `7074810` |
-| 4 | Low | Regex no left boundary — `/token` mid-word would highlight (e.g., `foo/qplan`) | Fixed — lookbehind `(?:^|(?<=\s))` added to both functions in `7074810` |
-| 5 | Low | `updateDashPromptHighlight()` has no behavioral test — SC-5 parity unverified in harness | Escalated — add a dashboard highlight test; deferred to Step 9 |
-| 6 | Low | `word-break` on overlay (`break-word`) may diverge from textarea UA default | Escalated — verify in browser QA at Step 9b; no test possible in harness |
-| 7 | Low | `color-mix` on `.acp-prompt-hl-match` has no fallback comment | Escalated — acceptable; WebView2/Chromium ≥111 confirms support per browser QA |
-| 8 | Low | `window._testAutoGrowPrompt` test hook ships in production template | Escalated — follows existing `window._test*` precedent; acceptable |
-| 9 | Low | Progress Tracker and §9 Divergences left "Not started"/"Reserved" by sub-agent | Fixed — updated in this Step 7 update |
+| 1 | High | Dashboard steer-restore and reconnect-queue-restore set `dashPromptInput.value` without overlay sync â€” restored text invisible | Fixed â€” `updateDashPromptHighlight()` added at both sites in fix commit `7074810` |
+| 2 | Medium | `removeAttachment()` (both pages) sets value without triggering overlay â€” stale overlay after image removal | Fixed â€” `autoGrowPrompt()`/`dashRefreshComposerControls()` added at renumber sites in `7074810` |
+| 3 | Medium | `color:transparent` textarea with no `::placeholder` rule â€” placeholder text invisible in empty state | Fixed â€” `.acp-prompt::placeholder { color: var(--text-dim, ...) }` added in `7074810` |
+| 4 | Low | Regex no left boundary â€” `/token` mid-word would highlight (e.g., `foo/qplan`) | Fixed â€” lookbehind `(?:^|(?<=\s))` added to both functions in `7074810` |
+| 5 | Low | `updateDashPromptHighlight()` has no behavioral test â€” SC-5 parity unverified in harness | Escalated â€” add a dashboard highlight test; deferred to Step 9 |
+| 6 | Low | `word-break` on overlay (`break-word`) may diverge from textarea UA default | Escalated â€” verify in browser QA at Step 9b; no test possible in harness |
+| 7 | Low | `color-mix` on `.acp-prompt-hl-match` has no fallback comment | Escalated â€” acceptable; WebView2/Chromium â‰¥111 confirms support per browser QA |
+| 8 | Low | `window._testAutoGrowPrompt` test hook ships in production template | Escalated â€” follows existing `window._test*` precedent; acceptable |
+| 9 | Low | Progress Tracker and Â§9 Divergences left "Not started"/"Reserved" by sub-agent | Fixed â€” updated in this Step 7 update |
 
 16 findings (2 High, 6 Medium, 8 Low). All Highs and most Mediums auto-resolved.
 
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
-| 1 | High | All ~12 programmatic `value=` sites in acp.html miss overlay sync — ghost text on steer/queue/reconnect/image | Fixed — `updatePromptHighlight()` moved into `autoGrowPrompt()`, covering all sites |
-| 2 | High | index.html keydown branch specifies `ev.` variables but index.html handler uses `e.` → ReferenceError | Fixed — Phase 2 explicitly specifies `e.` for index.html branch |
-| 3 | Medium | Overlay `word-break`/`overflow-wrap` could diverge from textarea under pre-wrap | Fixed — added to browser QA checklist (verify long-token wrap alignment) |
-| 4 | Medium | `align-items:stretch` could stretch wrap past textarea, exposing bare overlay at bottom | Fixed — added to browser QA checklist |
-| 5 | Medium | SC-1..SC-5 referenced in "Covers" lines but not defined anywhere | Fixed — added explicit Success Criteria block to Intent |
-| 6 | Medium | `dashRefreshComposerControls()` site coverage for dashboard overlay sync under-specified | Fixed — specified to add overlay call inside `dashRefreshComposerControls()` |
-| 7 | Medium | `color: transparent` makes drag-selected text invisible (no glyph in selection band) | Fixed — added `.acp-prompt::selection { color: var(--text); }` to Phase 1 CSS |
-| 8 | Medium | Placeholder "Shift+Enter for a new line" misleading after Phase 2; update marked optional | Fixed — made required in Phase 2 exit criteria |
-| 9 | Medium | Ctrl+Z will not undo list continuation (programmatic `.value =` wipes browser undo stack) | User: accepted — documented as known limitation in Follow-up Work; `execCommand` is deprecated |
-| 10 | Medium | Touch/mobile: Shift+Enter unavailable on most virtual keyboards → list continuation unreachable | User: accepted — scope limited to desktop; noted in Scope boundaries |
-| 11 | Low | Line citations drifted ~11-50 lines from actual code | Fixed — replaced absolute line numbers with search-pattern anchors throughout |
-| 12 | Low | Test pseudo-code used wrong harness API (`box.promptInput` etc.) | Fixed — updated to `check(name, page => ...)` pattern with `page.sandbox` and `page.el()` |
-| 13 | Low | Exploration risk table listed superseded overlay height-sync mitigation | Fixed — removed the superseded row |
-| 14 | Low | `color-mix` browser support check parked in Follow-up with no phase owner | Fixed — moved to Phase 1 exit criteria as a required check |
-| 15 | Low | index.html `onPromptChanged` is a bare function reference; Phase 1 must not wrap it | Fixed — Phase 1 notes: since `dashRefreshComposerControls` now calls the overlay update, the bare reference is sufficient |
-| 16 | Low | List regex fires on `foo1.` → `foo2.` (beyond stated spec) | Accepted — superset of stated spec; documented in risk table as acceptable extension |
+| 1 | High | All ~12 programmatic `value=` sites in acp.html miss overlay sync â€” ghost text on steer/queue/reconnect/image | Fixed â€” `updatePromptHighlight()` moved into `autoGrowPrompt()`, covering all sites |
+| 2 | High | index.html keydown branch specifies `ev.` variables but index.html handler uses `e.` â†’ ReferenceError | Fixed â€” Phase 2 explicitly specifies `e.` for index.html branch |
+| 3 | Medium | Overlay `word-break`/`overflow-wrap` could diverge from textarea under pre-wrap | Fixed â€” added to browser QA checklist (verify long-token wrap alignment) |
+| 4 | Medium | `align-items:stretch` could stretch wrap past textarea, exposing bare overlay at bottom | Fixed â€” added to browser QA checklist |
+| 5 | Medium | SC-1..SC-5 referenced in "Covers" lines but not defined anywhere | Fixed â€” added explicit Success Criteria block to Intent |
+| 6 | Medium | `dashRefreshComposerControls()` site coverage for dashboard overlay sync under-specified | Fixed â€” specified to add overlay call inside `dashRefreshComposerControls()` |
+| 7 | Medium | `color: transparent` makes drag-selected text invisible (no glyph in selection band) | Fixed â€” added `.acp-prompt::selection { color: var(--text); }` to Phase 1 CSS |
+| 8 | Medium | Placeholder "Shift+Enter for a new line" misleading after Phase 2; update marked optional | Fixed â€” made required in Phase 2 exit criteria |
+| 9 | Medium | Ctrl+Z will not undo list continuation (programmatic `.value =` wipes browser undo stack) | User: accepted â€” documented as known limitation in Follow-up Work; `execCommand` is deprecated |
+| 10 | Medium | Touch/mobile: Shift+Enter unavailable on most virtual keyboards â†’ list continuation unreachable | User: accepted â€” scope limited to desktop; noted in Scope boundaries |
+| 11 | Low | Line citations drifted ~11-50 lines from actual code | Fixed â€” replaced absolute line numbers with search-pattern anchors throughout |
+| 12 | Low | Test pseudo-code used wrong harness API (`box.promptInput` etc.) | Fixed â€” updated to `check(name, page => ...)` pattern with `page.sandbox` and `page.el()` |
+| 13 | Low | Exploration risk table listed superseded overlay height-sync mitigation | Fixed â€” removed the superseded row |
+| 14 | Low | `color-mix` browser support check parked in Follow-up with no phase owner | Fixed â€” moved to Phase 1 exit criteria as a required check |
+| 15 | Low | index.html `onPromptChanged` is a bare function reference; Phase 1 must not wrap it | Fixed â€” Phase 1 notes: since `dashRefreshComposerControls` now calls the overlay update, the bare reference is sufficient |
+| 16 | Low | List regex fires on `foo1.` â†’ `foo2.` (beyond stated spec) | Accepted â€” superset of stated spec; documented in risk table as acceptable extension |
 
 ## Harness Improvement Opportunities
 
-- The `/qexplore` skill asks for 1 question at a time but the orchestrator asked 4 at once on the first interview pass — cost: one correction round. Suggested change: add an explicit "1 question per turn" reminder to the pre-interview checklist in the skill.
-- The test harness's `innerHTML` prohibition (`HTML_SINK`) is not documented in `AGENTS.md § Doc & Test Guidelines` — it was discovered mid-plan by reading the test file, costing a design revision of the overlay approach. Suggested change: add a note to `AGENTS.md` that `acp_page.test.mjs` prohibits `innerHTML` and requires `createElement+textContent` for any DOM building that the test harness exercises.
+- The `/qexplore` skill asks for 1 question at a time but the orchestrator asked 4 at once on the first interview pass â€” cost: one correction round. Suggested change: add an explicit "1 question per turn" reminder to the pre-interview checklist in the skill.
+- The test harness's `innerHTML` prohibition (`HTML_SINK`) is not documented in `AGENTS.md Â§ Doc & Test Guidelines` â€” it was discovered mid-plan by reading the test file, costing a design revision of the overlay approach. Suggested change: add a note to `AGENTS.md` that `acp_page.test.mjs` prohibits `innerHTML` and requires `createElement+textContent` for any DOM building that the test harness exercises.
 
-### 2026-10-06 — Implementation Review (after Phase 2, personas: Architect, Senior Engineer, Reliability Engineer, End-User Advocate)
+### 2026-10-06 â€” Implementation Review (after Phase 2, personas: Architect, Senior Engineer, Reliability Engineer, End-User Advocate)
 
 Implementation health: Green (all Highs and Mediums resolved).
 Cycle cap: 1 (per user preference). Remaining findings: Low only (all accepted).
@@ -715,34 +733,34 @@ Cycle cap: 1 (per user preference). Remaining findings: Low only (all accepted).
 
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
-| 1 | Medium | Mid-line and non-list no-op tests used silent `preventDefault(){}` — couldn't catch a mis-ordered `preventDefault` call | Fixed — added `prevented` spy + assertion to both tests in `36034b6` |
-| 2 | Medium | Dashboard mid-line no-op test missing (plan specified both positive and mid-line dashboard mirrors) | Fixed — `dashShiftEnterMidLineDoesNotContinue` added in `36034b6` |
-| 3 | Low | acp.html has a redundant `updatePromptHighlight()` call after `autoGrowPrompt()` (which already calls it) | User: accepted — harmless, explicit intent; leave |
-| 4 | Low | `parseInt` overflow at 16+ digit list numbers produces exponential notation | User: accepted — pathological input, not worth guarding |
-| 5 | Low | Test names drift from plan spec (minor identifier differences) | User: accepted — coverage equivalent |
-| 6 | Low | `(\S*?)` prefix accepts broader input than plan examples (e.g. `v1.2.`) | User: accepted — superset of spec; matches note in plan's Risk table |
-| 7 | Low | URL no-match was identified as a risk case but had no regression test | Fixed — `shiftEnterUrlLineNoContinue` added in `36034b6` |
+| 1 | Medium | Mid-line and non-list no-op tests used silent `preventDefault(){}` â€” couldn't catch a mis-ordered `preventDefault` call | Fixed â€” added `prevented` spy + assertion to both tests in `36034b6` |
+| 2 | Medium | Dashboard mid-line no-op test missing (plan specified both positive and mid-line dashboard mirrors) | Fixed â€” `dashShiftEnterMidLineDoesNotContinue` added in `36034b6` |
+| 3 | Low | acp.html has a redundant `updatePromptHighlight()` call after `autoGrowPrompt()` (which already calls it) | User: accepted â€” harmless, explicit intent; leave |
+| 4 | Low | `parseInt` overflow at 16+ digit list numbers produces exponential notation | User: accepted â€” pathological input, not worth guarding |
+| 5 | Low | Test names drift from plan spec (minor identifier differences) | User: accepted â€” coverage equivalent |
+| 6 | Low | `(\S*?)` prefix accepts broader input than plan examples (e.g. `v1.2.`) | User: accepted â€” superset of spec; matches note in plan's Risk table |
+| 7 | Low | URL no-match was identified as a risk case but had no regression test | Fixed â€” `shiftEnterUrlLineNoContinue` added in `36034b6` |
 
-### 2026-10-07 — Post-Implementation Review (Step 9)
+### 2026-10-07 â€” Post-Implementation Review (Step 9)
 
 Overall implementation health: **Green**.
 Personas: Architect, Senior Engineer, End-User Advocate, Reliability Engineer.
-Cycle 1: 2 Medium, 5 Low → all Mediums fixed in `0ad9397`. Cycle 2: no new findings — ready state reached.
+Cycle 1: 2 Medium, 5 Low â†’ all Mediums fixed in `0ad9397`. Cycle 2: no new findings â€” ready state reached.
 QA verification: **PASS** (10 browser checks, headless Chromium against live :4915 instance).
 
 #### Test execution summary
 
 | Phase | Tests | QA | Notes |
 |---|---|---|---|
-| 1: Highlight overlay | pass (975→985) | PASS | Verified DOM, CSS, overlay render, caret-color, selection, placeholder |
-| 2: List continuation | pass (975→985) | PASS | Verified `1. item\n2. ` insertion + cursor position via page.evaluate |
+| 1: Highlight overlay | pass (975â†’985) | PASS | Verified DOM, CSS, overlay render, caret-color, selection, placeholder |
+| 2: List continuation | pass (975â†’985) | PASS | Verified `1. item\n2. ` insertion + cursor position via page.evaluate |
 
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
-| 1 | Medium | `updateDashPromptHighlight()` had zero behavioral test (SC-5 highlight parity unverified) | Fixed — `dashHighlightRendersMatchedToken` added in `0ad9397` |
-| 2 | Medium | `setSessionSkills`/`setSessionCommands`/`resetCommandPalette` mutated catalogue globals without re-rendering overlay (stale highlight on fast-typist session-open path) | Fixed — overlay resync calls added at 5 acp.html + 6 index.html sites in `0ad9397` |
+| 1 | Medium | `updateDashPromptHighlight()` had zero behavioral test (SC-5 highlight parity unverified) | Fixed â€” `dashHighlightRendersMatchedToken` added in `0ad9397` |
+| 2 | Medium | `setSessionSkills`/`setSessionCommands`/`resetCommandPalette` mutated catalogue globals without re-rendering overlay (stale highlight on fast-typist session-open path) | Fixed â€” overlay resync calls added at 5 acp.html + 6 index.html sites in `0ad9397` |
 | 3 | Low | Session change (`releaseSession()`) didn't re-sync overlay (covered by M2 fix) | Fixed via M2 |
 | 4 | Low | `}/**` cosmetic nit in index.html | Fixed in `0ad9397` |
-| 5 | Low | Test-count accounting drift in plan notes | User: accepted — suite total correct (985), bookkeeping only |
-| 6 | Low | Mirror duplication of overlay functions across pages | User: accepted — established repo convention; no shared host for page-local IIFE code |
-| 7 | Low | Overlay vs textarea word-break alignment unverifiable in harness | Orchestrator: proposed-accept — deferred to /qclose Playwright alignment check at both breakpoints |
+| 5 | Low | Test-count accounting drift in plan notes | User: accepted â€” suite total correct (985), bookkeeping only |
+| 6 | Low | Mirror duplication of overlay functions across pages | User: accepted â€” established repo convention; no shared host for page-local IIFE code |
+| 7 | Low | Overlay vs textarea word-break alignment unverifiable in harness | Orchestrator: proposed-accept â€” deferred to /qclose Playwright alignment check at both breakpoints |
