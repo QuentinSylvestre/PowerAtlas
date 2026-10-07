@@ -4995,6 +4995,17 @@
       }
       return;
     }
+    if (type === 'queue_status') {
+      // kiro-cli runs one turn at a time per agent process: this session's
+      // prompt was accepted but is held behind another session's turn. Shown
+      // on the steer-status line (steer is refused while waiting, so the two
+      // never compete). Live-only, like `steer_status`.
+      if (!replaying) {
+        setSteerStatus(payload && payload.waiting
+          ? 'Waiting for another session’s turn to finish…' : '');
+      }
+      return;
+    }
     if (type === 'steer_status') {
       // v3's `session_info_update` steer echo (SC-3): steering_queued ->
       // steering_injected -> steering_cleared. A live-only status line near

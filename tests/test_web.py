@@ -22183,6 +22183,67 @@ class TestSupervisor:
         finally:
             self._cleanup_registry(acp_mod)
 
+    def test_session_info_update_queued_marks_session_and_broadcasts_waiting(self, monkeypatch):
+        """``kind: "queued"`` (kiro-cli holding this prompt behind another
+        session's turn) records ``queued_behind`` and broadcasts
+        ``queue_status{waiting: true}``; ``turn_start`` clears it and
+        broadcasts ``waiting: false``. A repeat of the same state is silent."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            queued = {"kind": "queued", "activeSessionId": "sess-other"}
+            sv3._on_notification(self._session_info_msg(sid, queued))
+            sv3._on_notification(self._session_info_msg(sid, queued))
+            assert sv3.sessions[sid]["queued_behind"] == "sess-other"
+            sv3._on_notification(self._session_info_msg(sid, {"kind": "turn_start"}))
+            assert "queued_behind" not in sv3.sessions[sid]
+
+            events = _queued(conn)
+            assert [e["type"] for e in events] == ["queue_status"] * 2
+            assert [e["payload"]["waiting"] for e in events] == [True, False]
+            assert "queue_status" in acp_mod.SERVER_TYPES
+            assert sv3.history[sid].events() == []
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_queued_session_is_cleared_by_first_agent_output(self, monkeypatch):
+        """A held prompt that starts without a ``turn_start`` still stops
+        reading as waiting once real output arrives."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            sv3._on_notification(self._session_info_msg(
+                sid, {"kind": "queued", "activeSessionId": "sess-other"}))
+            sv3._on_notification({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sid, "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "hi"}}}})
+            assert "queued_behind" not in sv3.sessions[sid]
+            waiting = [e["payload"]["waiting"] for e in _queued(conn)
+                       if e["type"] == "queue_status"]
+            assert waiting == [True, False]
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_steer_refused_while_prompt_is_queued_behind_another_session(self, acp_session):
+        """A steer for a held prompt has nothing to inject into, so it is
+        refused with ``turn_queued`` instead of being sent to kiro-cli."""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        conn.session_id = sid
+        acp_mod._supervisor.inflight.add(sid)
+        acp_mod._supervisor.sessions[sid]["queued_behind"] = "sess-other"
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"message": "hurry"}))
+            assert _queued(conn)[0]["payload"]["code"] == "turn_queued"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+            acp_mod._registry.connections.discard(conn)
+
     def test_session_info_update_steering_content_truncated_at_max_steer_chars(
             self, monkeypatch):
         """steer_status.content is agent-controlled text echoed back from the

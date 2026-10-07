@@ -4741,6 +4741,16 @@ function dashHandle(frame){
     }
     return;
   }
+  if (type === 'queue_status') {
+    // This session's prompt is held behind another session's turn (kiro-cli
+    // runs one turn at a time per agent process). Mirrors acp.html's
+    // `queue_status` case; shares the steer-status line.
+    if (!_dashReplaying) {
+      setDashSteerStatus(payload && payload.waiting
+        ? 'Waiting for another session’s turn to finish…' : '');
+    }
+    return;
+  }
   if (type === 'steer_status') {
     // v3's steer echo (SC5): steering_queued -> steering_injected ->
     // steering_cleared, near the composer -- the transcript already got the

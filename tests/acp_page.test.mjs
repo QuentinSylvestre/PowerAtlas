@@ -11056,6 +11056,17 @@ check("steer_status queued shows transient text near composer", (tpl) => {
     `steer status text should include the steered content, got: ${status.textContent}`);
 });
 
+check("queue_status waiting shows on the composer status line and clears", (tpl) => {
+  const { page, live } = connected(tpl);
+  const status = page.el("acpSteerStatus");
+  page.deliver({ type: "queue_status", sessionId: live, payload: { waiting: true } });
+  assertEqual(status.hidden, false, "queue status should be shown while waiting");
+  assert(status.textContent.includes("another session"),
+    `queue status should say what it waits for, got: ${status.textContent}`);
+  page.deliver({ type: "queue_status", sessionId: live, payload: { waiting: false } });
+  assertEqual(status.hidden, true, "queue status should hide once the turn starts");
+});
+
 check("steer_status injected then auto-clears after a timer", (tpl) => {
   const { page, live } = connected(tpl);
   const status = page.el("acpSteerStatus");

@@ -213,6 +213,11 @@ SERVER_TYPES = frozenset({
     # and `agent_error` are genuinely new: neither a live session-title update
     # nor an agent-originated inline error frame existed for v2 to reuse.
     "steer_status", "title", "agent_error",
+    # kiro-cli runs one turn at a time per agent process, so a prompt sent while
+    # another session is mid-turn is accepted but held. `queue_status` carries
+    # `{waiting: bool}` for that wait (`session_info_update` kind "queued").
+    # Broadcast-only, like `steer_status`: a transient level, never replayed.
+    "queue_status",
     # v3-only (SC-9, plan Phase 6): a genuine inbound `session/request_permission`
     # *request* (has an id, blocks the turn) translated into a frame the client
     # can render as an interactive multiple-choice question. See
@@ -3867,6 +3872,14 @@ class _Supervisor:
             if last is not None:
                 deadline = max(deadline, last + PROMPT_SILENCE_SECONDS)
             now = time.monotonic()
+            # Held behind another session's turn: kiro-cli says nothing about
+            # this session until that turn ends, which is waiting, not silence.
+            # Only while that turn is still in flight, so a missed `turn_start`
+            # cannot exempt the session forever; the absolute ceiling still
+            # applies.
+            behind = meta.get("queued_behind")
+            if behind is not None and behind in self.inflight:
+                deadline = max(deadline, now + PROMPT_SILENCE_SECONDS)
             if now <= deadline and now <= hard_stop:
                 continue
             capped = now > hard_stop
@@ -4140,6 +4153,25 @@ class _Supervisor:
             # it every tick. `record()` and `_note_context()` model the idiom.
             return
         meta["last_activity"] = time.monotonic()
+
+    def _set_queued_behind(self, session_id: str, behind: str | None) -> None:
+        """Record (or clear) that kiro-cli is holding this session's prompt
+        behind another session's turn, and tell the pages when that changes.
+
+        ``meta["queued_behind"]`` is the other session's id. `_await_inactivity`
+        reads it so the wait is not counted as the agent going silent.
+        """
+        meta = self.sessions.get(session_id)
+        if meta is None:
+            return
+        if meta.get("queued_behind") == behind:
+            return
+        if behind is None:
+            meta.pop("queued_behind", None)
+        else:
+            meta["queued_behind"] = behind
+        _registry.broadcast(session_id, envelope(
+            "queue_status", {"waiting": behind is not None}, session_id))
 
     def touch_used(self, session_id) -> None:
         """Record that a *person* used this session. Resets the sweeper clock.
@@ -4718,6 +4750,12 @@ class _Supervisor:
         if method == SUBAGENT_LIST_METHOD:
             self._on_subagent_list(params)
             return
+        if (kind in ("agent_message_chunk", "agent_thought_chunk", "tool_call")
+                and isinstance(session_id, str)
+                and (self.sessions.get(session_id) or {}).get("queued_behind")):
+            # Real output for a held prompt: it is running now, whether or not
+            # kiro-cli sent a `turn_start` first.
+            self._set_queued_behind(session_id, None)
         if kind in ("agent_message_chunk", "user_message_chunk"):
             _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
             if not isinstance(_kiro_meta, dict):
@@ -4928,6 +4966,21 @@ class _Supervisor:
                         "content": _as_text(_kiro_meta.get("content"))[:MAX_STEER_CHARS],
                     }, session_id))
                 return
+            if _info_kind == "queued":
+                # Not a turn yet: kiro-cli accepted the prompt but is running
+                # another session's turn (`activeSessionId`) and runs this one
+                # when that ends. No first-party client renders this (the TUI
+                # drives one session; KiroCrew has no handler), so the wait was
+                # invisible and `_await_inactivity` counted it as agent silence.
+                _behind = _kiro_meta.get("activeSessionId")
+                if isinstance(session_id, str) and isinstance(_behind, str) and _behind:
+                    self._set_queued_behind(session_id, _behind)
+                return
+            if _info_kind == "turn_start":
+                # The queued prompt is now actually running.
+                if isinstance(session_id, str):
+                    self._set_queued_behind(session_id, None)
+                # Fall through to the INFO log: this kind was always logged.
             if _info_kind == "focus_update":
                 _title = _as_text(_kiro_meta.get("title"))[:MAX_TITLE_CHARS]
                 if _title and isinstance(session_id, str):
@@ -7125,6 +7178,8 @@ async def _handle_prompt(conn, session_id, payload):
         # answer awaits a write and nothing else in here should wait on it.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
         _swept_permissions = _pop_pending_permissions(session_id)
+        # A turn that ends while still held (cancelled, errored) is no longer waiting.
+        _supervisor._set_queued_behind(session_id, None)
         # Everything between the sweep and the `cancelled` answers sits in its
         # own `try`, so the answers are written even when a step here raises
         # (`_emit`, `_flush_bubble` and `_notify` all can). Skipping them
@@ -7242,6 +7297,14 @@ async def _handle_steer(conn, session_id, payload):
             "No turn is running -- steer is only available during an active turn.",
             session_id))
         log.warning("ACP steer refused: [%s] session=%s", "no_turn_in_progress", session_id)
+        return
+    if (_supervisor.sessions.get(session_id) or {}).get("queued_behind"):
+        conn.send(error_frame(
+            "turn_queued",
+            "This prompt is waiting for another session's turn to finish -- "
+            "steer is available once it starts.",
+            session_id))
+        log.warning("ACP steer refused: [%s] session=%s", "turn_queued", session_id)
         return
     raw = payload.get("message")
     if not isinstance(raw, (str, type(None))):
