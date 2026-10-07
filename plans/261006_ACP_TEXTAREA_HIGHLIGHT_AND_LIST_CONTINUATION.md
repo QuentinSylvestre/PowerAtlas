@@ -1,6 +1,6 @@
 # ACP Textarea: Skill Highlight + List Continuation
 
-**Status**: Draft
+**Status**: In Progress
 **Plan slug**: 261006_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION
 
 ---
@@ -636,12 +636,20 @@ The test file `tests/acp_page.test.mjs` already carries `acpPrompt` and `dashPro
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Highlight overlay (HTML + CSS + JS + tests) | Not started | |
+| 1 | Highlight overlay (HTML + CSS + JS + tests) | Complete | `652b015`, fixes `7074810` |
 | 2 | List continuation (keydown + tests) | Not started | |
 
 ## 9) Implementation Divergences from Plan
 
-*Reserved — filled during implementation.*
+1. Added `window._testAutoGrowPrompt = autoGrowPrompt;` test hook in `acp.html` (follows `window._testAddSystemMessage` pattern) — enables `highlightUpdatesViaAutoGrow` test to exercise the `autoGrowPrompt → overlay` coverage path.
+2. Added `dashPromptHlEl: new El("div")` to two dashboard sandbox literals in `tests/acp_page.test.mjs` — the dashboard harness exposes DOM elements as sandbox properties; `updateDashPromptHighlight` reads `dashPromptHlEl` as a free global.
+3. `updateDashPromptHighlight()` placed AFTER `dashRefreshComposerControls` in `index.html` (inside the harness-extracted composer-controls region) rather than before it as the brief implied — the harness slices that region from the `dashRefreshComposerControls` declaration; a function before it falls outside the run region.
+4. `color-mix(in srgb, var(--accent) 18%, transparent)` retained after browser QA confirmed visible rendering in Chromium/WebView2.
+
+### Phase 1 implementation notes
+
+Implementation (2026-10-06, code: 652b015)
+Added `.acp-prompt-wrap` wrapper and `.acp-prompt-hl` overlay to both prompt textareas. The textarea is transparent (`color`/`background: transparent`, `caret-color: var(--text)`, `z-index: 1`); `.acp-prompt::selection` and `::placeholder` rules restore selection-glyph and placeholder visibility. `updatePromptHighlight()` / `updateDashPromptHighlight()` use `createElement + textContent + appendChild` exclusively (no innerHTML). Both are hooked into `autoGrowPrompt()` and `dashRefreshComposerControls()` as the last statement, covering all programmatic value-change sites. Left-boundary lookbehind regex `(?:^|(?<=\s))` added so tokens only highlight at word start. Five new node tests pass; 975/975 total. Applied via fix commit 7074810: added `updateDashPromptHighlight()` at steer-restore/reconnect-restore sites in index.html; added `autoGrowPrompt()`/`dashRefreshComposerControls()` at `removeAttachment` renumber sites; added `::placeholder` color rule.
 
 ## Follow-up Work (Deferred)
 
@@ -652,7 +660,23 @@ The test file `tests/acp_page.test.mjs` already carries `acpPrompt` and `dashPro
 
 ## Review Log
 
-### 2026-10-06 — Plan creation (via /qplan, Full effort)
+### 2026-10-06 — Implementation Review (after Phase 1, personas: Architect, Senior Engineer, End-User Advocate, Reliability Engineer)
+
+Implementation health: Green (all Highs and Mediums resolved).
+Cycle cap: 1 (per user preference). Remaining findings: Low only.
+9 findings (1 High, 3 Medium, 5 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | Dashboard steer-restore and reconnect-queue-restore set `dashPromptInput.value` without overlay sync — restored text invisible | Fixed — `updateDashPromptHighlight()` added at both sites in fix commit `7074810` |
+| 2 | Medium | `removeAttachment()` (both pages) sets value without triggering overlay — stale overlay after image removal | Fixed — `autoGrowPrompt()`/`dashRefreshComposerControls()` added at renumber sites in `7074810` |
+| 3 | Medium | `color:transparent` textarea with no `::placeholder` rule — placeholder text invisible in empty state | Fixed — `.acp-prompt::placeholder { color: var(--text-dim, ...) }` added in `7074810` |
+| 4 | Low | Regex no left boundary — `/token` mid-word would highlight (e.g., `foo/qplan`) | Fixed — lookbehind `(?:^|(?<=\s))` added to both functions in `7074810` |
+| 5 | Low | `updateDashPromptHighlight()` has no behavioral test — SC-5 parity unverified in harness | Escalated — add a dashboard highlight test; deferred to Step 9 |
+| 6 | Low | `word-break` on overlay (`break-word`) may diverge from textarea UA default | Escalated — verify in browser QA at Step 9b; no test possible in harness |
+| 7 | Low | `color-mix` on `.acp-prompt-hl-match` has no fallback comment | Escalated — acceptable; WebView2/Chromium ≥111 confirms support per browser QA |
+| 8 | Low | `window._testAutoGrowPrompt` test hook ships in production template | Escalated — follows existing `window._test*` precedent; acceptable |
+| 9 | Low | Progress Tracker and §9 Divergences left "Not started"/"Reserved" by sub-agent | Fixed — updated in this Step 7 update |
 
 16 findings (2 High, 6 Medium, 8 Low). All Highs and most Mediums auto-resolved.
 
