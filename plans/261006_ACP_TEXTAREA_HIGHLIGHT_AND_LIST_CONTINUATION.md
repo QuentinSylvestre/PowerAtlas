@@ -577,14 +577,14 @@ Add after the scroll sync tests from Phase 1:
 - Dashboard mirrors of `shiftEnterAtEndOfListLineContinues` and `shiftEnterMidLineDoesNotContinue` on `dashPromptInput`.
 
 **Exit criteria**:
-- [ ] Shift+Enter at end of `1. text` inserts `\n2. ` (cursor after `2. `)
-- [ ] Shift+Enter mid-line does not trigger list continuation
-- [ ] Leading whitespace (indent) preserved on continuation
-- [ ] Letter prefix (`A1. `) preserved and number incremented
-- [ ] Both pages (`acp.html`, `index.html`) implement the handler
-- [ ] All new tests pass
-- [ ] `node tests/acp_page.test.mjs` passes (zero failures)
-- [ ] Placeholder text updated in **both** textareas to mention list continuation ("Shift+Enter continues lists or adds a new line")
+- [x] Shift+Enter at end of `1. text` inserts `\n2. ` (cursor after `2. `)
+- [x] Shift+Enter mid-line does not trigger list continuation
+- [x] Leading whitespace (indent) preserved on continuation
+- [x] Letter prefix (`A1. `) preserved and number incremented
+- [x] Both pages (`acp.html`, `index.html`) implement the handler
+- [x] All new tests pass
+- [x] `node tests/acp_page.test.mjs` passes (zero failures)
+- [x] Placeholder text updated in **both** textareas to mention list continuation ("Shift+Enter continues lists or adds a new line")
 
 ---
 
@@ -637,7 +637,7 @@ The test file `tests/acp_page.test.mjs` already carries `acpPrompt` and `dashPro
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Highlight overlay (HTML + CSS + JS + tests) | Complete | `652b015`, fixes `7074810` |
-| 2 | List continuation (keydown + tests) | Not started | |
+| 2 | List continuation (keydown + tests) | Complete | `9680853`, fixes `36034b6` |
 
 ## 9) Implementation Divergences from Plan
 
@@ -646,7 +646,10 @@ The test file `tests/acp_page.test.mjs` already carries `acpPrompt` and `dashPro
 3. `updateDashPromptHighlight()` placed AFTER `dashRefreshComposerControls` in `index.html` (inside the harness-extracted composer-controls region) rather than before it as the brief implied — the harness slices that region from the `dashRefreshComposerControls` declaration; a function before it falls outside the run region.
 4. `color-mix(in srgb, var(--accent) 18%, transparent)` retained after browser QA confirmed visible rendering in Chromium/WebView2.
 
-### Phase 1 implementation notes
+### Phase 2 implementation notes
+
+Implementation (2026-10-06, code: 9680853)
+Added Shift+Enter list continuation to the keydown handlers in both `acp.html` and `index.html`. The branch fires on `ev.key === 'Enter' && ev.shiftKey && !ctrlKey && !altKey`, uses `_pos === _lineEnd` to restrict to end-of-line, matches `^(\s*)(\S*?)(\d+)([.:])( +)` against the current line, and inserts `\n + indent + prefix + (n+1) + separator + spaces` with cursor positioned after the inserted prefix. Falls through to browser default newline when pattern does not match or cursor is mid-line. Both placeholder strings updated. Seven new tests added. Fix commit `36034b6` added `preventDefault` spies to no-op tests and a dashboard mid-line mirror + URL no-match test (984/984).
 
 Implementation (2026-10-06, code: 652b015)
 Added `.acp-prompt-wrap` wrapper and `.acp-prompt-hl` overlay to both prompt textareas. The textarea is transparent (`color`/`background: transparent`, `caret-color: var(--text)`, `z-index: 1`); `.acp-prompt::selection` and `::placeholder` rules restore selection-glyph and placeholder visibility. `updatePromptHighlight()` / `updateDashPromptHighlight()` use `createElement + textContent + appendChild` exclusively (no innerHTML). Both are hooked into `autoGrowPrompt()` and `dashRefreshComposerControls()` as the last statement, covering all programmatic value-change sites. Left-boundary lookbehind regex `(?:^|(?<=\s))` added so tokens only highlight at word start. Five new node tests pass; 975/975 total. Applied via fix commit 7074810: added `updateDashPromptHighlight()` at steer-restore/reconnect-restore sites in index.html; added `autoGrowPrompt()`/`dashRefreshComposerControls()` at `removeAttachment` renumber sites; added `::placeholder` color rule.
@@ -703,3 +706,19 @@ Cycle cap: 1 (per user preference). Remaining findings: Low only.
 
 - The `/qexplore` skill asks for 1 question at a time but the orchestrator asked 4 at once on the first interview pass — cost: one correction round. Suggested change: add an explicit "1 question per turn" reminder to the pre-interview checklist in the skill.
 - The test harness's `innerHTML` prohibition (`HTML_SINK`) is not documented in `AGENTS.md § Doc & Test Guidelines` — it was discovered mid-plan by reading the test file, costing a design revision of the overlay approach. Suggested change: add a note to `AGENTS.md` that `acp_page.test.mjs` prohibits `innerHTML` and requires `createElement+textContent` for any DOM building that the test harness exercises.
+
+### 2026-10-06 — Implementation Review (after Phase 2, personas: Architect, Senior Engineer, Reliability Engineer, End-User Advocate)
+
+Implementation health: Green (all Highs and Mediums resolved).
+Cycle cap: 1 (per user preference). Remaining findings: Low only (all accepted).
+7 findings (0 High, 2 Medium, 5 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Mid-line and non-list no-op tests used silent `preventDefault(){}` — couldn't catch a mis-ordered `preventDefault` call | Fixed — added `prevented` spy + assertion to both tests in `36034b6` |
+| 2 | Medium | Dashboard mid-line no-op test missing (plan specified both positive and mid-line dashboard mirrors) | Fixed — `dashShiftEnterMidLineDoesNotContinue` added in `36034b6` |
+| 3 | Low | acp.html has a redundant `updatePromptHighlight()` call after `autoGrowPrompt()` (which already calls it) | User: accepted — harmless, explicit intent; leave |
+| 4 | Low | `parseInt` overflow at 16+ digit list numbers produces exponential notation | User: accepted — pathological input, not worth guarding |
+| 5 | Low | Test names drift from plan spec (minor identifier differences) | User: accepted — coverage equivalent |
+| 6 | Low | `(\S*?)` prefix accepts broader input than plan examples (e.g. `v1.2.`) | User: accepted — superset of spec; matches note in plan's Risk table |
+| 7 | Low | URL no-match was identified as a risk case but had no regression test | Fixed — `shiftEnterUrlLineNoContinue` added in `36034b6` |
