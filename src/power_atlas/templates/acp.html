@@ -1277,6 +1277,7 @@
     closeSubagentView();
     // The commands catalogue belonged to the released session too.
     resetCommandPalette();
+    updatePromptHighlight();
     // Prompt nav: rows belong to the session that just closed; stale refs must
     // not survive to a new session's addMessage calls.
     userMsgEls = [];
@@ -4952,6 +4953,7 @@
       // A new session means any prior command catalogue is gone — reset so
       // stale slash-command suggestions from the old session never show up.
       resetCommandPalette();
+      updatePromptHighlight();
       // The server's answer, not an inference from whatever survived in the
       // buffer. A turn longer than the buffer replays without its start
       // marker, and Send would otherwise come back enabled against a session
@@ -5201,12 +5203,14 @@
       // Slash command catalogue from the server (SC-1). Broadcast-only (not
       // in history), so this is the only source for it after a reconnect.
       setSessionCommands(payload && payload.commands);
+      updatePromptHighlight();
       return;
     }
     if (type === 'skills') {
       // kiro-cli skills catalogue from the server. Broadcast-only (not in
       // history), so this is the only source for it after a reconnect.
       setSessionSkills(payload && payload.skills);
+      updatePromptHighlight();
       return;
     }
     if (type === 'mcp_servers') {
@@ -5321,6 +5325,7 @@
       // add regardless, since the composer is fully reset immediately around
       // it anyway.
       resetCommandPalette();
+      updatePromptHighlight();
       // Every sub-agent process went with the agent, the same as every
       // session did — the crew and any open panel are naming processes that
       // no longer exist.

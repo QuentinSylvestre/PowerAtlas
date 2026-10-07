@@ -10693,6 +10693,25 @@ check("shiftEnterUrlLineNoContinue", (tpl) => {
     "URL line must not call preventDefault");
 });
 
+// dashHighlightRendersMatchedToken: the dashboard overlay (updateDashPromptHighlight)
+// mirrors the acp.html highlight function. Verify it produces .acp-prompt-hl-match
+// spans for known skill tokens.
+check("dashHighlightRendersMatchedToken", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.sessionSkills = [{ name: "qexplore", description: "explore" }];
+  p.sandbox.dashPromptInput.value = "/qexplore";
+  p.sandbox.dashPromptInput.dispatch("input");
+  const hlEl = p.sandbox.dashPromptHlEl;
+  const matchSpans = hlEl.descendants().filter(
+    (n) => n.className === "acp-prompt-hl-match"
+  );
+  assertEqual(matchSpans.length, 1,
+    "dashboard overlay should produce 1 match span for /qexplore; got " +
+    matchSpans.length);
+  assertEqual(matchSpans[0].textContent, "/qexplore",
+    "dashboard overlay match span should contain '/qexplore'");
+});
+
 // Test 10: copyButtonPresentForLabeledCodeBlocks
 // A fenced block with a language label produces a .acp-md-copy button.
 check("copyButtonPresentForLabeledCodeBlocks", (tpl) => {

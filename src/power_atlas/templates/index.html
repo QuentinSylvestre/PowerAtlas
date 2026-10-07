@@ -2002,6 +2002,7 @@ function dashShowOverview(){
   // session_closed and agent_died branches already do.
   // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
   resetCommandPalette();
+  updateDashPromptHighlight();
   // clearTranscript() resets the renderer's per-conversation state (tool
   // rows, timers, prompt-nav targets); the pane is then emptied and given
   // back its single placeholder.
@@ -2744,7 +2745,9 @@ function dashRefreshComposerControls(){
   // Queue+Steer wrapper: visible during turn only when textarea has text.
   dashQueueSteerEl.hidden = !_dashTurnActive || !hasText;
   updateDashPromptHighlight(); // keep overlay in sync with every value change
-}/**
+}
+
+/**
  * Rebuild the dashboard highlight overlay -- mirrors updatePromptHighlight()
  * in acp.html. Uses createElement+textContent (never innerHTML) -- XSS-safe
  * and compatible with the test harness, which throws on any innerHTML access.
@@ -4471,6 +4474,7 @@ function dashHandle(frame){
     // show up (SC1, dashboard/ACP feature-parity plan Phase 2) — mirrors
     // acp.html's own `session`-frame handling.
     resetCommandPalette();
+    updateDashPromptHighlight();
     // The one place this page learns the workspace: `cwd` arrives on every
     // `session` frame, created or resubscribed alike -- mirrors acp.html's
     // own session-frame handling. Reset the reveal on every frame, not only
@@ -4721,12 +4725,14 @@ function dashHandle(frame){
     // feature-parity plan Phase 2). Broadcast-only (not in history), so this
     // is the only source for it after a reconnect.
     setSessionCommands(payload && payload.commands);
+    updateDashPromptHighlight();
     return;
   }
   if (type === 'skills') {
     // kiro-cli skills catalogue from the server. Broadcast-only (not in
     // history), so this is the only source for it after a reconnect.
     setSessionSkills(payload && payload.skills);
+    updateDashPromptHighlight();
     return;
   }
   if (type === 'mcp_servers') {
@@ -4946,6 +4952,7 @@ function dashHandle(frame){
     // dashboard/ACP feature-parity plan Phase 2) -- mirrors acp.html's own
     // releaseSession() reset.
     resetCommandPalette();
+    updateDashPromptHighlight();
     // The crew belonged to the session just released too (SC8, Phase 5) --
     // acp.py's close_session has already torn down every one of its
     // sub-agent records server-side, so a panel still showing them would be
@@ -5059,6 +5066,7 @@ function dashHandle(frame){
     _dashTurnActive = false;
     dashRefreshComposerControls();
     resetCommandPalette();
+    updateDashPromptHighlight();
     // Phase 5 (SC8): close any open sub-agent panel and clear crew state --
     // there is no live agent process left for either to be watching, and
     // acp.html's own agent_died handler has nothing left to show a sub-agent
