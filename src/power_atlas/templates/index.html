@@ -456,7 +456,7 @@
         <div class="acp-prompt-wrap">
           <div class="acp-prompt-hl" id="dashPromptHl" aria-hidden="true"></div>
           <textarea class="acp-prompt" id="dashPromptInput" rows="2" spellcheck="false"
-                    placeholder="Prompt this agent — Enter to send, Shift+Enter for a new line"
+                    placeholder="Prompt this agent — Enter to send, Shift+Enter continues lists or adds a new line"
                     aria-label="Prompt"
                     aria-haspopup="listbox" aria-controls="dashCmdDropdown"
                     aria-expanded="false"></textarea>
@@ -2885,6 +2885,30 @@ dashPromptInput.addEventListener('keydown', function(e){
     if (e.key === 'Escape') { e.preventDefault(); hideCommandDropdown(); return; }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
     if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
+  }
+  // List continuation — mirrors acp.html but uses `e` (this handler's event variable).
+  if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey) {
+    var _pos = dashPromptInput.selectionStart;
+    if (_pos === dashPromptInput.selectionEnd) {
+      var _val = dashPromptInput.value;
+      var _lineStart = _val.lastIndexOf('\n', _pos - 1) + 1;
+      var _lineText = _val.slice(_lineStart, _pos);
+      var _nextNl = _val.indexOf('\n', _pos);
+      var _lineEnd = _nextNl === -1 ? _val.length : _nextNl;
+      if (_pos === _lineEnd) {
+        var _m = _lineText.match(/^(\s*)(\S*?)(\d+)([.:])( +)/);
+        if (_m) {
+          e.preventDefault();
+          var _nextNum = String(parseInt(_m[3], 10) + 1);
+          var _insert = '\n' + _m[1] + _m[2] + _nextNum + _m[4] + _m[5];
+          dashPromptInput.value = _val.slice(0, _pos) + _insert + _val.slice(_pos);
+          var _newPos = _pos + _insert.length;
+          dashPromptInput.setSelectionRange(_newPos, _newPos);
+          dashRefreshComposerControls();
+          return;
+        }
+      }
+    }
   }
   // Fix 6 (review, Phase 3 fix cycle): !e.ctrlKey && !e.altKey added to match
   // acp.html's own equivalent plain-Enter-sends condition (acp.html:5863,

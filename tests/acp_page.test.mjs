@@ -10536,6 +10536,113 @@ check("highlightUpdatesViaAutoGrow", (tpl) => {
   assertEqual(hits[0].textContent, "/qexplore",
     "the synced highlight should contain the token; got " + hits[0].textContent);
 });
+
+// Phase 2 — list continuation (Shift+Enter) in the acp.html keydown handler.
+// shiftEnterAtEndOfListLineContinues: cursor at end of a '1. item' line, the
+// next prefix '2. ' is inserted and the caret lands after it (offset 11).
+check("shiftEnterAtEndOfListLineContinues", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "1. item";
+  prompt.selectionStart = prompt.selectionEnd = 7;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "1. item\n2. ",
+    "Shift+Enter at the end of a list line should insert the next prefix; got " +
+    JSON.stringify(prompt.value));
+  assertEqual(prompt.selectionStart, 11,
+    "the caret should land after the inserted prefix; got " + prompt.selectionStart);
+});
+
+// shiftEnterMidLineDoesNotContinue: cursor mid-line (offset 3, not end-of-line)
+// so the branch's _pos === _lineEnd guard is false; the value is unchanged (the
+// browser's default newline would fire in a real browser, but the harness
+// mutates nothing).
+check("shiftEnterMidLineDoesNotContinue", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "1. item";
+  prompt.selectionStart = prompt.selectionEnd = 3;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "1. item",
+    "Shift+Enter mid-line must not continue the list; got " +
+    JSON.stringify(prompt.value));
+});
+
+// shiftEnterOnEmptyPrefixLineContinues: a bare prefix '3. ' (no item text)
+// still continues to '4. '.
+check("shiftEnterOnEmptyPrefixLineContinues", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "3. ";
+  prompt.selectionStart = prompt.selectionEnd = 3;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "3. \n4. ",
+    "a bare list prefix should still continue; got " + JSON.stringify(prompt.value));
+});
+
+// shiftEnterNonListLineNoEffect: a non-list line ('hello') never matches, so
+// the value is unchanged.
+check("shiftEnterNonListLineNoEffect", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "hello";
+  prompt.selectionStart = prompt.selectionEnd = 5;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "hello",
+    "a non-list line must not be modified; got " + JSON.stringify(prompt.value));
+});
+
+// shiftEnterPreservesIndent: leading whitespace in the matched prefix is
+// carried onto the new line ('  2. item' -> '  3. ').
+check("shiftEnterPreservesIndent", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "  2. item";
+  prompt.selectionStart = prompt.selectionEnd = 9;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "  2. item\n  3. ",
+    "indentation should be preserved on the continued line; got " +
+    JSON.stringify(prompt.value));
+});
+
+// shiftEnterAlphaPrefix: an alphanumeric prefix ('A1. task') increments only
+// the numeric part, carrying the alpha prefix ('A2. ').
+check("shiftEnterAlphaPrefix", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "A1. task";
+  prompt.selectionStart = prompt.selectionEnd = 8;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "A1. task\nA2. ",
+    "an alpha prefix should be carried and the number incremented; got " +
+    JSON.stringify(prompt.value));
+});
+
+// dashShiftEnterContinues: the dashboard composer mirrors the acp.html handler.
+check("dashShiftEnterContinues", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "1. x";
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 4;
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "1. x\n2. ",
+    "the dashboard composer should continue a list on Shift+Enter; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+});
+
 // Test 10: copyButtonPresentForLabeledCodeBlocks
 // A fenced block with a language label produces a .acp-md-copy button.
 check("copyButtonPresentForLabeledCodeBlocks", (tpl) => {

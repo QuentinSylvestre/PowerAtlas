@@ -274,7 +274,7 @@
       <div class="acp-prompt-wrap">
         <div class="acp-prompt-hl" id="acpPromptHl" aria-hidden="true"></div>
         <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
-                  placeholder="Prompt the agent — Shift+Enter for a new line, Enter sends on desktop, Ctrl+V to attach an image"
+                  placeholder="Prompt the agent — Shift+Enter continues lists or adds a new line, Enter sends on desktop, Ctrl+V to attach an image"
                   aria-label="Prompt"
                   aria-haspopup="listbox" aria-controls="acpCmdDropdown"
                   aria-expanded="false"></textarea>
@@ -6124,6 +6124,35 @@
         confirmCommandSelection();
         return;
       }
+    }
+    // List continuation: Shift+Enter at end of a list-prefixed line.
+    // Pattern ^(\s*)(\S*?)(\d+)([.:])( +) — indent, prefix, number, sep, spaces.
+    // Only fires when cursor is at end-of-line with no selection (cursor mid-line → browser default newline).
+    if (ev.key === 'Enter' && ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
+      var _pos = promptInput.selectionStart;
+      if (_pos === promptInput.selectionEnd) {
+        var _val = promptInput.value;
+        var _lineStart = _val.lastIndexOf('\n', _pos - 1) + 1;
+        var _lineText = _val.slice(_lineStart, _pos);
+        var _nextNl = _val.indexOf('\n', _pos);
+        var _lineEnd = _nextNl === -1 ? _val.length : _nextNl;
+        if (_pos === _lineEnd) {
+          var _m = _lineText.match(/^(\s*)(\S*?)(\d+)([.:])( +)/);
+          if (_m) {
+            ev.preventDefault();
+            var _nextNum = String(parseInt(_m[3], 10) + 1);
+            var _insert = '\n' + _m[1] + _m[2] + _nextNum + _m[4] + _m[5];
+            promptInput.value = _val.slice(0, _pos) + _insert + _val.slice(_pos);
+            var _newPos = _pos + _insert.length;
+            promptInput.setSelectionRange(_newPos, _newPos);
+            autoGrowPrompt();
+            refreshComposerControls();
+            updatePromptHighlight();
+            return;
+          }
+        }
+      }
+      // Falls through: browser inserts a plain newline (default behavior).
     }
     if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !isTouchDevice) {
       ev.preventDefault();
