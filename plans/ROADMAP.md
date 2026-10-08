@@ -30,6 +30,14 @@
 - **`launch_terminal` env scrub excluded (follow-up)**: `launch_terminal` (~`launcher.py:595`) opens a bare shell without env scrubbing — the user manually starts a process inside it. Follow-up #5 of the same plan.
 
 ### Session Control & Integration
+- **Fix `/compact` in ACP sessions** — `/compact` slash command broken or incomplete in PA-held sessions; compaction recap UI exists but was excluded from dashboard parity scope
+- **Align PA ACP session settings with kiro-cli** — systematic audit of `_meta.kiro.settings` keys PA omits vs TUI; `workflows.enabled` was the first gap found, likely more
+- **Deferred kiro-cli settings** — `tangentMode`, `checkpoint`, `c2s`, `memory`, `disableAutoCompaction`; each needs PA UI/UX work before enabling; tracked as individual items
+- **Full workflow support** — four layers: enable `run_workflow` tool on session/new; handle `_kiro/workflow/*` notifications in acp.py; workflow monitor UI; child session subscriptions
+- **Workflow liveness** — sessions that launched a workflow show as idle; liveness should be the max of parent + running child sessions (rootConversationId correlation)
+- **Clean close (`session/close` on the wire)** — issue the wire call on close; currently local-only, kiro-cli keeps sessions in memory until agent recycle
+- **Increase session cap to match TUI** — default MAX_SESSIONS=8 is conservative vs TUI's soft 64; v3 single-process model makes per-session cost much lower
+- **Spike: one shared process vs per-process (Kiro Crew model)** — determine whether to stay on the shared process model or adopt per-process isolation
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described
 - **Reach the operator away from the machine** — the desktop half shipped 2026-09-19; reaching a phone needs a secure context on the remote bind, i.e. the TLS decision
 - **Decide permission requests by rule for unattended sessions** — the real Automation keystone, split out 2026-09-21; an `ask` rule alone leaves an unattended session waiting on the 30-minute silence ceiling rather than deciding
@@ -238,6 +246,66 @@ condition).
 ---
 
 ## Session Control & Integration
+
+- **Fix `/compact` in ACP sessions** — the `/compact` slash command (which summarizes conversation history to reduce context pressure) does not work correctly in kiro-cli sessions driven over ACP by PA. The compaction recap UI (`.acp-compaction-details` / `.acp-compaction-recap`) exists in `acp.html` but was deliberately excluded from the dashboard parity scope. The gap is likely in `acp.py`'s handling of the compaction lifecycle (`COMPACTION_STATUS_METHOD`) and/or in how the compacted session state is replayed to reconnecting tabs. Needs a probe to identify exactly where the flow breaks.
+  - *Done when* — `/compact` in a PA-held ACP session compacts the session history, the recap is shown inline in the transcript, and a reconnecting tab replays the compacted state correctly.
+
+- **Align PA ACP session settings with kiro-cli** — PA's `session/new` sends a minimal `_meta.kiro` block; the `settings` field (which KAS reads via a per-feature registry: `yR` / `kp` / `N6` pattern in `acp-server.js`) controls multiple capabilities beyond `workflows.enabled`. PA was built before many of these existed and has not been audited against the current KAS settings schema. The `workflows.enabled` investigation exposed the pattern; a systematic pass is needed.
+  - *Shape* — enumerate every recognized `_meta.kiro.settings` key and its shipped default from the KAS bundle; compare against what PA currently sends; add capability-improving keys (like `workflows`) and document any deliberate omissions.
+  - *Done when* — PA sessions receive the same capability set as an equivalently-configured TUI session; any divergence is documented in `docs/KNOWLEDGE.md`.
+
+- **kiro-cli setting: `tangentMode`** — Enable `chat.enableTangentMode` in PA's dynamic settings sync once PA supports tangent-mode sessions. Currently deferred from `plans/261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT.md` Phase 1 because enabling it may produce new notification types or UI states (sub-sessions, visual indicators) that PA has no handler for. Investigate what tangent mode produces in the TUI, implement PA support, then add to the `w1()` mapping.
+  - *Done when* — PA handles all notification types tangent mode produces; a tangent session in PA is visually identifiable and controllable.
+
+- **kiro-cli setting: `checkpoint`** — Enable `chat.enableCheckpoint` in PA's dynamic settings sync once PA supports checkpoint notifications. Deferred from `plans/261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT.md` Phase 1. Checkpoints may create save-point/rollback UI in the TUI that PA would need to surface.
+  - *Done when* — PA handles checkpoint notification types; checkpoints are visible in the transcript and actionable.
+
+- **kiro-cli setting: `c2s`** — Enable `chat.enableC2s` (cloud-to-server?) in PA once its behavior and UI requirements are understood. Deferred from `plans/261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT.md` Phase 1. Unknown feature — probe the TUI and KAS bundle to determine what it does before building PA support.
+  - *Done when* — Feature is understood, PA handles its notification types, and any required UI is present.
+
+- **kiro-cli setting: `memory`** — Enable `memory.enabled` / `userMemoryOptIn` in PA's dynamic settings sync once PA has a memory panel. Deferred from `plans/261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT.md` Phase 1. Memory tools (indexing, search, recall) produce tool calls that PA renders, but the full memory experience likely requires dedicated UI (memory index browser, opt-in control).
+  - *Done when* — PA has a memory panel or equivalent; `memory.enabled` and `userMemoryOptIn` are forwarded from `cli.json`.
+
+- **kiro-cli setting: `disableAutoCompaction`** — Decide whether PA should forward `chat.disableAutoCompaction` from `cli.json` or pin it to a PA-specific value. Deferred from `plans/261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT.md` Phase 1. Sending `disableAutoCompaction: true` would suppress kiro-cli's automatic compaction for PA sessions; may or may not be desirable depending on whether the user wants their PA sessions to auto-compact.
+  - *Source* — separate from the `/compact` replay bug (broadcast→emit fix in `plans/261008_ACP_COMPACT_FIX.md`); this is about whether auto-compaction fires at all.
+  - *Done when* — A deliberate decision is recorded in `docs/KNOWLEDGE.md` and implemented.
+
+- **Full workflow support** — kiro-cli 2.28.0 introduced a complete workflow system that PA does not support at any layer. Three converging gaps: PA sessions likely don't receive the `run_workflow` tool (kiro-cli may gate it on `workflowNotifications.enabled` in `session/new`), PA has no handler for the `_kiro/workflow/*` notification family (all fall to the INFO log), and PA has no workflow monitor UI. Net effect: sessions driven through PA use the older `subagent` tool for fan-outs while TUI sessions use `run_workflow` with parallel step sessions, a workflow monitor, and the ability to steer the parent session while steps run.
+
+  **Layer 1 — Enable the tool (session/new, one-liner):**  
+  Add `"settings": {"workflows": {"enabled": True}, "workflowNotifications": {"enabled": True, "delivery": "steer"}}` to the `_meta.kiro` block in `_new_session_params()` in `acp.py`. The real gate is `_meta.kiro.settings.workflows.enabled` — KAS ignores `workflowNotifications` entirely (0 occurrences in acp-server.js). When absent, KAS uses its shipped default of `"off"`, so `run_workflow` is never instantiated. When `enabled: true`, KAS also suppresses `invoke_sub_agent` for that session (the model is expected to use `run_workflow` for fan-outs instead) and makes `run_workflow`, `inspect_workflow`, `update_workflow`, and `send_message` all available. Source: `.agents/tasks/run-workflow-tool-registration.md`.  
+  **Note:** the TUI also has workflows off by default — users must enable them in `/settings → features → workflows`. PA can either mirror that opt-in (a per-session checkbox in the new-session picker) or enable it for all sessions. The behavioral side-effect (subagent suppression) means this should be a deliberate choice, not a silent default change.
+
+  **Layer 2 — Receive workflow events (acp.py, medium):**  
+  Handle the `_kiro/workflow/*` notification family in `_on_notification`. Ten methods: `run_start`, `node_start`, `node_complete`, `node_paused`, `loop_iteration`, `watch_poll`, `paused`, `run_complete`, `steps_queued`, `recipes_changed`. The `node_start` payload carries each step's `sessionId` (the full `sess_<uuid>/` sibling session). Populate `crews[parent_id]` with step entries on `node_start`; mark complete on `node_complete`/`run_complete`. Handle the steer/queue delivery toggle (`_kiro/session/setWorkflowNotificationDelivery`) from client requests.  
+  Workflow progress is also embedded in `user_message_chunk` frames tagged `_meta.kiro.kind == "workflow-progress"` (the persistence/replay path) — decoding these in the client would give basic status on session reload without subscribing to child sessions.
+
+  **Layer 3 — Workflow monitor UI (/acp and dashboard panel, larger):**  
+  The TUI has a dedicated `workflow-monitor` mode separate from `crew-monitor`. Workflow nodes have a different shape from crew entries: `{ nodeId, nodePath, branchId, iteration, status, agentName, sessionId }` vs `{ role, task, status }`. PA needs either a unified panel that accepts both shapes or a parallel track. The TUI's inline status line ("handhyg-001-phase… running 0/2 · ctrl+x expand · ctrl+g monitor") is rendered from the workflow's `nodes` state array. The steer/queue send-mode selector already exists in `/acp`'s composer CSS; it needs to be wired to the `setWorkflowNotificationDelivery` call.
+
+  **Layer 4 — Child session ACP subscriptions (architecture, later):**  
+  Each workflow step session is a full `sess_<uuid>/` with its own ACP event stream. PA currently processes one connection per session. To show per-step tool activity and transcript in the panel, PA would need to subscribe to each child session's ACP stream as they appear in `node_start`. Cost: N+1 ACP connections per workflow (parent + all running steps). This intersects with the process-model spike below — if PA moves toward per-session processes, child workflow sessions become first-class PA sessions naturally.
+
+  - *Sources* — workflow child-session investigation 2026-10-11, run-workflow tool registration investigation 2026-10-11 (both under `.agents/tasks/`).
+  - *Done when (Layer 1)* — PA sessions receive the `run_workflow` tool and behave identically to TUI sessions when the model uses it; the parent session remains steer-capable while steps run.
+  - *Done when (Layer 2)* — `_kiro/workflow/*` notifications are handled; crew panel shows running workflow steps with live status; `workflow-progress` chunks decode on reload.
+  - *Done when (Layer 3)* — `/acp` and the dashboard panel show a workflow monitor with per-step progress, the steer/queue toggle, and Ctrl+G navigation; parity with TUI's `workflow-monitor` mode.
+  - *Done when (Layer 4)* — per-step transcript and tool activity visible in the panel; architecture decision documented.
+
+- **Workflow liveness** — a PA session that launches a workflow via `run_workflow` has no active turn of its own (the parent turn ends or idles while step sessions do the work), so `presence.py`'s liveness computation reads it as idle and shows no dot or Working status. The correct state should combine the parent session with its running workflow children: if any child `sess_<uuid>/` with a matching `rootConversationId` is `in_progress` or `waiting_on_user`, the parent session should show Working or Waiting. This requires `data_kiro_v3.py` to correlate child sessions to their parent by `rootConversationId`, and `presence.py` (or the session-status computation) to propagate the highest-priority child state up to the parent's rail row.
+  - *Dependency* — Layer 2 of Full workflow support above (`_kiro/workflow/node_start` handling in `acp.py`) would supply child session IDs in real time for ACP-held sessions; for disk-based liveness (sessions PA isn't holding over ACP), `data_kiro_v3.py`'s session scan already reads `session.json` and can be extended to check child sessions in the same workspace hash directory.
+  - *Done when* — a PA session with an active workflow shows Working (not idle) in the rail and Overview tiles, and returns to idle/waiting once all child sessions complete.
+
+- **Clean close (`session/close` on the wire)** — PA's close is local-only: it pops the session from its own state and broadcasts `session_closed`, but never issues `session/close` to kiro-cli. kiro-cli TUI does issue it. The kiro-cli process keeps closed sessions in memory until the agent is recycled (15 min after the last session is gone, `AGENT_IDLE_RECYCLE_SECONDS`). For a user closing and re-opening many sessions in one PA run, memory grows silently. The fix: issue `session/close` after removing the session from PA's own state.
+  - *Why it was left out* — `session/close` returns `-32603` on v3 (measured 2026-09-24, `docs/KNOWLEDGE.md` § "Session close — no v3 method unloads..."), so the call has no protocol effect at present. The item is open for when kiro-cli exposes a proper unload path, or as a speculative call (harmless -32603, but kilo-cli can change behavior later).
+  - *What to check before building* — confirm whether `session/close` semantics changed in current kiro-cli builds, and whether the call now has an effect without deleting history.
+
+- **Increase session cap to match TUI** — the current default `MAX_SESSIONS = 8` (range 1-16) is more restrictive than the TUI's soft cap of 64 inactive conversations. A user who routinely has >8 kiro-cli sessions hits the PA limit in ways they would never hit in the TUI. Source of the 8: process-cost measurement on v2 (~161 MB/session); on v3, all sessions share one process tree, so the per-session cost is much lower. A reasonable new default is 16-32; the `acp_max_sessions` config key exists for per-machine tuning.
+  - *What to measure before changing the default* — current v3 per-session memory overhead (particularly how `history` and `subagent_history` grow under load), and whether the `MAX_CONNECTIONS = 8` WebSocket cap should move in tandem.
+
+- **Spike: one kiro-cli process (current) vs one process per session (Kiro Crew model)** — PA holds all sessions on a single shared `kiro-cli acp` process; Kiro Crew spawns a dedicated process per session (warm pool). One-process keeps overhead low and lets PA reclaim the agent after 15 min idle; per-process gives hard isolation (a crashed session doesn't affect others) and natural teardown on close. The TUI shares one process with PA's model. The spike should answer: what is the real isolation failure rate of the shared model, what is the memory and startup cost of per-process on v3, and which model better supports future unattended dispatch?
+  - *Source* — multi-session comparison investigation, 2026-10-06 (`plans/.agents/tasks/acp-multi-session-comparison.md`).
+  - *Done when* — a written recommendation with measured costs and a failure-mode analysis, committed to `plans/CLOSED_INVESTIGATIONS.md` or promoted to a plan.
 
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described.
   - *Shape A* — an inline text field in the "new session" dialog for entering a path manually. Simple, but not discoverable for paths the user doesn't have memorized.

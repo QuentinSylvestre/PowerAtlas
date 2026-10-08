@@ -190,4 +190,18 @@ Factor `_workflow_children[session_id]` (populated by Phase 2) into `_publish_li
 
 ## Harness Improvement Opportunities
 
+## REVISIT — Deferred kiro-cli settings (from Phase 1 audit)
+
+The following `_meta.kiro.settings` keys are present in the TUI's `w1()` mapping but were deferred from this plan because enabling them requires PA UI/UX work that isn't scoped here. Phase 1's settings audit will confirm the classification. Each deferred setting has a ROADMAP entry; use this marker to verify they were all added and are still tracked when archiving.
+
+| cli.json key | KAS key | Why deferred |
+|---|---|---|
+| `chat.enableTangentMode` | `tangentMode` | Tangent mode likely creates a sub-session or visual indicator in the TUI. PA needs to handle whatever notification types it produces. |
+| `chat.enableCheckpoint` | `checkpoint` | Checkpoints may create rollback/save-point UI. PA needs to handle checkpoint notification types before enabling. |
+| `chat.enableC2s` | `c2s` | Unknown feature. Needs investigation of what it does and what UI PA would need. |
+| `memory.enabled` | `userMemoryOptIn` | Memory tools need a memory panel in PA before forwarding. |
+| `chat.disableAutoCompaction` | `disableAutoCompaction` | Decide whether to forward user preference or always allow compaction in PA (separate from the `/compact` replay bug fix). |
+
+ROADMAP entries for each: search `plans/ROADMAP.md` for "kiro-cli setting:" to find them.
+
 ## Review Log
