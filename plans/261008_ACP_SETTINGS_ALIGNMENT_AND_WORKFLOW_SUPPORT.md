@@ -745,10 +745,10 @@ Cycle 1: 6 Medium, 9 Low (0 High). Cycle 2: 3 Medium, 10 Low (0 High). Both revi
 | 7 | Low | Weak logging; no log on load; "sent" before the request. | Fixed -- `{key: enabled}` at INFO on both paths, worded "sending". |
 | 8 | Low | Tests read the developer's real `cli.json`; no wire-level test; no directory/UTF-8/recursion cases. | Fixed -- module-wide redirect, `TestSessionSettingsOnTheWire`, new loader cases. |
 | 9 | Low | `RecursionError` uncaught in the new reader. | Fixed -- added to the except tuple. |
-| 10 | Low | Transient read failure turns an explicit opt-out into "on" (fallback is TUI defaults). | Orchestrator: proposed-accept -- pending user decision |
-| 11 | Low | Synchronous cli.json read on the event loop per session create/load, unlike neighbouring `to_thread` reads. | Orchestrator: proposed-accept -- pending user decision |
+| 10 | Low | Transient read failure turns an explicit opt-out into "on" (fallback is TUI defaults). | User: accepted -- "1. ok" (user reply, 2026-10-08), documented fallback direction. |
+| 11 | Low | Synchronous cli.json read on the event loop per session create/load, unlike neighbouring `to_thread` reads. | User: accepted -- "2. ok" (user reply, 2026-10-08). |
 | 12 | Low | `_kiro_tool_search_settings` still catches only `(OSError, ValueError)` (pre-existing, not in this diff). | Orchestrator: proposed-accept -- pending user decision |
-| 13 | Low | No guard test that the `KIRO_CLI_SETTINGS_PATH` redirect is active. | Orchestrator: proposed-accept -- pending user decision |
+| 13 | Low | No guard test that the `KIRO_CLI_SETTINGS_PATH` redirect is active. | Fixed -- guard test added in `719f010` (user asked "4. fix?"). |
 | 14 | Low | Phase 2 must update the gated-off tripwire test when it flips the constant. | Fixed -- deferred criterion added to Phase 2. |
 
 Cycle-2 reviewer claim "c2s is not in the registry" (cycle 1) was wrong: `kp("c2s")` is in the 2.28.0 registry (25 `kp` keys, 24 off plus `semanticReview` on); docs corrected.
