@@ -580,16 +580,23 @@ function confirmCommandSelection() {
   cmdOnPromptChanged();
   var sid = cmdGetSessionId();
   if (!sid) return;
-  // `compact` is handled via session/prompt in acp.py (_handle_prompt detects
-  // the text "/compact" and triggers compaction). In kiro-cli 2.28+ it is no
-  // longer advertised in available_commands_update, so _handle_commands_execute
-  // now rejects it as unknown. Sending it as a plain prompt uses the path that
-  // always worked, without a restart.
+  // Treated as a skill (text insertion, not immediate execution) so Tab
+  // inserts "/compact " and the user can press Enter when ready.
+  // On Enter, sends via commands_execute (acp.py now whitelists compact even
+  // when kiro-cli 2.28+ no longer advertises it).
   if (name === 'compact') {
-    var sent = cmdSend('prompt', { prompt: '/compact' }, sid);
-    if (!sent) {
-      logLine('error', 'command "/compact" was not sent — see the previous line');
+    var current = cmdPromptInput.value;
+    var tokenMatch = current.match(/(?:^|\s)(\/\S*)$/);
+    var completed = '/compact ';
+    if (tokenMatch) {
+      cmdPromptInput.value = current.slice(0, tokenMatch.index + (tokenMatch[0].charAt(0) === ' ' ? 1 : 0)) + completed;
+    } else {
+      cmdPromptInput.value = completed;
     }
+    cmdOnPromptChanged();
+    cmdPromptInput.focus();
+    var len = cmdPromptInput.value.length;
+    cmdPromptInput.setSelectionRange(len, len);
     return;
   }
   // Step 9 review, Fix 10: cmdSend()'s own return value used to go
