@@ -5565,6 +5565,13 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor.subagent_history.clear()
         acp_mod._supervisor.crew_spawn_anchors.clear()
         acp_mod._supervisor.crew_spawn_toolcallids.clear()
+        # Workflow state (261008 Phase 2) is keyed by session id and these
+        # tests reuse ids: a child left behind would make the next test's
+        # sweeper or crew assertions see another test's run.
+        acp_mod._supervisor._active_fan_out_wave.clear()
+        acp_mod._supervisor._workflow_children.clear()
+        acp_mod._supervisor._workflow_node_index.clear()
+        acp_mod._supervisor._crew_order_next.clear()
         acp_mod._supervisor._compacting.clear()
         acp_mod._bubbles.clear()
         for conn in tuple(acp_mod._registry.connections):
@@ -6309,14 +6316,18 @@ class TestAcpNewSessionParams:
                                 "content": "PowerAtlas context \u2014 content TBD",
                             }
                         ],
-                        # cli.json absent: the three default-on keys; the
-                        # workflows/goal keys are gated off in Phase 1, and
-                        # largeToolOutputHandler is not forwarded (user
-                        # decision 2026-10-08).
+                        # cli.json absent: the three default-on keys, plus
+                        # workflows/goal off (chat.enableWorkflows absent).
+                        # Phase 2 flipped the gate (plan 261008, Design
+                        # Decisions row "Phase 1/2 gating"), so the two keys
+                        # are now sent; largeToolOutputHandler is not
+                        # forwarded (user decision 2026-10-08).
                         "settings": {
                             "thinking": {"enabled": True},
                             "knowledge": {"enabled": True},
                             "codeIntelligence": {"enabled": True},
+                            "workflows": {"enabled": False},
+                            "goal": {"enabled": False},
                         },
                     }
                 },
@@ -6333,11 +6344,15 @@ class TestSessionSettingsOnTheWire:
     `tmp_path` and patch the name again.
     """
 
-    # cli.json absent: the three default-on keys, workflows/goal gated off.
+    # cli.json absent: the three default-on keys, workflows/goal off. Phase 2
+    # flipped the gate, so the last two are sent (plan 261008, Design
+    # Decisions row "Phase 1/2 gating").
     TUI_DEFAULTS = {
         "thinking": {"enabled": True},
         "knowledge": {"enabled": True},
         "codeIntelligence": {"enabled": True},
+        "workflows": {"enabled": False},
+        "goal": {"enabled": False},
     }
 
     def _new(self, acp_mod, store, sid):
@@ -6391,7 +6406,10 @@ class TestSessionSettingsOnTheWire:
                                     "chat.enableWorkflows": True}),
                         encoding="utf-8")
         monkeypatch.setattr(acp_mod, "KIRO_CLI_SETTINGS_PATH", path)
-        expected = {**self.TUI_DEFAULTS, "knowledge": {"enabled": False}}
+        # chat.enableWorkflows is a JSON true here, so workflows and goal
+        # follow it (plan 261008, Design Decisions row "Phase 1/2 gating").
+        expected = {**self.TUI_DEFAULTS, "knowledge": {"enabled": False},
+                    "workflows": {"enabled": True}, "goal": {"enabled": True}}
         new_calls = self._new(acp_mod, store, "wire-edit-0001")
         assert new_calls[0][1]["_meta"]["kiro"]["settings"] == expected
         load_calls = self._load(acp_mod, store, acp_store_dir_v3, monkeypatch,
@@ -6415,7 +6433,11 @@ class TestSessionSettingsOnTheWire:
         messages = [r.getMessage() for r in caplog.records
                     if r.name == "power_atlas.acp" and r.levelno == logging.INFO
                     and "settings" in r.getMessage() and "sending" in r.getMessage()]
-        shown = "{'codeIntelligence': True, 'knowledge': False, 'thinking': True}"
+        # workflows/goal are sent (off: the cli.json above never mentions
+        # chat.enableWorkflows) now that the gate is on (plan 261008, Design
+        # Decisions row "Phase 1/2 gating"). The log sorts its keys.
+        shown = ("{'codeIntelligence': True, 'goal': False, 'knowledge': False, "
+                 "'thinking': True, 'workflows': False}")
         assert [m for m in messages if "session/new" in m] == [
             "ACP session/new sending settings: " + shown]
         assert [m for m in messages if "session/load" in m] == [
@@ -6442,7 +6464,17 @@ class TestBuildSessionSettings:
 
     @staticmethod
     def _all_on():
-        return {kas: {"enabled": True} for kas in _DEFAULT_ON_SETTINGS.values()}
+        """The block for a cli.json that says nothing about workflows.
+
+        Phase 2 flipped `_WORKFLOWS_FORWARD_ENABLED` to True (plan 261008,
+        Design Decisions row "Phase 1/2 gating": "False in Phase 1, True in
+        Phase 2"), so the block now also carries `workflows` and `goal`,
+        both off because `chat.enableWorkflows` is absent.
+        """
+        block = {kas: {"enabled": True} for kas in _DEFAULT_ON_SETTINGS.values()}
+        block["workflows"] = {"enabled": False}
+        block["goal"] = {"enabled": False}
+        return block
 
     def test_build_session_settings_absent_keys_give_tui_defaults(self):
         from power_atlas import acp as acp_mod
@@ -6469,14 +6501,41 @@ class TestBuildSessionSettings:
         assert acp_mod._build_session_settings(cli) == self._all_on()
 
     @pytest.mark.parametrize("workflows", [True, False, "false", "true", 1, None])
-    def test_build_session_settings_workflows_keys_absent_while_gated_off(self, workflows):
-        """Phase 1 ships with the gate False: no input may emit workflows or goal."""
+    def test_build_session_settings_workflows_keys_absent_while_gated_off(
+            self, monkeypatch, workflows):
+        """With the gate explicitly off, no input may emit workflows or goal.
+
+        Phase 1 asserted the shipped constant was False; Phase 2 flipped it
+        (plan 261008, Design Decisions row "Phase 1/2 gating"), so the gate is
+        now forced off here and the committed default is covered by
+        `..._default_gate_is_on_and_follows_cli`.
+        """
         from power_atlas import acp as acp_mod
-        assert acp_mod._WORKFLOWS_FORWARD_ENABLED is False
+        monkeypatch.setattr(acp_mod, "_WORKFLOWS_FORWARD_ENABLED", False)
         settings = acp_mod._build_session_settings({"chat.enableWorkflows": workflows})
         assert "workflows" not in settings
         assert "goal" not in settings
-        assert settings == self._all_on()
+        assert settings == {kas: {"enabled": True}
+                            for kas in _DEFAULT_ON_SETTINGS.values()}
+
+    @pytest.mark.parametrize("value, enabled", [
+        (True, True),
+        (False, False),
+        ("false", False),   # bool("false") is True; must not enable
+        ("true", False),    # only a real JSON true enables
+        (1, False),
+        (None, False),
+    ])
+    def test_build_session_settings_default_gate_is_on_and_follows_cli(
+            self, value, enabled):
+        """The committed constant (no monkeypatch): Phase 2 shipped it True, and
+        `workflows`/`goal` follow `chat.enableWorkflows is True` (plan 261008,
+        Design Decisions rows "Phase 1/2 gating" and "Default-on settings")."""
+        from power_atlas import acp as acp_mod
+        assert acp_mod._WORKFLOWS_FORWARD_ENABLED is True
+        settings = acp_mod._build_session_settings({"chat.enableWorkflows": value})
+        assert settings["workflows"] == {"enabled": enabled}
+        assert settings["goal"] == {"enabled": enabled}
 
     @pytest.mark.parametrize("value, enabled", [
         (True, True),
@@ -11987,6 +12046,567 @@ class TestAcpInactivityCeiling:
         with pytest.raises(acp_mod.AgentTimeout) as exc:
             asyncio.run(run())
         assert "within 0s" in str(exc.value)
+
+
+class TestAcpWorkflowNotifications:
+    """`_kiro/workflow/*` handling (261008 Phase 2).
+
+    Frame shapes are the measured ones in docs/KNOWLEDGE.md (kiro-cli 2.28.0,
+    2026-10-08) with synthetic ids: the parent is `parentSessionId`, the outer
+    `sessionId` is absent on most frames and is the CHILD on the second
+    `node_start` of a step, and `node_complete` carries no child id. Expected
+    values come from those shapes and from plan Section 9 "probe-confirmed
+    design corrections", not from running the code.
+
+    Three places a plausible implementation gets this wrong, each pinned below:
+    matching `node_complete` (by `(workflowId, nodeId)`, not nodeId alone and
+    not by order), the pair of `node_start` frames (only the id-bearing one
+    creates), and what survives a turn end (live children and the fan-out wave
+    their entries are tagged with).
+    """
+
+    P = "wfparent-p1"
+    P2 = "wfparent-p2"
+    ENTRY_KEYS = {"sessionId", "sessionName", "role", "task", "status", "done",
+                  "error", "order", "action", "fan_out_id", "startedAt",
+                  "stoppedAt"}
+
+    @pytest.fixture
+    def wf(self, acp_store):
+        acp_mod, _ = acp_store
+        _live_session(acp_mod, self.P)
+        return acp_mod, acp_mod._supervisor
+
+    def _send(self, acp_mod, kind, **fields):
+        fields.setdefault("parentSessionId", self.P)
+        _notify(acp_mod, "_kiro/workflow/" + kind, fields)
+
+    def _start(self, acp_mod, wf, node, child=None, path=None, **extra):
+        fields = {"workflowId": wf, "nodeId": node,
+                  "nodePath": path or [wf, node], "type": "step",
+                  "agentName": "wf-coder"}
+        fields.update(extra)
+        if child:
+            fields["sessionId"] = child
+        self._send(acp_mod, "node_start", **fields)
+
+    def _complete(self, acp_mod, wf, node, status="completed", path=None, **extra):
+        self._send(acp_mod, "node_complete", workflowId=wf, nodeId=node,
+                   nodePath=path or [wf, node], status=status,
+                   capturedOutput="ok", **extra)
+
+    def _watch(self, acp_mod, session=None):
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, session or self.P)
+        _queued(conn)
+        return conn
+
+    @staticmethod
+    def _last_payload(conn):
+        frames = [f for f in _queued(conn) if f["type"] == "subagents"]
+        assert frames, "no subagents frame was emitted"
+        return frames[-1]["payload"]["subagents"]
+
+    def _legacy_entry(self, order=0):
+        return {"done": False, "role": "worker", "task": "t", "sessionName": "",
+                "status": "working", "action": "", "error": "", "order": order,
+                "startedAt": 1.0, "stoppedAt": None, "fan_out_id": ""}
+
+    def _run_turn(self, acp_mod, outcome):
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, self.P)
+
+        async def fake_request(self_, method, params, timeout=None):
+            if isinstance(outcome, Exception):
+                raise outcome
+            return {"stopReason": outcome}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._handle_prompt(conn, self.P, {"prompt": "hi"}))
+        return conn
+
+    # -- node_start ---------------------------------------------------------
+
+    def test_workflow_node_start_with_child_id_creates_the_entry(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        entry = sv.crews[self.P]["child-c7"]
+        assert set(entry) == self.ENTRY_KEYS
+        assert entry["sessionId"] == "child-c7"
+        assert entry["role"] == "step-one"     # nodePath minus its workflow id
+        assert entry["task"] == "wf-coder"
+        assert entry["sessionName"] == "wf-coder"
+        assert (entry["status"], entry["action"]) == ("working", "running")
+        assert entry["done"] is False and entry["error"] == ""
+        assert entry["stoppedAt"] is None and isinstance(entry["startedAt"], float)
+        assert entry["fan_out_id"] == ""       # no earlier fan-out
+        assert sv.subagent_sessions["child-c7"] == {"parent": self.P}
+        assert isinstance(sv.subagent_history["child-c7"], acp_mod._History)
+        assert sv._workflow_node_index == {(self.P, "wf-k7x", "step-one"): "child-c7"}
+        assert sv.workflow_state(self.P) == "working"
+        # The emitted payload is the wire shape: every key `_subagents_payload`
+        # reads must exist, or it raises KeyError on the first frame.
+        assert self._last_payload(watcher) == [{
+            "sessionId": "child-c7", "role": "step-one", "task": "wf-coder",
+            "sessionName": "wf-coder", "status": "working", "action": "running",
+            "done": False, "error": "", "startedAt": entry["startedAt"],
+            "stoppedAt": None}]
+
+    def test_workflow_node_start_first_variant_without_child_id_creates_nothing(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one")
+        assert sv.crews == {} and sv.subagent_sessions == {}
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        # The pair, in measured order, makes exactly one entry.
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        assert list(sv.crews[self.P]) == ["child-c7"]
+
+    def test_workflow_container_node_frames_create_nothing(self, wf):
+        acp_mod, sv = wf
+        container = ["wf-k7x", "run-both"]
+        self._start(acp_mod, "wf-k7x", "run-both", path=container, type="parallel",
+                    agentName=None)
+        # Defensive: even a container frame that did carry a child id.
+        self._start(acp_mod, "wf-k7x", "run-both", child="child-cc", path=container,
+                    type="parallel")
+        self._complete(acp_mod, "wf-k7x", "run-both", path=container)
+        assert sv.crews == {} and sv.subagent_sessions == {}
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+
+    def test_workflow_duplicate_node_start_is_idempotent(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        entry = sv.crews[self.P]["child-c7"]
+        entry["startedAt"], entry["order"] = 111.0, 5
+        history = sv.subagent_history["child-c7"]
+        history.append({"type": "chunk"})
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        assert sv.crews[self.P]["child-c7"] is entry
+        assert (entry["startedAt"], entry["order"]) == (111.0, 5)
+        assert sv.subagent_history["child-c7"] is history and len(history) == 1
+        assert list(sv._workflow_children[self.P]) == ["child-c7"]
+
+    def test_workflow_duplicate_node_start_does_not_reopen_a_finished_step(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        stopped = sv.crews[self.P]["child-c7"]["stoppedAt"]
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        entry = sv.crews[self.P]["child-c7"]
+        assert entry["done"] is True and entry["status"] == "done"
+        assert entry["stoppedAt"] == stopped
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        assert sv.workflow_state(self.P) is None
+
+    def test_workflow_parallel_branches_get_distinct_entries(self, wf):
+        acp_mod, sv = wf
+        for node, child in (("step-a", "child-ca"), ("step-b", "child-cb")):
+            self._start(acp_mod, "wf-k7x", node, child=child, branchId=node,
+                        path=["wf-k7x", "run-both", node])
+        crew = sv.crews[self.P]
+        assert [crew[c]["role"] for c in ("child-ca", "child-cb")] == [
+            "run-both/step-a", "run-both/step-b"]
+        assert crew["child-ca"]["order"] != crew["child-cb"]["order"]
+        # Measured: branch completions arrive in the reverse of the start order.
+        self._complete(acp_mod, "wf-k7x", "step-b", path=["wf-k7x", "run-both", "step-b"])
+        assert crew["child-cb"]["done"] is True
+        assert crew["child-ca"]["done"] is False
+        assert list(sv._workflow_children[self.P]) == ["child-ca"]
+        self._complete(acp_mod, "wf-k7x", "step-a", path=["wf-k7x", "run-both", "step-a"])
+        assert crew["child-ca"]["done"] is True and sv._workflow_children == {}
+
+    # -- node_complete ------------------------------------------------------
+
+    def test_workflow_node_complete_matches_on_workflow_and_node_not_node_alone(self, wf):
+        acp_mod, sv = wf
+        # The same nodeId in two runs of one parent: nodeId alone is ambiguous.
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-q2m", "step-one", child="child-c3")
+        self._complete(acp_mod, "wf-q2m", "step-one")
+        crew = sv.crews[self.P]
+        assert crew["child-c3"]["done"] is True
+        assert crew["child-c3"]["status"] == "done" and crew["child-c3"]["error"] == ""
+        assert isinstance(crew["child-c3"]["stoppedAt"], float)
+        assert crew["child-c7"]["done"] is False and crew["child-c7"]["stoppedAt"] is None
+        assert list(sv._workflow_children[self.P]) == ["child-c7"]
+        assert list(sv._workflow_node_index) == [(self.P, "wf-k7x", "step-one")]
+
+    def test_workflow_node_complete_for_unknown_child_is_ignored(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        before = copy.deepcopy((sv.crews, sv._workflow_children, sv._workflow_node_index))
+        self._complete(acp_mod, "wf-k7x", "step-nine")     # never started
+        self._complete(acp_mod, "wf-zzz", "step-one")      # other workflow
+        assert (sv.crews, sv._workflow_children, sv._workflow_node_index) == before
+
+    @pytest.mark.parametrize("status, expected", [
+        ("completed", ("done", "")),
+        ("cancelled", ("failed", "cancelled")),
+        ("errored", ("failed", "errored")),
+        ("", ("done", "")),            # no status at all is not a failure signal
+        (None, ("done", "")),
+    ])
+    def test_workflow_node_complete_status_mapping(self, wf, status, expected):
+        """INFERRED rule (plan Section 9 item 6): only "completed" is observed.
+        Any other non-empty status string is failed with that string as error."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._complete(acp_mod, "wf-k7x", "step-one", status=status)
+        entry = sv.crews[self.P]["child-c7"]
+        assert (entry["status"], entry["error"]) == expected
+        assert entry["done"] is True
+        assert sv._workflow_children == {}
+
+    def test_workflow_node_complete_removes_the_child_even_without_a_crew_entry(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv.crews.pop(self.P)           # what a turn-start eviction can do
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+
+    # -- pause --------------------------------------------------------------
+
+    def test_workflow_node_paused_keeps_the_child_waiting(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
+        entry = sv.crews[self.P]["child-c7"]
+        assert (entry["status"], entry["action"]) == ("waiting", "waiting")
+        assert entry["done"] is False and entry["stoppedAt"] is None
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+        assert sv.workflow_state(self.P) == "working"       # step-two still runs
+        self._complete(acp_mod, "wf-k7x", "step-two")
+        assert sv.workflow_state(self.P) == "waiting"       # only the paused one left
+        # Run-level pause clears nothing.
+        self._send(acp_mod, "paused", workflowId="wf-k7x")
+        assert list(sv._workflow_children[self.P]) == ["child-c7"]
+        assert sv.has_active_workflow(self.P) is True
+        # A waiting step can still finish.
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert sv.crews[self.P]["child-c7"]["done"] is True
+        assert sv.workflow_state(self.P) is None
+
+    # -- run_complete -------------------------------------------------------
+
+    def test_workflow_run_complete_finalises_what_is_left_and_pops_the_run(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        self._start(acp_mod, "wf-q2m", "step-one", child="child-c3")   # another run
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed",
+                   finalState={"root": {"children": []}})
+        crew = sv.crews[self.P]
+        assert crew["child-c8"]["done"] is True and crew["child-c8"]["status"] == "done"
+        assert crew["child-c8"]["action"] == "" and crew["child-c8"]["error"] == ""
+        assert crew["child-c3"]["done"] is False          # the other run is untouched
+        assert list(sv._workflow_children[self.P]) == ["child-c3"]
+        assert list(sv._workflow_node_index) == [(self.P, "wf-q2m", "step-one")]
+
+    def test_workflow_run_complete_with_a_non_completed_status_marks_the_rest_failed(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="cancelled")
+        entry = sv.crews[self.P]["child-c7"]
+        assert (entry["done"], entry["status"], entry["error"]) == (True, "failed", "cancelled")
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+
+    # -- routing ------------------------------------------------------------
+
+    @pytest.mark.parametrize("parent", [_OMITTED, None, "ghost-parent", 123])
+    def test_workflow_frame_with_missing_or_unknown_parent_mutates_nothing(
+            self, wf, parent):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")   # real state to disturb
+        sv.sessions[self.P]["last_activity"] = 0.0
+        before = copy.deepcopy((sv.crews, sv._workflow_children, sv._workflow_node_index,
+                                sv.subagent_sessions, sv._crew_order_next))
+        sessions_before = set(sv.sessions)
+        fields = {"workflowId": "wf-k7x", "nodeId": "step-two", "type": "step",
+                  "nodePath": ["wf-k7x", "step-two"], "sessionId": "child-c8"}
+        if parent is not _OMITTED:
+            fields["parentSessionId"] = parent
+        for kind in ("node_start", "node_complete", "node_paused", "run_complete"):
+            _notify(acp_mod, "_kiro/workflow/" + kind, fields)
+        assert (sv.crews, sv._workflow_children, sv._workflow_node_index,
+                sv.subagent_sessions, sv._crew_order_next) == before
+        assert set(sv.sessions) == sessions_before
+        assert sv.sessions[self.P]["last_activity"] == 0.0     # nobody was stamped
+
+    def test_workflow_routing_needs_no_outer_session_id_and_stamps_the_parent(self, wf):
+        acp_mod, sv = wf
+        # Measured: run_start, node_complete and run_complete carry no
+        # sessionId; the second node_start carries the CHILD's.
+        steps = [
+            ("run_start", {"workflowId": "wf-k7x", "workflowName": "demo"}),
+            ("node_start", {"workflowId": "wf-k7x", "nodeId": "step-one", "type": "step",
+                            "nodePath": ["wf-k7x", "step-one"], "agentName": "wf-coder",
+                            "sessionId": "child-c7"}),
+            ("node_complete", {"workflowId": "wf-k7x", "nodeId": "step-one",
+                               "status": "completed"}),
+            ("run_complete", {"workflowId": "wf-k7x", "status": "completed"}),
+        ]
+        for kind, fields in steps:
+            sv.sessions[self.P]["last_activity"] = 0.0
+            self._send(acp_mod, kind, **fields)
+            assert sv.sessions[self.P]["last_activity"] > 0.0, kind
+        assert sv.crews[self.P]["child-c7"]["done"] is True
+        assert "child-c7" not in sv.sessions      # a child never becomes a session
+
+    def test_workflow_frame_is_routed_before_the_early_frame_buffer(self, wf):
+        """With a session creation in flight (`_reserved > 0`) a frame whose
+        outer sessionId is not a known session is buffered by SC-1. The child's
+        id is exactly that, so the workflow router must run first."""
+        acp_mod, sv = wf
+        sv._reserved = 1
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        assert sv._pending_early_frames == {}
+        assert "child-c7" in sv.crews[self.P]
+
+    def test_workflow_frames_log_at_info_including_dropped_ones(self, wf, caplog):
+        acp_mod, sv = wf
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+            _notify(acp_mod, "_kiro/workflow/loop_iteration",
+                    {"workflowId": "wf-k7x", "parentSessionId": "ghost-parent"})
+        text = "\n".join(r.getMessage() for r in caplog.records
+                         if r.levelno == logging.INFO)
+        assert "_kiro/workflow/node_start" in text and "wf-k7x" in text
+        assert "_kiro/workflow/loop_iteration" in text
+        assert "dropped" in text and "1 tracked" in text
+
+    # -- fan-out wave -------------------------------------------------------
+
+    def test_workflow_after_an_invoke_sub_agent_fan_out_still_emits_its_entries(self, wf):
+        """The entry is tagged with the parent's current wave, and the wave must
+        survive a normal turn end while the child is live, or the filter in
+        `_subagents_payload` (wave id vs the entry's tag) hides the row."""
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        sv._on_agent_subtask_open(self.P, "task-t9", {"name": "explorer"}, "tc-t9")
+        assert sv._active_fan_out_wave[self.P] == "task-t9"
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        assert sv.crews[self.P]["child-c7"]["fan_out_id"] == "task-t9"
+        mid_turn = {e["sessionId"] for e in self._last_payload(watcher)}
+        assert mid_turn == {"task-t9", "child-c7"}
+        self._run_turn(acp_mod, "end_turn")
+        _queued(watcher)
+        assert sv._active_fan_out_wave[self.P] == "task-t9"
+        assert sv.crews[self.P]["child-c7"]["done"] is False
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        after = {e["sessionId"]: e for e in self._last_payload(watcher)}
+        assert "child-c7" in after and after["child-c7"]["done"] is True
+
+    def test_workflow_order_is_monotonic_across_eviction(self, wf):
+        acp_mod, sv = wf
+        with patch.object(acp_mod, "MAX_SUBAGENTS_PER_SESSION", 2):
+            for node, child in (("s1", "child-d1"), ("s2", "child-d2"),
+                                ("s3", "child-d3"), ("s4", "child-d4")):
+                self._start(acp_mod, "wf-k7x", node, child=child)
+                self._complete(acp_mod, "wf-k7x", node)
+        crew = sv.crews[self.P]
+        # d1 was evicted when d4 started. A `len(crew)` order would give d4 the
+        # value 2 and collide with d3; the counter gives 3.
+        assert "child-d1" not in crew
+        assert [crew[c]["order"] for c in ("child-d2", "child-d3", "child-d4")] == [1, 2, 3]
+
+    # -- liveness state -----------------------------------------------------
+
+    def test_workflow_state_is_working_waiting_or_none(self, wf):
+        acp_mod, sv = wf
+        now = time.monotonic()
+        assert sv.workflow_state(self.P) is None and sv.has_active_workflow(self.P) is False
+        sv._workflow_children[self.P] = {"child-c7": ("waiting", now)}
+        assert sv.workflow_state(self.P) == "waiting"
+        sv._workflow_children[self.P]["child-c8"] = ("running", now)
+        assert sv.workflow_state(self.P) == "working"
+        assert sv.has_active_workflow(self.P) is True
+
+    def test_workflow_staleness_bound_is_inclusive_at_exactly_the_bound(self, wf):
+        acp_mod, sv = wf
+        assert acp_mod._WORKFLOW_CHILD_STALE_S == 600    # plan Phase 2 Step 1
+        for seen_now, expected in ((1600.0, "working"), (1600.001, None)):
+            sv._workflow_children[self.P] = {"child-c7": ("running", 1000.0)}
+            sv._workflow_node_index[(self.P, "wf-k7x", "step-one")] = "child-c7"
+            assert sv.workflow_state(self.P, now=seen_now) == expected, seen_now
+            assert sv.has_active_workflow(self.P, now=seen_now) is (expected is not None)
+        # Lazy prune: the stale child and its index entry are gone, and so is
+        # the parent key.
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+
+    def test_workflow_stale_child_is_ignored_but_a_fresh_one_still_counts(self, wf):
+        acp_mod, sv = wf
+        sv._workflow_children[self.P] = {
+            "child-old": ("running", 100.0), "child-new": ("waiting", 900.0)}
+        # old is 900 s past, new is 100 s past: only the waiting one is live.
+        assert sv.workflow_state(self.P, now=1000.0) == "waiting"
+        assert list(sv._workflow_children[self.P]) == ["child-new"]
+
+    def test_workflow_child_frames_refresh_its_staleness_clock(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 500)
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "thinking"}}})
+        assert time.monotonic() - sv._workflow_children[self.P]["child-c7"][1] < 100
+        # Past the bound it is gone, and a late frame does not revive it.
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "still here"}}})
+        assert sv._workflow_children == {}
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def test_workflow_close_session_clears_only_its_own_state(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
+                   nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
+                   sessionId="child-c3")
+
+        async def answered(self_, method, params, timeout=None):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", answered), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(sv.close_session(self.P))
+        assert list(sv._workflow_children) == [self.P2]
+        assert list(sv._workflow_node_index) == [(self.P2, "wf-q2m", "step-one")]
+        assert self.P not in sv._crew_order_next and self.P2 in sv._crew_order_next
+
+    def test_workflow_detach_clears_everything_with_its_real_signature(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
+                   nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
+                   sessionId="child-c3")
+        assert sv._workflow_children and sv._workflow_node_index and sv._crew_order_next
+        # `_detach(reason)` takes no session id; a per-session pop would raise
+        # NameError here and abandon the return that hands back the process.
+        assert sv._detach("test detach") == (None, None)
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        assert sv._crew_order_next == {}
+
+    @pytest.mark.parametrize("outcome", [
+        "end_turn", "cancelled", RuntimeError("boom")], ids=["end_turn", "cancelled", "error"])
+    def test_workflow_turn_end_leaves_live_children_and_their_entries(self, wf, outcome):
+        """`session/prompt` returns before the run ends, and a cancel leaves the
+        child running with no run_complete (both measured), so no stopReason
+        proves a child dead. A legacy sub-agent entry in the same crew is the
+        positive control: the sweep still finalises it."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv.crews[self.P]["legacy-1"] = self._legacy_entry(order=9)
+        self._run_turn(acp_mod, outcome)
+        assert "legacy-1" not in sv.crews[self.P]        # finalised, then evicted
+        entry = sv.crews[self.P]["child-c7"]
+        assert entry["done"] is False and entry["stoppedAt"] is None
+        assert entry["status"] == "working"
+        assert sv._workflow_children[self.P]["child-c7"][0] == "running"
+        assert sv._workflow_node_index == {(self.P, "wf-k7x", "step-one"): "child-c7"}
+        assert sv.workflow_state(self.P) == "working"
+        assert "child-c7" in sv.subagent_sessions       # click-to-view survives
+
+    def test_workflow_turn_end_finalises_a_child_that_has_gone_stale(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 601)
+        self._run_turn(acp_mod, "end_turn")
+        # No longer live, so it is an ordinary not-done entry: marked done at
+        # turn end, then evicted by the same sweep.
+        assert "child-c7" not in sv.crews.get(self.P, {})
+        assert sv._workflow_children == {}
+
+    def test_workflow_user_cancel_does_not_mark_a_live_child_done(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv.crews[self.P]["legacy-1"] = self._legacy_entry(order=9)
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, self.P)
+        sv.inflight.add(self.P)
+
+        async def cancelled(self_, session_id):
+            return None
+
+        with patch.object(acp_mod._Supervisor, "cancel", cancelled):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+        assert sv.crews[self.P]["legacy-1"]["done"] is True
+        entry = sv.crews[self.P]["child-c7"]
+        assert entry["done"] is False and entry["stoppedAt"] is None
+        assert sv.workflow_state(self.P) == "working"
+
+    # -- the sweeper --------------------------------------------------------
+
+    def test_workflow_sweepable_refuses_a_session_with_active_children(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        meta = acp_mod._supervisor.sessions[sid]
+        meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
+        now = time.monotonic()
+        # Positive control: this exact session is otherwise sweepable.
+        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=False) is True
+        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=True) is False
+
+    def test_workflow_sweep_once_keeps_a_parent_with_a_live_child_until_it_goes_stale(
+            self, acp_fast):
+        acp_mod, _ = acp_fast
+        sv = acp_mod._supervisor
+        _live_session(acp_mod, self.P)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv.sessions[self.P]["last_used"] = (
+            time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
+
+        def sweep():
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+                _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+
+        sweep()
+        assert self.P in sv.sessions and "child-c7" in sv.crews[self.P]
+        # The only way out for a child that never reports back is the bound.
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 601)
+        sweep()
+        assert self.P not in sv.sessions
+
+    # -- workflow-progress chunks -------------------------------------------
+
+    def test_workflow_progress_chunk_changes_no_state_and_is_still_emitted(self, wf):
+        """Replay-only, display-only. The chunk's own text is a live-looking
+        `node_start` naming this parent and a child, so an implementation that
+        dispatched it would register a child here."""
+        acp_mod, sv = wf
+        text = json.dumps({
+            "method": "_kiro/workflow/node_start", "workflowId": "wf-k7x",
+            "nodeId": "step-one", "nodePath": ["wf-k7x", "step-one"], "type": "step",
+            "agentName": "wf-coder", "sessionId": "child-c7",
+            "parentSessionId": self.P})
+        watcher = self._watch(acp_mod)
+        _notify(acp_mod, "session/update", {"sessionId": self.P, "update": {
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": text},
+            "_meta": {"kiro": {
+                "notification": {"kind": "workflow-progress", "workflowId": "wf-k7x",
+                                 "eventType": "node_start"},
+                "messageId": "wf-progress-1", "replay": True}}}})
+        assert sv.crews == {} and sv.subagent_sessions == {}
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        chunks = [f for f in _queued(watcher) if f["type"] == "chunk"]
+        assert [(c["payload"]["role"], c["payload"]["text"]) for c in chunks] == [
+            ("user", text)]
+        # A malformed body is tolerated and the chunk still goes out.
+        _notify(acp_mod, "session/update", {"sessionId": self.P, "update": {
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "{not json"},
+            "_meta": {"kiro": {"notification": {"kind": "workflow-progress"}}}}})
+        assert [f["payload"]["text"] for f in _queued(watcher)
+                if f["type"] == "chunk"] == ["{not json"]
 
 
 class TestAcpIdleSweeper:

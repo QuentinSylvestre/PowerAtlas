@@ -6674,6 +6674,48 @@ check("crew row has status-errored dot for error entry", (tpl) => {
          "error row dot should have status-errored class, got: " + dot.className);
 });
 
+// Workflow steps (261008 Phase 2) arrive as ordinary crew entries whose
+// sessionId is a real child session id. The row reads only `done`/`error`
+// for its state and `action` for its text, so a paused step ("waiting") shows
+// as a working row labelled "waiting", and a failed one (done + error text)
+// as an errored row. The entry shape is what `_on_workflow_node_start` and
+// `_on_workflow_node_done` write; no status string is read by the renderer.
+check("workflow crew rows: running, waiting and failed render sensibly", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sess_00000000-0000-4000-8000-00000000000a", role: "run-both/step-a",
+      task: "wf-coder", sessionName: "wf-coder", status: "working", action: "running",
+      done: false, error: "", startedAt: now - 5, stoppedAt: null },
+    { sessionId: "sess_00000000-0000-4000-8000-00000000000b", role: "run-both/step-b",
+      task: "wf-coder", sessionName: "wf-coder", status: "waiting", action: "waiting",
+      done: false, error: "", startedAt: now - 5, stoppedAt: null },
+    { sessionId: "sess_00000000-0000-4000-8000-00000000000c", role: "step-three",
+      task: "wf-coder", sessionName: "wf-coder", status: "failed", action: "",
+      done: true, error: "cancelled", startedAt: now - 9, stoppedAt: now - 2 },
+  ]));
+  const rows = page.all("acpTranscript", ".acp-crew-row");
+  assertEqual(rows.length, 3, "one row per workflow step");
+  const cls = (row) => String(row.querySelector(".session-status").className)
+    .split(/\s+/);
+  const text = (row, sel) => row.querySelector(sel).textContent;
+  assertEqual(text(rows[0], ".acp-crew-label"), "wf-coder");
+  assertEqual(text(rows[0], ".acp-crew-role"), "run-both/step-a",
+              "the step's place in the workflow is the role column");
+  assertEqual(text(rows[0], ".acp-crew-action"), "running");
+  assert(cls(rows[0]).includes("status-thinking"), "running step shows the working dot");
+  assertEqual(text(rows[1], ".acp-crew-action"), "waiting",
+              "a paused step must say it is waiting, not just 'working'");
+  assert(cls(rows[1]).includes("status-thinking"), "waiting step is not done");
+  assert(!rows[1].className.includes("acp-crew-row-error") &&
+         !rows[1].className.includes("acp-crew-row-done"),
+         "a waiting step is not shown as finished");
+  assertEqual(text(rows[2], ".acp-crew-action"), "errored");
+  assert(cls(rows[2]).includes("status-errored"), "failed step shows the error dot");
+  assert(String(page.one("acpTranscript", ".acp-crew-header").textContent)
+         .startsWith("Orchestrating"), "the crew is not all done while a step waits");
+});
+
 check("acp-crew-label shows entry.sessionName when present", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver(subagentsFrame(live, [
