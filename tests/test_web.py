@@ -35277,7 +35277,7 @@ class TestOverviewLive:
         from power_atlas import web as web_mod
         got = []
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_: got.append(filter_) or {"filter": filter_, "tiles": []})
+                            lambda held, filter_, workflow_states=None: got.append(filter_) or {"filter": filter_, "tiles": []})
         client.get("/api/dashboard/overview/live?filter=poweratlas")
         client.get("/api/dashboard/overview/live?filter=bogus")
         client.get("/api/dashboard/overview/live")
@@ -35286,14 +35286,14 @@ class TestOverviewLive:
     def test_route_refused_without_the_cookie(self, anonymous_client, client, monkeypatch):
         from power_atlas import web as web_mod
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_: {"filter": filter_, "tiles": []})
+                            lambda held, filter_, workflow_states=None: {"filter": filter_, "tiles": []})
         assert _is_json_403(anonymous_client.get("/api/dashboard/overview/live"))
         assert client.get("/api/dashboard/overview/live").status_code == 200
 
     def test_route_refused_to_a_remote_peer(self, remote_enabled, monkeypatch):
         from power_atlas import web as web_mod
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_: {"filter": filter_, "tiles": ["LEAK"]})
+                            lambda held, filter_, workflow_states=None: {"filter": filter_, "tiles": ["LEAK"]})
         status, body, _ = _peer_http("/api/dashboard/overview/live", [_cookie_header()])
         assert status == 403
         assert b"LEAK" not in body
@@ -39329,3 +39329,314 @@ class TestCodexAdapterThroughTheDashboardListing:
         monkeypatch.setattr(web_mod, "load_config", lambda: Config(workspace_settings=settings))
         assert len(client.get(self._PATH, params={"tag": "work"}).json()["groups"]) == 1
         assert client.get(self._PATH, params={"tag": "other"}).json()["groups"] == []
+
+
+class TestWorkflowLivenessStatus:
+    """261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3, Part A: a held parent whose
+    workflow children still run is shown as working/waiting instead of idle.
+
+    Expected values come from the plan's Phase 3 "Ordering" paragraph: the override is applied
+    AFTER the parent's own verdict and only upgrades an idle one (for a kiro-cli v3 parent an
+    idle verdict reads `waiting`, `classify_kiro_v3`: assistant record -> WAITING); `errored`,
+    an already-`working` verdict and a permission-pending `waiting` are never masked; the
+    supervisor is read on the event loop, never from the `asyncio.to_thread` worker.
+    """
+
+    _SID = "sess_aabbccdd-1234-5678-abcd-ef0123456789"
+    _CWD = "C:\\dev\\ws"
+    # Child ages in seconds against the 600 s running bound and the 6 h waiting bound. The exact
+    # boundary is pinned in TestAcpWorkflowNotifications with an injected clock; here the real
+    # clock runs, so each side keeps a 1 s margin.
+    _FRESH_RUNNING, _STALE_RUNNING = 599.0, 601.0
+    _FRESH_WAITING, _STALE_WAITING = 21599.0, 21601.0
+
+    @staticmethod
+    def _children(monkeypatch, **spec):
+        """`spec`: session id -> (child state, child age in seconds)."""
+        from power_atlas import acp as acp_mod
+        now = time.monotonic()
+        kids = {sid: {f"child-of-{sid}": (state, now - age)} for sid, (state, age) in spec.items()}
+        monkeypatch.setattr(acp_mod._supervisor, "_workflow_children", kids)
+
+    @staticmethod
+    def _pending_permission(monkeypatch, *session_ids):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod._supervisor, "_pending_permission",
+                            {f"opaque-{i}": {"session_id": s, "options": [], "kiro_id": i}
+                             for i, s in enumerate(session_ids)})
+
+    @staticmethod
+    def _classify_as(monkeypatch, verdicts):
+        """Replace the transcript classifier: session id -> SemanticStatus."""
+        from power_atlas import presence as presence_mod
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "get_semantic_status",
+                            lambda sid, provider, cwd: verdicts[sid])
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                            lambda *a, **k: presence_mod.Snapshot(set(), set()))
+
+    # -- the pure overlay -----------------------------------------------------
+
+    @pytest.mark.parametrize("verdict, state, expected", [
+        ("waiting", "working", "working"),    # finished turn, a step runs: upgrade
+        ("idle", "working", "working"),
+        ("idle", "waiting", "waiting"),
+        ("waiting", "waiting", "waiting"),
+        ("errored", "working", "errored"),    # never masked
+        ("errored", "waiting", "errored"),
+        ("working", "waiting", "working"),    # an already-working verdict stays
+        ("working", "working", "working"),
+        ("waiting", None, "waiting"),         # no workflow: unchanged
+        ("working", None, "working"),
+        ("errored", None, "errored"),
+    ])
+    def test_workflow_state_overlay_only_upgrades_an_idle_verdict(self, verdict, state, expected):
+        from power_atlas import web as web_mod
+        assert web_mod._workflow_overlay_status(verdict, state) == expected
+
+    # -- the loop-side snapshot -----------------------------------------------
+
+    def test_workflow_state_snapshot_is_per_session_and_leaves_out_sessions_without_one(
+            self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+        self._children(monkeypatch, runner=("running", 5.0), pauser=("waiting", 5.0))
+        got = web_mod._workflow_states(acp_mod._supervisor, ["runner", "pauser", "plain"])
+        assert got == {"runner": "working", "pauser": "waiting"}
+
+    def test_workflow_state_snapshot_ignores_a_child_past_its_bound_and_keeps_one_inside(
+            self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+        sv = acp_mod._supervisor
+        for state, fresh, stale, expected in (
+                ("running", self._FRESH_RUNNING, self._STALE_RUNNING, "working"),
+                ("waiting", self._FRESH_WAITING, self._STALE_WAITING, "waiting")):
+            self._children(monkeypatch, s=(state, fresh))
+            assert web_mod._workflow_states(sv, ["s"]) == {"s": expected}, (state, fresh)
+            self._children(monkeypatch, s=(state, stale))
+            assert web_mod._workflow_states(sv, ["s"]) == {}, (state, stale)
+
+    def test_workflow_state_snapshot_skips_a_session_with_its_own_permission_pending(
+            self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+        self._children(monkeypatch, asking=("running", 5.0), other=("running", 5.0))
+        self._pending_permission(monkeypatch, "asking")
+        # Asymmetric on purpose: only the session that is asking is skipped.
+        assert web_mod._workflow_states(acp_mod._supervisor, ["asking", "other"]) == {
+            "other": "working"}
+
+    def test_workflow_state_snapshot_without_a_supervisor_or_with_a_failing_one_is_empty(
+            self, caplog):
+        from power_atlas import web as web_mod
+
+        class Broken:
+            def workflow_state(self, sid):
+                raise RuntimeError("boom")
+
+        assert web_mod._workflow_states(None, ["s"]) == {}
+        with caplog.at_level(logging.ERROR, logger="power_atlas.web"):
+            assert web_mod._workflow_states(Broken(), ["s"]) == {}
+        assert any("workflow liveness" in r.getMessage() for r in caplog.records)
+
+    # -- call site 1: the listings --------------------------------------------
+
+    def _listing_world(self, monkeypatch, acp_listing_store):
+        """Eight held parents, each with its own verdict and workflow shape. Returns their ids."""
+        from power_atlas import acp as acp_mod
+        from power_atlas.status_classifier import SemanticStatus as S
+        ids = ["idle_running", "idle_none", "errored_running", "working_waitingkid",
+               "idle_waitingkid", "idle_stale", "idle_asking", "idle_stale_waiting"]
+        acp_listing_store["add"](self._CWD, [_acp_row(s) for s in ids])
+        for s in ids:
+            acp_mod._supervisor.sessions[s] = {"cwd": self._CWD}
+        self._classify_as(monkeypatch, {
+            "idle_running": S.WAITING, "idle_none": S.WAITING, "errored_running": S.ERRORED,
+            "working_waitingkid": S.WORKING, "idle_waitingkid": S.WAITING,
+            "idle_stale": S.WAITING, "idle_asking": S.WAITING, "idle_stale_waiting": S.WAITING})
+        self._children(
+            monkeypatch,
+            idle_running=("running", 5.0),
+            errored_running=("running", 5.0),
+            working_waitingkid=("waiting", 5.0),
+            idle_waitingkid=("waiting", 5.0),
+            idle_stale=("running", self._STALE_RUNNING),
+            idle_asking=("running", 5.0),
+            idle_stale_waiting=("waiting", self._STALE_WAITING))
+        self._pending_permission(monkeypatch, "idle_asking")
+        return ids
+
+    # Per id: the status the rail must show.
+    _EXPECTED = {
+        "idle_running": "working",        # the upgrade this phase exists for
+        "idle_none": "waiting",           # a held parent with no workflow is untouched
+        "errored_running": "errored",     # never masked
+        "working_waitingkid": "working",  # already working: a waiting child does not downgrade it
+        "idle_waitingkid": "waiting",     # idle + only waiting children: waiting
+        "idle_stale": "waiting",          # past the 600 s bound: no override
+        "idle_asking": "waiting",         # its own permission request is still the signal
+        "idle_stale_waiting": "waiting",  # past the 6 h bound: nothing to overlay
+    }
+
+    def test_workflow_state_reaches_the_grouped_listing_rows(
+            self, client, acp_listing_store, monkeypatch):
+        self._listing_world(monkeypatch, acp_listing_store)
+        rows = {r["id"]: r["status"] for r in client.get(
+            "/api/acp/sessions", params={"cwd": self._CWD, "session_size": 50}
+        ).json()["groups"][0]["sessions"]}
+        assert rows == self._EXPECTED
+
+    def test_workflow_state_reaches_the_dashboard_listing_rows(
+            self, client, acp_listing_store, monkeypatch):
+        from power_atlas import data as data_mod
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        self._listing_world(monkeypatch, acp_listing_store)
+        body = client.get("/api/dashboard/sessions",
+                          params={"cwd": self._CWD, "session_size": 50}).json()
+        assert {r["id"]: r["status"] for r in body["groups"][0]["sessions"]} == self._EXPECTED
+
+    @pytest.mark.parametrize("path", ["/api/acp/sessions", "/api/dashboard/sessions"])
+    def test_workflow_state_reaches_the_flat_listing_rows(
+            self, client, acp_listing_store, monkeypatch, path):
+        from power_atlas import data as data_mod
+        ids = self._listing_world(monkeypatch, acp_listing_store)
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        rows = [(_acp_row(s), "kiro-cli-v3") for s in ids]
+        monkeypatch.setattr(data_mod, "get_all_sessions_paginated",
+                            lambda *a, **k: (rows, False))
+        body = client.get(path, params={"mode": "recent"}).json()
+        assert {r["id"]: r["status"] for r in body["sessions"]} == self._EXPECTED
+
+    def test_workflow_state_is_read_on_the_loop_and_never_in_the_listing_worker(
+            self, client, acp_listing_store, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import data as data_mod
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        self._listing_world(monkeypatch, acp_listing_store)
+        threads = []
+        real = acp_mod._supervisor.workflow_state
+
+        def spy(session_id, now=None):
+            threads.append(threading.current_thread().name)
+            return real(session_id, now)
+
+        monkeypatch.setattr(acp_mod._supervisor, "workflow_state", spy)
+        for path in ("/api/acp/sessions", "/api/dashboard/sessions"):
+            assert client.get(path).status_code == 200
+        # `asyncio.to_thread` runs on executor threads named "asyncio_N"; the loop's is not.
+        assert threads, "the supervisor was never asked"
+        assert not [t for t in threads if t.startswith("asyncio_")], threads
+
+    def test_workflow_state_listing_without_a_supervisor_is_the_parents_own_status(
+            self, client, acp_listing_store, monkeypatch):
+        """The route's `acp is None` degradation: nothing held, nothing overlaid, no error."""
+        from power_atlas import web as web_mod
+        acp_listing_store["add"](self._CWD, [_acp_row("s1")])
+        monkeypatch.setattr(web_mod, "acp", None)
+        rows = client.get("/api/acp/sessions").json()["groups"][0]["sessions"]
+        assert [(r["id"], r["status"]) for r in rows] == [("s1", "")]
+
+    # -- call site 1b: the Overview tiles -------------------------------------
+
+    def test_workflow_state_reaches_overview_tiles_through_the_status_closure(self, monkeypatch):
+        from power_atlas import overview, presence
+        from power_atlas import web as web_mod
+        from power_atlas.status_classifier import SemanticStatus as S
+        seen = {}
+        monkeypatch.setattr(overview, "live_sessions",
+                            lambda held, snap, f, deps, originals: seen.update(deps=deps) or [])
+        monkeypatch.setattr(web_mod.data, "discover_workspaces_with_counts", lambda *a, **k: [])
+        monkeypatch.setattr(web_mod, "get_semantic_status",
+                            lambda sid, provider, cwd: {"a": S.WAITING, "b": S.WAITING,
+                                                        "c": S.ERRORED}[sid])
+        empty = presence.Snapshot(set(), set())
+        web_mod._overview_live({}, "all", {"a": "working"})
+        statuses = seen["deps"].acp_status_for_held(
+            [_acp_row("a"), _acp_row("b"), _acp_row("c")], empty)
+        assert statuses == {"a": "working", "b": "waiting", "c": "errored"}
+        # No snapshot handed in (the default): the closure overlays nothing.
+        web_mod._overview_live({}, "all")
+        assert seen["deps"].acp_status_for_held([_acp_row("a")], empty) == {"a": "waiting"}
+
+    def test_workflow_state_overview_route_takes_the_snapshot_on_the_loop(
+            self, client, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+        sv = acp_mod._supervisor
+        monkeypatch.setattr(sv, "sessions", {"runner": {"cwd": self._CWD}, "plain": {"cwd": self._CWD}})
+        self._children(monkeypatch, runner=("running", 5.0))
+        threads, got = [], []
+        real = sv.workflow_state
+        monkeypatch.setattr(sv, "workflow_state",
+                            lambda sid, now=None: threads.append(threading.current_thread().name)
+                            or real(sid, now))
+        monkeypatch.setattr(web_mod, "_overview_live",
+                            lambda held, filter_, workflow_states=None: got.append(
+                                (dict(held), workflow_states)) or {"filter": filter_, "tiles": []})
+        assert client.get("/api/dashboard/overview/live").status_code == 200
+        assert got == [({"runner": self._CWD, "plain": self._CWD}, {"runner": "working"})]
+        assert threads and not [t for t in threads if t.startswith("asyncio_")], threads
+
+    # -- call site 2: /api/session-availability -------------------------------
+
+    @pytest.fixture
+    def held_sid(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod._supervisor, "sessions", {self._SID: {"cwd": self._CWD}})
+        return self._SID
+
+    def _status(self, client):
+        resp = client.get("/api/session-availability",
+                          params={"sid": self._SID, "cwd": self._CWD})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["availability"] == "held"
+        return body["status"]
+
+    @pytest.mark.parametrize("verdict, child, expected", [
+        ("WAITING", ("running", 5.0), "working"),     # the upgrade
+        ("WAITING", ("waiting", 5.0), "waiting"),
+        ("WAITING", None, "waiting"),                 # no workflow: unchanged
+        ("WAITING", ("running", 601.0), "waiting"),   # past the 600 s bound
+        ("ERRORED", ("running", 5.0), "errored"),     # never masked
+        ("WORKING", ("waiting", 5.0), "working"),     # already working
+    ])
+    def test_workflow_state_reaches_session_availability_status(
+            self, client, held_sid, monkeypatch, verdict, child, expected):
+        from power_atlas.status_classifier import SemanticStatus
+        self._classify_as(monkeypatch, {held_sid: SemanticStatus[verdict]})
+        self._children(monkeypatch, **({held_sid: child} if child else {}))
+        assert self._status(client) == expected
+
+    def test_workflow_state_session_availability_keeps_a_pending_permission_waiting(
+            self, client, held_sid, monkeypatch):
+        from power_atlas.status_classifier import SemanticStatus
+        self._classify_as(monkeypatch, {held_sid: SemanticStatus.WAITING})
+        self._children(monkeypatch, **{held_sid: ("running", 5.0)})
+        self._pending_permission(monkeypatch, held_sid)
+        assert self._status(client) == "waiting"
+
+    def test_workflow_state_session_availability_reads_the_supervisor_on_the_loop(
+            self, client, held_sid, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas.status_classifier import SemanticStatus
+        self._classify_as(monkeypatch, {held_sid: SemanticStatus.WAITING})
+        self._children(monkeypatch, **{held_sid: ("running", 5.0)})
+        threads = []
+        real = acp_mod._supervisor.workflow_state
+        monkeypatch.setattr(acp_mod._supervisor, "workflow_state",
+                            lambda sid, now=None: threads.append(threading.current_thread().name)
+                            or real(sid, now))
+        assert self._status(client) == "working"
+        assert threads and not [t for t in threads if t.startswith("asyncio_")], threads
+
+    def test_workflow_state_session_availability_does_not_overlay_a_session_it_does_not_hold(
+            self, client, monkeypatch):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda *a, **k: 4242)
+        self._children(monkeypatch, **{self._SID: ("running", 5.0)})
+        body = client.get("/api/session-availability",
+                          params={"sid": self._SID, "cwd": self._CWD}).json()
+        assert body == {"sid": self._SID, "availability": "locked", "status": ""}
