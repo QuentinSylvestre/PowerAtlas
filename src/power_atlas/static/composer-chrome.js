@@ -613,6 +613,15 @@ function moveCommandSelection(delta) {
  *  frame-handling both host pages used to carry inline. */
 function setSessionCommands(list) {
   sessionCommands = list || [];
+  // kiro-cli 2.28+ removed /compact from the available_commands list (it still
+  // works via commands_execute but is no longer advertised). Always inject it
+  // so the palette stays accessible.
+  if (!sessionCommands.some(function(c) { return c.name === 'compact'; })) {
+    sessionCommands = sessionCommands.concat([{
+      name: 'compact',
+      description: 'Compact the conversation context'
+    }]);
+  }
   if (cmdDropdownEl && !cmdDropdownEl.hidden) {
     showCommandDropdown(cmdPromptInput.value.slice(1));
   }

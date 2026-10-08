@@ -9860,6 +9860,27 @@ check("commandsFramePopulatesSessionCommands", (tpl) => {
     "got: " + JSON.stringify(names));
 });
 
+// compactCommandAlwaysInjected: /compact must always appear in the palette
+// even when kiro-cli (2.28+) omits it from the available_commands list.
+check("compactCommandAlwaysInjected", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands",
+    sessionId: live,
+    payload: { commands: [{ name: "context", description: "Show context" }] },
+  });
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  const names = page.el("acpCmdDropdown")
+    .querySelectorAll(".acp-cmd-name")
+    .map((n) => n.textContent);
+  assert(names.includes("/compact"),
+    "/compact must appear in the palette even when absent from the server list; " +
+    "got: " + JSON.stringify(names));
+});
+
 // commandsFrameOnSessionChangeResetsSessionCommands
 // A new 'session' frame resets sessionCommands so stale commands from the
 // previous session never appear in the dropdown.
