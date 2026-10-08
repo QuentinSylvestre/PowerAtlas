@@ -5290,6 +5290,7 @@
       return;
     }
     if (type === 'agent_died') {
+      setTranscriptLive(false); // reset live-grouping state; turn may have died mid-stream
       // If a steer was in-flight when the agent died, restore the textarea so
       // the composer is usable again — the steer_ack that would have cleared
       // _steerPending is never coming from an agent that has exited.

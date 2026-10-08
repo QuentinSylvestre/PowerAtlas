@@ -5016,6 +5016,7 @@ function dashHandle(frame){
     return;
   }
   if (type === 'agent_died') {
+    setTranscriptLive(false); // reset live-grouping state; turn may have died mid-stream
     // Baseline reset (turn state, composer, context, sid/copy widget,
     // command palette) from Phase 1, now extended by Phase 3 (SC5) to
     // restore any pending steer text and re-enable the send-mode controls,
