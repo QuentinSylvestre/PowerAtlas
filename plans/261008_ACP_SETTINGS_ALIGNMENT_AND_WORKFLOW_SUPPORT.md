@@ -747,7 +747,7 @@ Cycle 1: 6 Medium, 9 Low (0 High). Cycle 2: 3 Medium, 10 Low (0 High). Both revi
 | 9 | Low | `RecursionError` uncaught in the new reader. | Fixed -- added to the except tuple. |
 | 10 | Low | Transient read failure turns an explicit opt-out into "on" (fallback is TUI defaults). | User: accepted -- "1. ok" (user reply, 2026-10-08), documented fallback direction. |
 | 11 | Low | Synchronous cli.json read on the event loop per session create/load, unlike neighbouring `to_thread` reads. | User: accepted -- "2. ok" (user reply, 2026-10-08). |
-| 12 | Low | `_kiro_tool_search_settings` still catches only `(OSError, ValueError)` (pre-existing, not in this diff). | Orchestrator: proposed-accept -- pending user decision |
+| 12 | Low | `_kiro_tool_search_settings` still catches only `(OSError, ValueError)` (pre-existing, not in this diff). | User: accepted -- "accept" (user reply, 2026-10-08), out of scope, reported only. |
 | 13 | Low | No guard test that the `KIRO_CLI_SETTINGS_PATH` redirect is active. | Fixed -- guard test added in `719f010` (user asked "4. fix?"). |
 | 14 | Low | Phase 2 must update the gated-off tripwire test when it flips the constant. | Fixed -- deferred criterion added to Phase 2. |
 
