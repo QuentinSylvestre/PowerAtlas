@@ -497,9 +497,139 @@ A non-boolean value for one of the three default-on keys (a string, a number) co
 - *Probe A — `toolSearch` placement: not determined.* Reading the bundle: the `initialize` settings go to `configuration.stateStartup(...)` and the `session/new` settings to `configuration.openSession(...)`, and `toolSearch` is a key in the same registry (`kp("toolSearch","off")`) and in the client-capabilities schema, so both layers appear to reach it. A runtime check on 2026-10-08 sent `session/new` with `settings.toolSearch.enabled: true` (and, in another session, `false` beside the shipped block), with `toolSearch` absent from `clientCapabilities`. Result: `configOptions`, slash commands and the result keys were identical to a `session/new` without it, so no observable exists at the `session/new` boundary and the placement stays undetermined. Seeing the effect would need a prompt over enough MCP tool schemas to cross the deferral threshold. PowerAtlas keeps `toolSearch` in `clientCapabilities` only, which works as measured on 2026-10-05 (above); nothing changes.
 - *Probe B — `session/load` leaves the persisted `workflowsEnabled` unchanged: measured for `workflowsEnabled` only.* A session created with `workflows: true` was loaded with `workflows: false`, and one created with `false` was loaded with `true`. `session.json` kept its original `workflowsEnabled` in both directions, and the load result carried no `workflowsEnabled`. After each load the slash-command list held no `workflow-*` entry. The effect of `knowledge`, `codeIntelligence` and `thinking` on a loaded session is unmeasured by that probe. A second probe on 2026-10-08 created two sessions with all three keys `enabled: false`, then loaded one with the shipped block and the other with no block, filtering notifications by `sessionId`: the load result keys, `configOptions`, `workflowsEnabled` and the slash-command list (names, excluding the `.kirocrew-*` projections) were identical. The counts of `session_info_update` and `available_commands_update` notifications differed between the two loads; the first session handled in a process also emits more updates on `session/new`, so this looks like ordering, but it was not tested. Whether the loaded session's model tool list follows the persisted value or the request is not determined (no prompt was sent). This is the same uncertainty as Probe C, deferred to Phase 2's live probe; until then `session/load` keeps passing the block unchanged.
 - *`session/load` sends the block to every resumed session.* `session/load` sends `thinking`, `knowledge` and `codeIntelligence` = on to every resumed session (unless `cli.json` says otherwise). The effect on a resumed session's tool inventory is unmeasured and is to be probed in Phase 2 (user decision 2026-10-08: keep sending on load).
-- *Probe C — the observable for `run_workflow` in a session's tool inventory: deferred to Phase 2.* The workflows keys are gated off in Phase 1. One lead only: after a `workflows: true` `session/new`, an `available_commands_update` listed `workflow-run`, `workflow-resume`, `workflow-status` and `workflow-cancel` (100 commands against 96 without). Those are slash commands, not the model's tools, and the capture did not separate sessions, so treat it as a lead, not a result.
+- *Probe C — the observable for `run_workflow` in a session's tool inventory: measured 2026-10-08, see "`_kiro/workflow/*` notification family" below.* Short form: asking the agent to list its tool names is the direct observable; `_meta.workflowsEnabled` in the `session/new` result shows the setting was honoured; the four `workflow-*` slash commands in `available_commands_update` (100 against 96) are a proxy, not the tool list.
 
----
+### `_kiro/workflow/*` notification family (probe 2026-10-08)
+
+**Measured on kiro-cli 2.28.0 (`kiro-cli-chat 2.28.0`), 2026-10-08**, from a second `kiro-cli acp --agent-engine v3` process driven by a separate Python script (never the running PowerAtlas). Session settings: the production block (`thinking`, `knowledge`, `codeIntelligence`) plus `workflows` and `goal` both `enabled: true`, `modeId` `kiro_default`, `toolSearch` forwarded at `initialize`, scratch folder as `cwd`. Runs: one tool-list run (two sessions), four workflow runs (sequential, parallel, cancelled mid-run, deliberate-failure attempt) and one `session/load` of the finished sequential session. No `session/request_permission` fired in any run: `run_workflow` and the steps' `send_message` ran without asking. Plan: `plans/261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT.md`, Phase 2 Step 2. Statements below are **measured** unless a bullet says *Inferred* or *Undetermined*. Ids are replaced by placeholders (`<parent>`, `<child-1>`, `<wf-1>`).
+
+**Answers in one place**
+
+- **Q1, which id is on the frame.** The outer `params.sessionId` is **absent** from `run_start`, from the first `node_start` of each step, from `node_complete` and from `run_complete`. It appears on exactly one frame type, the **second** `node_start` of a step, where it is the **child's** id. The parent id is always `params.parentSessionId`, on every workflow frame in all four runs. The child id lives in `params.sessionId` of that second `node_start`, in `finalState.root...children[].sessionId` of `run_complete`, and as `params.callerSessionId` of `_kiro/session/notify`. `node_complete` carries **no** child id: correlate it by `workflowId` + `nodeId` (+ `nodePath`).
+- **Q2, failure signal.** `node_complete` has `status` (only `"completed"` observed) and `capturedOutput`. `run_complete` has `status` (only `"completed"` observed) and `finalState`, whose per-step entries carry `status`, `completionSignal` (`"success"`) and `completionSignalSource` (`"send_message"`). **A failing step was not obtained**: a step told to finish with `send_message` severity `error` produced a `_kiro/session/notify` with `severity: "error"`, and then no `node_complete`, `node_paused` or `run_complete` for the remaining 43 s of the capture (the child session stayed `in_progress`). So `error` severity is not a terminal signal, and the name of a failed `status` is **undetermined**. *Inferred, unverified:* a failed step would show a non-`"completed"` `status` on `node_complete`. Do not ship a `failed` branch keyed on a value this probe never saw.
+- **Q3, parallel and loops.** Parallel: each branch has its own `nodeId`, `branchId` (equal to the step's `nodeId`) and child session id; the container node (`type: "parallel"`) gets its own `node_start`/`node_complete` with no `sessionId` and no `branchId`. `node_complete` frames of the branches arrived in the reverse order of the starts. **`loop_iteration` was not induced** (budget), so whether it reuses or mints child ids is **undetermined**. `paused`, `node_paused`, `steps_queued`, `recipes_changed` and `watch_poll` never occurred in any run.
+- **Q4, cancel and prompt return.** `session/prompt` returns **before** the workflow ends: in the sequential run the response (`stopReason: "end_turn"`) came 2.0 s before `node_complete` of the last step and `run_complete`; in the parallel run 2.2 s before. The parent's turn ends once `run_workflow` has started the run and the model says it is waiting. After `run_complete` the parent runs an **agent-initiated turn with no `session/prompt` request**: its `agent_message_chunk` frames carry `_meta.kiro.agentInitiated: true` and `agentInitiatedReason: "workflow-complete-wake"`, and the parent's status on `_kiro/sessions/changed` goes `idle`, then `in_progress` at the instant the prompt returns, and `idle` again only after the wake turn ends (so `in_progress` spans the 4 s between the prompt response and the wake text). Cancel: `session/cancel` for the parent, sent the moment the id-bearing `node_start` of step 1 arrived, was answered 72 ms later with `stopReason: "cancelled"`. **No `run_complete`, `node_complete` or any other workflow frame followed** for the 74 s the capture continued. The step's child kept running (its `_kiro/session/notify` arrived 6 s after the cancel, and its `session.json` status was still `in_progress` with `contextUsage` records every 1.5 s when the process was killed). So cancelling the parent's turn neither stops the workflow nor produces `run_complete`. Not tested: the `workflow-cancel` slash command or any other cancel route.
+- **Q5, Probe C.** Direct observable: a prompt asking for the exact tool names. A `workflows: true` session lists `run_workflow`, `inspect_workflow`, `update_workflow`, `send_message` and `save_workflow_definition` and **no** `invoke_sub_agent`; a session created without the workflows keys in the same process lists `invoke_sub_agent` and none of those five (the `invoke_sub_agent` suppression is now measured, not only read from the bundle). Cheap observable that the setting took effect: `_meta.workflowsEnabled: true` in the `session/new` result (and in `session.json`). Proxy: `available_commands_update` held 100 commands in the workflows session and 96 in the other, the difference being exactly `workflow-run`, `workflow-resume`, `workflow-status`, `workflow-cancel`. `session/new` result `_meta` has no tool inventory.
+- **Q6, `workflow-progress` chunks.** None arrived on the **live** stream in any of the four runs (0 occurrences). They exist **on disk and on replay**. In the session's `messages.jsonl` each persisted entry is `payload.type: "user"`, `payload.source: "steer"`, `id: "wf-progress-<uuid>"`, `payload.content` = the frame serialised as a JSON string with a `method` key added, and `payload._meta.kiro.notification = {kind: "workflow-progress", workflowId, eventType}`. For the sequential run (read after the run) there were six: `run_start`, `node_start` and `node_complete` for each of the two steps, and `run_complete` with the full `finalState`. The persisted `node_start` is the **first** variant (no `sessionId`); the id-bearing second `node_start` is not persisted. The key is `_meta.kiro.notification.kind`, **not** `_meta.kiro.kind` (the plan's Step 7 sketch says the latter).
+- **Q7, `session/load` of the finished run.** With the shipped block plus `workflows` and `goal` on, the load result had keys `_meta`, `modes`, `configOptions`. **Zero `_kiro/workflow/*` notifications were replayed.** The same six entries came back as `user_message_chunk` frames (shape below), in original order, interleaved with the rest of the transcript: the user prompt chunk, the `run_workflow` `tool_call` and `tool_call_update` (both `status: "completed"`), then `run_start`, `node_start` (step 1), a `system-notification` chunk with the step's message, `node_complete` (step 1), `node_start` (step 2), a `steeringClearedIds` boundary chunk, a `system-notification` chunk, `node_complete` (step 2), `run_complete`, a last boundary chunk. Every replayed chunk has `_meta.kiro.replay: true`. *Inferred:* a run that was killed or cancelled would replay `run_start` and `node_start` chunks with no `run_complete` chunk, so replayed chunks must never drive liveness state (the plan's Step 7 rule stands). Not tested: loading a cancelled run.
+
+**Frame order for the sequential run** (seconds from process start; child frames omitted):
+
+| t | Frame |
+|---|---|
+| 8.1 | `tool_call` `run_workflow` (`status: in_progress`) |
+| 18.3 | `tool_call_update` `completed` (the tool returns after about 10 s, while the creator agent designs the workflow) |
+| 18.43 | `run_start` |
+| 18.44 | `node_start` step-one, no `sessionId` |
+| 18.5 | child's own housekeeping frames start (`_kiro/governance/state`, `_kiro/mcp/status`, `_kiro/sessions/changed`, all carrying the **child** id) |
+| 18.67 | `node_start` step-one, **with** `sessionId` |
+| 22.60 / 22.61 | `node_complete` step-one, `node_start` step-two (no `sessionId`) |
+| 22.76 | `node_start` step-two with `sessionId` |
+| 24.10 | `session/prompt` response `end_turn` |
+| 26.11 / 26.12 | `node_complete` step-two, `run_complete` |
+| 28.16 | wake turn text (`workflow-complete-wake`) |
+
+Child-session frames (`session/update`, `_kiro/mcp/status` and the other housekeeping notifications) reach the client on the same connection with the **child's** `sessionId`, before the id-bearing `node_start`. A client that treats an unknown `sessionId` as an error or buffers it (SC-1) sees the child before it knows it is a child.
+
+**Payload shapes** (every frame is a JSON-RPC notification; shown as `params`)
+
+`_kiro/workflow/run_start`:
+
+```json
+{"workflowId": "<wf-1>", "workflowName": "two-step-ok-done", "inputs": {},
+ "nodeTree": [
+   {"nodeId": "step-one", "type": "step", "agentName": "wf-coder", "modelId": "claude-sonnet-4.6", "effortLevel": "high"},
+   {"nodeId": "step-two", "type": "step", "agentName": "wf-coder", "modelId": "claude-sonnet-4.6", "effortLevel": "high"}],
+ "parentSessionId": "<parent>"}
+```
+
+For a parallel run `nodeTree` holds `{"nodeId": "run-both", "type": "parallel", "branches": [{...step...}, {...step...}]}`.
+
+`_kiro/workflow/node_start`, first variant (before the child exists; no `sessionId`):
+
+```json
+{"workflowId": "<wf-1>", "nodeId": "step-one", "nodePath": ["<wf-1>", "step-one"], "type": "step",
+ "agentName": "wf-coder", "parentSessionId": "<parent>"}
+```
+
+`_kiro/workflow/node_start`, second variant (about 0.2 s later, same `nodeId`, child created):
+
+```json
+{"workflowId": "<wf-1>", "nodeId": "step-one", "nodePath": ["<wf-1>", "step-one"], "type": "step",
+ "agentName": "wf-coder", "sessionId": "<child-1>", "parentSessionId": "<parent>"}
+```
+
+In a parallel run `nodePath` is `["<wf-1>", "run-both", "step-a"]` and `"branchId": "step-a"` is added to both variants. The container's own frame has `"type": "parallel"`, `"nodeId": "run-both"`, no `agentName`, no `sessionId`.
+
+`_kiro/workflow/node_complete` (no child id; container nodes have the same shape without `capturedOutput`):
+
+```json
+{"workflowId": "<wf-1>", "nodeId": "step-one", "nodePath": ["<wf-1>", "step-one"],
+ "status": "completed", "capturedOutput": "ok", "parentSessionId": "<parent>"}
+```
+
+`_kiro/workflow/run_complete` (the only frame that lists every child id):
+
+```json
+{"workflowId": "<wf-1>", "status": "completed",
+ "finalState": {
+   "workflowId": "<wf-1>", "workflowName": "two-step-ok-done", "status": "completed", "inputs": {}, "artifacts": {},
+   "capturedOutputs": {"step-one": "ok", "step-two": "done"},
+   "root": {"nodeId": "<wf-1>", "type": "sequence", "status": "completed",
+     "children": [
+       {"nodeId": "step-one", "type": "step", "status": "completed", "agentName": "wf-coder",
+        "modelId": "claude-sonnet-4.6", "effortLevel": "high", "startedAt": "<iso>", "endedAt": "<iso>",
+        "sessionId": "<child-1>", "completionSignal": "success", "completionSignalSource": "send_message",
+        "capturedOutput": "ok"},
+       {"nodeId": "step-two", "...": "same keys, sessionId <child-2>, capturedOutput done"}],
+     "startedAt": "<iso>", "endedAt": "<iso>"},
+   "createdAt": "<iso>", "planRevision": 0, "parentSessionId": "<parent>",
+   "originalUserMessages": ["<the user prompt>"], "rootConversationId": "<parent>",
+   "workspacePath": "<scratch cwd>", "memoryConfig": {"mode": "read_write", "reflection": true},
+   "memoryConfigSource": "legacy", "backgroundExecution": false,
+   "parentModelId": "claude-sonnet-4.6", "parentEffortLevel": "high"},
+ "parentSessionId": "<parent>"}
+```
+
+In the parallel run the root is a `sequence` whose single child is `{"nodeId": "run-both", "type": "parallel", "status": "completed", "children": [step-a, step-b]}`, and each step entry also has `"branchId"`. The root `sequence` itself gets no `node_start` or `node_complete`.
+
+`_kiro/session/notify` (not one of the ten `_kiro/workflow/*` methods; sent when a step calls `send_message`; here `sessionId` is the **parent** and `callerSessionId` the child):
+
+```json
+{"sessionId": "<parent>", "callerSessionId": "<child-1>", "message": "ok", "severity": "success",
+ "sender": "step", "workflowId": "<wf-1>", "nodeId": "step-one", "agentName": "wf-coder"}
+```
+
+`severity: "success"` from a step is what completes it (`completionSignalSource: "send_message"`); the step's child session goes `idle` about 1.5 s later and `node_complete` follows about 0.1 s after that.
+
+Child `session/update` frames carry the step identity in `_meta.kiro.workflow`:
+
+```json
+{"workflowId": "<wf-1>", "workflowName": "two-step-ok-done", "nodeId": "step-one",
+ "nodePath": ["<wf-1>", "step-one"], "type": "step"}
+```
+
+`user_message_chunk` on `session/load` replay (a persisted `workflow-progress` entry; the `text` is the frame as a JSON string with `method` added and the same params as the live frame):
+
+```json
+{"sessionUpdate": "user_message_chunk",
+ "content": {"type": "text", "text": "{\"method\":\"_kiro/workflow/node_start\",\"workflowId\":\"<wf-1>\",\"nodeId\":\"step-one\",\"nodePath\":[\"<wf-1>\",\"step-one\"],\"type\":\"step\",\"agentName\":\"wf-coder\",\"parentSessionId\":\"<parent>\"}"},
+ "_meta": {"kiro": {"notification": {"kind": "workflow-progress", "workflowId": "<wf-1>", "eventType": "node_start"},
+                    "messageId": "wf-progress-<uuid>", "timestamp": "<iso>", "source": "steer", "replay": true}}}
+```
+
+`eventType` is one of `run_start`, `node_start`, `node_complete`, `run_complete`. Replay also returns the step's `send_message` text as a different chunk, `"_meta": {"kiro": {"notification": {"kind": "system-notification", "status": "success", "workflowId": "<wf-1>", "agentName": "wf-coder", "nodeName": "step-one", "sender": "step", "notifyId": "notify-<uuid>"}, "source": "steer", "replay": true, ...}}`, and empty-text boundary chunks with `_meta.kiro.steeringClearedIds: ["notify-<uuid>"]`. A handler that keys on `_meta.kiro.notification.kind == "workflow-progress"` skips both.
+
+**Not measured** (reported, not guessed): `loop_iteration`, `paused`, `node_paused`, `steps_queued`, `recipes_changed`, `watch_poll` (none occurred); a failed step's `status`/`completionSignal` values; whether the workflow survives to a `run_complete` after a parent-turn cancel if the process is left alive longer than 74 s; loading a cancelled or killed run; `session/close` during a run.
+
+**Consequences for the Phase 2 design (Inferred from the measurements above, not themselves measured)**
+
+- A router that reads `params.sessionId` and returns when it is not a string drops every frame except the second `node_start`. Route on the method prefix and take the parent from `params.parentSessionId`; the plan's `_resolve_workflow_parent` ladder reduces to that one field (keep the ladder only as a fallback when it is missing).
+- Each step produces two `node_start` frames. The first has no child id; the second has it. Treat the pair as one start: register the crew entry from the second, tolerate the first.
+- `node_complete` must be matched by `(workflowId, nodeId)`; build that map from the id-bearing `node_start`, or read child ids from `run_complete`.
+- Container nodes (`type` other than `"step"`) have no child session; they must not create crew entries.
+- The prompt returns before the run ends and a parent turn follows the run with no prompt request, so turn-end must not clear workflow children and the wake turn's chunks arrive with no request pending.
+- A cancel of the parent's turn gives no `run_complete`; a staleness bound on active-workflow state is required, not optional.
 
 ## ACP permission wire shapes (measured 2026-09-23, kiro-cli KAS 2.23.1)
 
