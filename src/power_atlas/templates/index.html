@@ -4,10 +4,9 @@
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
   <div class="topbar-spacer"></div>
 
-  <!-- Settings menu: everything below used to live directly in this row as
-       separate pills (Profile / Remote / Autostart / Peek hotkey / Port).
-       Moved here so only Refresh -- the one control worth a click without a
-       menu in the way -- keeps a permanent seat in the bar. -->
+  <!-- Settings menu: controls that used to live directly in this row as
+       separate pills (Profile / Remote / Autostart / Peek hotkey / Port)
+       are now behind this gear icon to keep the topbar clean. -->
   <div class="topbar-settings-wrap">
     <button id="topbarSettingsBtn" class="topbar-settings-btn" aria-expanded="false" aria-haspopup="true" aria-controls="topbarSettingsMenu" title="Settings" aria-label="Settings">
       <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.97 7.97 0 0 0 0-2l1.9-1.5-2-3.4-2.2.9a8 8 0 0 0-1.7-1L15 3h-4l-.4 2.9a8 8 0 0 0-1.7 1l-2.2-.9-2 3.4L6.6 11a7.97 7.97 0 0 0 0 2l-1.9 1.5 2 3.4 2.2-.9a8 8 0 0 0 1.7 1L10.6 21h4l.4-2.9a8 8 0 0 0 1.7-1l2.2.9 2-3.4-1.9-1.5Z"/></svg>
@@ -8069,7 +8068,7 @@ function dashDeepRefresh() {
   var btn = dashRailReloadBtn;
   btn.disabled = true; btn.classList.add('spinning');
   fetch('/api/refresh', { method: 'POST' })
-    .then(function(r) { return r.json(); })
+    .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(function() { refreshSettings(); dashRailLoadFirstPage(); })
     .catch(function() { dashRailStatusEl.textContent = 'Refresh failed \u2014 try again'; })
     .finally(function() { btn.disabled = false; btn.classList.remove('spinning'); });
