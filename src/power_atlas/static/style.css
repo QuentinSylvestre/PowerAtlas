@@ -1979,7 +1979,7 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
    scales the whole viewport in — measured on this exact element, since it is
    focused by every prompt sent. The desktop-sized override undoes it above
    the breakpoint where no such browser is in play. */
-.acp-prompt { width: 100%; min-height: 44px; max-height: 258px; resize: none; background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: transparent; caret-color: var(--text); position: relative; z-index: 1; font-family: inherit; font-size: 16px; line-height: 1.5; padding: 8px 10px; }
+.acp-prompt { width: 100%; min-height: 44px; max-height: 258px; resize: none; background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: transparent; caret-color: var(--text); position: relative; z-index: 1; font-family: inherit; font-size: 16px; line-height: 1.5; padding: 8px 10px; word-break: break-word; overflow-wrap: break-word; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }
 .acp-prompt::selection { color: var(--text); }
 .acp-prompt::placeholder { color: var(--text-dim, var(--text-muted, rgba(128,128,128,0.7))); }
