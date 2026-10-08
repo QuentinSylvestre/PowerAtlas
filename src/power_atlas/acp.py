@@ -4870,6 +4870,41 @@ class _Supervisor:
                         if payload.get("status") in _TERMINAL_TOOL_STATUSES:
                             payload["stoppedAt"] = time.time()
                             self._tool_start_times.pop((session_id, tc_id), None)
+                # 261007 Phase 4 (SC-4): if this tool_call/tool_call_update is
+                # tagged with an agentSubtaskId we have registered, record a
+                # copy onto that sub-task's own channel so the sub-agent panel
+                # can show it live and on replay. `payload` is the normalized
+                # _tool_payload shape the client's handleSub/subAddToolCall
+                # expects, already stamped with startedAt/stoppedAt above.
+                #
+                # NOTE: whether a sub-agent's own *internal* tool calls carry
+                # agentSubtaskId could not be confirmed on the dev machine --
+                # kiro-cli reports autonomousAgents=false (admin_disabled), so
+                # no fan-out can run there (plan §9 Phase 4 divergence #1).
+                # This block is the "defended-against-regardless" path, mirroring
+                # _on_agent_subtask_open's spawnToolCallId guard: a no-op when
+                # the id is absent, correct the moment a build does tag them.
+                # _emit records to subagent_history AND broadcasts -- do NOT
+                # append to subagent_history separately (that double-records).
+                if _agent_subtask_id and _agent_subtask_id in self.subagent_history:
+                    if kind == "tool_call":
+                        # Close the sub-task's own prose bubble first, so its
+                        # markdown `rendered` frame lands before this tool row
+                        # (mirrors the parent-channel _flush_bubble above).
+                        _flush_bubble(_agent_subtask_id, emit_fn=_emit)
+                    _sub_payload = dict(payload)
+                    _emit(_agent_subtask_id, envelope(
+                        "tool_call" if kind == "tool_call" else "tool_update",
+                        _sub_payload, _agent_subtask_id))
+                    if (kind == "tool_call_update"
+                            and payload.get("status") in _TERMINAL_TOOL_STATUSES):
+                        # Flush any trailing sub-task prose at termination too.
+                        _flush_bubble(_agent_subtask_id, emit_fn=_emit)
+                elif _agent_subtask_id and kind == "tool_call":
+                    log.debug(
+                        "ACP sub-agent tool_call: agentSubtaskId=%r not yet in "
+                        "subagent_history (spawn frame may not have arrived yet)"
+                        " -- dropped", _agent_subtask_id)
                 _emit(session_id, envelope(
                     "tool_call" if kind == "tool_call" else "tool_update",
                     payload, session_id))
