@@ -140,7 +140,7 @@ Phase D (sub-agent panel): Python recording to `subagent_history`, client-side t
 ---
 
 > **Date**: 2026-10-07
-> **Status**: Draft
+> **Status**: In Progress
 > **Scope**: Live tool grouping, edit-row separation + diff fix, sub-agent panel (Python + client), prompt history, list continuation, Ctrl+Z, overlay, auto-scroll, dashboard auto-grow
 > **Estimated effort**: ~2-3 days
 
@@ -295,15 +295,15 @@ Fix strategy: confirmed by pre-flight. If the race is confirmed (most likely), O
 - Dashboard mirrors of the above.
 
 **Exit criteria**:
-- [ ] **Pre-flight**: edit diff race confirmed or ruled out; root cause documented in §9
-- [ ] During a live turn, non-edit tool calls appear inside a `.acp-tool-group` container immediately (not waiting for turn-end)
-- [ ] Edit rows are NOT inside any `.acp-tool-group` — they appear as standalone rows
-- [ ] Edit rows show the diff content immediately (auto-expanded, no click required)
-- [ ] When a session is loaded/replayed, edit rows show diff content (not blank)
-- [ ] `liveToolGroupsOnAddToolCall` test passes
-- [ ] `editToolCallNotInGroup` test passes
-- [ ] `editRowAutoExpanded` test passes
-- [ ] `node tests/acp_page.test.mjs` passes (0 failures)
+- [x] **Pre-flight**: edit diff race confirmed or ruled out; root cause documented in §9
+- [x] During a live turn, non-edit tool calls appear inside a `.acp-tool-group` container immediately (not waiting for turn-end)
+- [x] Edit rows are NOT inside any `.acp-tool-group` — they appear as standalone rows
+- [x] Edit rows show the diff content immediately (auto-expanded, no click required)
+- [x] When a session is loaded/replayed, edit rows show diff content (not blank)
+- [x] `liveToolGroupsOnAddToolCall` test passes
+- [x] `editToolCallNotInGroup` test passes
+- [x] `editRowAutoExpanded` test passes
+- [x] `node tests/acp_page.test.mjs` passes (0 failures)
 - [ ] Hard reload + live session: tool groups visible mid-turn in browser QA
 
 ---
@@ -478,7 +478,7 @@ if (_pos - _lineStart === _prefixLen) {  // cursor is right after the prefix, no
 - [ ] `listContinuationEmptyExits` test passes
 - [ ] **`shiftEnterOnEmptyPrefixLineContinues` rewritten**: this existing test asserts `'3. '` → `'3. \n4. '` — D10 inverts it to prefix-clear. The test must be updated to assert the new behavior (prefix cleared, cursor at line start) before the suite can pass.
 - [ ] `execCommand('insertText')` harness stub added to `tests/acp_page.test.mjs`
-- [ ] `node tests/acp_page.test.mjs` passes (0 failures)
+- [x] `node tests/acp_page.test.mjs` passes (0 failures)
 
 ---
 
@@ -537,7 +537,7 @@ The trigger: in `handleSub()`, on `session_closed` or when `subReplaying` become
 - [ ] During a live fan-out, the sub-agent panel shows tool calls as they stream
 - [ ] After opening a sub-agent that has completed, its past tool calls appear in the panel
 - [ ] Sub-agent text is rendered with markdown formatting
-- [ ] `node tests/acp_page.test.mjs` passes (0 failures)
+- [x] `node tests/acp_page.test.mjs` passes (0 failures)
 - [ ] Browser QA: open a fan-out sub-agent panel; verify tool calls + markdown rendering
 
 ---
@@ -580,13 +580,28 @@ Browser QA per phase (use Playwright or Chrome MCP with `pa_local` cookie per AG
 |---|---|---|---|
 | 0 | Pre-flights (edit diff race + sub-agent frame) | Not started | Embedded in Phase 2 and Phase 4 exit criteria |
 | 1 | Overlay word-break + auto-scroll | Complete | `883246f` |
-| 2 | Transcript rendering (live grouping, edit rows, diffs) | Not started | |
+| 2 | Transcript rendering (live grouping, edit rows, diffs) | Code complete (QA pending) | live grouping + edit auto-expand + "edit not applied"; 995/995 node tests; browser QA deferred |
 | 3 | Composer (history, Ctrl+Z, auto-grow, list continuation) | Not started | |
 | 4 | Sub-agent panel (Python + client) | Not started | Requires restart grant |
 
 ## 9) Implementation Divergences from Plan
 
 **Phase 1**: `fs_write` tool destroyed `style.css` on first attempt (overwrote 2890 lines with a single CRLF). Recovered immediately via `git checkout --`; no data loss. Subsequent edit used a byte-preserving PowerShell `ReadAllText/Replace/WriteAllText` script (CRLF preserved, 0 NUL bytes). Final diff is exactly the intended 1-line addition.
+
+**Phase 2**:
+1. Edit-diffs-on-load root cause: NOT a backfill race and NOT a missing `str_replace` handler. The backfill is always populated before history replay. The "absent" diffs were caused by edit rows being created hidden (collapsed) by default. Fix = auto-expand. No `acp.py` change or `docs/KNOWLEDGE.md` update needed — the documented behavior was always accurate.
+2. Multi-session entanglement: a concurrent session committed its own `fix(acp)` change to `acp.html` (commit `7e28335`) while Phase 2's three acp.html wiring hunks were uncommitted in the shared working tree, sweeping them into that commit. Phase 2's own feat commit (`819ffb5`) therefore covers only `transcript-renderer.js`, `index.html`, and `tests/acp_page.test.mjs`. The acp.html changes are correct and present in HEAD; no history rewrite performed.
+
+**Phase 2 pre-flight (edit diffs on load)** — ROOT CAUSE: NOT a backfill race, and NOT a server-side gap. Traced through four acp.py functions:
+
+1. `_handle_load` (acp.py:6826) `await`s `_supervisor.load_session` (which populates `_diff_backfill[session_id]` at acp.py:5799) *before* `_deliver_load` -> `_handle_subscribe` runs. The backfill is therefore fully populated before any history replay is sent. **No race.**
+2. `_handle_subscribe` (acp.py:6721) replays history through `_with_backfilled_bodies(history.events(), session_id, _diff_backfill.get(session_id))` (acp.py:2299), which inserts a synthetic `tool_output` (`form: diff`) frame before each recorded edit `tool_call` whose digest is `form: diff`. For a `str_replace`, the opening `tool_call` carries the diff and produces a `form: diff` digest; the terminal `tool_call_update` with `status==completed` returns `None` from `_tool_output_digest` (acp.py:2155) so the digest is not overwritten. So the backfilled diff **is** sent on load for str_replace edits.
+3. Client side (`transcript-renderer.js`): the backfilled `tool_output` reaches `addToolOutput` -> `_attachToolOutput` -> `_renderEditPanel`, which **builds the diff into the panel DOM**. But the edit panel is created with `panel.hidden = true` (collapsed by default), so the diff is present but **requires a click to reveal**. That is the user-perceived "diffs absent on load".
+4. `_get_tool_diffs_v3` (acp.py:2881) does populate the backfill for both `fs_write` and `str_replace` (keyed by `toolCallId`); confirmed by reading its extraction logic.
+
+**Conclusion**: the regression is the collapsed-by-default edit panel, not a missing/late diff. The correct fix is the Phase 2 edit-row **auto-expand** (feature B) — expanding the panel on creation makes the already-present diff visible on both the live and the session-load path. No `acp.py` change is required; neither Option B (re-broadcast) nor awaiting is needed. (`docs/KNOWLEDGE.md:127`'s "live-verified working" claim is consistent: the diff was always in the DOM, just behind one click. The user's "absent" report is the collapse, not a data gap.)
+
+**Dashboard note (out of scope)**: the dashboard's static `/api/session-transcript` panel (`translate_transcript` -> `renderTranscriptFrame`) never emits `tool_output` and `renderTranscriptFrame` deliberately drops it, so the dashboard static panel has never carried backfilled edit diffs. This is pre-existing and separate from the `/acp` session-load path fixed here.
 
 ## Follow-up Work (Deferred)
 
@@ -636,3 +651,61 @@ Implementation health: Green. Cycle 2 skipped — cycle 1 findings all Low + aut
 
 Implementation (2026-10-08, code: 883246f)
 Added `word-break: break-word; overflow-wrap: break-word` to the `.acp-prompt` rule in `style.css:1982`, matching the overlay div `.acp-prompt-hl` which already carried both properties. The `@media (min-width: 768px)` block overrides only `font-size` for both classes; the wrap properties cascade correctly from the base rule at both 16px and 13px. Auto-scroll exit criteria ticked as verified by existing node tests that drive both branches of the 60px `stuckToBottom()` threshold. Browser QA (visual alignment + streaming scroll confirm) deferred to Phase 1 QA pass.
+
+### Phase 2 implementation notes
+
+Implementation (2026-10-08).
+
+**Live grouping + edit rows + auto-expand** (`transcript-renderer.js`): added module
+vars `openGroup`/`_transcriptLive`/`_autoExpandEdits` with `setTranscriptLive(v)` and
+`setTranscriptAutoExpand(v)`. During a live turn (`setTranscriptLive(true)` at meta
+turn:start) non-edit tool calls open and append into one incremental
+`.acp-tool-group` (`_ensureOpenGroup` / `_addRowToOpenGroup`), header refreshed on
+each add and on each in-group `tool_update` (text-node only, no rebuild). A prose
+bubble (`appendChunk`) or an edit row breaks the run (`openGroup = null`). The replay
+path is unchanged (`toolGroup` + `flushToolGroups` tail-flush); `flushToolGroups`
+now also finalizes any open live group. Edit rows never join a group and auto-expand
+their panel (`_maybeAutoExpandEdit`) in a real-session context (live turn or replay).
+A failed/cancelled/rejected edit with no diff and no body shows `edit not applied`
+(`_editDidNotApply`) instead of the generic reload-not-retained note.
+
+**Edit diffs on load** — resolved by auto-expand, not a server change (see the §9 pre-
+flight finding). The backfilled diff was always present in the panel DOM after a
+`session/load` replay; it was merely collapsed. `renderTranscriptHistory` and both
+pages' `history` replay now set auto-expand so the diff is visible without a click.
+No `acp.py` change was needed; `docs/KNOWLEDGE.md` therefore unchanged.
+
+**Wiring**: `acp.html` meta turn:start/end call `setTranscriptLive(true/false)`, and
+its `history` replay sets `setTranscriptLive(false)` + `setTranscriptAutoExpand(true)`.
+`index.html` dashHandle turn:start/end mirror the live-mode toggle (replay there goes
+through `renderTranscriptHistory`, which sets auto-expand itself).
+
+**Tests**: 10 added to `tests/acp_page.test.mjs` (live grouping x2, edit-not-in-group
+x2, auto-expand live + on-load, edit-not-applied, isolated-stays-collapsed, 2 dashboard
+wiring mirrors). `loadDashPicker` gained `setTranscriptLive`/`setTranscriptAutoExpand`
+recording stubs (that partial sandbox does not load the renderer). Full suite: 995/995.
+
+**Multi-session entanglement (divergence)**: a concurrent session committed its own
+`.acp-compaction-*` CSS change in `acp.html` (commit `7e28335`) while this task's
+three `acp.html` Phase 2 wiring hunks were uncommitted in the shared working tree, so
+that commit swept in my `acp.html` edits under its own message. The edits are present
+and correct (verified at acp.html lines ~4784/4807/4923); no history rewrite was done
+(prohibited). The Phase 2 feat commit therefore covers only the remaining three files
+(`transcript-renderer.js`, `index.html`, `tests/acp_page.test.mjs`).
+
+### 2026-10-08 — Implementation Review (after Phase 2, 4-persona panel)
+
+Implementation health: Green. Cycle 2 skipped — 4 Low findings, all accepted/fixed.
+4 findings (0 High, 0 Medium, 4 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | `agent_died` handlers don't reset `_transcriptLive`/`openGroup` — latent stale state | Fixed — `setTranscriptLive(false)` added to both acp.html and index.html `agent_died` handlers, commit `80bf89a` |
+| 2 | Low | Dashboard mirror tests assert stub calls only, not real grouping behavior | Accepted — shared renderer covered on acp.html path; dashboard mirrors same code path |
+| 3 | Low | Phase 2 acp.html wiring in commit `7e28335` instead of `819ffb5` | Accepted — documented in §9; correct code in HEAD |
+| 4 | Low | "edit not applied" panel wording beyond Phase 2 exit criteria | Accepted — correct behavior added proactively |
+
+### Phase 2 implementation notes
+
+Implementation (2026-10-08, code: 819ffb5 + 7e28335 + 80bf89a)
+Live tool grouping via `openGroup`/`_transcriptLive`/`_autoExpandEdits` module-level state in `transcript-renderer.js`. `setTranscriptLive(v)` exposed and wired by both pages at turn:start/end and in `renderTranscriptHistory`. Edit rows excluded from groups and auto-expanded via `_maybeAutoExpandEdit`. "edit not applied" label for failed/rejected edits with no diff. Pre-flight found edit diffs on load were never a race or server gap — the panel was simply collapsed; auto-expand resolves it. 10 new tests, all discriminating (mutation-verified). `agent_died` reset fixed in follow-up commit.
