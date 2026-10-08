@@ -30,7 +30,7 @@
 - **`launch_terminal` env scrub excluded (follow-up)**: `launch_terminal` (~`launcher.py:595`) opens a bare shell without env scrubbing — the user manually starts a process inside it. Follow-up #5 of the same plan.
 
 ### Session Control & Integration
-- **Fix `/compact` in ACP sessions** — `/compact` slash command broken or incomplete in PA-held sessions; compaction recap UI exists but was excluded from dashboard parity scope
+- **Manual compaction in ACP sessions (kiro-cli v3 compatibility check)** — kiro-cli v3 KAS does not intercept `_kiro.dev/commands/execute` for "compact" via ACP; the command is forwarded to the agent model instead of triggering real compaction. Auto-compaction still works. The `/compact` palette entry has been removed until a kiro-cli version exposes a native ACP compaction path. **Check each kiro-cli minor release for a `session/compact` ACP method or reinstatement of "compact" in `available_commands_update` with v3 semantics.** When found, reinstate the palette entry and wire it to the new path.
 - **Align PA ACP session settings with kiro-cli** — systematic audit of `_meta.kiro.settings` keys PA omits vs TUI; `workflows.enabled` was the first gap found, likely more
 - **Deferred kiro-cli settings** — `tangentMode`, `checkpoint`, `c2s`, `memory`, `disableAutoCompaction`; each needs PA UI/UX work before enabling; tracked as individual items
 - **Full workflow support** — four layers: enable `run_workflow` tool on session/new; handle `_kiro/workflow/*` notifications in acp.py; workflow monitor UI; child session subscriptions

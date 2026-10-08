@@ -9860,9 +9860,10 @@ check("commandsFramePopulatesSessionCommands", (tpl) => {
     "got: " + JSON.stringify(names));
 });
 
-// compactCommandAlwaysInjected: /compact must always appear in the palette
-// even when kiro-cli (2.28+) omits it from the available_commands list.
-check("compactCommandAlwaysInjected", (tpl) => {
+// compactNotInjectedInPalette: /compact must NOT be injected by PA when absent
+// from the server list. kiro-cli v3 KAS does not intercept the command via ACP;
+// the entry will appear naturally only when kiro-cli advertises it.
+check("compactNotInjectedInPalette", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({
     type: "commands",
@@ -9876,8 +9877,8 @@ check("compactCommandAlwaysInjected", (tpl) => {
   const names = page.el("acpCmdDropdown")
     .querySelectorAll(".acp-cmd-name")
     .map((n) => n.textContent);
-  assert(names.includes("/compact"),
-    "/compact must appear in the palette even when absent from the server list; " +
+  assert(!names.includes("/compact"),
+    "/compact must NOT be injected when absent from the server list; " +
     "got: " + JSON.stringify(names));
 });
 

@@ -580,25 +580,6 @@ function confirmCommandSelection() {
   cmdOnPromptChanged();
   var sid = cmdGetSessionId();
   if (!sid) return;
-  // Treated as a skill (text insertion, not immediate execution) so Tab
-  // inserts "/compact " and the user can press Enter when ready.
-  // On Enter, sends via commands_execute (acp.py now whitelists compact even
-  // when kiro-cli 2.28+ no longer advertises it).
-  if (name === 'compact') {
-    var current = cmdPromptInput.value;
-    var tokenMatch = current.match(/(?:^|\s)(\/\S*)$/);
-    var completed = '/compact ';
-    if (tokenMatch) {
-      cmdPromptInput.value = current.slice(0, tokenMatch.index + (tokenMatch[0].charAt(0) === ' ' ? 1 : 0)) + completed;
-    } else {
-      cmdPromptInput.value = completed;
-    }
-    cmdOnPromptChanged();
-    cmdPromptInput.focus();
-    var len = cmdPromptInput.value.length;
-    cmdPromptInput.setSelectionRange(len, len);
-    return;
-  }
   // Step 9 review, Fix 10: cmdSend()'s own return value used to go
   // unchecked -- a failed send (while disconnected) produced no feedback
   // beyond whatever send() itself already logs on failure (`logLine('error',
@@ -632,15 +613,12 @@ function moveCommandSelection(delta) {
  *  frame-handling both host pages used to carry inline. */
 function setSessionCommands(list) {
   sessionCommands = list || [];
-  // kiro-cli 2.28+ removed /compact from the available_commands list (it still
-  // works via commands_execute but is no longer advertised). Always inject it
-  // so the palette stays accessible.
-  if (!sessionCommands.some(function(c) { return c.name === 'compact'; })) {
-    sessionCommands = sessionCommands.concat([{
-      name: 'compact',
-      description: 'Compact the conversation context'
-    }]);
-  }
+  // /compact is intentionally NOT injected here. kiro-cli v3 KAS does not
+  // intercept _kiro.dev/commands/execute for "compact" via ACP — it forwards
+  // the text to the agent model, which responds saying it cannot trigger it.
+  // Manual compaction is therefore unavailable in ACP sessions; auto-compaction
+  // still works. The entry will appear naturally if a future kiro-cli version
+  // re-advertises the command in available_commands_update.
   if (cmdDropdownEl && !cmdDropdownEl.hidden) {
     showCommandDropdown(cmdPromptInput.value.slice(1));
   }

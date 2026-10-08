@@ -7730,25 +7730,13 @@ async def _handle_commands_execute(conn, session_id, payload):
         return
     all_catalogue = (meta.get("commands") or []) + (meta.get("skills") or [])
     valid_names = {c.get("name") for c in all_catalogue if isinstance(c, dict) and c.get("name")}
-    # compact is a PA-handled built-in: always valid even if kiro-cli 2.28+ stopped
-    # advertising it in available_commands_update. The commands_execute path is tried
-    # first; if kiro-cli ignores it, the session/prompt path in confirmCommandSelection
-    # still triggers PA's own compaction announcement.
-    _ALWAYS_VALID = {"compact"}
-    if valid_names and name not in valid_names and name not in _ALWAYS_VALID:
+    if valid_names and name not in valid_names:
         conn.send(error_frame("bad_payload", "Unknown command.", session_id))
         log.warning("ACP commands_execute refused: [bad_payload] unknown command %r "
                     "session=%s", name, session_id)
         return
     _supervisor.touch_used(session_id)
     log.info("ACP commands_execute: session=%s name=%r", session_id, name)
-    if name == "compact" and session_id not in _supervisor._compacting:
-        _supervisor._compacting.add(session_id)
-        _supervisor._compaction_started_at[session_id] = time.monotonic()
-        _emit(
-            session_id,
-            envelope("compaction", {"status": "started", "error": "", "summary": ""},
-                     session_id))
     _supervisor.inflight.add(session_id)
     try:
         result = await _supervisor.commands_execute(session_id, name)
