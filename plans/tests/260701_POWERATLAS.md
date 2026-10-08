@@ -269,11 +269,11 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: substring on cwd, case-insensitive; empty q restores all.
 - **risks**: cwd-only match; per-keystroke metadata glob; selection wiped by swap.
 
-### 2.15 Manual refresh + last-refresh
-- **what**: refresh button clears caches, warms up, re-renders; last-refresh time shown.
-- **how-to-reach**: click `↻`; `POST /api/refresh`; `GET /api/last-refresh`. *(pa_local)*
-- **probes**: button → `...` disabled → re-enabled; full cache clear + warmup cost; `refreshTime` shows HH:MM:SS; visibilitychange re-refresh on tab focus.
-- **oracle**: `session_cache.clear()` + `_cache.clear()` + warmup; returns `last_refresh`.
+### 2.15 Manual refresh (deep refresh via rail-head button)
+- **what**: `#dashRailReload` in the rail head does a deep refresh — clears server caches, warms up, re-renders the rail. No topbar refresh button; no `#refreshTime` element.
+- **how-to-reach**: click the rotating-arrow icon button in the rail head; `POST /api/refresh`. *(pa_local)*
+- **probes**: click button → button spins and is disabled → rail re-renders with fresh data → button re-enabled; new workspace sessions appear without needing any secondary control; `POST /api/refresh` triggers full `session_cache.clear()` + `_cache.clear()` + `warmup_all`; on failure rail status shows "Refresh failed — try again" and button re-enables.
+- **oracle**: button carries `aria-label="Refresh sessions"` and `title="Refresh all sessions now"`; no `.refresh-group` div; no `#refreshTime` span.
 - **risks**: full clear expensive on many workspaces.
 
 ### 2.16 Lifespan: background refresh loop + Usage warm pass + ACP idle sweeper + ACP crash watchdog + ACP teardown

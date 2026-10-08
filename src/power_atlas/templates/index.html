@@ -3,12 +3,7 @@
 <div class="topbar">
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
   <div class="topbar-spacer"></div>
-  <div class="refresh-group" title="Last data refresh time">
-    <span class="refresh-time" id="refreshTime"></span>
-    <button class="refresh-btn" onclick="doRefresh()" aria-label="Refresh sessions" title="Refresh all sessions now">
-      <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
-    </button>
-  </div>
+
   <!-- Settings menu: everything below used to live directly in this row as
        separate pills (Profile / Remote / Autostart / Peek hotkey / Port).
        Moved here so only Refresh -- the one control worth a click without a
@@ -210,7 +205,7 @@
                aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         </button>
         <button class="ws-icon-btn" id="dashRailReload" type="button"
-                aria-label="Refresh workspaces" title="Refresh">
+                aria-label="Refresh sessions" title="Refresh all sessions now">
           <svg class="ws-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
                aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
@@ -5872,7 +5867,6 @@ function refreshNotifyToggle(){
 }
 function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput){peekInput.value=d.peek_hotkey||'ctrl+shift+z';peekInput.setAttribute('data-saved',peekInput.value)}var browserInput=document.getElementById('browserHotkey');if(browserInput){browserInput.value=d.browser_hotkey||'';browserInput.setAttribute('data-saved',browserInput.value)}['peekHotkeyError','browserHotkeyError'].forEach(function(id){var e=document.getElementById(id);if(e){e.textContent='';e.hidden=true}});if(typeof renderShortcutNotes==='function')renderShortcutNotes(d);var peekModeSel=document.getElementById('peekMode');if(peekModeSel)peekModeSel.value=d.peek_mode==='toggle'?'toggle':'hold';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){
-  fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});
   initProviderFilter();initWorkspaceFilters();
   dashRailInit();
   wsSearchInit();
@@ -7945,7 +7939,7 @@ document.addEventListener('click', function(){
 document.addEventListener('keydown', function(e){
   if (e.key === 'Escape' && !dashRailSettingsMenu.hidden) dashRailCloseMenus();
 });
-dashRailReloadBtn.addEventListener('click', function(){ dashRailReload(); });
+dashRailReloadBtn.addEventListener('click', dashDeepRefresh);
 dashRailMoreEl.addEventListener('click', function(){
   dashRailFocus = { more: true };
   if (dashRailMode === 'flat') { loadFlatPage(dashRailFlatPage + 1); return; }
@@ -8071,6 +8065,15 @@ function dashRailRefreshRetry(left){
 // ---- boot -------------------------------------------------------------
 
 function dashRailReload(){ dashRailLoadFirstPage(); }
+function dashDeepRefresh() {
+  var btn = dashRailReloadBtn;
+  btn.disabled = true; btn.classList.add('spinning');
+  fetch('/api/refresh', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function() { refreshSettings(); dashRailLoadFirstPage(); })
+    .catch(function() { dashRailStatusEl.textContent = 'Refresh failed \u2014 try again'; })
+    .finally(function() { btn.disabled = false; btn.classList.remove('spinning'); });
+}
 function dashRailInit(){
   dashRailLoadFirstPage();
   document.addEventListener('visibilitychange', function(){
@@ -8091,12 +8094,6 @@ function dashRailInit(){
 // refresh now (dashRailInit's 60s poll + visibilitychange, matching
 // /acp's own RAIL_REFRESH_MS cadence -- see that file's reasoning on why
 // 60s: it matches the idle sweeper's own cadence, not an arbitrary choice).
-// `btn.textContent='...'` used to say "loading" by replacing the glyph; now
-// that the button holds an SVG icon rather than a text glyph, that same
-// assignment would silently wipe the icon out. A `.spinning` class animating
-// the icon says the same thing without touching its children.
-function doRefresh(){var btn=document.querySelector('.refresh-btn');btn.disabled=true;btn.classList.add('spinning');fetch('/api/refresh',{method:'POST'}).then(function(r){return r.json()}).then(function(d){document.getElementById('refreshTime').textContent=d.last_refresh;refreshSettings();dashRailReload()}).finally(function(){btn.disabled=false;btn.classList.remove('spinning')})}
-
 // ---- topbar settings menu (Profile/Remote/toggles/All settings + Restart) --
 //
 // Same open/close pattern as the rail's own dashRailSettingsBtn/
