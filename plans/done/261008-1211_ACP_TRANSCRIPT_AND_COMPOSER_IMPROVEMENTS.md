@@ -144,6 +144,14 @@ Phase D (sub-agent panel): Python recording to `subagent_history`, client-side t
 > **Scope**: Live tool grouping, edit-row separation + diff fix, sub-agent panel (Python + client), prompt history, list continuation, Ctrl+Z, overlay, auto-scroll, dashboard auto-grow
 > **Estimated effort**: ~2-3 days
 
+## Completion Summary
+
+### Acknowledged at archival
+
+- `Accepted (harness opportunity)`: Nine items in one session with no friction — no change needed.
+- `Accepted (harness opportunity)`: Edit diff root cause required reading 4 `acp.py` functions. A node test for replayed sessions with `str_replace` events would have made it self-documenting. Tracked in Follow-up Work.
+- `Fix now (regression)`: `/compact` disappeared from the ACP palette after kiro-cli 2.28+ stopped advertising it in `available_commands_update`. Fixed in `d57f16b` — injected as a synthetic fallback in `setSessionCommands` in `composer-chrome.js`.
+
 ## 1) Current State
 
 **Tool grouping** (`transcript-renderer.js:80, 1503`): `toolGroup` accumulates tool-call rows during a turn; `flushToolGroups()` wraps them into collapsible `.acp-tool-group` containers only at `turn:end` (`acp.html:4812`). During a turn, rows render flat — no grouping. Edit rows (`kind=edit`) go through the same `addToolCall` path (`transcript-renderer.js:1293`) and are currently indistinguishable from other tool calls. `flushToolGroups()` builds a static snapshot header and resets `toolGroup = null`.
@@ -217,7 +225,7 @@ Also add inside the existing `@media (min-width: 768px)` block — not needed (`
 
 **Exit criteria**:
 - [x] `.acp-prompt` has `word-break: break-word; overflow-wrap: break-word` in `style.css`
-- [ ] Overlay and textarea wrap identically at both 16px and 13px for a long unbroken token (browser QA)
+- [x] Overlay and textarea wrap identically at both 16px and 13px for a long unbroken token (browser QA)
 - [x] Scroll-to-bottom fires reliably when user is at the bottom during a streaming turn (browser QA) -- verified by existing node tests; stuckToBottom() 60px threshold mirrored in harness
 - [x] Scroll does NOT fire when user has scrolled up more than 60px (browser QA) -- verified by existing node tests; stuckToBottom() 60px threshold mirrored in harness
 - [x] `node tests/acp_page.test.mjs` passes (0 failures) -- 985 passed, 0 failed
@@ -304,7 +312,7 @@ Fix strategy: confirmed by pre-flight. If the race is confirmed (most likely), O
 - [x] `editToolCallNotInGroup` test passes
 - [x] `editRowAutoExpanded` test passes
 - [x] `node tests/acp_page.test.mjs` passes (0 failures)
-- [ ] Hard reload + live session: tool groups visible mid-turn in browser QA
+- [x] Hard reload + live session: tool groups visible mid-turn in browser QA
 
 ---
 
