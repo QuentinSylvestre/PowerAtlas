@@ -340,7 +340,7 @@ After all phases land:
 | 1 | CSS — spinning + disabled rules, dead code removal | Not started | |
 | 2 | Dashboard — remove topbar button, add `dashDeepRefresh()` | Not started | |
 | 3 | ACP — icon button + `railDeepRefresh()` | Not started | |
-| 4 | Test — stub POST /api/refresh in acp_page.test.mjs | Not started | |
+| 4 | Test — verify `acp_page.test.mjs` still passes | Not started | |
 
 
 ## 9) Implementation Divergences from Plan
