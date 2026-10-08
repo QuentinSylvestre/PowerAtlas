@@ -78,7 +78,13 @@
     <input class="acp-rail-search" id="acpRailSearch" type="text" spellcheck="false"
            placeholder="Filter the sessions below"
            aria-label="Filter the sessions listed below">
-    <button class="acp-btn" id="acpRailReload" type="button">Refresh</button>
+    <button class="ws-icon-btn" id="acpRailReload" type="button"
+            aria-label="Refresh sessions" title="Refresh all sessions now">
+      <svg class="ws-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/>
+      </svg>
+    </button>
     <!-- The list's own settings, anchored to their button rather than opened as
          an overlay. It follows the row `⋯` menu's shape and not the create
          picker's: this changes how the list beneath is arranged, so it belongs
@@ -2468,6 +2474,23 @@
 
   function railLoadFirstPage() {
     if (railMode === 'date' || railMode === 'status') { loadFlatPage(1); } else { loadGroupPage(1); }
+  }
+
+  function railDeepRefresh() {
+    railReload.disabled = true;
+    railReload.classList.add('spinning');
+    fetch('/api/refresh', { method: 'POST' })
+      .then(function(r) { return r.json(); })
+      .then(function() {
+        railLoadFirstPage();
+      })
+      .catch(function() {
+        railStatus.textContent = 'Refresh failed \u2014 try again';
+      })
+      .finally(function() {
+        railReload.disabled = false;
+        railReload.classList.remove('spinning');
+      });
   }
 
   function railSetMode(mode) {
@@ -6001,7 +6024,7 @@
     });
   }
 
-  railReload.addEventListener('click', function () { railLoadFirstPage(); });
+  railReload.addEventListener('click', railDeepRefresh);
   railSettingsBtn.addEventListener('click', function () {
     if (!railSettingsMenu.hidden) { railCloseMenus(); return; }
     // The same guard a row menu's button sets. Without it this press carries on
