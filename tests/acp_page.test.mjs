@@ -11259,6 +11259,50 @@ check("dashPromptHistoryDraftRestored", () => {
     JSON.stringify(p.sandbox.dashPromptInput.value));
 });
 
+// dashPromptHistoryTwoConsecutiveArrowUps: consecutive ArrowUps without
+// manual cursor reset — regression for the reflow-cursor bug (mirrors
+// promptHistoryTwoConsecutiveArrowUps for the /acp page).
+check("dashPromptHistoryTwoConsecutiveArrowUps", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashSentPrompts.push("dash first");
+  p.sandbox.dashSentPrompts.push("dash second");
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 0;
+  const arrowUp = { key: "ArrowUp", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {} };
+  // First ArrowUp → newest
+  p.sandbox.dashPromptInput.dispatch("keydown", arrowUp);
+  assertEqual(p.sandbox.dashPromptInput.value, "dash second",
+    "first dashboard ArrowUp should recall 'dash second'; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+  assertEqual(p.sandbox.dashPromptInput.selectionStart, 0,
+    "selectionStart must be 0 after first ArrowUp; got " + p.sandbox.dashPromptInput.selectionStart);
+  // Second ArrowUp without touching cursor → older entry
+  p.sandbox.dashPromptInput.dispatch("keydown", arrowUp);
+  assertEqual(p.sandbox.dashPromptInput.value, "dash first",
+    "second dashboard ArrowUp without cursor reset should recall 'dash first'; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+});
+
+// dashPromptHistoryReplayPopulates: replayed user chunks populate
+// dashSentPrompts so ArrowUp works on reconnect.
+check("dashPromptHistoryReplayPopulates", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const arrowUp = { key: "ArrowUp", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {} };
+  // Simulate two replayed user chunks via onUserChunkReplayed (set by index.html)
+  p.sandbox.onUserChunkReplayed("replayed dash first");
+  p.sandbox.onUserChunkReplayed("replayed dash second");
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 0;
+  p.sandbox.dashPromptInput.dispatch("keydown", arrowUp);
+  assertEqual(p.sandbox.dashPromptInput.value, "replayed dash second",
+    "first ArrowUp should recall 'replayed dash second'; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+  p.sandbox.dashPromptInput.dispatch("keydown", arrowUp);
+  assertEqual(p.sandbox.dashPromptInput.value, "replayed dash first",
+    "second ArrowUp should recall 'replayed dash first'; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+});
+
 // shiftEnterUrlLineNoContinue: a URL-like line ('http://1.example.com') has a
 // digit before a colon but the colon is not followed by a space, so the regex
 // does not match and no continuation fires. Locks in the non-match behavior

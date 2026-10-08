@@ -1997,6 +1997,12 @@ function dashShowOverview(){
   // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
   resetCommandPalette();
   updateDashPromptHighlight();
+  // Clear prompt history so prompts from a previous session do not bleed
+  // into the next one. The replay populates dashSentPrompts via
+  // onUserChunkReplayed (same mechanism as acp.html).
+  dashSentPrompts = [];
+  dashPromptHistIdx = -1;
+  dashPromptDraft = '';
   // clearTranscript() resets the renderer's per-conversation state (tool
   // rows, timers, prompt-nav targets); the pane is then emptied and given
   // back its single placeholder.
@@ -2777,6 +2783,18 @@ function dashRecordSentPrompt(text) {
   }
   dashPromptHistIdx = -1;
 }
+// Populate dashSentPrompts from replayed user chunks (session load / reconnect).
+// transcript-renderer.js calls window.onUserChunkReplayed for every user-role
+// appendChunk; index.html defines it to target dashSentPrompts, acp.html to
+// target sentPrompts. Dedup check matches recordSentPrompt so live sends
+// (already recorded by dashRecordSentPrompt) are not doubled.
+window.onUserChunkReplayed = function(text) {
+  if (!text) return;
+  if (!dashSentPrompts.length || dashSentPrompts[dashSentPrompts.length - 1] !== text) {
+    dashSentPrompts.push(text);
+    if (dashSentPrompts.length > 200) dashSentPrompts.shift();
+  }
+};
 
 /**
  * Rebuild the dashboard highlight overlay -- mirrors updatePromptHighlight()
@@ -2925,8 +2943,12 @@ dashPromptInput.addEventListener('keydown', function(e){
           e.preventDefault();
           dashPromptHistIdx = _nextIdx;
           dashPromptInput.value = dashSentPrompts[dashPromptHistIdx];
-          dashPromptInput.setSelectionRange(0, 0);
           dashRefreshComposerControls();
+          // setSelectionRange after dashRefreshComposerControls: dashAutoGrowPrompt
+          // sets style.height='auto' which can trigger a browser reflow that moves
+          // the cursor to the end of the new value. Setting it here, after the
+          // reflow, ensures the next ArrowUp still sees the cursor on line 0.
+          dashPromptInput.setSelectionRange(0, 0);
           return;
         }
       }
