@@ -20,7 +20,7 @@ The desired outcome is PA sessions that behave identically to an equivalently-co
 
 - SC-1: A PA session created with `chat.enableWorkflows: true` in `cli.json` has `run_workflow`, `inspect_workflow`, `update_workflow`, and `send_message` in its tool inventory (verified via `available_commands_update` notification).
 - SC-2: PA's `_meta.kiro.settings` block is built dynamically from `cli.json` — no hardcoded values; a `cli.json` with `chat.enableWorkflows: false` produces a settings block with `workflows: {enabled: false}`, not the KAS shipped default.
-- SC-3: Settings in the "enable now" category (`thinking`, `knowledge`, `codeIntelligence`, `largeToolOutputHandler`) are forwarded with their `cli.json` values (or the TUI's defaults when the key is absent).
+- SC-3: Settings in the "enable now" category (`thinking`, `knowledge`, `codeIntelligence`; `largeToolOutputHandler` dropped 2026-10-08, see Section 9) are forwarded with their `cli.json` values (or the TUI's defaults when the key is absent).
 - SC-4: A PA session running a workflow via `run_workflow` shows running step entries in the crew panel with step name, status (running/done/failed), and elapsed time.
 - SC-5: A PA session whose workflow is active shows Working status in the rail and Overview tiles while any child step is `in_progress`, and Waiting when the only remaining steps are `waiting_on_user`.
 - SC-6: After all workflow steps complete, are cancelled, or go stale (no workflow frame for the staleness bound), the parent session reverts to its own status.
@@ -110,12 +110,12 @@ Implement a `_build_session_settings()` helper that reads `cli.json` at `session
 | Decision | Choice | Alternatives considered | Rationale |
 |---|---|---|---|
 | Settings source | Read `cli.json` dynamically at `session/new` time | Hardcode specific keys; PA-specific settings UI | User decided a+c: sync with kiro-cli's own config, no PA-specific overrides. The user's `/settings` choices propagate automatically. |
-| Settings enable scope | Only settings that are tool-availability-only (no new notification types, no new UI states) | Forward all 24 keys; forward only `workflows` | User constraint: "anything we enable in PA must have full productized support." Phase 1 settings audit confirms which keys qualify; others get ROADMAP entries. Initial "enable" list: `thinking`, `knowledge`, `codeIntelligence`, `largeToolOutputHandler`, `workflows`, `goal`. Deferred: `checkpoint`, `tangentMode`, `_subagent`, `_delegate`, `c2s`, `disableAutoCompaction`. |
+| Settings enable scope | Only settings that are tool-availability-only (no new notification types, no new UI states) | Forward all 24 keys; forward only `workflows` | User constraint: "anything we enable in PA must have full productized support." Phase 1 settings audit confirms which keys qualify; others get ROADMAP entries. Initial "enable" list: `thinking`, `knowledge`, `codeIntelligence`, `workflows`, `goal` (`largeToolOutputHandler` removed 2026-10-08 by user decision: not a KAS setting in any installed bundle 2.24.0-2.28.0). Deferred: `checkpoint`, `tangentMode`, `_subagent`, `_delegate`, `c2s`, `disableAutoCompaction`. |
 | `invoke_sub_agent` suppression | Accept — enabling `workflows` suppresses `invoke_sub_agent` for PA sessions | Disable workflow suppression via a KAS flag (no such flag exists) | KAS hard-gates this via `suppressChatDelegationTool`. The old crew panel path (`_on_subagent_list`) still works for TUI sessions PA observes but did not create. PA-created sessions use `run_workflow` exclusively once Phase 2 ships. |
 | Phase 1 + Phase 2 coupling | Both phases must ship in the same deployment | Ship Phase 1 first, accept silent discard during Phase 2 gap | Enabling `workflows` without the handler causes all workflow notifications to be silently discarded (logged at INFO). PA's existing session behavior becomes incorrect rather than just limited. |
 | `workflowNotifications` field | Omit | Include `workflowNotifications: {enabled, delivery: "steer"}` as forward-compat | KAS ignores it today (0 occurrences in `acp-server.js`); the plan's own rule is to forward only settings with productized PA support. Decided by the user 2026-10-08. Revisit if a KAS version starts reading it. |
 | Phase 1/2 gating | `_WORKFLOWS_FORWARD_ENABLED` module constant: `False` in Phase 1, `True` in Phase 2 | Commit-body "do not restart" note; merge Phases 1 and 2 | Property: no deployable build forwards `workflows.enabled: true` without the handlers. A restart between phases is likely and the user performs it. Decided by the user 2026-10-08 (followed the recommendation). |
-| Default-on settings | Forward `thinking`, `knowledge`, `codeIntelligence`, `largeToolOutputHandler` as TUI defaults (true when absent); `workflows` sends `false` when `chat.enableWorkflows` is absent | Forward only keys explicit in `cli.json` | User accepted the default-on behavior change and its token/indexing cost 2026-10-08. |
+| Default-on settings | Forward `thinking`, `knowledge`, `codeIntelligence` as TUI defaults (true when absent); `workflows` sends `false` when `chat.enableWorkflows` is absent | Forward only keys explicit in `cli.json` | User accepted the default-on behavior change and its token/indexing cost 2026-10-08. |
 | `toolSearch` in session/new | Verify if `toolSearch` should also appear in `_meta.kiro.settings` for session/new (currently only in `clientCapabilities`) | Move from `clientCapabilities` to session/new | Open verification item for Phase 1 — check if KAS reads `toolSearch` from both locations or only `clientCapabilities`. No change until verified. |
 | Workflow liveness Part B | Implement independent of Phase 2 | Wait for Phase 2's `_workflow_children` dict | Part B (disk-based `rootConversationId` scan) can ship before Part A (ACP-held sessions). Provides liveness for terminal sessions running workflows. |
 | Notification fan-out for workflow steps | Reuse existing `subagents` frame type (both use `sessionId` as key) | New `workflow_step` frame type | Workflow step entries use real `sessionId` values like v2 subagents. The crew panel's `handleSub` path already routes by `sessionId`. No new frame type needed for Phase 2. |
@@ -135,7 +135,7 @@ Implement a `_build_session_settings()` helper that reads `cli.json` at `session
 
 ### Cost impact
 
-No cloud resources, APIs, or third-party services. One recurring-usage change, approved by the user 2026-10-08: sessions now enable `thinking`, `knowledge`, `codeIntelligence` and `largeToolOutputHandler` by default (the TUI's defaults), which raises token use and local indexing per session compared with the KAS shipped default of off.
+No cloud resources, APIs, or third-party services. One recurring-usage change, approved by the user 2026-10-08: sessions now enable `thinking`, `knowledge` and `codeIntelligence` by default (the TUI's defaults), which raises token use and local indexing per session compared with the KAS shipped default of off.
 
 ## 5) Implementation Phases
 
@@ -154,7 +154,7 @@ For each `cli.json` key in the deferred set (`checkpoint`, `tangentMode`, `_suba
 - Which produce new notification types PA has no handler for (stay deferred)
 - Update the "enable now" / "deferred" split accordingly before writing `_build_session_settings()`
 
-The "enable now" starting set is confirmed: `thinking`, `knowledge`, `codeIntelligence`, `largeToolOutputHandler`, `workflows`, `goal`. The audit may expand this.
+The "enable now" set is `thinking`, `knowledge`, `codeIntelligence`, `workflows`, `goal` (the audit expanded nothing; `largeToolOutputHandler` was dropped). **The code listing below is the original sketch; the shipped code is the contract (`_build_session_settings` in `acp.py`), and it omits `largeToolOutputHandler`.**
 
 **Step 2: Implement `_build_session_settings()`**
 
@@ -273,15 +273,23 @@ Add a section "ACP session/new settings" documenting:
 - Where `_build_session_settings()` lives
 
 **Exit criteria**:
-- [ ] `_build_session_settings()` exists and is covered by a unit test that asserts the correct settings dict for a sample `cli.json` (with `chat.enableWorkflows: true` and with `false`)
-- [ ] `_load_cli_settings_dict()` exists in `acp.py`; returns `{}` on missing/malformed cli.json
-- [ ] `_build_kas_session_params()` includes `"settings"` under `_meta.kiro`
-- [ ] Probe C (run in Phase 2 together with the temporary-constant probe, since the `workflows` keys are gated off in Phase 1; before ticking the two live criteria below): establish the observable that shows `run_workflow` is in a session's tool inventory. `available_commands_update` (`_on_notification`) carries slash commands and skills, not necessarily the model's tool list, so it may not show `run_workflow`. Candidates: the `session/new` response, `orchestrator.log` INFO frames, or a prompt asking the agent to list its tools. Record the chosen observable in `docs/KNOWLEDGE.md`.
-- [ ] A live PA session with `chat.enableWorkflows: true` shows `run_workflow` via the observable from Probe C (run in a throwaway session; the real workflow run belongs to Phase 2)
-- [ ] A live PA session with `chat.enableWorkflows: false` does NOT show `run_workflow`
-- [ ] `docs/KNOWLEDGE.md` has the settings mapping table with probe results (toolSearch placement, `session/load` behavior, Probe C observable)
-- [ ] Tests live in the existing `tests/test_web.py` (no new test file). They cover `_build_session_settings()` for ≥3 `cli.json` shapes (workflows `true`, `false`/absent, string `"false"`) and `_load_cli_settings_dict()` for a missing file, a malformed file and a list-valued file. Name the functions `test_build_session_settings_*` and `test_load_cli_settings_dict_*` so `-k "build_session_settings or load_cli_settings_dict"` selects exactly them.
-- [ ] `_WORKFLOWS_FORWARD_ENABLED = False` in Phase 1, and a test asserts the settings block has no `workflows`/`goal` key while it is `False`. Consequently the two live `run_workflow` criteria above cannot be met in Phase 1: tick them in Phase 2 after the constant flips to `True`, and mark them `deferred to Phase 2` here.
+- [x] `_build_session_settings()` exists and is covered by a unit test that asserts the correct settings dict for a sample `cli.json` (with `chat.enableWorkflows: true` and with `false`)
+- [x] `_load_cli_settings_dict()` exists in `acp.py`; returns `{}` on missing/malformed cli.json
+- [x] `_build_kas_session_params()` includes `"settings"` under `_meta.kiro`
+- [ ] (deferred to Phase 2) Probe C (run in Phase 2 together with the temporary-constant probe, since the `workflows` keys are gated off in Phase 1; before ticking the two live criteria below): establish the observable that shows `run_workflow` is in a session's tool inventory. `available_commands_update` (`_on_notification`) carries slash commands and skills, not necessarily the model's tool list, so it may not show `run_workflow`. Candidates: the `session/new` response, `orchestrator.log` INFO frames, or a prompt asking the agent to list its tools. Record the chosen observable in `docs/KNOWLEDGE.md`.
+- [ ] (deferred to Phase 2) A live PA session with `chat.enableWorkflows: true` shows `run_workflow` via the observable from Probe C (run in a throwaway session; the real workflow run belongs to Phase 2)
+- [ ] (deferred to Phase 2) A live PA session with `chat.enableWorkflows: false` does NOT show `run_workflow`
+- [ ] (deferred to Phase 2: table, Probe A and Probe B are recorded; Probe C and the unmeasured resumed-session effect are not) `docs/KNOWLEDGE.md` has the settings mapping table with probe results (toolSearch placement, `session/load` behavior, Probe C observable)
+- [x] Tests live in the existing `tests/test_web.py` (no new test file). They cover `_build_session_settings()` for ≥3 `cli.json` shapes (workflows `true`, `false`/absent, string `"false"`) and `_load_cli_settings_dict()` for a missing file, a malformed file and a list-valued file. Name the functions `test_build_session_settings_*` and `test_load_cli_settings_dict_*` so `-k "build_session_settings or load_cli_settings_dict"` selects exactly them.
+- [x] `_WORKFLOWS_FORWARD_ENABLED = False` in Phase 1, and a test asserts the settings block has no `workflows`/`goal` key while it is `False`. Consequently the two live `run_workflow` criteria above cannot be met in Phase 1: tick them in Phase 2 after the constant flips to `True`, and mark them `deferred to Phase 2` here.
+
+#### Implementation notes
+
+Implementation (2026-10-08, code: 26e66c0; review fixes c1c882f, 080241e; docs fix bcf434e)
+
+Phase 1 is committed in `26e66c0`, with review fixes in `c1c882f` and `080241e` and a docs and roadmap accuracy fix in `bcf434e`. In `src/power_atlas/acp.py` the work added `_load_cli_settings_dict` (utf-8-sig; a missing file gives `{}` silently; malformed, unreadable, deeply nested or non-object content gives `{}` with a warning naming the path and the error), the module constant `_WORKFLOWS_FORWARD_ENABLED = False` and `_build_session_settings`. The settings builder maps `thinking`, `knowledge` and `codeIntelligence` with TUI defaults (on when absent, an explicit false wins, a non-bool counts as absent). `workflows` and `goal` are emitted only when the gate is `True` and only for a JSON `true`. `workflowNotifications`, `largeToolOutputHandler` and the deferred keys are never sent. `_build_kas_session_params` now carries the block under `_meta.kiro.settings` for both `session/new` and `session/load`, and a new `_log_session_settings` logs `{key: enabled}` at INFO before each request. Tests in `tests/test_web.py`: `TestBuildSessionSettings`, `TestSessionSettingsOnTheWire` (captures the real `session/new` and `session/load` requests), and a module-wide autouse redirect of `KIRO_CLI_SETTINGS_PATH` so no test reads the developer's real `cli.json`; targeted selection 43 passed, `tests/test_web.py` 2789 passed with 3 known pre-existing failures (proven on a pristine export), `tests/test_data.py` 722 passed. `docs/KNOWLEDGE.md` has the "ACP session/new settings" section (mapping, deferrals, gate, probes) and `plans/ROADMAP.md` entries were added or corrected. Probes on a second kiro-cli 2.28.0 process: the shipped block opens a session cleanly; `session/new` honours `workflows` (`_meta.workflowsEnabled`); `session/load` leaves the persisted `workflowsEnabled` unchanged; `toolSearch` placement and the effect of the three default-on keys on a resumed session's tool inventory are not determined (deferred to Phase 2).
+
+Per-phase QA (Step 5b): not run separately. The only observable change with the gate off is the new settings log line, and seeing it needs a PowerAtlas restart; Phase 2 needs a restart for its own probe, so the live check is carried there as a deferred criterion (user granted restarts for this plan 2026-10-08).
 
 ---
 
@@ -498,6 +506,9 @@ The exact display behaviour (what, if anything, is rendered from the decoded pro
 - [ ] `docs/KNOWLEDGE.md` has new `_kiro/workflow/*` notification family section (10 methods, payload shapes, PA handlers vs. stubs, `workflow-progress` chunk path)
 - [ ] `memory/MEMORY.md` has new `_workflow_children` lifecycle entry (populated by `node_start`; cleared by `node_complete`/`run_complete`/`close_session`/`_detach`/cancelled-turn end/staleness bound; distinct from `subagent_sessions` which persists turn-end for click-to-view routing)
 - [ ] `plans/ROADMAP.md` workflow entries updated for Phase 2
+- [ ] (deferred from Phase 1) Update `test_build_session_settings_workflows_keys_absent_while_gated_off` (asserts `_WORKFLOWS_FORWARD_ENABLED is False`) in the same commit that flips the constant; it fails by design once the gate is on
+- [ ] (deferred from Phase 1) Probe A (does `toolSearch` in `session/new` settings have any observable effect) and the resumed-session effect: with the workflows probe session live, check the model's tool inventory with and without the `thinking`/`knowledge`/`codeIntelligence` block on `session/new` and on `session/load`; record in `docs/KNOWLEDGE.md` (user decision 2026-10-08: `session/load` keeps sending the block)
+- [ ] (deferred from Phase 1) Live check that a real PA `session/new` logs `ACP session/new sending settings` with the expected keys (covers Phase 1's QA step, which was not run separately to avoid an extra PowerAtlas restart)
 
 ---
 
@@ -639,13 +650,16 @@ node tests/acp_page.test.mjs
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Dynamic `_meta.kiro.settings` | Not started | |
-| 2 | Workflow notification handler and crew panel | Not started | Must ship with Phase 1 |
+| 1 | Dynamic `_meta.kiro.settings` | Complete (code: 26e66c0) | Live `run_workflow` checks, Probe C, Probe A and resumed-session probe deferred to Phase 2 |
+| 2 | Workflow notification handler and crew panel | Not started | Flips `_WORKFLOWS_FORWARD_ENABLED`; needs a PowerAtlas restart for its probe (granted) |
 | 3 | Workflow liveness (Part A + Part B) | Not started | Part B independent of Phase 2 |
 
 ## 9) Implementation Divergences from Plan
 
-<Reserved — filled during implementation>
+- **Phase 1: `largeToolOutputHandler` dropped.** The plan's original sketch mapped `chat.enableLargeToolOutputHandler` to `largeToolOutputHandler` (default on). Review found it is not a KAS setting (0 occurrences in all seven installed bundles, 2.24.0 to 2.28.0), so sending it did nothing. The user chose on 2026-10-08 to stop forwarding it; plan text updated in SC-3, Section 3 and the Phase 1 intro. The listing in Phase 1 Step 2 is kept as the original sketch.
+- **Phase 1: Probe B method.** The plan said to observe `available_commands_update`; the implementer used `_meta.workflowsEnabled` on the `session/new` result and the persisted `session.json` instead, which is more direct and reproducible.
+- **Phase 1: existing test expectation changed.** `test_new_session_params_include_meta` now expects the settings block (three default-on keys); source: the plan's Step 3 spec plus the user's key-drop decision.
+- **Phase 1: Probe A not determined.** `toolSearch` in `session/new` settings gave no observable difference; recorded as not determined and carried to Phase 2.
 
 ## Follow-up Work (Deferred)
 
@@ -714,6 +728,30 @@ Standard-effort review, 3 personas (Architect with gap-critic lens, Senior engin
 - **C. `workflowNotifications`.** Keep as forward-compat scaffolding, or drop it (KAS ignores it today).
 
 Also noted, unresolved by design: `session/load` applying the settings block (Probe B) can flip an existing session's tool inventory mid-life; the Probe B outcome decides whether `session/load` passes settings at all. No PA-side kill switch for workflows exists beyond setting `chat.enableWorkflows: false` in `cli.json`.
+
+### 2026-10-08 -- Implementation Review (after Phase 1, persona: Senior engineer, Reliability engineer)
+
+Implementation health: Yellow (no High; cycle 2 left 3 Medium resolved by fix or user decision, and 4 Low awaiting a user response).
+Cycle 1: 6 Medium, 9 Low (0 High). Cycle 2: 3 Medium, 10 Low (0 High). Both reviewers returned "no blocking issues" in cycle 2; the cycle cap (2) was reached and the user chose the post-cap actions below. qvalidate `phase-count`: 5 ticked, expected 5, pass.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `largeToolOutputHandler` is not a KAS setting (0 hits in seven bundles) yet was forwarded and documented as a KAS key. | Fixed -- dropped by user decision 2026-10-08; code, tests, docs, plan text updated. |
+| 2 | Medium | KNOWLEDGE.md stated inferred probe results as measured; audit grep claim false for `_subagent`. | Fixed -- claims re-scoped to what was measured; audit wording corrected (`080241e`). |
+| 3 | Medium | `session/load` sends default-on keys to resumed sessions; effect unmeasured. | User: accepted -- keep sending on load, probe in Phase 2 (user decision 2026-10-08, post-cap prompt). |
+| 4 | Medium | Probe A (`toolSearch` placement) not run in the first pass. | Fixed -- run; no observable effect, recorded "not determined", carried to Phase 2. |
+| 5 | Medium | KNOWLEDGE.md claimed every deferred key has a ROADMAP entry; false for `_subagent`/`_delegate`; ROADMAP said "Phase 1 done" with criteria deferred. | Fixed -- entries added, wording corrected, stale `workflowNotifications` instruction removed (`bcf434e`). |
+| 6 | Medium | The shipped block was never sent to a real agent. | Fixed -- throwaway `session/new` with the shipped block opened cleanly. |
+| 7 | Low | Weak logging; no log on load; "sent" before the request. | Fixed -- `{key: enabled}` at INFO on both paths, worded "sending". |
+| 8 | Low | Tests read the developer's real `cli.json`; no wire-level test; no directory/UTF-8/recursion cases. | Fixed -- module-wide redirect, `TestSessionSettingsOnTheWire`, new loader cases. |
+| 9 | Low | `RecursionError` uncaught in the new reader. | Fixed -- added to the except tuple. |
+| 10 | Low | Transient read failure turns an explicit opt-out into "on" (fallback is TUI defaults). | Orchestrator: proposed-accept -- pending user decision |
+| 11 | Low | Synchronous cli.json read on the event loop per session create/load, unlike neighbouring `to_thread` reads. | Orchestrator: proposed-accept -- pending user decision |
+| 12 | Low | `_kiro_tool_search_settings` still catches only `(OSError, ValueError)` (pre-existing, not in this diff). | Orchestrator: proposed-accept -- pending user decision |
+| 13 | Low | No guard test that the `KIRO_CLI_SETTINGS_PATH` redirect is active. | Orchestrator: proposed-accept -- pending user decision |
+| 14 | Low | Phase 2 must update the gated-off tripwire test when it flips the constant. | Fixed -- deferred criterion added to Phase 2. |
+
+Cycle-2 reviewer claim "c2s is not in the registry" (cycle 1) was wrong: `kp("c2s")` is in the 2.28.0 registry (25 `kp` keys, 24 off plus `semanticReview` on); docs corrected.
 
 ## Harness Improvement Opportunities
 
