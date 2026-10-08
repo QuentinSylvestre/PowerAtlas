@@ -1,7 +1,7 @@
 # Refresh Button Unification
 
 > **Date**: 2026-10-07
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: 2026-10-07 11:03
 > **Scope**: Unify the three refresh buttons across dashboard and ACP into one consistent control per page; make manual refresh always do the full deep path; polish loading state and error feedback
 > **Estimated effort**: Half-day
@@ -205,7 +205,7 @@ function dashDeepRefresh() {
 - [x] `#dashRailReload` carries `aria-label="Refresh sessions"` and `title="Refresh all sessions now"`
 - [x] `dashDeepRefresh` function present immediately after `dashRailReload()` (~line 8073) and wired to `#dashRailReload` click
 - [x] `dashRailReload()` still called by pollWarmup, switchProvider, dashRailInit (no regressions to those paths)
-- [ ] Hard reload of the dashboard in a running PowerAtlas shows one Refresh button in the rail head (not in topbar); clicking it spins the button and the rail re-renders
+- [x] Hard reload of the dashboard in a running PowerAtlas shows one Refresh button in the rail head (not in topbar); clicking it spins the button and the rail re-renders
 - [x] `node tests/acp_page.test.mjs` suite unaffected (no references to dashboard's doRefresh)
 - [x] `plans/tests/260701_POWERATLAS.md` refresh probe entry updated to describe the new rail-head deep-refresh behavior (no `#refreshTime` reference)
 
@@ -273,7 +273,7 @@ function railDeepRefresh() {
 - [x] `railDeepRefresh` defined inside the IIFE and wired to the click handler
 - [x] `railLoadFirstPage()` still called by setSortMode and boot/reconnect (no regressions)
 - [x] `acp_page.test.mjs:3765` — `page.el("acpRailReload").disabled === true` still passes (the disabled-on-module-failure path is unchanged)
-- [ ] Hard reload of `/acp` in a running PowerAtlas shows the icon Refresh button; clicking it spins and shows "Refresh failed" or reloads the rail
+- [x] Hard reload of `/acp` in a running PowerAtlas shows the icon Refresh button; clicking it spins and shows "Refresh failed" or reloads the rail
 
 
 ### Phase 4: Test — verify `acp_page.test.mjs` still passes
@@ -403,6 +403,22 @@ Phase 2 health (post-fix): **Green** (1-cycle cap applies; Step 9 covers residua
 | 3 | Low | Senior engineer | `railBusy` race: user could click Refresh while a timer-triggered `railLoadFirstPage()` is already running — `railBusy` guard silently drops the call | User: accepted — pre-existing behavior not introduced by this change; button disable prevents double-click; timer uses `railRefresh()` not `railLoadFirstPage()`, so the realistic race is low |
 
 Phase 3 health (post-fix): **Green** (1-cycle cap; Step 9 covers residual verification). qvalidate 6/6 PASS.
+
+### 2026-10-08 — /qdev Step 9 final review (Senior engineer + Frontend/UX + Maintainability reviewer, full effort)
+
+QA verdict: **15/15 PASS** (Playwright, live PowerAtlas on port 4915). Both deferred visual criteria verified: dashboard shows single rail-head Refresh icon (no topbar button); ACP shows icon button (not text); both spin and recover correctly.
+
+Merged findings (all Low, deduplicated across 3 personas):
+
+| # | Severity | Persona | Finding | Resolution |
+|---|---|---|---|---|
+| 1 | Low | Senior + UX | `r.json()` called in both deep-refresh functions after the `r.ok` check; result is discarded. A non-JSON 200 would trigger the error handler. `POST /api/refresh` always returns JSON in practice. | User: accepted — pre-existing pattern (matches `doRefresh()`); provides secondary validation at trivial cost |
+| 2 | Low | Senior | Button re-enables in `.finally()` before `dashRailLoadFirstPage()` completes — user sees the button briefly while rail still shows "loading". | User: accepted — pre-existing behavior from the removed `doRefresh()`; intentional to allow re-click |
+| 3 | Low | UX | `aria-hidden` attribute ordinal position differs between `#dashRailReload` and `#acpRailReload` SVGs — cosmetic, both present and effective | User: accepted — cosmetic only |
+| 4 | Low | UX | Style compression inconsistency between `dashDeepRefresh` and `railDeepRefresh` (multiline vs compressed) | User: accepted — cosmetic |
+| 5 | Low | Maintainability | `plans/tests/260701_POWERATLAS.md` section 2.15 updated for dashboard but no equivalent ACP probe entry for `#acpRailReload` behavioral change | Fixed: added section 2.15a in `plans/tests/260701_POWERATLAS.md` |
+
+Step 9 health: **Green**. All Medium findings from per-phase reviews confirmed fixed. Implementation is complete and verified.
 
 
 ## Harness Improvement Opportunities
