@@ -140,7 +140,7 @@ Phase D (sub-agent panel): Python recording to `subagent_history`, client-side t
 ---
 
 > **Date**: 2026-10-07
-> **Status**: In Progress
+> **Status**: Complete
 > **Scope**: Live tool grouping, edit-row separation + diff fix, sub-agent panel (Python + client), prompt history, list continuation, Ctrl+Z, overlay, auto-scroll, dashboard auto-grow
 > **Estimated effort**: ~2-3 days
 
@@ -750,3 +750,27 @@ Cycle 2 skipped — all Medium findings accepted with documented deferred action
 
 Implementation (2026-10-08, code: 6d264ce + 0827388)
 Server (`acp.py`): added sub-task tool recording in the `tool_call`/`tool_call_update` handler — uses `_emit` only (which records + broadcasts), guarded on `_agent_subtask_id in self.subagent_history`, with debug log on not-yet-registered path. Added `_flush_bubble` calls at sub-task tool/termination boundaries to emit `rendered` markdown-token frames. Client (`acp.html`+`index.html`): upgraded sub-panel tool row to richer display (icon+name+kind+status, in-place status update); added `rendered`-frame handling to rebuild sub-agent bubble with `mdBuild(tokens)`. 1009/1009 node tests. Restart done (user grant); plain-session live QA passed; fan-out QA blocked by `autonomousAgents=admin_disabled`.
+
+### 2026-10-08 — Post-Implementation Review (Step 9)
+
+Overall implementation health: **Green** (post-fix; Yellow before `docs/KNOWLEDGE.md` update resolved the one Medium).
+Personas: Architect, Senior Engineer, End-User Advocate, Reliability Engineer.
+QA verification: **PASS** (11 surfaces, 11 checks, live headless Chromium against :4915).
+SC-4 fan-out path deferred: `autonomousAgents=admin_disabled` on this machine — re-verify on an enabled account.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Overlay word-break + auto-scroll | pass (985→1006) | PASS | Overlay+textarea `wordBreak`/`overflowWrap` match at runtime; scroll threshold confirmed |
+| 2: Transcript rendering | pass (985→1006) | PASS | `.acp-tool-group` containers live; edit row auto-expanded; diffs persist after reload |
+| 3: Composer | pass (985→1006) | PASS | List continuation, empty exit, history recall+draft restore all verified live |
+| 4: Sub-agent panel | pass (1009/1009) | PARTIAL | Node-tested; live fan-out unverifiable (admin_disabled); plain-session live QA passed |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `docs/KNOWLEDGE.md:127` still described edit rows as collapsed by default | Fixed — updated to note auto-expand in commit `027399a` |
+| 2 | Low | `clearTranscript()` doesn't reset `_transcriptLive`; mid-turn resume won't live-group until next turn:start | Accepted — no breakage; noted in project memory |
+| 3 | Low | `sentPrompts` not reset on session switch (terminal-like; within spec) | Accepted — to be documented |
+| 4 | Low | `ctrlZPreservesUndoViaExecCommand` cannot fully verify undo stack in harness | Accepted — browser QA confirmed Ctrl+Z behavior |
+| 5 | Low | SC-4 fan-out path unverifiable here | Deferred to Follow-up Work #4 |
