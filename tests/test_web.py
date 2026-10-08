@@ -11090,13 +11090,17 @@ class TestAcpActivityStamp:
             return {}
 
         self._prompt(acp_mod, sid, during)
-        assert acp_mod._sweepable(sid, meta, time.monotonic()) is False
+        # `has_active_workflow` is a required keyword since cycle 4 (user
+        # request: a default fails open); this test is about the turn-end stamp.
+        assert acp_mod._sweepable(
+            sid, meta, time.monotonic(), has_active_workflow=False) is False
         # Positive control. Put the record back the way deleting the turn-end
         # stamp would leave it and the same session really is swept, so the
         # assertion above is about the stamp rather than about some other
         # condition quietly holding this session back.
         meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
-        assert acp_mod._sweepable(sid, meta, time.monotonic()) is True
+        assert acp_mod._sweepable(
+            sid, meta, time.monotonic(), has_active_workflow=False) is True
 
     def test_agent_chatter_inside_a_turn_moves_activity_and_not_use(
             self, acp_store):
@@ -12067,9 +12071,12 @@ class TestAcpWorkflowNotifications:
 
     P = "wfparent-p1"
     P2 = "wfparent-p2"
+    # The 12 plan Step 3 keys plus the internal "workflow" marker (never on the
+    # wire; `_subagents_payload` builds its own key list) that keeps a finished
+    # workflow row listed across a turn boundary (cycle-4 fix A).
     ENTRY_KEYS = {"sessionId", "sessionName", "role", "task", "status", "done",
                   "error", "order", "action", "fan_out_id", "startedAt",
-                  "stoppedAt"}
+                  "stoppedAt", "workflow"}
 
     @pytest.fixture
     def wf(self, acp_store):
@@ -12112,11 +12119,13 @@ class TestAcpWorkflowNotifications:
                 "status": "working", "action": "", "error": "", "order": order,
                 "startedAt": 1.0, "stoppedAt": None, "fan_out_id": ""}
 
-    def _run_turn(self, acp_mod, outcome):
+    def _run_turn(self, acp_mod, outcome, during=None):
         conn = _acp_conn(acp_mod)
         acp_mod._registry.attach(conn, self.P)
 
         async def fake_request(self_, method, params, timeout=None):
+            if during is not None:
+                during()
             if isinstance(outcome, Exception):
                 raise outcome
             return {"stopReason": outcome}
@@ -12549,14 +12558,16 @@ class TestAcpWorkflowNotifications:
         assert sv.crews[self.P]["child-c7"]["done"] is True
 
     def test_workflow_evicting_a_finished_row_stops_tracking_its_child(self, wf):
+        """A closed-with-no-verdict row of a stale child (the only kind that is
+        both done and still tracked) goes when no child is live. (Cycle 4: with
+        a live sibling a workflow row now stays; see the A tests below.)"""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
-        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
-        sv.crews[self.P]["child-c7"]["done"] = True        # e.g. a sweep marked it
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        acp_mod._Supervisor._workflow_mark_reaped(sv.crews[self.P]["child-c7"])
         acp_mod._evict_crew_children(self.P, keep_history=True, broadcast_empty=False)
-        assert list(sv.crews[self.P]) == ["child-c8"]
-        assert list(sv._workflow_children[self.P]) == ["child-c8"]
-        assert list(sv._workflow_node_index.values()) == ["child-c8"]
+        assert self.P not in sv.crews
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
 
     def test_workflow_child_frames_refresh_its_staleness_clock(self, wf):
         acp_mod, sv = wf
@@ -12934,6 +12945,186 @@ class TestAcpWorkflowNotifications:
         sv.crews[self.P]["child-c7"]["done"] = True
         assert sv._workflow_reap(now=2300.0) == []
         assert sv._workflow_reap_failures == {}
+
+    # -- cycle 4: finished rows, age cap, freeing, index overwrite, log size --
+
+    def test_workflow_sweepable_requires_the_workflow_keyword(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        with pytest.raises(TypeError):
+            acp_mod._sweepable(sid, acp_mod._supervisor.sessions[sid], time.monotonic())
+
+    def test_workflow_finished_row_survives_a_turn_boundary_while_a_sibling_runs(self, wf):
+        """Measured: session/prompt returns ~2 s before the run ends, so the
+        turn boundary falls between step one finishing and step two finishing.
+        Both rows must still be listed afterwards."""
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        _queued(watcher)
+        self._run_turn(acp_mod, "end_turn")
+        assert {c: e["done"] for c, e in sv.crews[self.P].items()} == {
+            "child-c7": True, "child-c8": False}
+        assert "child-c7" in sv.subagent_sessions            # click-to-view survives
+        # The header's count comes from this payload.
+        self._complete(acp_mod, "wf-k7x", "step-two")
+        assert {e["sessionId"]: e["done"] for e in self._last_payload(watcher)} == {
+            "child-c7": True, "child-c8": True}
+        # run_complete leaves both visible until the next turn starts...
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed")
+        assert set(sv.crews[self.P]) == {"child-c7", "child-c8"}
+        # ...and then they go as any done row does, history included.
+        self._run_turn(acp_mod, "end_turn")
+        assert self.P not in sv.crews
+        assert "child-c7" not in sv.subagent_sessions and "child-c8" not in sv.subagent_history
+
+    def test_workflow_done_row_with_no_live_sibling_is_evicted_at_turn_end(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert sv.crews[self.P]["child-c7"]["done"] is True
+        self._run_turn(acp_mod, "end_turn")
+        assert self.P not in sv.crews
+
+    def test_workflow_turn_end_still_evicts_legacy_done_rows_beside_a_live_child(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        legacy = self._legacy_entry(order=9)
+        legacy["done"] = True
+        sv.crews[self.P]["legacy-1"] = legacy
+        self._run_turn(acp_mod, "end_turn")
+        assert set(sv.crews[self.P]) == {"child-c7", "child-c8"}   # legacy-1 is gone
+
+    def test_workflow_the_per_session_cap_still_evicts_finished_workflow_rows(self, wf):
+        acp_mod, sv = wf
+        with patch.object(acp_mod, "MAX_SUBAGENTS_PER_SESSION", 2):
+            self._start(acp_mod, "wf-k7x", "s-live", child="child-l1")
+            self._start(acp_mod, "wf-k7x", "s-a", child="child-a2")
+            self._start(acp_mod, "wf-k7x", "s-b", child="child-b3")
+            self._complete(acp_mod, "wf-k7x", "s-a")
+            self._complete(acp_mod, "wf-k7x", "s-b")
+            self._start(acp_mod, "wf-k7x", "s-c", child="child-c4")
+        assert set(sv.crews[self.P]) == {"child-l1", "child-b3", "child-c4"}
+        assert "child-a2" not in sv._workflow_child_meta
+
+    def test_workflow_turn_start_frees_a_finished_childs_history_once_its_row_is_gone(self, wf):
+        acp_mod, sv = wf
+        # A legacy sub-agent whose row went at an earlier turn end keeps its
+        # routing key and history (unchanged behaviour, restricted fix).
+        sv.subagent_sessions["legacy-1"] = {"parent": self.P}
+        sv.subagent_history["legacy-1"] = acp_mod._History()
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        # The step finishes DURING the turn, so its row is still there at the
+        # turn-start eviction and goes at turn end, history kept.
+        self._run_turn(acp_mod, "end_turn",
+                       during=lambda: self._complete(acp_mod, "wf-k7x", "step-one"))
+        assert self.P not in sv.crews
+        assert "child-c7" in sv.subagent_sessions and "child-c7" in sv.subagent_history
+        assert "child-c7" in sv._workflow_child_meta
+        self._run_turn(acp_mod, "end_turn")       # next turn start frees it
+        assert "child-c7" not in sv.subagent_sessions
+        assert "child-c7" not in sv.subagent_history
+        assert "child-c7" not in sv._workflow_child_meta
+        assert "legacy-1" in sv.subagent_sessions and "legacy-1" in sv.subagent_history
+
+    def test_workflow_turn_start_keeps_the_history_of_a_row_that_is_still_shown(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        self._run_turn(acp_mod, "end_turn")
+        self._run_turn(acp_mod, "end_turn")
+        assert "child-c7" in sv.crews[self.P]                 # still shown
+        assert "child-c7" in sv.subagent_sessions and "child-c7" in sv.subagent_history
+
+    def test_workflow_age_cap_stops_refreshing_at_exactly_the_cap(self, wf):
+        acp_mod, sv = wf
+        assert acp_mod._WORKFLOW_CHILD_MAX_AGE_S == 21600
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_child_meta["child-c7"]["started"] = 1000.0
+        for now, refreshed in ((22600.0, True), (22600.001, False)):
+            sv._workflow_children[self.P]["child-c7"] = ("running", 5.0)
+            sv._workflow_touch("child-c7", now=now)
+            assert (sv._workflow_children[self.P]["child-c7"][1] != 5.0) is refreshed, now
+
+    def test_workflow_age_cap_lets_a_chatty_dead_child_go_stale(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_child_meta["child-c7"]["started"] = time.monotonic() - 21601
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "housekeeping"}}})
+        assert sv.workflow_state(self.P) is None              # still stale
+
+    def test_workflow_child_meta_is_cleared_by_close_and_detach(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
+                   nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
+                   sessionId="child-c3")
+
+        async def answered(self_, method, params, timeout=None):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", answered), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(sv.close_session(self.P))
+        assert list(sv._workflow_child_meta) == ["child-c3"]
+        sv._detach("test detach")
+        assert sv._workflow_child_meta == {}
+
+    def test_workflow_index_overwrite_is_logged(self, wf, caplog):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            self._start(acp_mod, "wf-k7x", "step-one", child="child-c8")
+            self._start(acp_mod, "wf-k7x", "step-one", child="child-c8")   # same id: silent
+        msgs = [r.getMessage() for r in caplog.records if "replacing" in r.getMessage()]
+        assert len(msgs) == 1 and "child-c8" in msgs[0] and "child-c7" in msgs[0]
+        assert sv._workflow_node_index[(self.P, "wf-k7x", "step-one")] == "child-c8"
+
+    def test_workflow_run_complete_orphans_are_scoped_to_their_own_run(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c8")   # c7 becomes an orphan
+        self._start(acp_mod, "wf-q2m", "step-one", child="child-c3")
+        self._start(acp_mod, "wf-q2m", "step-one", child="child-c4")   # c3 becomes an orphan
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed")
+        crew = sv.crews[self.P]
+        assert [crew[c]["done"] for c in ("child-c7", "child-c8", "child-c3", "child-c4")] == [
+            True, True, False, False]
+        assert set(sv._workflow_children[self.P]) == {"child-c3", "child-c4"}
+
+    def test_workflow_frame_log_line_is_bounded_but_keeps_the_children(self, wf, caplog):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        big = "x" * 2_000_000
+        steps = [{"nodeId": "step-%03d" % i, "type": "step", "status": "completed",
+                  "sessionId": "child-%03d" % i, "capturedOutput": big[:1000]}
+                 for i in range(300)]
+        final = {"workflowId": "wf-k7x", "status": "completed",
+                 "root": {"nodeId": "wf-k7x", "type": "sequence", "children": [
+                     {"nodeId": "run", "type": "parallel", "children": steps}]},
+                 "originalUserMessages": [big]}
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed",
+                       finalState=final)
+            self._send(acp_mod, "node_complete", workflowId="wf-k7x", nodeId="step-one",
+                       status="completed", capturedOutput=big)
+        lines = [r.getMessage() for r in caplog.records
+                 if r.getMessage().startswith("ACP workflow _kiro/workflow/")]
+        run_line = next(m for m in lines if "run_complete" in m)
+        done_line = next(m for m in lines if "node_complete" in m)
+        assert len(run_line) < 700 and len(done_line) < 700
+        assert "step-000=completed/child-000" in run_line      # statuses and ids survive
+        assert '"status": "completed"' in run_line
+        assert "capturedOutput" in done_line and "chars)" in done_line   # clipped, marked
 
     # -- lifecycle ----------------------------------------------------------
 

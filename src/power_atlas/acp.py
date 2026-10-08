@@ -687,6 +687,79 @@ _WORKFLOW_CHILD_STALE_S = 600
 # paused step alive.
 _WORKFLOW_WAITING_STALE_S = 21600
 
+# Absolute cap, in seconds since a child's `node_start`, on how long frames from
+# the child's OWN sessionId may keep refreshing its staleness clock
+# (`_workflow_touch`). Without it a child that keeps emitting housekeeping
+# frames after it died would never go stale. 6 h is a judgement, not a
+# measurement: no step has been timed past a few minutes. Past it the normal
+# staleness bound applies (workflow frames still refresh, they are authoritative).
+_WORKFLOW_CHILD_MAX_AGE_S = 21600
+
+# Longest string, items per list and keys per dict that go into the INFO line
+# for a `_kiro/workflow/*` frame (`_workflow_log_view`).
+_WORKFLOW_LOG_STR_CHARS = 200
+_WORKFLOW_LOG_ITEMS = 20
+
+
+def _workflow_log_clip(value, depth: int = 0):
+    """A size-bounded copy of a JSON value, for logging only."""
+    if isinstance(value, str):
+        if len(value) > _WORKFLOW_LOG_STR_CHARS:
+            return value[:_WORKFLOW_LOG_STR_CHARS] + "...(%d chars)" % len(value)
+        return value
+    if depth >= 4:
+        return "..."
+    if isinstance(value, dict):
+        items = list(value.items())
+        out = {str(k): _workflow_log_clip(v, depth + 1)
+               for k, v in items[:_WORKFLOW_LOG_ITEMS]}
+        if len(items) > _WORKFLOW_LOG_ITEMS:
+            out["..."] = "%d more" % (len(items) - _WORKFLOW_LOG_ITEMS)
+        return out
+    if isinstance(value, (list, tuple)):
+        out = [_workflow_log_clip(v, depth + 1) for v in value[:_WORKFLOW_LOG_ITEMS]]
+        if len(value) > _WORKFLOW_LOG_ITEMS:
+            out.append("...%d more" % (len(value) - _WORKFLOW_LOG_ITEMS))
+        return out
+    return value
+
+
+def _workflow_final_state_summary(state: dict) -> dict:
+    """`run_complete.finalState` as run status plus one compact string per step.
+
+    The full tree (every `capturedOutput`, the original messages, the memory
+    config) is unbounded and mostly noise in a log line; what a reader of the
+    log needs is which child ended how. Walks `root.children` (nested under
+    `parallel` containers) with a node cap.
+    """
+    steps: list[str] = []
+
+    def walk(node, depth):
+        if not isinstance(node, dict) or depth > 6 or len(steps) >= _WORKFLOW_LOG_ITEMS:
+            return
+        if node.get("sessionId") is not None or node.get("type") == "step":
+            steps.append("%s=%s/%s" % (
+                _workflow_log_clip(node.get("nodeId")), _workflow_log_clip(node.get("status")),
+                _workflow_log_clip(node.get("sessionId"))))
+        children = node.get("children")
+        if isinstance(children, list):
+            for child in children[:_WORKFLOW_LOG_ITEMS * 2]:
+                walk(child, depth + 1)
+
+    walk(state.get("root"), 0)
+    return {"status": _workflow_log_clip(state.get("status")), "steps": steps}
+
+
+def _workflow_log_view(params: dict) -> dict:
+    """A size-bounded copy of a workflow frame's params, for the INFO line."""
+    out = {}
+    for key, value in list(params.items())[:_WORKFLOW_LOG_ITEMS * 2]:
+        if key == "finalState" and isinstance(value, dict):
+            out[str(key)] = _workflow_final_state_summary(value)
+        else:
+            out[str(key)] = _workflow_log_clip(value)
+    return out
+
 # `node_start`/`node_complete` `type` values that are containers, which have no
 # child session and so no crew entry (measured: `parallel`, and the root
 # `sequence`, which gets no frames at all). Anything else that carries a child
@@ -3559,6 +3632,15 @@ class _Supervisor:
         # traceback a minute (the `_sweep_failures` idiom). Bounded by the
         # parents with tracked children; popped with them.
         self._workflow_reap_failures: dict[str, int] = {}
+        # child session id -> {"parent", "workflowId", "started" (monotonic)} for
+        # every workflow child, set at its id-bearing node_start. Internal; never
+        # on the wire. Feeds the age cap (`_workflow_touch`), the per-run scope of
+        # `run_complete` (`workflowId`), and freeing a finished child's
+        # `subagent_sessions`/`subagent_history` once its row is gone
+        # (`_workflow_free_orphans`). Unlike `_workflow_children` it outlives the
+        # child's completion, so it is popped where those are freed, in
+        # `_workflow_drop_parent` and in `_detach`.
+        self._workflow_child_meta: dict[str, dict] = {}
         # SC-9: pending `session/request_permission` requests awaiting the
         # user's answer. Keyed by an opaque id PowerAtlas mints per request
         # (the `requestId` pages see and echo back), not by the JSON-RPC
@@ -3837,6 +3919,7 @@ class _Supervisor:
         self._workflow_node_index.clear()
         self._crew_order_next.clear()
         self._workflow_reap_failures.clear()
+        self._workflow_child_meta.clear()
         return proc, job
 
     @classmethod
@@ -4601,6 +4684,7 @@ class _Supervisor:
             # A finished row that is gone can no longer be finalised by a late
             # frame, so stop tracking it too.
             self._workflow_drop_child(parent_id, child_id)
+            self._workflow_child_meta.pop(child_id, None)
             _bubbles.pop(child_id, None)
             frame = _session_closed_frame(child_id)
             for target in tuple(_registry.subscribers.get(child_id, ())):
@@ -4643,6 +4727,34 @@ class _Supervisor:
             self._workflow_node_index.pop(key, None)
         self._crew_order_next.pop(parent_id, None)
         self._workflow_reap_failures.pop(parent_id, None)
+        for child_id in [c for c, m in self._workflow_child_meta.items()
+                         if m["parent"] == parent_id]:
+            self._workflow_child_meta.pop(child_id, None)
+
+    def _workflow_free_orphans(self, parent_id: str) -> None:
+        """Free a parent's finished workflow children whose rows are gone.
+
+        Turn-end eviction keeps `subagent_sessions`/`subagent_history` (for
+        click-to-view) and the turn-start eviction then finds the crew already
+        empty, so nothing ever freed a workflow child's. Called at turn start:
+        a workflow child that is neither shown (no crew row) nor tracked is
+        released, subscribers of its read-only view are told, and its meta goes.
+        A row still shown keeps its history. Workflow children only: legacy
+        sub-agent behaviour is unchanged.
+        """
+        crew = self.crews.get(parent_id) or {}
+        tracked = self._workflow_children.get(parent_id, {})
+        for child_id, meta in tuple(self._workflow_child_meta.items()):
+            if meta["parent"] != parent_id or child_id in crew or child_id in tracked:
+                continue
+            self._workflow_child_meta.pop(child_id, None)
+            self.subagent_sessions.pop(child_id, None)
+            self.subagent_history.pop(child_id, None)
+            _bubbles.pop(child_id, None)
+            frame = _session_closed_frame(child_id)
+            for target in tuple(_registry.subscribers.get(child_id, ())):
+                target.send(frame)
+                _registry.detach(target)
 
     @staticmethod
     def _workflow_mark_reaped(entry: dict) -> None:
@@ -4711,8 +4823,13 @@ class _Supervisor:
             return None
         return "working" if any(s == "running" for s, _ in live.values()) else "waiting"
 
-    def _workflow_touch(self, child_id: str) -> None:
+    def _workflow_touch(self, child_id: str, now: float | None = None) -> None:
         """Refresh a tracked child's staleness clock on a frame from the child.
+
+        Not past `_WORKFLOW_CHILD_MAX_AGE_S` since the child's `node_start`
+        (strictly greater-than stops it): beyond that its own frames no longer
+        count as proof of life, so a child that keeps emitting housekeeping
+        frames still goes stale. *now* is injectable for the boundary test.
 
         Loop-only (it writes). Reads the RAW tracked entry, not
         ``_workflow_live``: a child that went silent past its bound and then
@@ -4731,6 +4848,12 @@ class _Supervisor:
         current = self._workflow_children.get(parent_id, {}).get(child_id)
         if current is None:
             return
+        started = (self._workflow_child_meta.get(child_id) or {}).get("started")
+        if started is not None:
+            if now is None:
+                now = time.monotonic()
+            if now - started > _WORKFLOW_CHILD_MAX_AGE_S:
+                return
         state = current[0]
         self._workflow_set(parent_id, child_id, state)
         entry = (self.crews.get(parent_id) or {}).get(child_id)
@@ -4893,7 +5016,9 @@ class _Supervisor:
             # visible: this router returns before `_on_notification`'s own
             # INFO fallthrough, which is the evidence path for every other
             # unhandled method.
-            log.info("ACP workflow %s: %.600s", method, json.dumps(params, default=str))
+            # A bounded copy: `capturedOutput` and `finalState` are unbounded.
+            log.info("ACP workflow %s: %.600s", method,
+                     json.dumps(_workflow_log_view(params), default=str))
         parent_id = params.get("parentSessionId")
         if not isinstance(parent_id, str) or parent_id not in self.sessions:
             log.info("ACP workflow %s: parentSessionId %s; frame dropped", method,
@@ -4987,11 +5112,23 @@ class _Supervisor:
                 parent_id, _NO_ANCHOR_TOOLCALLID),
             "startedAt": time.time(),
             "stoppedAt": None,
+            # Internal, never on the wire: marks a workflow row so turn-boundary
+            # eviction keeps it while the parent still has a live child.
+            "workflow": True,
         }
         self.subagent_sessions[child_id] = {"parent": parent_id}
         if child_id not in self.subagent_history:
             self.subagent_history[child_id] = _History()
-        self._workflow_node_index[(parent_id, workflow_id, node_id)] = child_id
+        self._workflow_child_meta[child_id] = {
+            "parent": parent_id, "workflowId": workflow_id,
+            "started": time.monotonic()}
+        key = (parent_id, workflow_id, node_id)
+        previous = self._workflow_node_index.get(key)
+        if previous is not None and previous != child_id:
+            log.info("ACP workflow node_start %r: index key now points at %s, "
+                     "replacing %s (a loop iteration or a re-run?)",
+                     node_id, child_id, previous)
+        self._workflow_node_index[key] = child_id
         self._workflow_set(parent_id, child_id, "running")
         self._log_workflow_children(parent_id)
         _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
@@ -5055,14 +5192,18 @@ class _Supervisor:
         indexed = {
             child: wf for (p, wf, _node), child in self._workflow_node_index.items()
             if p == parent_id}
-        # A tracked child with no index entry (its key was overwritten by a
-        # later frame for the same nodeId) cannot belong to another run we
-        # know of, so it is finalised too.
-        orphans = set(self._workflow_children.get(parent_id, ())) - set(indexed)
+
+        def run_of(child_id):
+            # The workflowId recorded on the child at its node_start, so a child
+            # whose index key was overwritten (a loop iteration) is still
+            # scoped to its own run; the index is the fallback.
+            meta = self._workflow_child_meta.get(child_id)
+            return meta["workflowId"] if meta else indexed.get(child_id)
+
         # A frame with no usable workflowId matches only children registered
         # the same way, never every run of the parent.
-        children = orphans | {
-            child for child, wf in indexed.items() if wf == workflow_id}
+        children = {child for child in set(indexed) | set(self._workflow_children.get(parent_id, ()))
+                    if run_of(child) == workflow_id}
         crew = self.crews.get(parent_id) or {}
         changed = False
         for child_id in children:
@@ -7834,6 +7975,9 @@ async def _handle_prompt(conn, session_id, payload):
         return
     _supervisor.inflight.add(session_id)
     _evict_crew_children(session_id, keep_history=False, broadcast_empty=True)
+    # Workflow children whose rows went at an earlier turn end (history kept
+    # then for click-to-view) are released now; a row still shown keeps its own.
+    _supervisor._workflow_free_orphans(session_id)
     _supervisor.crew_spawn_toolcallids.pop(session_id, None)
     # Review fix (Phase 4 review pass, finding #1): reset the fan-out-wave
     # tracker for a new turn too -- not strictly required for correctness
@@ -8481,7 +8625,15 @@ def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty
     crew = _supervisor.crews.get(session_id)
     if not crew:
         return
-    for _child_id in [cid for cid, e in crew.items() if e["done"]]:
+    # `session/prompt` returns ~2 s before a workflow ends (measured), so the
+    # turn boundary falls mid-run. A finished workflow row stays listed while
+    # the parent still has a live workflow child, or the panel loses completed
+    # steps (and its header count drops) at the first turn boundary. Once no
+    # child is live they go as any done row does. The per-session cap
+    # (`_evict_finished_subagents`) still applies.
+    _keep_workflow_rows = _supervisor.has_active_workflow(session_id)
+    for _child_id in [cid for cid, e in crew.items()
+                      if e["done"] and not (_keep_workflow_rows and e.get("workflow"))]:
         crew.pop(_child_id, None)
         # The row is gone, so a late workflow frame could not finalise it:
         # stop tracking the child too.
@@ -8489,6 +8641,7 @@ def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty
         if not keep_history:
             _supervisor.subagent_sessions.pop(_child_id, None)
             _supervisor.subagent_history.pop(_child_id, None)
+            _supervisor._workflow_child_meta.pop(_child_id, None)
         _bubbles.pop(_child_id, None)
     if not crew:
         _supervisor.crews.pop(session_id, None)
@@ -8521,12 +8674,13 @@ _sweep_failures: dict[str, int] = {}
 
 
 def _sweepable(session_id: str, meta: dict, now: float, *,
-               has_active_workflow: bool = False) -> bool:
+               has_active_workflow: bool) -> bool:
     """Whether one session may be reclaimed on this tick.
 
     Seven conditions, and each one is a separate way this has already gone wrong
     in review (the seventh, ``has_active_workflow``, is answered by the caller
-    from ``_Supervisor.has_active_workflow``):
+    from ``_Supervisor.has_active_workflow`` and is a REQUIRED keyword: a default
+    would fail open, sweeping a session mid-run if a caller forgot it):
 
     1. **Still registered.** The iteration snapshots ``sessions`` once but
        awaits inside the loop, so by the time session *n* is reached a user
