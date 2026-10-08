@@ -461,6 +461,41 @@ Each server entry:
 
 **Implemented 2026-10-05** (`4a6902b`): `acp.py` `DEFAULT_EFFORT_LEVEL` is `"max"`. `_Supervisor._apply_default_effort` sets it right after `session/new`, and after `session/load` only when `_stored_session_effort_v3` finds no stored level, so a level chosen for a session is never overwritten on resume. It skips quietly when the agent does not offer the option or `max` is not among its levels, and a failed call is logged, never raised. Checked live after a restart: a new `/acp` session stored `effortLevel: "max"`. The value is a constant and ignores `cli.json`; exposing the choice is a roadmap item (*Expose the effort level*, `plans/ROADMAP.md`).
 
+### ACP `session/new` settings — `_meta.kiro.settings` is built from `cli.json`, and `workflows` waits on Phase 2
+
+**Measured on kiro-cli 2.28.0, 2026-10-08**, from the KAS bundle (`acp-server.js`) and a second `kiro-cli acp --agent-engine v3` process driven from a separate Python process (never the running PowerAtlas). Plan: `plans/261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT.md`, Phase 1.
+
+- `kiro-cli acp` does not read `cli.json`. Its settings registry holds 24 keys, every one defaulting to `"off"` except `semanticReview` (`"on"`). A client that sends no `_meta.kiro.settings` on `session/new` gets all of them off; the terminal UI builds the block itself (its `w1()` function) from `cli.json`.
+- **Where it lives**: `acp.py` `_build_session_settings(cli_settings)` builds the block, `_load_cli_settings_dict()` reads `cli.json` (`{}` on a missing, malformed or non-object file, so a hand-edited file cannot fail `session/new`), and `_build_kas_session_params` adds the result as `_meta.kiro.settings`. It is read on every call, so a `cli.json` edit reaches the next session without a restart. `session/new` logs the keys it sent at INFO (`ACP session/new settings sent: [...]`, keys only). `session/load` goes through the same function.
+
+| `cli.json` key | KAS key | KAS shipped default | PowerAtlas behaviour |
+|---|---|---|---|
+| `chat.enableThinking` | `thinking` | off | Sent. TUI default when absent: on. |
+| `chat.enableKnowledge` | `knowledge` | off | Sent. TUI default when absent: on. |
+| `chat.enableCodeIntelligence` | `codeIntelligence` | off | Sent. TUI default when absent: on. |
+| `chat.enableLargeToolOutputHandler` | `largeToolOutputHandler` | off | Sent. TUI default when absent: on. |
+| `chat.enableWorkflows` | `workflows` and `goal` (same value) | off | **Gated**: sent only when `_WORKFLOWS_FORWARD_ENABLED` is `True`, then `enabled: true` only for a JSON `true` (the string `"false"` is off) and `enabled: false` when absent. |
+| `chat.enableCheckpoint` | `checkpoint` | off | Deferred. |
+| `chat.enableTangentMode` | `tangentMode` | off | Deferred. |
+| `chat.enableSubagent` | `_subagent` | off | Deferred. |
+| `chat.enableDelegate` | `_delegate` | off | Deferred. |
+| `chat.enableC2s` | `c2s` | off | Deferred. |
+| `chat.disableAutoCompaction` | `disableAutoCompaction` | off | Deferred. |
+| `memory.enabled` | `userMemoryOptIn` | off | Deferred. |
+
+A non-boolean value for one of the four default-on keys (a string, a number) counts as absent. An explicit `false` wins over the default. `workflowNotifications` is never sent: KAS has no reader for it (0 occurrences in the bundle).
+
+- **Enabled now**: the four default-on keys. Their cost is tokens and local indexing per session, accepted by the user on 2026-10-08.
+- **Deferred, and why**: Phase 1's audit grepped `acp.py` for `tangent`, `checkpoint`, `c2s`, `disableAutoCompaction`, `_subagent` and `_delegate` (case-insensitive) and found **no match for any of them**. The only notification handlers are the `_kiro.dev/*` and `_kiro/*` methods named in `acp.py` (`METADATA_METHOD`, `COMPACTION_STATUS_METHOD`, `SUBAGENT_LIST_METHOD`, `_kiro/mcp/status`, `_kiro.dev/clear/status`, the secret, auth and open-URL requests). Nothing proves any deferred key to be tool-availability-only, so none moved to enable-now. `_subagent` and `_delegate` also interact with the `invoke_sub_agent` suppression that `workflows` causes; `disableAutoCompaction` is a policy choice. Each has a `plans/ROADMAP.md` entry ("kiro-cli setting:").
+- **The `workflows` gate**: `_WORKFLOWS_FORWARD_ENABLED` is `False` in Phase 1 and Phase 2 flips it in the same commit that adds the `_kiro/workflow/*` handlers. With workflows on and no handler, every workflow notification is logged and dropped, and KAS suppresses `invoke_sub_agent` (`suppressChatDelegationTool`), so no build may send `workflows.enabled: true` first.
+
+**How the settings are applied (probe results, kiro-cli 2.28.0):**
+
+- *`session/new` honours the block.* A `session/new` sent with `settings.workflows.enabled: true` returned `_meta.workflowsEnabled: true` and persisted `workflowsEnabled: true` in the session's `session.json`; `false` and an absent block both gave `false`. `_meta.workflowsEnabled` in the `session/new` result is therefore a direct observable for whether a `workflows` setting took effect. The `thinking` setting is not visible this way: the `thinking` entry in `configOptions` read `on` for `enabled: false`, `enabled: true` and no block alike.
+- *Probe A — `toolSearch` placement: not determined by measurement.* Reading the bundle: the `initialize` settings go to `configuration.stateStartup(...)` and the `session/new` settings to `configuration.openSession(...)`, and `toolSearch` is a key in the same registry (`kp("toolSearch","off")`) and in the client-capabilities schema, so both layers appear to reach it. No runtime check was run. PowerAtlas keeps `toolSearch` in `clientCapabilities` only, which works as measured on 2026-10-05 (above); nothing changes.
+- *Probe B — `session/load` does not apply the block to a stored session.* A session created with `workflows: true` was loaded with `workflows: false`, and one created with `false` was loaded with `true`. `session.json` kept its original `workflowsEnabled` in both directions, and the load result carried no `workflowsEnabled`. After each load the slash-command list held no `workflow-*` entry. Whether the loaded session's tool inventory follows the persisted value or the request is not determined: the capture was not filtered by `sessionId`, and the tool inventory was not read. This is the same uncertainty as Probe C, deferred to Phase 2's live probe; until then `session/load` keeps passing the block unchanged.
+- *Probe C — the observable for `run_workflow` in a session's tool inventory: deferred to Phase 2.* The workflows keys are gated off in Phase 1. One lead only: after a `workflows: true` `session/new`, an `available_commands_update` listed `workflow-run`, `workflow-resume`, `workflow-status` and `workflow-cancel` (100 commands against 96 without). Those are slash commands, not the model's tools, and the capture did not separate sessions, so treat it as a lead, not a result.
+
 ---
 
 ## ACP permission wire shapes (measured 2026-09-23, kiro-cli KAS 2.23.1)

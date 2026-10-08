@@ -6248,12 +6248,17 @@ class TestAcpSessionLoad:
 class TestAcpNewSessionParams:
     """``session/new`` request params include the KAS steering overlay."""
 
-    def test_new_session_params_include_meta(self, acp_store):
+    def test_new_session_params_include_meta(self, acp_store, monkeypatch, tmp_path):
         """session/new carries _meta.kiro.steering so the ACP session receives
         the PowerAtlas overlay steering document, alongside the modeId the
         sole surviving `_build_kas_session_params` (renamed from its v3-only
-        counterpart, which always carried a modeId) always includes."""
+        counterpart, which always carried a modeId) always includes. It also
+        carries `settings` built from cli.json (261008 Phase 1); the path is
+        redirected to a missing file so the expected block is the TUI
+        defaults rather than whatever this machine's cli.json says."""
         acp_mod, store = acp_store
+        monkeypatch.setattr(acp_mod, "KIRO_CLI_SETTINGS_PATH",
+                            tmp_path / "no-such-cli.json")
         calls = []
 
         async def fake_request(self, method, params, timeout=None):
@@ -6282,11 +6287,189 @@ class TestAcpNewSessionParams:
                                 "inclusion": "always",
                                 "content": "PowerAtlas context \u2014 content TBD",
                             }
-                        ]
+                        ],
+                        # cli.json absent: the TUI's four default-on keys; the
+                        # workflows/goal keys are gated off in Phase 1.
+                        "settings": {
+                            "thinking": {"enabled": True},
+                            "knowledge": {"enabled": True},
+                            "codeIntelligence": {"enabled": True},
+                            "largeToolOutputHandler": {"enabled": True},
+                        },
                     }
                 },
             }
         )
+
+
+_DEFAULT_ON_SETTINGS = {
+    "chat.enableThinking": "thinking",
+    "chat.enableKnowledge": "knowledge",
+    "chat.enableCodeIntelligence": "codeIntelligence",
+    "chat.enableLargeToolOutputHandler": "largeToolOutputHandler",
+}
+
+
+class TestBuildSessionSettings:
+    """`_build_session_settings` and `_load_cli_settings_dict` (261008 Phase 1).
+
+    Expected values come from the plan's spec: the TUI's four default-on keys,
+    `chat.enableWorkflows` read with ``is True`` and gated by
+    `_WORKFLOWS_FORWARD_ENABLED`, and no deferred or ``workflowNotifications``
+    key ever.
+    """
+
+    @staticmethod
+    def _all_on():
+        return {kas: {"enabled": True} for kas in _DEFAULT_ON_SETTINGS.values()}
+
+    def test_build_session_settings_absent_keys_give_tui_defaults(self):
+        from power_atlas import acp as acp_mod
+        assert acp_mod._build_session_settings({}) == self._all_on()
+
+    @pytest.mark.parametrize("cli_key", sorted(_DEFAULT_ON_SETTINGS))
+    def test_build_session_settings_explicit_false_overrides_the_default(self, cli_key):
+        """Only the named key flips; a default-true fallback written as
+        ``value or default`` would turn this back on."""
+        from power_atlas import acp as acp_mod
+        expected = self._all_on()
+        expected[_DEFAULT_ON_SETTINGS[cli_key]] = {"enabled": False}
+        assert acp_mod._build_session_settings({cli_key: False}) == expected
+
+    def test_build_session_settings_explicit_true_is_forwarded(self):
+        from power_atlas import acp as acp_mod
+        cli = {k: True for k in _DEFAULT_ON_SETTINGS}
+        assert acp_mod._build_session_settings(cli) == self._all_on()
+
+    @pytest.mark.parametrize("value", ["false", "true", 0, 1, None, []])
+    def test_build_session_settings_non_bool_value_counts_as_absent(self, value):
+        from power_atlas import acp as acp_mod
+        cli = {k: value for k in _DEFAULT_ON_SETTINGS}
+        assert acp_mod._build_session_settings(cli) == self._all_on()
+
+    @pytest.mark.parametrize("workflows", [True, False, "false", "true", 1, None])
+    def test_build_session_settings_workflows_keys_absent_while_gated_off(self, workflows):
+        """Phase 1 ships with the gate False: no input may emit workflows or goal."""
+        from power_atlas import acp as acp_mod
+        assert acp_mod._WORKFLOWS_FORWARD_ENABLED is False
+        settings = acp_mod._build_session_settings({"chat.enableWorkflows": workflows})
+        assert "workflows" not in settings
+        assert "goal" not in settings
+        assert settings == self._all_on()
+
+    @pytest.mark.parametrize("value, enabled", [
+        (True, True),
+        (False, False),
+        ("false", False),   # bool("false") is True; must not enable
+        ("true", False),    # only a real JSON true enables
+        (1, False),
+        (None, False),
+    ])
+    def test_build_session_settings_workflows_when_gated_on(
+            self, monkeypatch, value, enabled):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_WORKFLOWS_FORWARD_ENABLED", True)
+        settings = acp_mod._build_session_settings({"chat.enableWorkflows": value})
+        assert settings["workflows"] == {"enabled": enabled}
+        assert settings["goal"] == {"enabled": enabled}
+
+    def test_build_session_settings_workflows_absent_key_sends_false_when_gated_on(
+            self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_WORKFLOWS_FORWARD_ENABLED", True)
+        settings = acp_mod._build_session_settings({})
+        assert settings["workflows"] == {"enabled": False}
+        assert settings["goal"] == {"enabled": False}
+
+    def test_build_session_settings_never_forwards_deferred_or_unrelated_keys(
+            self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        cli = {
+            "chat.enableCheckpoint": True, "chat.enableTangentMode": True,
+            "chat.enableSubagent": True, "chat.enableDelegate": True,
+            "chat.enableC2s": True, "chat.disableAutoCompaction": True,
+            "memory.enabled": True, "toolSearch.enabled": True,
+            "chat.enableWorkflows": True,
+        }
+        for gate in (False, True):
+            monkeypatch.setattr(acp_mod, "_WORKFLOWS_FORWARD_ENABLED", gate)
+            keys = set(acp_mod._build_session_settings(cli))
+            assert keys == set(_DEFAULT_ON_SETTINGS.values()) | (
+                {"workflows", "goal"} if gate else set())
+
+    def test_build_session_settings_is_wired_into_kas_session_params(
+            self, monkeypatch, tmp_path):
+        """The cli.json on disk, not a constant, decides the block, for
+        session/new and session/load alike (both call this function)."""
+        from power_atlas import acp as acp_mod
+        path = tmp_path / "cli.json"
+        path.write_text(json.dumps({"chat.enableThinking": False,
+                                    "chat.enableKnowledge": True}), encoding="utf-8")
+        monkeypatch.setattr(acp_mod, "KIRO_CLI_SETTINGS_PATH", path)
+        kiro = acp_mod._build_kas_session_params()["_meta"]["kiro"]
+        assert kiro["settings"]["thinking"] == {"enabled": False}
+        assert kiro["settings"]["knowledge"] == {"enabled": True}
+        assert kiro["modeId"] == "kiro_default"
+        assert kiro["steering"]
+        # Editing the file changes the next call: no caching.
+        path.write_text(json.dumps({"chat.enableThinking": True}), encoding="utf-8")
+        kiro = acp_mod._build_kas_session_params(mode_id="spec")["_meta"]["kiro"]
+        assert kiro["settings"]["thinking"] == {"enabled": True}
+        assert kiro["modeId"] == "spec"
+
+    def _cli(self, acp_mod, monkeypatch, tmp_path, data=None):
+        path = tmp_path / "cli.json"
+        if data is not None:
+            path.write_bytes(data)
+        monkeypatch.setattr(acp_mod, "KIRO_CLI_SETTINGS_PATH", path)
+
+    def test_load_cli_settings_dict_missing_file_is_empty_and_silent(
+            self, monkeypatch, tmp_path, caplog):
+        from power_atlas import acp as acp_mod
+        self._cli(acp_mod, monkeypatch, tmp_path)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            assert acp_mod._load_cli_settings_dict() == {}
+        assert not [r for r in caplog.records if r.name == "power_atlas.acp"]
+
+    def test_load_cli_settings_dict_malformed_json_is_empty_with_warning(
+            self, monkeypatch, tmp_path, caplog):
+        from power_atlas import acp as acp_mod
+        self._cli(acp_mod, monkeypatch, tmp_path, b"{not json")
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            assert acp_mod._load_cli_settings_dict() == {}
+        assert any(r.levelno == logging.WARNING and "malformed" in r.getMessage()
+                   for r in caplog.records)
+
+    @pytest.mark.parametrize("text", ["[]", '["chat.enableThinking"]', "null", "3", '"x"'])
+    def test_load_cli_settings_dict_non_object_is_empty_with_warning(
+            self, monkeypatch, tmp_path, caplog, text):
+        """A list here would raise AttributeError inside session/new."""
+        from power_atlas import acp as acp_mod
+        self._cli(acp_mod, monkeypatch, tmp_path, text.encode())
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            assert acp_mod._load_cli_settings_dict() == {}
+        assert any(r.levelno == logging.WARNING and "not an object" in r.getMessage()
+                   for r in caplog.records)
+        # and the builder survives the result
+        assert acp_mod._build_session_settings(acp_mod._load_cli_settings_dict()) == (
+            self._all_on())
+
+    def test_load_cli_settings_dict_reads_a_bom_file(self, monkeypatch, tmp_path):
+        from power_atlas import acp as acp_mod
+        body = json.dumps({"chat.enableWorkflows": True, "chat.enableThinking": False})
+        self._cli(acp_mod, monkeypatch, tmp_path, b"\xef\xbb\xbf" + body.encode())
+        assert acp_mod._load_cli_settings_dict() == {
+            "chat.enableWorkflows": True, "chat.enableThinking": False}
+
+    def test_load_cli_settings_dict_returns_a_valid_object_whole(
+            self, monkeypatch, tmp_path):
+        """Unlike `_kiro_tool_search_settings`, the whole object comes back,
+        unrelated keys included."""
+        from power_atlas import acp as acp_mod
+        data = {"toolSearch.enabled": True, "chat.enableKnowledge": False,
+                "other": {"nested": [1, 2]}}
+        self._cli(acp_mod, monkeypatch, tmp_path, json.dumps(data).encode())
+        assert acp_mod._load_cli_settings_dict() == data
 
 
 def _stored_session(store, sid):

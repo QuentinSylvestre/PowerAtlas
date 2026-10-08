@@ -956,12 +956,96 @@ _VALID_TASK_MODES: Final[frozenset[str]] = frozenset({
 })
 
 
+def _load_cli_settings_dict() -> dict:
+    """The whole kiro-cli ``cli.json`` as a dict, or ``{}``.
+
+    ``{}`` when the file is absent, unreadable, not JSON, or its top level is
+    not an object (so `_build_session_settings` never sees a non-dict and
+    ``session/new`` cannot fail on a hand-edited file). Same tolerant read as
+    `_kiro_tool_search_settings`: ``utf-8-sig`` for the BOM some Windows
+    editors write. A missing file is normal and silent; anything else is
+    logged at WARNING because the session then runs on the TUI defaults.
+    """
+    try:
+        with open(KIRO_CLI_SETTINGS_PATH, encoding="utf-8-sig") as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        log.warning("ACP cli.json unreadable or malformed; using TUI defaults")
+        return {}
+    if not isinstance(raw, dict):
+        log.warning("ACP cli.json top level is not an object; using TUI defaults")
+        return {}
+    return raw
+
+
+# Gate for the `workflows` and `goal` keys of the session/new settings block.
+# False until the `_kiro/workflow/*` handlers exist (plan
+# 261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT, Phase 2 flips it in the
+# same commit that adds them). With workflows enabled and no handler, every
+# workflow notification is logged and dropped, and KAS suppresses
+# `invoke_sub_agent`, so no deployable build may forward `enabled: true` first.
+# Read at call time by `_build_session_settings` so tests can flip it.
+_WORKFLOWS_FORWARD_ENABLED = False
+
+
+def _build_session_settings(cli_settings: dict) -> dict:
+    """Construct ``_meta.kiro.settings`` for ``session/new`` from ``cli.json``.
+
+    ``kiro-cli acp`` does not read ``cli.json`` and ships every feature
+    setting off (``semanticReview`` excepted), so a client that sends none
+    gets fewer capabilities than the terminal UI. This mirrors the terminal
+    UI's own ``w1()`` builder, restricted to the keys PowerAtlas has a handler
+    for. Deferred keys (``checkpoint``, ``tangentMode``, ``_subagent``,
+    ``_delegate``, ``c2s``, ``disableAutoCompaction``, ``memory``) are not
+    sent; see docs/KNOWLEDGE.md "ACP session/new settings".
+
+    The terminal UI defaults ``codeIntelligence``, ``knowledge``, ``thinking``
+    and ``largeToolOutputHandler`` to on when the key is absent from
+    ``cli.json``; the same defaults apply here so a PowerAtlas session is not
+    silently poorer than a terminal one. An explicit ``false`` wins. A value
+    that is not a bool counts as absent.
+    """
+    defaults: dict[str, bool] = {
+        "codeIntelligence": True,
+        "knowledge": True,
+        "thinking": True,
+        "largeToolOutputHandler": True,
+    }
+    # cli.json key -> KAS setting name, for the keys enabled now.
+    mapping: list[tuple[str, str]] = [
+        ("chat.enableThinking", "thinking"),
+        ("chat.enableKnowledge", "knowledge"),
+        ("chat.enableCodeIntelligence", "codeIntelligence"),
+        ("chat.enableLargeToolOutputHandler", "largeToolOutputHandler"),
+    ]
+    settings: dict[str, dict] = {}
+    for cli_key, kas_key in mapping:
+        value = cli_settings.get(cli_key)
+        if isinstance(value, bool):
+            settings[kas_key] = {"enabled": value}
+        elif kas_key in defaults:
+            settings[kas_key] = {"enabled": defaults[kas_key]}
+
+    # `workflows` and `goal` both follow chat.enableWorkflows, which the
+    # terminal UI leaves off when absent. `is True`, not bool(): the string
+    # "false" must not enable workflows.
+    if _WORKFLOWS_FORWARD_ENABLED:
+        workflows_on = cli_settings.get("chat.enableWorkflows") is True
+        settings["workflows"] = {"enabled": workflows_on}
+        settings["goal"] = {"enabled": workflows_on}
+    return settings
+
+
 def _build_kas_session_params(mode_id: str = "kiro_default") -> dict[str, Any]:
     """Build the _meta.kiro fragment for session/new and session/load requests.
 
     The _meta.kiro key is a KAS protocol field accepted by KiroSessionMetaSchema
     in acp-server.js. The steering list is delivered as clientSteeringDocs via
-    createSessionState(..., kiroMeta?.steering ...).
+    createSessionState(..., kiroMeta?.steering ...). ``settings`` is built from
+    the user's cli.json on every call (`_build_session_settings`), so a change
+    there reaches the next session without a restart.
 
     ``mode_id`` binds the mode on ``session/new``. Measured 2026-09-21
     (probe P2, kiro-cli 2.22.x,
@@ -979,6 +1063,7 @@ def _build_kas_session_params(mode_id: str = "kiro_default") -> dict[str, Any]:
             "kiro": {
                 "modeId": mode_id,
                 "steering": [{**d} for d in _OVERLAY_STEERING],
+                "settings": _build_session_settings(_load_cli_settings_dict()),
             }
         },
     }
@@ -5727,6 +5812,8 @@ class _Supervisor:
             params = _build_kas_session_params(mode_id=mode or "kiro_default")
             params["cwd"] = cwd
             params["mcpServers"] = []
+            log.info("ACP session/new settings sent: %s",
+                     sorted(params["_meta"]["kiro"]["settings"]))
             result = await self._request("session/new", params)
             result = result or {}
             # CRITICAL: v3 session ID is at result._meta.id, not result.sessionId.
