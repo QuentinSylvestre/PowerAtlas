@@ -585,6 +585,23 @@
     }
     promptHistIdx = -1;
   }
+  // Called by transcript-renderer.js appendChunk for every user-role chunk
+  // that arrives during history replay. This repopulates sentPrompts when
+  // reconnecting to a session, so keyboard ArrowUp reaches all prior prompts,
+  // not only the ones sent in the current browser tab. The live-send path
+  // already calls recordSentPrompt() via sendPrompt(); this fills the gap for
+  // the replay path. Does NOT reset promptHistIdx — replay may still be in
+  // progress, and the first call from _histNavUp/_histNavDown will handle it.
+  // Exposed as a page-global so transcript-renderer.js can call it without
+  // importing acp.html's private scope (same pattern as logLine).
+  function onUserChunkReplayed(text) {
+    if (!text) return;
+    if (!sentPrompts.length || sentPrompts[sentPrompts.length - 1] !== text) {
+      sentPrompts.push(text);
+      if (sentPrompts.length > 200) sentPrompts.shift();
+    }
+  }
+  window.onUserChunkReplayed = onUserChunkReplayed;
   var promptHlEl = document.getElementById('acpPromptHl');
   var composerEl = document.getElementById('acpComposer');
   var trayEl = document.getElementById('acpTray');
@@ -5034,6 +5051,12 @@
       // A new session means any prior command catalogue is gone — reset so
       // stale slash-command suggestions from the old session never show up.
       resetCommandPalette();
+      // Clear prompt history so prompts from a previous session do not bleed
+      // into the next one. The replay that follows will repopulate sentPrompts
+      // from the new session's user messages (see onUserChunkReplayed).
+      sentPrompts = [];
+      promptHistIdx = -1;
+      promptDraft = '';
       updatePromptHighlight();
       // The server's answer, not an inference from whatever survived in the
       // buffer. A turn longer than the buffer replays without its start

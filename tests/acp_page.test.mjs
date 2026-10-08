@@ -11103,6 +11103,26 @@ check("promptHistoryTwoConsecutiveArrowUps", (tpl) => {
     JSON.stringify(prompt.value));
 });
 
+// promptHistoryReplayPopulates: replayed user chunks populate sentPrompts so
+// ArrowUp works from history even when the user hasn't sent anything yet.
+check("promptHistoryReplayPopulates", (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
+  const prompt = page.el("acpPrompt");
+  const arrowUp = { key: "ArrowUp", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {} };
+  // Replay two user chunks (as would arrive during session reconnect).
+  page.deliver({ type: "chunk", sessionId: live, payload: { role: "user", text: "replayed first" } });
+  page.deliver({ type: "chunk", sessionId: live, payload: { role: "user", text: "replayed second" } });
+  // ArrowUp from empty box → most recent replayed prompt.
+  prompt.selectionStart = prompt.selectionEnd = 0;
+  prompt.dispatch("keydown", arrowUp);
+  assertEqual(prompt.value, "replayed second",
+    "ArrowUp should recall 'replayed second' from replay history; got " + JSON.stringify(prompt.value));
+  // Second ArrowUp → older replayed prompt.
+  prompt.dispatch("keydown", arrowUp);
+  assertEqual(prompt.value, "replayed first",
+    "Second ArrowUp should recall 'replayed first' from replay history; got " + JSON.stringify(prompt.value));
+});
+
 // promptHistoryDraftRestored (SC-5): with a draft typed, ArrowUp saves the draft
 // and recalls history; ArrowDown past the end of history restores the draft.
 check("promptHistoryDraftRestored", (tpl) => {

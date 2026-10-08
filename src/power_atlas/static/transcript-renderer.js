@@ -1870,6 +1870,13 @@ function appendChunk(role, text) {
   openGroup = null;
   var body = addMessage(role, text);
   agentBody = role === 'agent' ? body : null;
+  // Let acp.html populate prompt history from replayed user messages.
+  // During live sends, recordSentPrompt is already called by sendPrompt();
+  // this covers the replay path (session load / reconnect). Guard the same
+  // way logLine is guarded — a host page with no history to populate omits it.
+  if (role === 'user' && typeof onUserChunkReplayed === 'function') {
+    onUserChunkReplayed(text);
+  }
 }
 
 // ---- permission requests ----------------------------------------------
