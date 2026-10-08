@@ -6716,6 +6716,64 @@ check("workflow crew rows: running, waiting and failed render sensibly", (tpl) =
          .startsWith("Orchestrating"), "the crew is not all done while a step waits");
 });
 
+// A workflow step the server reaped (stopped reporting past its bound) is sent
+// as done, no error, status 'stale', action 'no longer reporting'. It may still
+// be running, so it must not read as a plain success. A normal finish carries
+// action '' and keeps saying 'done'; a finished sub-agent row that kept its last
+// tool title in `action` (status is a terminal value, not 'stale') also still
+// says 'done'; an errored row still says 'errored'.
+const REAPED_ROWS = (now) => [
+  { sessionId: "sess_00000000-0000-4000-8000-0000000000a1", role: "step-reaped",
+    task: "wf-coder", sessionName: "wf-coder", status: "stale",
+    action: "no longer reporting", done: true, error: "", startedAt: now - 9,
+    stoppedAt: now - 1 },
+  { sessionId: "sess_00000000-0000-4000-8000-0000000000b2", role: "step-finished",
+    task: "wf-coder", sessionName: "wf-coder", status: "done", action: "",
+    done: true, error: "", startedAt: now - 9, stoppedAt: now - 2 },
+  { sessionId: "sess_00000000-0000-4000-8000-0000000000c3", role: "legacy",
+    task: "x", sessionName: "legacy", status: "terminated", action: "Reading file",
+    done: true, error: "", startedAt: now - 9, stoppedAt: now - 2 },
+  { sessionId: "sess_00000000-0000-4000-8000-0000000000d4", role: "step-failed",
+    task: "wf-coder", sessionName: "wf-coder", status: "failed", action: "",
+    done: true, error: "cancelled", startedAt: now - 9, stoppedAt: now - 2 },
+];
+
+check("a reaped workflow row says 'no longer reporting'; normal finishes still say 'done'", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, REAPED_ROWS(Date.now() / 1000)));
+  const rows = page.all("acpTranscript", ".acp-crew-row");
+  assertEqual(rows.length, 4);
+  const act = (r) => r.querySelector(".acp-crew-action").textContent;
+  assertEqual(act(rows[0]), "no longer reporting");
+  assertEqual(act(rows[1]), "done");
+  assertEqual(act(rows[2]), "done", "a finished sub-agent keeps saying done whatever its last tool title was");
+  assertEqual(act(rows[3]), "errored");
+  assert(String(rows[0].getAttribute("aria-label")).endsWith("no longer reporting"),
+         "the accessible name must carry the same text");
+  // Dot styling is the finished one, not the working one.
+  assert(String(rows[0].querySelector(".session-status").className).includes("status-idle"));
+});
+
+check("the sub-agent panel header shows 'no longer reporting' for a reaped row and 'done' otherwise", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, REAPED_ROWS(Date.now() / 1000)));
+  const rows = page.all("acpTranscript", ".acp-crew-row");
+  rows[0].dispatch("click");
+  assertEqual(page.el("acpSubStatus").textContent, "no longer reporting");
+});
+
+check("dashboard: a reaped workflow row says 'no longer reporting'; normal finishes still say 'done'", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", REAPED_ROWS(Date.now() / 1000)));
+  const rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
+  assertEqual(rows.length, 4);
+  const act = (r) => r.querySelector(".acp-crew-action").textContent;
+  assertEqual([0, 1, 2, 3].map((i) => act(rows[i])).join("|"),
+              "no longer reporting|done|done|errored");
+  rows[0].dispatch("click");
+  assertEqual(p.el("dashSubStatus").textContent, "no longer reporting");
+});
+
 check("acp-crew-label shows entry.sessionName when present", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver(subagentsFrame(live, [

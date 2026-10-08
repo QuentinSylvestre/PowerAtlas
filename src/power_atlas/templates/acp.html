@@ -1907,7 +1907,7 @@
                      : state === 'error'   ? 'status-errored'
                      : 'status-idle';
         var label = crewLabel(entry);
-        var stateText = state === 'error' ? 'errored' : state === 'done' ? 'done' : (entry.action || 'working');
+        var stateText = state === 'error' ? 'errored' : state === 'done' ? doneText(entry) : (entry.action || 'working');
 
         var row = document.createElement('button');
         row.type = 'button';
@@ -1957,6 +1957,16 @@
   function subagentState(entry) {
     if (!entry || !entry.done) return 'working';
     return entry.error ? 'error' : 'done';
+  }
+
+  // The text for a finished row. 'done' for every normal finish. A workflow
+  // step the server closed with no verdict (status 'stale', action 'no longer
+  // reporting') says so, because it may still be running: a plain 'done' would
+  // read as success. Keyed on status, not just on a non-empty action, since a
+  // finished sub-agent row can keep its last tool title in `action`.
+  // mirrors index.html's dashDoneText() — keep in sync
+  function doneText(entry) {
+    return entry.status === 'stale' && entry.action ? entry.action : 'done';
   }
 
   // ---- the sub-agent panel -------------------------------------------------
@@ -2084,7 +2094,7 @@
     var state = subagentState(entry);
     subStatusEl.className = 'acp-subpanel-status acp-subpanel-status-' + state;
     subStatusEl.textContent = state === 'error' ? 'errored: ' + entry.error
-      : state === 'done' ? 'done' : (entry.action || 'working…');
+      : state === 'done' ? doneText(entry) : (entry.action || 'working…');
   }
 
   // mirrors index.html's dashOpenSubagent() — keep in sync

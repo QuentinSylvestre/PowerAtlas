@@ -3554,6 +3554,11 @@ class _Supervisor:
         # `len(crew)`: eviction shrinks the crew and a length would collide
         # with a surviving entry's `order`.
         self._crew_order_next: dict[str, int] = {}
+        # parent -> consecutive failed `_workflow_reap` passes, so a persistent
+        # fault logs one traceback and then one short line a tick instead of a
+        # traceback a minute (the `_sweep_failures` idiom). Bounded by the
+        # parents with tracked children; popped with them.
+        self._workflow_reap_failures: dict[str, int] = {}
         # SC-9: pending `session/request_permission` requests awaiting the
         # user's answer. Keyed by an opaque id PowerAtlas mints per request
         # (the `requestId` pages see and echo back), not by the JSON-RPC
@@ -3831,6 +3836,7 @@ class _Supervisor:
         self._workflow_children.clear()
         self._workflow_node_index.clear()
         self._crew_order_next.clear()
+        self._workflow_reap_failures.clear()
         return proc, job
 
     @classmethod
@@ -4636,6 +4642,27 @@ class _Supervisor:
         for key in [k for k in self._workflow_node_index if k[0] == parent_id]:
             self._workflow_node_index.pop(key, None)
         self._crew_order_next.pop(parent_id, None)
+        self._workflow_reap_failures.pop(parent_id, None)
+
+    @staticmethod
+    def _workflow_mark_reaped(entry: dict) -> None:
+        """Close a row whose step stopped reporting, with NO verdict.
+
+        Done (so the rail and timer stop claiming it works), no error (it is
+        not known to have failed), ``status`` "stale" and the action text "no
+        longer reporting" (the pages show that text for a done row with this
+        status). The internal ``reaped`` marker is what lets a later frame from
+        the child reopen the row (``_workflow_touch``) and a late
+        ``node_complete``/``run_complete`` settle it; it is never sent on the
+        wire. Used by the sweeper reap, the cancel cascade and the turn-end
+        sweep for a child that is still tracked but past its bound.
+        """
+        entry["done"] = True
+        entry["reaped"] = True
+        entry["status"] = "stale"
+        entry["action"] = "no longer reporting"
+        if entry.get("stoppedAt") is None:
+            entry["stoppedAt"] = time.time()
 
     @staticmethod
     def _workflow_is_fresh(state: str, seen: float, now: float) -> bool:
@@ -4754,26 +4781,46 @@ class _Supervisor:
         if now is None:
             now = time.monotonic()
         reaped: list[str] = []
+        for parent_id in tuple(self._workflow_reap_failures):
+            if parent_id not in self._workflow_children:
+                del self._workflow_reap_failures[parent_id]
         for parent_id, kids in tuple(self._workflow_children.items()):
-            crew = self.crews.get(parent_id)
-            if not crew:
-                continue
-            changed = False
+            # Per parent: one poisoned row must not stop the others being
+            # reaped, and a persistent fault must not log a traceback a tick.
+            try:
+                reaped.extend(self._workflow_reap_parent(parent_id, kids, now))
+                self._workflow_reap_failures.pop(parent_id, None)
+            except Exception:
+                failures = self._workflow_reap_failures[parent_id] = (
+                    self._workflow_reap_failures.get(parent_id, 0) + 1)
+                if failures == 1:
+                    log.warning("ACP workflow reap failed for %s", parent_id,
+                                exc_info=True)
+                else:
+                    log.warning("ACP workflow reap failed again for %s (%d in a row)",
+                                parent_id, failures)
+        return reaped
+
+    def _workflow_reap_parent(self, parent_id: str, kids: dict, now: float) -> list[str]:
+        """One parent's share of ``_workflow_reap``. Loop-only."""
+        crew = self.crews.get(parent_id)
+        if not crew:
+            return []
+        reaped: list[str] = []
+        try:
             for child_id, (state, seen) in tuple(kids.items()):
                 if self._workflow_is_fresh(state, seen, now):
                     continue
                 entry = crew.get(child_id)
                 if entry is None or entry["done"]:
                     continue
-                entry["done"] = True
-                entry["reaped"] = True
-                entry["stoppedAt"] = time.time()
-                entry["action"] = "no longer reporting"
-                changed = True
+                self._workflow_mark_reaped(entry)
                 reaped.append(child_id)
                 log.info("ACP workflow step %s of %s reaped: %s, unseen %.0fs",
                          child_id, parent_id, state, now - seen)
-            if changed:
+        finally:
+            # Frame for what was changed even if a later row raised.
+            if reaped:
                 _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
         return reaped
 
@@ -4884,7 +4931,9 @@ class _Supervisor:
         that one. Container nodes (``parallel``, the root ``sequence``) never
         carry a child id and get no entry. Idempotent and terminal-sticky,
         like ``_on_subagent_list``: a repeat never resets ``startedAt``,
-        ``order`` or history and never re-opens a finished step.
+        ``order`` or history and never re-opens a step that finished. The one
+        exception is a row ``_workflow_reap`` closed with no verdict: a repeat
+        proves the step is alive and reopens it.
         """
         child_id = params.get("sessionId")
         node_id = _as_text(params.get("nodeId"))
@@ -7280,7 +7329,8 @@ def _deliver_load(conn: _Connection, waiters: list[_Connection],
         subscribe_fn(target, session_id)
 
 
-def _mark_crew_done(crew: dict, now: float, exempt: frozenset = frozenset()) -> bool:
+def _mark_crew_done(crew: dict, now: float, exempt: frozenset = frozenset(),
+                    stale: frozenset = frozenset()) -> bool:
     """Mark every non-done crew entry done and stamp ``stoppedAt``.
 
     Used by the cancel cascade in ``_handle_cancel`` to finalize the whole
@@ -7288,6 +7338,10 @@ def _mark_crew_done(crew: dict, now: float, exempt: frozenset = frozenset()) -> 
     parent cancel.  See ``_on_subagent_list`` for the per-entry stamping rule
     this mirrors: set ``stoppedAt`` to *now* only when transitioning to
     ``done=True`` for the first time and it was not already set.
+
+    *stale* holds tracked workflow children past their staleness bound: their
+    rows are closed with ``_Supervisor._workflow_mark_reaped`` (no verdict,
+    revivable) instead of a plain done.
 
     *exempt* holds the child ids to leave running: live workflow children.
     Cancelling the parent's turn does not stop a workflow (measured: no
@@ -7301,6 +7355,8 @@ def _mark_crew_done(crew: dict, now: float, exempt: frozenset = frozenset()) -> 
         if child_id in exempt:
             continue
         if not entry["done"]:
+            if child_id in stale:
+                _Supervisor._workflow_mark_reaped(entry)
             entry["done"] = True
             if not entry.get("stoppedAt"):
                 entry["stoppedAt"] = now
@@ -7870,6 +7926,9 @@ async def _handle_prompt(conn, session_id, payload):
                                      _child_id, session_id,
                                      _wf_tracked[_child_id][0],
                                      time.monotonic() - _wf_tracked[_child_id][1])
+                            # Same no-verdict close as the reap, so the row
+                            # stays revivable if its eviction below is skipped.
+                            _supervisor._workflow_mark_reaped(_entry)
                         _entry["done"] = True
                         if _entry.get("stoppedAt") is None:
                             _entry["stoppedAt"] = time.time()
@@ -8225,7 +8284,9 @@ async def _handle_cancel(conn, session_id):
     crew = _supervisor.crews.get(session_id)
     if crew:
         now = time.time()
-        if _mark_crew_done(crew, now, frozenset(_supervisor._workflow_live(session_id))):
+        _live = frozenset(_supervisor._workflow_live(session_id))
+        _stale = frozenset(_supervisor._workflow_children.get(session_id, {})) - _live
+        if _mark_crew_done(crew, now, _live, _stale):
             try:
                 _emit_subagents_frame(session_id, _supervisor.crews,
                                       _supervisor._active_fan_out_wave)

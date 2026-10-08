@@ -3855,7 +3855,7 @@ function dashRenderCrewPanel(slot) {
                    : state === 'error'   ? 'status-errored'
                    : 'status-idle';
       var label = dashCrewLabel(entry);
-      var stateText = state === 'error' ? 'errored' : state === 'done' ? 'done' : (entry.action || 'working');
+      var stateText = state === 'error' ? 'errored' : state === 'done' ? dashDoneText(entry) : (entry.action || 'working');
 
       var row = document.createElement('button');
       row.type = 'button';
@@ -3906,6 +3906,14 @@ function dashRenderCrewPanel(slot) {
 function dashSubagentState(entry) {
   if (!entry || !entry.done) return 'working';
   return entry.error ? 'error' : 'done';
+}
+
+// The text for a finished row: 'done' for every normal finish; a workflow step
+// the server closed with no verdict (status 'stale', action 'no longer
+// reporting') says so, since it may still be running. Mirrors acp.html's
+// doneText.
+function dashDoneText(entry) {
+  return entry.status === 'stale' && entry.action ? entry.action : 'done';
 }
 
 // Every code path that removes a crew slot (normal removal via
@@ -4085,7 +4093,7 @@ function dashRenderSubHead() {
   var state = dashSubagentState(entry);
   dashSubStatusEl.className = 'acp-subpanel-status acp-subpanel-status-' + state;
   dashSubStatusEl.textContent = state === 'error' ? 'errored: ' + entry.error
-    : state === 'done' ? 'done' : (entry.action || 'working…');
+    : state === 'done' ? dashDoneText(entry) : (entry.action || 'working…');
 }
 
 function dashOpenSubagent(sid) {

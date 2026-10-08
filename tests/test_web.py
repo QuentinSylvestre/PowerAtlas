@@ -12645,7 +12645,9 @@ class TestAcpWorkflowNotifications:
         for node, child, status, expected in (
                 ("s1", "child-c7", "completed", ("done", "")),
                 ("s2", "child-c8", "cancelled", ("failed", "cancelled"))):
-            assert sv.crews[self.P][child]["status"] == "working"   # no verdict yet
+            # No verdict yet: the reap closes a row with status "stale" (cycle-3
+            # fix 1, so the pages can word it "no longer reporting").
+            assert sv.crews[self.P][child]["status"] == "stale"
             self._complete(acp_mod, "wf-k7x", node, status=status)
             entry = sv.crews[self.P][child]
             assert (entry["status"], entry["error"]) == expected
@@ -12778,6 +12780,160 @@ class TestAcpWorkflowNotifications:
         assert set(sv._workflow_children[self.P]) == {"child-l1", "child-b3", "child-c4"}
         assert set(sv._workflow_node_index.values()) == {"child-l1", "child-b3", "child-c4"}
         assert "child-a2" not in sv.subagent_sessions
+
+    # -- reopen paths, wire shape, narrow windows, reap fault isolation ------
+
+    def _reaped_child(self, acp_mod, sv, state="running", watcher=None):
+        """child-c7 started (and paused if asked), made stale, then reaped."""
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        if state == "waiting":
+            self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
+        sv._workflow_children[self.P]["child-c7"] = (
+            state, time.monotonic() - (30000 if state == "waiting" else 700))
+        assert sv._workflow_reap() == ["child-c7"]
+        if watcher is not None:
+            _queued(watcher)
+        return sv.crews[self.P]["child-c7"]
+
+    def test_workflow_reaped_row_wire_payload_has_no_internal_marker(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        entry = self._reaped_child(acp_mod, sv, watcher=watcher)
+        assert entry["reaped"] is True and entry["status"] == "stale"
+        wire = acp_mod._subagents_payload(sv.crews[self.P], "")
+        assert len(wire) == 1
+        assert set(wire[0]) == {"sessionId", "role", "task", "sessionName", "status",
+                                "action", "done", "error", "startedAt", "stoppedAt"}
+        assert (wire[0]["done"], wire[0]["error"], wire[0]["status"],
+                wire[0]["action"]) == (True, "", "stale", "no longer reporting")
+
+    def test_workflow_repeated_node_start_after_a_reap_reopens_the_row(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        entry = self._reaped_child(acp_mod, sv, watcher=watcher)
+        started = entry["startedAt"]
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        assert sv.crews[self.P]["child-c7"] is entry
+        assert (entry["done"], entry["stoppedAt"], entry["status"], entry["action"]) == (
+            False, None, "working", "running")
+        assert "reaped" not in entry and entry["startedAt"] == started
+        assert sv.workflow_state(self.P) == "working"
+        frames = self._frames(watcher)
+        assert len(frames) == 1 and frames[0][0]["done"] is False
+
+    def test_workflow_node_paused_after_a_reap_reopens_the_row_as_waiting(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        entry = self._reaped_child(acp_mod, sv, watcher=watcher)
+        self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
+        assert (entry["done"], entry["stoppedAt"], entry["status"], entry["action"]) == (
+            False, None, "waiting", "waiting")
+        assert "reaped" not in entry
+        assert sv.workflow_state(self.P) == "waiting"
+        frames = self._frames(watcher)
+        assert len(frames) == 1 and frames[0][0]["done"] is False
+
+    def test_workflow_reap_then_a_normal_turn_end_evicts_the_row_and_its_tracking(self, wf):
+        acp_mod, sv = wf
+        self._reaped_child(acp_mod, sv)
+        self._run_turn(acp_mod, "end_turn")
+        assert "child-c7" not in sv.crews.get(self.P, {})
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        # Consequence (documented): a real node_complete arriving now has no
+        # registered child and is ignored.
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert "child-c7" not in sv.crews.get(self.P, {})
+
+    def test_workflow_reap_then_the_cancel_cascade_leaves_the_row_revivable(self, wf):
+        acp_mod, sv = wf
+        entry = self._reaped_child(acp_mod, sv)
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, self.P)
+        sv.inflight.add(self.P)
+
+        async def cancelled(self_, session_id):
+            return None
+
+        with patch.object(acp_mod._Supervisor, "cancel", cancelled):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+        assert entry["done"] is True and entry["reaped"] is True
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "back"}}})
+        assert (entry["done"], entry["status"]) == (False, "working")
+        assert sv.workflow_state(self.P) == "working"
+
+    def test_workflow_cancel_cascade_closing_a_stale_tracked_row_keeps_it_revivable(self, wf):
+        """Review fix 3: a stale child's row closed by the cancel cascade carries
+        the reaped marker, so a later frame from the child reopens it and its
+        tracking survives. A FRESH child is still left running (exempt)."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")     # stale
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")     # fresh
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, self.P)
+        sv.inflight.add(self.P)
+
+        async def cancelled(self_, session_id):
+            return None
+
+        with patch.object(acp_mod._Supervisor, "cancel", cancelled):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+        stale_row, fresh_row = sv.crews[self.P]["child-c7"], sv.crews[self.P]["child-c8"]
+        assert (stale_row["done"], stale_row["reaped"], stale_row["status"]) == (
+            True, True, "stale")
+        assert stale_row["error"] == "" and fresh_row["done"] is False
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "back"}}})
+        assert (stale_row["done"], stale_row["status"]) == (False, "working")
+        assert "child-c7" in sv._workflow_children[self.P]
+        # Without the marker the evict that follows would have dropped it.
+        acp_mod._evict_crew_children(self.P, keep_history=True, broadcast_empty=False)
+        assert "child-c7" in sv._workflow_children[self.P]
+
+    def test_workflow_turn_end_closing_a_stale_tracked_row_marks_it_reaped(self, wf):
+        """Same marker on the turn-end path. Its eviction is patched out here so
+        the closed row can be observed; in production the evict follows."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        with patch.object(acp_mod, "_evict_crew_children", lambda *a, **k: None):
+            self._run_turn(acp_mod, "end_turn")
+        entry = sv.crews[self.P]["child-c7"]
+        assert (entry["done"], entry["reaped"], entry["status"], entry["error"]) == (
+            True, True, "stale", "")
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "back"}}})
+        assert (entry["done"], sv.workflow_state(self.P)) == (False, "working")
+
+    def test_workflow_reap_isolates_a_poisoned_parent_and_logs_the_traceback_once(
+            self, wf, caplog):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
+                   nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
+                   sessionId="child-c3")
+        for parent, child in ((self.P, "child-c7"), (self.P2, "child-c3")):
+            sv._workflow_children[parent][child] = ("running", 1000.0)
+        del sv.crews[self.P]["child-c7"]["done"]          # poison the first parent
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            assert sv._workflow_reap(now=2000.0) == ["child-c3"]
+            assert sv.crews[self.P2]["child-c3"]["done"] is True
+            assert sv._workflow_reap(now=2100.0) == []
+            assert sv._workflow_reap(now=2200.0) == []
+        warns = [r for r in caplog.records if "workflow reap failed" in r.getMessage()]
+        assert len(warns) == 3
+        assert warns[0].exc_info is not None                      # the traceback, once
+        assert warns[1].exc_info is None and warns[2].exc_info is None
+        assert "again" in warns[1].getMessage() and "2 in a row" in warns[1].getMessage()
+        # A parent that stops failing is forgotten.
+        sv.crews[self.P]["child-c7"]["done"] = True
+        assert sv._workflow_reap(now=2300.0) == []
+        assert sv._workflow_reap_failures == {}
 
     # -- lifecycle ----------------------------------------------------------
 
