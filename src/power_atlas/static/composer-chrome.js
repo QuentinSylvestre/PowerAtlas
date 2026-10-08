@@ -580,6 +580,18 @@ function confirmCommandSelection() {
   cmdOnPromptChanged();
   var sid = cmdGetSessionId();
   if (!sid) return;
+  // `compact` is handled via session/prompt in acp.py (_handle_prompt detects
+  // the text "/compact" and triggers compaction). In kiro-cli 2.28+ it is no
+  // longer advertised in available_commands_update, so _handle_commands_execute
+  // now rejects it as unknown. Sending it as a plain prompt uses the path that
+  // always worked, without a restart.
+  if (name === 'compact') {
+    var sent = cmdSend('prompt', { prompt: '/compact' }, sid);
+    if (!sent) {
+      logLine('error', 'command "/compact" was not sent — see the previous line');
+    }
+    return;
+  }
   // Step 9 review, Fix 10: cmdSend()'s own return value used to go
   // unchecked -- a failed send (while disconnected) produced no feedback
   // beyond whatever send() itself already logs on failure (`logLine('error',
