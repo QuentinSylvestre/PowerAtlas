@@ -4020,8 +4020,10 @@ var dashSubWs = null;
 // history replay rather than the main socket's.
 var dashSubReplaying = false;
 // The sub-agent bubble text is appended to, mirroring agentBody but for
-// dashSubTranscriptEl. No markdown rendering in this panel, mirroring
-// acp.html's own subAgentBody -- a read-only, transcript-only view.
+// dashSubTranscriptEl. 261007 Phase 4 (D5): markdown IS now rendered here,
+// mirroring acp.html's own subAgentBody -- the server emits a `rendered`
+// frame on the sub-task channel and dashHandleSub rebuilds this bubble with
+// mdBuild(payload.tokens). Streaming chunks are plain; the frame upgrades.
 var dashSubAgentBody = null;
 // toolRows's counterpart for the sub-agent panel.
 var dashSubToolRows = Object.create(null);
@@ -4215,11 +4217,15 @@ function dashSubAppendChunk(text) {
   dashSubTranscriptEl.scrollTop = dashSubTranscriptEl.scrollHeight;
 }
 
+// 261007 Phase 4 (D4): richer tool row for the dashboard sub-agent panel,
+// the mirror of acp.html's subAddToolCall -- icon + name + kind chip + status
+// badge via the shared _toolKindIcon/_setToolStatus helpers. A repeat frame
+// updates the status badge in place. No innerHTML; closed icon/status maps.
 function dashSubAddToolCall(payload) {
   var id = payload.toolCallId;
   var known = id ? dashSubToolRows['t:' + id] : null;
   if (known) {
-    known.textContent = payload.title || payload.kind || 'tool call';
+    _setToolStatus(known.status, payload.status);
     return;
   }
   dashSubAgentBody = null;
@@ -4230,11 +4236,30 @@ function dashSubAddToolCall(payload) {
   who.textContent = 'tool';
   var body = document.createElement('div');
   body.className = 'acp-msg-body';
-  body.textContent = payload.title || payload.kind || 'tool call';
+  var head = document.createElement('div');
+  head.className = 'acp-tool-head';
+  var icon = _toolKindIcon(payload.kind);
+  if (icon) head.appendChild(icon);
+  var name = document.createElement('span');
+  name.className = 'acp-tool-name';
+  name.textContent = payload.title || payload.kind || 'tool call';
+  head.appendChild(name);
+  if (payload.kind && payload.title) {
+    var kindEl = document.createElement('span');
+    kindEl.className = 'acp-tool-kind';
+    kindEl.textContent = payload.kind;
+    head.appendChild(kindEl);
+  }
+  var status = document.createElement('span');
+  status.className = 'acp-tool-status';
+  status.hidden = true;
+  _setToolStatus(status, payload.status);
+  head.appendChild(status);
+  body.appendChild(head);
   row.appendChild(who);
   row.appendChild(body);
   dashSubTranscriptEl.appendChild(row);
-  if (id) dashSubToolRows['t:' + id] = body;
+  if (id) dashSubToolRows['t:' + id] = { body: body, status: status };
   dashSubTranscriptEl.scrollTop = dashSubTranscriptEl.scrollHeight;
 }
 
@@ -4296,6 +4321,12 @@ function dashHandleSub(frame) {
     if (payload.text) dashSubAppendChunk(payload.text);
     return;
   }
+  if (type === 'rendered') {
+    // 261007 Phase 4 (D5): server-flushed sub-agent markdown tokens. Rebuild
+    // the open bubble with mdBuild, the mirror of acp.html's subRenderMarkdown.
+    dashSubRenderMarkdown(payload.tokens);
+    return;
+  }
   if (type === 'tool_call' || type === 'tool_update') {
     dashSubAddToolCall(payload);
     return;
@@ -4316,8 +4347,27 @@ function dashHandleSub(frame) {
       : (payload.message || 'this sub-agent session ended'));
     return;
   }
-  // thought/rendered/meta/subagents -- not rendered in this panel, mirroring
-  // acp.html's own handleSub() (acp.html:2134-2136).
+  // thought/meta/subagents -- not rendered in this read-only panel, mirroring
+  // acp.html's own handleSub().
+}
+
+// 261007 Phase 4 (D5): mirror of subRenderMarkdown (acp.html) for the
+// dashboard sub-panel. Rebuilds the open dashSubAgentBody from server tokens;
+// a no-op if no bubble is open or the tokens are empty. mdBuild needs tokens
+// (no client parser), so the `rendered` frame is the only formatted path.
+function dashSubRenderMarkdown(tokens) {
+  var body = dashSubAgentBody;
+  dashSubAgentBody = null;
+  if (!body) return;
+  if (!Array.isArray(tokens) || !tokens.length) return;
+  var built = mdBuild(tokens);
+  if (!built.length) return;
+  var stick = (dashSubTranscriptEl.scrollHeight - dashSubTranscriptEl.scrollTop
+               - dashSubTranscriptEl.clientHeight) < 60;
+  body.textContent = '';
+  body.className = 'acp-msg-body acp-msg-md';
+  for (var i = 0; i < built.length; i++) body.appendChild(built[i]);
+  if (stick) dashSubTranscriptEl.scrollTop = dashSubTranscriptEl.scrollHeight;
 }
 
 // Live guards, called by transcript-renderer.js's clearTranscript()
@@ -6483,6 +6533,7 @@ function dashRailBumpGroup(cwd){
 function loadGroupPage(page){
   if (dashRailBusy) return;
   dashRailBusy = true;
+  var sentQ = dashRailFilter;
   dashRailStatusEl.textContent = 'loading workspaces…';
   if (page === 1) {
     dashRailGroups = [];
@@ -6495,9 +6546,17 @@ function loadGroupPage(page){
     provider: window._activeProvider === 'all' ? '' : window._activeProvider,
     tag: window._activeTag, time_filter: window._activeTimeFilter,
     project_sort: dashRailProjectSort,
-    q: dashRailFilter,
+    q: sentQ,
   }).then(function(data){
     dashRailBusy = false;
+    // The filter changed while this request was in flight, and the busy guard
+    // dropped the newer request. Discard this stale answer and ask again.
+    if (sentQ !== dashRailFilter) {
+      dashRailGroups = [];
+      dashRailGroupsByCwd = Object.create(null);
+      loadGroupPage(1);
+      return;
+    }
     (data.groups || []).forEach(dashRailMergeGroup);
     dashRailGroupPage = data.group_page;
     dashRailGroupTotal = data.group_total;

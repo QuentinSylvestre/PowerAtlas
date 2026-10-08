@@ -6437,6 +6437,67 @@ check("the sub-agent panel renders its own chunk and tool_call frames", (tpl) =>
   assert(body.includes("read"), "the sub-agent's tool call was not rendered");
 });
 
+check("the sub-agent panel builds a richer tool row (icon + name + kind chip + status badge) (261007 Phase 4)", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  page.all("acpTranscript", ".acp-crew-row")[0].dispatch("click");
+  page.openAt(1);
+  page.deliverTo(1, { type: "session", sessionId: "sub-1",
+    payload: { sessionId: "sub-1", readOnly: true, parentSessionId: live } });
+  page.deliverTo(1, { type: "history", sessionId: "sub-1", payload: { events: [] } });
+  page.deliverTo(1, { type: "tool_call", sessionId: "sub-1",
+    payload: { toolCallId: "tc-1", title: "List files", kind: "execute", status: "in_progress" } });
+  const row = page.all("acpSubTranscript", ".acp-msg-tool")[0];
+  assert(row, "a tool row was not created");
+  // The real _toolKindIcon (transcript-renderer.js) is loaded here, so a known
+  // kind produces an SVG icon element in the head.
+  assert(row.querySelectorAll(".acp-tool-icon").length === 1, "a known kind must render an icon");
+  const nameEl = row.querySelectorAll(".acp-tool-name")[0];
+  assertEqual(nameEl && nameEl.textContent, "List files", "the title belongs in .acp-tool-name");
+  const kindEl = row.querySelectorAll(".acp-tool-kind")[0];
+  assertEqual(kindEl && kindEl.textContent, "execute", "the kind chip shows the kind when a title is also present");
+  const statusEl = row.querySelectorAll(".acp-tool-status")[0];
+  assert(statusEl && statusEl.textContent, "the status badge was not populated");
+  assertEqual(statusEl.hidden, false, "a populated status badge must be visible");
+  // A second frame for the same id updates status in place, no new row.
+  const before = page.all("acpSubTranscript", ".acp-msg-tool").length;
+  page.deliverTo(1, { type: "tool_update", sessionId: "sub-1",
+    payload: { toolCallId: "tc-1", title: "", kind: "", status: "completed" } });
+  assertEqual(page.all("acpSubTranscript", ".acp-msg-tool").length, before,
+    "a repeat frame for a seen toolCallId must not append a new row");
+});
+
+check("the sub-agent panel renders markdown from a `rendered` frame, upgrading the streamed plain text (261007 Phase 4, D5)", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  page.all("acpTranscript", ".acp-crew-row")[0].dispatch("click");
+  page.openAt(1);
+  page.deliverTo(1, { type: "session", sessionId: "sub-1",
+    payload: { sessionId: "sub-1", readOnly: true, parentSessionId: live } });
+  page.deliverTo(1, { type: "history", sessionId: "sub-1", payload: { events: [] } });
+  // Streaming: plain text first.
+  page.deliverTo(1, { type: "chunk", sessionId: "sub-1",
+    payload: { role: "agent", text: "**bold** finding" } });
+  // Server flush: the mistune token tree for the same text. The real mdBuild
+  // (transcript-renderer.js) runs here, so a strong token becomes a <strong>.
+  const tokens = [{ type: "paragraph", children: [
+    { type: "strong", children: [{ type: "text", raw: "bold" }] },
+    { type: "text", raw: " finding" },
+  ] }];
+  page.deliverTo(1, { type: "rendered", sessionId: "sub-1", payload: { tokens } });
+  // The bubble is now markdown DOM: a .acp-msg-md body containing a <strong>.
+  const md = page.all("acpSubTranscript", ".acp-msg-md")[0];
+  assert(md, "the sub-agent bubble was not rebuilt as markdown (.acp-msg-md)");
+  assert(md.querySelectorAll("strong").length >= 1, "the rendered frame did not produce a <strong>");
+  assert(md.textContent.includes("bold"), "the rendered markdown lost its text");
+});
+
 check("the back button in the sub-agent panel returns to the main transcript", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver(subagentsFrame(live, [
@@ -15076,6 +15137,41 @@ function loadDashPicker(opts = {}) {
     stuckToBottom: () =>
       dashMainTranscriptEl.scrollHeight - dashMainTranscriptEl.scrollTop
         - dashMainTranscriptEl.clientHeight < 60,
+    // 261007 Phase 4: dashSubAddToolCall now builds a richer row through
+    // these three transcript-renderer.js top-level functions (icon + status
+    // badge + the markdown rebuild on a sub-task `rendered` frame). The real
+    // renderer is not loaded in this partial sandbox (see the header comment),
+    // so each is stood in. `_toolKindIcon` returns an element for a known kind
+    // and null otherwise (matching the real closed-map lookup); `_setToolStatus`
+    // mirrors the real label map + data-status + hidden=false; `mdBuild` returns
+    // one element per token carrying its text, enough to assert that a sub-agent
+    // `rendered` frame produced formatted DOM. All via textContent, never a sink.
+    _toolKindIcon: (kind) => {
+      if (!kind) return null;
+      const svg = new El("svg");
+      svg.className = "acp-tool-icon";
+      return svg;
+    },
+    _setToolStatus: (el, wireStatus) => {
+      if (!el || !wireStatus) return;
+      const LABEL = { pending: "pending", in_progress: "running",
+        completed: "done", failed: "failed", finished: "finished" };
+      const label = LABEL[wireStatus];
+      if (!label) return;
+      el.textContent = label;
+      el.setAttribute("data-status", wireStatus);
+      el.hidden = false;
+    },
+    mdBuild: (tokens) => {
+      if (!Array.isArray(tokens)) return [];
+      return tokens.map((tok) => {
+        const el = new El(tok && tok.type === "heading" ? "h2" : "p");
+        const raw = (tok && (tok.raw
+          || (tok.children || []).map((c) => c && c.raw).join(""))) || "";
+        el.textContent = raw;
+        return el;
+      });
+    },
     elapsedText: (startedAt, endAt) => {
       if (typeof startedAt !== "number" || !startedAt) return "";
       const now = (typeof endAt === "number" && endAt) ? endAt : Date.now() / 1000;
@@ -17841,10 +17937,40 @@ check("dashboard: sub-agent panel — renders its own chunk and tool_call frames
   p.deliverSub(0, { type: "session", sessionId: "sub-1", payload: { sessionId: "sub-1", readOnly: true, parentSessionId: "sess-1" } });
   p.deliverSub(0, { type: "history", sessionId: "sub-1", payload: { events: [] } });
   p.deliverSub(0, { type: "chunk", sessionId: "sub-1", payload: { role: "agent", text: "looking around" } });
-  p.deliverSub(0, { type: "tool_call", sessionId: "sub-1", payload: { toolCallId: "tc-1", title: "read", kind: "", status: "" } });
+  p.deliverSub(0, { type: "tool_call", sessionId: "sub-1", payload: { toolCallId: "tc-1", title: "read", kind: "execute", status: "in_progress" } });
   const body = p.el("dashSubTranscript").textContent;
   assert(body.includes("looking around"), "the sub-agent's chunk text was not rendered");
-  assert(body.includes("read"), "the sub-agent's tool call was not rendered");
+  assert(body.includes("read"), "the sub-agent's tool call title was not rendered");
+  // 261007 Phase 4 (D4): the richer row now carries a status badge and a name span.
+  const toolRow = p.el("dashSubTranscript").querySelectorAll(".acp-msg-tool")[0];
+  assert(toolRow, "a tool row element was not created");
+  const nameEl = toolRow.querySelectorAll(".acp-tool-name")[0];
+  assertEqual(nameEl && nameEl.textContent, "read", "the title belongs in the .acp-tool-name span");
+  const statusEl = toolRow.querySelectorAll(".acp-tool-status")[0];
+  assert(statusEl && statusEl.textContent === "running", "the status badge did not reflect in_progress");
+  assertEqual(statusEl.hidden, false, "a populated status badge must not be hidden");
+});
+
+check("dashboard: sub-agent panel — a `rendered` frame rebuilds the open bubble as markdown (261007 Phase 4, D5)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  p.deliverSub(0, { type: "session", sessionId: "sub-1", payload: { sessionId: "sub-1", readOnly: true, parentSessionId: "sess-1" } });
+  p.deliverSub(0, { type: "history", sessionId: "sub-1", payload: { events: [] } });
+  p.deliverSub(0, { type: "chunk", sessionId: "sub-1", payload: { role: "agent", text: "plain streamed" } });
+  // The server flushed the sub-task bubble and sent its tokens. dashHandleSub
+  // must route a `rendered` frame to dashSubRenderMarkdown (mdBuild stub here),
+  // which clears the open bubble and rebuilds it as .acp-msg-md DOM.
+  const tokens = [{ type: "paragraph", raw: "rebuilt finding" }];
+  p.deliverSub(0, { type: "rendered", sessionId: "sub-1", payload: { tokens } });
+  const md = p.el("dashSubTranscript").querySelectorAll(".acp-msg-md")[0];
+  assert(md, "the sub-agent bubble was not rebuilt as markdown (.acp-msg-md)");
+  assert(md.textContent.includes("rebuilt finding"), "the rendered token text is missing");
+  assert(!md.textContent.includes("plain streamed"),
+    "the markdown rebuild must replace the streamed plain text, not append to it");
 });
 
 check("dashboard: sub-agent panel — a live subagents update refreshes the header status while the panel is open", () => {
@@ -19898,29 +20024,42 @@ check("dashboard: sub-agent panel — tool_call frame with an agent-controlled t
   p.openSub(0);
   const malicious = "<img src=x onerror=\"window._dash_sub_tool_xss=true\">";
   p.deliverSub(0, { type: "tool_call", sessionId: "sub-1", payload: { toolCallId: "tc-x", title: malicious, kind: "", status: "" } });
+  // 261007 Phase 4 (D4): the title lands in the .acp-tool-name span via
+  // textContent, so the markup is literal and the onerror never fires.
   assert(p.el("dashSubTranscript").textContent.includes(malicious),
     "the sub-agent's tool-call title must render as literal text");
   assert(!p.sandbox._dash_sub_tool_xss, "the onerror handler must not fire -- tool-call rendering must not use innerHTML");
 });
 
-check("dashboard: sub-agent panel — a second tool_call/tool_update for the same toolCallId retitles the existing row via textContent, not innerHTML (Fix 5, Phase 5 review)", () => {
+check("dashboard: sub-agent panel — a second frame for the same toolCallId updates status in place, does not append a row, and never uses innerHTML (261007 Phase 4)", () => {
   const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
   p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
     { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
   ]));
   p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
   p.openSub(0);
-  p.deliverSub(0, { type: "tool_call", sessionId: "sub-1", payload: { toolCallId: "tc-1", title: "reading file.py", kind: "", status: "" } });
+  p.deliverSub(0, { type: "tool_call", sessionId: "sub-1", payload: { toolCallId: "tc-1", title: "reading file.py", kind: "", status: "pending" } });
   const rowsBefore = p.el("dashSubTranscript").querySelectorAll(".acp-msg-tool").length;
   const malicious = "<img src=x onerror=\"window._dash_sub_retitle_xss=true\">";
-  p.deliverSub(0, { type: "tool_update", sessionId: "sub-1", payload: { toolCallId: "tc-1", title: malicious, kind: "", status: "" } });
+  // A second frame for the same toolCallId: the richer row updates its status
+  // badge in place (mirroring the main transcript's addToolCall), does not
+  // append a row, and never retitles. A malicious `title` on the update frame
+  // is therefore ignored entirely -- so it cannot reach any sink.
+  p.deliverSub(0, { type: "tool_update", sessionId: "sub-1", payload: { toolCallId: "tc-1", title: malicious, kind: "", status: "completed" } });
   const rowsAfter = p.el("dashSubTranscript").querySelectorAll(".acp-msg-tool").length;
   assertEqual(rowsAfter, rowsBefore,
-    "retitling an already-seen toolCallId must update the existing row's text, not append a new row");
-  assert(p.el("dashSubTranscript").textContent.includes(malicious),
-    "the retitled row must render the new title as literal text");
+    "a repeat frame for a seen toolCallId must not append a new row");
+  const toolRow = p.el("dashSubTranscript").querySelectorAll(".acp-msg-tool")[0];
+  const statusEl = toolRow.querySelectorAll(".acp-tool-status")[0];
+  assertEqual(statusEl && statusEl.textContent, "done",
+    "the second frame must update the status badge in place");
+  const nameEl = toolRow.querySelectorAll(".acp-tool-name")[0];
+  assertEqual(nameEl && nameEl.textContent, "reading file.py",
+    "the row must keep its original title, not adopt the update frame's title");
+  assert(!p.el("dashSubTranscript").textContent.includes(malicious),
+    "the update frame's title must be ignored entirely, so its markup never appears");
   assert(!p.sandbox._dash_sub_retitle_xss,
-    "the onerror handler must not fire -- the retitle path must use textContent, never innerHTML");
+    "the onerror handler must not fire -- no sink is ever touched");
 });
 
 check("dashboard: sub-agent panel — session_closed/error note text uses textContent, never innerHTML", () => {

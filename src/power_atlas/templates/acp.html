@@ -842,11 +842,12 @@
   // `history` replay rather than the main socket's.
   var subReplaying = false;
   // The sub-agent bubble text is appended to, mirroring `agentBody` but for
-  // `subTranscriptEl`. No markdown rendering in this panel — a sub-agent's
-  // own `rendered` frame, on the rare turn that gets one, is left unhandled
-  // rather than given a second copy of `renderMarkdown`'s DOM-walking code
-  // for a read-only, transcript-only view (roadmap's own framing of this
-  // feature); the plain chunks it summarises are already on screen.
+  // `subTranscriptEl`. 261007 Phase 4 (D5): the sub-agent's own `rendered`
+  // frame IS now handled — the server emits one on the sub-task channel
+  // (acp.py `_flush_bubble(_agent_subtask_id, ...)`), and `handleSub`
+  // rebuilds this bubble with `mdBuild(payload.tokens)`, the same renderer
+  // the main transcript uses. During streaming the plain chunks are shown
+  // as they arrive; the `rendered` frame upgrades them in place.
   var subAgentBody = null;
   // `toolRows`'s counterpart for the sub-agent panel.
   var subToolRows = Object.create(null);
@@ -2137,11 +2138,21 @@
     subTranscriptEl.scrollTop = subTranscriptEl.scrollHeight;
   }
 
+  // 261007 Phase 4 (D4): a richer tool row for the sub-agent panel, mirroring
+  // the main transcript's `addToolCall` head (icon + name + kind chip + status
+  // badge) via the shared `_toolKindIcon`/`_setToolStatus` helpers from
+  // transcript-renderer.js. A repeat frame for the same toolCallId updates the
+  // status badge in place rather than stacking a second row. Full edit-panel /
+  // command-block / grouping machinery is deliberately NOT reused here: the
+  // sub-panel is a read-only secondary view with its own transcript element
+  // and tool-row map, and the main renderer writes to the primary globals.
+  // Every value below reaches the DOM only through textContent / the closed
+  // icon+status maps — never innerHTML, never an agent string as an attribute.
   function subAddToolCall(payload) {
     var id = payload.toolCallId;
     var known = id ? subToolRows['t:' + id] : null;
     if (known) {
-      known.textContent = payload.title || payload.kind || 'tool call';
+      _setToolStatus(known.status, payload.status);
       return;
     }
     subAgentBody = null;
@@ -2152,11 +2163,30 @@
     who.textContent = 'tool';
     var body = document.createElement('div');
     body.className = 'acp-msg-body';
-    body.textContent = payload.title || payload.kind || 'tool call';
+    var head = document.createElement('div');
+    head.className = 'acp-tool-head';
+    var icon = _toolKindIcon(payload.kind);
+    if (icon) head.appendChild(icon);
+    var name = document.createElement('span');
+    name.className = 'acp-tool-name';
+    name.textContent = payload.title || payload.kind || 'tool call';
+    head.appendChild(name);
+    if (payload.kind && payload.title) {
+      var kindEl = document.createElement('span');
+      kindEl.className = 'acp-tool-kind';
+      kindEl.textContent = payload.kind;
+      head.appendChild(kindEl);
+    }
+    var status = document.createElement('span');
+    status.className = 'acp-tool-status';
+    status.hidden = true;
+    _setToolStatus(status, payload.status);
+    head.appendChild(status);
+    body.appendChild(head);
     row.appendChild(who);
     row.appendChild(body);
     subTranscriptEl.appendChild(row);
-    if (id) subToolRows['t:' + id] = body;
+    if (id) subToolRows['t:' + id] = { body: body, status: status };
     subTranscriptEl.scrollTop = subTranscriptEl.scrollHeight;
   }
 
@@ -2206,6 +2236,15 @@
       if (payload.text) subAppendChunk(payload.text);
       return;
     }
+    if (type === 'rendered') {
+      // 261007 Phase 4 (D5): the server flushed the sub-agent's prose bubble
+      // and sent its mistune tokens. Rebuild the open bubble with the same
+      // `mdBuild` the main transcript uses, preserving scroll if stuck to the
+      // bottom. `mdBuild` consumes tokens (the client has no markdown parser),
+      // so this frame is the only path to formatted sub-agent text.
+      subRenderMarkdown(payload.tokens);
+      return;
+    }
     if (type === 'tool_call' || type === 'tool_update') {
       subAddToolCall(payload);
       return;
@@ -2214,9 +2253,28 @@
       subAddNote(payload.message || 'this sub-agent session ended');
       return;
     }
-    // `thought`/`rendered`/`meta`/`subagents` — not rendered in this panel;
-    // see the module-level comment on `subAgentBody` for why `rendered` in
-    // particular is skipped rather than given a second markdown path.
+    // `thought`/`meta`/`subagents` — not rendered in this read-only panel.
+  }
+
+  // 261007 Phase 4 (D5): mirror of the main transcript's `renderMarkdown`,
+  // scoped to the sub-panel's own open bubble. Takes the open `subAgentBody`
+  // (whichever one the streamed chunks were appended to), clears it, and
+  // rebuilds it from the server-parsed tokens. A `rendered` frame with no open
+  // bubble (a replay whose chunks were evicted) is a no-op, never a stale
+  // bubble for the next answer. Scroll is pinned to the bottom only if it was.
+  function subRenderMarkdown(tokens) {
+    var body = subAgentBody;
+    subAgentBody = null;
+    if (!body) return;
+    if (!Array.isArray(tokens) || !tokens.length) return;
+    var built = mdBuild(tokens);
+    if (!built.length) return;
+    var stick = (subTranscriptEl.scrollHeight - subTranscriptEl.scrollTop
+                 - subTranscriptEl.clientHeight) < 60;
+    body.textContent = '';
+    body.className = 'acp-msg-body acp-msg-md';
+    for (var i = 0; i < built.length; i++) body.appendChild(built[i]);
+    if (stick) subTranscriptEl.scrollTop = subTranscriptEl.scrollHeight;
   }
 
   function railUrl(params) {
