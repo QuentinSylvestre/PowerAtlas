@@ -295,9 +295,9 @@ Verification:
 If the test at line 4303 unexpectedly fails, the likely cause is that the promise chain requires an extra `page.settle()` call (two async hops instead of one). In that case, add one more `await page.settle()` before the assertion — do not add a fetch stub.
 
 **Exit criteria**:
-- [ ] `node tests/acp_page.test.mjs` exits 0 with no failures
-- [ ] The test at ~line 3765 (`disabled === true` on module failure) still passes
-- [ ] The test at ~line 4303 (capacity re-check after click) still passes
+- [x] `node tests/acp_page.test.mjs` exits 0 with no failures
+- [x] The test at ~line 3765 (`disabled === true` on module failure) still passes
+- [x] The test at ~line 4303 (capacity re-check after click) still passes
 
 
 ## 6) Risk Assessment
@@ -340,7 +340,7 @@ After all phases land:
 | 1 | CSS — spinning + disabled rules, dead code removal | Complete | commit 6aae8aa |
 | 2 | Dashboard — remove topbar button, add `dashDeepRefresh()` | Complete | commit 22cedf2; criterion 7 deferred to QA |
 | 3 | ACP — icon button + `railDeepRefresh()` | Complete | commit 29ddc43; criterion 5 deferred to QA |
-| 4 | Test — verify `acp_page.test.mjs` still passes | Not started | |
+| 4 | Test — verify `acp_page.test.mjs` still passes | Complete | 985/985 — no test changes needed |
 
 
 ## 9) Implementation Divergences from Plan
@@ -351,7 +351,8 @@ All 5 exit criteria satisfied. `.topbar-select:hover` and `.trust-dot` preserved
 ### Phase 2 — implementation notes (commit 22cedf2)
 8/9 exit criteria satisfied; criterion 7 (hard reload visual) deferred to Step 9 QA. `doRefresh()` fully removed. Startup `/api/last-refresh` fetch removed in same commit as HTML element. `dashRailReload()` non-button call sites intact (grep confirmed). `plans/tests/260701_POWERATLAS.md` section 2.15 rewritten. `plans/ROADMAP.md` verified clean — 0 hits for removed identifiers, no change needed. 985 tests pass.
 
-### Phase 3 — implementation notes (commit 29ddc43)
+### Phase 4 — implementation notes (no new commit)
+No test changes required. `fakeFetch` returns `{}` for unrecognized URLs; `railDeepRefresh()` and `dashDeepRefresh()` both ignore the response body and resolve normally. The single `await page.settle()` drains the full microtask chain in one tick. 985/985 tests pass including the capacity re-check at ~line 4303.
 4/5 exit criteria satisfied; criterion 5 (hard reload visual) deferred to Step 9 QA. `railDeepRefresh()` placed inside the IIFE immediately after `railLoadFirstPage()` at acp.html:2476. Button HTML uses `ws-icon-btn` class with matching rotating-arrow SVG. 985 tests pass (run after phases 1 and 3 combined).
 
 
