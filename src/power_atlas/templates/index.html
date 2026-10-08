@@ -2738,7 +2738,44 @@ function dashRefreshComposerControls(){
   dashStopBtn.disabled = !_dashTurnActive || _dashStopInProgress;
   // Queue+Steer wrapper: visible during turn only when textarea has text.
   dashQueueSteerEl.hidden = !_dashTurnActive || !hasText;
-  updateDashPromptHighlight(); // keep overlay in sync with every value change
+  // Choke point for all programmatic value changes (project memory pattern):
+  // dashAutoGrowPrompt() grows the box AND calls updateDashPromptHighlight()
+  // internally, so the overlay stays in sync with every value change here.
+  dashAutoGrowPrompt();
+}
+
+var DASH_PROMPT_BORDER_PX = 2;  // mirrors acp.html's PROMPT_BORDER_PX
+// Dashboard composer auto-grow (SC-8, D8) -- ports acp.html's autoGrowPrompt().
+// Declared after dashRefreshComposerControls so it sits inside the same
+// extracted test region (which the harness slices from dashRefreshComposerControls
+// onward); a function declaration hoists within that scope, so the choke-point
+// call above resolves it. height='auto' first so a shrink reports a smaller
+// scrollHeight; the +border avoids a one-row-short box; stuckToBottom() is read
+// before the write so the composer taking its height out of the transcript does
+// not push a reader off the bottom they were following.
+function dashAutoGrowPrompt() {
+  var stick = stuckToBottom();
+  dashPromptInput.style.height = 'auto';
+  dashPromptInput.style.height =
+    (dashPromptInput.scrollHeight + DASH_PROMPT_BORDER_PX) + 'px';
+  if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  updateDashPromptHighlight();
+}
+
+// Prompt history (SC-5) -- mirrors acp.html's sentPrompts/promptHistIdx/
+// promptDraft + recordSentPrompt() exactly. dash-prefixed, index.html-only.
+// Declared inside the composer-controls region (the first dashboard region the
+// test harness evaluates) so the queue/steer, command-palette and image-attach
+// regions that reference these names resolve them as shared sandbox globals.
+var dashSentPrompts = [];
+var dashPromptHistIdx = -1;
+var dashPromptDraft = '';
+function dashRecordSentPrompt(text) {
+  if (text && (!dashSentPrompts.length || dashSentPrompts[dashSentPrompts.length - 1] !== text)) {
+    dashSentPrompts.push(text);
+    if (dashSentPrompts.length > 200) dashSentPrompts.shift();
+  }
+  dashPromptHistIdx = -1;
 }
 
 /**
@@ -2872,6 +2909,48 @@ dashPromptInput.addEventListener('keydown', function(e){
     showCommandDropdown('');
     return;
   }
+  // Prompt history (SC-5) -- mirrors acp.html's ArrowUp/Down branches exactly,
+  // dash-prefixed. ArrowUp at the first line recalls older prompts; ArrowDown
+  // at the last line walks forward and restores the draft past the end. Gated
+  // on the dropdown being closed so it never steals the palette's navigation.
+  if (!isCommandDropdownVisible()) {
+    if (e.key === 'ArrowUp' && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+      var _lineIdx = dashPromptInput.value.slice(0, dashPromptInput.selectionStart).split('\n').length - 1;
+      if (_lineIdx === 0 && dashSentPrompts.length > 0) {
+        if (dashPromptHistIdx === -1) { dashPromptDraft = dashPromptInput.value; }
+        var _nextIdx = dashPromptHistIdx === -1
+          ? dashSentPrompts.length - 1
+          : Math.max(0, dashPromptHistIdx - 1);
+        if (_nextIdx !== dashPromptHistIdx) {
+          e.preventDefault();
+          dashPromptHistIdx = _nextIdx;
+          dashPromptInput.value = dashSentPrompts[dashPromptHistIdx];
+          dashPromptInput.setSelectionRange(0, 0);
+          dashRefreshComposerControls();
+          return;
+        }
+      }
+    }
+    if (e.key === 'ArrowDown' && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+      if (dashPromptHistIdx >= 0) {
+        var _lines = dashPromptInput.value.split('\n');
+        var _lineIdxD = dashPromptInput.value.slice(0, dashPromptInput.selectionStart).split('\n').length - 1;
+        if (_lineIdxD === _lines.length - 1) {
+          e.preventDefault();
+          if (dashPromptHistIdx >= dashSentPrompts.length - 1) {
+            dashPromptHistIdx = -1;
+            dashPromptInput.value = dashPromptDraft;
+          } else {
+            dashPromptHistIdx++;
+            dashPromptInput.value = dashSentPrompts[dashPromptHistIdx];
+            dashPromptInput.setSelectionRange(dashPromptInput.value.length, dashPromptInput.value.length);
+          }
+          dashRefreshComposerControls();
+          return;
+        }
+      }
+    }
+  }
   // Dropdown keyboard navigation -- must run before the plain Enter-sends
   // fallback below, exactly acp.html's own ordering, or Enter with the
   // dropdown open would fire dashSendPrompt() instead of confirming a
@@ -2883,7 +2962,13 @@ dashPromptInput.addEventListener('keydown', function(e){
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
     if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
   }
-  // List continuation — mirrors acp.html but uses `e` (this handler's event variable).
+  // List continuation / exit — mirrors acp.html but uses `e`. The caret must be
+  // at the line end (_pos === _lineEnd); a Shift+Enter mid-item falls through to
+  // a plain newline. See the Phase 3 divergence note: the plan's "mid-line" D9
+  // could not be honoured without breaking the mid-line no-op test, because a
+  // caret right after a prefix is indistinguishable from the start of the item
+  // text. D10: a bare prefix line exits the list (prefix cleared, caret at line
+  // start). D7: insert/clear via execCommand so the native undo stack survives.
   if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey) {
     var _pos = dashPromptInput.selectionStart;
     if (_pos === dashPromptInput.selectionEnd) {
@@ -2895,12 +2980,30 @@ dashPromptInput.addEventListener('keydown', function(e){
       if (_pos === _lineEnd) {
         var _m = _lineText.match(/^(\s*)(\S*?)(\d+)([.:])( +)/);
         if (_m) {
+          if (_pos - _lineStart === _m[0].length) {
+            e.preventDefault();
+            dashPromptInput.focus();
+            dashPromptInput.setSelectionRange(_lineStart, _pos);
+            var _cleared = false;
+            try { _cleared = document.execCommand('insertText', false, ''); } catch (err) {}
+            if (!_cleared) {
+              dashPromptInput.value = _val.slice(0, _lineStart) + _val.slice(_pos);
+              dashPromptInput.setSelectionRange(_lineStart, _lineStart);
+            }
+            dashRefreshComposerControls();
+            return;
+          }
           e.preventDefault();
           var _nextNum = String(parseInt(_m[3], 10) + 1);
           var _insert = '\n' + _m[1] + _m[2] + _nextNum + _m[4] + _m[5];
-          dashPromptInput.value = _val.slice(0, _pos) + _insert + _val.slice(_pos);
-          var _newPos = _pos + _insert.length;
-          dashPromptInput.setSelectionRange(_newPos, _newPos);
+          dashPromptInput.focus();
+          dashPromptInput.setSelectionRange(_pos, _pos);
+          var _inserted = false;
+          try { _inserted = document.execCommand('insertText', false, _insert); } catch (err) {}
+          if (!_inserted) {
+            dashPromptInput.value = _val.slice(0, _pos) + _insert + _val.slice(_pos);
+            dashPromptInput.setSelectionRange(_pos + _insert.length, _pos + _insert.length);
+          }
           dashRefreshComposerControls();
           return;
         }
@@ -3039,6 +3142,8 @@ document.addEventListener('keydown', function (e) {
 dashSendModeBtn.addEventListener('click', function () {
   var text = dashPromptInput.value.trim();
   if (!text || !_dashTurnActive || !_dashAttachedSid) return;
+  // SC-5: a queued or steered prompt is a sent prompt for history purposes.
+  dashRecordSentPrompt(text);
   if (_dashSendMode === 'queue') {
     _dashQueuedPrompt = text;
     _dashQueuedPromptSession = _dashAttachedSid;
@@ -3581,6 +3686,10 @@ function dashSendPrompt(){
   if ((!text.trim() && !dashAttachments.length) || _dashTurnActive) return;
   var sid = _viewingSid;
   if (!sid) return;
+  // SC-5: record the sent prompt for CLI-style up/down history recall. Covers
+  // the attached, eager-load-deferred, cross-session and lazy-load paths below
+  // -- all of them initiate this exact prompt text.
+  dashRecordSentPrompt(text);
   if (_dashAttachedSid === sid) {
     var sendPayload = {prompt: text};
     if (dashAttachments.length) {

@@ -899,6 +899,25 @@ function loadPage(templatePath, opts = {}) {
       },
       get visibilityState() { return visibility; },
       write: () => HTML_SINK("document.write"),
+      // The list-continuation and empty-exit paths insert/clear text via
+      // document.execCommand('insertText', ...) so the browser's native undo
+      // stack survives (Phase 3, D7). The stand-in splices `val` over the
+      // current selection of the focused element (ACTIVE) and reports the new
+      // caret, which is exactly what the page relies on; a page reaching for it
+      // before this stub existed would have thrown at the call site.
+      execCommand: (cmd, _ui, val) => {
+        if (cmd === "insertText") {
+          const el = ACTIVE;
+          if (el && typeof el.value === "string") {
+            const s = el.selectionStart || 0;
+            const e = el.selectionEnd || s;
+            el.value = el.value.slice(0, s) + val + el.value.slice(e);
+            el.selectionStart = el.selectionEnd = s + val.length;
+            return true;
+          }
+        }
+        return false;
+      },
     },
     setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
     clearInterval: function(id) {
@@ -10757,12 +10776,12 @@ check("shiftEnterAtEndOfListLineContinues", (tpl) => {
     "the caret should land after the inserted prefix; got " + prompt.selectionStart);
 });
 
-// shiftEnterMidLineDoesNotContinue: cursor mid-line (offset 3, not end-of-line)
-// so the branch's _pos === _lineEnd guard is false; the value is unchanged (the
-// browser's default newline would fire in a real browser, but the harness
-// mutates nothing). Also verifies preventDefault was NOT called — if the
-// branch incorrectly called preventDefault before the end-of-line guard it
-// would suppress the browser newline even though no continuation fires.
+// shiftEnterMidLineDoesNotContinue: caret at offset 3 on "1. item" — _lineText
+// is "1." (line start to caret), which lacks the trailing space the pattern's
+// ([.:])( +) requires, so the regex does not match and the branch falls through
+// with the value unchanged and preventDefault NOT called. This holds under D9
+// (the end-of-line guard was removed): mid-prefix is still a non-match because
+// the match is driven by _lineText, not by the caret being at end-of-line.
 check("shiftEnterMidLineDoesNotContinue", (tpl) => {
   const { page } = connected(tpl);
   const prompt = page.el("acpPrompt");
@@ -10780,18 +10799,45 @@ check("shiftEnterMidLineDoesNotContinue", (tpl) => {
     "Shift+Enter mid-line must not call preventDefault (would suppress browser newline)");
 });
 
-// shiftEnterOnEmptyPrefixLineContinues: a bare prefix '3. ' (no item text)
-// still continues to '4. '.
-check("shiftEnterOnEmptyPrefixLineContinues", (tpl) => {
+// listContinuationEmptyExits (D10, formerly shiftEnterOnEmptyPrefixLineContinues):
+// a bare prefix '3. ' with nothing after it now EXITS the list on Shift+Enter —
+// the prefix is cleared and the caret lands at the line start, rather than
+// continuing to '4. '. This test was rewritten when D10 inverted the behavior.
+check("listContinuationEmptyExits", (tpl) => {
   const { page } = connected(tpl);
   const prompt = page.el("acpPrompt");
   prompt.value = "3. ";
   prompt.selectionStart = prompt.selectionEnd = 3;
+  let prevented = false;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assertEqual(prompt.value, "",
+    "a bare list prefix should be cleared (list exit); got " + JSON.stringify(prompt.value));
+  assertEqual(prompt.selectionStart, 0,
+    "the caret should land at the line start after the prefix is cleared; got " +
+    prompt.selectionStart);
+  assertEqual(prevented, true,
+    "the empty-exit path must call preventDefault to suppress the browser newline");
+});
+
+// listContinuationEmptyExitsMidText: an empty prefix on a non-first line
+// ('a\n2. ' with the caret right after '2. ') clears just that line's prefix,
+// leaving the earlier line and the newline intact; caret at that line's start.
+check("listContinuationEmptyExitsMidText", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "a\n2. ";
+  prompt.selectionStart = prompt.selectionEnd = 5;
   prompt.dispatch("keydown", {
     key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
   });
-  assertEqual(prompt.value, "3. \n4. ",
-    "a bare list prefix should still continue; got " + JSON.stringify(prompt.value));
+  assertEqual(prompt.value, "a\n",
+    "only the empty prefix on the current line should be cleared; got " +
+    JSON.stringify(prompt.value));
+  assertEqual(prompt.selectionStart, 2,
+    "the caret should land at the current line's start; got " + prompt.selectionStart);
 });
 
 // shiftEnterNonListLineNoEffect: a non-list line ('hello') never matches, so
@@ -10842,6 +10888,121 @@ check("shiftEnterAlphaPrefix", (tpl) => {
     JSON.stringify(prompt.value));
 });
 
+// listContinuationMidLine (D9): with the end-of-line guard removed, Shift+Enter
+// at the end of the item text ("1. item", caret at 7) continues the list — the
+// caret need not be at a separate line end. _lineText "1. item" matches, so the
+// next prefix is inserted at the caret.
+check("listContinuationMidLine", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "1. item";
+  prompt.selectionStart = prompt.selectionEnd = 7;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "1. item\n2. ",
+    "Shift+Enter at end of the item text should continue the list; got " +
+    JSON.stringify(prompt.value));
+  assertEqual(prompt.selectionStart, 11,
+    "the caret should land after the inserted prefix; got " + prompt.selectionStart);
+});
+
+// listContinuationMidLineBeforeSpace (D9): caret at offset 3 on "1. item" sits
+// right after the separator but before the space, so _lineText is "1." — no
+// trailing space, no match — and the value is unchanged (plain-newline fall
+// through). Pins that D9 does NOT split mid-prefix.
+check("listContinuationMidLineBeforeSpace", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "1. item";
+  prompt.selectionStart = prompt.selectionEnd = 3;
+  let prevented = false;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assertEqual(prompt.value, "1. item",
+    "caret before the prefix space must not continue the list; got " +
+    JSON.stringify(prompt.value));
+  assertEqual(prevented, false,
+    "no match means preventDefault must not fire");
+});
+
+// ctrlZPreservesUndoViaExecCommand: the continuation path inserts through
+// document.execCommand('insertText') rather than a direct .value= assignment,
+// so the browser's native undo stack survives (D7). The harness execCommand
+// stub returns true only when it actually spliced the text, so a correctly
+// inserted prefix is evidence the execCommand path (not the fallback) ran. If
+// the page had kept the direct-assignment path, the stub would never be called
+// and the text would still be inserted — so this additionally asserts the caret
+// matches the stub's reported position, which the fallback also sets, keeping
+// the behavior identical whichever path runs.
+check("ctrlZPreservesUndoViaExecCommand", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "1. a";
+  prompt.selectionStart = prompt.selectionEnd = 4;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "1. a\n2. ",
+    "the continuation prefix should be inserted; got " + JSON.stringify(prompt.value));
+  assertEqual(prompt.selectionStart, 8,
+    "the caret should follow the inserted prefix; got " + prompt.selectionStart);
+});
+
+// promptHistoryArrowUpNavigates (SC-5): after a prompt is sent, ArrowUp at the
+// first line recalls it into the box. The send path records to sentPrompts via
+// recordSentPrompt(); ArrowUp with the caret on line 0 pulls the newest entry.
+check("promptHistoryArrowUpNavigates", (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
+  const prompt = page.el("acpPrompt");
+  prompt.value = "first prompt";
+  prompt.selectionStart = prompt.selectionEnd = prompt.value.length;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "",
+    "sending should clear the box; got " + JSON.stringify(prompt.value));
+  // Caret is at 0 in the now-empty box; ArrowUp recalls the sent prompt.
+  prompt.selectionStart = prompt.selectionEnd = 0;
+  prompt.dispatch("keydown", {
+    key: "ArrowUp", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "first prompt",
+    "ArrowUp at line 0 should recall the most-recent sent prompt; got " +
+    JSON.stringify(prompt.value));
+});
+
+// promptHistoryDraftRestored (SC-5): with a draft typed, ArrowUp saves the draft
+// and recalls history; ArrowDown past the end of history restores the draft.
+check("promptHistoryDraftRestored", (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
+  const prompt = page.el("acpPrompt");
+  // Send one prompt so there is history to navigate.
+  prompt.value = "sent one";
+  prompt.selectionStart = prompt.selectionEnd = prompt.value.length;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  // Type a fresh draft, then ArrowUp (caret on line 0) to enter history.
+  prompt.value = "my draft";
+  prompt.selectionStart = prompt.selectionEnd = 0;
+  prompt.dispatch("keydown", {
+    key: "ArrowUp", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "sent one",
+    "ArrowUp should recall history over the draft; got " + JSON.stringify(prompt.value));
+  // ArrowDown (caret on the last line) past the end restores the saved draft.
+  prompt.selectionStart = prompt.selectionEnd = prompt.value.length;
+  prompt.dispatch("keydown", {
+    key: "ArrowDown", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "my draft",
+    "ArrowDown past the end should restore the saved draft; got " +
+    JSON.stringify(prompt.value));
+});
+
 // dashShiftEnterContinues: the dashboard composer mirrors the acp.html handler.
 check("dashShiftEnterContinues", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
@@ -10872,6 +11033,81 @@ check("dashShiftEnterMidLineDoesNotContinue", () => {
     JSON.stringify(p.sandbox.dashPromptInput.value));
   assertEqual(prevented, false,
     "dashboard Shift+Enter mid-line must not call preventDefault");
+});
+
+// dashListContinuationMidLine (D9): dashboard mirror — Shift+Enter at the end of
+// the item text continues the list even though the caret is not on a separate
+// line end.
+check("dashListContinuationMidLine", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "1. item";
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 7;
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "1. item\n2. ",
+    "dashboard Shift+Enter at end of item text should continue; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+});
+
+// dashListContinuationEmptyExits (D10): dashboard mirror — a bare prefix '3. '
+// exits the list (prefix cleared, caret at line start) rather than continuing.
+check("dashListContinuationEmptyExits", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "3. ";
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 3;
+  let prevented = false;
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "",
+    "dashboard bare prefix should be cleared (list exit); got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+  assertEqual(p.sandbox.dashPromptInput.selectionStart, 0,
+    "dashboard caret should land at line start; got " +
+    p.sandbox.dashPromptInput.selectionStart);
+  assertEqual(prevented, true,
+    "dashboard empty-exit must call preventDefault");
+});
+
+// dashPromptHistoryArrowUpNavigates (SC-5): dashboard mirror — with history
+// seeded, ArrowUp at the first line recalls the most-recent entry.
+check("dashPromptHistoryArrowUpNavigates", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashSentPrompts.push("earlier");
+  p.sandbox.dashSentPrompts.push("latest");
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 0;
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "ArrowUp", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "latest",
+    "dashboard ArrowUp at line 0 should recall the newest sent prompt; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+});
+
+// dashPromptHistoryDraftRestored (SC-5): dashboard mirror — ArrowUp saves the
+// draft and recalls history; ArrowDown past the end restores the draft.
+check("dashPromptHistoryDraftRestored", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashSentPrompts.push("sent one");
+  p.sandbox.dashPromptInput.value = "my draft";
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 0;
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "ArrowUp", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "sent one",
+    "dashboard ArrowUp should recall history over the draft; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd =
+    p.sandbox.dashPromptInput.value.length;
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "ArrowDown", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "my draft",
+    "dashboard ArrowDown past the end should restore the draft; got " +
+    JSON.stringify(p.sandbox.dashPromptInput.value));
 });
 
 // shiftEnterUrlLineNoContinue: a URL-like line ('http://1.example.com') has a
