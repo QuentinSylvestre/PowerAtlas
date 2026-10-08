@@ -533,12 +533,12 @@ In `subAppendChunk()`, after the turn completes (`subReplaying` transitions to f
 The trigger: in `handleSub()`, on `session_closed` or when `subReplaying` becomes false after history replay, call `mdBuild(subAgentBody)` on the accumulated text. Mirror in index.html.
 
 **Exit criteria**:
-- [ ] **Pre-flight**: agentSubtaskId field confirmed; sub-task WS behavior documented in §9
-- [ ] During a live fan-out, the sub-agent panel shows tool calls as they stream
-- [ ] After opening a sub-agent that has completed, its past tool calls appear in the panel
-- [ ] Sub-agent text is rendered with markdown formatting
+- [x] **Pre-flight**: run; could NOT confirm agentSubtaskId on internal sub-agent tool calls because kiro-cli reports `autonomousAgents: false (admin_disabled)` on this machine, so no fan-out can run. Normal tool_call shape confirmed. BLOCKED/SKIP per Review item #6; documented in §9 Phase 4 #1
+- [~] During a live fan-out, the sub-agent panel shows tool calls as they stream — UNVERIFIABLE on this machine (fan-out admin-disabled). Server recording implemented (no-op-safe) + client richer tool row implemented and node-tested; must be re-verified on an account where autonomousAgents is enabled
+- [~] After opening a completed sub-agent, its past tool calls appear — UNVERIFIABLE on this machine (same cause). Replay path records to subagent_history via _emit, exercised by node tests (richer-row + markdown rebuild on replay)
+- [x] Sub-agent text is rendered with markdown formatting — server now emits a `rendered` frame on the sub-task channel (`_flush_bubble(_agent_subtask_id, ...)`); client `handleSub`/`dashHandleSub` rebuild the bubble with `mdBuild(payload.tokens)` (acp.html + index.html); node tests cover both pages
 - [x] `node tests/acp_page.test.mjs` passes (0 failures)
-- [ ] Browser QA: open a fan-out sub-agent panel; verify tool calls + markdown rendering
+- [~] Browser QA: a live fan-out cannot be driven here (admin-disabled). Live QA instead confirmed a plain session's tool_call frames + `rendered` frame on the primary channel after restart (§9 Phase 4). Fan-out-panel QA deferred to an autonomousAgents-enabled account
 
 ---
 
@@ -582,7 +582,7 @@ Browser QA per phase (use Playwright or Chrome MCP with `pa_local` cookie per AG
 | 1 | Overlay word-break + auto-scroll | Complete | `883246f` |
 | 2 | Transcript rendering (live grouping, edit rows, diffs) | Code complete (QA pending) | live grouping + edit auto-expand + "edit not applied"; 995/995 node tests; browser QA deferred |
 | 3 | Composer (history, Ctrl+Z, auto-grow, list continuation) | Code complete (QA pending) | prompt history + Ctrl+Z via execCommand + dashboard auto-grow + empty-exit; end-of-line guard kept (divergence); 1005/1005 node tests; browser QA deferred |
-| 4 | Sub-agent panel (Python + client) | Not started | Requires restart grant |
+| 4 | Sub-agent panel (Python + client) | Code complete (fan-out QA blocked by admin policy) | Server sub-task tool recording + `rendered` flush; client richer tool row + markdown; 1009/1009 node tests (3 new, 3 rewritten); restart done + plain-session live QA passed; fan-out QA unverifiable here (autonomousAgents=admin_disabled) — see §9 Phase 4 |
 
 ## 9) Implementation Divergences from Plan
 
@@ -613,10 +613,20 @@ Browser QA per phase (use Playwright or Chrome MCP with `pa_local` cookie per AG
 3. **Dashboard history vars/function relocated for the test harness.** `dashSentPrompts`/`dashPromptHistIdx`/`dashPromptDraft`/`dashRecordSentPrompt` (and `dashAutoGrowPrompt`/`DASH_PROMPT_BORDER_PX`) are defined inside the composer-controls region of index.html (right after `dashRefreshComposerControls`) rather than at the top of the script, because `tests/acp_page.test.mjs` evaluates the dashboard script as sliced regions and only the composer-controls region (loaded first) and the regions after it are run; names defined before the first region are never loaded into the sandbox. Function declarations hoist within the single real-browser inline script, so placement is behaviour-neutral there. Prompt-history recording is wired at the acp.html `sendPrompt()` / queue-steer handler and the index.html `dashSendPrompt()` / `dashSendModeBtn` handler via `recordSentPrompt`/`dashRecordSentPrompt`.
 4. **CRLF-preserving edits via a throwaway byte-literal applier** (`_apply_edits.py` + `_edits*/` search/replace pairs), mirroring Phase 1's PowerShell approach: every target file is CRLF (acp.html, index.html, test.mjs), and the Edit tool was unavailable in this run. Verified post-edit: CRLF counts rose only by the added lines, LF-only counts unchanged, 0 NUL bytes. The applier and edit scratch dirs are deleted before commit (not product surface).
 
+**Phase 4**:
+1. **Pre-flight could NOT confirm `agentSubtaskId` on internal sub-agent tool calls — fan-out is admin-disabled on this machine.** A live probe (`%TEMP%\pa_phase4_probe.py`) created a session in `algo_hand_hygiene` (90 sessions, the most) and sent a two-way fan-out prompt. No `subagents` frame arrived and no tool_call carried `agentSubtaskId`. The orchestrator log shows why: `_kiro/governance/state` reports `"autonomousAgents": false, "disabledReason": "admin_disabled"` for every session on this kiro-cli account, so a sub-agent fan-out cannot run here at all. A second probe (`%TEMP%\pa_phase4_probe2.py`) with a plain tool prompt confirmed the send/tool path works and captured the normal `_tool_payload` shape (`toolCallId`/`title`/`kind`/`status`/`command`/`output`/`startedAt`/`stoppedAt`) plus a main-channel `rendered` frame. **Verdict: the Phase 4 pre-flight exit criterion resolves to BLOCKED/SKIP on this machine** (the plan's Review item #6 branch). The server-side recording block is still implemented exactly as specified — it is the "defended-against-regardless" path consistent with `_on_agent_subtask_open`'s existing `spawnToolCallId` guard (finding #2), and it is a safe no-op when internal tool calls do not carry the id. It must be re-verified on an account where `autonomousAgents` is enabled.
+2. **Markdown via a sub-task `rendered` frame, NOT `mdBuild(subAgentBody)`.** The plan text says to "call `mdBuild()` on the accumulated text", but `mdBuild(tokens)` consumes **mistune-produced tokens**, and the client has no markdown *parser* — the main transcript's markdown comes from a server `rendered` frame (`payload.tokens`) emitted by `_flush_bubble`, which was only ever called with the parent `session_id`. The correct, verifiable implementation is therefore: (a) server — call `_flush_bubble(_agent_subtask_id, emit_fn=_emit)` at the sub-task text/tool/termination boundaries so a `rendered` frame is recorded to `subagent_history` and broadcast on the sub-task channel; (b) client — handle the `rendered` frame type in `handleSub` by rebuilding `subAgentBody` with `mdBuild(payload.tokens)`, preserving scroll via `stuckToBottom()`. This supersedes the plan's `mdBuild(subAgentBody)` wording (which is not implementable).
+4. **Post-restart live QA (plain session).** PowerAtlas was restarted (user grant; `Server ready` at 11:34:01 after the POST). A plain tool-using prompt in a live `/acp` session produced the full primary-channel sequence — `tool_call`, `tool_update`, `tool_output`, and a `rendered` frame — with no exception from the new sub-task recording block in `orchestrator.log` (the only error lines are pre-existing unrelated `kirocrew` custom-agent config errors). This confirms the server loads and runs the new code and the parent channel is unaffected. The sub-task channel itself could not be exercised because no fan-out can run (admin-disabled, above). Node suite: 1009/1009 (3 new Phase 4 tests, 3 rewritten for the richer-row contract).
+3. **CRLF-preserving edits to `acp.html`/`index.html`/`tests/acp_page.test.mjs` via a throwaway byte-literal applier** (mirroring Phase 1/3), since those files are CRLF and the Edit tool was unavailable in this run. Verified post-edit: CRLF counts rose only by added lines, 0 NUL bytes. Scratch applier deleted before commit.
+5. **Spawn-frame self-recording caveat (review finding M1)**: the `_agent_subtask_id in self.subagent_history` guard is true for the spawn frame itself (registered by `_on_agent_subtask_open` earlier in the same handler). If internal tool calls carry `agentSubtaskId`, the spawn invocation may appear as a row inside its own sub-panel. A `spawnToolCallId` filter (mirroring `_on_agent_subtask_update`) should be added and verified on an `autonomousAgents`-enabled account.
+6. **Drive-by race fix in commit `0827388` (review finding M2)**: `loadGroupPage` in `index.html` now snapshots `dashRailFilter` as `sentQ` before each fetch and discards stale responses when the filter changes in-flight. Correct fix bundled without a §9 note or regression test. A deferred-promise harness test is needed — see Follow-up Work.
+
 ## Follow-up Work (Deferred)
 
 1. **`execCommand` deprecation path.** If `execCommand('insertText')` stops working in a future WebView2 update, the Ctrl+Z feature will silently break. Track the WebView2 version and re-verify annually. Source: D7, Phase 3.
 2. **`autoGrowPrompt()` in index.html parity.** The dashboard textarea auto-grow is being added here; any future acp.html changes to `autoGrowPrompt()` need mirroring to `dashAutoGrowPrompt()`. Source: D8, Phase 3.
+3. **`loadGroupPage` stale-filter regression test.** The stale-filter race fix in `0827388` has no node test (complex async harness setup needed). Source: Phase 4 review M2.
+4. **Sub-agent spawn-frame self-recording.** When `autonomousAgents` is re-enabled, verify the spawn `tool_call` doesn't appear as a row in the sub-agent's own panel; add a `spawnToolCallId` filter to `acp.py` if it does. Source: Phase 4 review M1.
 
 ## Review Log
 
@@ -719,3 +729,24 @@ Implementation health: Green. Cycle 2 skipped — 4 Low findings, all accepted/f
 
 Implementation (2026-10-08, code: 819ffb5 + 7e28335 + 80bf89a)
 Live tool grouping via `openGroup`/`_transcriptLive`/`_autoExpandEdits` module-level state in `transcript-renderer.js`. `setTranscriptLive(v)` exposed and wired by both pages at turn:start/end and in `renderTranscriptHistory`. Edit rows excluded from groups and auto-expanded via `_maybeAutoExpandEdit`. "edit not applied" label for failed/rejected edits with no diff. Pre-flight found edit diffs on load were never a race or server gap — the panel was simply collapsed; auto-expand resolves it. 10 new tests, all discriminating (mutation-verified). `agent_died` reset fixed in follow-up commit.
+
+### 2026-10-08 — Implementation Review (after Phase 4, 4-persona panel)
+
+Implementation health: Yellow (2 Medium accepted/deferred — no High; unverifiable fan-out path).
+Cycle 2 skipped — all Medium findings accepted with documented deferred actions.
+7 findings (0 High, 2 Medium, 2 Low, 3 informational).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Spawn-frame self-recording: `_agent_subtask_id in self.subagent_history` guard is true for the spawn frame; without a `spawnToolCallId` filter the spawn invocation may appear as a row in its own sub-panel | Escalated — added to Follow-up Work #4 and §9 #5; must verify on autonomousAgents-enabled account |
+| 2 | Medium | Drive-by `loadGroupPage` stale-filter race fix in `0827388` — no §9 entry, no regression test | Fixed — §9 entry added (#6); Follow-up Work #3 added for deferred regression test |
+| 3 | Low | Markdown `[x]` criterion evidence basis weaker than stated (primary-channel only, not sub-task channel) | Accepted — criterion annotated; shares fan-out blocked status |
+| 4 | Low | `_emit`-only recording and `rendered`-frame markdown are both architecturally correct | No action |
+| 5 | Info | Richer tool row, in-place status update, scroll all correct | No action |
+| 6 | Info | No empty-`rendered`-frame scenario exists | No action |
+| 7 | Info | Pre-existing ruff F401 warnings in acp.py — out of scope | No action |
+
+### Phase 4 implementation notes
+
+Implementation (2026-10-08, code: 6d264ce + 0827388)
+Server (`acp.py`): added sub-task tool recording in the `tool_call`/`tool_call_update` handler — uses `_emit` only (which records + broadcasts), guarded on `_agent_subtask_id in self.subagent_history`, with debug log on not-yet-registered path. Added `_flush_bubble` calls at sub-task tool/termination boundaries to emit `rendered` markdown-token frames. Client (`acp.html`+`index.html`): upgraded sub-panel tool row to richer display (icon+name+kind+status, in-place status update); added `rendered`-frame handling to rebuild sub-agent bubble with `mdBuild(tokens)`. 1009/1009 node tests. Restart done (user grant); plain-session live QA passed; fan-out QA blocked by `autonomousAgents=admin_disabled`.
