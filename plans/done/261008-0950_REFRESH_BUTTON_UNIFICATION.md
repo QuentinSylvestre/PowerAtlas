@@ -7,7 +7,23 @@
 > **Estimated effort**: Half-day
 
 
-## Intent
+## Completion Summary
+
+Unified the three previously inconsistent refresh controls into one identically-behaving, identically-styled button per page. The core behavioral change: manual refresh now always does the full deep path (`POST /api/refresh` → cache clear + `warmup_all`), fixing the user-reported symptom where new workspace sessions and liveness dots didn't appear without pressing the topbar button.
+
+**Changes shipped** (5 implementation commits + 2 auto-fix commits):
+- `src/power_atlas/static/style.css` — dead code removed (`.refresh-btn*`, `.refresh-group`, `.refresh-time`); new `.ws-icon-btn.spinning` and `.ws-icon-btn:disabled` rules added
+- `src/power_atlas/templates/index.html` — topbar `.refresh-group` div removed; `doRefresh()` removed; `#dashRailReload` upgraded to deep path with loading state and error feedback; accessibility attributes updated
+- `src/power_atlas/templates/acp.html` — `#acpRailReload` converted from text pill to `ws-icon-btn` icon button; `railDeepRefresh()` added inside the IIFE
+- `plans/tests/260701_POWERATLAS.md` — section 2.15 updated; section 2.15a added for ACP button
+
+**Key design decisions** (resolved in /qexplore):
+- All manual Refresh buttons do the full deep path; auto-poll timers stay shallow
+- Dashboard button lives in the rail head; topbar removed (parity with ACP)
+- `last_refresh` timestamp dropped — the status line is overwritten synchronously before paint
+- `dashRailReload()` unchanged (4 other call sites must stay shallow)
+
+**Review findings addressed**: 2 Medium findings fixed during per-phase reviews (missing `r.ok` checks in both deep-refresh functions); 1 Low fixed at Step 9 (ACP probe entry added to plans/tests). All Step 9 reviewers returned Green; 15/15 Playwright QA checks passed against the live instance.
 
 ### Problem statement & desired outcomes
 
