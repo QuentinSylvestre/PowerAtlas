@@ -6204,8 +6204,12 @@
             ev.preventDefault();
             promptHistIdx = _nextIdx;
             promptInput.value = sentPrompts[promptHistIdx];
-            promptInput.setSelectionRange(0, 0);
             autoGrowPrompt(); refreshComposerControls(); updatePromptHighlight();
+            // setSelectionRange must come AFTER autoGrowPrompt: setting
+            // style.height='auto' can trigger a browser reflow that moves the
+            // cursor to the end of the new value, undoing an earlier
+            // setSelectionRange(0,0) and breaking the second ArrowUp in a row.
+            promptInput.setSelectionRange(0, 0);
             return;
           }
         }

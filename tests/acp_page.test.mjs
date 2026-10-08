@@ -11073,6 +11073,36 @@ check("promptHistoryArrowUpNavigates", (tpl) => {
     JSON.stringify(prompt.value));
 });
 
+// promptHistoryTwoConsecutiveArrowUps: two prompts sent, two ArrowUps without
+// manually repositioning the cursor between them. Regression for the bug where
+// autoGrowPrompt()'s style.height='auto' reflow moved the cursor to the end of
+// the text after the first ArrowUp, making the second ArrowUp a no-op.
+check("promptHistoryTwoConsecutiveArrowUps", (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
+  const prompt = page.el("acpPrompt");
+  const arrowUp = { key: "ArrowUp", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {} };
+  const enter = { key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {} };
+  // Send two distinct prompts.
+  prompt.value = "first"; prompt.selectionStart = prompt.selectionEnd = 5;
+  prompt.dispatch("keydown", enter);
+  prompt.value = "second"; prompt.selectionStart = prompt.selectionEnd = 6;
+  prompt.dispatch("keydown", enter);
+  // Start with cursor at 0 of the now-empty box.
+  prompt.selectionStart = prompt.selectionEnd = 0;
+  // First ArrowUp → newest ("second"); selectionStart must be 0 afterward
+  // (set by the handler via setSelectionRange after autoGrowPrompt).
+  prompt.dispatch("keydown", arrowUp);
+  assertEqual(prompt.value, "second",
+    "first ArrowUp should recall 'second'; got " + JSON.stringify(prompt.value));
+  assertEqual(prompt.selectionStart, 0,
+    "after first ArrowUp selectionStart should be 0; got " + prompt.selectionStart);
+  // Second ArrowUp without touching selectionStart → should reach "first".
+  prompt.dispatch("keydown", arrowUp);
+  assertEqual(prompt.value, "first",
+    "second ArrowUp without cursor reset should recall 'first'; got " +
+    JSON.stringify(prompt.value));
+});
+
 // promptHistoryDraftRestored (SC-5): with a draft typed, ArrowUp saves the draft
 // and recalls history; ArrowDown past the end of history restores the draft.
 check("promptHistoryDraftRestored", (tpl) => {
