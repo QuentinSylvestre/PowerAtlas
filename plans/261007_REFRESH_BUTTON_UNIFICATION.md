@@ -374,6 +374,35 @@ None identified.
 | 6 | Low | `dashDeepRefresh()` insertion point listed two options | Auto-fixed: specified as "immediately after `dashRailReload()` at index.html:8073" |
 | 7 | Low | `railStatus` line reference slightly off (~767 vs actual ~755) | Auto-fixed |
 
+### 2026-10-08 — /qdev Phase 1 review (Senior engineer, full effort)
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | Brief window where `index.html` still referenced `.refresh-btn` after Phase 1's CSS removal — transient state during parallel execution | User: accepted — phases explicitly annotated `[P:2,3]`; HEAD is clean; no visible regression in delivered state |
+| 2 | Low | `@keyframes topbar-spin` defined in topbar section, consumed by the new `.ws-icon-btn.spinning` rule in the rail section — cross-section dependency | User: accepted — pre-existing keyframe placement; valid CSS regardless of source-order |
+| 3 | Low | No `prefers-reduced-motion` override added for the new `.ws-icon-btn.spinning svg` animation | User: accepted — pre-existing gap; not introduced by this change |
+
+Phase 1 health: **Green**. qvalidate 6/6 PASS.
+
+### 2026-10-08 — /qdev Phase 2 review (Senior engineer, full effort)
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `dashDeepRefresh()` calls `r.json()` without `r.ok` check — a 500 with JSON body routes to the success path instead of showing the error banner, violating SC-1's error path | Fixed: commit 37ad47b adds `if (!r.ok) throw new Error('HTTP ' + r.status)` before `r.json()` |
+| 2 | Low | Stale HTML comment in topbar area referencing old `.refresh-group` layout | Fixed: commit 37ad47b removes the stale comment |
+
+Phase 2 health (post-fix): **Green** (1-cycle cap applies; Step 9 covers residual verification). qvalidate 6/6 PASS.
+
+### 2026-10-08 — /qdev Phase 3 review (Frontend/UX + Senior engineer, full effort, sequential)
+
+| # | Severity | Persona | Finding | Resolution |
+|---|---|---|---|---|
+| 1 | Medium | Senior engineer | `railDeepRefresh()` missing `r.ok` check — 500 with JSON body silently calls `railLoadFirstPage()` instead of showing "Refresh failed", violating SC-2 | Fixed: commit 855ba7b (same `if (!r.ok) throw new Error(...)` pattern as Phase 2 fix) |
+| 2 | Low | Frontend/UX | SVG inside `#acpRailReload` missing `aria-hidden="true"` — screen reader may expose a decorative untitled element | Fixed: commit 855ba7b — `aria-hidden="true"` added to match `#dashRailReload` and settings button pattern |
+| 3 | Low | Senior engineer | `railBusy` race: user could click Refresh while a timer-triggered `railLoadFirstPage()` is already running — `railBusy` guard silently drops the call | User: accepted — pre-existing behavior not introduced by this change; button disable prevents double-click; timer uses `railRefresh()` not `railLoadFirstPage()`, so the realistic race is low |
+
+Phase 3 health (post-fix): **Green** (1-cycle cap; Step 9 covers residual verification). qvalidate 6/6 PASS.
+
 
 ## Harness Improvement Opportunities
 <!-- Reserved -->
