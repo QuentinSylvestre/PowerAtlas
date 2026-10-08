@@ -730,24 +730,34 @@ def _workflow_final_state_summary(state: dict) -> dict:
     The full tree (every `capturedOutput`, the original messages, the memory
     config) is unbounded and mostly noise in a log line; what a reader of the
     log needs is which child ended how. Walks `root.children` (nested under
-    `parallel` containers) with a node cap.
+    `parallel` containers) with a node cap. Steps whose status is not
+    "completed" are listed FIRST, and ids are cut to 12 characters, because the
+    line is cut at 600 characters and a failure must never be the part that
+    goes (real session ids are 36+ characters, so only ~8 steps fit).
     """
-    steps: list[str] = []
+    steps: list[tuple[bool, str]] = []
+
+    def short(value, limit):
+        text = value if isinstance(value, str) else str(value)
+        return text[:limit]
 
     def walk(node, depth):
-        if not isinstance(node, dict) or depth > 6 or len(steps) >= _WORKFLOW_LOG_ITEMS:
+        if not isinstance(node, dict) or depth > 6 or len(steps) >= _WORKFLOW_LOG_ITEMS * 5:
             return
         if node.get("sessionId") is not None or node.get("type") == "step":
-            steps.append("%s=%s/%s" % (
-                _workflow_log_clip(node.get("nodeId")), _workflow_log_clip(node.get("status")),
-                _workflow_log_clip(node.get("sessionId"))))
+            status = node.get("status")
+            steps.append((status == "completed", "%s=%s/%s" % (
+                short(node.get("nodeId"), 24), short(status, 24),
+                short(node.get("sessionId"), 12))))
         children = node.get("children")
         if isinstance(children, list):
-            for child in children[:_WORKFLOW_LOG_ITEMS * 2]:
+            for child in children[:_WORKFLOW_LOG_ITEMS * 5]:
                 walk(child, depth + 1)
 
     walk(state.get("root"), 0)
-    return {"status": _workflow_log_clip(state.get("status")), "steps": steps}
+    steps.sort(key=lambda s: s[0])          # stable: failures first, order kept
+    return {"status": _workflow_log_clip(state.get("status")),
+            "steps": [text for _ok, text in steps[:_WORKFLOW_LOG_ITEMS]]}
 
 
 def _workflow_log_view(params: dict) -> dict:
@@ -3639,7 +3649,12 @@ class _Supervisor:
         # `subagent_sessions`/`subagent_history` once its row is gone
         # (`_workflow_free_orphans`). Unlike `_workflow_children` it outlives the
         # child's completion, so it is popped where those are freed, in
-        # `_workflow_drop_parent` and in `_detach`.
+        # `_workflow_drop_parent` and in `_detach`. Bound: a child evicted at turn
+        # end keeps its meta (and history, for click-to-view) until the parent's
+        # next prompt or its close. `started` is set once at node_start and NOT
+        # reset when a waiting step resumes, so waiting time counts toward the
+        # `_WORKFLOW_CHILD_MAX_AGE_S` cap; `capped` marks that the cap has been
+        # logged once.
         self._workflow_child_meta: dict[str, dict] = {}
         # SC-9: pending `session/request_permission` requests awaiting the
         # user's answer. Keyed by an opaque id PowerAtlas mints per request
@@ -4684,9 +4699,10 @@ class _Supervisor:
             # A finished row that is gone can no longer be finalised by a late
             # frame, so stop tracking it too.
             self._workflow_drop_child(parent_id, child_id)
-            self._workflow_child_meta.pop(child_id, None)
+            is_workflow = self._workflow_child_meta.pop(child_id, None) is not None
             _bubbles.pop(child_id, None)
-            frame = _session_closed_frame(child_id)
+            frame = (_workflow_released_frame(child_id) if is_workflow
+                     else _session_closed_frame(child_id))
             for target in tuple(_registry.subscribers.get(child_id, ())):
                 target.send(frame)
                 _registry.detach(target)
@@ -4751,7 +4767,7 @@ class _Supervisor:
             self.subagent_sessions.pop(child_id, None)
             self.subagent_history.pop(child_id, None)
             _bubbles.pop(child_id, None)
-            frame = _session_closed_frame(child_id)
+            frame = _workflow_released_frame(child_id)
             for target in tuple(_registry.subscribers.get(child_id, ())):
                 target.send(frame)
                 _registry.detach(target)
@@ -4853,6 +4869,15 @@ class _Supervisor:
             if now is None:
                 now = time.monotonic()
             if now - started > _WORKFLOW_CHILD_MAX_AGE_S:
+                meta_entry = self._workflow_child_meta[child_id]
+                if not meta_entry.get("capped"):
+                    # Once per child: the cap silently ends a legitimately long
+                    # step's refresh, so say so where the next stale/reap line
+                    # can be traced back to it.
+                    meta_entry["capped"] = True
+                    log.info("ACP workflow step %s of %s: age cap reached (%.0fs "
+                             "since node_start); its own frames no longer keep "
+                             "it live", child_id, parent_id, now - started)
                 return
         state = current[0]
         self._workflow_set(parent_id, child_id, state)
@@ -7528,6 +7553,19 @@ def _project_mcp_server(server: dict) -> dict:
     }
 
 
+def _workflow_released_frame(session_id: str) -> dict:
+    """The `session_closed` frame for a workflow step's read-only view.
+
+    The sub-agent panel renders `payload.message` as a note, so a message that
+    fits (the step's view, not "create a new session") needs no template change.
+    """
+    return envelope("session_closed", {
+        "sessionId": session_id,
+        "message": "This workflow step's view was released when a new turn "
+                   "started. The step itself is unaffected.",
+    }, session_id)
+
+
 def _session_closed_frame(session_id: str) -> dict:
     return envelope("session_closed", {
         "sessionId": session_id,
@@ -8641,7 +8679,13 @@ def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty
         if not keep_history:
             _supervisor.subagent_sessions.pop(_child_id, None)
             _supervisor.subagent_history.pop(_child_id, None)
-            _supervisor._workflow_child_meta.pop(_child_id, None)
+            if _supervisor._workflow_child_meta.pop(_child_id, None) is not None:
+                # Same note as `_workflow_free_orphans` gives; legacy sub-agent
+                # rows are freed silently, as before.
+                _frame = _workflow_released_frame(_child_id)
+                for _target in tuple(_registry.subscribers.get(_child_id, ())):
+                    _target.send(_frame)
+                    _registry.detach(_target)
         _bubbles.pop(_child_id, None)
     if not crew:
         _supervisor.crews.pop(session_id, None)
