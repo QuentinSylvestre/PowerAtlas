@@ -1,7 +1,7 @@
 # Refresh Button Unification
 
 > **Date**: 2026-10-07
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: 2026-10-07 11:03
 > **Scope**: Unify the three refresh buttons across dashboard and ACP into one consistent control per page; make manual refresh always do the full deep path; polish loading state and error feedback
 > **Estimated effort**: Half-day
@@ -131,11 +131,11 @@ Keep `.topbar-select:hover`, `.trust-dot`, and `@keyframes topbar-spin` — the 
 > **`.topbar-ic` is NOT unused** — doc-impact scan confirmed it is used in 6+ locations (settings modal, profile menu, remote access rows). Do not remove it.
 
 **Exit criteria**:
-- [ ] `.ws-icon-btn.spinning svg` rule present in `style.css`
-- [ ] `.ws-icon-btn:disabled` rule present in `style.css`
-- [ ] `.refresh-btn`, `.refresh-group`, `.refresh-time` class rules absent from `style.css`
-- [ ] `@keyframes topbar-spin` still present
-- [ ] In-code "only Refresh keeps a permanent seat" comment absent from `style.css`
+- [x] `.ws-icon-btn.spinning svg` rule present in `style.css`
+- [x] `.ws-icon-btn:disabled` rule present in `style.css`
+- [x] `.refresh-btn`, `.refresh-group`, `.refresh-time` class rules absent from `style.css`
+- [x] `@keyframes topbar-spin` still present
+- [x] In-code "only Refresh keeps a permanent seat" comment absent from `style.css`
 
 
 ### Phase 2: Dashboard — remove topbar button, add `dashDeepRefresh()` [P:1,3] [QA]
@@ -199,15 +199,15 @@ function dashDeepRefresh() {
 > **No other call sites change**: `dashRailReload()` (shallow) remains used by pollWarmup, switchProvider, dashRailInit, and the auto-timer. Only the button's click handler calls `dashDeepRefresh()`.
 
 **Exit criteria**:
-- [ ] `.refresh-group` div absent from `index.html`
-- [ ] `doRefresh` function absent from `index.html` (grep returns no hits)
-- [ ] Startup `/api/last-refresh` fetch that sets `refreshTime.textContent` removed in the same commit as the HTML element
-- [ ] `#dashRailReload` carries `aria-label="Refresh sessions"` and `title="Refresh all sessions now"`
-- [ ] `dashDeepRefresh` function present immediately after `dashRailReload()` (~line 8073) and wired to `#dashRailReload` click
-- [ ] `dashRailReload()` still called by pollWarmup, switchProvider, dashRailInit (no regressions to those paths)
+- [x] `.refresh-group` div absent from `index.html`
+- [x] `doRefresh` function absent from `index.html` (grep returns no hits)
+- [x] Startup `/api/last-refresh` fetch that sets `refreshTime.textContent` removed in the same commit as the HTML element
+- [x] `#dashRailReload` carries `aria-label="Refresh sessions"` and `title="Refresh all sessions now"`
+- [x] `dashDeepRefresh` function present immediately after `dashRailReload()` (~line 8073) and wired to `#dashRailReload` click
+- [x] `dashRailReload()` still called by pollWarmup, switchProvider, dashRailInit (no regressions to those paths)
 - [ ] Hard reload of the dashboard in a running PowerAtlas shows one Refresh button in the rail head (not in topbar); clicking it spins the button and the rail re-renders
-- [ ] `node tests/acp_page.test.mjs` suite unaffected (no references to dashboard's doRefresh)
-- [ ] `plans/tests/260701_POWERATLAS.md` refresh probe entry updated to describe the new rail-head deep-refresh behavior (no `#refreshTime` reference)
+- [x] `node tests/acp_page.test.mjs` suite unaffected (no references to dashboard's doRefresh)
+- [x] `plans/tests/260701_POWERATLAS.md` refresh probe entry updated to describe the new rail-head deep-refresh behavior (no `#refreshTime` reference)
 
 
 ### Phase 3: ACP — icon button + `railDeepRefresh()` [P:1,2] [QA]
@@ -269,10 +269,10 @@ function railDeepRefresh() {
 > **Other call sites unchanged**: `railLoadFirstPage()` is still called by setSortMode and on boot/reconnect.
 
 **Exit criteria**:
-- [ ] `#acpRailReload` carries class `ws-icon-btn` (not `acp-btn`) and contains an SVG child
-- [ ] `railDeepRefresh` defined inside the IIFE and wired to the click handler
-- [ ] `railLoadFirstPage()` still called by setSortMode and boot/reconnect (no regressions)
-- [ ] `acp_page.test.mjs:3765` — `page.el("acpRailReload").disabled === true` still passes (the disabled-on-module-failure path is unchanged)
+- [x] `#acpRailReload` carries class `ws-icon-btn` (not `acp-btn`) and contains an SVG child
+- [x] `railDeepRefresh` defined inside the IIFE and wired to the click handler
+- [x] `railLoadFirstPage()` still called by setSortMode and boot/reconnect (no regressions)
+- [x] `acp_page.test.mjs:3765` — `page.el("acpRailReload").disabled === true` still passes (the disabled-on-module-failure path is unchanged)
 - [ ] Hard reload of `/acp` in a running PowerAtlas shows the icon Refresh button; clicking it spins and shows "Refresh failed" or reloads the rail
 
 
@@ -337,14 +337,22 @@ After all phases land:
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | CSS — spinning + disabled rules, dead code removal | Not started | |
-| 2 | Dashboard — remove topbar button, add `dashDeepRefresh()` | Not started | |
-| 3 | ACP — icon button + `railDeepRefresh()` | Not started | |
+| 1 | CSS — spinning + disabled rules, dead code removal | Complete | commit 6aae8aa |
+| 2 | Dashboard — remove topbar button, add `dashDeepRefresh()` | Complete | commit 22cedf2; criterion 7 deferred to QA |
+| 3 | ACP — icon button + `railDeepRefresh()` | Complete | commit 29ddc43; criterion 5 deferred to QA |
 | 4 | Test — verify `acp_page.test.mjs` still passes | Not started | |
 
 
 ## 9) Implementation Divergences from Plan
-<!-- Reserved — filled during implementation -->
+
+### Phase 1 — implementation notes (commit 6aae8aa)
+All 5 exit criteria satisfied. `.topbar-select:hover` and `.trust-dot` preserved. `@keyframes topbar-spin` retained and now referenced by the new `.ws-icon-btn.spinning svg` rule. No divergences from plan.
+
+### Phase 2 — implementation notes (commit 22cedf2)
+8/9 exit criteria satisfied; criterion 7 (hard reload visual) deferred to Step 9 QA. `doRefresh()` fully removed. Startup `/api/last-refresh` fetch removed in same commit as HTML element. `dashRailReload()` non-button call sites intact (grep confirmed). `plans/tests/260701_POWERATLAS.md` section 2.15 rewritten. `plans/ROADMAP.md` verified clean — 0 hits for removed identifiers, no change needed. 985 tests pass.
+
+### Phase 3 — implementation notes (commit 29ddc43)
+4/5 exit criteria satisfied; criterion 5 (hard reload visual) deferred to Step 9 QA. `railDeepRefresh()` placed inside the IIFE immediately after `railLoadFirstPage()` at acp.html:2476. Button HTML uses `ws-icon-btn` class with matching rotating-arrow SVG. 985 tests pass (run after phases 1 and 3 combined).
 
 
 ## Follow-up Work (Deferred)
