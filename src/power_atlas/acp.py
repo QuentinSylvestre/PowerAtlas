@@ -667,15 +667,25 @@ _READ_ONLY_SUBAGENT_MESSAGE = (
 # history of them.
 MAX_SUBAGENTS_PER_SESSION = 64
 
-# How long (seconds, monotonic) a workflow child may go unmentioned before
-# `_Supervisor._workflow_live` stops counting it as running. A child is
+# How long (seconds, monotonic) a RUNNING workflow child may go unmentioned
+# before `_Supervisor._workflow_live` stops counting it as live. A child is
 # "mentioned" by any `_kiro/workflow/*` frame that resolves to it and by any
 # notification carrying its own sessionId. Strictly greater-than: a child last
 # seen exactly this long ago is still live; one second more and it is not.
 # Measured 2026-10-08 (kiro-cli 2.28.0, docs/KNOWLEDGE.md): `session/cancel` on
 # the parent returns `cancelled` and emits NO `run_complete`, so without a
 # bound a cancelled run would pin its parent to Working until the app exits.
+# The bound only affects liveness reads: the child's tracking entry and node
+# index stay until `node_complete`, `run_complete`, crew eviction,
+# `close_session` or `_detach`, so a late completion still finds its row.
 _WORKFLOW_CHILD_STALE_S = 600
+
+# The same bound for a WAITING child (`node_paused`: a step waiting for the
+# user). A person can take hours to answer, so 600 s would call a live wait
+# dead. 6 h is a judgement, not a measurement: the `node_paused` and resume
+# shapes were never captured (docs/KNOWLEDGE.md), nor how long KAS keeps a
+# paused step alive.
+_WORKFLOW_WAITING_STALE_S = 21600
 
 # `node_start`/`node_complete` `type` values that are containers, which have no
 # child session and so no crew entry (measured: `parallel`, and the root
@@ -3524,14 +3534,16 @@ class _Supervisor:
         # `state` is "running" or "waiting"; `last_seen` is `time.monotonic()` of
         # the last frame that touched the child. Written only by
         # `_workflow_set`; populated by the id-bearing `_kiro/workflow/node_start`;
-        # removed on `node_complete` (done/failed), `run_complete`,
-        # `close_session`, `_detach`, and by `_workflow_live` once an entry is
-        # older than `_WORKFLOW_CHILD_STALE_S`. Deliberately NOT cleared at turn
-        # end: `session/prompt` returns before the run ends and a cancelled turn
-        # leaves the child running with no `run_complete` (measured, docs/
-        # KNOWLEDGE.md), so the staleness bound is the only exit for those.
-        # Distinct from `subagent_sessions`, which persists past turn end for
-        # click-to-view routing.
+        # removed on `node_complete` (done/failed), `run_complete`, crew
+        # eviction of its row, `close_session` and `_detach`. Deliberately NOT
+        # cleared at turn end: `session/prompt` returns before the run ends and
+        # a cancelled turn leaves the child running with no `run_complete`
+        # (measured, docs/KNOWLEDGE.md). An entry older than the staleness bound
+        # (`_WORKFLOW_CHILD_STALE_S`, `_WORKFLOW_WAITING_STALE_S`) is merely
+        # not counted by `_workflow_live`; it is NOT removed, so a late
+        # `node_complete` still finds its row. Distinct from
+        # `subagent_sessions`, which persists past turn end for click-to-view
+        # routing.
         self._workflow_children: dict[str, dict[str, tuple[str, float]]] = {}
         # (parent, workflowId, nodeId) -> child session id, recorded at the
         # id-bearing `node_start`. `node_complete` carries no child id, so this
@@ -4580,6 +4592,9 @@ class _Supervisor:
             crew.pop(child_id, None)
             self.subagent_sessions.pop(child_id, None)
             self.subagent_history.pop(child_id, None)
+            # A finished row that is gone can no longer be finalised by a late
+            # frame, so stop tracking it too.
+            self._workflow_drop_child(parent_id, child_id)
             _bubbles.pop(child_id, None)
             frame = _session_closed_frame(child_id)
             for target in tuple(_registry.subscribers.get(child_id, ())):
@@ -4602,7 +4617,10 @@ class _Supervisor:
             state, time.monotonic())
 
     def _workflow_drop_child(self, parent_id: str, child_id: str) -> None:
-        """Forget one child and the node-index entries that point at it."""
+        """Forget one child and the node-index entries that point at it.
+
+        Loop-only (it writes).
+        """
         kids = self._workflow_children.get(parent_id)
         if kids is not None:
             kids.pop(child_id, None)
@@ -4619,37 +4637,48 @@ class _Supervisor:
             self._workflow_node_index.pop(key, None)
         self._crew_order_next.pop(parent_id, None)
 
+    @staticmethod
+    def _workflow_is_fresh(state: str, seen: float, now: float) -> bool:
+        """The one place the staleness bound is applied.
+
+        Strictly greater-than: unseen for exactly the bound is still fresh. A
+        waiting child gets the longer bound (a person may take hours).
+        """
+        bound = (_WORKFLOW_WAITING_STALE_S if state == "waiting"
+                 else _WORKFLOW_CHILD_STALE_S)
+        return now - seen <= bound
+
     def _workflow_live(self, parent_id: str, now: float | None = None
                        ) -> dict[str, tuple[str, float]]:
-        """The parent's children that are not stale, pruning the stale ones.
+        """The parent's children that are not stale. A PURE read.
 
-        An entry last seen more than ``_WORKFLOW_CHILD_STALE_S`` before *now*
-        is dropped (children and node index together). *now* is injectable so
-        the boundary can be tested without patching the shared clock.
+        Any-thread safe: it iterates a snapshot and never mutates, logs or
+        prunes. A stale child is only left out of the answer; its tracking
+        entry and node index stay (see ``_workflow_children``) so a late
+        ``node_complete`` still finds its row. *now* is injectable so the
+        boundary can be tested without patching the shared clock.
         """
         kids = self._workflow_children.get(parent_id)
         if not kids:
             return {}
         if now is None:
             now = time.monotonic()
-        for child_id, (_state, seen) in tuple(kids.items()):
-            if now - seen > _WORKFLOW_CHILD_STALE_S:
-                log.info("ACP workflow child %s of %s stale (%.0fs unseen); "
-                         "no longer counted", child_id, parent_id, now - seen)
-                self._workflow_drop_child(parent_id, child_id)
-        return dict(self._workflow_children.get(parent_id, {}))
+        return {child_id: (state, seen)
+                for child_id, (state, seen) in tuple(kids.items())
+                if self._workflow_is_fresh(state, seen, now)}
 
     def has_active_workflow(self, session_id: str, now: float | None = None) -> bool:
         """True while the session has a fresh running or waiting workflow child.
 
-        Independent of ``inflight``: ``session/prompt`` returns about 2 s before
-        the run ends (measured), so a turn-based check would miss the tail.
+        A pure read, any-thread safe (see ``_workflow_live``). Independent of
+        ``inflight``: ``session/prompt`` returns about 2 s before the run ends
+        (measured), so a turn-based check would miss the tail.
         """
         return bool(self._workflow_live(session_id, now))
 
     def workflow_state(self, session_id: str, now: float | None = None) -> str | None:
         """``"working"`` if a fresh child is running, ``"waiting"`` if only
-        waiting children remain, else ``None``."""
+        waiting children remain, else ``None``. A pure read, any-thread safe."""
         live = self._workflow_live(session_id, now)
         if not live:
             return None
@@ -4658,8 +4687,8 @@ class _Supervisor:
     def _workflow_touch(self, child_id: str) -> None:
         """Refresh a tracked child's staleness clock on a frame from the child.
 
-        A stale child is pruned first, not revived: once the bound has passed
-        and something has looked, it is gone for good.
+        Loop-only (it writes). A child already past its bound is not revived
+        by this: ``_workflow_live`` does not list it.
         """
         meta = self.subagent_sessions.get(child_id)
         if meta is None:
@@ -4787,9 +4816,12 @@ class _Supervisor:
             log.info("ACP workflow node_start %r: first variant (no sessionId); "
                      "no crew entry", node_id)
             return
-        if params.get("type") in _WORKFLOW_CONTAINER_TYPES:
+        # `_as_text`, not the raw value: a list or dict `type` is unhashable
+        # and would raise TypeError on the set lookup.
+        node_type = _as_text(params.get("type"))
+        if node_type in _WORKFLOW_CONTAINER_TYPES:
             log.info("ACP workflow node_start %r: container node (%r); no crew entry",
-                     node_id, params.get("type"))
+                     node_id, node_type)
             return
         existing = (self.crews.get(parent_id) or {}).get(child_id)
         if existing is not None:
@@ -4838,8 +4870,9 @@ class _Supervisor:
         ``node_complete`` carries no child id, so the child is found through
         the ``(parent, workflowId, nodeId)`` index recorded at its id-bearing
         ``node_start``. A container's ``node_complete`` and a frame for a child
-        that is unknown (never registered, or pruned as stale) miss the index
-        and are ignored.
+        that is unknown (never registered, or already finished and dropped) miss
+        the index and are ignored. A child past its staleness bound is still
+        in the index, so its late completion finalises the row.
         """
         workflow_id = _as_text(params.get("workflowId"))
         node_id = _as_text(params.get("nodeId"))
@@ -4896,9 +4929,10 @@ class _Supervisor:
         # later frame for the same nodeId) cannot belong to another run we
         # know of, so it is finalised too.
         orphans = set(self._workflow_children.get(parent_id, ())) - set(indexed)
+        # A frame with no usable workflowId matches only children registered
+        # the same way, never every run of the parent.
         children = orphans | {
-            child for child, wf in indexed.items()
-            if not workflow_id or wf == workflow_id}
+            child for child, wf in indexed.items() if wf == workflow_id}
         crew = self.crews.get(parent_id) or {}
         changed = False
         for child_id in children:
@@ -4915,26 +4949,6 @@ class _Supervisor:
         self._log_workflow_children(parent_id)
         if changed:
             _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
-
-    def _note_workflow_progress_chunk(self, session_id, text: str) -> None:
-        """Decode a ``workflow-progress`` ``user_message_chunk``, display-only.
-
-        These chunks exist on disk and are replayed on ``session/load`` with
-        ``_meta.kiro.notification.kind == "workflow-progress"`` and
-        ``_meta.kiro.replay``; they are NOT on the live stream (measured). They
-        must never mutate state: a killed or cancelled run replays a
-        ``node_start`` with no ``run_complete`` and would pin the session to
-        Working on every resume. Nothing is rendered beyond the raw chunk,
-        which carries on down the ordinary user-chunk path.
-        """
-        try:
-            payload = json.loads(text or "{}")
-        except (ValueError, RecursionError):
-            log.debug("ACP workflow-progress chunk is not JSON: session=%s", session_id)
-            return
-        if isinstance(payload, dict):
-            log.debug("ACP workflow-progress chunk (display only): session=%s "
-                      "method=%r", session_id, payload.get("method"))
 
     def _compaction_session(self, session_id: object) -> str | None:
         """Which session a compaction notification is about.
@@ -5284,10 +5298,11 @@ class _Supervisor:
             content = update.get("content")
             text = _content_text(content) or _as_text(update.get("text"))
             if role == "user":
+                # `_meta.kiro.notification.kind == "workflow-progress"` chunks
+                # (replay only, measured) are deliberately not special-cased:
+                # they must never change workflow state, and nothing renders
+                # from them beyond this ordinary user chunk.
                 text = _with_image_markers(text, _content_image_count(content))
-                _note = _kiro_meta.get("notification")
-                if isinstance(_note, dict) and _note.get("kind") == "workflow-progress":
-                    self._note_workflow_progress_chunk(session_id, text)
             if _agent_subtask_id:
                 if text and _agent_subtask_id in self.subagent_history:
                     _emit(_agent_subtask_id, envelope(
@@ -7761,10 +7776,11 @@ async def _handle_prompt(conn, session_id, payload):
             # turn leaves the child running with no `run_complete` (both
             # measured, docs/KNOWLEDGE.md), so neither a normal end nor
             # `cancelled`/`error` proves a child dead. Nothing is cleared here
-            # for them: `_WORKFLOW_CHILD_STALE_S` is the exit for a child that
-            # really did die, and a child already stale is no longer "live"
+            # for them: the staleness bound is the exit for a child that
+            # really did die, and a child already past it is no longer "live"
             # here, so it is finalised by this sweep like any other entry.
             _wf_live = _supervisor._workflow_live(session_id)
+            _wf_tracked = _supervisor._workflow_children.get(session_id, {})
             _finishing_crew = _supervisor.crews.get(session_id)
             if _finishing_crew:
                 _crew_changed = False
@@ -7772,6 +7788,12 @@ async def _handle_prompt(conn, session_id, payload):
                     if _child_id in _wf_live:
                         continue
                     if not _entry["done"]:
+                        if _child_id in _wf_tracked:
+                            log.info("ACP turn end: finalising stale workflow "
+                                     "step %s of %s (state %s, unseen %.0fs)",
+                                     _child_id, session_id,
+                                     _wf_tracked[_child_id][0],
+                                     time.monotonic() - _wf_tracked[_child_id][1])
                         _entry["done"] = True
                         if _entry.get("stoppedAt") is None:
                             _entry["stoppedAt"] = time.time()
@@ -8324,6 +8346,9 @@ def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty
         return
     for _child_id in [cid for cid, e in crew.items() if e["done"]]:
         crew.pop(_child_id, None)
+        # The row is gone, so a late workflow frame could not finalise it:
+        # stop tracking the child too.
+        _supervisor._workflow_drop_child(session_id, _child_id)
         if not keep_history:
             _supervisor.subagent_sessions.pop(_child_id, None)
             _supervisor.subagent_history.pop(_child_id, None)
@@ -8385,12 +8410,10 @@ def _sweepable(session_id: str, meta: dict, now: float, *,
        before the run does (measured), so a parent with running children looks
        idle to conditions 3 and 4 and would be closed mid-run: its children and
        crew popped, and every later frame dropped by the unknown-parent guard
-       while kiro-cli keeps running. The staleness bound on the children keeps
-       this from becoming a permanent pin.
+       while kiro-cli keeps running. The staleness bounds on the children
+       (600 s running, 6 h waiting) keep this from becoming a permanent pin.
     """
     if session_id not in _supervisor.sessions:
-        return False
-    if has_active_workflow:
         return False
     last_used = meta.get("last_used")
     if last_used is None or now - last_used <= ACP_IDLE_TTL_SECONDS:
@@ -8402,6 +8425,8 @@ def _sweepable(session_id: str, meta: dict, now: float, *,
     if session_id in _supervisor.closing:
         return False
     if session_id in _registry.loading:
+        return False
+    if has_active_workflow:
         return False
     return True
 

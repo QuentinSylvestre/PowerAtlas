@@ -12336,6 +12336,49 @@ class TestAcpWorkflowNotifications:
         assert set(sv.sessions) == sessions_before
         assert sv.sessions[self.P]["last_activity"] == 0.0     # nobody was stamped
 
+    @pytest.mark.parametrize("fields, creates", [
+        ({"nodePath": "a/b", "sessionId": "child-c9"}, True),
+        ({"nodePath": 7, "sessionId": "child-c9"}, True),
+        ({"nodePath": {"a": 1}, "sessionId": "child-c9"}, True),
+        ({"nodePath": [["x"], 3, None, "wf-zzz"], "sessionId": "child-c9"}, True),
+        ({"status": ["x"]}, False),
+        ({"status": 5}, False),
+        ({"sessionId": 5}, False),
+        ({"sessionId": ["child-c9"]}, False),
+        ({"sessionId": {"a": 1}, "type": "step"}, False),
+        ({"type": ["parallel"], "sessionId": "child-c9"}, True),
+        ({"type": {"a": 1}}, False),
+        ({"nodeId": ["x"], "workflowId": {"y": 1}, "sessionId": "child-c9"}, True),
+        ({"agentName": ["x"], "sessionId": "child-c9"}, True),
+    ])
+    def test_workflow_malformed_frames_raise_nothing_and_leave_other_state_alone(
+            self, wf, fields, creates):
+        """Review fix 4: agent-authored fields can be any JSON type. Unhashable
+        ones used to raise TypeError at a set/dict lookup."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        row = copy.deepcopy(sv.crews[self.P]["child-c7"])
+        base = {"workflowId": "wf-zzz", "nodeId": "step-none", "type": "step"}
+        for kind in ("node_start", "node_complete", "node_paused", "run_complete"):
+            self._send(acp_mod, kind, **{**base, **fields})      # must not raise
+        assert sv.crews[self.P]["child-c7"] == row
+        assert list(sv._workflow_children[self.P])[0] == "child-c7"
+        assert sv._workflow_node_index[(self.P, "wf-k7x", "step-one")] == "child-c7"
+        if creates:
+            assert isinstance(sv.crews[self.P]["child-c9"]["role"], str)
+        else:
+            assert list(sv.crews[self.P]) == ["child-c7"]
+            assert list(sv.subagent_sessions) == ["child-c7"]
+
+    @pytest.mark.parametrize("params", [["x"], "x", 5, [{"parentSessionId": "wfparent-p1"}]])
+    def test_workflow_non_object_params_are_dropped_without_error(self, wf, params):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        before = copy.deepcopy((sv.crews, sv._workflow_children, sv._workflow_node_index))
+        for kind in ("node_start", "node_complete", "run_complete", "run_start"):
+            sv._on_notification({"method": "_kiro/workflow/" + kind, "params": params})
+        assert (sv.crews, sv._workflow_children, sv._workflow_node_index) == before
+
     def test_workflow_routing_needs_no_outer_session_id_and_stamps_the_parent(self, wf):
         acp_mod, sv = wf
         # Measured: run_start, node_complete and run_complete carry no
@@ -12430,12 +12473,35 @@ class TestAcpWorkflowNotifications:
         assert acp_mod._WORKFLOW_CHILD_STALE_S == 600    # plan Phase 2 Step 1
         for seen_now, expected in ((1600.0, "working"), (1600.001, None)):
             sv._workflow_children[self.P] = {"child-c7": ("running", 1000.0)}
-            sv._workflow_node_index[(self.P, "wf-k7x", "step-one")] = "child-c7"
             assert sv.workflow_state(self.P, now=seen_now) == expected, seen_now
             assert sv.has_active_workflow(self.P, now=seen_now) is (expected is not None)
-        # Lazy prune: the stale child and its index entry are gone, and so is
-        # the parent key.
-        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+
+    def test_workflow_waiting_child_has_its_own_longer_bound(self, wf):
+        """Review fix 3: a step waiting on a person is not dead after 600 s.
+        The 6 h value is a judgement; both sides of it are pinned."""
+        acp_mod, sv = wf
+        assert acp_mod._WORKFLOW_WAITING_STALE_S == 21600
+        sv._workflow_children[self.P] = {"child-c7": ("waiting", 1000.0)}
+        for now, expected in ((1600.001, "waiting"),       # past the running bound
+                              (22600.0, "waiting"),        # exactly 21600 s
+                              (22600.001, None)):          # just over it
+            assert sv.workflow_state(self.P, now=now) == expected, now
+            assert sv.has_active_workflow(self.P, now=now) is (expected is not None), now
+
+    def test_workflow_reads_after_the_bound_do_not_mutate_or_log(self, wf, caplog):
+        """Review fix 2: `workflow_state`/`has_active_workflow` are pure reads
+        (safe from any thread); a stale child stays tracked."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
+        before = copy.deepcopy((sv._workflow_children, sv._workflow_node_index,
+                                sv.crews, sv.subagent_sessions, sv._crew_order_next))
+        with caplog.at_level(logging.DEBUG, logger="power_atlas.acp"):
+            assert sv.workflow_state(self.P, now=5000.0) is None
+            assert sv.has_active_workflow(self.P, now=5000.0) is False
+        assert (sv._workflow_children, sv._workflow_node_index, sv.crews,
+                sv.subagent_sessions, sv._crew_order_next) == before
+        assert [r for r in caplog.records if r.name == "power_atlas.acp"] == []
 
     def test_workflow_stale_child_is_ignored_but_a_fresh_one_still_counts(self, wf):
         acp_mod, sv = wf
@@ -12443,7 +12509,54 @@ class TestAcpWorkflowNotifications:
             "child-old": ("running", 100.0), "child-new": ("waiting", 900.0)}
         # old is 900 s past, new is 100 s past: only the waiting one is live.
         assert sv.workflow_state(self.P, now=1000.0) == "waiting"
-        assert list(sv._workflow_children[self.P]) == ["child-new"]
+        assert set(sv._workflow_children[self.P]) == {"child-old", "child-new"}
+
+    def test_workflow_late_node_complete_after_the_bound_finalises_the_row(self, wf):
+        """Review fix 1: staleness only affects liveness reads. The index and
+        the tracked child survive, so a completion that arrives after the bound
+        (and with no turn in between) still finds and finishes its row."""
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        _queued(watcher)
+        assert sv.workflow_state(self.P) is None           # stale: not counted...
+        assert sv._workflow_node_index == {(self.P, "wf-k7x", "step-one"): "child-c7"}
+        self._complete(acp_mod, "wf-k7x", "step-one")      # ...but still resolvable
+        entry = sv.crews[self.P]["child-c7"]
+        assert (entry["done"], entry["status"]) == (True, "done")
+        assert isinstance(entry["stoppedAt"], float)
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        assert {e["sessionId"]: e["done"] for e in self._last_payload(watcher)} == {
+            "child-c7": True}
+
+    def test_workflow_late_run_complete_after_the_bound_finalises_the_row(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed")
+        entry = sv.crews[self.P]["child-c7"]
+        assert (entry["done"], entry["status"]) == (True, "done")
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+
+    def test_workflow_late_waiting_step_completes_after_the_running_bound(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
+        sv._workflow_children[self.P]["child-c7"] = ("waiting", time.monotonic() - 7200)
+        assert sv.workflow_state(self.P) == "waiting"      # 2 h < 6 h
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert sv.crews[self.P]["child-c7"]["done"] is True
+
+    def test_workflow_evicting_a_finished_row_stops_tracking_its_child(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        sv.crews[self.P]["child-c7"]["done"] = True        # e.g. a sweep marked it
+        acp_mod._evict_crew_children(self.P, keep_history=True, broadcast_empty=False)
+        assert list(sv.crews[self.P]) == ["child-c8"]
+        assert list(sv._workflow_children[self.P]) == ["child-c8"]
+        assert list(sv._workflow_node_index.values()) == ["child-c8"]
 
     def test_workflow_child_frames_refresh_its_staleness_clock(self, wf):
         acp_mod, sv = wf
@@ -12453,12 +12566,14 @@ class TestAcpWorkflowNotifications:
             "sessionUpdate": "agent_thought_chunk",
             "content": {"type": "text", "text": "thinking"}}})
         assert time.monotonic() - sv._workflow_children[self.P]["child-c7"][1] < 100
-        # Past the bound it is gone, and a late frame does not revive it.
-        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        # Past the bound a late frame does not revive it, and nothing is lost.
+        stale = ("running", time.monotonic() - 700)
+        sv._workflow_children[self.P]["child-c7"] = stale
         _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
             "sessionUpdate": "agent_thought_chunk",
             "content": {"type": "text", "text": "still here"}}})
-        assert sv._workflow_children == {}
+        assert sv._workflow_children[self.P]["child-c7"] == stale
+        assert sv.workflow_state(self.P) is None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -12514,15 +12629,19 @@ class TestAcpWorkflowNotifications:
         assert sv.workflow_state(self.P) == "working"
         assert "child-c7" in sv.subagent_sessions       # click-to-view survives
 
-    def test_workflow_turn_end_finalises_a_child_that_has_gone_stale(self, wf):
+    def test_workflow_turn_end_finalises_a_child_that_has_gone_stale(self, wf, caplog):
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 601)
-        self._run_turn(acp_mod, "end_turn")
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            self._run_turn(acp_mod, "end_turn")
         # No longer live, so it is an ordinary not-done entry: marked done at
-        # turn end, then evicted by the same sweep.
+        # turn end, then evicted by the same sweep (which also stops tracking
+        # the child), and the sweep says so at INFO (review fix 6).
         assert "child-c7" not in sv.crews.get(self.P, {})
-        assert sv._workflow_children == {}
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        assert any("finalising stale workflow step child-c7" in r.getMessage()
+                   for r in caplog.records if r.levelno == logging.INFO)
 
     def test_workflow_user_cancel_does_not_mark_a_live_child_done(self, wf):
         acp_mod, sv = wf
@@ -12610,8 +12729,9 @@ class TestAcpWorkflowNotifications:
 
 
 class TestAcpIdleSweeper:
-    """Six conditions, one synchronous claim, and a failure mode that must
-    never take the task out."""
+    """Seven conditions (the seventh, a live workflow child, has its own
+    tests in `TestAcpWorkflowNotifications`), one synchronous claim, and a
+    failure mode that must never take the task out."""
 
     def _idle(self, acp_mod, sid):
         acp_mod._supervisor.sessions[sid]["last_used"] = (
