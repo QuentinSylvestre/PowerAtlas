@@ -971,11 +971,15 @@ def _load_cli_settings_dict() -> dict:
             raw = json.load(fh)
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError):
-        log.warning("ACP cli.json unreadable or malformed; using TUI defaults")
+    # ValueError covers JSONDecodeError and UnicodeDecodeError; RecursionError
+    # is what json.load raises on a deeply nested file.
+    except (OSError, ValueError, RecursionError) as exc:
+        log.warning("ACP cli.json unreadable or malformed (%s: %s); "
+                    "using TUI defaults", KIRO_CLI_SETTINGS_PATH, exc)
         return {}
     if not isinstance(raw, dict):
-        log.warning("ACP cli.json top level is not an object; using TUI defaults")
+        log.warning("ACP cli.json top level is not an object (%s); "
+                    "using TUI defaults", KIRO_CLI_SETTINGS_PATH)
         return {}
     return raw
 
@@ -1001,24 +1005,23 @@ def _build_session_settings(cli_settings: dict) -> dict:
     ``_delegate``, ``c2s``, ``disableAutoCompaction``, ``memory``) are not
     sent; see docs/KNOWLEDGE.md "ACP session/new settings".
 
-    The terminal UI defaults ``codeIntelligence``, ``knowledge``, ``thinking``
-    and ``largeToolOutputHandler`` to on when the key is absent from
-    ``cli.json``; the same defaults apply here so a PowerAtlas session is not
-    silently poorer than a terminal one. An explicit ``false`` wins. A value
-    that is not a bool counts as absent.
+    The terminal UI defaults ``codeIntelligence``, ``knowledge`` and
+    ``thinking`` to on when the key is absent from ``cli.json``; the same
+    defaults apply here so a PowerAtlas session is not silently poorer than a
+    terminal one. An explicit ``false`` wins. A value that is not a bool counts
+    as absent. ``largeToolOutputHandler`` is deliberately not forwarded: no KAS
+    bundle checked (2.24.0 to 2.28.0) knows the key; user decision 2026-10-08.
     """
     defaults: dict[str, bool] = {
         "codeIntelligence": True,
         "knowledge": True,
         "thinking": True,
-        "largeToolOutputHandler": True,
     }
     # cli.json key -> KAS setting name, for the keys enabled now.
     mapping: list[tuple[str, str]] = [
         ("chat.enableThinking", "thinking"),
         ("chat.enableKnowledge", "knowledge"),
         ("chat.enableCodeIntelligence", "codeIntelligence"),
-        ("chat.enableLargeToolOutputHandler", "largeToolOutputHandler"),
     ]
     settings: dict[str, dict] = {}
     for cli_key, kas_key in mapping:
@@ -1233,6 +1236,17 @@ MAX_ERROR_DETAIL_CHARS = 512
 # Set it through `set_sessions_changed_hook`, not by assignment: the initial
 # publish matters and is easy to forget.
 sessions_changed_hook = None
+
+
+def _log_session_settings(method: str, params: dict) -> None:
+    """INFO-log the settings block a session request is about to send.
+
+    Keys and their bool values only (``{kas_key: enabled}``), so the log shows
+    what the agent was asked to turn on without echoing any other field.
+    """
+    settings = params["_meta"]["kiro"]["settings"]
+    log.info("ACP %s sending settings: %s", method,
+             {k: v.get("enabled") for k, v in sorted(settings.items())})
 
 
 def set_sessions_changed_hook(hook) -> None:
@@ -5809,11 +5823,13 @@ class _Supervisor:
         self._reserved += 1
         try:
             await self.ensure_started()
+            # The cli.json read inside is a small synchronous file read, kept
+            # off asyncio.to_thread on purpose (the tool-search read at
+            # `initialize` is the same shape).
             params = _build_kas_session_params(mode_id=mode or "kiro_default")
             params["cwd"] = cwd
             params["mcpServers"] = []
-            log.info("ACP session/new settings sent: %s",
-                     sorted(params["_meta"]["kiro"]["settings"]))
+            _log_session_settings("session/new", params)
             result = await self._request("session/new", params)
             result = result or {}
             # CRITICAL: v3 session ID is at result._meta.id, not result.sessionId.
@@ -5977,10 +5993,12 @@ class _Supervisor:
                 # whose level is stored (the terminal records its own) keeps it.
                 chosen_effort = await asyncio.to_thread(
                     _stored_session_effort_v3, session_id)
-                loaded = await self._request(
-                    "session/load",
-                    {"sessionId": session_id, "cwd": cwd, "mcpServers": [],
-                     **_build_kas_session_params(mode_id=load_mode)})
+                # Same deliberate synchronous cli.json read as in new_session.
+                load_params = {"sessionId": session_id, "cwd": cwd,
+                               "mcpServers": [],
+                               **_build_kas_session_params(mode_id=load_mode)}
+                _log_session_settings("session/load", load_params)
+                loaded = await self._request("session/load", load_params)
                 if chosen_effort is None:
                     await self._apply_default_effort(session_id, loaded)
             except BaseException:

@@ -68,6 +68,15 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", tmp_path / "remote-secret")
     monkeypatch.setattr(agent_profile_mod, "KIRO_AGENTS_DIR", tmp_path / "kiro-agents")
+    # kiro-cli's cli.json, redirected to a file that does not exist: `session/new`
+    # and `session/load` build `_meta.kiro.settings` from it on every call
+    # (261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 1), so a test
+    # that reaches either would otherwise read this machine's real settings and
+    # pass or fail by what the developer toggled in the terminal UI. A test that
+    # wants a particular cli.json patches the name again.
+    from power_atlas import acp as _acp_for_cli_json
+    monkeypatch.setattr(_acp_for_cli_json, "KIRO_CLI_SETTINGS_PATH",
+                        tmp_path / "no-such-cli.json")
     # A base agent in the redirected folder, as a developer machine has one:
     # the derived agent is generated in every permission mode now
     # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-8), so every `lifespan`
@@ -6248,17 +6257,16 @@ class TestAcpSessionLoad:
 class TestAcpNewSessionParams:
     """``session/new`` request params include the KAS steering overlay."""
 
-    def test_new_session_params_include_meta(self, acp_store, monkeypatch, tmp_path):
+    def test_new_session_params_include_meta(self, acp_store):
         """session/new carries _meta.kiro.steering so the ACP session receives
         the PowerAtlas overlay steering document, alongside the modeId the
         sole surviving `_build_kas_session_params` (renamed from its v3-only
         counterpart, which always carried a modeId) always includes. It also
-        carries `settings` built from cli.json (261008 Phase 1); the path is
-        redirected to a missing file so the expected block is the TUI
-        defaults rather than whatever this machine's cli.json says."""
+        carries `settings` built from cli.json (261008 Phase 1); the
+        module-level `isolated_config` fixture points the path at a missing
+        file, so the expected block is the TUI defaults rather than whatever
+        this machine's cli.json says."""
         acp_mod, store = acp_store
-        monkeypatch.setattr(acp_mod, "KIRO_CLI_SETTINGS_PATH",
-                            tmp_path / "no-such-cli.json")
         calls = []
 
         async def fake_request(self, method, params, timeout=None):
@@ -6288,13 +6296,14 @@ class TestAcpNewSessionParams:
                                 "content": "PowerAtlas context \u2014 content TBD",
                             }
                         ],
-                        # cli.json absent: the TUI's four default-on keys; the
-                        # workflows/goal keys are gated off in Phase 1.
+                        # cli.json absent: the three default-on keys; the
+                        # workflows/goal keys are gated off in Phase 1, and
+                        # largeToolOutputHandler is not forwarded (user
+                        # decision 2026-10-08).
                         "settings": {
                             "thinking": {"enabled": True},
                             "knowledge": {"enabled": True},
                             "codeIntelligence": {"enabled": True},
-                            "largeToolOutputHandler": {"enabled": True},
                         },
                     }
                 },
@@ -6302,18 +6311,117 @@ class TestAcpNewSessionParams:
         )
 
 
+class TestSessionSettingsOnTheWire:
+    """The settings block reaches the `session/new` and `session/load`
+    requests the supervisor sends, and is logged (261008 Phase 1).
+
+    `isolated_config` points `KIRO_CLI_SETTINGS_PATH` at a missing file for
+    every test in this module; the tests that need a cli.json write one into
+    `tmp_path` and patch the name again.
+    """
+
+    # cli.json absent: the three default-on keys, workflows/goal gated off.
+    TUI_DEFAULTS = {
+        "thinking": {"enabled": True},
+        "knowledge": {"enabled": True},
+        "codeIntelligence": {"enabled": True},
+    }
+
+    def _new(self, acp_mod, store, sid):
+        calls = []
+
+        async def fake_request(self, method, params, timeout=None):
+            calls.append((method, params))
+            return {"_meta": {"id": sid}}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._supervisor.new_session(str(store)))
+        acp_mod._supervisor.sessions.pop(sid, None)
+        acp_mod._supervisor.history.pop(sid, None)
+        return calls
+
+    def _load(self, acp_mod, store, acp_store_dir_v3, monkeypatch, sid):
+        monkeypatch.setattr(acp_mod, "mode_gate_hook", lambda: False)
+        calls = []
+
+        async def fake_request(self, method, params, timeout=None):
+            calls.append((method, params))
+            return {}
+
+        acp_store_dir_v3(sid, cwd=str(Path(store).resolve()))
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        assert [m for m, _p in calls] == ["session/load"]
+        return calls
+
+    def test_new_session_request_carries_the_settings_block(self, acp_store):
+        acp_mod, store = acp_store
+        calls = self._new(acp_mod, store, "wire-new-0001")
+        assert calls[0][0] == "session/new"
+        assert calls[0][1]["_meta"]["kiro"]["settings"] == self.TUI_DEFAULTS
+
+    def test_load_session_request_carries_the_settings_block(
+            self, acp_store, acp_store_dir_v3, monkeypatch):
+        acp_mod, store = acp_store
+        calls = self._load(acp_mod, store, acp_store_dir_v3, monkeypatch,
+                           "wire-load-0001")
+        assert calls[0][1]["_meta"]["kiro"]["settings"] == self.TUI_DEFAULTS
+
+    def test_a_cli_json_edit_reaches_both_requests_without_a_restart(
+            self, acp_store, acp_store_dir_v3, monkeypatch, tmp_path):
+        acp_mod, store = acp_store
+        path = tmp_path / "cli.json"
+        path.write_text(json.dumps({"chat.enableKnowledge": False,
+                                    "chat.enableWorkflows": True}),
+                        encoding="utf-8")
+        monkeypatch.setattr(acp_mod, "KIRO_CLI_SETTINGS_PATH", path)
+        expected = {**self.TUI_DEFAULTS, "knowledge": {"enabled": False}}
+        new_calls = self._new(acp_mod, store, "wire-edit-0001")
+        assert new_calls[0][1]["_meta"]["kiro"]["settings"] == expected
+        load_calls = self._load(acp_mod, store, acp_store_dir_v3, monkeypatch,
+                                "wire-edit-0002")
+        assert load_calls[0][1]["_meta"]["kiro"]["settings"] == expected
+
+    def test_both_requests_log_the_settings_they_are_sending(
+            self, acp_store, acp_store_dir_v3, monkeypatch, tmp_path, caplog):
+        """INFO, `{kas_key: enabled}` with plain bools, worded "sending", and
+        nothing from cli.json beyond the keys PowerAtlas forwards."""
+        acp_mod, store = acp_store
+        path = tmp_path / "cli.json"
+        path.write_text(json.dumps({"chat.enableKnowledge": False,
+                                    "some.other.key": "do-not-log-me"}),
+                        encoding="utf-8")
+        monkeypatch.setattr(acp_mod, "KIRO_CLI_SETTINGS_PATH", path)
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            self._new(acp_mod, store, "wire-log-0001")
+            self._load(acp_mod, store, acp_store_dir_v3, monkeypatch,
+                       "wire-log-0002")
+        messages = [r.getMessage() for r in caplog.records
+                    if r.name == "power_atlas.acp" and r.levelno == logging.INFO
+                    and "settings" in r.getMessage() and "sending" in r.getMessage()]
+        shown = "{'codeIntelligence': True, 'knowledge': False, 'thinking': True}"
+        assert [m for m in messages if "session/new" in m] == [
+            "ACP session/new sending settings: " + shown]
+        assert [m for m in messages if "session/load" in m] == [
+            "ACP session/load sending settings: " + shown]
+        assert not any("do-not-log-me" in r.getMessage() for r in caplog.records)
+
+
 _DEFAULT_ON_SETTINGS = {
     "chat.enableThinking": "thinking",
     "chat.enableKnowledge": "knowledge",
     "chat.enableCodeIntelligence": "codeIntelligence",
-    "chat.enableLargeToolOutputHandler": "largeToolOutputHandler",
 }
 
 
 class TestBuildSessionSettings:
     """`_build_session_settings` and `_load_cli_settings_dict` (261008 Phase 1).
 
-    Expected values come from the plan's spec: the TUI's four default-on keys,
+    Expected values come from the plan's spec: the TUI's three default-on keys
+    (`largeToolOutputHandler` was dropped by user decision 2026-10-08),
     `chat.enableWorkflows` read with ``is True`` and gated by
     `_WORKFLOWS_FORWARD_ENABLED`, and no deferred or ``workflowNotifications``
     key ever.
@@ -6439,6 +6547,45 @@ class TestBuildSessionSettings:
             assert acp_mod._load_cli_settings_dict() == {}
         assert any(r.levelno == logging.WARNING and "malformed" in r.getMessage()
                    for r in caplog.records)
+        # The warning names the file and carries the parser's own message.
+        msg = " ".join(r.getMessage() for r in caplog.records
+                       if r.levelno == logging.WARNING)
+        assert str(tmp_path / "cli.json") in msg
+        assert "JSONDecodeError" in msg or "Expecting property name" in msg
+
+    def test_load_cli_settings_dict_invalid_utf8_is_empty_with_warning(
+            self, monkeypatch, tmp_path, caplog):
+        """A UnicodeDecodeError is a ValueError: it must not escape into
+        session/new."""
+        from power_atlas import acp as acp_mod
+        self._cli(acp_mod, monkeypatch, tmp_path, b'{"a": "\xff\xfe"}')
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            assert acp_mod._load_cli_settings_dict() == {}
+        assert any(r.levelno == logging.WARNING and "malformed" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_load_cli_settings_dict_directory_at_the_path_is_empty_with_warning(
+            self, monkeypatch, tmp_path, caplog):
+        """open() on a directory raises an OSError (PermissionError on
+        Windows, IsADirectoryError elsewhere): not FileNotFoundError, so it
+        is warned about rather than silent."""
+        from power_atlas import acp as acp_mod
+        (tmp_path / "cli.json").mkdir()
+        monkeypatch.setattr(acp_mod, "KIRO_CLI_SETTINGS_PATH", tmp_path / "cli.json")
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            assert acp_mod._load_cli_settings_dict() == {}
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_load_cli_settings_dict_deeply_nested_json_is_empty_with_warning(
+            self, monkeypatch, tmp_path, caplog):
+        """json.load raises RecursionError, not ValueError, past the
+        interpreter's recursion limit."""
+        from power_atlas import acp as acp_mod
+        depth = sys.getrecursionlimit() * 4
+        self._cli(acp_mod, monkeypatch, tmp_path, b"[" * depth + b"]" * depth)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            assert acp_mod._load_cli_settings_dict() == {}
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
 
     @pytest.mark.parametrize("text", ["[]", '["chat.enableThinking"]', "null", "3", '"x"'])
     def test_load_cli_settings_dict_non_object_is_empty_with_warning(
