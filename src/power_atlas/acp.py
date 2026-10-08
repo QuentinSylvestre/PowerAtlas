@@ -4687,8 +4687,13 @@ class _Supervisor:
     def _workflow_touch(self, child_id: str) -> None:
         """Refresh a tracked child's staleness clock on a frame from the child.
 
-        Loop-only (it writes). A child already past its bound is not revived
-        by this: ``_workflow_live`` does not list it.
+        Loop-only (it writes). Reads the RAW tracked entry, not
+        ``_workflow_live``: a child that went silent past its bound and then
+        speaks again is alive, so it is refreshed and, if the sweeper's
+        ``_workflow_reap`` had marked its row done, the row is reopened. A
+        child whose tracking is gone (finished by ``node_complete`` or
+        ``run_complete``, or evicted) is never touched, so a finished row is
+        never reopened.
         """
         meta = self.subagent_sessions.get(child_id)
         if meta is None:
@@ -4696,9 +4701,81 @@ class _Supervisor:
         parent_id = meta.get("parent")
         if not isinstance(parent_id, str):
             return
-        current = self._workflow_live(parent_id).get(child_id)
-        if current is not None:
-            self._workflow_set(parent_id, child_id, current[0])
+        current = self._workflow_children.get(parent_id, {}).get(child_id)
+        if current is None:
+            return
+        state = current[0]
+        self._workflow_set(parent_id, child_id, state)
+        entry = (self.crews.get(parent_id) or {}).get(child_id)
+        if entry is not None and entry.get("reaped"):
+            self._workflow_reopen_row(entry, state)
+            log.info("ACP workflow step %s of %s reporting again; row reopened",
+                     child_id, parent_id)
+            _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
+
+    @staticmethod
+    def _workflow_reopen_row(entry: dict, state: str) -> None:
+        """Undo ``_workflow_reap`` on a row: not done, timer running again."""
+        entry.pop("reaped", None)
+        entry["done"] = False
+        entry["stoppedAt"] = None
+        entry["status"] = "waiting" if state == "waiting" else "working"
+        entry["action"] = "waiting" if state == "waiting" else "running"
+
+    @staticmethod
+    def _workflow_finish_row(entry: dict, terminal: str, error: str = "") -> None:
+        """Give a row its real final state (``done`` or ``failed``).
+
+        Also the path that settles a row ``_workflow_reap`` had already marked
+        done with no verdict: the flag goes, the real status and time land.
+        """
+        entry.pop("reaped", None)
+        entry["done"] = True
+        entry["status"] = terminal
+        entry["action"] = ""
+        entry["stoppedAt"] = time.time()
+        if terminal == "failed":
+            entry["error"] = error
+
+    def _workflow_reap(self, now: float | None = None) -> list[str]:
+        """Mark the crew row of every stale, still-open workflow child done.
+
+        Loop-only; called from ``_sweep_once``. Without it a step silent past
+        its bound drops out of the liveness reads (the rail goes idle) while
+        its row keeps saying "working" until the next user turn ends. The row
+        gets ``done`` and an action of "no longer reporting" and NO error: it is
+        not known to have failed. The tracking entry and node index are KEPT,
+        so a late ``node_complete``/``run_complete`` still settles the row with
+        its real status, and a frame from the child reopens it
+        (``_workflow_touch``). Fresh children are never touched; a waiting one
+        uses its own bound. One ``subagents`` frame per affected parent.
+        Returns the reaped child ids.
+        """
+        if now is None:
+            now = time.monotonic()
+        reaped: list[str] = []
+        for parent_id, kids in tuple(self._workflow_children.items()):
+            crew = self.crews.get(parent_id)
+            if not crew:
+                continue
+            changed = False
+            for child_id, (state, seen) in tuple(kids.items()):
+                if self._workflow_is_fresh(state, seen, now):
+                    continue
+                entry = crew.get(child_id)
+                if entry is None or entry["done"]:
+                    continue
+                entry["done"] = True
+                entry["reaped"] = True
+                entry["stoppedAt"] = time.time()
+                entry["action"] = "no longer reporting"
+                changed = True
+                reaped.append(child_id)
+                log.info("ACP workflow step %s of %s reaped: %s, unseen %.0fs",
+                         child_id, parent_id, state, now - seen)
+            if changed:
+                _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
+        return reaped
 
     def _next_crew_order(self, parent_id: str) -> int:
         """The next ``order`` for a crew entry: monotonic, never ``len(crew)``.
@@ -4825,13 +4902,20 @@ class _Supervisor:
             return
         existing = (self.crews.get(parent_id) or {}).get(child_id)
         if existing is not None:
-            if not existing["done"]:
+            reopened = False
+            if not existing["done"] or existing.get("reaped"):
                 state = self._workflow_children.get(parent_id, {}).get(
                     child_id, ("running", 0.0))[0]
                 self._workflow_set(parent_id, child_id, state)
                 self._workflow_node_index[(parent_id, workflow_id, node_id)] = child_id
-            log.info("ACP workflow node_start %r: child already %s; unchanged",
-                     node_id, "finished" if existing["done"] else "registered")
+                if existing.get("reaped"):
+                    self._workflow_reopen_row(existing, state)
+                    reopened = True
+            log.info("ACP workflow node_start %r: child already %s; %s",
+                     node_id, "finished" if existing["done"] else "registered",
+                     "row reopened" if reopened else "unchanged")
+            if reopened:
+                _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
             return
         self._evict_finished_subagents(parent_id)
         agent_name = _as_text(params.get("agentName"))
@@ -4889,23 +4973,20 @@ class _Supervisor:
         entry = (self.crews.get(parent_id) or {}).get(child_id)
         if terminal_status == "waiting":
             self._workflow_set(parent_id, child_id, "waiting")
-            if entry is not None and not entry["done"]:
+            if entry is not None and (not entry["done"] or entry.get("reaped")):
                 # A waiting step is not stopped: stoppedAt stays None so its
                 # elapsed timer keeps running. The row's text is `action`.
-                entry["status"] = "waiting"
-                entry["action"] = "waiting"
+                # (A reaped row is reopened: the step is plainly still there.)
+                self._workflow_reopen_row(entry, "waiting")
         else:
             # Removal is unconditional, even when the crew entry is gone: the
             # turn-end sweep and `_evict_crew_children` can drop it while the
             # child is still tracked.
             self._workflow_drop_child(parent_id, child_id)
-            if entry is not None and not entry["done"]:
-                entry["done"] = True
-                entry["status"] = terminal_status
-                entry["action"] = ""
-                entry["stoppedAt"] = time.time()
-                if terminal_status == "failed":
-                    entry["error"] = self._workflow_outcome(params.get("status"))[1]
+            if entry is not None and (not entry["done"] or entry.get("reaped")):
+                self._workflow_finish_row(
+                    entry, terminal_status,
+                    self._workflow_outcome(params.get("status"))[1])
         self._log_workflow_children(parent_id)
         if entry is not None:
             _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
@@ -4938,13 +5019,8 @@ class _Supervisor:
         for child_id in children:
             entry = crew.get(child_id)
             self._workflow_drop_child(parent_id, child_id)
-            if entry is not None and not entry["done"]:
-                entry["done"] = True
-                entry["status"] = terminal
-                entry["action"] = ""
-                entry["stoppedAt"] = time.time()
-                if terminal == "failed":
-                    entry["error"] = error
+            if entry is not None and (not entry["done"] or entry.get("reaped")):
+                self._workflow_finish_row(entry, terminal, error)
                 changed = True
         self._log_workflow_children(parent_id)
         if changed:
@@ -8453,6 +8529,13 @@ async def _sweep_once() -> None:
     # miss self-heal within one sweep interval instead of never. Costs one
     # frozenset of a dict that is at most MAX_SESSIONS long.
     _supervisor._publish_live()
+    # The only writer the sweeper tick adds for workflows: rows of steps that
+    # have gone silent past their bound stop claiming to be working. Guarded
+    # so a fault here cannot take the sweeper task out.
+    try:
+        _supervisor._workflow_reap()
+    except Exception:
+        log.exception("ACP sweeper: reaping stale workflow rows failed")
     # Forget the failure counts of sessions that are no longer here, whatever
     # took them — this is what keeps `_sweep_failures` bounded by the live
     # session count rather than growing for the application's lifetime.

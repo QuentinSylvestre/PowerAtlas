@@ -12566,14 +12566,218 @@ class TestAcpWorkflowNotifications:
             "sessionUpdate": "agent_thought_chunk",
             "content": {"type": "text", "text": "thinking"}}})
         assert time.monotonic() - sv._workflow_children[self.P]["child-c7"][1] < 100
-        # Past the bound a late frame does not revive it, and nothing is lost.
-        stale = ("running", time.monotonic() - 700)
-        sv._workflow_children[self.P]["child-c7"] = stale
+        # Past the bound it reads as not live; a frame from the child then
+        # revives it (cycle-2 fix 2: `_workflow_touch` reads the raw tracked
+        # entry, so a silent child that speaks again is alive again).
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        assert sv.workflow_state(self.P) is None
         _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
             "sessionUpdate": "agent_thought_chunk",
             "content": {"type": "text", "text": "still here"}}})
-        assert sv._workflow_children[self.P]["child-c7"] == stale
+        assert sv.workflow_state(self.P) == "working"
+        assert time.monotonic() - sv._workflow_children[self.P]["child-c7"][1] < 100
+
+    # -- reaping stale rows, and reviving them ------------------------------
+
+    @staticmethod
+    def _frames(conn):
+        return [f["payload"]["subagents"] for f in _queued(conn)
+                if f["type"] == "subagents"]
+
+    def test_workflow_reap_marks_a_stale_row_done_without_an_error_and_emits_one_frame(
+            self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
+        _queued(watcher)
+        assert sv._workflow_reap(now=1600.001) == ["child-c7"]
+        entry = sv.crews[self.P]["child-c7"]
+        assert entry["done"] is True and entry["error"] == ""
+        assert entry["action"] == "no longer reporting"
+        assert isinstance(entry["stoppedAt"], float)
+        # Tracking and index stay, so a late completion still resolves the row.
+        assert sv._workflow_children[self.P]["child-c7"] == ("running", 1000.0)
+        assert sv._workflow_node_index == {(self.P, "wf-k7x", "step-one"): "child-c7"}
+        frames = self._frames(watcher)
+        assert len(frames) == 1
+        assert [(e["sessionId"], e["done"], e["error"], e["action"]) for e in frames[0]] == [
+            ("child-c7", True, "", "no longer reporting")]
+        # A second pass has nothing left to do and stays silent.
+        assert sv._workflow_reap(now=1700.0) == [] and self._frames(watcher) == []
+
+    def test_workflow_reap_boundary_is_strictly_greater_than_the_bound(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
+        assert sv._workflow_reap(now=1600.0) == []           # exactly 600 s: fresh
+        assert sv.crews[self.P]["child-c7"]["done"] is False
+        assert sv._workflow_reap(now=1600.001) == ["child-c7"]
+
+    def test_workflow_reap_leaves_fresh_and_waiting_children_alone(self, wf):
+        acp_mod, sv = wf
+        for node, child in (("s1", "child-f1"), ("s2", "child-w2"), ("s3", "child-r3")):
+            self._start(acp_mod, "wf-k7x", node, child=child)
+        sv._workflow_children[self.P] = {
+            "child-f1": ("running", 1500.0),      # 100 s old at now=1600
+            "child-w2": ("waiting", 1000.0),      # 600.001 s old: past the running bound only
+            "child-r3": ("running", 1000.0),      # 600.001 s old
+        }
+        assert sv._workflow_reap(now=1600.001) == ["child-r3"]
+        crew = sv.crews[self.P]
+        assert [crew[c]["done"] for c in ("child-f1", "child-w2", "child-r3")] == [
+            False, False, True]
+        # The waiting child has its own 6 h bound, strictly greater than. The
+        # running child is kept fresh by a new sighting at 22100.
+        sv._workflow_children[self.P]["child-f1"] = ("running", 22100.0)
+        assert sv._workflow_reap(now=22600.0) == []
+        assert sv._workflow_reap(now=22600.001) == ["child-w2"]
+        assert crew["child-f1"]["done"] is False
+
+    def test_workflow_late_node_complete_after_a_reap_settles_the_real_status(self, wf):
+        acp_mod, sv = wf
+        for node, child, status, expected in (
+                ("s1", "child-c7", "completed", ("done", "")),
+                ("s2", "child-c8", "cancelled", ("failed", "cancelled"))):
+            self._start(acp_mod, "wf-k7x", node, child=child)
+            sv._workflow_children[self.P][child] = ("running", 1000.0)
+        sv._workflow_reap(now=2000.0)
+        for node, child, status, expected in (
+                ("s1", "child-c7", "completed", ("done", "")),
+                ("s2", "child-c8", "cancelled", ("failed", "cancelled"))):
+            assert sv.crews[self.P][child]["status"] == "working"   # no verdict yet
+            self._complete(acp_mod, "wf-k7x", node, status=status)
+            entry = sv.crews[self.P][child]
+            assert (entry["status"], entry["error"]) == expected
+            assert entry["done"] is True and entry["action"] == ""
+            assert "reaped" not in entry
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+
+    def test_workflow_late_run_complete_after_a_reap_settles_the_real_status(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
+        sv._workflow_reap(now=2000.0)
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="cancelled")
+        entry = sv.crews[self.P]["child-c7"]
+        assert (entry["status"], entry["error"], entry["done"]) == ("failed", "cancelled", True)
+        assert "reaped" not in entry and sv._workflow_children == {}
+
+    @pytest.mark.parametrize("state, seen_age, status, action", [
+        ("running", 700, "working", "running"),
+        ("waiting", 30000, "waiting", "waiting"),
+    ])
+    def test_workflow_frames_from_a_reaped_child_revive_it(
+            self, wf, state, seen_age, status, action):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        if state == "waiting":
+            self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
+        sv._workflow_children[self.P]["child-c7"] = (state, time.monotonic() - seen_age)
         assert sv.workflow_state(self.P) is None
+        assert sv._workflow_reap() == ["child-c7"]
+        assert sv.crews[self.P]["child-c7"]["done"] is True
+        _queued(watcher)
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "back"}}})
+        entry = sv.crews[self.P]["child-c7"]
+        assert (entry["done"], entry["stoppedAt"], entry["status"], entry["action"]) == (
+            False, None, status, action)
+        assert "reaped" not in entry and entry["error"] == ""
+        assert sv.workflow_state(self.P) == ("working" if state == "running" else "waiting")
+        frames = self._frames(watcher)
+        assert len(frames) == 1 and frames[0][0]["done"] is False
+
+    def test_workflow_reap_revive_complete_ends_done_exactly_once(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        _queued(watcher)
+        sv._workflow_reap()
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "back"}}})
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert [f[0]["done"] for f in self._frames(watcher)] == [True, False, True]
+        # Finished by node_complete: tracking is gone, so neither a later child
+        # frame nor another reap can reopen or touch the row.
+        done_at = sv.crews[self.P]["child-c7"]["stoppedAt"]
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "late"}}})
+        assert sv._workflow_reap(now=time.monotonic() + 99999) == []
+        entry = sv.crews[self.P]["child-c7"]
+        assert (entry["done"], entry["status"], entry["stoppedAt"]) == (True, "done", done_at)
+        assert self._frames(watcher) == []
+
+    def test_workflow_reap_emits_one_frame_per_affected_parent(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        w1, w2 = self._watch(acp_mod, self.P), self._watch(acp_mod, self.P2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
+                   nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
+                   sessionId="child-c3")
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
+                   nodeId="step-two", type="step", nodePath=["wf-q2m", "step-two"],
+                   sessionId="child-c4")
+        sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
+        sv._workflow_children[self.P]["child-c8"] = ("running", 1900.0)   # fresh
+        sv._workflow_children[self.P2]["child-c3"] = ("running", 1000.0)
+        sv._workflow_children[self.P2]["child-c4"] = ("running", 1000.0)
+        _queued(w1), _queued(w2)
+        assert sorted(sv._workflow_reap(now=2000.0)) == ["child-c3", "child-c4", "child-c7"]
+        f1, f2 = self._frames(w1), self._frames(w2)
+        assert len(f1) == 1 and len(f2) == 1
+        assert {e["sessionId"]: e["done"] for e in f1[0]} == {"child-c7": True, "child-c8": False}
+        assert {e["sessionId"]: e["done"] for e in f2[0]} == {"child-c3": True, "child-c4": True}
+
+    def test_workflow_sweep_once_reaps_rows_and_still_closes_an_idle_parent(self, acp_fast):
+        acp_mod, _ = acp_fast
+        sv = acp_mod._supervisor
+        _live_session(acp_mod, self.P)
+        _live_session(acp_mod, self.P2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
+                   nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
+                   sessionId="child-c3")
+        for parent, child in ((self.P, "child-c7"), (self.P2, "child-c3")):
+            sv._workflow_children[parent][child] = ("running", time.monotonic() - 700)
+        # Only P2 is idle past the TTL; P was used just now.
+        sv.sessions[self.P2]["last_used"] = (
+            time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+        # P: kept, but its silent step no longer claims to be working.
+        assert self.P in sv.sessions
+        row = sv.crews[self.P]["child-c7"]
+        assert (row["done"], row["action"], row["error"]) == (True, "no longer reporting", "")
+        assert "child-c7" in sv._workflow_children[self.P]
+        # P2: its only child is stale, so it is no longer a reason to keep it.
+        assert self.P2 not in sv.sessions
+        assert self.P2 not in sv._workflow_children
+
+    def test_workflow_cap_eviction_stops_tracking_the_evicted_child_only(self, wf):
+        """The per-session cap path in `_evict_finished_subagents`: rows that
+        are done but were never completed by a frame (a sweep or reap marked
+        them) are evicted oldest first, and only their tracking goes."""
+        acp_mod, sv = wf
+        with patch.object(acp_mod, "MAX_SUBAGENTS_PER_SESSION", 2):
+            self._start(acp_mod, "wf-k7x", "s-live", child="child-l1")
+            self._start(acp_mod, "wf-k7x", "s-a", child="child-a2")
+            self._start(acp_mod, "wf-k7x", "s-b", child="child-b3")
+            sv.crews[self.P]["child-a2"]["done"] = True
+            sv.crews[self.P]["child-b3"]["done"] = True
+            self._start(acp_mod, "wf-k7x", "s-c", child="child-c4")
+        assert set(sv.crews[self.P]) == {"child-l1", "child-b3", "child-c4"}
+        assert set(sv._workflow_children[self.P]) == {"child-l1", "child-b3", "child-c4"}
+        assert set(sv._workflow_node_index.values()) == {"child-l1", "child-b3", "child-c4"}
+        assert "child-a2" not in sv.subagent_sessions
 
     # -- lifecycle ----------------------------------------------------------
 
