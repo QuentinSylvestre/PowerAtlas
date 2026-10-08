@@ -1340,6 +1340,47 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-system-msg[data-empty] { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 100%; font-size: 12.5px; font-style: normal; }
 .dash-empty-icon { width: 34px; height: 34px; color: var(--text-dim); opacity: 0.6; margin-bottom: 4px; }
 .dash-empty-hint { font-size: 11px; opacity: 0.8; }
+/* Compaction recap: collapsible summary below the system row.
+   Moved from acp.html inline <style> (261008_ACP_COMPACT_FIX) so the dashboard
+   panel renders compaction rows on reload as well as /acp. */
+.acp-compaction-details {
+  margin: 2px 14px 6px;
+  border: 1px solid var(--border, #2d3148);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.acp-compaction-details summary {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--text-dim, #8b95b0);
+  cursor: pointer;
+  user-select: none;
+  list-style: none; /* hide default triangle on some browsers */
+}
+.acp-compaction-details summary::-webkit-details-marker { display: none; }
+.acp-compaction-details summary::before {
+  content: '▶\00a0';
+  font-size: 9px;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+.acp-compaction-details[open] summary::before {
+  transform: rotate(90deg);
+}
+.acp-compaction-details summary:hover {
+  color: var(--text-main, #c9d1e8);
+}
+.acp-compaction-recap {
+  padding: 8px 12px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim, #8b95b0);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid var(--border, #2d3148);
+  max-height: 400px;
+  overflow-y: auto;
+}
 .dash-empty-hint kbd { display: inline-block; min-width: 16px; padding: 0 4px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; font: 11px/16px 'SF Mono', 'Cascadia Code', monospace; color: var(--text-muted); background: var(--surface); text-align: center; }
 /* Metadata strip above the dashboard transcript (dashSessionMetaRender). */
 .dash-session-meta { display: flex; flex-direction: column; gap: 3px; padding: 2px 2px 10px; min-width: 0; }

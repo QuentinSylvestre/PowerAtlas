@@ -4511,7 +4511,7 @@ class _Supervisor:
             # anyway, and it is the only source left if a build streams it.
             buffered = "".join(self._compaction_buf.pop(session_id, []))
             summary = summary or buffered
-        _registry.broadcast(
+        _emit(
             session_id,
             envelope("compaction",
                      {"status": s_type, "error": error,
@@ -4735,7 +4735,7 @@ class _Supervisor:
                             and time.monotonic() - started_at > COMPACTION_BACKSTOP_SECONDS):
                         self._compacting.discard(session_id)
                         self._compaction_started_at.pop(session_id, None)
-                        _registry.broadcast(
+                        _emit(
                             session_id,
                             envelope("compaction",
                                      {"status": "completed", "error": "",
@@ -7135,7 +7135,7 @@ async def _handle_prompt(conn, session_id, payload):
     if text.strip() == "/compact" and session_id not in _supervisor._compacting:
         _supervisor._compacting.add(session_id)
         _supervisor._compaction_started_at[session_id] = time.monotonic()
-        _registry.broadcast(
+        _emit(
             session_id,
             envelope("compaction", {"status": "started", "error": "", "summary": ""},
                      session_id))
@@ -7705,7 +7705,7 @@ async def _handle_commands_execute(conn, session_id, payload):
     if name == "compact" and session_id not in _supervisor._compacting:
         _supervisor._compacting.add(session_id)
         _supervisor._compaction_started_at[session_id] = time.monotonic()
-        _registry.broadcast(
+        _emit(
             session_id,
             envelope("compaction", {"status": "started", "error": "", "summary": ""},
                      session_id))

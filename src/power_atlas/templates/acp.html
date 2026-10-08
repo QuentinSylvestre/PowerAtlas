@@ -460,45 +460,8 @@
   color: var(--text-dim, #8b95b0);
   text-align: center;
 }
-/* Compaction recap: collapsible summary below the system row */
-.acp-compaction-details {
-  margin: 2px 14px 6px;
-  border: 1px solid var(--border, #2d3148);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.acp-compaction-details summary {
-  padding: 5px 10px;
-  font-size: 11px;
-  color: var(--text-dim, #8b95b0);
-  cursor: pointer;
-  user-select: none;
-  list-style: none; /* hide default triangle on some browsers */
-}
-.acp-compaction-details summary::-webkit-details-marker { display: none; }
-.acp-compaction-details summary::before {
-  content: '▶\00a0';
-  font-size: 9px;
-  display: inline-block;
-  transition: transform 0.15s;
-}
-.acp-compaction-details[open] summary::before {
-  transform: rotate(90deg);
-}
-.acp-compaction-details summary:hover {
-  color: var(--text-main, #c9d1e8);
-}
-.acp-compaction-recap {
-  padding: 8px 12px 10px;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text-dim, #8b95b0);
-  white-space: pre-wrap;
-  word-break: break-word;
-  border-top: 1px solid var(--border, #2d3148);
-  max-height: 400px;
-  overflow-y: auto;
-}
+/* .acp-compaction-details and .acp-compaction-recap moved to /static/style.css
+   (261008_ACP_COMPACT_FIX) so the dashboard panel also renders compaction rows. */
 /* ---- two-button + mode-select composer row: .acp-queue-steer/.acp-mode-*/
    .sr-only, migrated to /static/style.css (dashboard/ACP feature-parity
    plan, Phase 3), the same move Phase 2 made for .acp-cmd-dropdown/
@@ -4813,6 +4776,12 @@
       agentBody = null;
       pendingPrompt = null;
       toolGroup = null; // also reset in clearTranscript() and at end of flushToolGroups()
+      // 261007 Phase 2: a live turn groups tool calls incrementally and
+      // auto-expands edit rows. setTranscriptLive(true) sets both flags and
+      // breaks any open run so this turn starts a fresh group. Live even on a
+      // replayed turn marker is harmless: replay never calls addToolCall on
+      // the live path because the history branch sets replaying + live=false.
+      if (!replaying) { setTranscriptLive(true); } else { openGroup = null; }
       // The turn really started, so the images that went with it are spent and
       // their object URLs can go. Guarded on `replaying` where `pendingPrompt`
       // is not: a replayed turn marker is history, and revoking on one would
@@ -4832,6 +4801,10 @@
       agentBody = null;
       // Group consecutive tool calls accumulated during this turn into
       // collapsible containers. flushToolGroups() sets toolGroup = null.
+      // 261007 Phase 2: leave live mode first — this closes the open live
+      // group (setTranscriptLive(false) nulls openGroup); flushToolGroups()
+      // then finalizes/no-ops it and still groups any replay-path rows.
+      if (!replaying) { setTranscriptLive(false); }
       flushToolGroups();
       // Snapshot queued prompt BEFORE setTurn(false), so the decision
       // guards can read the pre-release turn/session state correctly.
@@ -4943,6 +4916,12 @@
       // preceded it, which is what stops a reconnect duplicating it.
       var events = payload.events || [];
       replaying = true;
+      // 261007 Phase 2: a load/reconnect replay is a real-session context,
+      // so edit rows auto-expand (diffs visible without a click). Not live:
+      // grouping stays on the toolGroup tail-flush path below, not the
+      // incremental open-group path.
+      setTranscriptLive(false);
+      setTranscriptAutoExpand(true);
       try {
         for (var i = 0; i < events.length; i++) handle(events[i]);
       } finally {
