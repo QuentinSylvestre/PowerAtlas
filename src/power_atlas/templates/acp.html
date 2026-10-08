@@ -4770,6 +4770,9 @@
     // Emptying the box does not fire `input`, so the height it grew to would
     // survive the send and leave a tall empty composer.
     autoGrowPrompt();
+    // Keep keyboard focus in the textarea so the user can start typing the
+    // next prompt without a click.
+    promptInput.focus();
   }
 
   function restorePendingPrompt(why) {

@@ -3711,6 +3711,9 @@ function dashSendPrompt(){
     dashAttachments = [];
     dashRenderTray();
     dashPromptInput.value = '';
+    // Keep keyboard focus in the textarea so the user can start typing the
+    // next prompt without a click. Mirrors acp.html's sendPrompt().
+    dashPromptInput.focus();
     dashRefreshComposerControls();
     return;
   }
