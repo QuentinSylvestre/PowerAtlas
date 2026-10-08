@@ -22,8 +22,8 @@ The desired outcome is PA sessions that behave identically to an equivalently-co
 - SC-2: PA's `_meta.kiro.settings` block is built dynamically from `cli.json` — no hardcoded values; a `cli.json` with `chat.enableWorkflows: false` produces a settings block with `workflows: {enabled: false}`, not the KAS shipped default.
 - SC-3: Settings in the "enable now" category (`thinking`, `knowledge`, `codeIntelligence`, `largeToolOutputHandler`) are forwarded with their `cli.json` values (or the TUI's defaults when the key is absent).
 - SC-4: A PA session running a workflow via `run_workflow` shows running step entries in the crew panel with step name, status (running/done/failed), and elapsed time.
-- SC-5: A PA session whose workflow is active shows Working status in the rail and Overview tiles while any child step is `in_progress` or `waiting_on_user`.
-- SC-6: After all workflow steps complete, the parent session reverts to its own status.
+- SC-5: A PA session whose workflow is active shows Working status in the rail and Overview tiles while any child step is `in_progress`, and Waiting when the only remaining steps are `waiting_on_user`.
+- SC-6: After all workflow steps complete, are cancelled, or go stale (no workflow frame for the staleness bound), the parent session reverts to its own status.
 
 ### Scope boundaries & non-goals
 
@@ -143,7 +143,7 @@ None. All changes are in PowerAtlas's own Python/JS codebase. No cloud resources
 
 **Covers**: SC-1, SC-2, SC-3
 
-**File scope**: `src/power_atlas/acp.py`, `docs/KNOWLEDGE.md`
+**File scope**: `src/power_atlas/acp.py`, `tests/test_web.py`, `docs/KNOWLEDGE.md`, `plans/ROADMAP.md`
 
 **Step 1: Settings audit** (do this before writing code)
 
@@ -196,8 +196,9 @@ def _build_session_settings(cli_settings: dict) -> dict:
         elif kas_key in _DEFAULTS:
             settings[kas_key] = {"enabled": _DEFAULTS[kas_key]}
 
-    # Workflow + goal: both controlled by chat.enableWorkflows
-    workflows_on = bool(cli_settings.get("chat.enableWorkflows", False))
+    # Workflow + goal: both controlled by chat.enableWorkflows.
+    # `is True`, not bool(): a string "false" must not enable workflows.
+    workflows_on = cli_settings.get("chat.enableWorkflows") is True
     settings["workflows"] = {"enabled": workflows_on}
     settings["goal"] = {"enabled": workflows_on}
 
@@ -220,12 +221,23 @@ Modify `_build_kas_session_params` (`acp.py:959–981`) to call `_build_session_
 
 ```python
 def _load_cli_settings_dict() -> dict:
-    """Return the full cli.json as a dict, or {} on read/parse failure."""
+    """Return the full cli.json as a dict, or {} on read/parse failure
+    or when the top-level JSON value is not an object."""
     try:
-        return json.loads(KIRO_CLI_SETTINGS_PATH.read_bytes())
-    except (OSError, ValueError):
+        with open(KIRO_CLI_SETTINGS_PATH, encoding="utf-8-sig") as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError):
+        log.warning("ACP cli.json unreadable or malformed; using TUI defaults")
+        return {}
+    if not isinstance(raw, dict):
+        log.warning("ACP cli.json top level is not an object; using TUI defaults")
+        return {}
+    return raw
 ```
+
+Match the encoding and `isinstance(raw, dict)` guard of `_kiro_tool_search_settings` (`acp.py:854`); a non-dict return would make `_build_session_settings` raise `AttributeError` inside `session/new` and `session/load`, failing every session create. Refactoring `_kiro_tool_search_settings` onto this reader is optional and out of scope unless trivial.
 
 Then modify `_build_kas_session_params` to call it:
 
@@ -266,10 +278,12 @@ Add a section "ACP session/new settings" documenting:
 - [ ] `_build_session_settings()` exists and is covered by a unit test that asserts the correct settings dict for a sample `cli.json` (with `chat.enableWorkflows: true` and with `false`)
 - [ ] `_load_cli_settings_dict()` exists in `acp.py`; returns `{}` on missing/malformed cli.json
 - [ ] `_build_kas_session_params()` includes `"settings"` under `_meta.kiro`
-- [ ] A live PA session with `chat.enableWorkflows: true` receives `run_workflow` in its `available_commands_update` notification
-- [ ] A live PA session with `chat.enableWorkflows: false` does NOT receive `run_workflow`
-- [ ] `docs/KNOWLEDGE.md` has the settings mapping table with probe results (toolSearch placement, `session/load` behavior from Step 4 probes)
-- [ ] `test_web.py` or a new module covers `_build_session_settings()` for ≥2 `cli.json` shapes
+- [ ] Probe C (before ticking the two live criteria below): establish the observable that shows `run_workflow` is in a session's tool inventory. `available_commands_update` (`_on_notification`) carries slash commands and skills, not necessarily the model's tool list, so it may not show `run_workflow`. Candidates: the `session/new` response, `orchestrator.log` INFO frames, or a prompt asking the agent to list its tools. Record the chosen observable in `docs/KNOWLEDGE.md`.
+- [ ] A live PA session with `chat.enableWorkflows: true` shows `run_workflow` via the observable from Probe C (run in a throwaway session; the real workflow run belongs to Phase 2)
+- [ ] A live PA session with `chat.enableWorkflows: false` does NOT show `run_workflow`
+- [ ] `docs/KNOWLEDGE.md` has the settings mapping table with probe results (toolSearch placement, `session/load` behavior, Probe C observable)
+- [ ] Tests live in the existing `tests/test_web.py` (no new test file). They cover `_build_session_settings()` for ≥3 `cli.json` shapes (workflows `true`, `false`/absent, string `"false"`) and `_load_cli_settings_dict()` for a missing file, a malformed file and a list-valued file. Name the functions `test_build_session_settings_*` and `test_load_cli_settings_dict_*` so `-k "build_session_settings or load_cli_settings_dict"` selects exactly them.
+- [ ] **Do not deploy Phase 1 without Phase 2** (restart-gated): the PA restart is user-run, so the implementer states in the Phase 1 commit body that the build must not be restarted onto until Phase 2 lands. See Open decisions in the Review Log (gating option).
 
 ---
 
@@ -279,22 +293,40 @@ Add a section "ACP session/new settings" documenting:
 
 **Covers**: SC-4
 
-**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/templates/acp.html`, `src/power_atlas/static/composer-chrome.js`
+**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html` (Step 6 mirror), `src/power_atlas/static/style.css` and `src/power_atlas/static/composer-chrome.js` (only if Step 6 finds a rendering change), `tests/test_web.py`, `tests/acp_page.test.mjs`, `docs/KNOWLEDGE.md`, `memory/MEMORY.md`, `plans/ROADMAP.md`
 
 **Step 1: Add `_workflow_children` dict to `_Supervisor.__init__`**
 
 In `_Supervisor.__init__` (`acp.py:3239`), add:
 
 ```python
-# workflow child sessions: parent_id → set of active child session IDs.
-# Populated by _kiro/workflow/node_start; cleared on node_complete/run_complete
-# and in close_session/_detach. Used for liveness tracking (Phase 3).
-self._workflow_children: dict[str, set[str]] = {}
+# workflow child sessions: parent_id → {child_id: (state, last_seen)}.
+# state is "running" or "waiting"; last_seen is time.monotonic() of the last
+# workflow frame that touched the child. Populated by _kiro/workflow/node_start;
+# removed on node_complete/run_complete and in close_session/_detach. Entries
+# older than _WORKFLOW_CHILD_STALE_S (module constant, 600 s) are ignored by
+# has_active_workflow and pruned lazily, so a lost run_complete (cancel, crash,
+# dropped frame) cannot pin a session to Working forever.
+self._workflow_children: dict[str, dict[str, tuple[str, float]]] = {}
 ```
+
+Add a helper `_workflow_set(parent_id, child_id, state)` that writes `(state, time.monotonic())` and is the only writer; every `_kiro/workflow/*` frame for a known child refreshes `last_seen`.
+
+**Line numbers in this plan drift** (the code moved about 35 lines between exploration and review). Anchor every edit by function or class name, not by the cited line.
 
 **Step 2: Implement `_on_workflow_notification()`**
 
-**Mandatory pre-implementation probe (do this before writing Step 3's sub-handlers)**: Capture a live `_kiro/workflow/node_start` notification from `orchestrator.log` during a TUI workflow run to confirm which field in `params` carries the parent session ID. The documented payload shape (`{ sessionId, nodeId, nodePath, branchId, iteration, agentName }`) contains no `parentSessionId` field. If the parent ID lives in the outer `params.get("sessionId")` (standard ACP convention, consistent with every other notification type), the sub-handlers must extract it as `session_id` (already available in `_on_notification`'s own scope at line 4707, not from a nested payload field). Failing to run this probe before Step 3 risks a handler that silently no-ops on every notification.
+**Mandatory pre-implementation probe (do this before writing Step 3's sub-handlers)**: determine what the outer `params.sessionId` carries on `_kiro/workflow/*` frames, and where the parent session ID lives. The documented payload (`{ sessionId, nodeId, nodePath, branchId, iteration, agentName }`) has no `parentSessionId`, and `sessionId` there looks like the node's own (child) ID. This plan previously assumed both "outer id = parent" (Steps 2-3) and "outer id = child" (Step 4); at most one is true.
+
+A TUI workflow run never appears in PA's `orchestrator.log` (it records only frames from PA-spawned kiro-cli), so the probe cannot use one. Instead: with Phase 1 code built, run one throwaway PA session with `chat.enableWorkflows: true`, dispatch a trivial two-step workflow, and read the first `_kiro/workflow/node_start`, `node_complete`, `node_paused` (if reachable) and `run_complete` frames from the existing INFO fallthrough log (`ACP notification ... (...)`, which logs full params). This requires a PA restart: ask the user for a restart grant first (project AGENTS.md). Record the four payloads in `docs/KNOWLEDGE.md`.
+
+Then implement exactly one **parent resolution** helper, `_resolve_workflow_parent(outer_session_id, params) -> str | None`, and write its ladder into the plan's Divergences section after the probe:
+1. If the outer id is in `self.sessions`, it is the parent.
+2. Otherwise, if the outer id is a known child (in `subagent_sessions`), use its recorded parent.
+3. Otherwise, if exactly one session is in `inflight` (the ladder `_on_subagent_list` uses), use it.
+4. Otherwise log at INFO (with the frame) and return `None`; the handler returns without mutating state.
+
+Add a test where the outer id is a child id and a test where it is the parent id. Also record from the probe: the `node_complete`/`run_complete` payload fields that signal failure or cancellation (needed for `failed`, see Step 3), whether `loop_iteration` and `branchId` reuse or mint child session IDs, and whether KAS emits `run_complete` on cancel.
 
 Add a new method to `_Supervisor` near `_on_subagent_list` (`acp.py:4190`):
 
@@ -302,8 +334,10 @@ Add a new method to `_Supervisor` near `_on_subagent_list` (`acp.py:4190`):
 def _on_workflow_notification(self, method: str, session_id: str, params: dict) -> None:
     """Route one *_kiro/workflow/** frame to the appropriate handler.
 
-    ``session_id`` is the PARENT session ID extracted by ``_on_notification``
-    at line 4707 — it is NOT re-extracted from params here.
+    ``session_id`` is the OUTER ``params.sessionId`` extracted by
+    ``_on_notification``. Whether that is the parent or the child is settled by
+    the Step 2 probe; resolve the parent with ``_resolve_workflow_parent``
+    before any mutation.
     """
     if method == "_kiro/workflow/node_start":
         self._on_workflow_node_start(session_id, params)
@@ -328,10 +362,10 @@ def _on_workflow_notification(self, method: str, session_id: str, params: dict) 
 **Step 3: Implement the three sub-handlers**
 
 `_on_workflow_node_start`:
-- `parentSessionId` = the `session_id` argument (from `_on_notification`'s outer scope — confirmed by probe from Step 2)
-- Extract `childSessionId` from params (field name confirmed by probe — tentatively `params.get("sessionId")` within the payload, but verify)
+- `parentSessionId` = `_resolve_workflow_parent(session_id, params)` (Step 2 ladder); `childSessionId` = the field the probe confirms
 - Guard both: `if not isinstance(parentSessionId, str) or not isinstance(childSessionId, str): log.warning(...); return` (follows `_on_subagent_list`'s defensive `_as_text` pattern)
 - If `parentSessionId not in self.sessions`: log warning, return
+- **Idempotent and terminal-sticky** (mirrors `_on_subagent_list`'s "terminal is sticky" guard): if `childSessionId` is already in `self.crews[parentSessionId]`, refresh `last_seen` and return without resetting `startedAt`, `order` or history; if the existing entry is `done`, ignore the frame. A repeated `node_start` (live frame plus replayed chunk, `loop_iteration`) must never re-open a finished step or wipe `subagent_history`.
 - Register `self.subagent_sessions[childSessionId] = {"parent": parentSessionId}`
 - Initialize `self.subagent_history[childSessionId] = _History()`
 - Call `self._evict_finished_subagents(parentSessionId)` (follows `_on_agent_subtask_open` pattern, prevents unbounded accumulation)
@@ -347,42 +381,52 @@ crew[childSessionId] = {
     "status":      "working",
     "done":        False,
     "error":       "",                           # REQUIRED: _subagents_payload["error"] is bare []
-    "order":       len(crew),                    # REQUIRED: _subagents_payload sort key is bare []
+    "order":       self._next_crew_order(parentSessionId),  # REQUIRED; monotonic counter, NOT len(crew) (eviction shrinks len and collides)
     "action":      "running",
-    "fan_out_id":  _NO_ANCHOR_TOOLCALLID,
+    "fan_out_id":  self._active_fan_out_wave.get(parentSessionId, _NO_ANCHOR_TOOLCALLID),  # must equal the wave the frame filters on
     "startedAt":   time.time(),
     "stoppedAt":   None,
 }
 ```
 
-- Update `self._workflow_children.setdefault(parentSessionId, set()).add(childSessionId)`
-- Call `_emit_subagents_frame(parentSessionId, self.crews, self._active_fan_out_wave)` — use `_active_fan_out_wave`, not `crew_spawn_toolcallids` (per established v3 fan-out convention, `acp.py:6094`)
+- Update `_workflow_children` via `_workflow_set(parentSessionId, childSessionId, "running")`
+- Call `_emit_subagents_frame(parentSessionId, self.crews, self._active_fan_out_wave)` — use `_active_fan_out_wave`, not `crew_spawn_toolcallids` (per established v3 fan-out convention, `_emit_subagents_frame`'s docstring)
 
+> **Rejected**: tagging workflow entries with a fixed `_NO_ANCHOR_TOOLCALLID` — `_subagents_payload` drops entries whose `fan_out_id` differs from the parent's current wave (`_active_fan_out_wave[parent]`, set by `_on_agent_subtask_open` and cleared only at `close_session`/`_detach`). After any earlier `invoke_sub_agent` fan-out in the same session, every workflow entry would be filtered out and the crew panel empty. **Use instead**: tag with the current wave id (`_active_fan_out_wave.get(parent, _NO_ANCHOR_TOOLCALLID)`) as shown. Add a test that runs an old-style fan-out first, then a workflow, and asserts the emitted payload contains the workflow entries.
+>
 > **Rejected**: passing `self.crew_spawn_toolcallids` as third arg to `_emit_subagents_frame` — all active v3 fan-out call sites use `self._active_fan_out_wave` per the function's own docstring. **Use instead**: `self._active_fan_out_wave`.
 >
 > **Rejected**: omitting `"order"`, `"error"` from the crew entry — `_subagents_payload` (`acp.py:6063`) uses `entry["order"]` as the sort key and `entry["error"]` as a payload field, both bare `[]` accesses. A `KeyError` fires the first time any workflow session emits a crew frame. **Use instead**: include both fields as shown above.
 
 `_on_workflow_node_done(session_id, params, terminal_status)`:
-- Extract `childSessionId` from params
-- If crew entry exists: set `entry["done"] = (terminal_status != "waiting")`, `entry["status"] = terminal_status`, `entry["stoppedAt"] = time.time()`
-- If `terminal_status in ("done", "failed")`: remove from `self._workflow_children.get(parentSessionId, set())`
-- If `terminal_status == "waiting"`: **leave in `_workflow_children`** — the step is paused, not complete; liveness must continue reporting Working/Waiting
+- Resolve parent via `_resolve_workflow_parent`; extract `childSessionId` from params
+- `terminal_status` is `"done"`, `"failed"` or `"waiting"`. **`failed` source**: the dispatcher passes `"failed"` when the `node_complete` payload carries the error/status field the Step 2 probe identifies (record the field name in `docs/KNOWLEDGE.md`); if the probe finds no failure signal, delete the `failed` branch and the `error` population, and reduce SC-4's status set to running/done/waiting. Do not ship an unreachable branch.
+- If crew entry exists: for `done`/`failed` set `entry["done"] = True`, `entry["status"] = terminal_status`, `entry["stoppedAt"] = time.time()`. For `waiting` set `entry["status"] = "waiting"` and leave `done=False` and `stoppedAt=None` (a waiting step is not stopped; setting `stoppedAt` freezes the elapsed timer).
+- **Removal from `_workflow_children` is unconditional** for `done`/`failed`, even when no crew entry exists (the turn-end `finally` marks every not-done crew entry done and `_evict_crew_children` drops them at the next turn start, so the crew entry may be gone while the child is still tracked). An unknown child on `node_complete` is logged at INFO and otherwise ignored.
+- For `waiting`: set state `"waiting"` via `_workflow_set` — **keep in `_workflow_children`** (the step is paused, not complete); Phase 3 reports it as waiting, not working. Verify the crew panel's status vocabulary (`acp.html` `setCrew`) renders `"waiting"`; if it does not, map it to an existing label in Step 6.
 - Set `entry["error"]` only for `terminal_status == "failed"` (non-empty string)
 - Call `_emit_subagents_frame(parentSessionId, self.crews, self._active_fan_out_wave)`
 
 `_on_workflow_run_done(session_id, params)`:
-- For each active child in `self._workflow_children.pop(parentSessionId, set())`: mark crew entry `done=True`, `status="done"`, `stoppedAt=time.time()`
+- For each child in `self._workflow_children.pop(parentSessionId, {})`: mark crew entry (if present) `done=True`, `status="done"` (or `"failed"` if the probe-identified field says so), `stoppedAt=time.time()`
 - Call `_emit_subagents_frame`
+
+**Turn-end interaction.** The turn-end `finally` in the prompt path marks every not-done crew entry done, including live workflow children, and `session/prompt` may return before the workflow ends (open risk in Section 6). Decision: workflow children are exempt from that sweep while they remain in `_workflow_children` (so the crew panel keeps showing them); a turn ending with `stopReason` `cancelled` or `error` clears `_workflow_children[session_id]` and marks the entries done. Add a test for each branch.
+
+**Idle sweeper.** `_sweepable` requires only idle-past-TTL, no subscriber, not in `inflight`, not closing/loading. A parent whose prompt returned while children run would be closed mid-workflow (children and crew popped, later frames dropped by the unknown-parent guard while kiro-cli keeps running). `_sweepable` is a module-level function (`_sweepable(session_id, meta, now)`), so pass it the active-workflow answer from its caller (`_sweep_once`, which has the supervisor) rather than referencing `self`; add `and not has_active_workflow` to its conditions. The staleness bound on `_workflow_children` keeps this from becoming a permanent pin. Add a test.
+
+**Observability.** The new router returns before the existing INFO fallthrough, which AGENTS.md names as the evidence path. Log `node_start`, `node_complete`, `node_paused`, `run_complete` and every stub method at INFO with the same truncated params (`%.600s`), plus the parent-resolution outcome and `_workflow_children` size after each mutation. Log the `settings` keys sent at `session/new` (keys only) in Phase 1.
 
 **Step 4: Route in `_on_notification`**
 
-Add the workflow routing block **BEFORE the SC-1 early-frame buffer check** at `_on_notification` (`acp.py:4718`). Workflow `node_start` notifications carry `params.sessionId` = the child step's session ID (never in `self.sessions`), so the SC-1 check (`session_id not in self.sessions AND _reserved > 0`) would buffer and orphan the notification under the child's ID. The SC-1 replay path only replays frames for the newly-created parent session, not for child IDs.
+Add the workflow routing block **conditionally before the SC-1 early-frame buffer check** in `_on_notification` (the `session_id not in self.sessions AND _reserved > 0` check). Placement depends on the Step 2 probe result:
+- If the outer `sessionId` is the **child** (never in `self.sessions`): route before SC-1, otherwise SC-1 buffers the frame under the child's ID and orphans it; the SC-1 replay path only replays frames for the newly created parent.
+- If the outer `sessionId` is the **parent**: the parent is in `self.sessions`, SC-1 does not fire for it, and the block may sit after SC-1. Placing it before SC-1 is still harmless, so keep it before.
 
 ```python
-# Route workflow notifications before SC-1: their sessionId is the child
-# step's ID (never in self.sessions), so SC-1 would buffer them incorrectly.
-# session_id here is the PARENT's ID (extracted from params.sessionId by
-# the notification envelope — confirmed by probe in Step 2).
+# Route workflow notifications before SC-1: if the outer sessionId is a
+# child step's ID (never in self.sessions), SC-1 would buffer it incorrectly.
+# Parent resolution happens inside _on_workflow_notification.
 if isinstance(session_id, str) and method.startswith("_kiro/workflow/"):
     self._on_workflow_notification(method, session_id, params)
     return
@@ -419,23 +463,28 @@ Verify that `acp.html`'s `setCrew` / `renderCrewPanel` can render an entry where
 
 **Step 7: Decode `workflow-progress` chunks for basic replay**
 
-`user_message_chunk` frames with `_meta.kiro.kind == "workflow-progress"` embed workflow progress JSON. In the `user_message_chunk` branch of `_on_notification`, add:
+`user_message_chunk` frames with `_meta.kiro.kind == "workflow-progress"` embed workflow progress JSON. **Decode for display only; never drive liveness state from it.** The same chunks arrive on `session/load` replay and on reconnect, so a historic `node_start` chunk with no persisted `run_complete` (killed or cancelled workflow) would re-register children and pin the session to Working on every resume; live frames also arrive twice (real notification plus chunk). In the `user_message_chunk` branch of `_on_notification` (variables there are `update`, `content`, `text`, `_kiro_meta` — there is no `chunk`), add:
 
 ```python
-_kiro_kind = _kiro_meta.get("kind")
-if _kiro_kind == "workflow-progress":
+if _kiro_meta.get("kind") == "workflow-progress":
     try:
-        progress = json.loads(chunk.get("text") or "{}")
-        progress_method = "_kiro/workflow/" + (progress.get("type") or "")
-        if progress_method != "_kiro/workflow/":   # only dispatch if type is non-empty
-            self._on_workflow_notification(
-                progress_method, session_id,
-                progress.get("payload") or {})
-    except Exception:
-        log.debug("ACP workflow-progress chunk decode failed for session=%s", session_id)
-    # forward the raw chunk to the transcript (existing path continues below)
+        progress = json.loads(text or "{}")
+    except ValueError:
+        log.debug("ACP workflow-progress chunk not JSON: session=%s", session_id)
+        progress = None
+    if isinstance(progress, dict):
+        # Display-only: decode the step names for the transcript rendering.
+        # Do NOT call _on_workflow_notification here (see note above).
+        ...
+    # the raw chunk continues down the existing transcript path unchanged
 ```
 
+The exact display behaviour (what, if anything, is rendered from the decoded progress) is a Phase 2 decision after the probe shows the chunk shape; the default is no rendering change and a `log.debug` of the decoded `type`. Whether chunks suffice to rebuild crew state on resume stays an open item (Layer 4). Add a test that feeds a `workflow-progress` chunk through `_on_notification` and asserts `crews` and `_workflow_children` are untouched and the chunk is still emitted.
+
+> **Rejected**: dispatching `_on_workflow_notification` from the chunk — replay re-populates `_workflow_children` for finished workflows and double-applies live frames. **Use instead**: display-only decode.
+>
+> **Rejected**: referencing `chunk.get("text")` — `chunk` is not defined in that branch (`NameError`, which a broad `except` then hides). **Use instead**: `text` and `_kiro_meta`, with the `except` narrowed to `ValueError`.
+>
 > **Rejected**: bare `except Exception: pass` — `_on_workflow_notification` dispatches to state-mutating sub-handlers; an exception mid-mutation leaves dicts partially updated and produces no diagnostic output. **Use instead**: `log.debug(...)` to preserve the "never drop the chunk" guarantee while making failures visible in `orchestrator.log`.
 
 **Exit criteria**:
@@ -443,11 +492,13 @@ if _kiro_kind == "workflow-progress":
 - [ ] `_workflow_children` dict initialized in `__init__` and cleared in `close_session`/`_detach`
 - [ ] A PA session that dispatches a multi-step workflow (requires Phase 1 to be live) shows crew panel entries for each running step
 - [ ] Clicking a crew entry for a workflow step opens the step's transcript in the sub-panel (requires `subagent_sessions[childSessionId]` to be populated)
-- [ ] `tests/test_web.py` has a test covering `_on_workflow_notification` with a `node_start` payload and asserting `crews` and `subagent_sessions` are populated correctly
-- [ ] `tests/test_web.py` has a test covering `_on_workflow_notification` with an unknown (non-PA) parent session ID — verifies the guard-and-return path
-- [ ] `tests/test_web.py` has a test covering `_workflow_children` cleared by `close_session` while children are still active (verifies SC-6 safety)
+- [ ] Probe from Step 2 done: outer-`sessionId` meaning, `node_complete`/`run_complete` failure field, loop/branch child-id behaviour, run_complete-on-cancel recorded in `docs/KNOWLEDGE.md`; the parent-resolution ladder written into Section 9
+- [ ] A live PA session with `chat.enableWorkflows: true` dispatches a real workflow via `run_workflow` (the Phase 1 live check is only the tool-inventory observable)
+- [ ] `tests/test_web.py` tests (existing file; names containing `workflow` so `-k workflow` selects them): `node_start` populates `crews` and `subagent_sessions`; outer id is a child id and outer id is the parent id (both resolve); unknown parent id returns without mutation; duplicate `node_start` is idempotent and does not re-open a done step; `node_paused` keeps the child as `waiting` with `stoppedAt` unset; `node_complete` for an unregistered child is ignored; a workflow run after an earlier `invoke_sub_agent` fan-out still emits its entries; `close_session` and `_detach` clear `_workflow_children`; turn-end with `cancelled`/`error` clears it and a normal turn end does not; `_sweepable` refuses a session with active children; a `workflow-progress` chunk leaves `crews`/`_workflow_children` untouched
+- [ ] `node tests/acp_page.test.mjs` passes, with a case rendering a workflow crew row (`status: "waiting"` included) in `acp.html` and, if mirrored, `index.html`
 - [ ] `docs/KNOWLEDGE.md` has new `_kiro/workflow/*` notification family section (10 methods, payload shapes, PA handlers vs. stubs, `workflow-progress` chunk path)
-- [ ] `memory/MEMORY.md` has new `_workflow_children` lifecycle entry (populated by `node_start`; cleared by `node_complete`/`run_complete`/`close_session`/`_detach`; distinct from `subagent_sessions` which persists turn-end for click-to-view routing)
+- [ ] `memory/MEMORY.md` has new `_workflow_children` lifecycle entry (populated by `node_start`; cleared by `node_complete`/`run_complete`/`close_session`/`_detach`/cancelled-turn end/staleness bound; distinct from `subagent_sessions` which persists turn-end for click-to-view routing)
+- [ ] `plans/ROADMAP.md` workflow entries updated for Phase 2
 
 ---
 
@@ -457,78 +508,61 @@ if _kiro_kind == "workflow-progress":
 
 **Covers**: SC-5, SC-6
 
-**File scope**: `src/power_atlas/acp.py` (Part A), `src/power_atlas/data_kiro_v3.py` (Part B), `src/power_atlas/web.py` (Part B wiring)
+**File scope**: `src/power_atlas/acp.py` (Part A), `src/power_atlas/data_kiro_v3.py` (Part B), `src/power_atlas/web.py` (Parts A and B wiring), `src/power_atlas/overview.py` (only if its `LiveDeps` closure needs the snapshot), `tests/test_web.py`, `tests/test_data_kiro_v3.py`, `docs/KNOWLEDGE.md`, `memory/MEMORY.md`, `plans/ROADMAP.md`
 
 **Part A — ACP-held sessions**
 
-Expose a new method on `_Supervisor`:
+Expose a tri-state method on `_Supervisor` that ignores entries older than `_WORKFLOW_CHILD_STALE_S` (Phase 2 Step 1):
 
 ```python
-def has_active_workflow(self, session_id: str) -> bool:
-    """True when session has at least one running workflow child."""
-    return bool(self._workflow_children.get(session_id))
+def workflow_state(self, session_id: str) -> str | None:
+    """"working" if any fresh child is running, "waiting" if only waiting
+    children remain, else None."""
 ```
 
-Wire it into **two** call sites in `web.py`:
+**Threading.** `_acp_status_for_held` runs in an `asyncio.to_thread` hop (listing routes, `overview.LiveDeps.acp_status_for_held`, and `api_session_availability`'s `_compute`), and `_supervisor.sessions` state is loop-owned and unlocked — the existing code snapshots `held` on the loop first. Follow the same pattern: on the loop, build `workflow_states = {sid: st for sid in held if (st := sup.workflow_state(sid))}` once per request and pass it into `_acp_status_for_held`, the `LiveDeps` closure and `_compute` as a parameter; do not call the supervisor from the worker thread. Plain dict snapshot is enough; no lock.
 
-**Call site 1 — `_acp_status_for_held`** (line ~3313): Before calling `get_semantic_status`, check `_supervisor.has_active_workflow(session_id)` and early-return `"working"` if true. This covers the dashboard session listing.
+**Ordering.** Apply the workflow override **after** the existing verdict from `_resolved_session_status`, and only upgrade an idle verdict: `errored` (which `_resolved_session_status` deliberately preserves) and the parent's own permission-pending `waiting` must not be masked. Map: `workflow_states[sid] == "working"` and verdict idle → `working`; `"waiting"` and verdict idle → `waiting`.
 
-**Call site 2 — `api_session_availability`** (line ~6760, `GET /api/session-availability`): The `_compute` closure independently calls `_resolved_session_status` for a single session — bypassing `_acp_status_for_held`. Apply the same `has_active_workflow` guard before `get_semantic_status` in `_compute`. The supervisor reference is already accessed there (`supervisor = getattr(acp, "_supervisor", None)`), so the guard is symmetric.
+Wire it into **two** families of call sites in `web.py` (anchor by function name):
 
-> **Rejected**: modifying `_publish_live()` with a `frozenset(sessions) | live_with_children` union — `live_with_children ⊆ frozenset(self.sessions)` (it iterates `self.sessions`), so the union is always identical to `frozenset(self.sessions)`. This changes nothing. **Use instead**: the `has_active_workflow()` check in both status call sites above.
+**Call site 1 — `_acp_status_for_held`**: covers the dashboard session listing and the Overview tiles (via `LiveDeps`).
+
+**Call site 2 — `api_session_availability`** (`GET /api/session-availability`): its `_compute` closure independently calls `_resolved_session_status` for a single session, bypassing `_acp_status_for_held`. Apply the same override there using the snapshot.
+
+> **Rejected**: modifying `_publish_live()` with a `frozenset(sessions) | live_with_children` union — `live_with_children ⊆ frozenset(self.sessions)` (it iterates `self.sessions`), so the union is always identical to `frozenset(self.sessions)`. This changes nothing. **Use instead**: the tri-state `workflow_state()` override in both status call sites above.
 
 **Part B — disk-based / terminal sessions**
 
+Part B serves **non-held** (terminal) rows only; for held sessions it would duplicate Part A. `_acp_status_for_held` handles only held sessions, so it is not a Part B site.
+
 **Step 1: Run the probe before implementing Part B.**
-Check whether the parent session's `messages.jsonl` mtime advances during workflow execution (KAS writes `workflow-progress` chunks to the parent's transcript per Phase 2 Step 7). If the mtime advances within `_LIVE_MTIME_WINDOW = 300s`, the parent already appears live and Part B may be partially or fully unnecessary.
+Check whether the parent session's `messages.jsonl` mtime advances during workflow execution (KAS writes `workflow-progress` chunks to the parent's transcript per Phase 2 Step 7). The live window `_LIVE_MTIME_WINDOW = 300s` is defined in `web.py` (not `data_kiro_v3.py`). If the mtime advances within it, the parent already appears live and Part B is unnecessary; in that case record the result, mark the Part B exit criteria `n/a: probe shows parent stays live` and skip Steps 2-3. Also record in the probe: the real child `status` literals in `session.json`, and whether child `rootConversationId` equals the bare parent id or the `sess_`-prefixed form (`_is_subagent_session` reads it only as a boolean today).
 
-**Step 2: Implement `active_workflow_children`** (in `data_kiro_v3.py`, only if probe confirms Part B is needed):
+**Step 2: Implement `active_workflow_children`** (in `data_kiro_v3.py`, only if the probe confirms Part B is needed). Contract, not code:
+- Input: parent id and its hash dir. Output: IDs of child sessions whose `rootConversationId` matches the parent (in the form the probe found) and whose `status` is one of the probe-confirmed active literals (expected `in_progress`, `waiting_on_user`).
+- A child counts as active only if its `session.json` mtime is within `_LIVE_MTIME_WINDOW`; a crashed child leaves `status: in_progress` on disk forever and must not pin the parent.
+- **Cache per child on that child's `session.json` mtime**, the way the existing session index in `data_kiro_v3.py` does (it indexes on per-`session.json` mtimes). The cache is bounded (evict on size).
+- An unparseable `session.json` is skipped and logged at DEBUG.
 
-```python
-def active_workflow_children(parent_id: str, hash_dir: Path) -> list[str]:
-    """Return IDs of active workflow children of *parent_id* in *hash_dir*."""
-    active: list[str] = []
-    try:
-        dir_mtime = hash_dir.stat().st_mtime
-    except OSError:
-        return active
-    # Cache per (parent_id, hash_dir, dir_mtime) to avoid repeated reads
-    # when the directory contents haven't changed
-    cache_key = (parent_id, str(hash_dir), dir_mtime)
-    if cache_key in _active_children_cache:
-        return _active_children_cache[cache_key]
-    for sess_dir in hash_dir.iterdir():
-        if not sess_dir.is_dir() or not sess_dir.name.startswith("sess_"):
-            continue
-        try:
-            data = json.loads((sess_dir / "session.json").read_bytes())
-            if (data.get("rootConversationId") == parent_id
-                    and data.get("status") in ("in_progress", "waiting_on_user")):
-                active.append(data.get("id", sess_dir.name))
-        except Exception:
-            continue
-    _active_children_cache[cache_key] = active
-    return active
-```
-
-Add module-level `_active_children_cache: dict = {}`. The hash-dir mtime cache key means the scan only re-runs when a session is added/removed from the directory.
+> **Rejected**: caching on `hash_dir.stat().st_mtime`. A directory's mtime changes only when entries are added, removed or renamed; a child's `session.json` flipping `in_progress` to idle is an in-place write, so the cached "active" answer would persist until an unrelated session folder appeared (parent stuck Working, violating SC-6), and every directory mtime change would add a never-evicted key. **Use instead**: per-child `session.json` mtime, bounded cache.
 
 **Step 3: Wire into liveness pipeline.**
-Obtain `hash_dir` via `_find_v3_session_dir(session_id).parent` (already present in `data_kiro_v3.py`) — no schema changes needed to the `Session` dataclass. Do NOT re-derive the hash from the workspace path string (forbidden by `memory-sources.md § The store key`).
+Obtain `hash_dir` via `_find_v3_session_dir(session_id)`; it returns `Path | None`, so guard `None` before `.parent`. It is an uncached scan of hash dirs, so call it only for non-held rows whose own verdict is idle, and measure the cost over the ~376-store case (`docs/KNOWLEDGE.md` § sessions) before wiring it into the per-row rail path; cache the resolved hash dir per session id if the measurement warrants. No schema change to the `Session` dataclass. Do NOT re-derive the hash from the workspace path string (forbidden by `memory-sources.md § The store key`).
 
-In `web.py`'s `_session_is_live` or `_acp_status_for_held`: if the parent appears idle but `active_workflow_children(session_id, hash_dir)` returns non-empty, treat it as Working.
+Wire into the non-held branch of the status resolution in `web.py` (the function that produces the row verdict for terminal sessions; the implementer names it after reading `_resolved_session_status`'s callers). Do not use `_session_is_live`: it returns a process-liveness bool, not a Working/idle verdict. Apply the same only-upgrade-idle ordering as Part A.
 
 **Exit criteria**:
 - [ ] Probe result documented: does the parent's `messages.jsonl` mtime advance during workflow execution? Answer recorded in `docs/KNOWLEDGE.md`.
-- [ ] `_Supervisor.has_active_workflow(session_id)` method exists; ACP-held parent session shows Working in the rail when `_workflow_children[session_id]` is non-empty (Part A)
-- [ ] Both `_acp_status_for_held` and `api_session_availability` call sites in `web.py` check `has_active_workflow` before calling `get_semantic_status`
-- [ ] `active_workflow_children(parent_id, hash_dir)` function exists in `data_kiro_v3.py`; uses `_find_v3_session_dir(session_id).parent` for hash-dir acquisition; uses dir-mtime caching (Part B — required only if probe confirms mtime window doesn't keep parent live)
-- [ ] After all children complete, parent reverts to its own status within one rail refresh cycle (≤30s)
-- [ ] Unit test for `active_workflow_children` covering: child with matching `rootConversationId` + `in_progress`, child with non-matching `rootConversationId`, child already `idle`, missing `session.json`
+- [ ] `_Supervisor.workflow_state(session_id)` exists and ignores entries older than `_WORKFLOW_CHILD_STALE_S`; an ACP-held idle parent shows Working in the rail while a child runs and Waiting when only waiting children remain (Part A)
+- [ ] Both `_acp_status_for_held` (and the Overview `LiveDeps` path) and `api_session_availability` apply the override from a loop-side snapshot, after the existing verdict, upgrading only an idle verdict (an `errored` or permission-pending parent is not masked)
+- [ ] `active_workflow_children` exists in `data_kiro_v3.py`, uses per-child `session.json` mtime caching (bounded) and the live-window check, guards a `None` from `_find_v3_session_dir` (Part B; `n/a: probe shows parent stays live` if Step 1 says so)
+- [ ] After all children complete (or the staleness bound passes), the parent reverts to its own status within one rail refresh cycle (≤30s)
+- [ ] Tests in existing files, names containing `workflow_state` / `workflow_children` / `liveness`: `tests/test_web.py` for tri-state, staleness expiry, errored-not-masked and both call sites; `tests/test_data_kiro_v3.py` for `active_workflow_children` (matching root + active status, non-matching root, already idle, stale mtime, missing `session.json`, status flip invalidates the cache)
 - [ ] `docs/KNOWLEDGE.md` § "kiro-cli v3 sub-agent sessions" updated with a sentence describing the inverse lookup
-- [ ] `memory/MEMORY.md` `_publish_live` entry has new Update note (follows the existing Update-note chain at MEMORY.md ~line 372)
-- [ ] If Phase 3 modifies `classify_kiro_v3`: update the parenthetical note at MEMORY.md ~line 341
-- [ ] If Phase 3 modifies `classify_kiro_v3`: update the parenthetical note in `memory/MEMORY.md` ~line 341 ("was deliberately left untouched" → state what changed)
+- [ ] `memory/MEMORY.md`: append a note to the `_publish_live` Update chain (the latest entry, not mid-chain; locate it by heading) stating that `_publish_live` is intentionally unchanged and workflow liveness is overlaid at the status call sites
+- [ ] If Phase 3 modifies `classify_kiro_v3`: update the parenthetical in `memory/MEMORY.md` that says it "was deliberately left untouched" to state what changed (locate by that phrase, not by line)
+- [ ] `plans/ROADMAP.md` workflow entries updated for Phase 3
 
 ---
 
@@ -558,7 +592,7 @@ Get-Content "$env:LOCALAPPDATA\power-atlas\orchestrator.log" | Select-String "se
 
 # 3. Run unit tests
 cd C:\Users\QSylvestre.POLESTAR\Documents\Perso\PowerAtlas
-.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q --timeout=60 -k "settings or session_settings or build_kas"
+.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q --timeout=60 -k "build_session_settings or load_cli_settings_dict"
 ```
 
 **Phase 2**:
@@ -569,7 +603,7 @@ cd C:\Users\QSylvestre.POLESTAR\Documents\Perso\PowerAtlas
 # 2. Verify crew panel shows running step entries in the /acp page
 # 3. Verify clicking a step entry opens its transcript in the sub-panel
 # 4. Run unit tests
-.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q --timeout=60 -k "workflow"
+.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q --timeout=60 -k "workflow"   # drop -x here: select by the test names fixed in the exit criteria
 ```
 
 **Phase 3**:
@@ -578,7 +612,7 @@ cd C:\Users\QSylvestre.POLESTAR\Documents\Perso\PowerAtlas
 #    - Should show Working dot while children run
 #    - Should revert to idle/waiting after run_complete
 # 2. Run unit tests
-.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q --timeout=60 -k "liveness or workflow_children"
+.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q --timeout=60 -k "workflow_state or workflow_children or liveness"
 ```
 
 **Full node test** (acp.html changes in Phase 2):
@@ -596,8 +630,9 @@ node tests/acp_page.test.mjs
 | `docs/KNOWLEDGE.md` | Add "Workflow notification shapes": `node_start` payload structure, `run_complete` payload, `workflow-progress` chunk format | 2 |
 | `docs/KNOWLEDGE.md` | Add probe result: does parent's `messages.jsonl` mtime advance during workflow execution? | 3 |
 | `docs/KNOWLEDGE.md` | Update § "kiro-cli v3 sub-agent sessions" (rootConversationId section): add sentence describing the new inverse lookup for liveness | 3 |
-| `memory/MEMORY.md` | Append Update note to `_publish_live` entry (~line 372) documenting workflow-children factoring in `_publish_live()` | 3 |
-| `memory/MEMORY.md` | If `classify_kiro_v3` is modified in Phase 3: update parenthetical at ~line 341 ("was deliberately left untouched") | 3 (conditional) |
+| `memory/MEMORY.md` | Append Update note at the end of the `_publish_live` Update chain: `_publish_live` intentionally unchanged; workflow liveness overlaid at the status call sites | 3 |
+| `memory/MEMORY.md` | If `classify_kiro_v3` is modified in Phase 3: update the parenthetical containing "was deliberately left untouched" | 3 (conditional) |
+| `docs/KNOWLEDGE.md` | Probe C observable and Phase 2 probe payloads (outer `sessionId` meaning, failure field, loop/branch ids) | 1, 2 |
 | `plans/ROADMAP.md` | Update "Full workflow support" and "Align PA ACP session settings" entries to note plan in progress / completed phases | 1 (started), 2+3 (as phases complete) |
 
 ---
@@ -649,9 +684,42 @@ Full-effort review, 4 personas (Architect, Senior engineer, Reliability engineer
 | 17 | Low | Phase 2 Step 7 bare `except Exception: pass` on state-mutating call; silent on mid-mutation failure | Fixed — replaced with `log.debug(...)` |
 | 18 | Low | `active_workflow_children` O(n) reads per liveness check; no caching | Fixed — added hash-dir mtime caching to Phase 3 Part B spec |
 
+### 2026-10-08 -- Plan Revision (via /qplan, review mode)
+
+Standard-effort review, 3 personas (Architect with gap-critic lens, Senior engineer, Reliability engineer), run in parallel; the earlier Review Log findings were re-verified against the code, not trusted. 29 distinct findings after dedup (9 High, 15 Medium, 5 Low) of which the table lists the merged ones. 26 auto-resolved in the plan body; 3 escalated (Open decisions below). Corroboration: #1, #4, #5, #6 and #8 were raised by all three personas, #2 and #7 by two.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | Plan assumed both "outer sessionId = parent" (Steps 2-3) and "= child" (Step 4); handler could still no-op on every frame. | Fixed -- probe rewritten (PA log, not TUI run); `_resolve_workflow_parent` ladder; SC-1 placement made conditional. |
+| 2 | High | `_workflow_children` had no staleness bound or cancel/turn-end reconciliation; lost `run_complete` pins session to Working. | Fixed -- `(state, last_seen)` entries with 600 s bound; cancelled/error turn end clears; test added. |
+| 3 | High | Step 7 snippet referenced undefined `chunk` (NameError hidden by broad except) and replay would re-register finished children. | Fixed -- display-only decode using `text`/`_kiro_meta`; no state mutation; idempotent `node_start`. |
+| 4 | High | Part B cache keyed on directory mtime cannot see in-place `session.json` status changes; unbounded growth. | Fixed -- per-child `session.json` mtime, bounded cache, live-window check; Rejected note added. |
+| 5 | High | Workflow entries tagged `_NO_ANCHOR_TOOLCALLID` are filtered out after any earlier `invoke_sub_agent` fan-out. | Fixed -- tag with current `_active_fan_out_wave`; Rejected note and test added. |
+| 6 | High | Phase 1 deploys `workflows: true` before Phase 2 handlers exist; coupling was prose only. | Escalated -- see Open decision A; interim "do not deploy alone" exit criterion added. |
+| 7 | Medium | `failed` status unreachable; SC-4 requires it; loop/branch child-id behaviour unspecified. | Fixed -- `failed` sourced from probed field or branch deleted; probe records loop/branch behaviour. |
+| 8 | Medium | Waiting children reported as Working; override masked `errored`; web.py sites run in a worker thread. | Fixed -- tri-state `workflow_state`, loop-side snapshot, override applied after verdict, idle-only upgrade. |
+| 9 | Medium | Idle sweeper (`_sweepable`) can close a parent mid-workflow. | Fixed -- `_sweepable` refuses sessions with fresh children; test added. |
+| 10 | Medium | Turn-end `finally` marks live workflow children done; `_workflow_children` removal was conditional on crew entry. | Fixed -- children exempt from sweep; removal unconditional. |
+| 11 | Medium | `_load_cli_settings_dict` lacks `utf-8-sig` and dict guard; non-dict JSON fails every session create; `bool("false")` is True. | Fixed -- guarded reader mirroring `_kiro_tool_search_settings`; `is True` for workflows; tests. |
+| 12 | Medium | Part B wiring site wrong (`_session_is_live` is a bool; `_acp_status_for_held` is held-only); `_LIVE_MTIME_WINDOW` lives in web.py; `_find_v3_session_dir` may return None. | Fixed -- non-held branch named by contract; None guard; cost measurement required. |
+| 13 | Medium | Router returns before the INFO fallthrough, removing the documented evidence log. | Fixed -- INFO logging requirement for all workflow frames. |
+| 14 | Medium | SC-1 observable (`available_commands_update`) may not carry the tool inventory. | Fixed -- Probe C added before the live criteria. |
+| 15 | Medium | Test-file location and `-k` selectors ambiguous; node test not in exit criteria. | Fixed -- existing test files, fixed name stems, node-test criterion. |
+| 16 | Medium | Section 8, File scopes and exit criteria disagreed; `_publish_live` note documented a change the plan rejects. | Fixed -- scopes aligned; note rewritten as "intentionally unchanged". |
+| 17 | Low | Duplicate classify_kiro_v3 bullet; stale line numbers (~35 lines drift); `order=len(crew)` collides after eviction. | Fixed -- deduped; anchor by name; monotonic order counter. |
+| 18 | Low | `workflowNotifications` forwarded though KAS ignores it (YAGNI against the plan's own "productized support" rule). | Escalated -- see Open decision C. |
+
+**Open decisions for the user** (not auto-resolved; each changes scope or cost):
+
+- **A. Phase 1 / Phase 2 gating.** Options: (1) keep as now, "do not restart onto Phase 1 alone" as a commit-body note; (2) emit `workflows`/`goal`/`workflowNotifications` only behind a module constant flipped in Phase 2; (3) merge Phases 1 and 2 into one phase. Property the choice must preserve: no deployable build forwards `workflows.enabled: true` without the handlers. Recommendation: option 2, because a restart between phases is likely and the user, not the plan, performs it.
+- **B. Default-on settings cost.** `thinking`, `knowledge`, `codeIntelligence`, `largeToolOutputHandler` change from KAS-off to on (TUI defaults) for every PA session, which affects token use and indexing; Section 4 says "Cost impact: None". Confirm this is wanted, or forward only keys explicitly present in `cli.json`. Also confirm the absent-`chat.enableWorkflows` default (this plan sends `enabled: false`; verify against the TUI's `w1()`).
+- **C. `workflowNotifications`.** Keep as forward-compat scaffolding, or drop it (KAS ignores it today).
+
+Also noted, unresolved by design: `session/load` applying the settings block (Probe B) can flip an existing session's tool inventory mid-life; the Probe B outcome decides whether `session/load` passes settings at all. No PA-side kill switch for workflows exists beyond setting `chat.enableWorkflows: false` in `cli.json`.
+
 ## Harness Improvement Opportunities
 
-<Reserved>
+- `/qplan` review sub-agents cannot see the TUI-only evidence a plan's probe depends on (a TUI workflow run is absent from PA's own log) — cost: the first-round "mandatory probe" was infeasible as written and survived a full review — suggested change: add to the Spawn brief contract a check that every probe in a plan names an evidence source the implementer can actually reach.
 
 ## REVISIT — Deferred kiro-cli settings (from Phase 1 audit)
 
