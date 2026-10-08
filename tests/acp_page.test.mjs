@@ -10776,17 +10776,15 @@ check("shiftEnterAtEndOfListLineContinues", (tpl) => {
     "the caret should land after the inserted prefix; got " + prompt.selectionStart);
 });
 
-// shiftEnterMidLineDoesNotContinue: caret at offset 3 on "1. item" — _lineText
-// is "1." (line start to caret), which lacks the trailing space the pattern's
-// ([.:])( +) requires, so the regex does not match and the branch falls through
-// with the value unchanged and preventDefault NOT called. This holds under D9
-// (the end-of-line guard was removed): mid-prefix is still a non-match because
-// the match is driven by _lineText, not by the caret being at end-of-line.
+// shiftEnterMidLineDoesNotContinue: caret at offset 2 on "1. item" — _lineText
+// is "1." (before the separator's trailing space), which lacks the space the
+// pattern's ([.:])( +) requires, so the regex does not match. D9 (no end-of-line
+// guard) is active: the test proves the regex, not the guard, prevents firing here.
 check("shiftEnterMidLineDoesNotContinue", (tpl) => {
   const { page } = connected(tpl);
   const prompt = page.el("acpPrompt");
   prompt.value = "1. item";
-  prompt.selectionStart = prompt.selectionEnd = 3;
+  prompt.selectionStart = prompt.selectionEnd = 2;
   let prevented = false;
   prompt.dispatch("keydown", {
     key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,
@@ -10907,15 +10905,15 @@ check("listContinuationMidLine", (tpl) => {
     "the caret should land after the inserted prefix; got " + prompt.selectionStart);
 });
 
-// listContinuationMidLineBeforeSpace (D9): caret at offset 3 on "1. item" sits
-// right after the separator but before the space, so _lineText is "1." — no
+// listContinuationMidLineBeforeSpace (D9): caret at offset 2 on "1. item" sits
+// right before the separator's trailing space, so _lineText is "1." — no
 // trailing space, no match — and the value is unchanged (plain-newline fall
-// through). Pins that D9 does NOT split mid-prefix.
+// through). Pins that D9 does NOT split before the complete prefix.
 check("listContinuationMidLineBeforeSpace", (tpl) => {
   const { page } = connected(tpl);
   const prompt = page.el("acpPrompt");
   prompt.value = "1. item";
-  prompt.selectionStart = prompt.selectionEnd = 3;
+  prompt.selectionStart = prompt.selectionEnd = 2;
   let prevented = false;
   prompt.dispatch("keydown", {
     key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,
@@ -11022,7 +11020,7 @@ check("dashShiftEnterContinues", () => {
 check("dashShiftEnterMidLineDoesNotContinue", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
   p.sandbox.dashPromptInput.value = "1. item";
-  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 3;
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 2;
   let prevented = false;
   p.sandbox.dashPromptInput.dispatch("keydown", {
     key: "Enter", shiftKey: true, ctrlKey: false, altKey: false,

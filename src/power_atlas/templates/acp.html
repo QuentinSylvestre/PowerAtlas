@@ -6219,13 +6219,12 @@
         var _lineText = _val.slice(_lineStart, _pos);
         var _nextNl = _val.indexOf('\n', _pos);
         var _lineEnd = _nextNl === -1 ? _val.length : _nextNl;
-        if (_pos === _lineEnd) {
-          var _m = _lineText.match(/^(\s*)(\S*?)(\d+)([.:])( +)/);
-          if (_m) {
+        var _m = _lineText.match(/^(\s*)(\S*?)(\d+)([.:])( +)/);
+        if (_m) {
             // D10 empty exit: the whole line is just the prefix — clear it and
-            // leave the caret at the line start. (Under the end-of-line guard
-            // _lineText is the full line, so this test is exact.)
-            if (_pos - _lineStart === _m[0].length) {
+            // leave the caret at the line start. Checked against _lineEnd so
+            // a cursor mid-item (with content after it) does not false-trigger.
+            if (_lineEnd - _lineStart === _m[0].length) {
               ev.preventDefault();
               promptInput.focus();
               promptInput.setSelectionRange(_lineStart, _pos);
@@ -6256,7 +6255,6 @@
             updatePromptHighlight();
             return;
           }
-        }
       }
       // Falls through: browser inserts a plain newline (default behavior).
     }

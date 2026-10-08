@@ -2977,24 +2977,23 @@ dashPromptInput.addEventListener('keydown', function(e){
       var _lineText = _val.slice(_lineStart, _pos);
       var _nextNl = _val.indexOf('\n', _pos);
       var _lineEnd = _nextNl === -1 ? _val.length : _nextNl;
-      if (_pos === _lineEnd) {
-        var _m = _lineText.match(/^(\s*)(\S*?)(\d+)([.:])( +)/);
-        if (_m) {
-          if (_pos - _lineStart === _m[0].length) {
-            e.preventDefault();
-            dashPromptInput.focus();
-            dashPromptInput.setSelectionRange(_lineStart, _pos);
-            var _cleared = false;
-            try { _cleared = document.execCommand('insertText', false, ''); } catch (err) {}
-            if (!_cleared) {
-              dashPromptInput.value = _val.slice(0, _lineStart) + _val.slice(_pos);
-              dashPromptInput.setSelectionRange(_lineStart, _lineStart);
-            }
-            dashRefreshComposerControls();
-            return;
-          }
+      var _m = _lineText.match(/^(\s*)(\S*?)(\d+)([.:])( +)/);
+      if (_m) {
+        if (_lineEnd - _lineStart === _m[0].length) {
           e.preventDefault();
-          var _nextNum = String(parseInt(_m[3], 10) + 1);
+          dashPromptInput.focus();
+          dashPromptInput.setSelectionRange(_lineStart, _pos);
+          var _cleared = false;
+          try { _cleared = document.execCommand('insertText', false, ''); } catch (err) {}
+          if (!_cleared) {
+            dashPromptInput.value = _val.slice(0, _lineStart) + _val.slice(_pos);
+            dashPromptInput.setSelectionRange(_lineStart, _lineStart);
+          }
+          dashRefreshComposerControls();
+          return;
+        }
+        e.preventDefault();
+        var _nextNum = String(parseInt(_m[3], 10) + 1);
           var _insert = '\n' + _m[1] + _m[2] + _nextNum + _m[4] + _m[5];
           dashPromptInput.focus();
           dashPromptInput.setSelectionRange(_pos, _pos);
@@ -3007,7 +3006,6 @@ dashPromptInput.addEventListener('keydown', function(e){
           dashRefreshComposerControls();
           return;
         }
-      }
     }
   }
   // Fix 6 (review, Phase 3 fix cycle): !e.ctrlKey && !e.altKey added to match
