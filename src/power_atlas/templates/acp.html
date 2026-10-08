@@ -6197,19 +6197,14 @@
         return;
       }
     }
-    // List continuation / exit: Shift+Enter at the END of a list-prefixed line.
+    // List continuation / exit: Shift+Enter on a list-prefixed line (D9, D10, D7).
     // Pattern ^(\s*)(\S*?)(\d+)([.:])( +) — indent, prefix, number, sep, spaces.
-    // The caret must be at the line end (_pos === _lineEnd) so a Shift+Enter in
-    // the middle of an item falls through to a plain newline — see the Phase 3
-    // divergence note: the plan's "mid-line" D9 could not be honoured without
-    // breaking shiftEnterMidLineDoesNotContinue, because the caret right after a
-    // prefix is indistinguishable from the start of the item text. With the
-    // end-of-line guard, _lineText spans the whole line, so a bare prefix
-    // (_pos - _lineStart === _m[0].length) is a genuine empty line.
-    // D10: a bare prefix line exits the list — the prefix is cleared and the
-    // caret lands at the line start — instead of continuing to the next number.
-    // D7: both the continuation insert and the empty-exit clear go through
-    // execCommand('insertText') so the browser's native undo stack survives;
+    // D9: no end-of-line guard — continuation fires whenever _lineText (line-start
+    // to caret) matches the prefix pattern. Mid-item splits are intentional.
+    // D10: when the whole line equals the bare prefix (_lineEnd - _lineStart ===
+    // _m[0].length), Shift+Enter exits the list (clears the prefix).
+    // D7: both the insert and the clear go through execCommand('insertText') to
+    // preserve the browser's native undo stack; direct .value= is the fallback.
     // a direct .value= assignment (the fallback) wipes it.
     if (ev.key === 'Enter' && ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
       var _pos = promptInput.selectionStart;

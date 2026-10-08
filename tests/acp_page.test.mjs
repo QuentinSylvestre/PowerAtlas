@@ -10905,6 +10905,24 @@ check("listContinuationMidLine", (tpl) => {
     "the caret should land after the inserted prefix; got " + prompt.selectionStart);
 });
 
+// listContinuationMidItemSplits (D9): caret at offset 5 inside item text on
+// "1. item" — _lineText is "1. it" which matches the prefix "1. " — inserts
+// "\n2. " at the caret, splitting the item. Mid-word split is intentional.
+check("listContinuationMidItemSplits", (tpl) => {
+  const { page } = connected(tpl);
+  const prompt = page.el("acpPrompt");
+  prompt.value = "1. item";
+  prompt.selectionStart = prompt.selectionEnd = 5;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: true, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(prompt.value, "1. it\n2. em",
+    "caret mid-item should split the item at the caret; got " +
+    JSON.stringify(prompt.value));
+  assertEqual(prompt.selectionStart, 9,
+    "the caret should land after the inserted prefix; got " + prompt.selectionStart);
+});
+
 // listContinuationMidLineBeforeSpace (D9): caret at offset 2 on "1. item" sits
 // right before the separator's trailing space, so _lineText is "1." — no
 // trailing space, no match — and the value is unchanged (plain-newline fall

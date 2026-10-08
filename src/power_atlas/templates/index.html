@@ -2962,13 +2962,9 @@ dashPromptInput.addEventListener('keydown', function(e){
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
     if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
   }
-  // List continuation / exit — mirrors acp.html but uses `e`. The caret must be
-  // at the line end (_pos === _lineEnd); a Shift+Enter mid-item falls through to
-  // a plain newline. See the Phase 3 divergence note: the plan's "mid-line" D9
-  // could not be honoured without breaking the mid-line no-op test, because a
-  // caret right after a prefix is indistinguishable from the start of the item
-  // text. D10: a bare prefix line exits the list (prefix cleared, caret at line
-  // start). D7: insert/clear via execCommand so the native undo stack survives.
+  // List continuation / exit — mirrors acp.html but uses `e`.
+  // D9: no end-of-line guard; D10: whole-line empty-prefix exits the list;
+  // D7: execCommand('insertText') preserves the native undo stack.
   if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey) {
     var _pos = dashPromptInput.selectionStart;
     if (_pos === dashPromptInput.selectionEnd) {
