@@ -8437,6 +8437,208 @@ check("P3: flushToolGroups fires at post-replay tail (tool_calls at end of histo
     "post-replay tail flush should produce a tool group when history ends with tool_calls");
 });
 
+// ---- Phase 2 (261007): live tool grouping + edit rows + diffs -------------
+//
+// Live grouping opens a group on the first non-edit tool call DURING a turn
+// (setTranscriptLive(true) at meta turn:start), not just at turn:end. Edit
+// rows stand alone (never in a group) and auto-expand so their diff is visible
+// without a click, on both the live and the session-load replay path.
+
+// Deliver a sequence of frames inside a live turn WITHOUT a trailing turn:end,
+// so assertions see the mid-turn (live) state rather than the turn-end flush.
+async function deliverLiveFrames(page, live, frames) {
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  for (const fr of frames) {
+    page.deliver({ ...fr, sessionId: live });
+  }
+  await page.settle();
+}
+
+function _editRowAncestorIsGroup(row, transcriptEl) {
+  // Walk up from the row; true if any ancestor before the transcript root is a
+  // group body/container.
+  var n = row.parentNode;
+  while (n && n !== transcriptEl) {
+    if (n.className && String(n.className).indexOf("acp-tool-group") >= 0) return true;
+    n = n.parentNode;
+  }
+  return false;
+}
+
+check("liveToolGroupsOnAddToolCall: two consecutive live tool calls group immediately (no turn:end)", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverLiveFrames(page, live, [
+    { type: "tool_call", payload: { toolCallId: "lg1", title: "shell", kind: "execute", status: "completed", command: "a" } },
+    { type: "tool_call", payload: { toolCallId: "lg2", title: "shell", kind: "execute", status: "completed", command: "b" } },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const groups = transcript.querySelectorAll(".acp-tool-group");
+  assertEqual(groups.length, 1,
+    "two consecutive live tool calls should appear inside one .acp-tool-group before turn:end");
+  const body = groups[0].querySelector(".acp-tool-group-body");
+  assert(body !== null, "the live group should have a body");
+  const inner = body.querySelectorAll(".acp-msg-tool");
+  assertEqual(inner.length, 2, "both tool rows should be inside the group body");
+  const rootToolRows = transcript.childNodes.filter(
+    (n) => n.className && String(n.className).includes("acp-msg-tool"));
+  assertEqual(rootToolRows.length, 0,
+    "no tool rows should remain at transcript root during a live run");
+});
+
+check("liveToolGroupsOnAddToolCall: live group header updates as calls are added", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverLiveFrames(page, live, [
+    { type: "tool_call", payload: { toolCallId: "lh1", title: "shell", kind: "execute", status: "completed", command: "a" } },
+    { type: "tool_call", payload: { toolCallId: "lh2", title: "shell", kind: "execute", status: "completed", command: "b" } },
+  ]);
+  const toggle = page.el("acpTranscript").querySelector(".acp-tool-group-toggle");
+  assert(toggle !== null, "live group should have a toggle header");
+  assert(toggle.textContent.indexOf("Called 2 tools") === 0,
+    "header should tally both live calls: " + toggle.textContent);
+  assert(toggle.textContent.indexOf("execute \u00d72") >= 0,
+    "header should count execute x2: " + toggle.textContent);
+});
+
+check("editToolCallNotInGroup: a live edit tool call stands alone, outside any group", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverLiveFrames(page, live, [
+    // A non-edit call first opens a group...
+    { type: "tool_call", payload: { toolCallId: "eg1", title: "shell", kind: "execute", status: "completed", command: "a" } },
+    // ...then an edit call must NOT join it.
+    { type: "tool_call", payload: { toolCallId: "eg2", title: "edit", kind: "edit", status: "completed",
+        locations: [{ path: "/repo/x.py" }],
+        output: { form: "diff", path: "/repo/x.py", added: 2, removed: 0, isNew: false } } },
+  ]);
+  const transcript = page.el("acpTranscript");
+  // Find the edit row (its panel class is acp-tool-edit-panel).
+  const editPanel = transcript.querySelector(".acp-tool-edit-panel");
+  assert(editPanel !== null, "the edit row should exist");
+  // Walk to the owning acp-msg-tool row.
+  var editRow = editPanel;
+  while (editRow && !(editRow.className && String(editRow.className).indexOf("acp-msg-tool") >= 0)) {
+    editRow = editRow.parentNode;
+  }
+  assert(editRow !== null, "the edit panel should live inside an acp-msg-tool row");
+  assert(_editRowAncestorIsGroup(editRow, transcript) === false,
+    "an edit row must NOT be inside any .acp-tool-group");
+});
+
+check("editToolCallNotInGroup: an edit breaks the run so a following tool call starts a fresh group", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverLiveFrames(page, live, [
+    { type: "tool_call", payload: { toolCallId: "eb1", title: "shell", kind: "execute", status: "completed", command: "a" } },
+    { type: "tool_call", payload: { toolCallId: "eb2", title: "edit", kind: "edit", status: "completed",
+        locations: [{ path: "/repo/x.py" }],
+        output: { form: "diff", path: "/repo/x.py", added: 1, removed: 0, isNew: false } } },
+    { type: "tool_call", payload: { toolCallId: "eb3", title: "shell", kind: "execute", status: "completed", command: "b" } },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const groups = transcript.querySelectorAll(".acp-tool-group");
+  // The pre-edit call is a solo group; the post-edit call is a second solo group.
+  assertEqual(groups.length, 2,
+    "an edit between two tool calls should break the run into two groups: " + groups.length);
+});
+
+check("editRowAutoExpanded: a live edit row's panel is visible without a click", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverLiveFrames(page, live, [
+    { type: "tool_call", payload: { toolCallId: "ea1", title: "edit", kind: "edit", status: "completed",
+        locations: [{ path: "/repo/x.py" }],
+        output: { form: "diff", path: "/repo/x.py", added: 3, removed: 1, isNew: false } } },
+    { type: "tool_output", payload: { toolCallId: "ea1", form: "diff", path: "/repo/x.py",
+        truncated: false, oldText: "a\nb\n", newText: "a\nc\nd\n" } },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const panel = transcript.querySelector(".acp-tool-edit-panel");
+  assert(panel !== null, "the edit panel should exist");
+  assert(panel.hidden === false,
+    "a live edit row's panel should be auto-expanded (visible) without a click");
+  assert(panel.querySelector(".acp-tool-diff") !== null,
+    "the diff should be rendered inside the auto-expanded panel");
+});
+
+check("editRowAutoExpanded: an edit row replayed in a history load is auto-expanded with its diff", async (tpl) => {
+  // Mirrors the session-load path: a `history` frame carries the edit tool_call
+  // and a backfilled tool_output. The panel must be open with the diff visible,
+  // which is the real-world "edit diffs on load" fix.
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "history", sessionId: live,
+    payload: { events: [
+      { type: "meta", sessionId: live, payload: { turn: "start" } },
+      { type: "tool_output", sessionId: live, payload: { toolCallId: "hl1", form: "diff",
+          path: "/repo/x.py", truncated: false, oldText: "a\n", newText: "a\nb\n" } },
+      { type: "tool_call", sessionId: live, payload: { toolCallId: "hl1", title: "edit", kind: "edit",
+          status: "completed", locations: [{ path: "/repo/x.py" }],
+          output: { form: "diff", path: "/repo/x.py", added: 1, removed: 0, isNew: false } } },
+      { type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } },
+    ] },
+  });
+  await page.settle();
+  const panel = page.el("acpTranscript").querySelector(".acp-tool-edit-panel");
+  assert(panel !== null, "the replayed edit panel should exist");
+  assert(panel.hidden === false,
+    "a replayed edit row's panel should be auto-expanded on load (the edit-diffs-on-load fix)");
+  assert(panel.querySelector(".acp-tool-diff") !== null,
+    "the backfilled diff should be visible inside the auto-expanded panel");
+});
+
+check("editRowNotApplied: a failed edit with no diff and no body says 'edit not applied'", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverLiveFrames(page, live, [
+    { type: "tool_call", payload: { toolCallId: "en1", title: "edit", kind: "edit", status: "failed",
+        locations: [{ path: "/repo/x.py" }] } },
+  ]);
+  const panel = page.el("acpTranscript").querySelector(".acp-tool-edit-panel");
+  assert(panel !== null, "the failed edit panel should exist");
+  assert(panel.textContent.indexOf("edit not applied") >= 0,
+    "a failed edit with no diff/body should say 'edit not applied', not 'not retained': " + panel.textContent);
+  assert(panel.textContent.indexOf("output not retained") < 0,
+    "a failed edit must not use the generic reload-not-retained wording: " + panel.textContent);
+});
+
+check("isolated edit tool call (no turn, no replay) stays collapsed by default", (tpl) => {
+  // The auto-expand is gated on a real-session context (a live turn or a
+  // replay). A bare edit tool_call delivered with neither keeps the historical
+  // collapsed-by-default row, so the primitive row-building unit tests above
+  // keep holding.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ic1", title: "edit", kind: "edit", status: "completed",
+               locations: [{ path: "/repo/x.py" }],
+               output: { form: "diff", path: "/repo/x.py", added: 1, removed: 0, isNew: false } } });
+  const panel = page.el("acpTranscript").querySelector(".acp-tool-edit-panel");
+  assert(panel !== null, "the edit panel should exist");
+  assert(panel.hidden === true,
+    "an isolated edit tool call outside any turn/replay should stay collapsed by default");
+});
+
+// ---- Phase 2 (261007) dashboard mirrors -----------------------------------
+//
+// transcript-renderer.js is shared verbatim by both pages, so the grouping and
+// edit behaviour above is identical on the dashboard. The dashboard-specific
+// part is the wiring: dashHandle's meta turn:start enters live mode and
+// turn:end leaves it. loadDashPicker records setTranscriptLive(bool) calls.
+
+check("dashboard: a live turn start enters live grouping mode (setTranscriptLive(true))", () => {
+  const p = loadDashPicker();
+  p.setLiveCalls.length = 0;
+  p.sandbox.dashHandle({ type: "meta", payload: { turn: "start" } });
+  assert(p.setLiveCalls.length >= 1 && p.setLiveCalls[p.setLiveCalls.length - 1] === true,
+    "meta turn:start should call setTranscriptLive(true): " + JSON.stringify(p.setLiveCalls));
+});
+
+check("dashboard: a turn end leaves live grouping mode (setTranscriptLive(false))", () => {
+  const p = loadDashPicker();
+  p.setLiveCalls.length = 0;
+  p.sandbox.dashHandle({ type: "meta", payload: { turn: "start" } });
+  p.sandbox.dashHandle({ type: "meta", payload: { turn: "end", stopReason: "end_turn" } });
+  assert(p.setLiveCalls.indexOf(true) >= 0 && p.setLiveCalls.indexOf(false) >= 0,
+    "turn:start then turn:end should toggle live mode on then off: " + JSON.stringify(p.setLiveCalls));
+  assertEqual(p.setLiveCalls[p.setLiveCalls.length - 1], false,
+    "the last live-mode call across a start/end pair should be false");
+});
+
 // ---- Phase 2: Queue/Steer controls and image inline -----------------------
 
 check("image inline: [Image N] marker inserted at cursor position", async (tpl) => {
@@ -14199,6 +14401,11 @@ function loadDashPicker(opts = {}) {
   // renderTranscriptHistory() call log (SC6, Phase 4) -- see the sandbox
   // stub below.
   const historyRenders = [];
+  // 261007 Phase 2: records setTranscriptLive(bool) calls so the dashboard
+  // turn:start/end wiring can be asserted. On the real page these are
+  // transcript-renderer.js top-level functions; this partial sandbox stubs
+  // them (the renderer source is not loaded here, by design).
+  const setLiveCalls = [];
   // Timer stand-in for setDashSteerStatus's steering_injected auto-clear
   // (SC5, Phase 3) -- mirrors the acp.html-side harness's own timers/
   // setTimeout/runTimers pattern (see loadPage() above) so a check can fire
@@ -14558,6 +14765,10 @@ function loadDashPicker(opts = {}) {
     // state down with its own explicit dash* calls, and the crew/sub-agent
     // session_closed checks must keep testing those calls, not this stub.
     clearTranscript: () => {},
+    // 261007 Phase 2 dashboard wiring: dashHandle's meta turn:start/end
+    // call these shared renderer functions. Recorded for assertion.
+    setTranscriptLive: (v) => { setLiveCalls.push(Boolean(v)); },
+    setTranscriptAutoExpand: () => {},
     // dashHandle's agent_died/session_closed/agent_error branches call this
     // (transcript-renderer.js, not part of either extracted region). Records
     // every call (SC5, Phase 3 needs to assert on queue/steer notes and
@@ -14873,6 +15084,7 @@ function loadDashPicker(opts = {}) {
     // trayChips()/revoked() exactly, targeted at dashPromptInput/
     // dashComposerEl/dashTrayEl instead of acpPrompt/acpComposer/acpTray.
     historyRenders,
+    setLiveCalls,
     imageFile(type = "image/png", name = "screenshot.png") { return { type, name }; },
     paste(files) {
       let prevented = false;

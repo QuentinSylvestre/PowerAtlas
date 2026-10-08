@@ -79,6 +79,111 @@ var _toolTimers = Object.create(null);
 // Null between turns (reset at turn:start and after each flush).
 var toolGroup = null; // accumulates tool-call rows during a turn; flushed at turn:end
 var _toolGroupSeq = 0; // monotonic counter for unique group-body ids (aria-controls linkage)
+// Phase 2 (261007): live incremental tool grouping. During a live turn a
+// group container is opened on the first non-edit tool call and later calls
+// are appended into it, so the user sees a grouped block mid-turn rather than
+// a flat wall of rows that only groups at turn:end. openGroup holds the
+// current live group ({ group, toggle, body, rows }) or null between runs.
+// Module-local is enough: this file runs once per page document, so one
+// variable serves the single transcript each page owns.
+var openGroup = null;
+// True only while the page is feeding live frames (set by setTranscriptLive).
+// Gates live grouping: replay uses the toolGroup/flushToolGroups path instead.
+var _transcriptLive = false;
+// True while rendering a real session (a live turn or a history/load replay).
+// Gates edit-row auto-expand so edit diffs are visible without a click on both
+// the live and the session-load path. Left false for the isolated row-building
+// unit tests (no turn, no replay), which keep the collapsed-by-default row.
+var _autoExpandEdits = false;
+function setTranscriptLive(v) {
+  _transcriptLive = Boolean(v);
+  // Entering a live turn is also a real-session context: auto-expand edits.
+  if (_transcriptLive) { _autoExpandEdits = true; }
+  // Leaving live (turn end / before replay) must break any open run so the
+  // next run starts a fresh group.
+  if (!_transcriptLive) { openGroup = null; }
+}
+function setTranscriptAutoExpand(v) { _autoExpandEdits = Boolean(v); }
+// Build the Called N tools: kind xN . status xN header for a live group
+// from the rows currently in it. Same shape and tally rules flushToolGroups()
+// uses for the replay path, kept in step with it deliberately.
+function _liveGroupHeaderText(rows) {
+  var nameCounts = Object.create(null);
+  var nameOrder = [];
+  for (var n = 0; n < rows.length; n++) {
+    var kindEl = rows[n].querySelector('.acp-tool-kind');
+    var nameEl = rows[n].querySelector('.acp-tool-name');
+    var nm = (kindEl ? kindEl.textContent : '') || (nameEl ? nameEl.textContent : 'tool');
+    if (!nameCounts[nm]) { nameCounts[nm] = 0; nameOrder.push(nm); }
+    nameCounts[nm]++;
+  }
+  var stCounts = Object.create(null);
+  var stOrder = [];
+  for (var s = 0; s < rows.length; s++) {
+    var stEl = rows[s].querySelector('.acp-tool-status');
+    var stRaw = stEl ? (stEl.getAttribute('data-status') || '') : '';
+    var st = TOOL_STATUS_LABEL[stRaw];
+    if (st) {
+      if (!stCounts[st]) { stCounts[st] = 0; stOrder.push(st); }
+      stCounts[st]++;
+    }
+  }
+  var nameTally = nameOrder.map(function (nm) {
+    return nameCounts[nm] > 1 ? nm + ' \xd7' + nameCounts[nm] : nm;
+  }).join(', ');
+  var stTally = stOrder.map(function (st) {
+    return stCounts[st] > 1 ? st + ' \xd7' + stCounts[st] : st;
+  }).join(', ');
+  var toolWord = rows.length === 1 ? 'tool' : 'tools';
+  return 'Called ' + rows.length + ' ' + toolWord + ': ' + nameTally + (stTally ? ' \xb7 ' + stTally : '');
+}
+// Open the live group if none is open, matching flushToolGroups()'s container
+// structure and toggle behaviour so a live group and a replayed one read and
+// behave identically (collapsed by default; opening it expands child panels).
+function _ensureOpenGroup() {
+  if (openGroup) { return openGroup; }
+  var group = document.createElement('div');
+  group.className = 'acp-tool-group';
+  var groupToggle = document.createElement('button');
+  groupToggle.className = 'acp-tool-group-toggle';
+  groupToggle.type = 'button';
+  groupToggle.setAttribute('aria-expanded', 'false');
+  group.appendChild(groupToggle);
+  var groupBody = document.createElement('div');
+  groupBody.id = 'acp-tg-' + (++_toolGroupSeq);
+  groupBody.className = 'acp-tool-group-body';
+  groupBody.hidden = true;
+  group.appendChild(groupBody);
+  groupToggle.setAttribute('aria-label', 'Expand tool call group');
+  groupToggle.setAttribute('aria-controls', groupBody.id);
+  groupToggle.addEventListener('click', function () {
+    var open = groupToggle.getAttribute('aria-expanded') === 'true';
+    groupToggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+    groupToggle.setAttribute('aria-label', open ? 'Expand tool call group' : 'Collapse tool call group');
+    groupBody.hidden = open;
+    if (!open) {
+      var childToggles = groupBody.querySelectorAll('.acp-tool-toggle');
+      for (var ci = 0; ci < childToggles.length; ci++) {
+        if (childToggles[ci].getAttribute('aria-expanded') === 'false') {
+          childToggles[ci].click();
+        }
+      }
+    }
+  });
+  transcriptEl.appendChild(group);
+  openGroup = { group: group, toggle: groupToggle, body: groupBody, rows: [] };
+  return openGroup;
+}
+// Move a freshly-created non-edit row (already appended at transcript root)
+// into the live group's body and refresh the header. Opening the group first
+// keeps the group container at the row's chronological position.
+function _addRowToOpenGroup(row) {
+  var g = _ensureOpenGroup();
+  if (row.parentNode === transcriptEl) { transcriptEl.removeChild(row); }
+  g.body.appendChild(row);
+  g.rows.push(row);
+  g.toggle.textContent = _liveGroupHeaderText(g.rows);
+}
 
 function stuckToBottom() {
   // Measured before the append, not after: once the node is in the DOM the
@@ -1216,7 +1321,26 @@ function _renderEditPanel(known) {
     note.className = 'acp-tool-lost';
     note.textContent = 'output not retained after reload';
     panel.appendChild(note);
+  } else if (_editDidNotApply(known)) {
+    // A failed/cancelled/rejected edit with no diff and no output body: the
+    // generic reload notice would be misleading — nothing was lost because
+    // the edit never applied. Say exactly that instead of a blank panel.
+    var fail = document.createElement('div');
+    fail.className = 'acp-tool-lost';
+    fail.textContent = 'edit not applied';
+    panel.appendChild(fail);
   }
+}
+
+/** True when an edit row carries no diff/output body and its status is a
+ *  terminal failure (failed/cancelled/rejected) — the case where the panel
+ *  would otherwise be blank and the row should say the edit did not apply. */
+function _editDidNotApply(known) {
+  if (!known || known.kind !== 'edit') { return false; }
+  if (known.outputPayload) { return false; }
+  if (_expectsBody(known.digest)) { return false; }
+  var st = known.status ? (known.status.getAttribute('data-status') || '') : '';
+  return st === 'failed' || st === 'cancelled' || st === 'rejected';
 }
 
 /** Put a digest on a row, replacing any earlier one, and say so when the
@@ -1290,6 +1414,19 @@ function _attachToolOutput(known, payload) {
   if (lost && lost.parentNode === known.body) known.body.removeChild(lost);
 }
 
+// Expand an edit row's panel on creation/update so its diff is visible with
+// no click, in a real-session context (a live turn or a replay). The
+// _makeToolToggle click handler is reused so aria state and quick-info stay
+// consistent with a manual expand. Only acts on a collapsed edit row.
+function _maybeAutoExpandEdit(known) {
+  if (!_autoExpandEdits) { return; }
+  if (!known || known.kind !== 'edit' || !known.panel) { return; }
+  if (known.panel.hidden === false) { return; }
+  if (known.editToggle && known.editToggle.getAttribute('aria-expanded') !== 'true') {
+    known.editToggle.click();
+  }
+}
+
 function addToolCall(payload) {
   // Every class name below is a literal. `status`, `kind` and `title` are
   // agent-authored and reach the page only through textContent — under -a
@@ -1312,6 +1449,9 @@ function addToolCall(payload) {
       if (typeof payload.startedAt === 'number') known.startedAt = payload.startedAt;
       if (typeof payload.stoppedAt === 'number') known.stoppedAt = payload.stoppedAt;
       _updateToolTime(known, id);
+      // A late diff/output or location can arrive on an update frame; keep
+      // the panel open so the diff stays visible in a real-session context.
+      _maybeAutoExpandEdit(known);
       return;
     }
     // `locations` can arrive on the update rather than the opening call —
@@ -1352,6 +1492,20 @@ function addToolCall(payload) {
     if (typeof payload.startedAt === 'number') known.startedAt = payload.startedAt;
     if (typeof payload.stoppedAt === 'number') known.stoppedAt = payload.stoppedAt;
     _updateToolTime(known, id);
+    // 261007 Phase 2: a status change on a row inside the open live group
+    // refreshes the header tally in place (text-node only, no rebuild) so a
+    // group whose rows finish mid-turn shows the right counts without
+    // disturbing its expanded/collapsed state. known.status is the badge
+    // span; walk up to its owning acp-msg-tool row before the membership test.
+    if (openGroup) {
+      var _ownRow = known.status;
+      while (_ownRow && !(_ownRow.className && String(_ownRow.className).indexOf('acp-msg-tool') >= 0)) {
+        _ownRow = _ownRow.parentNode;
+      }
+      if (_ownRow && openGroup.rows.indexOf(_ownRow) >= 0) {
+        openGroup.toggle.textContent = _liveGroupHeaderText(openGroup.rows);
+      }
+    }
     return;
   }
 
@@ -1403,6 +1557,7 @@ function addToolCall(payload) {
   var isEdit = payload.kind === 'edit';
   var panel = null;
   var quickInfo = null;
+  var editToggle = null;
   if (isEdit) {
     // One toggle, one panel: collapsed shows the head (name, kind chip,
     // status) plus a short filename+stat one-liner (`_renderEditQuickInfo`,
@@ -1419,7 +1574,7 @@ function addToolCall(payload) {
     panel = document.createElement('div');
     panel.className = 'acp-tool-edit-panel';
     panel.hidden = true;
-    var editToggle = _makeToolToggle(panel, payload.title || payload.kind, 'diff');
+    editToggle = _makeToolToggle(panel, payload.title || payload.kind, 'diff');
     head.appendChild(editToggle);
     // Runs after `_makeToolToggle`'s own listener above, so `panel.hidden`
     // already reflects the click when this reads it.
@@ -1452,7 +1607,7 @@ function addToolCall(payload) {
   if (id) {
     toolRows['t:' + id] = { status: status, body: body, kind: payload.kind,
       panel: panel, quickInfo: quickInfo, locations: payload.locations || null,
-      digest: null, outputPayload: null,
+      digest: null, outputPayload: null, editToggle: editToggle,
       timeSpan: timeSpan,
       startedAt: (typeof payload.startedAt === 'number') ? payload.startedAt : null,
       stoppedAt: (typeof payload.stoppedAt === 'number') ? payload.stoppedAt : null };
@@ -1474,10 +1629,26 @@ function addToolCall(payload) {
   }
   // Render initial elapsed time (or start a live ticker for in-progress calls).
   if (id) _updateToolTime(toolRows['t:' + id], id);
-  // Accumulate this row for turn-end grouping. The flush at meta turn:end
-  // will wrap consecutive sub-runs of >=2 rows into collapsible group containers.
-  if (!toolGroup) toolGroup = [];
-  toolGroup.push(row);
+  if (isEdit) {
+    // Edit rows are never grouped (D2): they stand alone, auto-expanded. An
+    // edit also breaks any current run, so a following tool call starts a
+    // fresh group rather than joining the pre-edit one.
+    openGroup = null;
+    _maybeAutoExpandEdit(id ? toolRows['t:' + id] : null);
+  } else if (_transcriptLive) {
+    // Live, non-edit: group incrementally into the open group (opening one
+    // if needed) instead of waiting for turn:end. The row was appended at
+    // transcript root above; _addRowToOpenGroup relocates it into the group
+    // body and refreshes the header. The toolGroup/flushToolGroups path is
+    // deliberately not used here, so turn:end's flush is a no-op for this run.
+    _addRowToOpenGroup(row);
+  } else {
+    // Replay path (not live): accumulate for turn-end grouping. The flush at
+    // meta turn:end (or a user-chunk boundary / post-replay tail) wraps
+    // consecutive sub-runs into collapsible group containers.
+    if (!toolGroup) toolGroup = [];
+    toolGroup.push(row);
+  }
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
@@ -1510,6 +1681,12 @@ function commandBlock(payload) {
 //   - toolGroup is reset in clearTranscript() and meta turn:start, so this
 //     function always operates on a single turn's accumulation.
 function flushToolGroups() {
+  // Finalize any live incremental group (261007 Phase 2): it is already in
+  // the DOM with its rows; closing it just means forgetting the open-run
+  // handle so the next run starts fresh. Done before the early-return so the
+  // common live-turn case (toolGroup empty, since the live path does not push
+  // to it) still closes the open group.
+  openGroup = null;
   if (!toolGroup || toolGroup.length < 1) { toolGroup = null; return; }
 
   // Split toolGroup into consecutive sub-runs by DOM adjacency.
@@ -1687,6 +1864,10 @@ function appendChunk(role, text) {
   // mirrors the bubble-flush the server already performs at the same
   // boundary (_flush_bubble is called before every user_message_chunk).
   if (role === 'user' && toolGroup) flushToolGroups();
+  // 261007 Phase 2: a prose bubble between tool calls breaks the live run
+  // so the next tool call opens a fresh group (DOM adjacency is also lost
+  // for the replay-path toolGroup, which flushToolGroups splits on).
+  openGroup = null;
   var body = addMessage(role, text);
   agentBody = role === 'agent' ? body : null;
 }
@@ -2529,6 +2710,10 @@ function clearTranscript() {
   // reuse would attach itself to a stranger's tool call.
   pendingToolOutput = Object.create(null);
   toolGroup = null; // also reset at meta turn:start and at end of flushToolGroups()
+  openGroup = null; // 261007 Phase 2: no live group carries across a clear
+  // Auto-expand is a real-session (live/replay) signal; a cleared transcript
+  // is neither until the next turn or replay sets it again.
+  _autoExpandEdits = false;
   // The row emptying just detached, if one was showing — nothing left to
   // remove a second time, and `showThinking` would otherwise believe one
   // still stands.
@@ -2632,6 +2817,10 @@ function renderTranscriptFrame(frame) {
  *  fetch the events, call this once. */
 function renderTranscriptHistory(frames) {
   clearTranscript();
+  // A replay is a real-session context (261007 Phase 2): auto-expand edit
+  // rows so their diffs show without a click. clearTranscript() reset this to
+  // false, so set it here, after the clear and before the frames render.
+  _autoExpandEdits = true;
   var events = frames || [];
   for (var i = 0; i < events.length; i++) renderTranscriptFrame(events[i]);
   if (toolGroup) flushToolGroups();

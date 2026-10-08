@@ -4622,6 +4622,10 @@ function dashHandle(frame){
   // on and would just be confusing -- mirrors acp.html's own setTurn(true).
   if (type === 'meta' && payload.turn === 'start') {
     _dashTurnActive = true;
+    // 261007 Phase 2: a live turn groups tool calls incrementally and
+    // auto-expands edit rows (mirrors acp.html). Never reached during
+    // replay, so this is unconditionally live.
+    setTranscriptLive(true);
     // The turn really started, so the images that went with it are spent --
     // mirrors acp.html's own turn:start handling (acp.html:5138-5142, SC6
     // Phase 4). No `if (!replaying)` guard is needed here: unlike acp.html,
@@ -4649,6 +4653,9 @@ function dashHandle(frame){
     // whenever a turn ends.
     _dashStopInProgress = false;
     _dashTurnActive = false;
+    // 261007 Phase 2: leave live mode — closes the open live group
+    // (setTranscriptLive(false) nulls openGroup).
+    setTranscriptLive(false);
     dashRefreshComposerControls();
     dashUpdateCloseButton();
     var _dp2 = document.getElementById('dashPicker'); if (_dp2 && !_dp2.hidden) dashPickerRenderKeepRow();
