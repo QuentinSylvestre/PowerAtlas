@@ -22,8 +22,8 @@ The desired outcome is PA sessions that behave identically to an equivalently-co
 - SC-2: PA's `_meta.kiro.settings` block is built dynamically from `cli.json` — no hardcoded values; a `cli.json` with `chat.enableWorkflows: false` produces a settings block with `workflows: {enabled: false}`, not the KAS shipped default.
 - SC-3: Settings in the "enable now" category (`thinking`, `knowledge`, `codeIntelligence`; `largeToolOutputHandler` dropped 2026-10-08, see Section 9) are forwarded with their `cli.json` values (or the TUI's defaults when the key is absent).
 - SC-4: A PA session running a workflow via `run_workflow` shows running step entries in the crew panel with step name, status (running/done/failed), and elapsed time.
-- SC-5: A PA session whose workflow is active shows Working status in the rail and Overview tiles while any child step is `in_progress`, and Waiting when the only remaining steps are `waiting_on_user`.
-- SC-6: After all workflow steps complete, are cancelled, or go stale (no workflow frame for the staleness bound), the parent session reverts to its own status.
+- SC-5: A PA session whose workflow is active shows Working status in the rail and Overview tiles while any child step is `in_progress`, and Waiting when the only remaining steps are `waiting_on_user`. **Amended 2026-10-08 (user): the Waiting half is unverified** until `_kiro/session/notify` (the only pause signal seen) or `node_paused` (never captured) is wired; the Working half is the verifiable criterion.
+- SC-6: After all workflow steps complete or go stale (no frame from the workflow or the child for the staleness bound: 600 s running, 6 h waiting), the parent session reverts to its own status. **Amended 2026-10-08 (user): "cancelled" removed.** PowerAtlas cannot stop a running workflow (Stop returns `cancelled` while the step keeps running, measured), so a cancelled run is only covered by the staleness bound; wiring `workflow-cancel` is a ROADMAP item.
 
 ### Scope boundaries & non-goals
 
@@ -276,10 +276,10 @@ Add a section "ACP session/new settings" documenting:
 - [x] `_build_session_settings()` exists and is covered by a unit test that asserts the correct settings dict for a sample `cli.json` (with `chat.enableWorkflows: true` and with `false`)
 - [x] `_load_cli_settings_dict()` exists in `acp.py`; returns `{}` on missing/malformed cli.json
 - [x] `_build_kas_session_params()` includes `"settings"` under `_meta.kiro`
-- [ ] (deferred to Phase 2) Probe C (run in Phase 2 together with the temporary-constant probe, since the `workflows` keys are gated off in Phase 1; before ticking the two live criteria below): establish the observable that shows `run_workflow` is in a session's tool inventory. `available_commands_update` (`_on_notification`) carries slash commands and skills, not necessarily the model's tool list, so it may not show `run_workflow`. Candidates: the `session/new` response, `orchestrator.log` INFO frames, or a prompt asking the agent to list its tools. Record the chosen observable in `docs/KNOWLEDGE.md`.
-- [ ] (deferred to Phase 2) A live PA session with `chat.enableWorkflows: true` shows `run_workflow` via the observable from Probe C (run in a throwaway session; the real workflow run belongs to Phase 2)
-- [ ] (deferred to Phase 2) A live PA session with `chat.enableWorkflows: false` does NOT show `run_workflow`
-- [ ] (deferred to Phase 2: table, Probe A and Probe B are recorded; Probe C and the unmeasured resumed-session effect are not) `docs/KNOWLEDGE.md` has the settings mapping table with probe results (toolSearch placement, `session/load` behavior, Probe C observable)
+- [x] (done in Phase 2: observable = asking the agent for its exact tool names, plus `_meta.workflowsEnabled` on the `session/new` result) Probe C (run in Phase 2 together with the temporary-constant probe, since the `workflows` keys are gated off in Phase 1; before ticking the two live criteria below): establish the observable that shows `run_workflow` is in a session's tool inventory. `available_commands_update` (`_on_notification`) carries slash commands and skills, not necessarily the model's tool list, so it may not show `run_workflow`. Candidates: the `session/new` response, `orchestrator.log` INFO frames, or a prompt asking the agent to list its tools. Record the chosen observable in `docs/KNOWLEDGE.md`.
+- [x] (done in Phase 2 live QA: tool list showed `run_workflow`, `inspect_workflow`, `update_workflow`, `send_message`, `save_workflow_definition` and no `invoke_sub_agent`) A live PA session with `chat.enableWorkflows: true` shows `run_workflow` via the observable from Probe C (run in a throwaway session; the real workflow run belongs to Phase 2)
+- [x] (met by the Phase 2 probe on a second kiro-cli process, not in a PA session, to avoid editing the user's real cli.json: a session created without the workflows keys listed `invoke_sub_agent` and none of the workflow tools; the gate-off and `false` shapes are unit-tested) A live PA session with `chat.enableWorkflows: false` does NOT show `run_workflow`
+- [x] (all recorded in Phase 2, including "not determined" for Probe A and the unmeasured resumed-session tool inventory) `docs/KNOWLEDGE.md` has the settings mapping table with probe results (toolSearch placement, `session/load` behavior, Probe C observable)
 - [x] Tests live in the existing `tests/test_web.py` (no new test file). They cover `_build_session_settings()` for ≥3 `cli.json` shapes (workflows `true`, `false`/absent, string `"false"`) and `_load_cli_settings_dict()` for a missing file, a malformed file and a list-valued file. Name the functions `test_build_session_settings_*` and `test_load_cli_settings_dict_*` so `-k "build_session_settings or load_cli_settings_dict"` selects exactly them.
 - [x] `_WORKFLOWS_FORWARD_ENABLED = False` in Phase 1, and a test asserts the settings block has no `workflows`/`goal` key while it is `False`. Consequently the two live `run_workflow` criteria above cannot be met in Phase 1: tick them in Phase 2 after the constant flips to `True`, and mark them `deferred to Phase 2` here.
 
@@ -310,8 +310,9 @@ In `_Supervisor.__init__` (`acp.py:3239`), add:
 # state is "running" or "waiting"; last_seen is time.monotonic() of the last
 # workflow frame that touched the child. Populated by _kiro/workflow/node_start;
 # removed on node_complete/run_complete and in close_session/_detach. Entries
-# older than _WORKFLOW_CHILD_STALE_S (module constant, 600 s) are ignored by
-# has_active_workflow and pruned lazily, so a lost run_complete (cancel, crash,
+# older than _WORKFLOW_CHILD_STALE_S (module constant, 600 s; a waiting child uses
+# _WORKFLOW_WAITING_STALE_S, 6 h) are ignored by the pure liveness reads (never
+# pruned: tracking is kept so a late node_complete still resolves its row), so a lost run_complete (cancel, crash,
 # dropped frame) cannot pin a session to Working forever.
 self._workflow_children: dict[str, dict[str, tuple[str, float]]] = {}
 ```
@@ -494,21 +495,27 @@ The exact display behaviour (what, if anything, is rendered from the decoded pro
 > **Rejected**: bare `except Exception: pass` — `_on_workflow_notification` dispatches to state-mutating sub-handlers; an exception mid-mutation leaves dicts partially updated and produces no diagnostic output. **Use instead**: `log.debug(...)` to preserve the "never drop the chunk" guarantee while making failures visible in `orchestrator.log`.
 
 **Exit criteria**:
-- [ ] Grep `acp.py` for `_kiro/workflow/`: at minimum `_on_workflow_notification`, `_on_workflow_node_start`, `_on_workflow_node_done`, `_on_workflow_run_done` exist
-- [ ] `_workflow_children` dict initialized in `__init__` and cleared in `close_session`/`_detach`
-- [ ] A PA session that dispatches a multi-step workflow (requires Phase 1 to be live) shows crew panel entries for each running step
-- [ ] Clicking a crew entry for a workflow step opens the step's transcript in the sub-panel (requires `subagent_sessions[childSessionId]` to be populated)
-- [ ] Probe from Step 2 done: outer-`sessionId` meaning, `node_complete`/`run_complete` failure field, loop/branch child-id behaviour, run_complete-on-cancel recorded in `docs/KNOWLEDGE.md`; the parent-resolution ladder written into Section 9
-- [ ] `_WORKFLOWS_FORWARD_ENABLED` flipped to `True` in the same commit that adds the handlers; the two deferred Phase 1 live `run_workflow` criteria (present with `true`, absent with `false`) are ticked here
-- [ ] A live PA session with `chat.enableWorkflows: true` dispatches a real workflow via `run_workflow` (the Phase 1 live check is only the tool-inventory observable)
-- [ ] `tests/test_web.py` tests (existing file; names containing `workflow` so `-k workflow` selects them): `node_start` populates `crews` and `subagent_sessions`; outer id is a child id and outer id is the parent id (both resolve); unknown parent id returns without mutation; duplicate `node_start` is idempotent and does not re-open a done step; `node_paused` keeps the child as `waiting` with `stoppedAt` unset; `node_complete` for an unregistered child is ignored; a workflow run after an earlier `invoke_sub_agent` fan-out still emits its entries; `close_session` and `_detach` clear `_workflow_children`; turn-end with `cancelled`/`error` clears it and a normal turn end does not; `_sweepable` refuses a session with active children; a `workflow-progress` chunk leaves `crews`/`_workflow_children` untouched
-- [ ] `node tests/acp_page.test.mjs` passes, with a case rendering a workflow crew row (`status: "waiting"` included) in `acp.html` and, if mirrored, `index.html`
-- [ ] `docs/KNOWLEDGE.md` has new `_kiro/workflow/*` notification family section (10 methods, payload shapes, PA handlers vs. stubs, `workflow-progress` chunk path)
-- [ ] `memory/MEMORY.md` has new `_workflow_children` lifecycle entry (populated by `node_start`; cleared by `node_complete`/`run_complete`/`close_session`/`_detach`/cancelled-turn end/staleness bound; distinct from `subagent_sessions` which persists turn-end for click-to-view routing)
-- [ ] `plans/ROADMAP.md` workflow entries updated for Phase 2
-- [ ] (deferred from Phase 1) Update `test_build_session_settings_workflows_keys_absent_while_gated_off` (asserts `_WORKFLOWS_FORWARD_ENABLED is False`) in the same commit that flips the constant; it fails by design once the gate is on
+- [x] Grep `acp.py` for `_kiro/workflow/`: at minimum `_on_workflow_notification`, `_on_workflow_node_start`, `_on_workflow_node_done`, `_on_workflow_run_done` exist
+- [x] `_workflow_children` dict initialized in `__init__` and cleared in `close_session`/`_detach`
+- [x] A PA session that dispatches a multi-step workflow (requires Phase 1 to be live) shows crew panel entries for each running step
+- [x] Clicking a crew entry for a workflow step opens the step's transcript in the sub-panel (requires `subagent_sessions[childSessionId]` to be populated)
+- [x] Probe from Step 2 done: outer-`sessionId` meaning, `node_complete`/`run_complete` failure field, loop/branch child-id behaviour, run_complete-on-cancel recorded in `docs/KNOWLEDGE.md`; the parent-resolution ladder written into Section 9
+- [x] `_WORKFLOWS_FORWARD_ENABLED` flipped to `True` in the same commit that adds the handlers; the two deferred Phase 1 live `run_workflow` criteria (present with `true`, absent with `false`) are ticked here
+- [x] A live PA session with `chat.enableWorkflows: true` dispatches a real workflow via `run_workflow` (the Phase 1 live check is only the tool-inventory observable)
+- [x] `tests/test_web.py` tests (existing file; names containing `workflow` so `-k workflow` selects them): `node_start` populates `crews` and `subagent_sessions`; outer id is a child id and outer id is the parent id (both resolve); unknown parent id returns without mutation; duplicate `node_start` is idempotent and does not re-open a done step; `node_paused` keeps the child as `waiting` with `stoppedAt` unset; `node_complete` for an unregistered child is ignored; a workflow run after an earlier `invoke_sub_agent` fan-out still emits its entries; `close_session` and `_detach` clear `_workflow_children`; turn end clears nothing whatever the stopReason (Section 9 item 7; reworded 2026-10-08 from "cancelled/error clears it"); `_sweepable` refuses a session with active children; a `workflow-progress` chunk leaves `crews`/`_workflow_children` untouched
+- [x] `node tests/acp_page.test.mjs` passes, with a case rendering a workflow crew row (`status: "waiting"` included) in `acp.html` and, if mirrored, `index.html`
+- [x] `docs/KNOWLEDGE.md` has new `_kiro/workflow/*` notification family section (10 methods, payload shapes, PA handlers vs. stubs, `workflow-progress` chunk path)
+- [x] `memory/MEMORY.md` has new `_workflow_children` lifecycle entry (populated by `node_start`; cleared by `node_complete`/`run_complete`/crew-row eviction/`close_session`/`_detach` (the staleness bound only hides a child from the pure liveness reads; a sweeper-tick reap marks its stale row done and a child's own frames revive it); distinct from `subagent_sessions` which persists turn-end for click-to-view routing)
+- [x] `plans/ROADMAP.md` workflow entries updated for Phase 2
+- [x] (deferred from Phase 1) Update `test_build_session_settings_workflows_keys_absent_while_gated_off` (asserts `_WORKFLOWS_FORWARD_ENABLED is False`) in the same commit that flips the constant; it fails by design once the gate is on
 - [ ] (deferred from Phase 1) Probe A (does `toolSearch` in `session/new` settings have any observable effect) and the resumed-session effect: with the workflows probe session live, check the model's tool inventory with and without the `thinking`/`knowledge`/`codeIntelligence` block on `session/new` and on `session/load`; record in `docs/KNOWLEDGE.md` (user decision 2026-10-08: `session/load` keeps sending the block)
-- [ ] (deferred from Phase 1) Live check that a real PA `session/new` logs `ACP session/new sending settings` with the expected keys (covers Phase 1's QA step, which was not run separately to avoid an extra PowerAtlas restart)
+- [x] (deferred from Phase 1; done in live QA) Live check that a real PA `session/new` logs `ACP session/new sending settings` with the expected keys (covers Phase 1's QA step, which was not run separately to avoid an extra PowerAtlas restart)
+
+#### Implementation notes
+
+Implementation (2026-10-08, code: 73389d6; review fixes 30cee21, 9df51b1)
+
+Phase 2 is committed as `73389d6`, with review fixes in `30cee21` and a user-approved stale-row reap and revive pass in `9df51b1`; the pre-implementation probe is `d793f08` with the binding design corrections recorded in Section 9. In `src/power_atlas/acp.py`, `_on_notification` routes every `_kiro/workflow/*` frame first, before `_stamp_activity` and the SC-1 buffer, to `_on_workflow_notification`, which reads `params.parentSessionId` (the outer `sessionId` is absent on most frames), stamps activity on the parent and dispatches to `_on_workflow_node_start` (only the id-bearing second `node_start` creates a crew entry; containers never do; idempotent and terminal-sticky), `_on_workflow_node_done` (matched by `(parentSessionId, workflowId, nodeId)` through `_workflow_node_index`; `completed` is done, any other non-empty status is failed, an inferred rule) and `_on_workflow_run_done` (scoped to the frame's own `workflowId`). State lives in `_workflow_children` (parent to child to `(state, last_seen)`), the node index and a monotonic crew-order counter; liveness is read through pure functions (`_workflow_live`, `workflow_state`, `has_active_workflow`) with a 600 s bound (6 h for a waiting step) that only hides a child from liveness reads. Tracking is removed on `node_complete`, `run_complete`, crew-row eviction, `close_session` and `_detach`. A sweeper-tick `_workflow_reap` marks a stale row done ("no longer reporting", no error) and a child's own frames (`_workflow_touch`) revive it and reopen the row. Turn end clears nothing, whatever the stopReason (the probe shows cancel emits no `run_complete` and the child keeps running); the turn-end sweep and the cancel cascade skip fresh workflow children, `_active_fan_out_wave` is kept while a child is live, and `_sweepable` refuses a session with a live child. `workflow-progress` chunks are not decoded or rendered (replay-only; the unused decoder was deleted). `_WORKFLOWS_FORWARD_ENABLED` is now `True`. Crew panel audit: neither `acp.html` nor `index.html` needed a change (state comes from `done`/`error`, text from `action`; a waiting row renders as a working row labelled "waiting"). Tests: about 87 workflow tests in `tests/test_web.py` plus a crew-row case in `tests/acp_page.test.mjs`; `tests/test_web.py` 2870 passed with the 3 known pre-existing failures, `tests/test_data.py` 722 passed, node page test 1015 passed. Docs: `docs/KNOWLEDGE.md` (PA-side handlers, staleness model, unmeasured items), `memory/MEMORY.md` (`_workflow_children` lifecycle), `plans/ROADMAP.md` (workflow entries plus gaps: child permission requests answered cancelled, `_kiro/session/notify` unhandled, running workflow in a loaded session untracked, `_note_subagent_action` wave-map mismatch, `_workflow_touch` no age cap, wire `workflow-cancel`).
 
 ---
 
@@ -522,7 +529,7 @@ The exact display behaviour (what, if anything, is rendered from the decoded pro
 
 **Part A — ACP-held sessions**
 
-Expose a tri-state method on `_Supervisor` that ignores entries older than `_WORKFLOW_CHILD_STALE_S` (Phase 2 Step 1):
+Phase 2 shipped `_Supervisor.workflow_state(session_id, now=None)` (pure read, returns `"working"` / `"waiting"` / `None`; entries older than `_WORKFLOW_CHILD_STALE_S` (600 s) or, for a waiting child, `_WORKFLOW_WAITING_STALE_S` (6 h) are ignored) and `has_active_workflow`. Phase 3 wires them; do not re-implement. Original sketch:
 
 ```python
 def workflow_state(self, session_id: str) -> str | None:
@@ -530,7 +537,7 @@ def workflow_state(self, session_id: str) -> str | None:
     children remain, else None."""
 ```
 
-**Threading.** `_acp_status_for_held` runs in an `asyncio.to_thread` hop (listing routes, `overview.LiveDeps.acp_status_for_held`, and `api_session_availability`'s `_compute`), and `_supervisor.sessions` state is loop-owned and unlocked — the existing code snapshots `held` on the loop first. Follow the same pattern: on the loop, build `workflow_states = {sid: st for sid in held if (st := sup.workflow_state(sid))}` once per request and pass it into `_acp_status_for_held`, the `LiveDeps` closure and `_compute` as a parameter; do not call the supervisor from the worker thread. Plain dict snapshot is enough; no lock.
+**Threading.** `_acp_status_for_held` runs in an `asyncio.to_thread` hop (listing routes, `overview.LiveDeps.acp_status_for_held`, and `api_session_availability`'s `_compute`), and `_supervisor.sessions` state is loop-owned and unlocked — the existing code snapshots `held` on the loop first. Follow the same pattern: on the loop, build `workflow_states = {sid: st for sid in held if (st := sup.workflow_state(sid))}` once per request and pass it into `_acp_status_for_held`, the `LiveDeps` closure and `_compute` as a parameter; prefer not to call the supervisor from the worker thread (Phase 2's reads are pure and snapshot-based, so they would be safe, but the loop-side snapshot keeps one consistent view per request and matches how `held` is handled). Plain dict snapshot is enough; no lock. Staleness is time-based with no event, so the "reverts within one rail refresh" criterion holds only if the rail is polled: verify that in Phase 3.
 
 **Ordering.** Apply the workflow override **after** the existing verdict from `_resolved_session_status`, and only upgrade an idle verdict: `errored` (which `_resolved_session_status` deliberately preserves) and the parent's own permission-pending `waiting` must not be masked. Map: `workflow_states[sid] == "working"` and verdict idle → `working`; `"waiting"` and verdict idle → `waiting`.
 
@@ -564,7 +571,7 @@ Wire into the non-held branch of the status resolution in `web.py` (the function
 
 **Exit criteria**:
 - [ ] Probe result documented: does the parent's `messages.jsonl` mtime advance during workflow execution? Answer recorded in `docs/KNOWLEDGE.md`.
-- [ ] `_Supervisor.workflow_state(session_id)` exists and ignores entries older than `_WORKFLOW_CHILD_STALE_S`; an ACP-held idle parent shows Working in the rail while a child runs and Waiting when only waiting children remain (Part A)
+- [ ] (`_Supervisor.workflow_state` already exists from Phase 2 and ignores entries past their bound; this phase wires it) an ACP-held idle parent shows Working in the rail while a child runs and Waiting when only waiting children remain (Part A)
 - [ ] Both `_acp_status_for_held` (and the Overview `LiveDeps` path) and `api_session_availability` apply the override from a loop-side snapshot, after the existing verdict, upgrading only an idle verdict (an `errored` or permission-pending parent is not masked)
 - [ ] `active_workflow_children` exists in `data_kiro_v3.py`, uses per-child `session.json` mtime caching (bounded) and the live-window check, guards a `None` from `_find_v3_session_dir` (Part B; `n/a: probe shows parent stays live` if Step 1 says so)
 - [ ] After all children complete (or the staleness bound passes), the parent reverts to its own status within one rail refresh cycle (≤30s)
@@ -651,7 +658,7 @@ node tests/acp_page.test.mjs
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Dynamic `_meta.kiro.settings` | Complete (code: 26e66c0) | Live `run_workflow` checks, Probe C, Probe A and resumed-session probe deferred to Phase 2 |
-| 2 | Workflow notification handler and crew panel | Not started | Flips `_WORKFLOWS_FORWARD_ENABLED`; needs a PowerAtlas restart for its probe (granted) |
+| 2 | Workflow notification handler and crew panel | Complete (code: 73389d6; fixes 30cee21, 9df51b1, b240479), 2 items pending user decision | Live QA PASS; Probe A / resumed-session check hit the deferral cap; finished rows vanish at turn boundary (Low) |
 | 3 | Workflow liveness (Part A + Part B) | Not started | Part B independent of Phase 2 |
 
 ## 9) Implementation Divergences from Plan
@@ -669,6 +676,9 @@ node tests/acp_page.test.mjs
   9. **Probe C resolved**: the direct observable is asking the agent for its exact tool names (a workflows session lists `run_workflow`, `inspect_workflow`, `update_workflow`, `send_message`, `save_workflow_definition` and not `invoke_sub_agent`); `session/new` result `_meta.workflowsEnabled` is the cheap "setting honoured" check; the `available_commands_update` count (100 vs 96, difference `workflow-run/resume/status/cancel`) is only a proxy.
   10. Extra method outside the ten: `_kiro/session/notify` (`{sessionId: <parent>, callerSessionId: <child>, message, severity, sender: "step", workflowId, nodeId, agentName}`); leave it to its existing handling.
   Not measured: `loop_iteration`, `paused`, `node_paused`, `steps_queued`, `recipes_changed`, `watch_poll`, a real failed step, `session/load` of a cancelled run, `session/close` during a run. Their handlers stay as logged stubs with the same shape assumptions as the plan; the staleness bound covers the rest.
+- **Phase 2: turn end clears nothing (overrides Step 3 "Turn-end interaction").** The plan said a turn ending `cancelled`/`error` clears `_workflow_children`. The probe shows cancel emits no `run_complete` and the child keeps running, so no stopReason proves a child dead; turn end clears nothing and only the staleness bound hides a silent child from liveness reads.
+- **Phase 2: additions beyond the plan, each user-reviewed.** `_workflow_touch` (a child's own frames refresh its clock and revive it), the cancel-cascade and turn-end exemptions for live children, `_active_fan_out_wave` kept while a child is live, `_sweepable(has_active_workflow=...)`, a 6 h bound for waiting steps, a sweeper-tick reap that marks stale rows done with status `stale`, and a per-parent failure counter for the reap. `workflowId`-scoped `run_complete`, a monotonic crew-order counter and `node_paused`/repeat-`node_start` reopening of reaped rows also exist.
+- **Phase 2: Step 7 decoder removed.** The plan's display-only `workflow-progress` decode was implemented, found to have no consumer, and deleted; replay chunks pass through the existing transcript path unchanged.
 - **Phase 2: probe run without a PowerAtlas restart.** The plan said to read the frames from `orchestrator.log` after restarting PowerAtlas; the probe instead drove a second kiro-cli process and captured the raw JSON-RPC, which gives the full frames and avoids ending the user's running sessions. The live PowerAtlas check moves to the Phase 2 QA step.
 - **Phase 1: Probe B method.** The plan said to observe `available_commands_update`; the implementer used `_meta.workflowsEnabled` on the `session/new` result and the persisted `session.json` instead, which is more direct and reproducible.
 - **Phase 1: existing test expectation changed.** `test_new_session_params_include_meta` now expects the settings block (three default-on keys); source: the plan's Step 3 spec plus the user's key-drop decision.
@@ -765,6 +775,29 @@ Cycle 1: 6 Medium, 9 Low (0 High). Cycle 2: 3 Medium, 10 Low (0 High). Both revi
 | 14 | Low | Phase 2 must update the gated-off tripwire test when it flips the constant. | Fixed -- deferred criterion added to Phase 2. |
 
 Cycle-2 reviewer claim "c2s is not in the registry" (cycle 1) was wrong: `kp("c2s")` is in the 2.28.0 registry (25 `kp` keys, 24 off plus `semanticReview` on); docs corrected.
+
+### 2026-10-08 -- Implementation Review (after Phase 2, persona: Senior engineer, Reliability engineer, Architect)
+
+Implementation health: Yellow (no High in any cycle; 1 Escalated Low and 1 deferral-cap item await a user response, plus 5 Low proposed-accepts).
+Cycle 1 (3 personas): 0 High, 3 Medium, about 12 Low. Cycle 2 (3 personas, fresh): 0 High, 5 Medium, about 10 Low; all cycle-1 items verified fixed. The cycle cap was reached, so the user chose the post-cap actions (reap and revive: fix now; SC amendment: amend and track). A focused Reliability review of that new reap/revive code (commit `9df51b1`) found 1 Medium and 5 Low, fixed in `b240479`; that last commit was verified by the orchestrator's own test runs (workflow tests 95 passed, node page test 1018 passed) but not re-reviewed by a separate agent, to end the review loop. Live QA (`/qqa`, real PowerAtlas after a restart): PASS on all six claims. qvalidate `phase-count`: Phase 1 has 9 ticked, Phase 2 has 14 ticked, both pass.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | A stale-pruned child orphaned its crew row and a late completion was ignored (all three personas). | Fixed -- staleness is liveness-only; tracking kept until completion, eviction, close or detach (`30cee21`). |
+| 2 | Medium | The liveness read API mutated state on a read path and stated no thread contract. | Fixed -- `workflow_state` and `has_active_workflow` are pure snapshot reads (`30cee21`). |
+| 3 | Medium | A waiting step was judged dead after 10 minutes. | Fixed -- waiting uses a 6 h bound, a labelled judgement (`30cee21`). |
+| 4 | Medium | Stale rows kept saying working while the rail read idle; a silent child that resumed was not revived. | Fixed -- sweeper-tick reap plus revive on the child's own frames, user-approved (`9df51b1`). |
+| 5 | Medium | A reaped row rendered as plain "done" on both pages, hiding "no longer reporting". | Fixed -- reaped rows carry status `stale` and both templates show the action text (`b240479`). |
+| 6 | Medium | Exit criterion and Step 3 said turn end clears children on cancelled/error; code and probe say it clears nothing. | Fixed -- criterion reworded to Section 9 item 7; override recorded as a divergence. |
+| 7 | Medium | SC-6 said the parent reverts when children are "cancelled" but PowerAtlas cannot stop a workflow; waiting is unverifiable. | User: accepted -- amend SC-5/SC-6 and track workflow-cancel and notify wiring (user reply, post-cap prompt). |
+| 8 | Low | Unhashable `type` raised TypeError; no malformed-frame tests; dead progress-chunk decoder. | Fixed -- guarded with `_as_text`, parametrised test added, decoder deleted (`30cee21`). |
+| 9 | Low | Missing tests: cap-eviction hook, reopen paths, cancel-cascade window; sweeper reap not isolated per parent. | Fixed -- tests added and per-parent isolation with log-once failure handling (`9df51b1`, `b240479`). |
+| 10 | Low | Live QA: a finished step's row disappears at the turn boundary while the workflow still runs (header count drops). | Escalated -- exempt done workflow rows from turn-end eviction while the parent has live children; user decision needed. |
+| 11 | Low | Probe A and the resumed-session tool-inventory check, already deferred once from Phase 1, remain unmet. | Escalated -- second deferral violates the one-hop cap; convert to follow-up or accept; user decision needed. |
+| 12 | Low | `_workflow_touch` has no absolute age cap; index overwrite and orphan scoping unmeasured for loops; per-session child history never trimmed; unbounded JSON dump in the frame log. | Orchestrator: proposed-accept -- pending user decision |
+| 13 | Low | `_sweepable(has_active_workflow=False)` defaults to False, so a future caller that omits it fails open. | Orchestrator: proposed-accept -- pending user decision |
+
+Live QA detail (all PASS): settings log line with `thinking`, `knowledge`, `codeIntelligence`, `workflows`, `goal` enabled and keys plus bools only; the agent's tool list contains `run_workflow`, `inspect_workflow`, `update_workflow`, `send_message`, `save_workflow_definition` and not `invoke_sub_agent`; a two-step workflow showed "Orchestrating (1 agent)", then two rows, then done rows, with the prompt returning before the workflow ended and the rows finishing with no new prompt; clicking a row opened the step's transcript; `ACP workflow` INFO lines for every frame and no errors; no browser console errors; the dashboard loaded cleanly. The workflow ran about 4 s, so the elapsed timer was seen only at 0 s and 2 s.
 
 ## Harness Improvement Opportunities
 
