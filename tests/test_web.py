@@ -1103,6 +1103,19 @@ class TestCodexProviderSurface:
             for forbidden in real:
                 assert not Path(root).resolve().is_relative_to(forbidden.resolve()), root
 
+    def test_kiro_cli_settings_path_is_redirected_from_the_real_home(
+            self, isolated_config):
+        """Fails if `isolated_config` stopped redirecting kiro-cli's cli.json:
+        `session/new` and `session/load` build `_meta.kiro.settings` from it on
+        every call, so a test would read the developer's real terminal-UI
+        settings (261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 1)."""
+        from power_atlas import acp as acp_mod
+        path = Path(acp_mod.KIRO_CLI_SETTINGS_PATH)
+        real = Path.home() / ".kiro" / "settings" / "cli.json"
+        assert path.resolve() != real.resolve(), path
+        assert path.resolve().is_relative_to(isolated_config.resolve()), path
+        assert not path.exists(), path
+
     def test_provider_tables_know_codex(self):
         from power_atlas import web as web_mod
         assert web_mod.PROVIDER_COLORS["codex"] == "#ffffff"
