@@ -95,6 +95,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1846,6 +1847,25 @@ def _validate_images(raw) -> tuple[list[dict], str]:
         # put on the item travels to the agent.
         blocks.append({"type": "image", "mimeType": mime, "data": data})
     return blocks, ""
+
+
+def _clean_step_label(value) -> str:
+    """A workflow step's name made safe to put inside a card title.
+
+    Agent-authored text: whitespace (newlines included) collapses to single
+    spaces, every control, format (bidi override and isolate marks, zero-width
+    characters), private-use and unassigned character is dropped, square
+    brackets become parentheses so the name cannot close or fake the
+    ``[workflow step ...]`` prefix, and the result is clipped to 60 characters.
+    A non-string is ``""``.
+    """
+    if not isinstance(value, str):
+        return ""
+    kept = "".join(
+        "(" if ch == "[" else ")" if ch == "]" else ch
+        for ch in " ".join(value.split())
+        if not unicodedata.category(ch).startswith("C"))
+    return kept.strip()[:60].strip()
 
 
 def _as_text(value) -> str:
@@ -4749,6 +4769,41 @@ class _Supervisor:
         for key in [k for k, v in self._workflow_node_index.items()
                     if k[0] == parent_id and v == child_id]:
             self._workflow_node_index.pop(key, None)
+        if self._pending_permission:
+            self._cancel_step_permissions(
+                parent_id, child_id, "the workflow step is no longer tracked")
+
+    def _cancel_step_permissions(self, parent_id: str, child_id: str,
+                                 why: str) -> None:
+        """Cancel the requests routed from one workflow step. Loop-only.
+
+        A routed request is answerable only while its step is tracked: once
+        the tracking is dropped (completion, Stop, eviction) or the step is
+        reaped as no longer reporting, nothing is waiting for the answer. Each
+        entry is popped, announced (``permission_resolved``, so every tab
+        disables the card) and answered ``cancelled`` in a task. Never raises:
+        callers are state writers that must finish.
+        """
+        for opaque_id in [k for k, v in tuple(self._pending_permission.items())
+                          if v.get("session_id") == parent_id
+                          and v.get("workflow_child") == child_id]:
+            entry = self._pending_permission.pop(opaque_id, None)
+            if entry is None:
+                continue
+            try:
+                _emit(parent_id, envelope(
+                    "permission_resolved", {"requestId": opaque_id}, parent_id))
+            except Exception:
+                log.exception("ACP could not announce permission request %s as "
+                              "resolved; session=%s", opaque_id, parent_id)
+            coro = self._answer_permission_cancelled(entry["kiro_id"], why)
+            try:
+                _spawn_task(coro)
+            except Exception:
+                coro.close()
+                log.warning("ACP could not answer permission request id=%r "
+                            "as cancelled (%s): no event loop",
+                            entry["kiro_id"], why)
 
     def _workflow_touch_if_emptied(self, parent_id: str, was_tracked: bool) -> None:
         """Count the end of a parent's last tracked child as a use of the parent.
@@ -4979,11 +5034,13 @@ class _Supervisor:
 
         The name is the crew row's ``sessionName`` (the step's ``agentName``),
         else its ``role`` (the node path); with neither, just ``workflow
-        step``. Clipped, because the text is agent-authored.
+        step``. Agent-authored, so `_clean_step_label` clips and sanitises it
+        (the card's title is what a person approves on).
         """
         row = (self.crews.get(parent_id) or {}).get(child_id) or {}
-        name = _as_text(row.get("sessionName")).strip() or _as_text(row.get("role")).strip()
-        return f"workflow step {name[:60]}" if name else "workflow step"
+        name = (_clean_step_label(row.get("sessionName"))
+                or _clean_step_label(row.get("role")))
+        return f"workflow step {name}" if name else "workflow step"
 
     def _workflow_touch(self, child_id: str, now: float | None = None) -> None:
         """Refresh a tracked child's staleness clock on a frame from the child.
@@ -5171,6 +5228,9 @@ class _Supervisor:
                     continue
                 self._workflow_mark_reaped(entry)
                 reaped.append(child_id)
+                if self._pending_permission:
+                    self._cancel_step_permissions(
+                        parent_id, child_id, "the workflow step stopped reporting")
                 log.info("ACP workflow step %s of %s reaped: %s, unseen %.0fs",
                          child_id, parent_id, state, now - seen)
         finally:
@@ -6670,8 +6730,13 @@ class _Supervisor:
             "kiro_id": request_id,
         }
         title = _as_text(tool_call.get("title"))
+        # The desktop toast is clamped to 200 characters, so its prefix is
+        # short and fixed: a long step name must not push the dangerous part
+        # of the title out of the toast.
+        toast_title = title
         if step_id is not None:
             self._pending_permission[opaque_id]["workflow_child"] = step_id
+            toast_title = f"[workflow step] {title}"
             title = f"[{self._workflow_step_label(owner_id, step_id)}] {title}"
             log.info("ACP: session/request_permission from workflow step %s "
                      "routed to parent %s (id=%r)", step_id, owner_id, request_id)
@@ -6731,7 +6796,17 @@ class _Supervisor:
         # silence timeout cancels it, so "someone has the page open" is not
         # evidence anyone has seen it.
         _notify("permission_request", owner_id,
-                title[:MAX_PERMISSION_TITLE_CHARS])
+                toast_title[:MAX_PERMISSION_TITLE_CHARS])
+        if step_id is not None:
+            # A request is proof of life: a step waiting on a person must not
+            # be reaped at the running bound while the card is open. Guarded:
+            # the request is already stored and shown, so nothing here may
+            # raise out of the callback.
+            try:
+                self._workflow_touch(step_id)
+            except Exception:
+                log.exception("ACP: could not refresh workflow step %s after "
+                              "its permission request", step_id)
 
     async def _fulfill_token(self, request_id) -> None:
         """Fetch a fresh OIDC token and deliver it to the agent.
@@ -7062,7 +7137,19 @@ class _Supervisor:
         # they are attached, and answered `cancelled` at the end so the step is
         # not left blocked. Best effort: `_answer_permission_cancelled` never
         # raises, so a dead agent does not prevent the local cleanup below.
+        # The answers sit in a `finally`: the entries are already popped, so a
+        # fault in the cleanup must not leave the step blocked on a request
+        # nothing can answer any more.
         _closing_permissions = _pop_pending_permissions(session_id)
+        try:
+            self._release_session_locally(session_id)
+        finally:
+            for _entry in _closing_permissions:
+                await self._answer_permission_cancelled(
+                    _entry["kiro_id"], "the session was closed")
+
+    def _release_session_locally(self, session_id: str) -> None:
+        """The synchronous part of `close_session`: drop every local trace."""
         # No alive() check: no wire call is made, so a dead agent must not
         # prevent local cleanup. (F5 fix -- Phase 1 review.)
         self.sessions.pop(session_id, None)
@@ -7112,9 +7199,6 @@ class _Supervisor:
                 # silently, as before.
                 self._workflow_release_viewers(_orphan_id)
         log.info("ACP session closed: %s; %d live", session_id, len(self.sessions))
-        for _entry in _closing_permissions:
-            await self._answer_permission_cancelled(
-                _entry["kiro_id"], "the session was closed")
 
     def _publish_live(self) -> None:
         """Tell whoever is listening which sessions this agent holds.
@@ -8775,6 +8859,14 @@ async def _handle_cancel(conn, session_id):
         log.warning("ACP cancel refused: [not_subscribed] session=%s", session_id)
         return
     if session_id not in _supervisor.inflight:
+        # No turn to interrupt, but a request routed from a workflow step
+        # outlives the turn (the run goes on after the prompt returns), so Stop
+        # still cancels the session's pending requests. The pages offer Stop
+        # only while a turn is active; this is reached by a stale page or a
+        # raw frame. The workflow rows are left alone, as before.
+        for entry in _pop_pending_permissions(session_id):
+            await _supervisor._answer_permission_cancelled(
+                entry["kiro_id"], "the user stopped the session")
         log.info("ACP cancel: session=%s is not running a turn", session_id)
         return
     log.info("ACP cancel requested: session=%s", session_id)

