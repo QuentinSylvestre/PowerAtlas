@@ -12911,54 +12911,21 @@ class TestAcpWorkflowNotifications:
         self._complete(acp_mod, "wf-k7x", "step-one")
         assert "child-c7" not in sv.crews.get(self.P, {})
 
-    def test_workflow_reap_then_the_cancel_cascade_leaves_the_row_revivable(self, wf):
+    def test_workflow_reap_then_stop_settles_the_row_as_stopped_and_not_revivable(self, wf):
+        """Was "...leaves the row revivable". Changed by the user decision 2026-10-09 after live QA: Stop stalls the workflow
+        (Stop now drops every tracked child, so nothing can revive the row)."""
         acp_mod, sv = wf
         entry = self._reaped_child(acp_mod, sv)
-        conn = _acp_conn(acp_mod)
-        acp_mod._registry.attach(conn, self.P)
-        sv.inflight.add(self.P)
-
-        async def cancelled(self_, session_id):
-            return None
-
-        with patch.object(acp_mod._Supervisor, "cancel", cancelled):
-            asyncio.run(acp_mod._handle_cancel(conn, self.P))
-        assert entry["done"] is True and entry["reaped"] is True
+        assert entry["action"] == "no longer reporting"
+        self._cancel(acp_mod)
+        assert (entry["done"], entry["status"], entry["action"], entry["error"]) == (
+            True, "stale", "stopped", "")
+        assert "reaped" not in entry
         _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
             "sessionUpdate": "agent_thought_chunk",
             "content": {"type": "text", "text": "back"}}})
-        assert (entry["done"], entry["status"]) == (False, "working")
-        assert sv.workflow_state(self.P) == "working"
-
-    def test_workflow_cancel_cascade_closing_a_stale_tracked_row_keeps_it_revivable(self, wf):
-        """Review fix 3: a stale child's row closed by the cancel cascade carries
-        the reaped marker, so a later frame from the child reopens it and its
-        tracking survives. A FRESH child is still left running (exempt)."""
-        acp_mod, sv = wf
-        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")     # stale
-        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")     # fresh
-        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
-        conn = _acp_conn(acp_mod)
-        acp_mod._registry.attach(conn, self.P)
-        sv.inflight.add(self.P)
-
-        async def cancelled(self_, session_id):
-            return None
-
-        with patch.object(acp_mod._Supervisor, "cancel", cancelled):
-            asyncio.run(acp_mod._handle_cancel(conn, self.P))
-        stale_row, fresh_row = sv.crews[self.P]["child-c7"], sv.crews[self.P]["child-c8"]
-        assert (stale_row["done"], stale_row["reaped"], stale_row["status"]) == (
-            True, True, "stale")
-        assert stale_row["error"] == "" and fresh_row["done"] is False
-        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
-            "sessionUpdate": "agent_thought_chunk",
-            "content": {"type": "text", "text": "back"}}})
-        assert (stale_row["done"], stale_row["status"]) == (False, "working")
-        assert "child-c7" in sv._workflow_children[self.P]
-        # Without the marker the evict that follows would have dropped it.
-        acp_mod._evict_crew_children(self.P, keep_history=True, broadcast_empty=False)
-        assert "child-c7" in sv._workflow_children[self.P]
+        assert (entry["done"], entry["action"]) == (True, "stopped")
+        assert sv.workflow_state(self.P) is None
 
     def test_workflow_turn_end_closing_a_stale_tracked_row_marks_it_reaped(self, wf):
         """Same marker on the turn-end path. Its eviction is patched out here so
@@ -13354,23 +13321,20 @@ class TestAcpWorkflowNotifications:
         assert any("finalising stale workflow step child-c7" in r.getMessage()
                    for r in caplog.records if r.levelno == logging.INFO)
 
-    def test_workflow_user_cancel_does_not_mark_a_live_child_done(self, wf):
+    def test_workflow_user_cancel_marks_a_live_child_stopped_and_drops_its_tracking(self, wf):
+        """Was "...does_not_mark_a_live_child_done" (the old exemption). Changed
+        by the user decision 2026-10-09 after live QA: Stop stalls the workflow."""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         sv.crews[self.P]["legacy-1"] = self._legacy_entry(order=9)
-        conn = _acp_conn(acp_mod)
-        acp_mod._registry.attach(conn, self.P)
-        sv.inflight.add(self.P)
-
-        async def cancelled(self_, session_id):
-            return None
-
-        with patch.object(acp_mod._Supervisor, "cancel", cancelled):
-            asyncio.run(acp_mod._handle_cancel(conn, self.P))
-        assert sv.crews[self.P]["legacy-1"]["done"] is True
+        self._cancel(acp_mod)
+        legacy = sv.crews[self.P]["legacy-1"]
+        assert legacy["done"] is True and legacy["stoppedAt"] is not None
+        # Legacy sub-agent behaviour is unchanged: done and stamped, nothing else.
+        assert (legacy["status"], legacy["action"], legacy["error"]) == ("working", "", "")
         entry = sv.crews[self.P]["child-c7"]
-        assert entry["done"] is False and entry["stoppedAt"] is None
-        assert sv.workflow_state(self.P) == "working"
+        assert entry["done"] is True and isinstance(entry["stoppedAt"], float)
+        assert sv.workflow_state(self.P) is None
 
     # -- the sweeper --------------------------------------------------------
 
@@ -13599,45 +13563,154 @@ class TestAcpWorkflowNotifications:
         assert "wf-k7x" in warned[0] and "step-one" in warned[0] and "child-c7" in warned[0]
         assert sv.crews[self.P]["child-c7"]["done"] is True      # still finished
 
-    def _cancel(self, acp_mod):
+    def _cancel(self, acp_mod, session=None):
+        session = session or self.P
         conn = _acp_conn(acp_mod)
-        acp_mod._registry.attach(conn, self.P)
-        acp_mod._supervisor.inflight.add(self.P)
+        acp_mod._registry.attach(conn, session)
+        acp_mod._supervisor.inflight.add(session)
         _queued(conn)
 
         async def cancelled(self_, session_id):
             return None
 
         with patch.object(acp_mod._Supervisor, "cancel", cancelled):
-            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+            asyncio.run(acp_mod._handle_cancel(conn, session))
         return conn
 
-    def test_workflow_stop_with_live_steps_tells_the_tab_they_keep_going(self, wf):
-        """C7. `agent_error` renders as an inline transcript row in both pages
-        with no other side effect, so it carries the notice with no client
-        change. Broadcast only: a reload must not replay it."""
+    NOTICE_PARTS = ("Stop ended this turn and the workflow",
+                    "may finish its current work",
+                    "the workflow will not continue")
+
+    def _stop_outcome(self, conn):
+        frames = _queued(conn)
+        subs = [f["payload"]["subagents"] for f in frames if f["type"] == "subagents"]
+        notes = [f for f in frames if f["type"] == "agent_error"]
+        return subs, notes
+
+    def test_workflow_stop_ends_a_running_step_in_the_emitted_payload(self, wf):
+        """user decision 2026-10-09 after live QA: Stop stalls the workflow. Expected from the
+        decision: the row reads done with the action text "stopped" (status
+        "stale" so the pages' doneText shows it), no error string, tracking and
+        index gone, liveness None at once, exactly one frame and one notice."""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv.crews[self.P]["legacy-1"] = self._legacy_entry(order=9)
         conn = self._cancel(acp_mod)
-        notes = [f for f in _queued(conn) if f["type"] == "agent_error"]
-        assert len(notes) == 1
-        assert notes[0]["sessionId"] == self.P
+        subs, notes = self._stop_outcome(conn)
+        assert len(subs) == 1
+        rows = {e["sessionId"]: e for e in subs[0]}
+        row = rows["child-c7"]
+        assert (row["done"], row["status"], row["action"], row["error"]) == (
+            True, "stale", "stopped", "")
+        assert isinstance(row["stoppedAt"], float)
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        assert sv.workflow_state(self.P) is None and not sv.has_active_workflow(self.P)
+        # Kept for click-to-view and the later orphan release.
+        assert "child-c7" in sv.subagent_sessions and "child-c7" in sv.subagent_history
+        assert "child-c7" in sv._workflow_child_meta
+        assert len(notes) == 1 and notes[0]["sessionId"] == self.P
+        message = notes[0]["payload"]["message"]
         assert notes[0]["payload"]["errorType"] == ""
-        assert "Stop ended this turn" in notes[0]["payload"]["message"]
-        assert "workflow steps keep going" in notes[0]["payload"]["message"]
+        for part in self.NOTICE_PARTS:
+            assert part in message
+        assert "keep going" not in message
+        # Broadcast only: a reload must not replay it.
         assert [f for f in sv.history[self.P].events() if f["type"] == "agent_error"] == []
 
-    def test_workflow_stop_says_nothing_when_no_step_is_live(self, wf):
+    def test_workflow_stop_ends_a_waiting_step(self, wf):
         acp_mod, sv = wf
-        # No workflow at all.
-        conn = self._cancel(acp_mod)
-        assert [f for f in _queued(conn) if f["type"] == "agent_error"] == []
-        sv.inflight.discard(self.P)
-        # A tracked child past its bound is not live either.
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
-        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 601)
+        self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
+        assert sv.crews[self.P]["child-c7"]["stoppedAt"] is None     # waiting: timer runs
         conn = self._cancel(acp_mod)
-        assert [f for f in _queued(conn) if f["type"] == "agent_error"] == []
+        subs, notes = self._stop_outcome(conn)
+        row = subs[0][0]
+        assert (row["done"], row["status"], row["action"], row["error"]) == (
+            True, "stale", "stopped", "")
+        assert isinstance(row["stoppedAt"], float)
+        assert sv._workflow_children == {} and sv.workflow_state(self.P) is None
+        assert len(notes) == 1
+
+    def test_workflow_stop_ends_a_stale_step_too(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 700)
+        assert not sv.has_active_workflow(self.P)                    # stale, not live
+        conn = self._cancel(acp_mod)
+        subs, notes = self._stop_outcome(conn)
+        row = subs[0][0]
+        assert (row["done"], row["status"], row["action"], row["error"]) == (
+            True, "stale", "stopped", "")
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        assert "reaped" not in sv.crews[self.P]["child-c7"]
+        assert len(notes) == 1
+
+    def test_workflow_stop_touches_only_the_cancelled_parents_children(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
+                   nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
+                   sessionId="child-c3")
+        other = self._watch(acp_mod, self.P2)
+        self._cancel(acp_mod)                                        # cancels P only
+        assert list(sv._workflow_children) == [self.P2]
+        assert list(sv._workflow_node_index) == [(self.P2, "wf-q2m", "step-one")]
+        row = sv.crews[self.P2]["child-c3"]
+        assert (row["done"], row["status"], row["action"]) == (False, "working", "running")
+        assert sv.workflow_state(self.P2) == "working"
+        assert _queued(other) == []                                  # no frame, no notice
+
+    def test_workflow_stop_without_workflow_children_changes_nothing_and_says_nothing(self, wf):
+        acp_mod, sv = wf
+        # No crew at all: no frame and no notice.
+        conn = self._cancel(acp_mod)
+        assert self._stop_outcome(conn) == ([], [])
+        sv.inflight.discard(self.P)
+        # A legacy crew only: the old cascade (one frame), still no notice.
+        sv.crews[self.P] = {"legacy-1": self._legacy_entry(order=0)}
+        sv.subagent_sessions["legacy-1"] = {"parent": self.P}
+        conn = self._cancel(acp_mod)
+        subs, notes = self._stop_outcome(conn)
+        assert len(subs) == 1 and subs[0][0]["done"] is True and notes == []
+
+    def test_workflow_late_frames_for_a_stopped_child_are_ignored(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._cancel(acp_mod)
+        self._stop_outcome(conn)
+        row = sv.crews[self.P]["child-c7"]
+        stopped_at = row["stoppedAt"]
+        # The step's own late completion, the run's completion, the step's own
+        # transcript traffic and a repeated start: none revives or rewrites it.
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed")
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "still here"}}})
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        assert (row["done"], row["status"], row["action"], row["error"]) == (
+            True, "stale", "stopped", "")
+        assert row["stoppedAt"] == stopped_at
+        assert sv._workflow_children == {} and sv._workflow_node_index == {}
+        assert sv.workflow_state(self.P) is None
+        assert [f for f in _queued(conn) if f["type"] == "subagents"] == []
+
+    def test_workflow_parent_is_sweepable_after_stop(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        meta = sv.sessions[self.P]
+        meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
+        now = time.monotonic()
+        # Positive control: the live step is what blocks the sweep.
+        assert acp_mod._sweepable(self.P, meta, now,
+                                  has_active_workflow=sv.has_active_workflow(self.P)) is False
+        self._cancel(acp_mod)
+        sv.inflight.discard(self.P)
+        acp_mod._registry.detach(next(iter(acp_mod._registry.subscribers[self.P])))
+        meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
+        assert acp_mod._sweepable(self.P, meta, time.monotonic(),
+                                  has_active_workflow=sv.has_active_workflow(self.P)) is True
 
     # -- workflow-progress chunks -------------------------------------------
 

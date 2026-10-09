@@ -4803,8 +4803,10 @@ class _Supervisor:
         status). The internal ``reaped`` marker is what lets a later frame from
         the child reopen the row (``_workflow_touch``) and a late
         ``node_complete``/``run_complete`` settle it; it is never sent on the
-        wire. Used by the sweeper reap, the cancel cascade and the turn-end
-        sweep for a child that is still tracked but past its bound.
+        wire. Used by the sweeper reap and the turn-end sweep for a child that
+        is still tracked but past its bound. (A user Stop does not use it:
+        ``_workflow_stop_children`` closes the row as "stopped" and drops the
+        tracking.)
         """
         entry["done"] = True
         entry["reaped"] = True
@@ -4946,6 +4948,41 @@ class _Supervisor:
         entry["stoppedAt"] = time.time()
         if terminal == "failed":
             entry["error"] = error
+
+    def _workflow_stop_children(self, parent_id: str) -> list[str]:
+        """End a parent's tracked workflow children after a user Stop.
+
+        User decision 2026-10-09 after live QA: Stop stalls the workflow (no
+        later step starts, no ``run_complete`` follows), so PowerAtlas treats
+        it as ended. Every tracked child, fresh or stale, gets its row closed
+        as stopped (done, status ``stale`` so the pages' ``doneText`` shows the
+        action text "stopped", no error, the ``reaped`` marker removed) and its
+        tracking and node-index entries dropped: the liveness reads answer
+        ``None`` at once, and a later ``node_complete``, ``run_complete`` or
+        frame from the child finds no tracked child and changes nothing.
+        ``subagent_sessions``, ``subagent_history`` and ``_workflow_child_meta``
+        stay for click-to-view and the later orphan release. The step's own
+        process is not stopped (``workflow-cancel`` is not wired). Returns the
+        ids it dropped; the caller emits the frame. Loop-only (it writes).
+        """
+        kids = tuple(self._workflow_children.get(parent_id, {}))
+        if not kids:
+            return []
+        crew = self.crews.get(parent_id) or {}
+        now = time.time()
+        for child_id in kids:
+            entry = crew.get(child_id)
+            if entry is not None and (not entry["done"] or entry.get("reaped")):
+                entry.pop("reaped", None)
+                entry["done"] = True
+                entry["status"] = "stale"
+                entry["action"] = "stopped"
+                if not entry.get("stoppedAt"):
+                    entry["stoppedAt"] = now
+            self._workflow_drop_child(parent_id, child_id)
+        log.info("ACP workflow stopped by the user: %d step(s) of %s no longer "
+                 "tracked", len(kids), parent_id)
+        return list(kids)
 
     def _workflow_reap(self, now: float | None = None) -> list[str]:
         """Mark the crew row of every stale, still-open workflow child done.
@@ -7562,8 +7599,7 @@ def _deliver_load(conn: _Connection, waiters: list[_Connection],
         subscribe_fn(target, session_id)
 
 
-def _mark_crew_done(crew: dict, now: float, exempt: frozenset = frozenset(),
-                    stale: frozenset = frozenset()) -> bool:
+def _mark_crew_done(crew: dict, now: float) -> bool:
     """Mark every non-done crew entry done and stamp ``stoppedAt``.
 
     Used by the cancel cascade in ``_handle_cancel`` to finalize the whole
@@ -7572,24 +7608,15 @@ def _mark_crew_done(crew: dict, now: float, exempt: frozenset = frozenset(),
     this mirrors: set ``stoppedAt`` to *now* only when transitioning to
     ``done=True`` for the first time and it was not already set.
 
-    *stale* holds tracked workflow children past their staleness bound: their
-    rows are closed with ``_Supervisor._workflow_mark_reaped`` (no verdict,
-    revivable) instead of a plain done.
-
-    *exempt* holds the child ids to leave running: live workflow children.
-    Cancelling the parent's turn does not stop a workflow (measured: no
-    ``run_complete`` follows and the child keeps running), so marking them
-    done would show a finished row for a step that is still working.
+    Tracked workflow children are closed first by
+    ``_Supervisor._workflow_stop_children`` (status ``stale``, action
+    "stopped"), so by the time this runs their rows are already done.
 
     Returns ``True`` if any entry was changed, ``False`` otherwise.
     """
     changed = False
     for child_id, entry in crew.items():
-        if child_id in exempt:
-            continue
         if not entry["done"]:
-            if child_id in stale:
-                _Supervisor._workflow_mark_reaped(entry)
             entry["done"] = True
             if not entry.get("stoppedAt"):
                 entry["stoppedAt"] = now
@@ -8531,26 +8558,31 @@ async def _handle_cancel(conn, session_id):
     for entry in _pop_pending_permissions(session_id):
         await _supervisor._answer_permission_cancelled(
             entry["kiro_id"], "the user stopped the turn")
+    # Stop ends the workflow in PowerAtlas's view (user decision 2026-10-09
+    # after live QA: a workflow stalls after Stop, no later step starts and no
+    # `run_complete` follows). Every tracked workflow child, fresh or stale,
+    # gets a "stopped" row and loses its tracking; PowerAtlas cannot stop the
+    # step's process (`workflow-cancel` is not wired).
+    stopped = _supervisor._workflow_stop_children(session_id)
+    changed = bool(stopped)
     crew = _supervisor.crews.get(session_id)
     if crew:
-        now = time.time()
-        _live = frozenset(_supervisor._workflow_live(session_id))
-        _stale = frozenset(_supervisor._workflow_children.get(session_id, {})) - _live
-        if _mark_crew_done(crew, now, _live, _stale):
-            try:
-                _emit_subagents_frame(session_id, _supervisor.crews,
-                                      _supervisor._active_fan_out_wave)
-            except Exception:
-                log.exception("ACP cancel cascade: failed to emit subagents frame")
-    if _supervisor.has_active_workflow(session_id):
-        # Stop ends the turn but leaves live workflow steps running (it has no
-        # way to cancel them). Both pages render `agent_error` as an inline
-        # transcript row with no other side effect, so it is the existing frame
-        # that carries this note. Broadcast only: a transient notice, never
-        # recorded, so a reload does not replay it.
+        changed = _mark_crew_done(crew, time.time()) or changed
+    if changed:
+        try:
+            _emit_subagents_frame(session_id, _supervisor.crews,
+                                  _supervisor._active_fan_out_wave)
+        except Exception:
+            log.exception("ACP cancel cascade: failed to emit subagents frame")
+    if stopped:
+        # Both pages render `agent_error` as an inline transcript row with no
+        # other side effect, so it is the existing frame that carries this
+        # note. Broadcast only: a transient notice, never recorded, so a
+        # reload does not replay it.
         _registry.broadcast(session_id, envelope("agent_error", {
-            "message": "Stop ended this turn. The running workflow steps keep "
-                       "going until they finish.",
+            "message": "Stop ended this turn and the workflow. A step that was "
+                       "already running may finish its current work, but the "
+                       "workflow will not continue.",
             "errorType": "",
         }, session_id))
 
