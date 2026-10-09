@@ -362,6 +362,17 @@ def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
         if ptype is None or ptype in _V3_SKIP_TYPES:
             continue
 
+        # A steering boundary is bookkeeping, not a person speaking: after a turn that
+        # consumed steering messages (every workflow's wake turn does), kiro-cli appends
+        # `type: user`, `source: steer`, `content: ""`, `_meta.kiro.steeringClearedIds`,
+        # id `steering_boundary_<uuid>` a few ms after `turn_end` (measured on 2.28.0,
+        # 2026-10-09; a plain turn writes none). Read as a user record it turned a finished
+        # turn back into WORKING until the next turn ended. Only an EMPTY steer record is
+        # skipped: a real prompt, a non-empty steer message and an empty `user` record from
+        # any other source still read WORKING.
+        if (ptype == "user" and payload.get("source") == "steer"
+                and isinstance(payload.get("content"), str) and not payload["content"].strip()):
+            continue
         if ptype in ("tool_call", "user"):
             last_meaningful = SemanticStatus.WORKING
             break

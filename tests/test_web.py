@@ -10396,6 +10396,85 @@ class TestClassifyKiroV3:
         result = _classify_from_path(f, "kiro-cli-v3")
         assert result == SemanticStatus.WAITING
 
+    # -- the trailing steering boundary (261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3)
+    #
+    # Measured on kiro-cli 2.28.0, 2026-10-09: after the wake turn of a workflow, 3 ms after the
+    # final `turn_end`, kiro-cli appends `type: user`, `source: steer`, `content: ""`, `_meta.kiro`
+    # `steeringClearedIds`, id `steering_boundary_<uuid>`. It is bookkeeping (the steering messages
+    # the turn consumed were cleared), not a person speaking, so it must not turn a finished
+    # turn back into WORKING. Expected values below come from that measurement and from the rule
+    # that a real prompt, a non-empty steer message and a tool call do read WORKING.
+
+    @staticmethod
+    def _rec(ptype, **payload):
+        return _json.dumps({"id": f"{ptype}-id", "timestamp": "2026-01-01T00:00:00.000Z",
+                            "payload": dict(type=ptype, **payload)})
+
+    def _boundary(self, content="", source="steer"):
+        return self._rec("user", source=source, content=content,
+                         _meta={"kiro": {"steeringClearedIds": ["notify-id"]}})
+
+    def _finished_turn(self):
+        """The measured end of a turn: assistant text, bookkeeping records, turn_end."""
+        return [self._rec("assistant", content="done"), self._rec("session_metadata"),
+                self._rec("usage_summary"), self._rec("session_event"), self._rec("turn_end")]
+
+    def test_trailing_empty_steer_boundary_after_turn_end_stays_waiting(self):
+        lines = self._finished_turn()
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+        assert classify_kiro_v3(lines + [self._boundary()]) == SemanticStatus.WAITING
+
+    def test_the_measured_workflow_wake_turn_tail_reads_waiting(self):
+        """Records 17-31 of a measured workflow parent, ids replaced."""
+        lines = [
+            self._rec("user", source="steer", content="x" * 245,
+                      _meta={"kiro": {"notification": {"kind": "workflow-progress"}}}),
+            self._rec("user", source="steer", content="x" * 2015,
+                      _meta={"kiro": {"notification": {"kind": "workflow-progress"}}}),
+            self._rec("user", content="x" * 212, _meta={"kiro": {"syntheticUserMessageReason": "wake"}}),
+            self._rec("turn_start"),
+            self._rec("user", content="x" * 768,
+                      _meta={"kiro": {"steeringConsumedIds": ["n"], "syntheticUserMessageReason": "wake"}}),
+            self._rec("assistant", content="x" * 153, _meta={"kiro": {"agentInitiated": True}}),
+            self._rec("assistant", content="x" * 70, _meta={"kiro": {"agentInitiated": True}}),
+        ] + self._finished_turn()[1:] + [self._boundary()]
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+
+    @pytest.mark.parametrize("content", ["", " \n"])
+    def test_an_empty_or_blank_steer_boundary_is_ignored(self, content):
+        assert classify_kiro_v3(self._finished_turn() + [self._boundary(content)]) == SemanticStatus.WAITING
+
+    def test_a_non_empty_steer_message_after_turn_end_reads_working(self):
+        lines = self._finished_turn() + [self._boundary("please also check the logs")]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_a_real_user_prompt_after_turn_end_reads_working(self):
+        lines = self._finished_turn() + [self._rec("user", content="next question")]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    @pytest.mark.parametrize("source", [None, "user", "queue"])
+    def test_an_empty_user_record_from_another_source_still_reads_working(self, source):
+        payload = {"content": ""} if source is None else {"content": "", "source": source}
+        lines = self._finished_turn() + [self._rec("user", **payload)]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_an_empty_steer_boundary_mid_turn_still_reads_working(self):
+        lines = [self._rec("user", content="go"), self._rec("turn_start"),
+                 self._rec("tool_call", toolName="read_file", args={}, status="completed", kind="read"),
+                 self._boundary()]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_a_tool_call_after_the_boundary_reads_working(self):
+        lines = self._finished_turn() + [
+            self._boundary(), self._rec("tool_call", toolName="x", args={}, status="running", kind="read")]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_a_boundary_with_nothing_before_it_classifies_as_none(self):
+        assert classify_kiro_v3([self._boundary()]) is None
+
+    def test_another_providers_empty_user_record_is_unchanged(self):
+        assert classify_claude([_json.dumps({"type": "user", "content": "", "source": "steer"})]) == SemanticStatus.WORKING
+
 
 class TestGetSemanticStatus:
     def setup_method(self):
