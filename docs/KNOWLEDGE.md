@@ -709,6 +709,97 @@ Child `session/update` frames carry the step identity in `_meta.kiro.workflow`:
 
 **Known disagreement between these clocks.** For a RUNNING child silent between 600 s and 1800 s the supervisor says not live (its row reads "no longer reporting" and the status overlay drops), while the disk path still reads the child as `in_progress` and keeps a terminal row's dot lit. `_sweepable` uses the supervisor's 600 s read, so a workflow that has outlived the idle TTL, with one step quiet for more than 10 minutes and no tab attached, can have its parent swept. The probability is low (the longest measured quiet step is 330 s) and it is recorded as a roadmap entry, not fixed.
 
+## Two ACP clients on one session — nothing locks, nothing syncs (measured 2026-10-09, kiro-cli 2.29.0)
+
+> A probe of whether a second client can attach to a session another client already holds. It matters
+> to any feature that would let PowerAtlas "join" a session a terminal or another PowerAtlas process
+> is driving. Nothing here is a to-do.
+
+Two separate `kiro-cli acp --agent-engine v3` processes (A and B), one throwaway session in a scratch
+folder. Both answered `getAccessToken` from `kiro-cli chat _ get-kas-token`. B called `session/load`
+on A's session id while A was alive and had already completed one turn.
+
+| Step | Observed |
+|---|---|
+| A: `session/new`, then a prompt answered `ALPHA` | The session folder held only `session.json` and `messages.jsonl` (11 lines after the turn). **No lock file.** |
+| B: `session/load` of the same id, A still alive | Succeeded with no error. B received 13 replayed `session/update` notifications: A's prompt and `ALPHA`. |
+| B: prompt answered `BETA` | **Zero** updates reached A. The agent does not broadcast a turn to other clients of the same session. |
+| A: "list every single-word reply you have given" | A answered `ALPHA` only. A's in-memory history does not contain B's turn. |
+| B: "how many user messages are in this conversation" | B answered `3` (its own view: the first prompt, `BETA`'s prompt and this one). A's third prompt was invisible to B. |
+
+**What this settles.**
+- `session/load` does not refuse a session that another client holds. Each process keeps its own
+  history in memory.
+- Both processes append to the same `messages.jsonl` (35 lines at the end). The file interleaves two
+  diverging branches, and whichever client prompts next continues from its own stale view. That is
+  silent corruption of the conversation, not a conflict error.
+- A second ACP client is therefore not a live mirror. Joining a session safely means one writer at a
+  time: the second client must be read-only (tail `messages.jsonl`), or the first must be closed or
+  idle first.
+- The `held` state PowerAtlas shows for a session is its own bookkeeping (the supervisor's session
+  table), not something kiro-cli enforces. Nothing on disk tells a terminal client that PowerAtlas
+  holds a session, or the reverse.
+
+**Not measured.** An interactive `kiro-cli` TUI holding a session while PowerAtlas loads it, and the
+reverse. The TUI is itself an ACP client, so the same result is expected, but it was not run. The
+probe's session folder was deleted afterwards; the script lived in the session scratchpad and is not
+kept. To repeat it: spawn two agents, `session/new` on A, `session/prompt` on A, `session/load` on B,
+then prompt each in turn and compare `messages.jsonl` line counts with what each client reports.
+
+## Claude Code channels — pushing input into a live terminal session (measured 2026-10-09, Claude Code 2.1.296)
+
+> A spike of whether PowerAtlas could send input into a Claude Code session that a person is sitting in,
+> using the documented *channels* feature (an MCP server that pushes events into a running session).
+> Channels are a research preview, so every claim here is version-bound. Nothing here is a to-do.
+> Source for the contract: `code.claude.com/docs/en/channels` and `/channels-reference`.
+
+**Setup that worked.** A stdlib-only Python MCP server over stdio declaring
+`experimental: {"claude/channel": {}, "claude/channel/permission": {}}` and `tools: {}`, plus a
+`reply` tool, plus a localhost HTTP door standing in for PowerAtlas. Claude was started interactively
+(in a pseudo-terminal) as
+`claude --dangerously-load-development-channels server:<name> --mcp-config <file> --permission-mode default`.
+Account: Claude Max, no organisation, so no admin gate applied. Whether a Team or Enterprise plan blocks
+it was not tested.
+
+| Step | Observed |
+|---|---|
+| Startup | Two dialogs. Folder trust defaults to **"No, exit"**; the development-channel warning defaults to option 1, "I am using this for local development". A blind Enter on the first one quits. A notice then reads "Channels (experimental) messages from server:… inject directly in this session". |
+| MCP handshake | Claude sent `initialize` with protocol `2025-11-25`, client name `claude-code`, capabilities `roots` and `elicitation` only. The channel server answered with the experimental capabilities above. |
+| Push an event (HTTP POST → `notifications/claude/channel`) | The idle terminal showed `← <server>: <text>` and Claude started a turn within about 3 s. No keystroke was needed. |
+| Permission prompt on the reply tool | The terminal opened its normal dialog **and** Claude sent `notifications/claude/channel/permission_request` to the channel with `request_id`, `tool_name` (`mcp__<server>__reply`), `description`, `input_preview`. |
+| Verdict (`notifications/claude/channel/permission`, `request_id` + `behavior: allow`) | The tool ran about 1 s later and the terminal dialog closed without a keystroke. The `reply` call reached the server with the `chat_id` taken from the event tag. |
+| Typing in the terminal afterwards | Worked on the same session: the typed prompt was answered normally. Terminal and channel share one conversation. |
+
+**What it leaves on disk (relevant to what PowerAtlas reads).**
+- `~/.claude/sessions/<pid>.json` showed `status: "waiting"` with `waitingFor: "permission prompt"` while the
+  dialog was open, and `idle` after the verdict. That is the existing sidecar contract, unchanged.
+- The transcript `.jsonl` records the pushed event as a `user` record with
+  `origin: {"kind": "channel", "server": "<name>"}` and content
+  `<channel source="<name>" chat_id="1" …>text</channel>`. A typed prompt in the same session is
+  `origin: {"kind": "human"}`. Today `data_claude.py` ignores `origin` and skips only `isMeta` and
+  command-tag messages (`_is_meta_or_command_message`), so a channel event would display as a user
+  message carrying the raw `<channel …>` tag, and could become a session's first prompt or title.
+  Not run against PowerAtlas; read from the code.
+
+**Side findings.**
+- A child session launched from inside another Claude Code session inherits `CLAUDE_CODE_CHILD_SESSION`,
+  which turns **transcript saving off** ("restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1"), so no
+  sidecar or transcript is written. It also inherits `CLAUDE_CODE_MESSAGING_SOCKET` and
+  `CLAUDE_CODE_MESSAGING_TOKEN`. The independent spike session had to be launched with the whole
+  inherited set removed. Any PowerAtlas code that spawns `claude` from a process started by Claude Code
+  needs the same scrub.
+- The independent session's sidecar carried a `messagingSocketPath` (a named pipe, `\\.\pipe\LOCAL\cc-msg-…`)
+  and a `bridgeSessionId`, with no Remote Control command run. A lead only; what the pipe accepts was not
+  probed.
+- The banner printed "server:<name> · no MCP server configured with that name" while the server was
+  running and delivering events. Cosmetic on 2.1.296 with `--mcp-config`; cause not isolated.
+
+**Not measured.** Answering the permission dialog in the terminal first and what the channel then sees.
+An event arriving while a turn is running. Sender gating (the spike's door trusted every local caller; a
+real one must gate it). Resuming a session (`--resume`) with the flag. How PowerAtlas would inject the
+flag into the launch command it builds. A Team or Enterprise plan. The development flag is ignored in
+`-p` mode and with the Agent SDK, per the docs, so this route exists only for an interactive session.
+
 ## ACP permission wire shapes (measured 2026-09-23, kiro-cli KAS 2.23.1)
 
 > Measured during Phase 7 of `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`, against the running PowerAtlas build and directly against `kiro-cli acp`. The first finding was a PowerAtlas defect and is fixed; the others are kiro-cli behaviour that PowerAtlas now relies on.
