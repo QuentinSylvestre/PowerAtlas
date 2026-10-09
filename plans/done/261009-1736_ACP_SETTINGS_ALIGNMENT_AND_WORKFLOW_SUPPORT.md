@@ -1,10 +1,28 @@
 # ACP Settings Alignment and Workflow Support
 
 > **Date**: 2026-10-08
-> **Status**: In Progress
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: Complete
+> **Last Updated**: 2026-10-09 17:40
 > **Scope**: Dynamic kiro-cli settings sync + full workflow support (Layers 1–3) + workflow liveness
+> **Memory relied on**: none
 > **Estimated effort**: ~1 week (3 phases, ~2–3 days each)
+
+---
+
+## Completion Summary
+
+Three phases implemented, reviewed by sub-agents and verified live in a real PowerAtlas (restart, real workflows, Manual permission mode switched on and restored to `yolo`, verified). Final suites: `tests/test_web.py` + `tests/test_data.py` + `tests/test_data_kiro_v3.py` 3955 passed, 3 failed (the known pre-existing `test_compact_command_fires_compaction_started`, `test_agent_subtask_completion_prefers_raw_output_over_streamed_bubble`, `test_agent_subtask_completion_with_no_prior_stream_emits_bare_chunk`); `node tests/acp_page.test.mjs` 1038 passed.
+
+- **Phase 1:** session settings are built from the user's `cli.json` at `session/new` and `session/load` (`thinking`, `knowledge`, `codeIntelligence`, `workflows`, `goal`).
+- **Phase 2:** the `_kiro/workflow/*` frames drive workflow steps into the crew panel on /acp and the dashboard, with run-level tracking for the header, row keeping, Stop ending the workflow in PowerAtlas's view, and workflow step approvals routed to the parent session.
+- **Phase 3:** a held parent reads working while a workflow runs (rail listing, availability API, Overview tile), a terminal row stays live during a silent step, and two `classify_kiro_v3` fixes (steering-boundary and notification steer records, and a `turn_end` ending a turn) so a finished parent reads waiting.
+
+### Acknowledged at archival
+
+- Accepted: Stop pressed mid-turn while a workflow step's approval card is pending was not exercised live (the prompt always returned before the card); covered by unit tests only.
+- Accepted (harness opportunity): `/qplan` review sub-agents cannot see TUI-only evidence a plan's probe depends on, so an infeasible 'mandatory probe' survived a full review; suggested change: have the `/qreview` spawn brief contract check that every probe in a plan names an evidence source the implementer can reach.
+- Known limits, accepted earlier by the user and recorded in `docs/KNOWLEDGE.md` and `plans/ROADMAP.md`: the Waiting half of SC-5 is unobservable for kiro v3 (the classifier never returns idle; amended 2026-10-08); the Part B live dot for terminal rows is unit-tested only (never checked with a real terminal); the outcome of Stop is condition-dependent and the lingering step process is not stopped (`workflow-cancel` is not wired); an unanswered routed approval is cancelled when its step goes stale (600 s); the windows of 1800 s and 6 h are judgements, not measurements.
+- Follow-up work (informational, from the plan's Follow-up Work section): deferred kiro settings `checkpoint`, `tangentMode`, `_subagent`, `_delegate`, `c2s`, `disableAutoCompaction` (each has a ROADMAP entry); Layer 4, per-step child ACP subscriptions for real-time per-step transcripts.
 
 ---
 
@@ -886,7 +904,7 @@ Overall implementation health: Green. Reliability review of `7ea84b0` (no High; 
 | 3 | Low | A late `run_complete` of an already-ended run wiped a newer live run's record. | Fixed -- an already-ended id clears nothing (`2469e38`). |
 | 4 | Low | Denial notices repeated per request, and in-turn Stop sent two stop-like notices and frames. | Fixed -- deduped per step, suppressed on the in-turn Stop path (`2469e38`). |
 | 5 | Low | Idle Stop could silently deny a parent's own approval during an agent-initiated wake turn. | Fixed -- the no-turn Stop is limited to routed step cards via a `workflowStep` frame marker (`2469e38`). |
-| 6 | Info | Stop with a pending step card while the prompt is still in flight was not exercised live. | Orchestrator: proposed-accept -- pending user decision |
+| 6 | Info | Stop with a pending step card while the prompt is still in flight was not exercised live. | User: accepted -- "Accept and note (Recommended)" at the /qclose cleanup scan (user reply, 2026-10-09); unit-tested only. |
 
 ## Harness Improvement Opportunities
 
