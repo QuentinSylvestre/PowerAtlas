@@ -1093,16 +1093,6 @@ def _load_cli_settings_dict() -> dict:
     return raw
 
 
-# Gate for the `workflows` and `goal` keys of the session/new settings block.
-# It was False while the `_kiro/workflow/*` handlers did not exist (plan
-# 261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT); Phase 2 flipped it in the
-# same commit that added `_Supervisor._on_workflow_notification`. With workflows
-# enabled and no handler, every workflow notification is logged and dropped, and
-# KAS suppresses `invoke_sub_agent`, so a build without the handlers must keep
-# this False. Read at call time by `_build_session_settings` so tests can flip it.
-_WORKFLOWS_FORWARD_ENABLED = True
-
-
 def _build_session_settings(cli_settings: dict) -> dict:
     """Construct ``_meta.kiro.settings`` for ``session/new`` from ``cli.json``.
 
@@ -1142,11 +1132,12 @@ def _build_session_settings(cli_settings: dict) -> dict:
 
     # `workflows` and `goal` both follow chat.enableWorkflows, which the
     # terminal UI leaves off when absent. `is True`, not bool(): the string
-    # "false" must not enable workflows.
-    if _WORKFLOWS_FORWARD_ENABLED:
-        workflows_on = cli_settings.get("chat.enableWorkflows") is True
-        settings["workflows"] = {"enabled": workflows_on}
-        settings["goal"] = {"enabled": workflows_on}
+    # "false" must not enable workflows. With workflows on, KAS suppresses
+    # `invoke_sub_agent`, so the `_kiro/workflow/*` handlers below are what the
+    # user's `chat.enableWorkflows` switch relies on.
+    workflows_on = cli_settings.get("chat.enableWorkflows") is True
+    settings["workflows"] = {"enabled": workflows_on}
+    settings["goal"] = {"enabled": workflows_on}
     return settings
 
 
@@ -3934,6 +3925,16 @@ class _Supervisor:
         self._workflow_node_index.clear()
         self._crew_order_next.clear()
         self._workflow_reap_failures.clear()
+        # Viewers of a workflow step's read-only view are told before its meta
+        # goes, as `_workflow_free_orphans` does. Legacy sub-agent viewers get
+        # nothing here, as before.
+        # Guarded: a fault here must not abandon the return below.
+        for _wf_child in tuple(self._workflow_child_meta):
+            try:
+                self._workflow_release_viewers(_wf_child)
+            except Exception:
+                log.exception("ACP: could not release the viewers of workflow "
+                              "step %s", _wf_child)
         self._workflow_child_meta.clear()
         return proc, job
 
@@ -4736,6 +4737,20 @@ class _Supervisor:
                     if k[0] == parent_id and v == child_id]:
             self._workflow_node_index.pop(key, None)
 
+    def _workflow_touch_if_emptied(self, parent_id: str, was_tracked: bool) -> None:
+        """Count the end of a parent's last tracked child as a use of the parent.
+
+        Workflow frames stamp only ``last_activity``, never ``last_used`` (a
+        chatty agent must not keep a session alive). A workflow longer than
+        ``ACP_IDLE_TTL_SECONDS`` with no tab attached therefore leaves the
+        parent already past the TTL, and the agent-initiated wake turn that
+        follows ``run_complete`` is not in ``inflight``: the next sweeper tick
+        would close the parent mid-turn. The completion that empties the
+        parent's tracked set is a finite event, so it restarts the clock once.
+        """
+        if was_tracked and parent_id not in self._workflow_children:
+            self.touch_used(parent_id)
+
     def _workflow_drop_parent(self, parent_id: str) -> None:
         """Forget everything workflow-related about one parent (it is gone)."""
         self._workflow_children.pop(parent_id, None)
@@ -4767,10 +4782,16 @@ class _Supervisor:
             self.subagent_sessions.pop(child_id, None)
             self.subagent_history.pop(child_id, None)
             _bubbles.pop(child_id, None)
-            frame = _workflow_released_frame(child_id)
-            for target in tuple(_registry.subscribers.get(child_id, ())):
-                target.send(frame)
-                _registry.detach(target)
+            self._workflow_release_viewers(child_id)
+
+    @staticmethod
+    def _workflow_release_viewers(child_id: str) -> None:
+        """Tell whoever watches a workflow step's read-only view that it is
+        released, and detach them. Loop-only (it detaches sockets)."""
+        frame = _workflow_released_frame(child_id)
+        for target in tuple(_registry.subscribers.get(child_id, ())):
+            target.send(frame)
+            _registry.detach(target)
 
     @staticmethod
     def _workflow_mark_reaped(entry: dict) -> None:
@@ -5124,9 +5145,17 @@ class _Supervisor:
                 if existing.get("reaped"):
                     self._workflow_reopen_row(existing, state)
                     reopened = True
-            log.info("ACP workflow node_start %r: child already %s; %s",
-                     node_id, "finished" if existing["done"] else "registered",
-                     "row reopened" if reopened else "unchanged")
+            if existing["done"] and not reopened:
+                # Terminal-sticky: a repeat never re-opens a finished step. A
+                # loop iteration that reuses a child id would land here, so the
+                # ignored frame is logged where it can be found.
+                log.warning("ACP workflow node_start %r (workflowId %r): child "
+                            "%s already finished; repeat ignored", node_id,
+                            workflow_id, child_id)
+            else:
+                log.info("ACP workflow node_start %r: child already %s; %s",
+                         node_id, "finished" if existing["done"] else "registered",
+                         "row reopened" if reopened else "unchanged")
             if reopened:
                 _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
             return
@@ -5207,7 +5236,9 @@ class _Supervisor:
             # Removal is unconditional, even when the crew entry is gone: the
             # turn-end sweep and `_evict_crew_children` can drop it while the
             # child is still tracked.
+            was_tracked = parent_id in self._workflow_children
             self._workflow_drop_child(parent_id, child_id)
+            self._workflow_touch_if_emptied(parent_id, was_tracked)
             if entry is not None and (not entry["done"] or entry.get("reaped")):
                 self._workflow_finish_row(
                     entry, terminal_status,
@@ -5245,12 +5276,14 @@ class _Supervisor:
                     if run_of(child) == workflow_id}
         crew = self.crews.get(parent_id) or {}
         changed = False
+        was_tracked = parent_id in self._workflow_children
         for child_id in children:
             entry = crew.get(child_id)
             self._workflow_drop_child(parent_id, child_id)
             if entry is not None and (not entry["done"] or entry.get("reaped")):
                 self._workflow_finish_row(entry, terminal, error)
                 changed = True
+        self._workflow_touch_if_emptied(parent_id, was_tracked)
         self._log_workflow_children(parent_id)
         if changed:
             _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
@@ -6364,6 +6397,17 @@ class _Supervisor:
                      and not isinstance(request_id, bool))
         if (not usable_id or not isinstance(session_id, str) or not session_id
                 or not options or session_id not in self.sessions):
+            if (isinstance(session_id, str) and session_id not in self.sessions
+                    and session_id in self.subagent_sessions):
+                # A workflow step asking for permission: only the parent is a
+                # registered session, so the request is refused below. Named so
+                # the log says why that step's tool call stopped.
+                _owner = self.subagent_sessions[session_id].get("parent")
+                log.warning(
+                    "ACP: session/request_permission from %s %s (parent %s), "
+                    "which is not a registered session — refusing (id=%r)",
+                    "workflow step" if session_id in self._workflow_child_meta
+                    else "sub-agent session", session_id, _owner, request_id)
             log.warning(
                 "ACP: session/request_permission missing sessionId, "
                 "usable options or a string/integer id, or names an "
@@ -6786,6 +6830,10 @@ class _Supervisor:
         self._active_fan_out_wave.pop(session_id, None)
         # A closed parent's later workflow frames are dropped by the
         # unknown-parent guard, so nothing could ever clear these afterwards.
+        # The ids are read first: the drop forgets which children were workflow
+        # steps, and the kept-history loop below tells their viewers.
+        _workflow_ids = {cid for cid, m in self._workflow_child_meta.items()
+                         if m["parent"] == session_id}
         self._workflow_drop_parent(session_id)
         _bubbles.pop(session_id, None)
         frame = _session_closed_frame(session_id)
@@ -6805,6 +6853,11 @@ class _Supervisor:
             self.subagent_sessions.pop(_orphan_id, None)
             self.subagent_history.pop(_orphan_id, None)
             _bubbles.pop(_orphan_id, None)
+            if _orphan_id in _workflow_ids:
+                # A kept-history workflow step: its viewers are told, as
+                # `_workflow_free_orphans` does. Legacy sub-agents are freed
+                # silently, as before.
+                self._workflow_release_viewers(_orphan_id)
         log.info("ACP session closed: %s; %d live", session_id, len(self.sessions))
 
     def _publish_live(self) -> None:
@@ -7570,13 +7623,14 @@ def _project_mcp_server(server: dict) -> dict:
 def _workflow_released_frame(session_id: str) -> dict:
     """The `session_closed` frame for a workflow step's read-only view.
 
-    The sub-agent panel renders `payload.message` as a note, so a message that
-    fits (the step's view, not "create a new session") needs no template change.
+    Sent whenever the view is released: at a new turn, at the per-session cap
+    mid-turn, when the parent is closed, or when the agent goes away. The
+    sub-agent panel renders `payload.message` as a note, so a message that fits
+    (the step's view, not "create a new session") needs no template change.
     """
     return envelope("session_closed", {
         "sessionId": session_id,
-        "message": "This workflow step's view was released when a new turn "
-                   "started. The step itself is unaffected.",
+        "message": "This workflow step's view was released.",
     }, session_id)
 
 
@@ -8488,6 +8542,17 @@ async def _handle_cancel(conn, session_id):
                                       _supervisor._active_fan_out_wave)
             except Exception:
                 log.exception("ACP cancel cascade: failed to emit subagents frame")
+    if _supervisor.has_active_workflow(session_id):
+        # Stop ends the turn but leaves live workflow steps running (it has no
+        # way to cancel them). Both pages render `agent_error` as an inline
+        # transcript row with no other side effect, so it is the existing frame
+        # that carries this note. Broadcast only: a transient notice, never
+        # recorded, so a reload does not replay it.
+        _registry.broadcast(session_id, envelope("agent_error", {
+            "message": "Stop ended this turn. The running workflow steps keep "
+                       "going until they finish.",
+            "errorType": "",
+        }, session_id))
 
 
 async def _handle_close(conn, session_id):
