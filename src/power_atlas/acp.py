@@ -8580,9 +8580,8 @@ async def _handle_cancel(conn, session_id):
         # note. Broadcast only: a transient notice, never recorded, so a
         # reload does not replay it.
         _registry.broadcast(session_id, envelope("agent_error", {
-            "message": "Stop ended this turn and the workflow. A step that was "
-                       "already running may finish its current work, but the "
-                       "workflow will not continue.",
+            "message": "Stop ended this turn. The workflow may not continue; a "
+                       "step that was already running may finish its current work.",
             "errorType": "",
         }, session_id))
 

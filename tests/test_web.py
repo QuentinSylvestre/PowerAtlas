@@ -10538,6 +10538,117 @@ class TestClassifyKiroV3:
             assert classify_kiro_v3(self._finished_turn() + [record]) == SemanticStatus.WORKING
 
 
+    # -- a turn_end ends the turn (user decision 2026-10-09; measured Stop/interrupt tails) ----------
+    #
+    # Measured on kiro-cli 2.28.0, 2026-10-09: a turn cut off by Stop while its last meaningful record
+    # is a `tool_call` ends `tool_call`, `tool_result` (content "This tool was interrupted before it
+    # reported..." for a shell command, "Workflow creation was canceled." for run_workflow creation),
+    # bookkeeping records, `turn_end`. The classifier used to skip `turn_end`, so such a session read
+    # WORKING until its next turn. A `turn_end` that is the newest meaningful record means the turn is
+    # over, whatever came before it; a record NEWER than it (a prompt, a tool call, a `turn_start`)
+    # means a new turn began.
+
+    @staticmethod
+    def _tail_end(*extra):
+        return [*extra, TestClassifyKiroV3._rec("session_metadata"), TestClassifyKiroV3._rec("usage_summary"),
+                TestClassifyKiroV3._rec("session_event"), TestClassifyKiroV3._rec("turn_end")]
+
+    def test_a_turn_cut_off_at_a_shell_command_reads_waiting(self):
+        lines = self._tail_end(
+            self._rec("user", content="run it", _meta={"kiro": {"userMessageTag": "t"}}),
+            self._rec("turn_start"),
+            self._rec("tool_call", toolName="execute_pwsh", args={}, status="completed", kind="execute"),
+            self._rec("tool_result", content="This tool was interrupted before it reported a result",
+                      success=True))
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+
+    def test_a_run_workflow_creation_cancelled_by_stop_reads_waiting(self):
+        lines = self._tail_end(
+            self._rec("user", content="run a workflow"), self._rec("turn_start"),
+            self._rec("assistant", content="I will run it"),
+            self._rec("tool_call", toolName="run_workflow", args={}, status="completed", kind="other"),
+            self._rec("tool_result", content="Workflow creation was canceled.", success=True))
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+
+    def test_notification_steers_after_a_tool_call_turn_end_still_read_waiting(self):
+        lines = self._tail_end(
+            self._rec("user", content="run a workflow"), self._rec("turn_start"),
+            self._rec("tool_call", toolName="run_workflow", args={}, status="completed", kind="other"),
+            self._rec("tool_result", content="Workflow started", success=True),
+        ) + [self._notification("workflow-progress", "{}"), self._notification("system-notification", "waited"),
+             self._boundary()]
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+
+    def test_a_turn_end_alone_reads_waiting(self):
+        assert classify_kiro_v3([self._rec("turn_end")]) == SemanticStatus.WAITING
+
+    def test_a_prompt_newer_than_the_turn_end_reads_working(self):
+        lines = self._tail_end(self._rec("tool_call", toolName="x", args={}, status="completed", kind="read"))
+        assert classify_kiro_v3(lines + [self._rec("user", content="next")]) == SemanticStatus.WORKING
+
+    def test_a_turn_start_newer_than_the_turn_end_reads_working(self):
+        lines = self._tail_end(self._rec("assistant", content="done"))
+        assert classify_kiro_v3(lines + [self._rec("turn_start")]) == SemanticStatus.WORKING
+
+    def test_a_tool_call_newer_than_the_turn_end_reads_working(self):
+        lines = self._tail_end(self._rec("assistant", content="done"))
+        lines.append(self._rec("tool_call", toolName="x", args={}, status="running", kind="read"))
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_a_tool_call_in_flight_with_no_turn_end_reads_working(self):
+        lines = [self._rec("user", content="go"), self._rec("turn_start"),
+                 self._rec("tool_call", toolName="x", args={}, status="running", kind="read")]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+        assert classify_kiro_v3([self._rec("tool_call", toolName="x", args={}, status="running", kind="read")]) \
+            == SemanticStatus.WORKING
+
+    def test_a_turn_ending_on_assistant_text_is_unchanged(self):
+        assert classify_kiro_v3(self._finished_turn()) == SemanticStatus.WAITING
+
+    def test_the_measured_ordinary_workflow_verdicts_record_by_record(self):
+        """Prompt turn, steps running, wake turn: WAITING while the parent is idle between turns,
+        WORKING during the wake turn, WAITING again after its turn_end (ids replaced)."""
+        wf = {"kiro": {"notification": {"kind": "workflow-progress"}}}
+        nt = {"kiro": {"notification": {"kind": "system-notification"}}}
+        records = [
+            (self._rec("user", content="run a workflow"), "working"),
+            (self._rec("turn_start"), "working"),
+            (self._rec("assistant", content="starting"), "waiting"),
+            (self._rec("tool_call", toolName="run_workflow", args={}, status="completed", kind="other"), "working"),
+            (self._rec("tool_result", content="Workflow started", success=True), "working"),
+            (self._rec("user", source="steer", content="{}", _meta=wf), "working"),
+            (self._rec("assistant", content="Workflow is running"), "waiting"),
+            (self._rec("turn_end"), "waiting"),
+            (self._rec("session_start", content="x" * 100), "waiting"),
+            (self._rec("user", source="steer", content="Step 1 complete.", _meta=nt), "waiting"),
+            (self._rec("user", source="steer", content="{}", _meta=wf), "waiting"),
+            (self._rec("user", content="A workflow you launched", _meta={"kiro": {"syntheticUserMessageReason": "w"}}), "working"),
+            (self._rec("turn_start"), "working"),
+            (self._rec("user", content="[WORKFLOW NOTIFICATION]", _meta={"kiro": {"steeringConsumedIds": ["n"]}}), "working"),
+            (self._rec("assistant", content="done", _meta={"kiro": {"agentInitiated": True}}), "waiting"),
+            (self._rec("turn_end"), "waiting"),
+            (self._boundary(), "waiting"),
+        ]
+        lines, got = [], []
+        for line, _expected in records:
+            lines.append(line)
+            verdict = classify_kiro_v3(lines)
+            got.append(verdict.value if verdict else None)
+        # The prompt-turn tool_call / tool_result / steer records read WORKING mid-turn (no turn_end yet).
+        assert got == [expected for _line, expected in records]
+
+    def test_a_failed_tool_result_pair_before_a_turn_end_is_errored_like_any_ended_turn(self):
+        """The existing ERRORED gate (two failures in the last five records and a non-WORKING verdict)
+        now also applies to a turn that ended on a tool call; one failure does not trigger it."""
+        failed = lambda: self._rec("tool_result", content="boom", success=False)  # noqa: E731
+        two = [self._rec("tool_call", toolName="x", args={}, status="failed", kind="read"), failed(), failed(),
+               self._rec("turn_end")]
+        assert classify_kiro_v3(two) == SemanticStatus.ERRORED
+        one = [self._rec("tool_call", toolName="x", args={}, status="failed", kind="read"), failed(),
+               self._rec("turn_end")]
+        assert classify_kiro_v3(one) == SemanticStatus.WAITING
+
+
 class TestGetSemanticStatus:
     def setup_method(self):
         """Clear cache between tests."""
@@ -13662,9 +13773,11 @@ class TestAcpWorkflowNotifications:
             asyncio.run(acp_mod._handle_cancel(conn, session))
         return conn
 
-    NOTICE_PARTS = ("Stop ended this turn and the workflow",
-                    "may finish its current work",
-                    "the workflow will not continue")
+    # Softened by user decision 2026-10-09: the Stop outcome is condition-dependent (one live run
+    # stalled, a second-process run completed all steps), so the notice does not promise either.
+    NOTICE_PARTS = ("Stop ended this turn.",
+                    "The workflow may not continue",
+                    "may finish its current work")
 
     def _stop_outcome(self, conn):
         frames = _queued(conn)

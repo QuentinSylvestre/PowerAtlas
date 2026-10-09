@@ -328,6 +328,8 @@ def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
     Classification logic:
     - tool_call or user → WORKING (agent is actively executing)
     - assistant → WAITING (agent finished, awaiting user)
+    - turn_end → WAITING (the turn is over, even if it was cut off at a tool_call);
+      turn_start → WORKING (a turn began)
     - tool_result with success==false → ERRORED (check recent lines for error pattern)
     - Skip: tool_result, usage_summary, session_metadata, steering_inclusion
     - Skip: a ``user`` record with ``source == "steer"`` and an empty or blank
@@ -409,9 +411,19 @@ def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
         if ptype == "sub_agent_complete":
             last_meaningful = SemanticStatus.WAITING
             break
-        # turn_start/turn_end are structural — skip
-        if ptype in ("turn_start", "turn_end"):
-            continue
+        # A turn_end that is the newest meaningful record means the turn is over, whatever
+        # came before it. It used to be skipped, so a turn cut off by Stop while its last
+        # meaningful record was a tool_call (tool_result "This tool was interrupted..." or
+        # "Workflow creation was canceled.", then turn_end; measured on 2.28.0, 2026-10-09)
+        # read WORKING until the next turn. A record NEWER than the turn_end (a prompt, a tool
+        # call, a turn_start) is met first when scanning backwards and means a new turn began.
+        # User decision 2026-10-09.
+        if ptype == "turn_end":
+            last_meaningful = SemanticStatus.WAITING
+            break
+        if ptype == "turn_start":
+            last_meaningful = SemanticStatus.WORKING
+            break
         # pending_interaction means waiting for user
         if ptype == "pending_interaction":
             last_meaningful = SemanticStatus.WAITING
