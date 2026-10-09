@@ -10475,6 +10475,22 @@ class TestClassifyKiroV3:
     def test_another_providers_empty_user_record_is_unchanged(self):
         assert classify_claude([_json.dumps({"type": "user", "content": "", "source": "steer"})]) == SemanticStatus.WORKING
 
+    @pytest.mark.parametrize("content", [None, [], [{"type": "text", "text": " "}]],
+                             ids=["none", "empty-list", "blank-text-block"])
+    def test_a_steer_boundary_with_non_string_content_is_not_skipped_and_reads_working(self, content):
+        """The rule is deliberately string-only: the measured boundary has `content: ""`, and a
+        list-shaped one has never been observed. Anything else fails open to the old reading
+        (WORKING) rather than guessing that it is bookkeeping. Revisit if a list-shaped boundary
+        is ever seen."""
+        lines = self._finished_turn() + [self._boundary(content)]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_a_real_prompt_before_a_trailing_boundary_still_counts(self):
+        """[turn_end, real user prompt, empty steer boundary]: the boundary is skipped and the
+        prompt before it is the last meaningful record."""
+        lines = [self._rec("turn_end"), self._rec("user", content="next question"), self._boundary()]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
 
 class TestGetSemanticStatus:
     def setup_method(self):

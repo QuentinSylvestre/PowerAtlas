@@ -323,6 +323,8 @@ def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
     - assistant → WAITING (agent finished, awaiting user)
     - tool_result with success==false → ERRORED (check recent lines for error pattern)
     - Skip: tool_result, usage_summary, session_metadata, steering_inclusion
+    - Skip: a ``user`` record with ``source == "steer"`` and an empty or blank
+      string ``content`` (the steering boundary kiro-cli writes after ``turn_end``)
     """
     # First pass: check recent lines for error patterns (failed tool_results)
     error_count = 0
@@ -363,7 +365,8 @@ def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
             continue
 
         # A steering boundary is bookkeeping, not a person speaking: after a turn that
-        # consumed steering messages (every workflow's wake turn does), kiro-cli appends
+        # consumed steering messages (measured after a workflow's wake turn on 2.28.0, one
+        # parent; inferred, not measured, for other steering-consuming turns), kiro-cli appends
         # `type: user`, `source: steer`, `content: ""`, `_meta.kiro.steeringClearedIds`,
         # id `steering_boundary_<uuid>` a few ms after `turn_end` (measured on 2.28.0,
         # 2026-10-09; a plain turn writes none). Read as a user record it turned a finished
