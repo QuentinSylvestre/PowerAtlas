@@ -12334,7 +12334,14 @@ class TestAcpWorkflowNotifications:
     def wf(self, acp_store):
         acp_mod, _ = acp_store
         _live_session(acp_mod, self.P)
-        return acp_mod, acp_mod._supervisor
+        try:
+            yield acp_mod, acp_mod._supervisor
+        finally:
+            # `acp_store` clears neither: routed approvals (user decision
+            # 2026-10-09) leave pending entries, and the step meta is keyed by
+            # ids these tests reuse.
+            acp_mod._supervisor._pending_permission.clear()
+            acp_mod._supervisor._workflow_child_meta.clear()
 
     def _send(self, acp_mod, kind, **fields):
         fields.setdefault("parentSessionId", self.P)
@@ -13707,38 +13714,366 @@ class TestAcpWorkflowNotifications:
         assert [f for f in _queued(legacy_viewer) if f["type"] == "session_closed"] == []
         assert sv._workflow_child_meta == {}
 
+    # -- permission requests from a workflow step (user decision 2026-10-09:
+    # fix now before archival) ---------------------------------------------
+    #
+    # A step's `session/request_permission` carries the CHILD's sessionId,
+    # which is not a registered session. It used to be answered `cancelled`
+    # (the step's tool call denied, no card). Expected values come from the
+    # fix brief, not from running the code: the request is routed to the
+    # PARENT (frame `sessionId` = parent, title prefixed, pending entry keyed
+    # by the parent) and answered by kiro's own request id.
+    #
+    # Likeliest bug spots, pinned first: (1) the entry keyed by the child, so
+    # Stop/close/the overlay never see it; (2) routing a step that is no
+    # longer tracked, or a legacy sub-agent, or a child whose parent is gone;
+    # (3) a request for one parent's child landing on another parent; (4) the
+    # turn-end sweep cancelling a live step's request.
+
+    OPTIONS = [{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+               {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]
+
+    def _ask(self, session_id, request_id=71, title="Run shell: dir", meta=None, **params):
+        body = {"sessionId": session_id, "toolCall": {"title": title},
+                "options": [dict(o) for o in self.OPTIONS]}
+        if meta is not None:
+            body["_meta"] = meta
+        body.update(params)
+        return {"jsonrpc": "2.0", "id": request_id,
+                "method": "session/request_permission", "params": body}
+
+    def _start_p2_step(self, acp_mod, child="child-c3", agent="wf-writer"):
+        _live_session(acp_mod, self.P2)
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
+                   nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
+                   sessionId=child, agentName=agent)
+
+    @staticmethod
+    def _pending_frames(conn, kind="permission_request"):
+        return [f for f in _queued(conn) if f["type"] == kind]
+
+    def test_workflow_permission_request_from_a_step_is_routed_to_the_parent(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        parent_view = self._watch(acp_mod)
+        step_view = self._watch(acp_mod, "child-c7")
+        spawned, toasts = [], []
+        with patch.object(acp_mod, "_spawn_task", spawned.append), \
+                patch.object(acp_mod, "_notify", lambda *a: toasts.append(a)):
+            sv._on_agent_request(self._ask("child-c7", 71))
+        assert spawned == []                          # not answered `cancelled`
+        frames = self._pending_frames(parent_view)
+        assert len(frames) == 1
+        frame = frames[0]
+        payload = frame["payload"]
+        assert frame["sessionId"] == self.P and payload["sessionId"] == self.P
+        assert payload["toolCall"]["title"] == "[workflow step wf-coder] Run shell: dir"
+        assert payload["options"] == self.OPTIONS
+        opaque = payload["requestId"]
+        assert isinstance(opaque, str) and opaque != "71"
+        # Keyed by the PARENT; kiro's own id (the step's) stays inside.
+        assert sv._pending_permission == {opaque: {
+            "session_id": self.P, "options": self.OPTIONS, "kiro_id": 71,
+            "workflow_child": "child-c7"}}
+        # Nothing reaches a viewer of the step's own read-only view.
+        assert self._pending_frames(step_view) == []
+        # Recorded for replay on the parent, like a parent's own request.
+        assert [e["type"] for e in sv.history[self.P].events()
+                ].count("permission_request") == 1
+        assert toasts == [("permission_request", self.P,
+                           "[workflow step wf-coder] Run shell: dir")]
+
+    def test_workflow_permission_request_routed_step_is_answered_by_its_own_kiro_id(
+            self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        parent_view = self._watch(acp_mod)
+        stranger = _acp_conn(acp_mod)
+        acp_mod._registry.attach(stranger, self.P2)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        opaque = self._pending_frames(parent_view)[0]["payload"]["requestId"]
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            # A viewer of another session, and an option the request never
+            # offered, are refused with no write and the entry kept.
+            asyncio.run(acp_mod._handle_permission_response(
+                stranger, self.P, {"requestId": opaque, "optionId": "allow"}))
+            asyncio.run(acp_mod._handle_permission_response(
+                parent_view, self.P, {"requestId": opaque, "optionId": "nope"}))
+            assert written == [] and opaque in sv._pending_permission
+            assert _queued(stranger)[0]["payload"]["code"] == "not_subscribed"
+            assert _queued(parent_view)[0]["payload"]["code"] == "invalid_option"
+            asyncio.run(acp_mod._handle_permission_response(
+                parent_view, self.P, {"requestId": opaque, "optionId": "allow"}))
+            # A second answer to the same request finds nothing.
+            asyncio.run(acp_mod._handle_permission_response(
+                parent_view, self.P, {"requestId": opaque, "optionId": "allow"}))
+        assert written == [{"jsonrpc": "2.0", "id": 71, "result": {
+            "outcome": {"outcome": "selected", "optionId": "allow"}}}]
+        assert sv._pending_permission == {}
+        out = _queued(parent_view)
+        assert [(f["type"], f["sessionId"]) for f in out[:1]] == [
+            ("permission_resolved", self.P)]
+        assert out[0]["payload"] == {"requestId": opaque}
+        assert out[1]["payload"]["code"] == "unknown_request"
+
+    def test_workflow_permission_pending_on_a_step_marks_the_parent_waiting_in_the_overlay(
+            self, wf):
+        from power_atlas import web as web_mod
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start_p2_step(acp_mod)
+        # Both parents have a running step; only P's step is asking.
+        assert web_mod._workflow_states(sv, [self.P, self.P2]) == {
+            self.P: "working", self.P2: "working"}
+        sv._on_agent_request(self._ask("child-c7", 71))
+        assert sv.sessions_with_pending_permission() == frozenset({self.P})
+        assert web_mod._workflow_states(sv, [self.P, self.P2]) == {self.P2: "working"}
+
+    def test_workflow_permission_request_stop_cancels_the_routed_request(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        parent_view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        opaque = self._pending_frames(parent_view)[0]["payload"]["requestId"]
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            self._cancel(acp_mod)
+        assert written == [{"jsonrpc": "2.0", "id": 71,
+                            "result": {"outcome": {"outcome": "cancelled"}}}]
+        assert sv._pending_permission == {}
+        assert sv.sessions_with_pending_permission() == frozenset()
+        # The card is disabled on the parent's page.
+        assert any(f["type"] == "permission_resolved" and f["payload"] == {"requestId": opaque}
+                   for f in sv.history[self.P].events())
+
+    def test_workflow_permission_request_close_session_cancels_the_routed_request(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        parent_view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        opaque = self._pending_frames(parent_view)[0]["payload"]["requestId"]
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(sv.close_session(self.P))
+        assert written == [{"jsonrpc": "2.0", "id": 71,
+                            "result": {"outcome": {"outcome": "cancelled"}}}]
+        assert sv._pending_permission == {}
+        out = _queued(parent_view)
+        kinds = [f["type"] for f in out]
+        assert kinds.index("permission_resolved") < kinds.index("session_closed")
+        assert out[kinds.index("permission_resolved")]["payload"] == {"requestId": opaque}
+
+    def test_workflow_permission_request_detach_drops_the_routed_request(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        parent_view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        opaque = self._pending_frames(parent_view)[0]["payload"]["requestId"]
+        assert sv._detach("test detach") == (None, None)
+        assert sv._pending_permission == {}
+        assert [f["payload"] for f in self._pending_frames(parent_view, "permission_resolved")
+                ] == [{"requestId": opaque}]
+
+    def test_workflow_permission_request_turn_end_keeps_a_live_step_and_sweeps_the_rest(
+            self, wf):
+        """Live steps survive a turn end, so a request routed from one is not
+        swept with the parent's own; once the step is no longer tracked its
+        request is swept like any other."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c9", agentName="wf-tester")
+        written = []
+
+        def during():
+            sv._on_agent_request(self._ask(self.P, 5, title="parent asks"))
+            sv._on_agent_request(self._ask("child-c7", 71))      # step stays live
+            sv._on_agent_request(self._ask("child-c9", 72))      # step finishes below
+            self._complete(acp_mod, "wf-k7x", "step-two")
+
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            self._run_turn(acp_mod, "end_turn", during=during)
+        assert [w["id"] for w in written] == [5, 72]          # both cancelled
+        assert all(w["result"] == {"outcome": {"outcome": "cancelled"}} for w in written)
+        assert [(e["kiro_id"], e["workflow_child"]) for e in sv._pending_permission.values()
+                ] == [(71, "child-c7")]
+
+    def test_workflow_permission_request_label_falls_back_to_the_node_path_then_to_plain_text(
+            self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7", agentName="")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c9", agentName="")
+        view = self._watch(acp_mod)
+        sv.crews[self.P].pop("child-c9")                    # tracked, but its row is gone
+        sv._on_agent_request(self._ask("child-c7", 71, title="T"))
+        sv._on_agent_request(self._ask("child-c9", 72, title="T"))
+        titles = [f["payload"]["toolCall"]["title"] for f in self._pending_frames(view)]
+        assert titles == ["[workflow step step-one] T", "[workflow step] T"]
+
+    def test_workflow_permission_request_rule_eligibility_uses_the_parents_mode(self, wf):
+        acp_mod, sv = wf
+        consent = {"capability": "shell", "resource": "echo x", "scope": "agent",
+                   "source": "agent-profile",
+                   "matchedRule": {"capability": "shell", "effect": "ask"}}
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        # The rule fields go only to a loopback viewer (D-9).
+        view.ws.client = types.SimpleNamespace(host="127.0.0.1", port=1)
+        got = {}
+        for mode, request_id in ((acp_mod.DERIVED_AGENT_NAME, 71), ("kiro_default", 72)):
+            sv.sessions[self.P]["mode"] = mode
+            sv._on_agent_request(self._ask("child-c7", request_id, meta={"kiro": {"consent": consent}}))
+            got[mode] = self._pending_frames(view)[0]["payload"]
+        derived = got[acp_mod.DERIVED_AGENT_NAME]
+        assert (derived["ruleEligible"], derived["ruleRow"]) == (True, "shell")
+        other = got["kiro_default"]
+        assert (other["ruleEligible"], other["ruleRow"]) == (False, None)
+
+    def test_workflow_permission_requests_of_two_steps_get_distinct_ids_and_answers(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c9", agentName="wf-tester")
+        view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71, title="first"))
+        sv._on_agent_request(self._ask("child-c9", 72, title="second"))
+        frames = self._pending_frames(view)
+        ids = [f["payload"]["requestId"] for f in frames]
+        assert len(set(ids)) == 2
+        assert [f["payload"]["toolCall"]["title"] for f in frames] == [
+            "[workflow step wf-coder] first", "[workflow step wf-tester] second"]
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_permission_response(
+                view, self.P, {"requestId": ids[1], "optionId": "deny"}))
+        assert [w["id"] for w in written] == [72]
+        assert written[0]["result"]["outcome"]["optionId"] == "deny"
+        assert [e["kiro_id"] for e in sv._pending_permission.values()] == [71]
+
+    def test_workflow_permission_request_never_lands_on_another_parent(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start_p2_step(acp_mod)
+        view_p, view_p2 = self._watch(acp_mod), self._watch(acp_mod, self.P2)
+        sv._on_agent_request(self._ask("child-c3", 81, title="from p2"))
+        assert self._pending_frames(view_p) == []
+        frames = self._pending_frames(view_p2)
+        assert len(frames) == 1 and frames[0]["sessionId"] == self.P2
+        assert frames[0]["payload"]["toolCall"]["title"] == "[workflow step wf-writer] from p2"
+        assert [(e["session_id"], e["kiro_id"]) for e in sv._pending_permission.values()
+                ] == [(self.P2, 81)]
+        assert sv.sessions_with_pending_permission() == frozenset({self.P2})
+
+    def test_workflow_permission_request_is_refused_unless_its_step_is_tracked_with_a_live_parent(
+            self, wf, caplog):
+        """Both sides of each boundary: the same step is routed while tracked
+        and refused (answered `cancelled`, nothing stored, a WARNING naming the
+        step) once Stop, completion, a parent mismatch or a closed parent takes
+        it out. A legacy sub-agent keeps today's refusal and wording."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c9")
+        self._start_p2_step(acp_mod, child="child-c3")
+        sv.subagent_sessions["legacy-1"] = {"parent": self.P}
+        spawned = []
+
+        def refused(session_id, request_id):
+            before = len(spawned)
+            sv._on_agent_request(self._ask(session_id, request_id))
+            return len(spawned) - before
+
+        with patch.object(acp_mod, "_spawn_task", spawned.append), \
+                caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            assert refused("child-c7", 71) == 0                    # tracked: routed
+            assert len(sv._pending_permission) == 1
+            sv._pending_permission.clear()
+            assert refused("legacy-1", 72) == 1                    # legacy: refused
+            assert refused("sess-nobody", 73) == 1                 # unknown: refused
+            # Finished (tracking dropped by node_complete).
+            self._complete(acp_mod, "wf-k7x", "step-one")
+            assert refused("child-c7", 74) == 1
+            # Dropped by Stop (meta and subagent_sessions are kept).
+            self._cancel(acp_mod)
+            assert "child-c9" in sv._workflow_child_meta
+            assert refused("child-c9", 75) == 1
+            # Parent record and step meta disagree (tracked under both, so only
+            # the disagreement can refuse it).
+            sv._workflow_set(self.P, "child-c3", "running")
+            sv.subagent_sessions["child-c3"] = {"parent": self.P}
+            assert refused("child-c3", 76) == 1
+            # Parent no longer a registered session.
+            sv.subagent_sessions["child-c3"] = {"parent": self.P2}
+            sv.sessions.pop(self.P2)
+            assert refused("child-c3", 77) == 1
+        for coro in spawned:
+            coro.close()
+        assert sv._pending_permission == {}
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING and "request_permission" in r.getMessage()]
+        # Names the step and its parent for the four step refusals.
+        for child, parent in (("child-c7", self.P), ("child-c9", self.P),
+                              ("child-c3", self.P), ("child-c3", self.P2)):
+            assert any(child in m and "workflow step" in m and parent in m
+                       for m in warnings), child
+        assert any("legacy-1" in m and "sub-agent session" in m and "workflow step" not in m
+                   for m in warnings)
+        assert not any("sess-nobody" in m and "workflow step" in m for m in warnings)
+        routed = [r.getMessage() for r in caplog.records
+                  if r.levelno == logging.INFO and "routed to parent" in r.getMessage()]
+        assert len(routed) == 1 and "child-c7" in routed[0] and self.P in routed[0]
+
+    def test_workflow_permission_request_malformed_for_a_tracked_step_is_still_refused(
+            self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        spawned = []
+        bad = [
+            self._ask("child-c7", 71, options=[]),                  # no usable options
+            self._ask("child-c7", 72, options="allow"),             # options not a list
+            {"jsonrpc": "2.0", "id": 73, "method": "session/request_permission",
+             "params": ["not", "a", "dict"]},                        # no sessionId at all
+            self._ask("child-c7", [74]),                             # unhashable id
+            self._ask("child-c7", True),                             # bool id
+            self._ask("child-c7", None),                             # null id
+        ]
+        with patch.object(acp_mod, "_spawn_task", spawned.append):
+            for msg in bad:
+                sv._on_agent_request(msg)
+        for coro in spawned:
+            coro.close()
+        assert len(spawned) == len(bad)
+        assert sv._pending_permission == {}
+        assert self._pending_frames(view) == []
+
     def test_workflow_permission_request_from_a_step_is_logged_by_name(
             self, wf, caplog):
-        """C5: a workflow step is not a registered session, so its permission
-        request is refused; the WARNING names the step and its parent."""
+        """C5, reworked (user decision 2026-10-09: fix now before archival): a
+        TRACKED step is no longer refused, it is routed and one INFO line names
+        the step and its parent. A legacy sub-agent and an unknown id are still
+        refused, with today's WARNING wording."""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         sv.subagent_sessions["legacy-1"] = {"parent": self.P}
         spawned = []
 
-        def ask(session_id, request_id):
-            return {"jsonrpc": "2.0", "id": request_id,
-                    "method": "session/request_permission",
-                    "params": {"sessionId": session_id, "toolCall": {},
-                               "options": [{"optionId": "allow", "name": "Allow",
-                                            "kind": "allow_once"}]}}
-
         with patch.object(acp_mod, "_spawn_task", spawned.append), \
-                caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
-            sv._on_agent_request(ask("child-c7", 71))
-            sv._on_agent_request(ask("legacy-1", 72))
-            sv._on_agent_request(ask("sess-nobody", 73))
+                caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            sv._on_agent_request(self._ask("child-c7", 71))
+            sv._on_agent_request(self._ask("legacy-1", 72))
+            sv._on_agent_request(self._ask("sess-nobody", 73))
         for coro in spawned:
             coro.close()
-        assert len(spawned) == 3                      # all three still refused
-        warnings = [r.getMessage() for r in caplog.records
-                    if r.levelno == logging.WARNING and "request_permission" in r.getMessage()]
-        step = [m for m in warnings if "child-c7" in m and "workflow step" in m]
-        assert len(step) == 1 and self.P in step[0]
+        assert len(spawned) == 2          # the step is no longer refused; the other two are
+        records = [r for r in caplog.records if "request_permission" in r.getMessage()]
+        warnings = [r.getMessage() for r in records if r.levelno == logging.WARNING]
+        assert not any("child-c7" in m for m in warnings)
+        infos = [r.getMessage() for r in records if r.levelno == logging.INFO]
+        assert len([m for m in infos if "child-c7" in m and self.P in m]) == 1
         # A legacy sub-agent is not called a workflow step; an unknown id gets
         # only the generic line.
-        legacy = [m for m in warnings if "legacy-1" in m and "workflow step" in m]
-        assert legacy == []
+        legacy = [m for m in warnings if "legacy-1" in m]
+        assert any("sub-agent session" in m for m in legacy)
+        assert not any("workflow step" in m for m in legacy)
         assert not any("sess-nobody" in m and "workflow step" in m for m in warnings)
 
     def test_workflow_repeated_node_start_on_a_finished_step_is_logged_at_warning(

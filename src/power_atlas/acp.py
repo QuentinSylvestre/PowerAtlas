@@ -4876,6 +4876,37 @@ class _Supervisor:
             for entry in tuple(self._pending_permission.values())
             if isinstance(entry, dict) and isinstance(entry.get("session_id"), str))
 
+    def _workflow_step_parent(self, child_id: str) -> str | None:
+        """The registered parent of a TRACKED workflow step, else ``None``.
+
+        What lets `_on_permission_request` route a step's approval to the
+        session the user is watching. ``None`` (so the request is refused as
+        before) for a legacy sub-agent session, a step whose parent is not a
+        registered session, a step whose parent record and meta disagree, and
+        a step that is no longer tracked (Stop drops the tracking but keeps
+        the meta). A pure read. Loop-only.
+        261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT (user decision
+        2026-10-09: fix now before archival).
+        """
+        meta = self._workflow_child_meta.get(child_id)
+        parent = (self.subagent_sessions.get(child_id) or {}).get("parent")
+        if (meta is None or not isinstance(parent, str)
+                or meta.get("parent") != parent or parent not in self.sessions
+                or child_id not in self._workflow_children.get(parent, {})):
+            return None
+        return parent
+
+    def _workflow_step_label(self, parent_id: str, child_id: str) -> str:
+        """``workflow step <name>`` for a step's approval card.
+
+        The name is the crew row's ``sessionName`` (the step's ``agentName``),
+        else its ``role`` (the node path); with neither, just ``workflow
+        step``. Clipped, because the text is agent-authored.
+        """
+        row = (self.crews.get(parent_id) or {}).get(child_id) or {}
+        name = _as_text(row.get("sessionName")).strip() or _as_text(row.get("role")).strip()
+        return f"workflow step {name[:60]}" if name else "workflow step"
+
     def _workflow_touch(self, child_id: str, now: float | None = None) -> None:
         """Refresh a tracked child's staleness clock on a frame from the child.
 
@@ -6378,6 +6409,17 @@ class _Supervisor:
         plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
         Phase 2).
 
+        A request whose ``sessionId`` is a TRACKED workflow step (not a
+        registered session; `_workflow_step_parent`) is routed to the step's
+        parent: the frame goes to the parent's viewers with ``sessionId`` =
+        parent and the title prefixed ``[workflow step <name>]``, and the
+        pending entry is keyed by the parent (plus ``workflow_child``), so
+        Stop, close, `_detach`, the overlay and the answer route treat it like
+        a parent's own request. Answered by the stored ``kiro_id``, which is
+        the step's own request id. Live behaviour in Manual mode is not yet
+        verified end to end. 261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT
+        (user decision 2026-10-09: fix now before archival).
+
         A malformed request (no ``sessionId``, no usable options, a
         ``sessionId`` that names no registered session, or a JSON-RPC ``id``
         that is not a string or an integer) is refused rather than
@@ -6432,13 +6474,28 @@ class _Supervisor:
                 })
         usable_id = (isinstance(request_id, (str, int))
                      and not isinstance(request_id, bool))
+        # A tracked workflow step is not a registered session; its approval
+        # belongs to the parent that started the workflow. `owner_id` is the
+        # registered session the request is routed to (the session itself, or
+        # the step's parent); `step_id` is set only for the second case.
+        owner_id: str | None = None
+        step_id: str | None = None
+        if isinstance(session_id, str) and session_id:
+            if session_id in self.sessions:
+                owner_id = session_id
+            else:
+                step_parent = self._workflow_step_parent(session_id)
+                if step_parent is not None:
+                    owner_id, step_id = step_parent, session_id
         if (not usable_id or not isinstance(session_id, str) or not session_id
-                or not options or session_id not in self.sessions):
+                or not options or owner_id is None):
             if (isinstance(session_id, str) and session_id not in self.sessions
+                    and step_id is None
                     and session_id in self.subagent_sessions):
-                # A workflow step asking for permission: only the parent is a
-                # registered session, so the request is refused below. Named so
-                # the log says why that step's tool call stopped.
+                # A workflow step that cannot be routed (its parent is not a
+                # registered session, or Stop already dropped its tracking), or
+                # a legacy sub-agent session: refused below. Named so the log
+                # says why that step's tool call stopped.
                 _owner = self.subagent_sessions[session_id].get("parent")
                 log.warning(
                     "ACP: session/request_permission from %s %s (parent %s), "
@@ -6464,12 +6521,22 @@ class _Supervisor:
         # The page sees only this opaque id; the kiro id stays here.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1).
         opaque_id = secrets.token_urlsafe(16)
+        # Keyed by the OWNER: for a workflow step that is the parent, so the
+        # existing lookups by session id (Stop, the turn-end sweep, the
+        # overlay's `sessions_with_pending_permission`, the answer route's
+        # ownership check) work unchanged. `workflow_child` is present only on
+        # a routed entry; the turn-end sweep reads it.
         self._pending_permission[opaque_id] = {
-            "session_id": session_id,
+            "session_id": owner_id,
             "options": options,
             "kiro_id": request_id,
         }
         title = _as_text(tool_call.get("title"))
+        if step_id is not None:
+            self._pending_permission[opaque_id]["workflow_child"] = step_id
+            title = f"[{self._workflow_step_label(owner_id, step_id)}] {title}"
+            log.info("ACP: session/request_permission from workflow step %s "
+                     "routed to parent %s (id=%r)", step_id, owner_id, request_id)
         # Every level type-guarded rather than `or {}`-chained. A truthy
         # non-dict `_meta` or `kiro` would raise AttributeError on the two
         # lines below; a truthy non-dict `consent` is guarded inside
@@ -6484,13 +6551,17 @@ class _Supervisor:
         consent = kiro_meta.get("consent") if isinstance(kiro_meta, dict) else None
         # D-31: from the raw consent, and from the mode this session was bound
         # to (the record's `mode`, set at `session/new` and `session/load`).
-        record = self.sessions[session_id]
+        # For a routed step request the record is the PARENT's: same mode rule
+        # as a parent request, no new rule semantics.
+        record = self.sessions[owner_id]
         rule_row = _rule_row(consent, record.get("mode"))
         rule_root = (_rule_root(consent, record)
                      if rule_row in ("fs_read", "fs_write") else "")
-        _emit(session_id, envelope("permission_request", {
+        _emit(owner_id, envelope("permission_request", {
             "requestId": opaque_id,
-            "sessionId": session_id,
+            # The owner, not the step: the pages key their pending cards by the
+            # session they are subscribed to.
+            "sessionId": owner_id,
             # Unclamped, unlike the notification below (D-5,
             # plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
             # Phase 2): a shell prompt's title *is* the command and a write
@@ -6516,12 +6587,12 @@ class _Supervisor:
             # resource is relative to, so the card prefills an absolute path;
             # null otherwise.
             "ruleRoot": rule_root or None,
-        }, session_id))
+        }, owner_id))
         # Notified unconditionally, unlike turn end: this request has stopped
         # the turn and will keep it stopped until a human answers or the
         # silence timeout cancels it, so "someone has the page open" is not
         # evidence anyone has seen it.
-        _notify("permission_request", session_id,
+        _notify("permission_request", owner_id,
                 title[:MAX_PERMISSION_TITLE_CHARS])
 
     async def _fulfill_token(self, request_id) -> None:
@@ -6847,6 +6918,13 @@ class _Supervisor:
         """
         if session_id not in self.sessions:
             raise AgentRejected("That session no longer exists on this agent.")
+        # A request still pending here (a workflow step's, routed to this
+        # parent: the parent's own turn is over while the step waits) can no
+        # longer be answered by anyone. Announced to the viewers now, while
+        # they are attached, and answered `cancelled` at the end so the step is
+        # not left blocked. Best effort: `_answer_permission_cancelled` never
+        # raises, so a dead agent does not prevent the local cleanup below.
+        _closing_permissions = _pop_pending_permissions(session_id)
         # No alive() check: no wire call is made, so a dead agent must not
         # prevent local cleanup. (F5 fix -- Phase 1 review.)
         self.sessions.pop(session_id, None)
@@ -6896,6 +6974,9 @@ class _Supervisor:
                 # silently, as before.
                 self._workflow_release_viewers(_orphan_id)
         log.info("ACP session closed: %s; %d live", session_id, len(self.sessions))
+        for _entry in _closing_permissions:
+            await self._answer_permission_cancelled(
+                _entry["kiro_id"], "the session was closed")
 
     def _publish_live(self) -> None:
         """Tell whoever is listening which sessions this agent holds.
@@ -8170,7 +8251,8 @@ async def _handle_prompt(conn, session_id, payload):
         # `cancelled` at the very end of this `finally` (K2), because that
         # answer awaits a write and nothing else in here should wait on it.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
-        _swept_permissions = _pop_pending_permissions(session_id)
+        _swept_permissions = _pop_pending_permissions(
+            session_id, keep_live_steps=True)
         # A turn that ends while still held (cancelled, errored) is no longer waiting.
         _supervisor._set_queued_behind(session_id, None)
         # Everything between the sweep and the `cancelled` answers sits in its
@@ -8248,7 +8330,8 @@ async def _handle_prompt(conn, session_id, payload):
                     _swept["kiro_id"], "turn ended with the request unanswered")
 
 
-def _pop_pending_permissions(session_id: str) -> list[dict]:
+def _pop_pending_permissions(session_id: str, *,
+                             keep_live_steps: bool = False) -> list[dict]:
     """Drop every pending permission request of one session, announcing each.
 
     Pops each entry and emits its ``permission_resolved`` frame, so every tab
@@ -8256,11 +8339,21 @@ def _pop_pending_permissions(session_id: str) -> list[dict]:
     ``cancelled``; popping first means a second path (the user's Stop, then
     the turn-end sweep it causes) finds nothing left to answer twice.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
+
+    ``keep_live_steps`` is the turn-end sweep's setting: a request routed from
+    a workflow step (``workflow_child``) whose step is still tracked is left
+    pending, because live workflow steps survive a turn end (the prompt
+    returns while the run goes on) and the person has not had the chance to
+    answer. A routed request whose step is no longer tracked is swept like any
+    other.
     """
     dropped = []
     popped = []
+    tracked = _supervisor._workflow_children.get(session_id, {})
     for opaque_id in [k for k, v in _supervisor._pending_permission.items()
-                      if v.get("session_id") == session_id]:
+                      if v.get("session_id") == session_id
+                      and not (keep_live_steps
+                               and v.get("workflow_child") in tracked)]:
         entry = _supervisor._pending_permission.pop(opaque_id, None)
         if entry is None:
             continue
