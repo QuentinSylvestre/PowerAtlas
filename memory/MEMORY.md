@@ -190,6 +190,7 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Source**: this session (2026-08-11) — two direct `kiro-cli acp -a` 2.16.2 subprocess captures (a 3-stage all-succeed fan-out, and a 2-stage fan-out with one stage's command deliberately failed), both logged to session scratchpad only (not retained, same practice as the depth-2 probe above); corrections landed in `acp.py` (SUBAGENT_LIST_METHOD/SUBAGENT_ACTIVITY_METHOD/`_SUBAGENT_ACTIVE_STATUSES`/`_SUBAGENT_ROLE_KEYS`/`_SUBAGENT_TASK_KEYS`/`MAX_SUBAGENT_TASK_CHARS` comments, the `error =` line, the `agent_message_chunk` dispatch comment, and the content-only `tool_call_update` skip) and `tests/test_web.py` (matching comment corrections plus two new regression tests, `test_an_oversized_task_is_clipped` and `test_a_content_only_update_is_not_forwarded`) | **Verified**: 2026-09-28 (sweep, grep)
 **Update (2026-09-16, `260911_ACP_V3_FOLLOWUP_FEATURES`)**: A standalone probe driving `initialize` → `session/new` directly against a disposable `kiro-cli acp --agent-engine v3` subprocess found one more harness gap this entry's method didn't yet name: `session/new` blocks forever unless the client answers an inbound `_kiro/auth/getAccessToken` request the agent sends right after `initialize`'s response. Quote: "`session/new` blocks forever unless the client answers an inbound `_kiro/auth/getAccessToken` request the agent sends right after `initialize`'s response. Added a handler mirroring `acp.py`'s `_fulfill_token` (shells out to `kiro-cli chat _ get-kas-token`), plus a generic `-32601` refusal for any other inbound request so the probe never grants tool permission." Any future standalone probe using this session's method must implement that handler plus the generic `-32601` refusal, or the handshake hangs indefinitely (cost one 90s wasted attempt before being found).
 **Update (2026-09-22, `260921_DASHBOARD_ACP_FEATURE_PARITY`)**: PowerAtlas has run v3-only since 2026-09-17 (`data_kiro_v3.py:9`), but this entry's probe recipe ("use the `subagent` tool to dispatch N parallel stages...", driven via `kiro-cli acp -a`) exercises `_kiro.dev/subagent/list_update`, which is **v2-only** — `acp.py:4009` confirms that check never matches on v3 — so this recipe cannot fire through PowerAtlas at all, structurally, regardless of phrasing. v3's actual crew-panel trigger is `_on_agent_subtask_open`, gated on a `tool_call`'s `_meta.kiro.kind == "agent-subtask"` — confirmed as a real code path in `acp.py`, but **never observed to actually fire**: two live v3 probes during this plan's Step 9b QA both confirmed kiro-cli's real internal `invoke_subagent` delegation tool was genuinely invoked (concurrent execution, ~7-8s each), yet zero `subagents` frames arrived either time, and PowerAtlas's own server log never records `_meta.kiro` for `tool_call`/`tool_call_update` frames, so whether the tag is truly absent on the wire or merely unrecognized could not be determined without adding temporary diagnostic logging to `acp.py`.
+**Update (2026-10-09, sweep)**: The content-only `tool_call_update` behaviour above is reversed: commit `3b054a0` forwards it in two halves (the body broadcast and never recorded, a digest recorded), and the regression test is now `test_a_content_only_update_carries_its_output_but_records_no_body` (`tests/test_web.py` ~L3686). The method in How to apply still holds; it was reused in session c32f930b to capture `_kiro/workflow/*` frames.
 
 ### `close_session` having zero internal `await` points makes wire-call-mocking test synchronization silently useless
 
@@ -251,9 +252,9 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 
 ### PowerAtlas source files use CRLF line endings — edit them with the Edit tool, not shell edit scripts
 
-**Why**: `web.py`, `acp.html`, `index.html` and `style.css` are CRLF on every line (measured 2026-09-28); in two sessions shell/heredoc edit scripts failed to match text or tripped on quoting, and one wrote a stray NUL byte into `style.css`. Each time the agent spent several turns diagnosing before switching to the Edit tool, which worked.
-**How to apply**: Edit `src/power_atlas/templates/*.html`, `static/*.css` and `web.py` with the Edit tool. If a scripted edit is unavoidable, check the file's line endings first and grep the result for NUL/control bytes afterwards.
-**Source**: claude-code sessions 47de9653-a4aa-4b70-96fa-f791927ffe5c L905-L983 and e3292686-7c13-4ec6-973e-356f71d24205 L475, L585 | **Verified**: 2026-09-28 (human:quentin)
+**Why**: Line endings in the web sources are mixed and change over time: on 2026-10-09 `git ls-files --eol` showed `acp.html` and `index.html` CRLF, `style.css` mixed and `web.py` LF (on 2026-09-28 all four were CRLF). In two sessions shell/heredoc edit scripts failed to match text or tripped on quoting, and one wrote a stray NUL byte into `style.css`. Each time the agent spent several turns diagnosing before switching to the Edit tool, which worked.
+**How to apply**: Edit `src/power_atlas/templates/*.html`, `static/*.css` and `web.py` with the Edit tool. If a scripted edit is unavoidable, run `git ls-files --eol <file>` first rather than assuming CRLF, and grep the result for NUL/control bytes afterwards.
+**Source**: claude-code sessions 47de9653-a4aa-4b70-96fa-f791927ffe5c L905-L983 and e3292686-7c13-4ec6-973e-356f71d24205 L475, L585 + `git ls-files --eol` 2026-10-09 | **Verified**: 2026-10-09 (human:quentin)
 **Evidence-quote**: "`web.py` uses Windows line endings, so my script's text didn't match. Switching to the Edit tool."
 
 ### This repository is public — plans, docs, tests and commit messages carry no real session ids, home paths or user names
@@ -261,6 +262,50 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Why**: A real Codex session id and lock-file names sat in a committed plan during the Codex work, were caught only by a security review (a Medium finding), and the commit was already on the public remote.
 **How to apply**: Build fixtures from key-path skeletons with synthetic values, and name a real artifact by how to find it (a cwd marker or folder suffix), never by id, path or user name; a memory entry's `Source` anchor is the one sanctioned place for a session id.
 **Source**: `plans/done/261002-1113_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW.md` § Review Log, Plan Review, row 19 | **Verified**: 2026-10-02 (session, anchor-reopen)
+
+### Composer prompt history must be seeded from transcript replay — page-local `sentPrompts`/`dashSentPrompts` otherwise holds only this tab's sends
+
+**Why**: ArrowUp history built only from the current tab's sends could not reach prompts of a reloaded or reconnected session; same-tab agent QA passed, and a wrong root cause shipped first.
+**How to apply**: Feed any composer feature keyed on 'what the user sent' from replayed user chunks via `window.onUserChunkReplayed` (called from `transcript-renderer.js` `appendChunk`) and reset it on session switch, on both `acp.html` and `index.html`; QA by reloading and reconnecting to an existing session.
+**Source**: session sess_ab3f95e1-41d5-47b7-9163-fda78a604522 L2296-L2532 (commits d83a9e8, 1426b03) | **Verified**: 2026-10-09 (sweep, anchor-reopen)
+**Evidence-quote**: "The in-memory history doesn't get pre-populated from the transcript replay when you open/reconnect to a session."
+
+### `autoGrowPrompt()` and `dashRefreshComposerControls()` are the choke points for all programmatic textarea value changes
+
+**Why**: These two functions are called at every site where `promptInput.value =` or `dashPromptInput.value =` is set programmatically (~12 sites in acp.html, ~18 in index.html — steer-restore, queue-restore, reconnect, send-clear, image renumber, etc.). Hooking new behavior into these functions covers all sites atomically without enumerating each one. The overlay sync was fixed this way: `updatePromptHighlight()` as the last line of `autoGrowPrompt()` and `updateDashPromptHighlight()` as the last line of `dashRefreshComposerControls()`. A per-phase review missed several restore paths and they were caught only in Step 9.
+**How to apply**: When implementing any feature that must react to every textarea value change, add the behavior to the END of `autoGrowPrompt()` (acp.html) and `dashRefreshComposerControls()` (index.html). Do not enumerate the assignment sites — new ones are added over time.
+**Source**: `plans/done/261007-1013_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION.md` Step 9 M2 finding | **Verified**: 2026-10-07 (session)
+
+### Transparent textarea overlay pattern for inline token highlighting
+
+**Why**: A `<textarea>` can't hold HTML markup. When inline highlighting is needed (e.g. skill/command tokens), the established pattern is: wrapper div (`flex:1; position:relative`), overlay div (`position:absolute; inset:1px; pointer-events:none; overflow:hidden; same font/padding/line-height as textarea`), textarea (`background:transparent; color:transparent; caret-color:var(--text); z-index:1`). `inset:1px` aligns the overlay's content area inside the textarea's 1px border — without it, the overlay is 2px wider and text wraps differently, causing misalignment. Add `.acp-prompt::selection { color:var(--text) }` to restore selection-glyph visibility. Scroll sync required: `textarea.addEventListener('scroll', () => overlay.scrollTop = textarea.scrollTop)`. Overlay content must use `createElement+textContent+appendChild` — never `innerHTML` (AGENTS.md prohibits it in this harness).
+**How to apply**: Use this pattern for any future in-textarea visual enrichment. The overlay renders the full textarea value using `createElement+textContent` spans; matched tokens get an additional `.acp-prompt-hl-match` class. Update on every `input` event and on `autoGrowPrompt()`/`dashRefreshComposerControls()` calls (see previous entry) to keep overlay in sync with all value-change paths.
+**Source**: `plans/done/261007-1013_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION.md` Phase 1 | **Verified**: 2026-10-07 (session, browser QA: 10/10 checks pass)
+
+### `sessionSkills`/`sessionCommands` globals change mid-session — any rendering feature must also re-render on catalogue arrival
+
+**Why**: `sessionSkills` and `sessionCommands` are populated from server-pushed `skills`/`commands` frames that arrive a few seconds after `session/new`. Any feature that renders from these globals must also hook the frame handlers and catalogue-clear sites: each `setSessionSkills(...)`/`setSessionCommands(...)` call in the page, and each `resetCommandPalette()` call site. The highlight overlay initially missed these (~5 acp.html + ~6 index.html sites), leaving stale or missing highlights until the next keystroke. The gap was caught only in Step 9 cycle 1.
+**How to apply**: When writing a feature that reads `sessionSkills` or `sessionCommands`, add re-render calls at: each `setSessionSkills`/`setSessionCommands` invocation and each `resetCommandPalette()` call site. Grep `acp.html` and `index.html` for `setSessionSkills\|setSessionCommands\|resetCommandPalette` to find all sites.
+**Source**: `plans/done/261007-1013_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION.md` Step 9 M2 finding, fixed in `0ad9397` | **Verified**: 2026-10-07 (session)
+
+### kiro-cli built-in TUI commands may be dropped from the ACP `available_commands_update` list on version bumps
+
+**Why**: kiro-cli 2.28.0 stopped advertising `/compact` in `available_commands_update`. A palette injection plus a `session/prompt` reroute (`d57f16b`, `8914884`) was tried and recorded here as working, but it did not compact: PowerAtlas emitted the 'Compacting...' banner itself, and kiro-cli v3 (KAS) forwards `/compact` to the model on both the `session/prompt` and `_kiro.dev/commands/execute` paths. On the user's choice the injection, the special case and the premature banner were removed (`56d82ff`) and a per-release compatibility check went into ROADMAP.md.
+**How to apply**: On kiro-cli 2.28 (v3/KAS) manual `/compact` cannot be triggered over ACP; KiroCrew's `compact()` relies on v2-engine interception. Do not inject synthetic palette entries for dropped built-ins, and do not emit a 'started' banner before kiro-cli sends `_kiro.dev/compaction/status`. When a command disappears after a version bump, check the KiroCrew source for how the TUI handles it before building a reroute.
+**Source**: `plans/done/261008-1211_ACP_TRANSCRIPT_AND_COMPOSER_IMPROVEMENTS.md`, commits `d57f16b` + `8914884` + revert `56d82ff`; session sess_ab3f95e1-41d5-47b7-9163-fda78a604522 L1768-L1871 | **Verified**: 2026-10-09 (human:quentin)
+**Evidence-quote**: "The banner is false — PowerAtlas emits it immediately on the `commands_execute` path, before kiro-cli responds. Then kiro-cli v3 KAS doesn't intercept `_kiro.dev/commands/execute` for \"compact\" — it passes the text to the agent model, which produces the \"TUI built-in\" response. This is a fundamental v3 ACP limitation, not a fixable routing issue."
+
+### `transcript-renderer.js` module-level state must be reset in `clearTranscript()` AND `agent_died` handlers
+
+**Why**: Phase 2 of `261008-1211_ACP_TRANSCRIPT_AND_COMPOSER_IMPROVEMENTS` added `openGroup` and `_transcriptLive` as module-level state. `clearTranscript()` was updated but the `agent_died` handlers in both `acp.html` and `index.html` were missed — a session dying mid-turn left `_transcriptLive=true` and `openGroup` pointing at a stale DOM element. Required a follow-up fix commit `80bf89a` after the Phase 2 review.
+**How to apply**: When adding new module-level state to `transcript-renderer.js` that tracks turn or session progress, add resets to four sites: (1) `clearTranscript()` in `transcript-renderer.js`, (2) `agent_died` handler in `acp.html`, (3) `agent_died` handler in `index.html`, (4) `meta turn:start` handler in both pages. Check these before committing.
+**Source**: `plans/done/261008-1211_ACP_TRANSCRIPT_AND_COMPOSER_IMPROVEMENTS.md` Phase 2, fix commit `80bf89a` | **Verified**: 2026-10-08 (session)
+
+
+
+
+
+
 
 ## Feedback
 
@@ -322,6 +367,22 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: For a visual or UI change request whose wording admits two layouts or behaviours, restate your reading in one line and wait for confirmation before any edit; once the user has picked, implement without re-asking.
 **Source**: kiro-cli session sess_b951edd5-f421-433a-ac94-06f45f135eed L83-L172 | **Verified**: 2026-09-28 (human:quentin)
 **Evidence-quote**: "that's not what i wanted. I want to keep the on-hover behavior, I just want the session title text to not bleed inside the on-hover button when they are shown"
+
+### Anything PowerAtlas turns on from kiro-cli must ship with full productized UI/UX support — never enable a feature PA cannot render
+
+**Why**: The user set this as a standing constraint when settings alignment proposed forwarding every kiro-cli feature flag; a forwarded flag without UI support gives users a feature they cannot use.
+**How to apply**: Before forwarding or enabling a kiro-cli setting or capability in PA ACP sessions, confirm PA renders and controls everything it emits on both /acp and the dashboard; otherwise defer it as its own ROADMAP item with a done-when condition.
+**Source**: kiro-cli session sess_7bfa54ea-c028-4efd-b11f-058fe9efbf50 L497 | **Verified**: 2026-10-09 (sweep, anchor-reopen)
+**Evidence-quote**: "Note that anything that we enable in PA must have full productized support (for example tangent must be fully supported in the UI/UX if we enable it)."
+
+### Sonnet for exploration sub-agents — read-only exploration and /qexplore trio sub-agents run with model sonnet
+
+**Why**: On 2026-10-06 the user asked mid-dispatch to use Sonnet for exploration sub-agents and approved saving it as a standing preference (Claude Code native memory, never committed until this harvest).
+**How to apply**: Set `model: "sonnet"` on Agent calls whose job is read-only exploration or fact-gathering (the /qexplore Step 1.5 trio included); review, council and verification sub-agents are not covered — ask if unsure.
+**Source**: native ~/.claude/projects/C--Users-QSylvestre-POLESTAR-Documents-Perso-PowerAtlas/memory/sonnet-for-exploration-subagents.md (legacy native ID sonnet-for-exploration-subagents), harvested via /qdream GAT-NATIVE | **Verified**: 2026-10-09 (sweep, anchor-reopen)
+**Evidence-quote**: "Dispatch read-only exploration sub-agents with `model: sonnet`. This covers the `/qexplore` Step 1.5 trio and other fact-gathering searches."
+
+
 
 ## Decision
 
@@ -483,6 +544,14 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Source**: `plans/done/260924-0525_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` § Design Decisions (D-6) | **Verified**: 2026-09-24 (sweep, cross-validated)
 **Evidence-quote**: "| D-6 Agent-file ownership | **PowerAtlas repo owns it**; PowerAtlas installs it | agent-playbook inventory row | agent-playbook is a personal config repo; a product feature must not depend on a personal deploy pipeline |"
 
+### PowerAtlas ACP session settings sync dynamically from kiro-cli's own config — no PA-specific settings that duplicate kiro-cli's
+
+**Why**: In /qexplore the agent recommended a PA-owned `acp_session_settings` block; the user rejected it and chose to read kiro-cli's own storage.
+**How to apply**: When aligning a kiro-cli behaviour setting, read it at session creation from where kiro-cli stores it (e.g. `~/.kiro/settings/cli.json`) and forward it; do not add PA config keys or a PA settings UI that shadow it.
+**Source**: kiro-cli session sess_7bfa54ea-c028-4efd-b11f-058fe9efbf50 L455-L462 | **Verified**: 2026-10-09 (sweep, anchor-reopen)
+**Evidence-quote**: "a+c, I don't want PA specific settings for, dynamic sync only."
+
+
 ## Declined
 
 <!-- Declination records: the user's Skip of an agent-initiated memory proposal. A live row here suppresses re-proposal of that subject for 60 days (window owned by shared/skills/qdream/memory-rules.md § Memory File Format → Declined records). NOT a fourth type and rows are NOT entries (no Type/Usage/Outcome; excluded from the Size advisory and the prune order). Sessions append rows only; the /qdream sweep prunes expired rows and rows whose subject is now a live entry. This heading is guarded by verify-citations — never remove it, even with zero rows. Row format: - "<proposed heading>" — declined <YYYY-MM-DD> (<reason, if given>) -->
@@ -497,33 +566,3 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 - "_supervisor_v3 getattr silent null — rename singletons by string ref too" — declined 2026-09-17
 - "Large removal plans accumulate sub-agent pull-forwards — add import-check exit criterion per phase" — declined 2026-09-17
 - "4-persona high-effort holistic review catches cross-module silent regressions that per-phase review misses" — declined 2026-09-17
-
-### `autoGrowPrompt()` and `dashRefreshComposerControls()` are the choke points for all programmatic textarea value changes
-
-**Why**: These two functions are called at every site where `promptInput.value =` or `dashPromptInput.value =` is set programmatically (~12 sites in acp.html, ~18 in index.html — steer-restore, queue-restore, reconnect, send-clear, image renumber, etc.). Hooking new behavior into these functions covers all sites atomically without enumerating each one. The overlay sync was fixed this way: `updatePromptHighlight()` as the last line of `autoGrowPrompt()` and `updateDashPromptHighlight()` as the last line of `dashRefreshComposerControls()`. A per-phase review missed several restore paths and they were caught only in Step 9.
-**How to apply**: When implementing any feature that must react to every textarea value change, add the behavior to the END of `autoGrowPrompt()` (acp.html) and `dashRefreshComposerControls()` (index.html). Do not enumerate the assignment sites — new ones are added over time.
-**Source**: `plans/done/261007-1013_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION.md` Step 9 M2 finding | **Verified**: 2026-10-07 (session)
-
-### Transparent textarea overlay pattern for inline token highlighting
-
-**Why**: A `<textarea>` can't hold HTML markup. When inline highlighting is needed (e.g. skill/command tokens), the established pattern is: wrapper div (`flex:1; position:relative`), overlay div (`position:absolute; inset:1px; pointer-events:none; overflow:hidden; same font/padding/line-height as textarea`), textarea (`background:transparent; color:transparent; caret-color:var(--text); z-index:1`). `inset:1px` aligns the overlay's content area inside the textarea's 1px border — without it, the overlay is 2px wider and text wraps differently, causing misalignment. Add `.acp-prompt::selection { color:var(--text) }` to restore selection-glyph visibility. Scroll sync required: `textarea.addEventListener('scroll', () => overlay.scrollTop = textarea.scrollTop)`. Overlay content must use `createElement+textContent+appendChild` — never `innerHTML` (AGENTS.md prohibits it in this harness).
-**How to apply**: Use this pattern for any future in-textarea visual enrichment. The overlay renders the full textarea value using `createElement+textContent` spans; matched tokens get an additional `.acp-prompt-hl-match` class. Update on every `input` event and on `autoGrowPrompt()`/`dashRefreshComposerControls()` calls (see previous entry) to keep overlay in sync with all value-change paths.
-**Source**: `plans/done/261007-1013_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION.md` Phase 1 | **Verified**: 2026-10-07 (session, browser QA: 10/10 checks pass)
-
-### `sessionSkills`/`sessionCommands` globals change mid-session — any rendering feature must also re-render on catalogue arrival
-
-**Why**: `sessionSkills` and `sessionCommands` are populated from server-pushed `skills`/`commands` frames that arrive a few seconds after `session/new`. Any feature that renders from these globals must also hook the frame handlers and catalogue-clear sites: each `setSessionSkills(...)`/`setSessionCommands(...)` call in the page, and each `resetCommandPalette()` call site. The highlight overlay initially missed these (~5 acp.html + ~6 index.html sites), leaving stale or missing highlights until the next keystroke. The gap was caught only in Step 9 cycle 1.
-**How to apply**: When writing a feature that reads `sessionSkills` or `sessionCommands`, add re-render calls at: each `setSessionSkills`/`setSessionCommands` invocation and each `resetCommandPalette()` call site. Grep `acp.html` and `index.html` for `setSessionSkills\|setSessionCommands\|resetCommandPalette` to find all sites.
-**Source**: `plans/done/261007-1013_ACP_TEXTAREA_HIGHLIGHT_AND_LIST_CONTINUATION.md` Step 9 M2 finding, fixed in `0ad9397` | **Verified**: 2026-10-07 (session)
-
-### kiro-cli built-in TUI commands may be dropped from the ACP `available_commands_update` list on version bumps
-
-**Why**: kiro-cli 2.28.0 stopped advertising `/compact` in `available_commands_update`. The `_handle_commands_execute` path in `acp.py` validates command names against `meta["commands"]` — since `compact` is no longer in that list, it is rejected as `[bad_payload] unknown command`. But `acp.py:7170` shows that sending `/compact` as a regular `session/prompt` still works (PA detects the text and triggers compaction directly). Fix: inject `/compact` as a synthetic fallback in `setSessionCommands` so it appears in the palette (`d57f16b`), and route it via `session/prompt` instead of `commands_execute` when selected from the dropdown (`8914884`). Hard reload picks up both changes.
-**How to apply**: When a kiro-cli version bump causes a command to disappear from the ACP palette, check if `_handle_commands_execute` still accepts it (by looking at `meta["commands"]` validation). If rejected, route via `session/prompt` if `_handle_prompt` already handles it (check for the text in that function). Add a synthetic dropdown entry in `setSessionCommands` and a special-case in `confirmCommandSelection` for the affected command.
-**Source**: `plans/done/261008-1211_ACP_TRANSCRIPT_AND_COMPOSER_IMPROVEMENTS.md`, commits `d57f16b` + `8914884` | **Verified**: 2026-10-08 (session)
-
-### `transcript-renderer.js` module-level state must be reset in `clearTranscript()` AND `agent_died` handlers
-
-**Why**: Phase 2 of `261008-1211_ACP_TRANSCRIPT_AND_COMPOSER_IMPROVEMENTS` added `openGroup` and `_transcriptLive` as module-level state. `clearTranscript()` was updated but the `agent_died` handlers in both `acp.html` and `index.html` were missed — a session dying mid-turn left `_transcriptLive=true` and `openGroup` pointing at a stale DOM element. Required a follow-up fix commit `80bf89a` after the Phase 2 review.
-**How to apply**: When adding new module-level state to `transcript-renderer.js` that tracks turn or session progress, add resets to four sites: (1) `clearTranscript()` in `transcript-renderer.js`, (2) `agent_died` handler in `acp.html`, (3) `agent_died` handler in `index.html`, (4) `meta turn:start` handler in both pages. Check these before committing.
-**Source**: `plans/done/261008-1211_ACP_TRANSCRIPT_AND_COMPOSER_IMPROVEMENTS.md` Phase 2, fix commit `80bf89a` | **Verified**: 2026-10-08 (session)
