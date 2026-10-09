@@ -3838,7 +3838,10 @@ function dashRenderCrewPanel(slot) {
     slot.panel.insertBefore(hdr, slot.panel.firstChild);
   }
   var n = slot.entries.length;
-  hdr.textContent = slot.allDone
+  // workflowLive (the subagents frame's field): a workflow run is still going
+  // on, so every row done is only the gap before the next step starts. Absent
+  // on older frames and on an emptying frame: reads as false.
+  hdr.textContent = slot.allDone && !slot.workflowLive
     ? 'Done (' + n + (n === 1 ? ' agent)' : ' agents)')
     : 'Orchestrating (' + n + (n === 1 ? ' agent)' : ' agents)');
 
@@ -3948,7 +3951,7 @@ function dashRemoveAllCrewPanels() {
   _dashNoAnchorKey = null; // reset for the next session
 }
 
-function dashSetCrew(entries, toolCallId) {
+function dashSetCrew(entries, toolCallId, workflowLive) {
   var key = (toolCallId && toolCallId !== '') ? toolCallId : null;
 
   // Early-return for empty entries BEFORE computing useKey -- mirrors
@@ -3982,6 +3985,7 @@ function dashSetCrew(entries, toolCallId) {
   var s = dashCrews[useKey];
   s.entries = entries;
   s.allDone = entries.every(function(e) { return e.done; });
+  s.workflowLive = workflowLive === true;
 
   // The panel currently open may name a sub-agent this update no longer
   // carries the same entry for -- refresh its header from the latest
@@ -4904,7 +4908,7 @@ function dashHandle(frame){
     // right after every subscribe/session reply that has a crew to report,
     // which is this page's only source for it after a reconnect. Mirrors
     // acp.html's own `subagents` handling (acp.html:5038-5045).
-    dashSetCrew(payload.subagents || [], payload.toolCallId || '');
+    dashSetCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive);
     return;
   }
   if (type === 'commands') {

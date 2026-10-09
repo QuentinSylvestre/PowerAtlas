@@ -3647,6 +3647,18 @@ class _Supervisor:
         # `_WORKFLOW_CHILD_MAX_AGE_S` cap; `capped` marks that the cap has been
         # logged once.
         self._workflow_child_meta: dict[str, dict] = {}
+        # (parent, workflowId) -> monotonic time of the last `_kiro/workflow/*`
+        # frame of that run. Recorded at `run_start`, refreshed by every later
+        # frame of the run, removed at its `run_complete`, by Stop
+        # (`_workflow_stop_children`), in `_workflow_drop_parent`, in `_detach`
+        # and by the sweeper once it is past `_WORKFLOW_CHILD_STALE_S`
+        # (`_workflow_expire_runs`). It exists for the crew panel's header ONLY
+        # (the `workflowLive` flag, `workflow_run_live`): `node_complete` drops a
+        # step's child before the next step's id-bearing `node_start`, so for
+        # about a second no child is tracked while the run is plainly going on.
+        # Never read by `workflow_state`, `has_active_workflow`, the rail overlay
+        # or the idle sweeper.
+        self._workflow_runs: dict[tuple[str, str], float] = {}
         # SC-9: pending `session/request_permission` requests awaiting the
         # user's answer. Keyed by an opaque id PowerAtlas mints per request
         # (the `requestId` pages see and echo back), not by the JSON-RPC
@@ -3923,6 +3935,7 @@ class _Supervisor:
         # agent's process unkilled.
         self._workflow_children.clear()
         self._workflow_node_index.clear()
+        self._workflow_runs.clear()
         self._crew_order_next.clear()
         self._workflow_reap_failures.clear()
         # Viewers of a workflow step's read-only view are told before its meta
@@ -4756,11 +4769,55 @@ class _Supervisor:
         self._workflow_children.pop(parent_id, None)
         for key in [k for k in self._workflow_node_index if k[0] == parent_id]:
             self._workflow_node_index.pop(key, None)
+        self._workflow_clear_runs(parent_id)
         self._crew_order_next.pop(parent_id, None)
         self._workflow_reap_failures.pop(parent_id, None)
         for child_id in [c for c, m in self._workflow_child_meta.items()
                          if m["parent"] == parent_id]:
             self._workflow_child_meta.pop(child_id, None)
+
+    def _workflow_clear_runs(self, parent_id: str) -> bool:
+        """Forget every recorded run of one parent. True if there was one.
+
+        Loop-only (it writes).
+        """
+        keys = [k for k in self._workflow_runs if k[0] == parent_id]
+        for key in keys:
+            self._workflow_runs.pop(key, None)
+        return bool(keys)
+
+    def _workflow_has_runs(self, parent_id: str) -> bool:
+        """True if any run is recorded for the parent, fresh or not. A pure read."""
+        return any(k[0] == parent_id for k in tuple(self._workflow_runs))
+
+    def _workflow_expire_runs(self, now: float) -> list[str]:
+        """Drop the runs unheard of past the staleness bound; return the parents
+        that need a closing ``subagents`` frame.
+
+        Loop-only (it writes); called from ``_workflow_reap``. The same bound
+        and the same strictly-greater-than rule as a RUNNING child
+        (``_WORKFLOW_CHILD_STALE_S``). A stale run that still has a fresh
+        tracked child (a step waiting for a person may take hours) is kept: it
+        is alive, and the child's own completion refreshes it. A parent is
+        returned only if, with its stale runs gone, nothing keeps its header
+        live: it is the one frame that flips the header to "Done" when a
+        ``run_complete`` was lost. The pure read ``workflow_run_live`` already
+        answers False the moment the bound passes; this is the writer that
+        makes the page hear about it.
+        """
+        expired: list[str] = []
+        for (parent_id, workflow_id), seen in tuple(self._workflow_runs.items()):
+            if now - seen <= _WORKFLOW_CHILD_STALE_S:
+                continue
+            if any((self._workflow_child_meta.get(child) or {}).get("workflowId")
+                   == workflow_id for child in self._workflow_live(parent_id, now)):
+                continue
+            self._workflow_runs.pop((parent_id, workflow_id), None)
+            log.info("ACP workflow run %.80s of %s expired: unheard of for %.0fs",
+                     workflow_id, parent_id, now - seen)
+            if parent_id not in expired:
+                expired.append(parent_id)
+        return [p for p in expired if not self.workflow_run_live(p, now)]
 
     def _workflow_free_orphans(self, parent_id: str) -> None:
         """Free a parent's finished workflow children whose rows are gone.
@@ -4875,6 +4932,27 @@ class _Supervisor:
             entry["session_id"]
             for entry in tuple(self._pending_permission.values())
             if isinstance(entry, dict) and isinstance(entry.get("session_id"), str))
+
+    def workflow_run_live(self, session_id: str, now: float | None = None) -> bool:
+        """True while a workflow run of the session is going on. A pure read.
+
+        What the ``subagents`` frame's ``workflowLive`` flag says, so the crew
+        panel's header can stay "Orchestrating" through the gap between one
+        step's ``node_complete`` and the next step's id-bearing ``node_start``,
+        when every row is done and no child is tracked. Live while a run
+        recorded at ``run_start`` has been heard from within the staleness bound
+        (``_WORKFLOW_CHILD_STALE_S``, strictly greater-than), or while a fresh
+        child is tracked (a run whose ``run_start`` was missed, or a long wait).
+        For the header only: ``has_active_workflow``, ``workflow_state``, the
+        rail overlay and the idle sweeper never read runs. Any-thread safe
+        (snapshots, no writes); *now* is injectable.
+        """
+        if now is None:
+            now = time.monotonic()
+        if self._workflow_live(session_id, now):
+            return True
+        return any(p == session_id and now - seen <= _WORKFLOW_CHILD_STALE_S
+                   for (p, _wf), seen in tuple(self._workflow_runs.items()))
 
     def _workflow_step_parent(self, child_id: str) -> str | None:
         """The registered parent of a TRACKED workflow step, else ``None``.
@@ -4995,7 +5073,13 @@ class _Supervisor:
         stay for click-to-view and the later orphan release. The step's own
         process is not stopped (``workflow-cancel`` is not wired). Returns the
         ids it dropped; the caller emits the frame. Loop-only (it writes).
+
+        Also forgets the parent's recorded runs (``_workflow_runs``), whether
+        or not a child is tracked: a Stop in the gap between two steps must
+        not leave the header "Orchestrating". The caller asks
+        ``_workflow_has_runs`` first to know whether that needs a frame.
         """
+        self._workflow_clear_runs(parent_id)
         kids = tuple(self._workflow_children.get(parent_id, {}))
         if not kids:
             return []
@@ -5028,10 +5112,19 @@ class _Supervisor:
         (``_workflow_touch``). Fresh children are never touched; a waiting one
         uses its own bound. One ``subagents`` frame per affected parent.
         Returns the reaped child ids.
+
+        Also expires the runs unheard of past their bound
+        (``_workflow_expire_runs``) BEFORE the rows are reaped, so a frame
+        this pass emits already says the run is over. A parent whose run
+        expired but whose rows did not change still gets exactly one closing
+        frame, so the header cannot stay "Orchestrating" after a lost
+        ``run_complete``.
         """
         if now is None:
             now = time.monotonic()
         reaped: list[str] = []
+        framed: set[str] = set()
+        expired = self._workflow_expire_runs(now)
         for parent_id in tuple(self._workflow_reap_failures):
             if parent_id not in self._workflow_children:
                 del self._workflow_reap_failures[parent_id]
@@ -5039,7 +5132,10 @@ class _Supervisor:
             # Per parent: one poisoned row must not stop the others being
             # reaped, and a persistent fault must not log a traceback a tick.
             try:
-                reaped.extend(self._workflow_reap_parent(parent_id, kids, now))
+                parent_reaped = self._workflow_reap_parent(parent_id, kids, now)
+                reaped.extend(parent_reaped)
+                if parent_reaped:
+                    framed.add(parent_id)
                 self._workflow_reap_failures.pop(parent_id, None)
             except Exception:
                 failures = self._workflow_reap_failures[parent_id] = (
@@ -5050,6 +5146,14 @@ class _Supervisor:
                 else:
                     log.warning("ACP workflow reap failed again for %s (%d in a row)",
                                 parent_id, failures)
+        for parent_id in expired:
+            if parent_id in framed:
+                continue
+            try:
+                _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
+            except Exception:
+                log.warning("ACP workflow run expiry: closing frame for %s failed",
+                            parent_id, exc_info=True)
         return reaped
 
     def _workflow_reap_parent(self, parent_id: str, kids: dict, now: float) -> list[str]:
@@ -5156,7 +5260,16 @@ class _Supervisor:
         # The workflow is the parent's activity: without this a long run with
         # no other output reads as silence to the prompt watchdog.
         self._stamp_activity(parent_id)
-        if method == "_kiro/workflow/node_start":
+        # Every frame of a recorded run proves the run is alive (run-level
+        # tracking, `_workflow_runs`). A frame of a run that was never recorded
+        # (its `run_start` missed) or was ended (Stop, `run_complete`) does not
+        # resurrect it. `run_complete` removes the record just below.
+        run_id = _as_text(params.get("workflowId"))
+        if run_id and (parent_id, run_id) in self._workflow_runs:
+            self._workflow_runs[(parent_id, run_id)] = time.monotonic()
+        if method == "_kiro/workflow/run_start":
+            self._on_workflow_run_start(parent_id, params)
+        elif method == "_kiro/workflow/node_start":
             self._on_workflow_node_start(parent_id, params)
         elif method == "_kiro/workflow/node_complete":
             terminal, _err = self._workflow_outcome(params.get("status"))
@@ -5172,9 +5285,31 @@ class _Supervisor:
             # not finished. Shape not measured.
             log.info("ACP workflow run paused: parent=%s (children kept)", parent_id)
         else:
-            # run_start, loop_iteration, watch_poll, steps_queued,
-            # recipes_changed: logged above, no state.
+            # loop_iteration, watch_poll, steps_queued, recipes_changed:
+            # logged above, no state (a recorded run is refreshed above).
             log.info("ACP workflow %s: no handler (stub)", method)
+
+    def _on_workflow_run_start(self, parent_id: str, params: dict) -> None:
+        """Record a run so the crew header can tell the run from its rows.
+
+        Keyed ``(parent, workflowId)``. A repeated ``run_start`` just refreshes
+        the record. A frame with no usable ``workflowId`` (missing, not a
+        string, blank) is ignored: with no key, nothing could later end it
+        except the staleness bound. The unknown-parent case never reaches here
+        (``_on_workflow_notification`` drops it). Emits a ``subagents`` frame
+        so a header showing "Done" from an earlier run flips back to
+        "Orchestrating" at once (``_emit_subagents_frame`` sends nothing for a
+        parent with an empty crew; with no rows there is no header to flip).
+        """
+        workflow_id = params.get("workflowId")
+        if not isinstance(workflow_id, str) or not workflow_id.strip():
+            log.info("ACP workflow run_start: no usable workflowId; ignored")
+            return
+        self._workflow_runs[(parent_id, workflow_id)] = time.monotonic()
+        log.info("ACP workflow run_start: parent=%s workflowId=%.80s (%d run(s) recorded)",
+                 parent_id, workflow_id,
+                 sum(1 for k in self._workflow_runs if k[0] == parent_id))
+        _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
 
     def _on_workflow_node_start(self, parent_id: str, params: dict) -> None:
         """Register one workflow step as a crew entry.
@@ -5353,7 +5488,10 @@ class _Supervisor:
                 changed = True
         self._workflow_touch_if_emptied(parent_id, was_tracked)
         self._log_workflow_children(parent_id)
-        if changed:
+        # The run itself is over, whether or not any row was still open: the
+        # header needs the frame that says so (one frame for both causes).
+        ended = self._workflow_runs.pop((parent_id, workflow_id), None) is not None
+        if changed or ended:
             _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
 
     def _compaction_session(self, session_id: object) -> str | None:
@@ -7096,6 +7234,14 @@ def _first_text(entry: dict, keys: tuple) -> str:
     return ""
 
 
+def _workflow_live_flag(session_id: str) -> bool:
+    """The ``workflowLive`` field of a ``subagents`` frame: a workflow run of
+    this session is going on (`_Supervisor.workflow_run_live`). The pages keep
+    the crew header on "Orchestrating" while it is true, even with every row
+    done; a frame without the field reads as false."""
+    return _supervisor.workflow_run_live(session_id)
+
+
 def _subagents_payload(crew: dict, fan_out_id: str | None = None) -> list:
     """A crew dict as the ``subagents`` frame's wire list, arrival-ordered.
 
@@ -7165,7 +7311,8 @@ def _emit_subagents_frame(parent_id: str, crews: dict | None = None,
     toolcall_id = fan_out_id
     _registry.broadcast(parent_id, envelope(
         "subagents",
-        {"subagents": _subagents_payload(crew, fan_out_id), "toolCallId": toolcall_id},
+        {"subagents": _subagents_payload(crew, fan_out_id), "toolCallId": toolcall_id,
+         "workflowLive": _workflow_live_flag(parent_id)},
         parent_id))
 
 
@@ -7871,7 +8018,8 @@ def _handle_subscribe(conn, session_id):
         conn.send(envelope(
             "subagents",
             {"subagents": _subagents_payload(crew, fan_out_id),
-             "toolCallId": fan_out_id},
+             "toolCallId": fan_out_id,
+             "workflowLive": _workflow_live_flag(session_id)},
             session_id))
     # Phase 8 live-verification fix: commands/skills are broadcast-only,
     # never recorded into history (same reasoning as the `subagents`
@@ -8656,8 +8804,11 @@ async def _handle_cancel(conn, session_id):
     # `run_complete` follows). Every tracked workflow child, fresh or stale,
     # gets a "stopped" row and loses its tracking; PowerAtlas cannot stop the
     # step's process (`workflow-cancel` is not wired).
+    # A run recorded in the gap between two steps has no tracked child, so
+    # `stopped` is empty: the header still needs the frame that says it is over.
+    had_runs = _supervisor._workflow_has_runs(session_id)
     stopped = _supervisor._workflow_stop_children(session_id)
-    changed = bool(stopped)
+    changed = bool(stopped) or had_runs
     crew = _supervisor.crews.get(session_id)
     if crew:
         changed = _mark_crew_done(crew, time.time()) or changed

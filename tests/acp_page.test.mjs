@@ -6264,8 +6264,11 @@ check("the topbar hides only what a wider window renders differently", () => {
 
 // ---------------------------------------------- the agent bar + debug log --
 
-function subagentsFrame(live, subagents, toolCallId) {
-  return { type: "subagents", sessionId: live, payload: { subagents, toolCallId: toolCallId || '' } };
+function subagentsFrame(live, subagents, toolCallId, workflowLive) {
+  const payload = { subagents, toolCallId: toolCallId || '' };
+  // Omitted (not undefined-valued) unless given: a legacy frame has no field.
+  if (workflowLive !== undefined) payload.workflowLive = workflowLive;
+  return { type: "subagents", sessionId: live, payload };
 }
 
 check("no crew panel appears until the session has a crew", (tpl) => {
@@ -6630,6 +6633,63 @@ check("crew panel header shows 'Done (1 agent)' (singular) when crewAllDone is t
   assert(hdr !== null, "crew panel should have a header element");
   assertEqual(hdr.textContent, "Done (1 agent)",
               "header should say 'Done (1 agent)' (singular) when all done with 1 entry");
+});
+
+// The gap between two workflow steps (docs/KNOWLEDGE.md, "Workflow liveness"):
+// every row is done while the run is still going. The server says so with
+// `workflowLive: true`; the header must not read "Done" then, and must read
+// "Done" again as soon as a frame says the run is over or says nothing.
+const GAP_ROWS = (now) => [
+  { sessionId: "sess_00000000-0000-4000-8000-0000000000e1", role: "step-one",
+    task: "wf-coder", sessionName: "wf-coder", status: "done", action: "",
+    done: true, error: "", startedAt: now - 5, stoppedAt: now - 1 },
+];
+
+check("crew header stays 'Orchestrating' while workflowLive is true and every row is done", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, GAP_ROWS(Date.now() / 1000), "", true));
+  assertEqual(page.one("acpTranscript", ".acp-crew-header").textContent,
+              "Orchestrating (1 agent)", "the gap must not flash 'Done'");
+});
+
+check("crew header flips Done -> Orchestrating -> Done across workflowLive true/false/absent", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  const hdr = () => page.one("acpTranscript", ".acp-crew-header").textContent;
+  page.deliver(subagentsFrame(live, GAP_ROWS(now), "", false));
+  assertEqual(hdr(), "Done (1 agent)", "workflowLive false reads as today");
+  page.deliver(subagentsFrame(live, GAP_ROWS(now), "", true));
+  assertEqual(hdr(), "Orchestrating (1 agent)", "the next run starts: the header goes back");
+  page.deliver(subagentsFrame(live, GAP_ROWS(now), ""));
+  assertEqual(hdr(), "Done (1 agent)", "a legacy frame without the field must not keep it live");
+  page.deliver(subagentsFrame(live, GAP_ROWS(now), "", true));
+  page.deliver(subagentsFrame(live, GAP_ROWS(now), "", false));
+  assertEqual(hdr(), "Done (1 agent)", "run_complete: the closing frame flips it to Done");
+});
+
+check("crew header: only a boolean true counts as workflowLive", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  for (const bogus of ["true", 1, null, {}, "yes"]) {
+    page.deliver(subagentsFrame(live, GAP_ROWS(now), "", bogus));
+    assertEqual(page.one("acpTranscript", ".acp-crew-header").textContent,
+                "Done (1 agent)", "a non-boolean workflowLive (" + JSON.stringify(bogus) + ") is not live");
+  }
+});
+
+check("crew header: an errored row with workflowLive true still reads Orchestrating, row unchanged", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sess_00000000-0000-4000-8000-0000000000e2", role: "step-one",
+      task: "wf-coder", sessionName: "wf-coder", status: "failed", action: "",
+      done: true, error: "cancelled", startedAt: now - 5, stoppedAt: now - 1 },
+  ], "", true));
+  assertEqual(page.one("acpTranscript", ".acp-crew-header").textContent,
+              "Orchestrating (1 agent)");
+  const row = page.one("acpTranscript", ".acp-crew-row");
+  assertEqual(row.querySelector(".acp-crew-action").textContent, "errored",
+              "workflowLive changes the header only, never how a row renders");
 });
 
 check("crew row has status-thinking dot for working entry", (tpl) => {
@@ -17652,8 +17712,11 @@ check("dashboard: image attach — the session-frame stale-load block resets _da
 // as acp.html keeps them. `dashSubagentsFrame()` mirrors the acp.html-side
 // harness's own `subagentsFrame()` helper.
 
-function dashSubagentsFrame(sid, subagents, toolCallId) {
-  return { type: "subagents", sessionId: sid, payload: { subagents, toolCallId: toolCallId || "" } };
+function dashSubagentsFrame(sid, subagents, toolCallId, workflowLive) {
+  const payload = { subagents, toolCallId: toolCallId || "" };
+  // Omitted unless given: a legacy frame has no field.
+  if (workflowLive !== undefined) payload.workflowLive = workflowLive;
+  return { type: "subagents", sessionId: sid, payload };
 }
 
 // ---- crew panel rendering ---------------------------------------------
@@ -17768,6 +17831,36 @@ check("dashboard: crew panel — header text: 'Done (N agents)' singular/plural 
   ]));
   assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
     "Done (2 agents)", "plural when both entries are done");
+});
+
+check("dashboard: crew header stays 'Orchestrating' while workflowLive is true and every row is done", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  const rows = [
+    { sessionId: "sub-1", role: "step-one", task: "", status: "done", action: "", done: true, error: "", startedAt: now - 5, stoppedAt: now - 1 },
+  ];
+  const hdr = () => p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, "", true));
+  assertEqual(hdr(), "Orchestrating (1 agent)", "the gap must not flash 'Done'");
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, "", false));
+  assertEqual(hdr(), "Done (1 agent)", "the closing frame flips it to Done");
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, "", true));
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, ""));
+  assertEqual(hdr(), "Done (1 agent)", "a legacy frame without the field must not keep it live");
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, "", "true"));
+  assertEqual(hdr(), "Done (1 agent)", "only a boolean true counts");
+});
+
+check("dashboard: crew header: an errored row with workflowLive true reads Orchestrating, row unchanged", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "step-one", task: "", status: "failed", action: "", done: true, error: "cancelled", startedAt: now - 5, stoppedAt: now - 1 },
+  ], "", true));
+  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
+    "Orchestrating (1 agent)");
+  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-action").textContent, "errored",
+    "workflowLive changes the header only, never how a row renders");
 });
 
 check("dashboard: crew panel — label falls back from sessionName to truncated task to 'agent'", () => {

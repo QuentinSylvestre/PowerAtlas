@@ -1890,7 +1890,10 @@
       slot.panel.insertBefore(hdr, slot.panel.firstChild);
     }
     var n = slot.entries.length;
-    hdr.textContent = slot.allDone
+    // `workflowLive` (the `subagents` frame's field): a workflow run is still
+    // going on, so every row done is only the gap before the next step starts.
+    // Absent on older frames and on an emptying frame: reads as false.
+    hdr.textContent = slot.allDone && !slot.workflowLive
       ? 'Done (' + n + (n === 1 ? ' agent)' : ' agents)')
       : 'Orchestrating (' + n + (n === 1 ? ' agent)' : ' agents)');
 
@@ -1994,7 +1997,7 @@
   }
 
   // mirrors index.html's dashSetCrew() — keep in sync
-  function setCrew(entries, toolCallId) {
+  function setCrew(entries, toolCallId, workflowLive) {
     var key = (toolCallId && toolCallId !== '') ? toolCallId : null;
 
     // Early-return for empty entries BEFORE computing useKey.
@@ -2032,6 +2035,7 @@
     var s = crews[useKey];
     s.entries = entries;
     s.allDone = entries.every(function(e) { return e.done; });
+    s.workflowLive = workflowLive === true;
 
     // The panel currently open may name a sub-agent this update no longer
     // carries the same entry for — refresh its header from the latest
@@ -5310,7 +5314,7 @@
       // keeps it out of the replay buffer) — it arrives live, and once more
       // right after every `subscribe`/`session` reply that has a crew to
       // report, which is this page's only source for it after a reload.
-      setCrew(payload.subagents || [], payload.toolCallId || '');
+      setCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive);
       return;
     }
     if (type === 'commands') {
@@ -6493,7 +6497,7 @@
     window._testCrews = function() { return crews; };
     window._testCrewEntry = function(sid) { return crewEntry(sid); };
     // Exposed for BUG-1 verification: simulate the turn-end empty broadcast.
-    window._testSetCrew = function(entries, toolCallId) { setCrew(entries, toolCallId); };
+    window._testSetCrew = function(entries, toolCallId, workflowLive) { setCrew(entries, toolCallId, workflowLive); };
   }
 })();
 </script>
