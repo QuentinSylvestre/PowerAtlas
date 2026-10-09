@@ -10453,6 +10453,91 @@ class TestClassifyKiroV3:
         assert classify_kiro_v3(lines) == SemanticStatus.WORKING
 
 
+    # -- machine notifications delivered as steer records (261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3)
+    #
+    # Measured on kiro-cli 2.28.0, 2026-10-09 (a stopped and an ordinary workflow, second process): the
+    # workflow machinery writes `type: user`, `source: steer` records carrying `_meta.kiro.notification`
+    # (a dict): `kind: "workflow-progress"` (id `wf-progress-<uuid>`, content a JSON frame) and
+    # `kind: "system-notification"` (id `notify-<uuid>`, content the step's own `send_message` text, for
+    # example "waited"). They arrive between turns, after the final `turn_end`, while steps run, and
+    # after Stop up to a step's length later. They are not a person typing, so after `turn_end` they must
+    # not turn the verdict back into WORKING. A typed message mid-turn was measured to be an ordinary
+    # `user` record (source absent, `userMessageTag`), not a steer.
+
+    def _notification(self, kind="system-notification", content="waited", source="steer", notif=None):
+        notif = {"kind": kind} if notif is None else notif
+        return self._rec("user", source=source, content=content, _meta={"kiro": {"notification": notif}})
+
+    def _stopped_workflow_parent(self):
+        """The parent of a workflow whose Stop landed after the turn had ended: prompt, the
+        run_workflow call, the model's closing text, turn_end."""
+        return [
+            self._rec("user", content="run a workflow", _meta={"kiro": {"userMessageTag": "t"}}),
+            self._rec("turn_start"),
+            self._rec("assistant", content="I will run it"),
+            self._rec("tool_call", toolName="run_workflow", args={}, status="completed", kind="other"),
+            self._rec("tool_result", content="Workflow started", success=True),
+            self._rec("user", source="steer", content='{"method":"_kiro/workflow/run_start"}',
+                      _meta={"kiro": {"notification": {"kind": "workflow-progress"}}}),
+            self._rec("assistant", content="The workflow is running."),
+            self._rec("session_metadata"), self._rec("usage_summary"), self._rec("session_event"),
+            self._rec("turn_end"),
+        ]
+
+    def test_the_measured_post_stop_tail_with_late_step_notifications_reads_waiting(self):
+        lines = self._stopped_workflow_parent()
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+        lines += [self._notification("system-notification", "waited"),
+                  self._notification("workflow-progress", '{"method":"_kiro/workflow/node_complete"}'),
+                  self._notification("workflow-progress", '{"method":"_kiro/workflow/node_start"}')]
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+
+    @pytest.mark.parametrize("kind", ["system-notification", "workflow-progress"])
+    def test_a_notification_steer_after_turn_end_stays_waiting(self, kind):
+        assert classify_kiro_v3(self._finished_turn() + [self._notification(kind)]) == SemanticStatus.WAITING
+
+    def test_both_skip_rules_together_leave_the_finished_turn_waiting(self):
+        lines = self._finished_turn() + [self._notification(), self._boundary()]
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+
+    def test_a_notification_steer_mid_turn_reads_as_the_previous_meaningful_record(self):
+        lines = [self._rec("user", content="go"), self._rec("turn_start"),
+                 self._rec("tool_call", toolName="read_file", args={}, status="completed", kind="read"),
+                 self._notification()]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_a_non_empty_steer_without_a_notification_meta_still_reads_working(self):
+        """What a person steering would plausibly look like: not machine-generated, so it counts."""
+        lines = self._finished_turn() + [self._rec("user", source="steer", content="also check the logs")]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+        lines = self._finished_turn() + [self._rec("user", source="steer", content="also check the logs",
+                                                   _meta={"kiro": {"steeringConsumedIds": ["n"]}})]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_a_real_prompt_after_notification_steers_reads_working(self):
+        lines = self._finished_turn() + [self._notification(), self._rec("user", content="next question")]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    @pytest.mark.parametrize("notif", [None, "system-notification", ["x"], 3],
+                             ids=["none", "str", "list", "int"])
+    def test_a_notification_meta_that_is_not_a_mapping_is_not_skipped(self, notif):
+        """Fail-open and pinned: only a dict marks a machine notification."""
+        record = self._rec("user", source="steer", content="waited", _meta={"kiro": {"notification": notif}})
+        assert classify_kiro_v3(self._finished_turn() + [record]) == SemanticStatus.WORKING
+
+    @pytest.mark.parametrize("source", [None, "user"])
+    def test_a_notification_meta_on_a_non_steer_user_record_is_not_skipped(self, source):
+        payload = {"content": "x", "_meta": {"kiro": {"notification": {"kind": "system-notification"}}}}
+        if source is not None:
+            payload["source"] = source
+        assert classify_kiro_v3(self._finished_turn() + [self._rec("user", **payload)]) == SemanticStatus.WORKING
+
+    def test_a_non_dict_meta_or_kiro_is_not_skipped_and_does_not_raise(self):
+        for meta in (None, "x", {"kiro": None}, {"kiro": "x"}):
+            record = self._rec("user", source="steer", content="waited", _meta=meta)
+            assert classify_kiro_v3(self._finished_turn() + [record]) == SemanticStatus.WORKING
+
+
 class TestGetSemanticStatus:
     def setup_method(self):
         """Clear cache between tests."""

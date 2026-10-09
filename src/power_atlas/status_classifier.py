@@ -313,6 +313,13 @@ def classify_claude(tail_lines: list[str]) -> Optional[SemanticStatus]:
 _V3_SKIP_TYPES = frozenset({"tool_result", "usage_summary", "session_metadata", "steering_inclusion"})
 
 
+def _v3_is_notification(payload: dict) -> bool:
+    """True when a v3 record's ``_meta.kiro.notification`` is a mapping (a machine notification)."""
+    meta = payload.get("_meta")
+    kiro = meta.get("kiro") if isinstance(meta, dict) else None
+    return isinstance(kiro, dict) and isinstance(kiro.get("notification"), dict)
+
+
 def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
     """Classify session status from kiro-cli v3 JSONL tail.
 
@@ -325,6 +332,9 @@ def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
     - Skip: tool_result, usage_summary, session_metadata, steering_inclusion
     - Skip: a ``user`` record with ``source == "steer"`` and an empty or blank
       string ``content`` (the steering boundary kiro-cli writes after ``turn_end``)
+    - Skip: a ``user`` record with ``source == "steer"`` whose
+      ``_meta.kiro.notification`` is a dict (a workflow progress frame or a step's
+      message, machine-generated)
     """
     # First pass: check recent lines for error patterns (failed tool_results)
     error_count = 0
@@ -373,8 +383,17 @@ def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
         # turn back into WORKING until the next turn ended. Only an EMPTY steer record is
         # skipped: a real prompt, a non-empty steer message and an empty `user` record from
         # any other source still read WORKING.
-        if (ptype == "user" and payload.get("source") == "steer"
-                and isinstance(payload.get("content"), str) and not payload["content"].strip()):
+        #
+        # The same goes for a machine notification delivered as a steer record: `source: steer`
+        # with `_meta.kiro.notification` a dict (`kind` "workflow-progress", id `wf-progress-<uuid>`;
+        # or "system-notification", id `notify-<uuid>`, content a workflow step's own
+        # `send_message` text). They land between turns and after the final `turn_end`, after a
+        # Stop up to a step's length later (measured on 2.28.0, 2026-10-09), and are not a person
+        # typing. A typed mid-turn message was measured to be a plain `user` record (no `source`),
+        # and a steer with no notification meta still reads WORKING.
+        if ptype == "user" and payload.get("source") == "steer" and (
+                (isinstance(payload.get("content"), str) and not payload["content"].strip())
+                or _v3_is_notification(payload)):
             continue
         if ptype in ("tool_call", "user"):
             last_meaningful = SemanticStatus.WORKING
