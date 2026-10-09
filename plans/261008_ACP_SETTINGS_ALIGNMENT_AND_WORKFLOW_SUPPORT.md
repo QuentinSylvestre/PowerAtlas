@@ -853,9 +853,9 @@ Final runs: `tests/test_web.py` + `tests/test_data.py` + `tests/test_data_kiro_v
 | 5 | Medium | Workflow step permission requests are cancelled silently (Manual mode); no user-visible card. | Escalated -- logged with the step named (`3a0a4ee`); user-visible handling stays a ROADMAP item. |
 | 6 | Low | `_WORKFLOWS_FORWARD_ENABLED` dead configuration. | Fixed -- deleted (`3a0a4ee`). |
 | 7 | Low | `close_session` and `_detach` freed kept-history workflow children without telling viewers; wording of the release note. | Fixed -- shared release helper (`3a0a4ee`). |
-| 8 | Low | `_crew_order_next` and `_workflow_reap_failures` are redundant or log-throttle-only structures. | Orchestrator: proposed-accept -- pending user decision |
-| 9 | Low | No waiting-to-running transition after `node_paused`; `loop_iteration` child-id reuse would be ignored; throttled-log helpers and two caches may be more than needed. | Orchestrator: proposed-accept -- pending user decision |
-| 10 | Low | The Part B live dot is unit-tested only; the task-mode session with workflows enabled was never verified. | Orchestrator: proposed-accept -- pending user decision |
+| 8 | Low | `_crew_order_next` and `_workflow_reap_failures` are redundant or log-throttle-only structures. | User: accepted -- "accept and /qclose" (user reply, 2026-10-09). |
+| 9 | Low | No waiting-to-running transition after `node_paused`; `loop_iteration` child-id reuse would be ignored; throttled-log helpers and two caches may be more than needed. | User: accepted -- "accept and /qclose" (user reply, 2026-10-09). |
+| 10 | Low | The Part B live dot is unit-tested only; the task-mode session with workflows enabled was never verified. | User: accepted -- "accept and /qclose" (user reply, 2026-10-09). |
 
 ## Harness Improvement Opportunities
 
