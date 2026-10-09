@@ -2740,8 +2740,12 @@ function dashRefreshComposerControls(){
   dashSendBtn.disabled = !hasText || _dashTurnActive;
   // Stop: visible during turn only when textarea is empty and no steer
   // pending; stays disabled while _dashStopInProgress (cancel in-flight).
-  dashStopBtn.hidden = !_dashTurnActive || hasText || !!_dashSteerPending;
-  dashStopBtn.disabled = !_dashTurnActive || _dashStopInProgress;
+  // With no turn it is visible, and enabled, only while an unsettled
+  // permission card is showing (a request routed from a workflow step outlives
+  // the parent's turn; Stop cancels it) -- mirrors acp.html.
+  var pendingCard = hasPendingPermissionCard();
+  dashStopBtn.hidden = _dashTurnActive ? (hasText || !!_dashSteerPending) : !pendingCard;
+  dashStopBtn.disabled = (!_dashTurnActive && !pendingCard) || _dashStopInProgress;
   // Queue+Steer wrapper: visible during turn only when textarea has text.
   dashQueueSteerEl.hidden = !_dashTurnActive || !hasText;
   // Choke point for all programmatic value changes (project memory pattern):
@@ -3107,7 +3111,7 @@ dashPromptInput.addEventListener('focus', function () {
 // modeOptions/sendModeBtn click wiring (acp.html:5473-5599) as-is, not
 // through composer-chrome.js.
 dashStopBtn.addEventListener('click', function () {
-  if (!_dashAttachedSid || !_dashTurnActive) return;
+  if (!_dashAttachedSid || (!_dashTurnActive && !hasPendingPermissionCard())) return;
   if (!send('cancel', {}, _dashAttachedSid)) {
     // Fix 7 (review, Phase 3 fix cycle): mirrors dashSendPrompt()'s own
     // not-connected toast for the same class of failure -- previously this
@@ -3126,7 +3130,9 @@ dashStopBtn.addEventListener('click', function () {
   // here: this eager disable is the only thing that disables the button
   // immediately, and _dashStopInProgress stops it being re-enabled by a
   // later dashRefreshComposerControls() call before turn:end clears the flag.
-  _dashStopInProgress = true;
+  // With no turn there is no boundary to clear the flag: the card's
+  // `permission_resolved` frame repaints the controls instead.
+  _dashStopInProgress = !!_dashTurnActive;
   dashStopBtn.disabled = true;
 });
 function _dashCloseModeMenu() {
@@ -5110,12 +5116,17 @@ function dashHandle(frame){
         // relative resource is relative to, for an absolute prefill.
         root: payload && payload.ruleRoot,
       });
+      // An unsettled card keeps Stop usable even with no turn active.
+      dashRefreshComposerControls();
     }
     return;
   }
   if (type === 'permission_resolved') {
     var resolvedId = payload && payload.requestId;
-    if (typeof resolvedId === 'string' || typeof resolvedId === 'number') markPermissionResolved(resolvedId);
+    if (typeof resolvedId === 'string' || typeof resolvedId === 'number') {
+      markPermissionResolved(resolvedId);
+      dashRefreshComposerControls();
+    }
     return;
   }
   if (type === 'session_closed') {

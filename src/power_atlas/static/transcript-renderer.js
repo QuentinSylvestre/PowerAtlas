@@ -2609,6 +2609,21 @@ function markPermissionResolved(requestId) {
   }
 }
 
+/** Whether the transcript holds a permission card nobody has settled yet (no
+ *  `acp-permission-resolved` class). The pages keep their Stop button usable
+ *  while this is true, even with no turn active: a request routed from a
+ *  workflow step outlives the parent's turn (the prompt returns while the run
+ *  goes on), and Stop is the only way to cancel its card. A plain row scan, like
+ *  findPermissionRequestRow. False before the transcript element is wired. */
+function hasPendingPermissionCard() {
+  if (!transcriptEl) return false;
+  var rows = transcriptEl.querySelectorAll('.acp-msg-permission');
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i].classList.contains('acp-permission-resolved')) return true;
+  }
+  return false;
+}
+
 /** Whether `node` sits inside an open rule row of permission card `row`. */
 function insidePermissionRuleEditor(node, row) {
   for (var n = node.parentNode; n && n !== row; n = n.parentNode) {

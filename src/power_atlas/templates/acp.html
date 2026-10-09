@@ -1176,9 +1176,14 @@
     sendBtn.hidden = turnActive;
     sendBtn.disabled = turnActive || !sessionId || loadFailed || !ws || ws.readyState !== WebSocket.OPEN;
     // Stop: visible during turn only when textarea is empty and no steer pending;
-    // stays disabled while _stopInProgress (cancel in-flight).
-    stopBtn.hidden = !turnActive || hasText || !!_steerPending;
-    stopBtn.disabled = !turnActive || _stopInProgress;
+    // stays disabled while _stopInProgress (cancel in-flight). With no turn it
+    // is visible, and enabled, only while an unsettled permission card is
+    // showing: a request routed from a workflow step outlives the parent's
+    // turn, and Stop is what cancels it (the server cancels the session's
+    // pending requests on an idle Stop).
+    var pendingCard = hasPendingPermissionCard();
+    stopBtn.hidden = turnActive ? (hasText || !!_steerPending) : !pendingCard;
+    stopBtn.disabled = (!turnActive && !pendingCard) || _stopInProgress;
     // Queue+Steer wrapper: visible during turn only when textarea has text
     queueSteerEl.hidden = !turnActive || !hasText;
   }
@@ -5272,6 +5277,8 @@
       };
       if ((typeof _reqId === 'string' || typeof _reqId === 'number') && _permOptions.length) {
         addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions, _permConsent, _permRule);
+        // An unsettled card keeps Stop usable even with no turn active.
+        refreshComposerControls();
         // The notification takes a `!replaying` gate even though the row above
         // deliberately does not. The two want opposite things from a reload:
         // the buttons must come back (the request may still be unanswered
@@ -5306,6 +5313,7 @@
       var _resolvedId = payload && payload.requestId;
       if (typeof _resolvedId === 'string' || typeof _resolvedId === 'number') {
         markPermissionResolved(_resolvedId);
+        refreshComposerControls();
       }
       return;
     }
@@ -5810,7 +5818,7 @@
     pickerRender();
   });
   stopBtn.addEventListener('click', function () {
-    if (!sessionId || !turnActive) return;
+    if (!sessionId || (!turnActive && !hasPendingPermissionCard())) return;
     if (!send('cancel', {}, sessionId)) return;
     // SC-5: cancel sent — trigger a rail refresh so the dot state updates
     // promptly rather than waiting for the 60-second polling cycle.
@@ -5821,7 +5829,9 @@
     // `setTurn(false)` on that boundary is what puts Send back.
     // Fix 4: mark stop in-progress so refreshComposerControls does not
     // re-enable Stop before setTurn(false) clears the flag.
-    _stopInProgress = true;
+    // With no turn there is no boundary to clear the flag: the card's
+    // `permission_resolved` frame repaints the controls instead.
+    _stopInProgress = !!turnActive;
     // stopBtn.disabled = true is kept as an eager visual update: refreshComposerControls()
     // is NOT called here, so this is the only thing that disables the button immediately.
     // If refreshComposerControls() were called after _stopInProgress = true, this line

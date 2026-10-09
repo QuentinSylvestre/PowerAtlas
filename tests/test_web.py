@@ -5572,6 +5572,7 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor._workflow_children.clear()
         acp_mod._supervisor._workflow_node_index.clear()
         acp_mod._supervisor._workflow_runs.clear()
+        acp_mod._supervisor._workflow_ended.clear()
         acp_mod._supervisor._crew_order_next.clear()
         acp_mod._supervisor._compacting.clear()
         acp_mod._bubbles.clear()
@@ -12984,7 +12985,13 @@ class TestAcpWorkflowNotifications:
         assert sv._workflow_reap(now=time.monotonic() + 99999) == []
         entry = sv.crews[self.P]["child-c7"]
         assert (entry["done"], entry["status"], entry["stoppedAt"]) == (True, "done", done_at)
-        assert self._frames(watcher) == []
+        # The only change: `_start` recorded the run (joined mid-way, no
+        # run_start in this test) and no run_complete ever came, so the far
+        # future reap expires it with its one closing frame (item A3). The row
+        # is untouched.
+        closing = self._frames(watcher)
+        assert len(closing) == 1 and closing[0][0]["done"] is True
+        assert sv._workflow_runs == {}
 
     def test_workflow_reap_emits_one_frame_per_affected_parent(self, wf):
         acp_mod, sv = wf
@@ -13930,11 +13937,10 @@ class TestAcpWorkflowNotifications:
             self, wf):
         """Medium 1. A routed request outlives the parent's turn, but Stop
         returned at the not-in-flight check before reaching the pending
-        requests. The pages show Stop only while a turn is active
-        (acp.html `stopBtn.hidden = !turnActive || ...`, index.html
-        `dashStopBtn.hidden = !_dashTurnActive || ...`), so this is reached by
-        a stale page or a raw `cancel` frame; the workflow rows are left
-        alone, as before."""
+        requests. Both pages show Stop while an unsettled permission card is
+        pending, turn or not (`hasPendingPermissionCard` in
+        refreshComposerControls / dashRefreshComposerControls), so a person
+        reaches this path; the workflow rows are left alone, as before."""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         conn = self._watch(acp_mod)
@@ -13949,8 +13955,16 @@ class TestAcpWorkflowNotifications:
         out = _queued(conn)
         assert [f["payload"] for f in out if f["type"] == "permission_resolved"] == [
             {"requestId": opaque}]
-        assert [f for f in out if f["type"] in ("agent_error", "subagents")] == []
+        # The cancelled request is a denial of the step's tool call: one
+        # notice and the row's action text (item C, 2026-10-09). The row is
+        # still open and tracked: Stop on an idle parent does not stop steps.
+        assert [f["payload"]["message"] for f in out if f["type"] == "agent_error"] == [
+            "A tool call of workflow step wf-coder was denied. The step may still "
+            "report success."]
+        assert [e["action"] for f in out if f["type"] == "subagents"
+                for e in f["payload"]["subagents"]] == ["tool call denied"]
         assert list(sv._workflow_children[self.P]) == ["child-c7"]     # rows untouched
+        assert sv.crews[self.P]["child-c7"]["done"] is False
 
     def test_workflow_permission_request_stop_on_an_idle_parent_with_nothing_pending_is_a_noop(
             self, wf):
@@ -14603,13 +14617,14 @@ class TestAcpWorkflowNotifications:
             self, wf, caplog, workflow_id):
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")   # a crew to frame
+        recorded = dict(sv._workflow_runs)         # the step itself recorded its run (A3)
         watcher = self._watch(acp_mod)
         fields = {"parentSessionId": self.P}
         if workflow_id is not _OMITTED:
             fields["workflowId"] = workflow_id
         with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
             _notify(acp_mod, "_kiro/workflow/run_start", fields)
-        assert sv._workflow_runs == {}
+        assert sv._workflow_runs == recorded           # the ignored run_start adds nothing
         assert [f for f in _queued(watcher) if f["type"] == "subagents"] == []
         assert any("run_start: no usable workflowId" in r.getMessage()
                    for r in caplog.records)
@@ -14637,13 +14652,17 @@ class TestAcpWorkflowNotifications:
             assert sv._workflow_runs[(self.P, "wf-k7x")] >= before, frame
             assert sv._workflow_runs[(self.P, "wf-q2m")] == old, frame
 
-    def test_workflow_frames_of_an_unrecorded_run_do_not_create_one(self, wf):
+    def test_workflow_frames_other_than_a_step_start_or_complete_do_not_record_a_run(self, wf):
         acp_mod, sv = wf
-        # run_start was missed (or Stop ended the run): later frames never
-        # resurrect a record, only a fresh run_start does.
-        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
-        self._complete(acp_mod, "wf-k7x", "step-one")
+        # run_start was missed: only an id-bearing step node_start or a
+        # node_complete joins a run mid-way (item A3, 2026-10-09). Housekeeping
+        # frames, the id-less first node_start variant and container nodes do not.
         self._send(acp_mod, "paused", workflowId="wf-k7x")
+        self._send(acp_mod, "loop_iteration", workflowId="wf-k7x")
+        self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
+        self._start(acp_mod, "wf-k7x", "step-one")                    # no child id
+        self._start(acp_mod, "wf-k7x", "run-both", child="child-cc",
+                    path=["wf-k7x", "run-both"], type="parallel")      # a container
         assert sv._workflow_runs == {}
         assert sv.workflow_run_live(self.P) is False
 
@@ -14713,19 +14732,19 @@ class TestAcpWorkflowNotifications:
         _queued(watcher)
         # Exactly the bound: still live, nothing sent. One millisecond more:
         # the pure read says not live, and the reap sends the closing frame.
-        assert sv.workflow_run_live(self.P, now=t0 + 600.0) is True
-        assert sv._workflow_reap(now=t0 + 600.0) == []
+        assert sv.workflow_run_live(self.P, now=t0 + 1800.0) is True
+        assert sv._workflow_reap(now=t0 + 1800.0) == []
         assert self._live_flags(watcher) == []
         assert (self.P, "wf-k7x") in sv._workflow_runs
-        assert sv.workflow_run_live(self.P, now=t0 + 600.001) is False
+        assert sv.workflow_run_live(self.P, now=t0 + 1800.001) is False
         before = dict(sv._workflow_runs)
         sv.workflow_run_live(self.P, now=t0 + 9999.0)              # a read mutates nothing
         assert sv._workflow_runs == before
-        assert sv._workflow_reap(now=t0 + 600.001) == []
+        assert sv._workflow_reap(now=t0 + 1800.001) == []
         assert self._live_flags(watcher) == [False]
         assert sv._workflow_runs == {}
         # A later pass has nothing left to say.
-        assert sv._workflow_reap(now=t0 + 700.0) == []
+        assert sv._workflow_reap(now=t0 + 1900.0) == []
         assert self._live_flags(watcher) == []
 
     def test_workflow_expiry_beside_a_reaped_row_sends_one_frame_not_two(self, wf):
@@ -14733,7 +14752,7 @@ class TestAcpWorkflowNotifications:
         watcher = self._watch(acp_mod)
         self._run_start(acp_mod)
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
-        stale = time.monotonic() - 700
+        stale = time.monotonic() - 1900          # past both the step and the run bound
         sv._workflow_runs[(self.P, "wf-k7x")] = stale
         sv._workflow_children[self.P]["child-c7"] = ("running", stale)
         _queued(watcher)
@@ -14748,7 +14767,7 @@ class TestAcpWorkflowNotifications:
         self._run_start(acp_mod)
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
-        long_ago = time.monotonic() - 1000                        # past 600, inside the 6 h wait bound
+        long_ago = time.monotonic() - 2500                        # past 1800, inside the 6 h wait bound
         sv._workflow_runs[(self.P, "wf-k7x")] = long_ago
         sv._workflow_children[self.P]["child-c7"] = ("waiting", long_ago)
         _queued(watcher)
@@ -14763,7 +14782,7 @@ class TestAcpWorkflowNotifications:
         self._run_start(acp_mod, "wf-k7x")
         self._run_start(acp_mod, "wf-q2m")
         self._start(acp_mod, "wf-q2m", "step-one", child="child-c3")   # fresh child of wf-q2m
-        sv._workflow_runs[(self.P, "wf-k7x")] = time.monotonic() - 700
+        sv._workflow_runs[(self.P, "wf-k7x")] = time.monotonic() - 1900
         _queued(watcher)
         sv._workflow_reap()
         assert (self.P, "wf-k7x") not in sv._workflow_runs
@@ -14777,8 +14796,8 @@ class TestAcpWorkflowNotifications:
         t0 = 100000.0
         sv._workflow_runs[(self.P, "wf-k7x")] = t0
         sv._workflow_runs[(self.P, "wf-q2m")] = t0 + 300.0
-        assert sv.workflow_run_live(self.P, now=t0 + 700.0) is True    # q2m is 400 s old
-        assert sv.workflow_run_live(self.P, now=t0 + 900.001) is False
+        assert sv.workflow_run_live(self.P, now=t0 + 1900.0) is True   # q2m is 1600 s old
+        assert sv.workflow_run_live(self.P, now=t0 + 2100.001) is False
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -14837,6 +14856,501 @@ class TestAcpWorkflowNotifications:
         acp_mod._emit_subagents_frame(self.P, sv.crews, sv._active_fan_out_wave)
         flags = self._live_flags(watcher)
         assert flags == [False] and type(flags[0]) is bool
+
+    # -- run-level tracking, second pass (2026-10-09, before archival) --------
+    #
+    # Expected values come from the brief: (A1) a run_complete that matches no
+    # recorded run, with no tracked child, clears the parent's runs and says so
+    # once; (A2) a run has its own 1800 s bound (strictly greater-than) while a
+    # step keeps 600 s; (A3) an id-bearing step node_start or a node_complete
+    # records a run joined mid-way unless this supervisor saw it end (run_complete,
+    # Stop, expiry), the ended set holding 64 ids per parent; (A4) the header
+    # flag is true only when the frame's own rows include a workflow row.
+    #
+    # Likeliest bug spots, pinned first: (1) a late frame after Stop, run_complete
+    # or expiry bringing the run back, (2) a doubled or missing closing frame,
+    # (3) the flag riding on a legacy panel of the same session, (4) a step
+    # bound and a run bound that drifted into one number.
+
+    def _gap(self, acp_mod, sv, wfid="wf-k7x"):
+        """A recorded run between two steps: every row done, nothing tracked."""
+        self._run_start(acp_mod, wfid)
+        self._start(acp_mod, wfid, "step-one", child="child-c7")
+        self._complete(acp_mod, wfid, "step-one")
+        assert sv._workflow_children == {}
+        assert list(sv._workflow_runs) == [(self.P, wfid)]
+
+    @pytest.mark.parametrize("fields", [
+        {"workflowId": "wf-other"}, {}, {"workflowId": None}, {"workflowId": ""},
+        {"workflowId": 7}],
+        ids=["different-id", "omitted", "none", "empty", "int"])
+    def test_workflow_run_complete_matching_no_run_and_no_tracked_child_clears_runs_once(
+            self, wf, fields):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._gap(acp_mod, sv)
+        _queued(watcher)
+        self._send(acp_mod, "run_complete", status="completed", **fields)
+        assert self._live_flags(watcher) == [False]
+        assert sv._workflow_runs == {}
+        assert sv.workflow_run_live(self.P) is False
+        # A second one finds nothing to clear: no second frame.
+        self._send(acp_mod, "run_complete", status="completed", **fields)
+        assert self._live_flags(watcher) == []
+
+    def test_workflow_run_complete_matching_no_run_leaves_runs_while_a_child_is_tracked(
+            self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._run_start(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")      # tracked
+        _queued(watcher)
+        self._send(acp_mod, "run_complete", workflowId="wf-other", status="completed")
+        assert list(sv._workflow_runs) == [(self.P, "wf-k7x")]
+        assert list(sv._workflow_children[self.P]) == ["child-c7"]
+        assert self._live_flags(watcher) == []
+
+    def test_workflow_unmatched_run_complete_clears_only_its_own_parents_runs(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        self._gap(acp_mod, sv)
+        self._send(acp_mod, "run_start", parentSessionId=self.P2, workflowId="wf-q2m")
+        self._send(acp_mod, "run_complete", workflowId="wf-other", status="completed")
+        assert list(sv._workflow_runs) == [(self.P2, "wf-q2m")]
+
+    def test_workflow_run_cleared_by_an_unmatched_run_complete_records_itself_again(
+            self, wf):
+        """The clearing is a guess (the run it ends cannot be told apart), so it
+        is not remembered as an end: a run that was in fact alive comes back
+        with its next step frame."""
+        acp_mod, sv = wf
+        self._gap(acp_mod, sv)
+        self._send(acp_mod, "run_complete", workflowId="wf-other", status="completed")
+        assert sv._workflow_runs == {}
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        assert list(sv._workflow_runs) == [(self.P, "wf-k7x")]
+
+    # -- the run's own bound ---------------------------------------------------
+
+    def test_workflow_run_bound_is_1800_seconds_and_the_step_bound_stays_600(self, wf):
+        acp_mod, sv = wf
+        assert acp_mod._WORKFLOW_RUN_STALE_S == 1800
+        assert acp_mod._WORKFLOW_CHILD_STALE_S == 600
+        assert acp_mod._WORKFLOW_WAITING_STALE_S == 21600
+        watcher = self._watch(acp_mod)
+        self._gap(acp_mod, sv)
+        t0 = 100000.0
+        sv._workflow_runs[(self.P, "wf-k7x")] = t0
+        _queued(watcher)
+        # Silent for 1799 s with no tracked child (a long watch_poll, a loop's
+        # sleep): still live, the sweeper says nothing.
+        assert sv.workflow_run_live(self.P, now=t0 + 1799.0) is True
+        assert sv._workflow_reap(now=t0 + 1799.0) == []
+        assert self._live_flags(watcher) == []
+        # Exactly the bound: still live. Just over: one closing frame.
+        assert sv._workflow_reap(now=t0 + 1800.0) == []
+        assert self._live_flags(watcher) == []
+        assert sv.workflow_run_live(self.P, now=t0 + 1800.0) is True
+        assert sv._workflow_reap(now=t0 + 1800.001) == []
+        assert self._live_flags(watcher) == [False]
+        assert sv._workflow_runs == {}
+        assert sv._workflow_reap(now=t0 + 1900.0) == []
+        assert self._live_flags(watcher) == []
+
+    def test_workflow_step_goes_stale_at_600_s_while_its_run_stays_live_to_1800(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._run_start(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        # Anchored to the real clock: the frame the reap emits reads it.
+        t0 = time.monotonic() - 1000.0
+        sv._workflow_runs[(self.P, "wf-k7x")] = t0
+        sv._workflow_children[self.P]["child-c7"] = ("running", t0)
+        _queued(watcher)
+        assert sv.has_active_workflow(self.P, now=t0 + 600.0) is True
+        assert sv.has_active_workflow(self.P, now=t0 + 600.001) is False   # unchanged
+        assert sv.workflow_run_live(self.P, now=t0 + 1000.0) is True       # the run
+        # The step is reaped at 1000 s, and the frame still says the run is live.
+        assert sv._workflow_reap(now=t0 + 1000.0) == ["child-c7"]
+        frames = [f for f in _queued(watcher) if f["type"] == "subagents"]
+        assert len(frames) == 1 and frames[0]["payload"]["workflowLive"] is True
+        assert frames[0]["payload"]["subagents"][0]["action"] == "no longer reporting"
+        # Past the run bound too: one closing frame.
+        assert sv._workflow_reap(now=t0 + 1800.001) == []
+        assert self._live_flags(watcher) == [False]
+        assert sv._workflow_runs == {}
+
+    # -- a run joined mid-way --------------------------------------------------
+
+    def test_workflow_first_id_bearing_node_start_of_an_unrecorded_run_records_it(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        watcher = self._watch(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        assert list(sv._workflow_runs) == [(self.P, "wf-k7x")]
+        assert sv.workflow_run_live(self.P2) is False          # not the other parent's
+        assert self._live_flags(watcher) == [True]
+        # The gap after the step is covered, which is the point of recording it.
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert self._live_flags(watcher) == [True]
+        assert sv._workflow_children == {} and sv.workflow_run_live(self.P) is True
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed")
+        assert self._live_flags(watcher) == [False]
+        assert sv._workflow_runs == {}
+
+    def test_workflow_node_complete_of_an_unrecorded_run_records_it_for_the_header_only(
+            self, wf):
+        acp_mod, sv = wf
+        # A node_complete with no registered child (the run was joined after its
+        # start): recorded, but it feeds neither the rail nor the sweeper.
+        self._complete(acp_mod, "wf-q2m", "step-one")
+        self._start(acp_mod, "wf-k7x", "first-half")          # first variant: no child id
+        assert list(sv._workflow_runs) == [(self.P, "wf-q2m")]
+        assert sv.workflow_run_live(self.P) is True
+        assert sv.has_active_workflow(self.P) is False
+        assert sv.workflow_state(self.P) is None
+        meta = sv.sessions[self.P]
+        meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
+        assert acp_mod._sweepable(self.P, meta, time.monotonic(),
+                                  has_active_workflow=sv.has_active_workflow(self.P)) is True
+
+    def test_workflow_late_frames_after_run_complete_do_not_record_the_run_again(self, wf):
+        acp_mod, sv = wf
+        self._run_start(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed")
+        assert sv._workflow_runs == {}
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")     # late
+        self._complete(acp_mod, "wf-k7x", "step-two")                    # late
+        assert sv._workflow_runs == {}
+        assert sv.workflow_run_live(self.P) is False
+        # Another run of the same parent is not blocked by it.
+        self._start(acp_mod, "wf-q2m", "step-one", child="child-c3")
+        assert list(sv._workflow_runs) == [(self.P, "wf-q2m")]
+
+    def test_workflow_late_frames_after_stop_do_not_record_the_run_again(self, wf):
+        acp_mod, sv = wf
+        self._run_start(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._cancel(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")     # late
+        self._complete(acp_mod, "wf-k7x", "step-two")                    # late
+        self._complete(acp_mod, "wf-k7x", "step-one")                    # late
+        assert sv._workflow_runs == {}
+        assert sv.workflow_run_live(self.P) is False
+
+    def test_workflow_stop_in_the_gap_remembers_the_recorded_run(self, wf):
+        acp_mod, sv = wf
+        self._gap(acp_mod, sv)                     # a recorded run, no tracked child
+        self._cancel(acp_mod)
+        assert sv._workflow_runs == {}
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")     # late
+        self._complete(acp_mod, "wf-k7x", "step-two")
+        assert sv._workflow_runs == {}
+
+    def test_workflow_stop_remembers_the_runs_of_the_stopped_steps_even_when_unrecorded(
+            self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._workflow_runs.clear()                  # no record, only a tracked step
+        self._cancel(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")     # late
+        self._complete(acp_mod, "wf-k7x", "step-two")
+        assert sv._workflow_runs == {}
+
+    def test_workflow_late_frames_after_expiry_do_not_record_the_run_again(self, wf):
+        acp_mod, sv = wf
+        self._gap(acp_mod, sv)
+        t0 = 100000.0
+        sv._workflow_runs[(self.P, "wf-k7x")] = t0
+        sv._workflow_reap(now=t0 + 1800.001)
+        assert sv._workflow_runs == {}
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")     # late
+        self._complete(acp_mod, "wf-k7x", "step-two")
+        assert sv._workflow_runs == {}
+
+    def test_workflow_run_start_of_an_ended_id_records_it_again(self, wf):
+        acp_mod, sv = wf
+        self._run_start(acp_mod)
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed")
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")     # late: ignored
+        assert sv._workflow_runs == {}
+        self._run_start(acp_mod)                                          # a real new start
+        assert list(sv._workflow_runs) == [(self.P, "wf-k7x")]
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert sv.workflow_run_live(self.P) is True
+
+    def test_workflow_ended_set_is_bounded_at_64_and_evicts_the_oldest(self, wf):
+        acp_mod, sv = wf
+        assert acp_mod._WORKFLOW_ENDED_MAX == 64
+        for i in range(65):
+            self._send(acp_mod, "run_complete", workflowId=f"wf-e{i}", status="completed")
+        assert len(sv._workflow_ended[self.P]) == 64
+        assert "wf-e0" not in sv._workflow_ended[self.P]
+        assert "wf-e1" in sv._workflow_ended[self.P] and "wf-e64" in sv._workflow_ended[self.P]
+        self._start(acp_mod, "wf-e64", "step-one", child="child-c7")      # newest: still ended
+        assert sv._workflow_runs == {}
+        self._start(acp_mod, "wf-e1", "step-one", child="child-c8")       # oldest kept
+        assert sv._workflow_runs == {}
+        self._start(acp_mod, "wf-e0", "step-one", child="child-c9")       # evicted: records
+        assert list(sv._workflow_runs) == [(self.P, "wf-e0")]
+
+    def test_workflow_ended_set_is_per_parent_and_cleared_with_the_parent_and_on_detach(
+            self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed")
+        self._send(acp_mod, "run_complete", parentSessionId=self.P2, workflowId="wf-q2m",
+                   status="completed")
+        assert set(sv._workflow_ended) == {self.P, self.P2}
+        # P's ended id does not block P2's run of the same id.
+        self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-k7x",
+                   nodeId="step-one", type="step", nodePath=["wf-k7x", "step-one"],
+                   sessionId="child-c3", agentName="wf-writer")
+        assert list(sv._workflow_runs) == [(self.P2, "wf-k7x")]
+
+        async def answered(self_, method, params, timeout=None):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", answered), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(sv.close_session(self.P))
+        assert set(sv._workflow_ended) == {self.P2}
+        sv._detach("test detach")
+        assert sv._workflow_ended == {}
+
+    # -- the flag follows the frame's own rows ---------------------------------
+
+    def test_workflow_flag_is_false_when_no_row_of_the_frame_is_a_workflow_row(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        watcher = self._watch(acp_mod)
+        watcher2 = self._watch(acp_mod, self.P2)
+        self._run_start(acp_mod)                              # this session's run is live
+        sv.crews[self.P] = {"legacy-1": self._legacy_entry(order=0)}
+        sv.crews[self.P2] = {"legacy-2": self._legacy_entry(order=0)}
+        acp_mod._emit_subagents_frame(self.P, sv.crews, sv._active_fan_out_wave)
+        acp_mod._emit_subagents_frame(self.P2, sv.crews, sv._active_fan_out_wave)
+        assert self._live_flags(watcher) == [False]            # a finished legacy panel
+        assert self._live_flags(watcher2) == [False]
+        assert sv.workflow_run_live(self.P) is True            # the run itself is unchanged
+        # A workflow row beside it: true.
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert self._live_flags(watcher)[-1] is True
+
+    def test_workflow_flag_is_false_for_a_reconnect_resend_of_a_legacy_only_crew(self, wf):
+        acp_mod, sv = wf
+        self._run_start(acp_mod)
+        sv.crews[self.P] = {"legacy-1": self._legacy_entry(order=0)}
+        sv.inflight.add(self.P)
+        late = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(late, self.P)
+        frames = [f for f in _queued(late) if f["type"] == "subagents"]
+        assert len(frames) == 1 and frames[0]["payload"]["workflowLive"] is False
+
+    def test_workflow_flag_only_counts_rows_of_the_frames_own_wave(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._run_start(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")   # wave ""
+        sv._active_fan_out_wave[self.P] = "wave-2"
+        legacy = self._legacy_entry(order=5)
+        legacy["fan_out_id"] = "wave-2"
+        sv.crews[self.P]["legacy-1"] = legacy
+        _queued(watcher)
+        acp_mod._emit_subagents_frame(self.P, sv.crews, sv._active_fan_out_wave)
+        frames = [f for f in _queued(watcher) if f["type"] == "subagents"]
+        assert [r["sessionId"] for r in frames[0]["payload"]["subagents"]] == ["legacy-1"]
+        assert frames[0]["payload"]["workflowLive"] is False
+
+    # -- a denied tool call of a workflow step ---------------------------------
+
+    DENIED = ("A tool call of workflow step wf-coder was denied. The step may "
+              "still report success.")
+    DENY_OPTIONS = [{"optionId": "allow", "name": "Yes", "kind": "allow_once"},
+                    {"optionId": "always-allow", "name": "Always", "kind": "allow_always"},
+                    {"optionId": "deny", "name": "No", "kind": "reject_once"},
+                    {"optionId": "never", "name": "Never", "kind": "reject_always"}]
+
+    def _answer(self, acp_mod, conn, opaque, option_id):
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_permission_response(
+                conn, self.P, {"requestId": opaque, "optionId": option_id}))
+        return written
+
+    @staticmethod
+    def _notices(frames):
+        return [f["payload"]["message"] for f in frames if f["type"] == "agent_error"]
+
+    @pytest.mark.parametrize("option_id", ["deny", "never"])
+    def test_workflow_denying_a_routed_tool_call_gives_one_notice_and_marks_the_row(
+            self, wf, option_id):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c9", agentName="wf-tester")
+        view, other = self._watch(acp_mod), self._watch(acp_mod, self.P2)
+        sv._on_agent_request(self._ask("child-c7", 71, options=[dict(o) for o in self.DENY_OPTIONS]))
+        opaque = self._pending_frames(view)[0]["payload"]["requestId"]
+        written = self._answer(acp_mod, view, opaque, option_id)
+        assert [w["id"] for w in written] == [71]                  # the answer still goes
+        out = _queued(view)
+        assert self._notices(out) == [self.DENIED]
+        subs = [f for f in out if f["type"] == "subagents"]
+        assert len(subs) == 1
+        assert {r["sessionId"]: r["action"] for r in subs[0]["payload"]["subagents"]} == {
+            "child-c7": "tool call denied", "child-c9": "running"}
+        assert sv.crews[self.P]["child-c7"]["done"] is False
+        # Broadcast only: another session's viewer hears nothing, and a reload
+        # does not replay it.
+        assert _queued(other) == []
+        assert "agent_error" not in [e["type"] for e in sv.history[self.P].events()]
+        # A second answer to the same request is refused and says nothing more.
+        self._answer(acp_mod, view, opaque, option_id)
+        again = _queued(view)
+        assert self._notices(again) == [] and again[0]["payload"]["code"] == "unknown_request"
+
+    @pytest.mark.parametrize("option_id", ["allow", "always-allow"])
+    def test_workflow_allowing_a_routed_tool_call_changes_nothing(self, wf, option_id):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71, options=[dict(o) for o in self.DENY_OPTIONS]))
+        opaque = self._pending_frames(view)[0]["payload"]["requestId"]
+        written = self._answer(acp_mod, view, opaque, option_id)
+        assert [w["id"] for w in written] == [71]
+        out = _queued(view)
+        assert [f["type"] for f in out] == ["permission_resolved"]
+        assert sv.crews[self.P]["child-c7"]["action"] == "running"
+
+    def test_workflow_denying_the_parents_own_request_gives_no_workflow_notice(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask(self.P, 5, title="parent asks"))
+        opaque = self._pending_frames(view)[0]["payload"]["requestId"]
+        self._answer(acp_mod, view, opaque, "deny")
+        out = _queued(view)
+        assert [f["type"] for f in out] == ["permission_resolved"]
+        assert sv.crews[self.P]["child-c7"]["action"] == "running"
+
+    @pytest.mark.parametrize("name, label", [
+        ("evil\nname\r\n\tx", "workflow step evil name x"),
+        ("x] [parent", "workflow step x) (parent"),
+        ("A" * 200, "workflow step " + "A" * 60),
+        (12345, "workflow step step-one")])
+    def test_workflow_denial_notice_uses_the_sanitised_step_label(self, wf, name, label):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7", agentName=name)
+        view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        opaque = self._pending_frames(view)[0]["payload"]["requestId"]
+        self._answer(acp_mod, view, opaque, "deny")
+        assert self._notices(_queued(view)) == [
+            f"A tool call of {label} was denied. The step may still report success."]
+
+    def test_workflow_denial_notice_survives_a_step_whose_row_is_gone(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        opaque = self._pending_frames(view)[0]["payload"]["requestId"]
+        sv.crews[self.P].pop("child-c7")
+        sv.crews[self.P]["legacy-1"] = self._legacy_entry(order=9)        # a non-empty crew
+        self._answer(acp_mod, view, opaque, "deny")
+        out = _queued(view)
+        assert self._notices(out) == [
+            "A tool call of workflow step was denied. The step may still report success."]
+        assert [f for f in out if f["type"] == "subagents"] == []         # nothing to mark
+
+    def test_workflow_stop_gives_one_denial_notice_per_cancelled_routed_request(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c9", agentName="wf-tester")
+        sv._on_agent_request(self._ask(self.P, 5, title="parent asks"))
+        sv._on_agent_request(self._ask("child-c7", 71))
+        sv._on_agent_request(self._ask("child-c9", 72))
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            conn = self._cancel(acp_mod)
+        assert sorted(w["id"] for w in written) == [5, 71, 72]
+        notices = self._notices(_queued(conn))
+        denials = [m for m in notices if m.startswith("A tool call of")]
+        assert sorted(denials) == [
+            "A tool call of workflow step wf-coder was denied. The step may still "
+            "report success.",
+            "A tool call of workflow step wf-tester was denied. The step may still "
+            "report success."]
+        # Beside the existing Stop notice, which is unchanged.
+        assert [m for m in notices if m.startswith("Stop ended this turn")] != []
+        assert len(notices) == 3
+        # The rows end as stopped, not as denied.
+        assert {e["action"] for e in sv.crews[self.P].values()} == {"stopped"}
+
+    def test_workflow_close_session_gives_one_denial_notice_for_a_routed_request(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        _queued(view)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(sv.close_session(self.P))
+        out = _queued(view)
+        assert self._notices(out) == [self.DENIED]
+        kinds = [f["type"] for f in out]
+        assert kinds.index("agent_error") < kinds.index("session_closed")
+
+    def test_workflow_reap_gives_one_denial_notice_and_keeps_the_reaped_row_text(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
+        _queued(view)
+        spawned = []
+        with patch.object(acp_mod, "_spawn_task", spawned.append):
+            assert sv._workflow_reap(now=1600.001) == ["child-c7"]
+        for coro in spawned:
+            coro.close()
+        assert len(spawned) == 1 and sv._pending_permission == {}
+        out = _queued(view)
+        assert self._notices(out) == [self.DENIED]
+        row = sv.crews[self.P]["child-c7"]
+        assert (row["done"], row["status"], row["action"]) == (True, "stale", "no longer reporting")
+        subs = [f for f in out if f["type"] == "subagents"]
+        assert len(subs) == 1 and subs[0]["payload"]["subagents"][0]["action"] == "no longer reporting"
+
+    def test_workflow_step_finishing_with_a_request_pending_gives_no_denial_notice(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        _queued(view)
+        spawned = []
+        with patch.object(acp_mod, "_spawn_task", spawned.append):
+            self._complete(acp_mod, "wf-k7x", "step-one")
+        for coro in spawned:
+            coro.close()
+        assert len(spawned) == 1 and sv._pending_permission == {}
+        assert self._notices(_queued(view)) == []
+
+    def test_workflow_turn_end_sweep_of_an_untracked_routed_request_gives_no_notice(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        written = []
+
+        def during():
+            sv._pending_permission["orphan"] = {
+                "session_id": self.P, "options": [], "kiro_id": 73,
+                "workflow_child": "child-gone"}
+
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            conn = self._run_turn(acp_mod, "end_turn", during=during)
+        assert [w["id"] for w in written] == [73]
+        assert self._notices(_queued(conn)) == []
 
     # -- workflow-progress chunks -------------------------------------------
 
