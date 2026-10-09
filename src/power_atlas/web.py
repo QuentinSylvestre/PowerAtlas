@@ -833,7 +833,8 @@ def _mark_resume_locked(row: dict, session, provider: str) -> None:
 
 
 def _resolved_session_status(snapshot, provider: str, session_id: str,
-                             semantic: SemanticStatus | None) -> str:
+                             semantic: SemanticStatus | None,
+                             inflight: frozenset[str] | None = None) -> str:
     """Settle one live session's status, the way its own row settles it.
 
     Same precedence as ``_session_status``: a first-hand, current report beats a
@@ -843,6 +844,12 @@ def _resolved_session_status(snapshot, provider: str, session_id: str,
 
     Callers pass the classifier verdict they have already read, so settling a
     session here costs no extra tail parse.
+
+    *inflight*, from ``_inflight_ids`` on the event loop (ACP-held callers only),
+    settles a verdict the classifier could not give (no transcript yet, or one
+    with no meaningful record): the session this PowerAtlas holds with no prompt
+    in flight is idle, so ``waiting``; with a prompt in flight it is ``working``.
+    ``None`` (the caller has no supervisor reading) keeps the legacy ``working``.
     """
     if semantic is SemanticStatus.ERRORED:
         return "errored"
@@ -851,6 +858,8 @@ def _resolved_session_status(snapshot, provider: str, session_id: str,
         return reported
     if semantic is not None:
         return semantic.value
+    if inflight is not None and session_id not in inflight:
+        return "waiting"
     # A process is running and nothing could classify it — not evidence of idle.
     return "working"
 
@@ -3371,6 +3380,24 @@ def _workflow_states(supervisor, held) -> dict[str, str]:
     return out
 
 
+def _inflight_ids(supervisor, held) -> frozenset[str] | None:
+    """The held sessions with a prompt in flight: ONE snapshot per request,
+    **taken on the event loop** beside `_workflow_states`.
+
+    `None` when there is no supervisor reading (no supervisor, or the read
+    failed): the status call sites then keep the legacy "working" for a session
+    the classifier cannot read (`_resolved_session_status`). An empty frozenset
+    is a real answer: nothing in flight.
+    """
+    if supervisor is None:
+        return None
+    try:
+        return frozenset(sid for sid in held if sid in supervisor.inflight)
+    except Exception:
+        log.debug("ACP listing: could not read in-flight prompts", exc_info=True)
+        return None
+
+
 # Consecutive failures of `_workflow_states`, per session id (or the pending-
 # permission read). Loop-only, like the function. The Overview tile poll runs
 # about every 2 s, so a persistent fault would write ~30 tracebacks a minute
@@ -3394,7 +3421,8 @@ def _workflow_state_fault(key: str) -> None:
 
 
 def _acp_status_for_held(sessions, snapshot=None,
-                         workflow_states: dict[str, str] | None = None) -> dict[str, str]:
+                         workflow_states: dict[str, str] | None = None,
+                         inflight: frozenset[str] | None = None) -> dict[str, str]:
     """The dashboard's verdict for the sessions this PowerAtlas is driving.
 
     Blocking — a transcript-tail classify per session — so this runs inside
@@ -3427,6 +3455,11 @@ def _acp_status_for_held(sessions, snapshot=None,
     `_workflow_overlay_status`). It is applied AFTER the verdict above and is a
     parameter because this runs in a worker thread, which must not call the
     supervisor.
+
+    `inflight`, from `_inflight_ids` on the event loop, settles a session the
+    classifier cannot read (a brand-new session with no transcript): `waiting`
+    with no prompt in flight, `working` with one (`_resolved_session_status`).
+    `None` keeps the legacy `working`.
     """
     if not sessions:
         return {}
@@ -3440,7 +3473,8 @@ def _acp_status_for_held(sessions, snapshot=None,
                 session.session_id, _ACP_V3_LISTING_PROVIDER, session.cwd)
             out[session.session_id] = _workflow_overlay_status(
                 _resolved_session_status(
-                    snapshot, _ACP_V3_LISTING_PROVIDER, session.session_id, semantic),
+                    snapshot, _ACP_V3_LISTING_PROVIDER, session.session_id, semantic,
+                    inflight),
                 workflow_states.get(session.session_id))
         except Exception:
             log.exception("ACP listing: could not settle status for %s",
@@ -3580,11 +3614,13 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                  include_provider: bool = False,
                  tag: str = "", time_filter: str = "",
                  sort: str = "recent", q: str = "",
-                 workflow_states: dict[str, str] | None = None) -> dict:
+                 workflow_states: dict[str, str] | None = None,
+                 inflight: frozenset[str] | None = None) -> dict:
     """Build the listing payload. Blocking; runs off the loop.
 
     `workflow_states`: the loop-side `_workflow_states` snapshot, overlaid on
-    the held rows' status by `_acp_status_for_held`. This function never calls
+    the held rows' status by `_acp_status_for_held`. `inflight`: the loop-side
+    `_inflight_ids` snapshot, passed to the same call. This function never calls
     the supervisor itself.
 
     Paginated **independently at both levels** (D19). A post-pagination
@@ -3939,7 +3975,8 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     all_page_sessions = [s for _meta, page_tagged in rows for s, _p in page_tagged]
     statuses = _acp_status_for_held([
         s for s in all_page_sessions + [s for _c, _n, s, _p in pinned_sessions_found]
-        if availability.get(s.session_id) == "held"], snapshot, workflow_states)
+        if availability.get(s.session_id) == "held"], snapshot, workflow_states,
+        inflight)
 
     def _row_dict(s, prov_name: str, pinned: bool = False) -> dict:
         d = {
@@ -3997,10 +4034,11 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
                        providers: frozenset[str] = frozenset({_ACP_V3_LISTING_PROVIDER}),
                        include_provider: bool = False, tag: str = "",
                        time_filter: str = "",
-                       workflow_states: dict[str, str] | None = None) -> dict:
+                       workflow_states: dict[str, str] | None = None,
+                       inflight: frozenset[str] | None = None) -> dict:
     """Build the recency-ordered listing payload. Blocking; runs off the loop.
 
-    `workflow_states`: see `_acp_listing`.
+    `workflow_states`, `inflight`: see `_acp_listing`.
 
     The listing's second shape: every session this ACP can resume, newest
     first, across all workspaces instead of grouped inside one. It exists so
@@ -4129,7 +4167,8 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
     availability = _acp_availability(all_sids, held)
     statuses = _acp_status_for_held(
         [s for s in sessions + pinned_sessions_list
-         if availability.get(s.session_id) == "held"], snapshot, workflow_states)
+         if availability.get(s.session_id) == "held"], snapshot, workflow_states,
+        inflight)
 
     order = list(dict.fromkeys(s.cwd for s in sessions + pinned_sessions_list))
     flags = dict(zip(order, _acp_exists_flags(order)))
@@ -4238,16 +4277,17 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     }
     # Taken here, on the loop, with `held`: the worker only receives the dict.
     workflow_states = _workflow_states(supervisor, held)
+    inflight = _inflight_ids(supervisor, held)
     if mode == "recent":
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
             max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity,
-            workflow_states=workflow_states)
+            workflow_states=workflow_states, inflight=inflight)
     return await asyncio.to_thread(
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
-        held, capacity, workflow_states=workflow_states)
+        held, capacity, workflow_states=workflow_states, inflight=inflight)
 
 
 _DASHBOARD_LISTING_PATH = "/api/dashboard/sessions"
@@ -4307,17 +4347,19 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
     sort = project_sort if project_sort in ("recent", "alpha") else "recent"
     # Taken here, on the loop, with `held`: the worker only receives the dict.
     workflow_states = _workflow_states(supervisor, held)
+    inflight = _inflight_ids(supervisor, held)
     if mode == "recent":
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
             max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity,
-            providers, True, tag, time_filter, workflow_states=workflow_states)
+            providers, True, tag, time_filter, workflow_states=workflow_states,
+            inflight=inflight)
     return await asyncio.to_thread(
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
         held, capacity, providers, True, tag, time_filter, sort, q,
-        workflow_states=workflow_states)
+        workflow_states=workflow_states, inflight=inflight)
 
 
 # --- The dashboard Overview's summary ------------------------------------
@@ -4475,12 +4517,14 @@ def _overview_filters_cached():
 
 
 def _overview_live(held: dict[str, str], filter_: str,
-                   workflow_states: dict[str, str] | None = None) -> dict:
+                   workflow_states: dict[str, str] | None = None,
+                   inflight: frozenset[str] | None = None) -> dict:
     """The live tiles payload. Blocking; runs off the loop.
 
-    `workflow_states` is the loop-side `_workflow_states` snapshot. It reaches
-    `overview.live_sessions` through the `acp_status_for_held` closure below, so
-    `overview.py` and the `LiveDeps` shape are unchanged.
+    `workflow_states` and `inflight` are the loop-side `_workflow_states` and
+    `_inflight_ids` snapshots. They reach `overview.live_sessions` through the
+    `acp_status_for_held` closure below, so `overview.py` and the `LiveDeps`
+    shape are unchanged.
 
     The presence snapshot is taken here, in the worker thread, never as a
     `to_thread` argument: a rescan takes 42-75 ms and would block the loop
@@ -4497,7 +4541,7 @@ def _overview_live(held: dict[str, str], filter_: str,
         session_is_live=_session_is_live,
         acp_availability=_acp_availability,
         acp_status_for_held=lambda sessions, snap: _acp_status_for_held(
-            sessions, snap, workflow_states),
+            sessions, snap, workflow_states, inflight),
         row_title=_acp_row_title,
         hidden=hidden,
         provider_shown=lambda prov: prov in providers,
@@ -4525,7 +4569,9 @@ async def api_dashboard_overview_live(response: Response,
             for sid, m in (sup.sessions.items() if sup is not None else [])}
     # Taken here, on the loop, with `held`: the worker only receives the dict.
     workflow_states = _workflow_states(sup, held)
-    return await asyncio.to_thread(_overview_live, held, filter_, workflow_states)
+    inflight = _inflight_ids(sup, held)
+    return await asyncio.to_thread(
+        _overview_live, held, filter_, workflow_states, inflight)
 
 
 # --- The create flow's workspace list ------------------------------------
@@ -4912,144 +4958,6 @@ async def api_acp_delete_sessions(request: Request):
     sv3 = getattr(acp, "_supervisor", None)
     held = (frozenset(acp._supervisor.sessions)
             | frozenset(sv3.sessions if sv3 is not None else ()))
-    result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
-    return JSONResponse({
-        "deleted": result["deleted"],
-        "failed": result["failed"],
-        "total_found": len(session_ids),
-    })
-
-
-
-
-# --- v3 ACP session browser endpoints ---------------------------------
-#
-# Mirrors of the v2 listing, workspaces, and delete endpoints for the
-# ``/acp-v3`` surface. Same security posture; supervisor calls route to
-# ``acp._supervisor`` instead of ``acp._supervisor``.
-
-
-@app.get(_ACP_LISTING_PATH)
-async def api_acp_v3_sessions(response: Response, cwd: str = "",
-                              group_page: int = 1,
-                              group_size: int = _ACP_GROUPS_PER_PAGE,
-                              session_page: int = 1,
-                              session_size: int = _ACP_SESSIONS_PER_GROUP,
-                              mode: str = "", page: int = 1,
-                              size: int = _ACP_FLAT_PAGE_SIZE):
-    """v3 session listing. Mirrors ``api_acp_sessions`` with ``_supervisor``."""
-    response.headers["Cache-Control"] = "no-store"
-    sv3 = getattr(acp, "_supervisor", None) if acp is not None else None
-    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
-    capacity = {
-        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
-        "max": acp.MAX_SESSIONS if acp is not None else 0,
-    }
-    if mode == "recent":
-        return await asyncio.to_thread(
-            _acp_flat_listing_v3, max(1, page),
-            max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity)
-    return await asyncio.to_thread(
-        _acp_listing_v3, cwd,
-        max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
-        max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
-        held, capacity)
-
-
-@app.get(_ACP_WORKSPACES_PATH)
-async def api_acp_v3_workspaces(response: Response):
-    """v3 workspace list for the create picker. Mirrors ``api_acp_workspaces``."""
-    response.headers["Cache-Control"] = "no-store"
-    sv3 = getattr(acp, "_supervisor", None) if acp is not None else None
-    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
-    capacity = {
-        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
-        "max": acp.MAX_SESSIONS if acp is not None else 0,
-    }
-    return await asyncio.to_thread(_acp_workspaces_v3, capacity)
-
-
-@app.post(_ACP_DELETE_PATH)
-async def api_acp_v3_delete_sessions(request: Request):
-    """v3 session delete. Mirrors ``api_acp_delete_sessions`` with ``_supervisor``.
-
-    Uses the same workspace-level and per-session delete paths as the v2
-    endpoint, but snapshots ``_supervisor.sessions`` for the held set.
-    """
-    if acp is None:
-        return JSONResponse(
-            {"error": "The ACP module is not loaded, so its store is not "
-                      "reachable from here."}, status_code=503)
-    sv3 = getattr(acp, "_supervisor", None)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Expected a JSON body."}, status_code=400)
-
-    # --- Workspace-level delete path ---
-    cwd: str | None = body.get("cwd") if isinstance(body, dict) else None
-    delete_folder: bool = (
-        bool(body.get("delete_folder", False)) if isinstance(body, dict) else False
-    )
-    if cwd is not None:
-        if not isinstance(cwd, str) or not cwd.strip():
-            return JSONResponse(
-                {"error": "'cwd' must be a non-empty string."}, status_code=400)
-        from . import data_kiro_v3
-        _v3_sessions, _ = await asyncio.to_thread(data_kiro_v3.load_sessions, cwd)
-        all_ids = [s.session_id for s in _v3_sessions]
-        # Enumerate v3 session IDs for this workspace (off the event loop).
-        # `data_kiro_v3.load_sessions(cwd)` returns (list[Session], dict) — unpack correctly.
-        # `acp._supervisor.sessions` already carries every live id regardless of shape.
-
-        deleted_total: list[str] = []
-        failed_total: list[dict] = []
-        while all_ids:
-            batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
-            held = frozenset(acp._supervisor.sessions)
-            result = await asyncio.to_thread(_acp_delete_many, batch, held)
-            deleted_total.extend(result["deleted"])
-            failed_total.extend(result["failed"])
-        resp_data: dict = {
-            "deleted": deleted_total,
-            "failed": failed_total,
-            "total_found": len(deleted_total) + len(failed_total),
-        }
-        if delete_folder:
-            peer_ip = (request.scope.get("client") or (None,))[0]
-            if _is_remote_peer(peer_ip):
-                resp_data["folder_deleted"] = False
-                resp_data["folder_error"] = (
-                    "Folder deletion is not available from remote access."
-                )
-            else:
-                try:
-                    folder_deleted, folder_error = await asyncio.to_thread(
-                        _acp_delete_workspace_folder, cwd
-                    )
-                except Exception as exc:
-                    folder_deleted = False
-                    folder_error = f"Folder delete failed unexpectedly: {exc}"
-                resp_data["folder_deleted"] = folder_deleted
-                resp_data["folder_error"] = folder_error
-        return JSONResponse(resp_data)
-
-    # --- Per-session delete path ---
-    raw = body.get("session_ids") if isinstance(body, dict) else None
-    if not isinstance(raw, list) or not raw:
-        return JSONResponse(
-            {"error": "'session_ids' must be a non-empty list."},
-            status_code=400)
-    if len(raw) > _ACP_MAX_DELETE_IDS:
-        return JSONResponse(
-            {"error": f"At most {_ACP_MAX_DELETE_IDS} sessions per request."},
-            status_code=400)
-    session_ids = [s for s in raw if isinstance(s, str)]
-    # `_acp_delete_many` dispatches each id by shape — `sess_`-prefixed routes
-    # to `data_kiro_v3.delete_session` (via `_acp_delete_session`'s own v3
-    # branch) and `_lock_holder_v3`'s externally-held check, anything else to
-    # the historical v2 path — so every requested id is handled by one call.
-    held = frozenset(acp._supervisor.sessions)
     result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
     return JSONResponse({
         "deleted": result["deleted"],
@@ -6903,6 +6811,7 @@ async def api_session_availability(response: Response, sid: str = "", cwd: str =
     supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
     held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
     workflow_states = _workflow_states(supervisor, held & {sid})
+    inflight = _inflight_ids(supervisor, held & {sid})
 
     def _compute() -> tuple[str, str]:
         availability = _acp_availability([sid], held)
@@ -6913,7 +6822,8 @@ async def api_session_availability(response: Response, sid: str = "", cwd: str =
                 snapshot = presence.get_snapshot()
                 semantic = get_semantic_status(sid, _ACP_V3_LISTING_PROVIDER, cwd)
                 status = _workflow_overlay_status(
-                    _resolved_session_status(snapshot, _ACP_V3_LISTING_PROVIDER, sid, semantic),
+                    _resolved_session_status(
+                        snapshot, _ACP_V3_LISTING_PROVIDER, sid, semantic, inflight),
                     workflow_states.get(sid))
             except Exception:
                 log.exception("session-availability: could not settle status for %s", sid)

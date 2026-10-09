@@ -17430,25 +17430,34 @@ class TestAcpListingEndpoint:
             "a transcript was read for a row that draws no dot; the tail parse "
             f"is the cost being avoided here — classified {asked}")
 
-    @pytest.mark.parametrize("semantic", [
-        pytest.param(lambda _sid: None, id="nothing-classifiable"),
+    @pytest.mark.parametrize("semantic, in_flight, expected", [
+        # Changed 2026-10-09 (261008 cleanup): a held session with nothing to
+        # classify and no prompt in flight is a brand-new, idle one, so
+        # `waiting`; it used to read `working` for its first seconds.
+        pytest.param(lambda _sid: None, False, "waiting", id="nothing-classifiable"),
+        pytest.param(lambda _sid: None, True, "working",
+                     id="nothing-classifiable-prompt-in-flight"),
         pytest.param(
             lambda _sid: (_ for _ in ()).throw(RuntimeError("tail unreadable")),
-            id="classifier-raised"),
+            False, "working", id="classifier-raised"),
     ])
-    def test_a_held_row_nothing_can_classify_still_reads_as_working(
-            self, client, acp_listing_store, monkeypatch, semantic):
-        """The direction this fails in is the load-bearing part.
+    def test_a_held_row_nothing_can_classify_is_settled_by_its_prompt_in_flight(
+            self, client, acp_listing_store, monkeypatch, semantic, in_flight, expected):
+        """The direction a *failure* lands in is the load-bearing part.
 
-        A session this process holds is running by definition — we *are* the
-        process — so an unreadable transcript is a failure to classify and never
-        evidence of quiet. Both arms land on `working`: the one
-        `_resolved_session_status` takes for the dashboard's own row, and the
-        one the `except` here takes when the classifier raises outright.
+        A classifier that raises is a failure to classify, never evidence of
+        quiet: the `except` in `_acp_status_for_held` lands on `working`
+        whatever the supervisor says. A classifier with simply nothing to read
+        (a session that has no transcript yet) is a different thing: with no
+        prompt in flight the session is idle (`waiting`), with one it is
+        `working` (`_resolved_session_status`).
         """
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod._supervisor, "inflight",
+                            {"mine"} if in_flight else set())
         rows, _asked = self._held_rows(
             client, acp_listing_store, monkeypatch, semantic)
-        assert rows["mine"]["status"] == "working"
+        assert rows["mine"]["status"] == expected
 
     def test_capacity_counts_held_sessions_and_the_cap(self, client,
                                                        acp_listing_store):
@@ -35838,7 +35847,7 @@ class TestOverviewLive:
         from power_atlas import web as web_mod
         got = []
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_, workflow_states=None: got.append(filter_) or {"filter": filter_, "tiles": []})
+                            lambda held, filter_, workflow_states=None, inflight=None: got.append(filter_) or {"filter": filter_, "tiles": []})
         client.get("/api/dashboard/overview/live?filter=poweratlas")
         client.get("/api/dashboard/overview/live?filter=bogus")
         client.get("/api/dashboard/overview/live")
@@ -35847,14 +35856,14 @@ class TestOverviewLive:
     def test_route_refused_without_the_cookie(self, anonymous_client, client, monkeypatch):
         from power_atlas import web as web_mod
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_, workflow_states=None: {"filter": filter_, "tiles": []})
+                            lambda held, filter_, workflow_states=None, inflight=None: {"filter": filter_, "tiles": []})
         assert _is_json_403(anonymous_client.get("/api/dashboard/overview/live"))
         assert client.get("/api/dashboard/overview/live").status_code == 200
 
     def test_route_refused_to_a_remote_peer(self, remote_enabled, monkeypatch):
         from power_atlas import web as web_mod
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_, workflow_states=None: {"filter": filter_, "tiles": ["LEAK"]})
+                            lambda held, filter_, workflow_states=None, inflight=None: {"filter": filter_, "tiles": ["LEAK"]})
         status, body, _ = _peer_http("/api/dashboard/overview/live", [_cookie_header()])
         assert status == 403
         assert b"LEAK" not in body
@@ -40212,7 +40221,7 @@ class TestWorkflowLivenessStatus:
                             lambda sid, now=None: threads.append(threading.current_thread().name)
                             or real(sid, now))
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_, workflow_states=None: got.append(
+                            lambda held, filter_, workflow_states=None, inflight=None: got.append(
                                 (dict(held), workflow_states)) or {"filter": filter_, "tiles": []})
         assert client.get("/api/dashboard/overview/live").status_code == 200
         assert got == [({"runner": self._CWD, "plain": self._CWD}, {"runner": "working"})]
@@ -40280,6 +40289,253 @@ class TestWorkflowLivenessStatus:
         body = client.get("/api/session-availability",
                           params={"sid": self._SID, "cwd": self._CWD}).json()
         assert body == {"sid": self._SID, "availability": "locked", "status": ""}
+
+
+class _ThreadSpySet(set):
+    """A `_supervisor.inflight` stand-in that records the thread of each membership test."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.threads = []
+
+    def __contains__(self, item):
+        self.threads.append(threading.current_thread().name)
+        return super().__contains__(item)
+
+
+class TestNewSessionStatusWithoutTranscript:
+    """A held session the classifier cannot read (a brand-new one has no transcript yet) reads
+    `waiting` while no prompt is in flight and `working` while one is. Before this, it read
+    `working` for the first seconds of its life and again between a prompt and the first
+    transcript record (measured in live QA, 2026-10-09). The supervisor's `inflight` is read on
+    the event loop, where `held` and `workflow_states` are read, and handed to the worker.
+    A verdict the classifier does give is never changed by this."""
+
+    _SID = "sess_aabbccdd-1234-5678-abcd-ef0123456789"
+    _CWD = "C:\\dev\\ws"
+
+    @staticmethod
+    def _empty_snapshot():
+        from power_atlas import presence as presence_mod
+        return presence_mod.Snapshot(set(), set())
+
+    # -- the pure rule --------------------------------------------------------
+
+    @pytest.mark.parametrize("verdict, inflight, expected", [
+        (None, frozenset(), "waiting"),             # no transcript, nothing in flight: idle
+        (None, frozenset({"s"}), "working"),        # no transcript, this session's prompt in flight
+        (None, frozenset({"other"}), "waiting"),    # another session's prompt is not this one's
+        (None, None, "working"),                    # no supervisor reading: legacy behaviour
+        ("WAITING", frozenset({"s"}), "waiting"),   # a classifier verdict wins, in flight or not
+        ("WORKING", frozenset(), "working"),
+        ("ERRORED", frozenset(), "errored"),
+        ("ERRORED", frozenset({"s"}), "errored"),
+    ])
+    def test_a_held_session_the_classifier_cannot_read_is_settled_by_its_inflight_prompt(
+            self, verdict, inflight, expected):
+        from power_atlas import web as web_mod
+        from power_atlas.status_classifier import SemanticStatus
+        semantic = SemanticStatus[verdict] if verdict else None
+        assert web_mod._resolved_session_status(
+            self._empty_snapshot(), "kiro-cli-v3", "s", semantic, inflight) == expected
+
+    def test_the_inflight_argument_is_optional_so_every_older_caller_keeps_working(self):
+        from power_atlas import web as web_mod
+        assert web_mod._resolved_session_status(
+            self._empty_snapshot(), "kiro-cli-v3", "s", None) == "working"
+
+    def test_a_first_hand_report_still_beats_the_no_transcript_rule(self):
+        from power_atlas import web as web_mod
+
+        class Busy:
+            def reported_status(self, provider, session_id):
+                return "busy"
+
+        assert web_mod._resolved_session_status(
+            Busy(), "claude-code", "s", None, frozenset()) == "working"
+
+    # -- the loop-side snapshot -----------------------------------------------
+
+    def test_inflight_snapshot_keeps_only_held_sessions_with_a_prompt_in_flight(self):
+        from power_atlas import web as web_mod
+
+        class Sv:
+            inflight = {"a", "c"}
+
+        assert web_mod._inflight_ids(Sv(), frozenset({"a", "b"})) == frozenset({"a"})
+        assert web_mod._inflight_ids(Sv(), frozenset()) == frozenset()
+        # A held-set dict (the Overview's shape) is read by its keys.
+        assert web_mod._inflight_ids(Sv(), {"c": "cwd", "b": "cwd"}) == frozenset({"c"})
+
+    def test_inflight_snapshot_is_none_without_a_supervisor_or_when_the_read_fails(self):
+        from power_atlas import web as web_mod
+
+        class Broken:
+            @property
+            def inflight(self):
+                raise RuntimeError("boom")
+
+        assert web_mod._inflight_ids(None, frozenset({"a"})) is None
+        assert web_mod._inflight_ids(Broken(), frozenset({"a"})) is None
+
+    # -- the status call sites ------------------------------------------------
+
+    @pytest.fixture
+    def held_sid(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod._supervisor, "sessions", {self._SID: {"cwd": self._CWD}})
+        return self._SID
+
+    @staticmethod
+    def _classify_as(monkeypatch, verdict):
+        from power_atlas import presence as presence_mod
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "get_semantic_status", lambda sid, provider, cwd: verdict)
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                            lambda *a, **k: presence_mod.Snapshot(set(), set()))
+
+    def _availability_status(self, client):
+        body = client.get("/api/session-availability",
+                          params={"sid": self._SID, "cwd": self._CWD}).json()
+        assert body["availability"] == "held"
+        return body["status"]
+
+    @pytest.mark.parametrize("verdict, in_flight, expected", [
+        (None, False, "waiting"),
+        (None, True, "working"),
+        ("WAITING", True, "waiting"),   # the transcript tail is unchanged by a prompt in flight
+        ("WORKING", False, "working"),
+        ("ERRORED", False, "errored"),
+    ])
+    def test_session_availability_status_for_a_session_with_no_transcript(
+            self, client, held_sid, monkeypatch, verdict, in_flight, expected):
+        from power_atlas import acp as acp_mod
+        from power_atlas.status_classifier import SemanticStatus
+        self._classify_as(monkeypatch, SemanticStatus[verdict] if verdict else None)
+        monkeypatch.setattr(acp_mod._supervisor, "inflight", {held_sid} if in_flight else set())
+        assert self._availability_status(client) == expected
+
+    def test_session_availability_keeps_a_running_workflow_working_over_the_idle_rule(
+            self, client, held_sid, monkeypatch):
+        """The workflow overlay still upgrades a `waiting` verdict, the no-transcript one too."""
+        from power_atlas import acp as acp_mod
+        self._classify_as(monkeypatch, None)
+        monkeypatch.setattr(acp_mod._supervisor, "inflight", set())
+        monkeypatch.setattr(acp_mod._supervisor, "_workflow_children",
+                            {held_sid: {"child": ("running", time.monotonic() - 5.0)}})
+        assert self._availability_status(client) == "working"
+
+    def test_session_availability_reads_inflight_on_the_loop_never_in_the_worker(
+            self, client, held_sid, monkeypatch):
+        from power_atlas import acp as acp_mod
+        self._classify_as(monkeypatch, None)
+        spy = _ThreadSpySet()
+        monkeypatch.setattr(acp_mod._supervisor, "inflight", spy)
+        assert self._availability_status(client) == "waiting"
+        assert spy.threads, "the supervisor's inflight was never read"
+        assert not [t for t in spy.threads if t.startswith("asyncio_")], spy.threads
+
+    def _listing_world(self, monkeypatch, acp_listing_store):
+        """Two held sessions the classifier cannot read, plus a held one it can."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import presence as presence_mod
+        from power_atlas import web as web_mod
+        from power_atlas.status_classifier import SemanticStatus
+        ids = ["fresh_idle", "fresh_sent", "has_tail"]
+        acp_listing_store["add"](self._CWD, [_acp_row(s) for s in ids])
+        for s in ids:
+            acp_mod._supervisor.sessions[s] = {"cwd": self._CWD}
+        monkeypatch.setattr(acp_mod._supervisor, "inflight", {"fresh_sent", "has_tail"})
+        monkeypatch.setattr(
+            web_mod, "get_semantic_status",
+            lambda sid, provider, cwd: SemanticStatus.WAITING if sid == "has_tail" else None)
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                            lambda *a, **k: presence_mod.Snapshot(set(), set()))
+        return ids
+
+    # Per id: the status the rail must show.
+    _EXPECTED = {
+        "fresh_idle": "waiting",   # no transcript, no prompt in flight
+        "fresh_sent": "working",   # no transcript yet, prompt sent
+        "has_tail": "waiting",     # classifier verdict, unchanged by the prompt in flight
+    }
+
+    def test_listing_rows_for_sessions_with_no_transcript(
+            self, client, acp_listing_store, monkeypatch):
+        from power_atlas import data as data_mod
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        self._listing_world(monkeypatch, acp_listing_store)
+        for path in ("/api/acp/sessions", "/api/dashboard/sessions"):
+            rows = client.get(path, params={"cwd": self._CWD, "session_size": 50}
+                              ).json()["groups"][0]["sessions"]
+            assert {r["id"]: r["status"] for r in rows} == self._EXPECTED, path
+
+    @pytest.mark.parametrize("path", ["/api/acp/sessions", "/api/dashboard/sessions"])
+    def test_flat_listing_rows_for_sessions_with_no_transcript(
+            self, client, acp_listing_store, monkeypatch, path):
+        from power_atlas import data as data_mod
+        ids = self._listing_world(monkeypatch, acp_listing_store)
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        rows = [(_acp_row(s), "kiro-cli-v3") for s in ids]
+        monkeypatch.setattr(data_mod, "get_all_sessions_paginated", lambda *a, **k: (rows, False))
+        body = client.get(path, params={"mode": "recent"}).json()
+        assert {r["id"]: r["status"] for r in body["sessions"]} == self._EXPECTED
+
+    def test_listing_reads_inflight_on_the_loop_never_in_the_listing_worker(
+            self, client, acp_listing_store, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import data as data_mod
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        self._listing_world(monkeypatch, acp_listing_store)
+        spy = _ThreadSpySet({"fresh_sent"})
+        monkeypatch.setattr(acp_mod._supervisor, "inflight", spy)
+        for path in ("/api/acp/sessions", "/api/dashboard/sessions"):
+            assert client.get(path).status_code == 200
+        assert spy.threads, "the supervisor's inflight was never read"
+        assert not [t for t in spy.threads if t.startswith("asyncio_")], spy.threads
+
+    def test_the_overview_closure_settles_a_session_with_no_transcript_by_inflight(
+            self, monkeypatch):
+        from power_atlas import overview
+        from power_atlas import web as web_mod
+        seen = {}
+        monkeypatch.setattr(overview, "live_sessions",
+                            lambda held, snap, f, deps, originals: seen.update(deps=deps) or [])
+        monkeypatch.setattr(web_mod.data, "discover_workspaces_with_counts", lambda *a, **k: [])
+        monkeypatch.setattr(web_mod, "get_semantic_status", lambda sid, provider, cwd: None)
+        empty = self._empty_snapshot()
+        rows = [_acp_row("a"), _acp_row("b")]
+        web_mod._overview_live({}, "all", None, frozenset({"a"}))
+        assert seen["deps"].acp_status_for_held(rows, empty) == {"a": "working", "b": "waiting"}
+        # No inflight reading handed in (the default): the legacy `working` for both.
+        web_mod._overview_live({}, "all")
+        assert seen["deps"].acp_status_for_held(rows, empty) == {"a": "working", "b": "working"}
+
+    def test_the_overview_route_takes_the_inflight_snapshot_on_the_loop(
+            self, client, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+        sv = acp_mod._supervisor
+        monkeypatch.setattr(sv, "sessions", {"a": {"cwd": self._CWD}, "b": {"cwd": self._CWD}})
+        spy = _ThreadSpySet({"a", "elsewhere"})
+        monkeypatch.setattr(sv, "inflight", spy)
+        got = []
+        monkeypatch.setattr(
+            web_mod, "_overview_live",
+            lambda held, filter_, workflow_states=None, inflight=None: got.append(inflight)
+            or {"filter": filter_, "tiles": []})
+        assert client.get("/api/dashboard/overview/live").status_code == 200
+        assert got == [frozenset({"a"})]
+        assert spy.threads and not [t for t in spy.threads if t.startswith("asyncio_")], spy.threads
+
+    def test_with_no_acp_module_a_listing_row_has_no_status_and_raises_nothing(
+            self, client, acp_listing_store, monkeypatch):
+        """The route's `acp is None` degradation: no supervisor, so no snapshot and no error."""
+        from power_atlas import web as web_mod
+        acp_listing_store["add"](self._CWD, [_acp_row("s1")])
+        monkeypatch.setattr(web_mod, "acp", None)
+        rows = client.get("/api/acp/sessions").json()["groups"][0]["sessions"]
+        assert [(r["id"], r["status"]) for r in rows] == [("s1", "")]
 
 
 @pytest.fixture(autouse=True)
