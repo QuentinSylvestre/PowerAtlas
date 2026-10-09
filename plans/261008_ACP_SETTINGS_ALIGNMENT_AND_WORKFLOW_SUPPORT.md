@@ -824,10 +824,10 @@ Part A review (2 personas): 0 High, 1 Medium (40% confidence), about 9 Low; fixe
 | 4 | Low | `idle` verdict unreachable; staleness tests used 1 s margins on the real clock. | Fixed -- comment and 590 s / 21500 s margins (`4a0c005`). |
 | 5 | Low | Part B skip rested on one two-step run (n=1). | Fixed -- 330 s probe measured the gap; Part B built (`b1c1bbc`, `17ef314`). |
 | 6 | Low | Part B: one window fits neither long steps nor waiting-on-user; 'crashed child' premise unmeasured; cache bound below store size; non-OSError unhandled; test caches not autouse. | Fixed -- per-status windows, premise labelled assumed, 8192 bound, catch-all, autouse isolation (`08ade6d`). |
-| 7 | Info | Pre-existing dead route `api_acp_v3_sessions` calls nonexistent `_acp_listing_v3` / `_acp_flat_listing_v3`. | Escalated -- outside this plan; reported to the user, not changed. |
+| 7 | Info | Pre-existing dead route `api_acp_v3_sessions` calls nonexistent `_acp_listing_v3` / `_acp_flat_listing_v3`. | Fixed -- three dead `/acp-v3` handlers deleted (`3b4986d`); user chose 'Fix now' at the /qclose cleanup scan, 2026-10-09. |
 | 8 | Medium | Live QA first could not run (PowerAtlas not running; launch refused), then found the parent stuck at working after the wake turn (SC-6 failed). | Fixed -- user authorised the launch; cause was `classify_kiro_v3` reading the empty steer boundary record as WORKING; fixed in `9ce42b4`, re-verified live. |
 | 9 | Low | Classifier fix review: stale docstring, overclaiming comment, non-string content untested. | Fixed -- docstring, comment and two pinning tests (`fa3934d`). |
-| 10 | Low | Live QA: crew header reads 'Done (1 agent)' for about 1 s between steps; a new held session reads working before its transcript exists. | Escalated -- logged as ROADMAP Low items, not fixed; user decision needed. |
+| 10 | Low | Live QA: crew header reads 'Done (1 agent)' for about 1 s between steps; a new held session reads working before its transcript exists. | Fixed -- run-level tracking (`49e7547`) and the no-transcript status rule (`3b4986d`); verified live; user chose 'Fix now' at the /qclose cleanup scan, 2026-10-09. |
 
 ### 2026-10-09 -- Final Post-Implementation Review (Step 9, personas: Senior engineer, Architect, Reliability engineer)
 
@@ -851,7 +851,7 @@ Final runs: `tests/test_web.py` + `tests/test_data.py` + `tests/test_data_kiro_v
 | 2 | Medium | README did not mention workflow crew rows or cli.json-driven session settings (user-visible surface). | Fixed -- five small README edits (`3a0a4ee`). |
 | 3 | Medium | Four staleness clocks not documented side by side; the sweeper can close a parent whose workflow outlives the idle TTL when the last child completes. | Fixed -- clocks table in KNOWLEDGE.md and `touch_used` on the last completion (`3a0a4ee`). Quiet step over 600 s with no tab remains a documented, unmeasured limitation. |
 | 4 | Medium | Stop gave no feedback and the live run showed the parent staying working after Stop. | Fixed -- Stop notice, Stop ends the workflow in PowerAtlas's view, classifier fixes (`3a0a4ee`, `3901a53`, `6e98f40`, `c3ca104`); outcome of Stop itself stays condition-dependent (ROADMAP). |
-| 5 | Medium | Workflow step permission requests are cancelled silently (Manual mode); no user-visible card. | Escalated -- logged with the step named (`3a0a4ee`); user-visible handling stays a ROADMAP item. |
+| 5 | Medium | Workflow step permission requests are cancelled silently (Manual mode); no user-visible card. | Fixed -- routed to the parent (`5103cc9`, hardened `1830fe3`); Allow, Deny and Stop verified live in Manual mode; user chose 'Fix now' at the /qclose cleanup scan, 2026-10-09. |
 | 6 | Low | `_WORKFLOWS_FORWARD_ENABLED` dead configuration. | Fixed -- deleted (`3a0a4ee`). |
 | 7 | Low | `close_session` and `_detach` freed kept-history workflow children without telling viewers; wording of the release note. | Fixed -- shared release helper (`3a0a4ee`). |
 | 8 | Low | `_crew_order_next` and `_workflow_reap_failures` are redundant or log-throttle-only structures. | User: accepted -- "accept and /qclose" (user reply, 2026-10-09). |
@@ -871,9 +871,22 @@ Overall implementation health: Green. The four items below were left open by the
 | 5 | Medium | Stop did nothing for a kept-pending routed approval while the parent was idle. | Fixed -- cancel before the inflight early return (`1830fe3`). |
 | 6 | Low | Routed request outlived its step's tracking; unsanitised step label; `close_session` could leave popped requests unanswered. | Fixed -- cancelled on tracking drop, sanitised label and fixed toast prefix, `finally` answers (`1830fe3`). |
 | 7 | Low | Routed owner is derived from frames the agent sends (self-consistency, not proof). | Fixed -- trust boundary documented in KNOWLEDGE.md (`1830fe3`). |
-| 8 | Low | Run-level header limits: mismatched `run_complete` id falls back to a 600 s expiry; a run silent over 600 s reads Done; a run joined mid-way still flashes; `workflowLive` is session-wide on one slot. | Orchestrator: proposed-accept -- pending user decision |
-| 9 | Low | A pending routed card cannot be cancelled with the Stop button when the parent's prompt has returned (the UI hides Stop); only closing the session cleared it. | Orchestrator: proposed-accept -- pending user decision |
-| 10 | Info | A Deny on a step's shell command does not end the step; the workflow summary can read as success. | Orchestrator: proposed-accept -- pending user decision |
+| 8 | Low | Run-level header limits: mismatched `run_complete` id falls back to a 600 s expiry; a run silent over 600 s reads Done; a run joined mid-way still flashes; `workflowLive` is session-wide on one slot. | Fixed -- unmatched run_complete clears, own run bound, mid-way recording with an ended-run set, flag only with workflow rows (`7ea84b0`); a run with a reaped step now expires at 600 s (`2469e38`); user chose 'Fix now' at the /qclose cleanup scan, 2026-10-09. |
+| 9 | Low | A pending routed card cannot be cancelled with the Stop button when the parent's prompt has returned (the UI hides Stop); only closing the session cleared it. | Fixed -- Stop shows for a pending routed step card even with no turn (`7ea84b0`, restricted to routed cards in `2469e38`); verified live; user chose 'Fix now' at the /qclose cleanup scan, 2026-10-09. |
+| 10 | Info | A Deny on a step's shell command does not end the step; the workflow summary can read as success. | Fixed -- a denial notice and the row text 'tool call denied' (`7ea84b0`, deduped in `2469e38`); verified live (the agent's own summary wording stays the agent's); user chose 'Fix now' at the /qclose cleanup scan, 2026-10-09. |
+
+### 2026-10-09 -- Final Polish Review (via /qclose; persona: Reliability engineer)
+
+Overall implementation health: Green. Reliability review of `7ea84b0` (no High; 1 Medium, 4 Low), all fixed in `2469e38`, then a last live pass in Manual mode (restored to `yolo`, verified): the routed step card shows an enabled Stop with no turn and clears it, exactly one denial notice for Deny and Stop, none for Allow, a parent's own card behaves as before, the header is correct through the gap, console and log clean. One path was not exercised live: Stop pressed mid-turn with a pending step card (the prompt always returned before the card); it is covered by unit tests only.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | A lost `run_complete` pinned the header on 'Orchestrating' up to 1800 s even after the run's own step was reaped. | Fixed -- a run with a tracked or reaped step expires at 600 s; only a childless run keeps 1800 s (`2469e38`). |
+| 2 | Low | The container exclusion for mid-way recording was vacuous for `node_complete` (the frame has no `type`). | Fixed -- clause removed, comment and KNOWLEDGE corrected (`2469e38`). |
+| 3 | Low | A late `run_complete` of an already-ended run wiped a newer live run's record. | Fixed -- an already-ended id clears nothing (`2469e38`). |
+| 4 | Low | Denial notices repeated per request, and in-turn Stop sent two stop-like notices and frames. | Fixed -- deduped per step, suppressed on the in-turn Stop path (`2469e38`). |
+| 5 | Low | Idle Stop could silently deny a parent's own approval during an agent-initiated wake turn. | Fixed -- the no-turn Stop is limited to routed step cards via a `workflowStep` frame marker (`2469e38`). |
+| 6 | Info | Stop with a pending step card while the prompt is still in flight was not exercised live. | Orchestrator: proposed-accept -- pending user decision |
 
 ## Harness Improvement Opportunities
 
