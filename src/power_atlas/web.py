@@ -758,6 +758,10 @@ def _session_is_live(snapshot, session, provider: str) -> bool:
     the expensive transcript-tail classify entirely — that classify, not
     this gate, is what `_acp_status_for_held` reserves for held sessions
     only.
+
+    A kiro-cli v3 session whose own transcript is older than the window is still
+    live while one of its workflow children is `in_progress` on disk
+    (`data_kiro_v3.active_workflow_children`).
     """
     if snapshot.is_live(provider, session.cwd, session.session_id):
         return True
@@ -789,7 +793,21 @@ def _session_is_live(snapshot, session, provider: str) -> bool:
             # 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
             return ((_time.time() - data_codex.activity_epoch(jsonl_path, os.stat(jsonl_path)))
                     <= data_codex.ACTIVITY_WINDOW)
-        return (_time.time() - os.path.getmtime(jsonl_path)) <= _LIVE_MTIME_WINDOW
+        if (_time.time() - os.path.getmtime(jsonl_path)) <= _LIVE_MTIME_WINDOW:
+            return True
+        if provider == "kiro-cli-v3":
+            from . import data_kiro_v3
+            # A workflow step can be silent for longer than the window while neither
+            # its transcript nor its parent's is written (a 330 s step was measured), so
+            # a parent whose child is still running on disk stays live. A dot and a tile
+            # candidate only; no Working verdict exists for a row we do not hold. The
+            # hash dir comes from the path already resolved (`<hash>/<sid>/messages.jsonl`),
+            # so there is no directory scan. 261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT
+            # Phase 3 Part B
+            hash_dir = (jsonl_path.parent.parent
+                        if jsonl_path.name == "messages.jsonl" else None)
+            return bool(data_kiro_v3.active_workflow_children(session.session_id, hash_dir))
+        return False
     except OSError:
         return False
 

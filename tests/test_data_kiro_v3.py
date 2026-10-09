@@ -2,6 +2,7 @@
 
 import itertools
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -1519,3 +1520,181 @@ class TestGetFullTranscriptDispatch:
 
         result = data.get_full_transcript("sess_xyz", provider="no-such-provider", cwd="C:\\proj")
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# TestActiveWorkflowChildren: 261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3 Part B
+# ---------------------------------------------------------------------------
+
+_T0 = 1_800_000_000.0   # a fixed "now" (epoch seconds), so every age below is exact
+_PARENT = "sess_11111111-1111-1111-1111-111111111111"
+
+
+def _put_child(root: Path, hash_name: str, name: str, *, parent: str | None = _PARENT,
+               status: str | None = "in_progress", json_age: float = 5.0,
+               msgs_age: float | None = 5.0, raw: str | None = None) -> Path:
+    """A workflow child folder with `rootConversationId`/`status`; the two files are
+    stamped `*_age` seconds before `_T0`. `msgs_age=None` writes no messages.jsonl."""
+    d = root / hash_name / name
+    d.mkdir(parents=True, exist_ok=True)
+    body = {"id": name}
+    if parent is not None:
+        body["rootConversationId"] = parent
+    if status is not None:
+        body["status"] = status
+    sj = d / "session.json"
+    sj.write_text(raw if raw is not None else json.dumps(body), encoding="utf-8")
+    os.utime(sj, (_T0 - json_age, _T0 - json_age))
+    if msgs_age is not None:
+        mj = d / "messages.jsonl"
+        mj.write_text("", encoding="utf-8")
+        os.utime(mj, (_T0 - msgs_age, _T0 - msgs_age))
+    return d
+
+
+@pytest.fixture
+def child_store(tmp_path, monkeypatch):
+    """An isolated store root; the per-child cache and the shared scan start empty and the
+    scan is not shared between calls (TTL 0), except in the test that pins the sharing."""
+    monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
+    monkeypatch.setattr(dv3, "_child_meta", {})
+    monkeypatch.setattr(dv3, "_child_scan", {})
+    monkeypatch.setattr(dv3, "_CHILD_SCAN_TTL_S", 0.0)
+    (tmp_path / "h1" / _PARENT).mkdir(parents=True)
+    return tmp_path
+
+
+class TestActiveWorkflowChildren:
+    """The inverse of `rootConversationId`: which of a parent's children are still running.
+    Expected values come from the Phase 3 Part B brief: a child is active when its
+    `rootConversationId` is the parent's `sess_<uuid>` (or the bare uuid), its `status` is
+    `in_progress` or `waiting_on_user`, and the newer of its two files is no more than
+    1800 s old."""
+
+    @staticmethod
+    def _active(store):
+        return dv3.active_workflow_children(_PARENT, store / "h1", now=_T0)
+
+    def test_workflow_children_a_matching_in_progress_child_is_active(self, child_store):
+        _put_child(child_store, "h1", "sess_c1")
+        assert self._active(child_store) == ["sess_c1"]
+
+    @pytest.mark.parametrize("status", ["in_progress", "waiting_on_user"])
+    def test_workflow_children_both_active_status_literals_count(self, child_store, status):
+        _put_child(child_store, "h1", "sess_c1", status=status)
+        assert self._active(child_store) == ["sess_c1"]
+
+    @pytest.mark.parametrize("status", ["idle", None, "completed", ""])
+    def test_workflow_children_an_idle_or_unknown_status_is_not_active(self, child_store, status):
+        _put_child(child_store, "h1", "sess_c1", status=status)
+        assert self._active(child_store) == []
+
+    def test_workflow_children_the_bare_parent_uuid_is_accepted_as_the_root(self, child_store):
+        _put_child(child_store, "h1", "sess_c1", parent=_PARENT[len("sess_"):])
+        assert self._active(child_store) == ["sess_c1"]
+
+    def test_workflow_children_only_the_named_parents_children_match(self, child_store):
+        _put_child(child_store, "h1", "sess_mine")
+        _put_child(child_store, "h1", "sess_other", parent="sess_22222222-2222-2222-2222-222222222222")
+        _put_child(child_store, "h1", "sess_top", parent=None)   # a top-level session
+        assert self._active(child_store) == ["sess_mine"]
+
+    def test_workflow_children_a_session_that_names_itself_as_root_is_not_a_child(self, child_store):
+        _put_child(child_store, "h1", "sess_self", parent="sess_self")
+        assert dv3.active_workflow_children("sess_self", child_store / "h1", now=_T0) == []
+
+    def test_workflow_children_window_is_1800_seconds_and_inclusive(self, child_store):
+        assert dv3._WORKFLOW_DISK_CHILD_WINDOW_S == 1800
+        for age, expected in ((1799.0, True), (1800.0, True), (1800.5, False), (3600.0, False)):
+            _put_child(child_store, "h1", "sess_c1", json_age=age, msgs_age=age)
+            assert (self._active(child_store) == ["sess_c1"]) is expected, age
+
+    def test_workflow_children_the_newer_of_the_two_files_decides(self, child_store):
+        # A quiet child that still writes its transcript (or only session.json) is alive.
+        _put_child(child_store, "h1", "sess_a", json_age=5000.0, msgs_age=10.0)
+        _put_child(child_store, "h1", "sess_b", json_age=10.0, msgs_age=5000.0)
+        _put_child(child_store, "h1", "sess_c", json_age=5000.0, msgs_age=5000.0)
+        _put_child(child_store, "h1", "sess_d", json_age=1700.0, msgs_age=None)   # no transcript yet
+        assert sorted(self._active(child_store)) == ["sess_a", "sess_b", "sess_d"]
+
+    def test_workflow_children_a_folder_without_session_json_is_skipped(self, child_store):
+        (child_store / "h1" / "sess_empty").mkdir()
+        _put_child(child_store, "h1", "sess_ok")
+        assert self._active(child_store) == ["sess_ok"]
+
+    def test_workflow_children_an_unparseable_session_json_is_skipped_and_logged_at_debug(
+            self, child_store, caplog):
+        _put_child(child_store, "h1", "sess_bad", raw="{not json")
+        _put_child(child_store, "h1", "sess_list", raw="[1, 2]")
+        _put_child(child_store, "h1", "sess_ok")
+        with caplog.at_level(logging.DEBUG, logger="power_atlas.data_kiro_v3"):
+            assert self._active(child_store) == ["sess_ok"]
+        assert [r.levelno for r in caplog.records if "unreadable" in r.getMessage()] == [logging.DEBUG]
+
+    def test_workflow_children_a_missing_hash_dir_gives_nothing(self, child_store):
+        assert dv3.active_workflow_children(_PARENT, child_store / "gone", now=_T0) == []
+
+    def test_workflow_children_without_a_hash_dir_the_parent_is_looked_up_and_none_is_guarded(
+            self, child_store):
+        _put_child(child_store, "h1", "sess_c1")
+        # Found by the uncached scan: the parent folder exists in h1.
+        assert dv3.active_workflow_children(_PARENT, now=_T0) == ["sess_c1"]
+        # `_find_v3_session_dir` returns None for a parent that is not on disk: no `.parent` on None.
+        assert dv3._find_v3_session_dir("sess_99999999-9999-9999-9999-999999999999") is None
+        assert dv3.active_workflow_children("sess_99999999-9999-9999-9999-999999999999", now=_T0) == []
+
+    def test_workflow_children_a_status_flip_is_picked_up_not_served_from_the_cache(self, child_store):
+        d = _put_child(child_store, "h1", "sess_c1")
+        assert self._active(child_store) == ["sess_c1"]
+        assert str(d / "session.json") in dv3._child_meta
+        # The child finishes: the same file is rewritten in place with a new mtime.
+        sj = d / "session.json"
+        sj.write_text(json.dumps({"id": "sess_c1", "rootConversationId": _PARENT, "status": "idle"}),
+                      encoding="utf-8")
+        os.utime(sj, (_T0 - 1.0, _T0 - 1.0))
+        assert self._active(child_store) == []
+
+    def test_workflow_children_the_per_child_cache_is_keyed_on_mtime_and_size(self, child_store):
+        d = _put_child(child_store, "h1", "sess_c1")
+        self._active(child_store)
+        sj = d / "session.json"
+        st = sj.stat()
+        assert dv3._child_meta[str(sj)][:2] == (st.st_mtime_ns, st.st_size)
+        # Unchanged file: no second parse.
+        real = Path.read_text
+        calls = []
+        def spy(self_, *a, **k):
+            calls.append(self_)
+            return real(self_, *a, **k)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Path, "read_text", spy)
+            self._active(child_store)
+        assert [c for c in calls if c == sj] == []
+
+    def test_workflow_children_the_per_child_cache_is_bounded(self, child_store, monkeypatch):
+        monkeypatch.setattr(dv3, "_CHILD_META_MAX", 3)
+        for i in range(8):
+            _put_child(child_store, "h1", f"sess_c{i}")
+        assert len(self._active(child_store)) == 8
+        assert len(dv3._child_meta) <= 3
+
+    def test_workflow_children_the_scan_is_shared_for_its_ttl_then_refreshed(
+            self, child_store, monkeypatch):
+        monkeypatch.setattr(dv3, "_CHILD_SCAN_TTL_S", 60.0)
+        d = _put_child(child_store, "h1", "sess_c1")
+        assert self._active(child_store) == ["sess_c1"]
+        sj = d / "session.json"
+        sj.write_text(json.dumps({"id": "sess_c1", "rootConversationId": _PARENT, "status": "idle"}),
+                      encoding="utf-8")
+        os.utime(sj, (_T0 - 1.0, _T0 - 1.0))
+        assert self._active(child_store) == ["sess_c1"], "served from the shared scan inside the TTL"
+        monkeypatch.setattr(dv3, "_CHILD_SCAN_TTL_S", 0.0)
+        assert self._active(child_store) == []
+
+    def test_workflow_children_the_scan_cache_is_bounded(self, child_store, monkeypatch):
+        monkeypatch.setattr(dv3, "_CHILD_SCAN_TTL_S", 60.0)
+        monkeypatch.setattr(dv3, "_CHILD_SCAN_MAX", 2)
+        for i in range(5):
+            (child_store / f"hh{i}").mkdir()
+            dv3.active_workflow_children(_PARENT, child_store / f"hh{i}", now=_T0)
+        assert len(dv3._child_scan) <= 2

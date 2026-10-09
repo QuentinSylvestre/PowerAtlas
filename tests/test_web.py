@@ -39719,3 +39719,154 @@ class TestWorkflowLivenessStatus:
         body = client.get("/api/session-availability",
                           params={"sid": self._SID, "cwd": self._CWD}).json()
         assert body == {"sid": self._SID, "availability": "locked", "status": ""}
+
+
+class TestWorkflowChildrenLiveness:
+    """261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3 Part B: a terminal kiro-cli
+    row (live only through `_session_is_live`'s 300 s recency rule) stays live while a workflow
+    child is `in_progress` on disk. Measured: a step silent for 330 s left the parent's
+    `messages.jsonl` unwritten for 331 s and the parent's own `session.json` `idle`.
+    Dot and tile candidacy only; no Working verdict, no change for held sessions."""
+
+    _SID = "sess_11111111-1111-1111-1111-111111111111"
+    _CWD = "C:\\dev\\ws"
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        """`<tmp>/h/<parent>/messages.jsonl`, resolved the way the status classifier resolves it."""
+        from power_atlas import data_kiro_v3 as dv3
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
+        monkeypatch.setattr(dv3, "_child_meta", {})
+        monkeypatch.setattr(dv3, "_child_scan", {})
+        monkeypatch.setattr(dv3, "_CHILD_SCAN_TTL_S", 0.0)
+        parent = tmp_path / "h" / self._SID
+        parent.mkdir(parents=True)
+        messages = parent / "messages.jsonl"
+        messages.write_text(_ov_v3_line("assistant", content="hello") + "\n", encoding="utf-8")
+        monkeypatch.setattr("power_atlas.status_classifier._resolve_jsonl_path",
+                            lambda sid, provider, cwd: messages)
+
+        parent_id = self._SID
+
+        class S:
+            root = tmp_path
+            parent_messages = messages
+
+            @staticmethod
+            def age_parent(seconds):
+                t = time.time() - seconds
+                os.utime(messages, (t, t))
+
+            @staticmethod
+            def child(name, *, status="in_progress", root=None, quiet=330.0):
+                d = tmp_path / "h" / name
+                d.mkdir(exist_ok=True)
+                body = {"id": name, "rootConversationId": root or parent_id, "status": status}
+                (d / "session.json").write_text(json.dumps(body), encoding="utf-8")
+                (d / "messages.jsonl").write_text("", encoding="utf-8")
+                t = time.time() - quiet
+                for f in (d / "session.json", d / "messages.jsonl"):
+                    os.utime(f, (t, t))
+
+        return S
+
+    def _session(self):
+        return Session(session_id=self._SID, title="t", cwd=self._CWD, created_at="",
+                       updated_at="", first_prompt="", last_prompt="", last_reply_tail="")
+
+    def _live(self, snap=None, provider="kiro-cli-v3"):
+        from power_atlas import presence
+        from power_atlas.data import _normalize_path
+        from power_atlas.web import _session_is_live
+        if snap is None:
+            snap = presence.Snapshot(set(), {(provider, _normalize_path(self._CWD))})
+        return _session_is_live(snap, self._session(), provider)
+
+    def test_workflow_children_a_silent_step_keeps_the_parent_live(self, store):
+        store.age_parent(331)
+        store.child("sess_step1", quiet=330)
+        assert self._live() is True
+
+    def test_workflow_children_positive_control_without_a_child_the_same_parent_is_not_live(self, store):
+        store.age_parent(331)
+        assert self._live() is False
+
+    def test_workflow_children_a_finished_or_foreign_or_ancient_child_does_not_light_the_parent(self, store):
+        store.age_parent(331)
+        store.child("sess_done", status="idle")
+        store.child("sess_foreign", root="sess_22222222-2222-2222-2222-222222222222")
+        store.child("sess_ancient", quiet=1801 + 5)
+        assert self._live() is False
+        store.child("sess_ok", quiet=1700)
+        assert self._live() is True
+
+    def test_workflow_children_a_fresh_parent_is_live_without_looking_for_children(self, store, monkeypatch):
+        from power_atlas import data_kiro_v3 as dv3
+        calls = []
+        monkeypatch.setattr(dv3, "active_workflow_children", lambda *a, **k: calls.append(a) or [])
+        store.age_parent(10)
+        assert self._live() is True
+        assert calls == []
+
+    def test_workflow_children_a_resumed_session_is_live_by_its_id_and_needs_no_lookup(
+            self, store, monkeypatch):
+        from power_atlas import data_kiro_v3 as dv3, presence
+        calls = []
+        monkeypatch.setattr(dv3, "active_workflow_children", lambda *a, **k: calls.append(a) or [])
+        store.age_parent(5000)
+        snap = presence.Snapshot({("kiro-cli-v3", self._SID)}, set())
+        assert self._live(snap) is True
+        assert calls == []
+
+    def test_workflow_children_no_kiro_process_in_the_folder_means_not_live_whatever_the_children(
+            self, store):
+        from power_atlas import presence
+        store.age_parent(331)
+        store.child("sess_step1")
+        assert self._live(presence.Snapshot(set(), set())) is False
+
+    def test_workflow_children_the_lookup_is_for_kiro_cli_v3_only(self, store, monkeypatch):
+        from power_atlas import data_kiro_v3 as dv3
+        calls = []
+        monkeypatch.setattr(dv3, "active_workflow_children", lambda *a, **k: calls.append(a) or ["x"])
+        store.age_parent(5000)
+        assert self._live(provider="claude-code") is False
+        assert calls == []
+
+    def test_workflow_children_the_hash_dir_comes_from_the_resolved_path_without_a_scan(
+            self, store, monkeypatch):
+        from power_atlas import data_kiro_v3 as dv3
+        store.age_parent(331)
+        store.child("sess_step1")
+        monkeypatch.setattr(dv3, "_find_v3_session_dir",
+                            lambda sid: pytest.fail("the uncached directory scan ran"))
+        assert self._live() is True
+
+    def test_workflow_children_an_overview_tile_stays_while_the_step_is_silent(
+            self, store, monkeypatch):
+        """Branch (c) of `overview.live_sessions` gates a process-in-folder candidate on the
+        rail's own live rule, so the same child keeps the tile."""
+        from power_atlas import data, overview, presence, web as web_mod
+
+        monkeypatch.setattr(data, "get_sessions", lambda cwd, provider="kiro-cli-v3": (
+            [self._session()] if provider == "kiro-cli-v3" else []))
+        monkeypatch.setattr(overview, "_transcript_path",
+                            lambda sid, provider, cwd: store.parent_messages)
+        deps = overview.LiveDeps(
+            session_is_live=web_mod._session_is_live,
+            acp_availability=lambda sids, held, hashes: {s: "available" for s in sids},
+            acp_status_for_held=lambda sessions, snap: {},
+            row_title=lambda s: s.title,
+            hidden=lambda cwd: False,
+            provider_shown=lambda p: True,
+        )
+        snap = presence.Snapshot(set(), {("kiro-cli-v3", data._normalize_path(self._CWD))})
+        originals = {data._normalize_path(self._CWD): self._CWD}
+
+        def tiles():
+            return [t["id"] for t in overview.live_sessions({}, snap, "all", deps, originals)]
+
+        store.age_parent(331)
+        assert tiles() == [], "positive control: no child, no tile"
+        store.child("sess_step1", quiet=330)
+        assert tiles() == [self._SID]

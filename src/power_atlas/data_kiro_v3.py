@@ -473,6 +473,157 @@ def _find_v3_session_path(session_id: str) -> Path | None:
     return found_path
 
 
+# ---------------------------------------------------------------------------
+# Workflow children, found from the parent (inverse of `rootConversationId`)
+# ---------------------------------------------------------------------------
+
+# How long a child that is `in_progress` on disk keeps its parent counted as
+# having live work. A workflow step can be silent for a long time: a step
+# measured at 330 s wrote neither its own `messages.jsonl` nor the parent's for
+# 330 s, and the parent's `session.json` read `idle` throughout, so the 300 s
+# recency rule in `web._session_is_live` loses the parent mid-step. A crashed
+# child leaves `status: in_progress` on disk forever, so this window, not the
+# status, bounds how long it can keep a dot lit. 30 minutes is a judgement
+# (about 5x the longest measured quiet step), not a measurement.
+# 261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3 Part B
+_WORKFLOW_DISK_CHILD_WINDOW_S = 1800
+
+# `session.json` `status` literals that mean the child is doing, or waiting
+# for, work. Seen: `in_progress`, `idle`. `waiting_on_user` has never been seen
+# on a child and is accepted on the plan's word.
+_WORKFLOW_ACTIVE_STATUSES = frozenset({"in_progress", "waiting_on_user"})
+
+# session.json path -> (mtime_ns, size, rootConversationId or None, status or
+# None). Parsed once per version of a file, so a poll costs one stat per
+# session folder in the workspace, not a parse. A status flip rewrites the file
+# (new mtime), which invalidates the entry. Bounded: cleared when full.
+_CHILD_META_MAX = 512
+_child_meta: dict[str, tuple[int, int, str | None, str | None]] = {}
+_child_meta_lock = threading.Lock()
+
+
+def _child_session_meta(session_json: Path, st: os.stat_result) -> tuple[str | None, str | None] | None:
+    """`(rootConversationId, status)` of one `session.json`, cached on its
+    `(mtime_ns, size)`. None when the file cannot be read or parsed (logged at
+    DEBUG), so the folder is skipped."""
+    key = str(session_json)
+    with _child_meta_lock:
+        cached = _child_meta.get(key)
+    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+        return cached[2], cached[3]
+    try:
+        data = json.loads(session_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.debug("workflow children: unreadable %s", session_json, exc_info=True)
+        return None
+    if not isinstance(data, dict):
+        return None
+    root = data.get("rootConversationId")
+    status = data.get("status")
+    root = root if isinstance(root, str) else None
+    status = status if isinstance(status, str) else None
+    with _child_meta_lock:
+        if len(_child_meta) >= _CHILD_META_MAX:
+            _child_meta.clear()
+        _child_meta[key] = (st.st_mtime_ns, st.st_size, root, status)
+    return root, status
+
+
+# hash dir -> (monotonic time of the scan, {rootConversationId: [(child folder
+# name, status, newest mtime)]} for the children whose status is active). A
+# rail page or the Overview asks once per stale row of a live workspace, and
+# one workspace folder can hold ~100 session folders, so an un-shared scan
+# would cost O(rows x folders) stats per poll (measured 414 ms for 105 rows in
+# the largest hash dir). The index is shared for `_CHILD_SCAN_TTL_S`; a status
+# flip shows within that long. Bounded: cleared when full.
+_CHILD_SCAN_TTL_S = 2.0
+_CHILD_SCAN_MAX = 64
+_child_scan: dict[str, tuple[float, dict[str, list[tuple[str, str, float]]]]] = {}
+
+
+def _scan_workflow_children(hash_dir: Path) -> dict[str, list[tuple[str, str, float]]]:
+    """Active-status children in one hash dir, by `rootConversationId`.
+
+    Shared for `_CHILD_SCAN_TTL_S`. A missing directory gives an empty index
+    (and is not cached). Unreadable `session.json` files are skipped.
+    """
+    key = str(hash_dir)
+    mono = time.monotonic()
+    with _child_meta_lock:
+        cached = _child_scan.get(key)
+    if cached is not None and mono - cached[0] < _CHILD_SCAN_TTL_S:
+        return cached[1]
+    try:
+        entries = [e for e in os.scandir(hash_dir) if e.name.startswith("sess_")]
+    except OSError:
+        return {}
+    index: dict[str, list[tuple[str, str, float]]] = {}
+    for entry in entries:
+        child_dir = Path(entry.path)
+        session_json = child_dir / "session.json"
+        try:
+            st = session_json.stat()
+        except OSError:
+            continue
+        meta = _child_session_meta(session_json, st)
+        if meta is None:
+            continue
+        root, status = meta
+        if (root is None or _ensure_sess_prefix(root) == entry.name
+                or status not in _WORKFLOW_ACTIVE_STATUSES):
+            continue
+        newest = st.st_mtime
+        try:
+            newest = max(newest, (child_dir / "messages.jsonl").stat().st_mtime)
+        except OSError:
+            pass
+        index.setdefault(root, []).append((entry.name, status, newest))
+    with _child_meta_lock:
+        if len(_child_scan) >= _CHILD_SCAN_MAX:
+            _child_scan.clear()
+        _child_scan[key] = (mono, index)
+    return index
+
+
+def active_workflow_children(parent_id: str, hash_dir: Path | None = None,
+                             now: float | None = None) -> list[str]:
+    """Ids of the parent's workflow children that are still running on disk.
+
+    A child counts when its `session.json` `rootConversationId` names the
+    parent (the measured form is the full `sess_<uuid>`; the bare uuid is
+    accepted too), its `status` is `in_progress` or `waiting_on_user`, AND the
+    newer of its `session.json` and `messages.jsonl` mtimes is within
+    `_WORKFLOW_DISK_CHILD_WINDOW_S` of *now* (inclusive: exactly at the bound
+    still counts). Children sit in the parent's own workspace-hash directory.
+
+    *hash_dir* is that directory. Omitted, it is found with the uncached
+    `_find_v3_session_dir` scan, and a parent that is not on disk gives `[]`.
+    Callers that already resolved the parent's `messages.jsonl` pass
+    `path.parent.parent` and skip the scan. *now* (epoch seconds) is injectable
+    for the boundary test.
+
+    Never raises on a missing or unreadable folder or file: those are skipped.
+    This is a liveness hint only. It gives a terminal row its live dot while a
+    step is quiet; it does not make a Working verdict (no such path exists for
+    a row this PowerAtlas does not hold).
+    """
+    parent_sid = _ensure_sess_prefix(parent_id)
+    if hash_dir is None:
+        sess_dir = _find_v3_session_dir(parent_id)
+        if sess_dir is None:
+            return []
+        hash_dir = sess_dir.parent
+    if now is None:
+        now = time.time()
+    index = _scan_workflow_children(hash_dir)
+    out: list[str] = []
+    for root in (parent_sid, parent_sid[len("sess_"):]):
+        for name, _status, newest in index.get(root, ()):
+            if now - newest <= _WORKFLOW_DISK_CHILD_WINDOW_S:
+                out.append(name)
+    return out
+
+
 def delete_session(session_id: str) -> bool | None:
     """Delete a v3 session's entire directory tree from disk.
 
