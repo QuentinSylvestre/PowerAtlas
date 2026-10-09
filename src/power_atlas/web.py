@@ -806,7 +806,12 @@ def _session_is_live(snapshot, session, provider: str) -> bool:
             # Phase 3 Part B
             hash_dir = (jsonl_path.parent.parent
                         if jsonl_path.name == "messages.jsonl" else None)
-            return bool(data_kiro_v3.active_workflow_children(session.session_id, hash_dir))
+            try:
+                return bool(data_kiro_v3.active_workflow_children(session.session_id, hash_dir))
+            except Exception:
+                # A hint only: any failure reads as "not live", never as a broken rail.
+                log.debug("workflow children: lookup failed for a kiro-cli-v3 row", exc_info=True)
+                return False
         return False
     except OSError:
         return False

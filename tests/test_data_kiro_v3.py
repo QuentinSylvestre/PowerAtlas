@@ -1552,6 +1552,16 @@ def _put_child(root: Path, hash_name: str, name: str, *, parent: str | None = _P
     return d
 
 
+@pytest.fixture(autouse=True)
+def _isolate_child_state(tmp_path, monkeypatch):
+    """No test in this module may read the developer's real ~/.kiro store through the workflow
+    children lookup (its `hash_dir=None` fallback scans `V3_SESSIONS_ROOT`), and the two
+    module-level caches start empty. A test that needs a store sets its own root afterwards."""
+    monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path / "no-real-v3-store")
+    monkeypatch.setattr(dv3, "_child_meta", {})
+    monkeypatch.setattr(dv3, "_child_scan", {})
+
+
 @pytest.fixture
 def child_store(tmp_path, monkeypatch):
     """An isolated store root; the per-child cache and the shared scan start empty and the
@@ -1603,11 +1613,26 @@ class TestActiveWorkflowChildren:
         _put_child(child_store, "h1", "sess_self", parent="sess_self")
         assert dv3.active_workflow_children("sess_self", child_store / "h1", now=_T0) == []
 
-    def test_workflow_children_window_is_1800_seconds_and_inclusive(self, child_store):
+    def test_workflow_children_in_progress_window_is_1800_seconds_and_inclusive(self, child_store):
         assert dv3._WORKFLOW_DISK_CHILD_WINDOW_S == 1800
         for age, expected in ((1799.0, True), (1800.0, True), (1800.5, False), (3600.0, False)):
             _put_child(child_store, "h1", "sess_c1", json_age=age, msgs_age=age)
             assert (self._active(child_store) == ["sess_c1"]) is expected, age
+
+    def test_workflow_children_a_waiting_child_has_its_own_6_hour_window_inclusive(self, child_store):
+        # A person deciding can take hours: the same 6 h as the Phase 2 waiting bound.
+        assert dv3._WORKFLOW_DISK_WAITING_WINDOW_S == 21600
+        for age, expected in ((1800.5, True), (21599.0, True), (21600.0, True),
+                              (21600.5, False), (50000.0, False)):
+            _put_child(child_store, "h1", "sess_w1", status="waiting_on_user",
+                       json_age=age, msgs_age=age)
+            assert (self._active(child_store) == ["sess_w1"]) is expected, age
+
+    def test_workflow_children_each_status_uses_only_its_own_window(self, child_store):
+        # 2 h old: far past the in_progress bound, inside the waiting bound.
+        _put_child(child_store, "h1", "sess_run", status="in_progress", json_age=7200.0, msgs_age=7200.0)
+        _put_child(child_store, "h1", "sess_wait", status="waiting_on_user", json_age=7200.0, msgs_age=7200.0)
+        assert self._active(child_store) == ["sess_wait"]
 
     def test_workflow_children_the_newer_of_the_two_files_decides(self, child_store):
         # A quiet child that still writes its transcript (or only session.json) is alive.
@@ -1670,6 +1695,16 @@ class TestActiveWorkflowChildren:
             mp.setattr(Path, "read_text", spy)
             self._active(child_store)
         assert [c for c in calls if c == sj] == []
+
+    def test_workflow_children_the_per_child_cache_bound_is_above_the_store_size(self):
+        # 553 session folders were measured on 2026-10-09; a bound below the store size would
+        # clear the whole cache on every pass.
+        assert dv3._CHILD_META_MAX > 553
+
+    def test_workflow_children_a_deeply_nested_session_json_is_skipped_not_raised(self, child_store):
+        _put_child(child_store, "h1", "sess_deep", raw="[" * 200_000)
+        _put_child(child_store, "h1", "sess_ok")
+        assert self._active(child_store) == ["sess_ok"]
 
     def test_workflow_children_the_per_child_cache_is_bounded(self, child_store, monkeypatch):
         monkeypatch.setattr(dv3, "_CHILD_META_MAX", 3)

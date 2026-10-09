@@ -485,19 +485,38 @@ def _find_v3_session_path(session_id: str) -> Path | None:
 # child leaves `status: in_progress` on disk forever, so this window, not the
 # status, bounds how long it can keep a dot lit. 30 minutes is a judgement
 # (about 5x the longest measured quiet step), not a measurement.
+# ASSUMED, not observed: that a crashed child really does leave `in_progress`
+# behind. Among the 212 child folders in the store measured on 2026-10-09 none
+# had an active status, so the window is a precaution against a state nobody
+# has seen. Known trade-off: if that happens, or the terminal is killed
+# mid-step and a different kiro-cli then runs in the same folder, the old
+# parent's dot can stay lit up to the window.
 # 261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3 Part B
 _WORKFLOW_DISK_CHILD_WINDOW_S = 1800
+
+# A child waiting on a person can wait for hours, so it gets the same longer
+# bound as the Phase 2 waiting bound (`acp._WORKFLOW_WAITING_STALE_S`, 6 h). A
+# judgement, not a measurement: `waiting_on_user` has never been seen on disk.
+_WORKFLOW_DISK_WAITING_WINDOW_S = 21600
 
 # `session.json` `status` literals that mean the child is doing, or waiting
 # for, work. Seen: `in_progress`, `idle`. `waiting_on_user` has never been seen
 # on a child and is accepted on the plan's word.
 _WORKFLOW_ACTIVE_STATUSES = frozenset({"in_progress", "waiting_on_user"})
 
+
+def _workflow_window_s(status: str) -> int:
+    return (_WORKFLOW_DISK_WAITING_WINDOW_S if status == "waiting_on_user"
+            else _WORKFLOW_DISK_CHILD_WINDOW_S)
+
 # session.json path -> (mtime_ns, size, rootConversationId or None, status or
 # None). Parsed once per version of a file, so a poll costs one stat per
 # session folder in the workspace, not a parse. A status flip rewrites the file
-# (new mtime), which invalidates the entry. Bounded: cleared when full.
-_CHILD_META_MAX = 512
+# (new mtime), which invalidates the entry. Bounded: cleared when full. Every
+# session folder is cached (a non-child costs a whole-file parse to re-learn),
+# so the bound sits far above the store size (553 folders measured 2026-10-09);
+# a bound below it would clear the cache on every pass.
+_CHILD_META_MAX = 8192
 _child_meta: dict[str, tuple[int, int, str | None, str | None]] = {}
 _child_meta_lock = threading.Lock()
 
@@ -513,7 +532,8 @@ def _child_session_meta(session_json: Path, st: os.stat_result) -> tuple[str | N
         return cached[2], cached[3]
     try:
         data = json.loads(session_json.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: json.loads on a deeply nested file.
         log.debug("workflow children: unreadable %s", session_json, exc_info=True)
         return None
     if not isinstance(data, dict):
@@ -593,8 +613,10 @@ def active_workflow_children(parent_id: str, hash_dir: Path | None = None,
     parent (the measured form is the full `sess_<uuid>`; the bare uuid is
     accepted too), its `status` is `in_progress` or `waiting_on_user`, AND the
     newer of its `session.json` and `messages.jsonl` mtimes is within
-    `_WORKFLOW_DISK_CHILD_WINDOW_S` of *now* (inclusive: exactly at the bound
-    still counts). Children sit in the parent's own workspace-hash directory.
+    `_WORKFLOW_DISK_CHILD_WINDOW_S` (`in_progress`) or
+    `_WORKFLOW_DISK_WAITING_WINDOW_S` (`waiting_on_user`) of *now* (inclusive:
+    exactly at the bound still counts). Children sit in the parent's own
+    workspace-hash directory.
 
     *hash_dir* is that directory. Omitted, it is found with the uncached
     `_find_v3_session_dir` scan, and a parent that is not on disk gives `[]`.
@@ -618,8 +640,8 @@ def active_workflow_children(parent_id: str, hash_dir: Path | None = None,
     index = _scan_workflow_children(hash_dir)
     out: list[str] = []
     for root in (parent_sid, parent_sid[len("sess_"):]):
-        for name, _status, newest in index.get(root, ()):
-            if now - newest <= _WORKFLOW_DISK_CHILD_WINDOW_S:
+        for name, status, newest in index.get(root, ()):
+            if now - newest <= _workflow_window_s(status):
                 out.append(name)
     return out
 

@@ -39721,6 +39721,22 @@ class TestWorkflowLivenessStatus:
         assert body == {"sid": self._SID, "availability": "locked", "status": ""}
 
 
+@pytest.fixture(autouse=True)
+def _isolate_workflow_children_state(tmp_path, monkeypatch):
+    """`_session_is_live` reaches `data_kiro_v3.active_workflow_children`, whose `hash_dir=None`
+    fallback scans `V3_SESSIONS_ROOT`: no test in this module may read the developer's real
+    ~/.kiro store through it, and the two module-level caches start empty. A test that needs a
+    store sets its own root afterwards (autouse fixtures run first)."""
+    from power_atlas import data_kiro_v3 as dv3
+    # One empty hash folder: `dv3.is_available()` is true on it, as it is on a developer's real
+    # store, and several Overview tests depend on the provider being shown. Nothing real is read.
+    root = tmp_path / "no-real-v3-store"
+    (root / "h0").mkdir(parents=True)
+    monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+    monkeypatch.setattr(dv3, "_child_meta", {})
+    monkeypatch.setattr(dv3, "_child_scan", {})
+
+
 class TestWorkflowChildrenLiveness:
     """261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3 Part B: a terminal kiro-cli
     row (live only through `_session_is_live`'s 300 s recency rule) stays live while a workflow
@@ -39870,3 +39886,49 @@ class TestWorkflowChildrenLiveness:
         assert tiles() == [], "positive control: no child, no tile"
         store.child("sess_step1", quiet=330)
         assert tiles() == [self._SID]
+
+    def test_workflow_children_a_transcript_not_named_messages_jsonl_falls_back_to_the_lookup_by_id(
+            self, store, monkeypatch):
+        """The hash dir is only taken from the path when it is `<hash>/<sid>/messages.jsonl`;
+        any other name omits it and the function finds the parent folder itself, under the
+        (temporary) store root."""
+        from power_atlas import data_kiro_v3 as dv3
+        other = store.parent_messages.with_name("other.jsonl")
+        other.write_text("", encoding="utf-8")
+        monkeypatch.setattr("power_atlas.status_classifier._resolve_jsonl_path",
+                            lambda sid, provider, cwd: other)
+        store.age_parent(331)
+        os.utime(other, (time.time() - 331, time.time() - 331))
+        asked = []
+        real = dv3._find_v3_session_dir
+        monkeypatch.setattr(dv3, "_find_v3_session_dir", lambda sid: asked.append(sid) or real(sid))
+        assert self._live() is False, "positive control: no child"
+        store.child("sess_step1")
+        assert self._live() is True
+        assert asked and set(asked) == {self._SID}
+
+    def test_workflow_children_a_failing_lookup_reads_as_not_live_and_does_not_break_the_row(
+            self, store, monkeypatch, caplog):
+        from power_atlas import data_kiro_v3 as dv3
+
+        def boom(*a, **k):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(dv3, "active_workflow_children", boom)
+        store.age_parent(331)
+        with caplog.at_level(logging.DEBUG, logger="power_atlas.web"):
+            assert self._live() is False
+        assert [r.levelno for r in caplog.records if "lookup failed" in r.getMessage()] == [logging.DEBUG]
+
+    def test_workflow_children_a_deeply_nested_child_session_json_does_not_break_the_row(self, store):
+        store.age_parent(331)
+        store.child("sess_ok", quiet=330)
+        deep = store.root / "h" / "sess_deep"
+        deep.mkdir()
+        (deep / "session.json").write_text("[" * 200_000, encoding="utf-8")
+        assert self._live() is True, "the good child still counts"
+        (store.root / "h" / "sess_ok" / "session.json").write_text(
+            json.dumps({"rootConversationId": "sess_x", "status": "idle"}), encoding="utf-8")
+        from power_atlas import data_kiro_v3 as dv3
+        dv3._child_scan.clear()
+        assert self._live() is False, "only the unparseable one is left: not live, no error"
