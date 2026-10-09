@@ -4839,6 +4839,20 @@ class _Supervisor:
             return None
         return "working" if any(s == "running" for s, _ in live.values()) else "waiting"
 
+    def sessions_with_pending_permission(self) -> frozenset[str]:
+        """Ids of the sessions that have a permission request waiting for a person.
+
+        Loop-only: it iterates a snapshot of ``_pending_permission``, which the
+        loop mutates. An entry that is not a dict, or has no string
+        ``session_id``, is skipped, so one malformed entry never hides the
+        others. Read by ``web.py``'s status call sites so a running workflow
+        does not turn a parent's own ``waiting`` into ``working``.
+        """
+        return frozenset(
+            entry["session_id"]
+            for entry in tuple(self._pending_permission.values())
+            if isinstance(entry, dict) and isinstance(entry.get("session_id"), str))
+
     def _workflow_touch(self, child_id: str, now: float | None = None) -> None:
         """Refresh a tracked child's staleness clock on a frame from the child.
 

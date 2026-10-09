@@ -39346,9 +39346,14 @@ class TestWorkflowLivenessStatus:
     _CWD = "C:\\dev\\ws"
     # Child ages in seconds against the 600 s running bound and the 6 h waiting bound. The exact
     # boundary is pinned in TestAcpWorkflowNotifications with an injected clock; here the real
-    # clock runs, so each side keeps a 1 s margin.
-    _FRESH_RUNNING, _STALE_RUNNING = 599.0, 601.0
-    _FRESH_WAITING, _STALE_WAITING = 21599.0, 21601.0
+    # clock runs, so the fresh cases sit well inside the bound and the stale ones just past it.
+    _FRESH_RUNNING, _STALE_RUNNING = 590.0, 601.0
+    _FRESH_WAITING, _STALE_WAITING = 21500.0, 21601.0
+
+    @pytest.fixture(autouse=True)
+    def _fresh_fault_counters(self, monkeypatch):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_workflow_state_failures", {})
 
     @staticmethod
     def _children(monkeypatch, **spec):
@@ -39432,13 +39437,87 @@ class TestWorkflowLivenessStatus:
         from power_atlas import web as web_mod
 
         class Broken:
+            def sessions_with_pending_permission(self):
+                return frozenset()
+
             def workflow_state(self, sid):
                 raise RuntimeError("boom")
 
         assert web_mod._workflow_states(None, ["s"]) == {}
-        with caplog.at_level(logging.ERROR, logger="power_atlas.web"):
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
             assert web_mod._workflow_states(Broken(), ["s"]) == {}
         assert any("workflow liveness" in r.getMessage() for r in caplog.records)
+
+    def test_workflow_state_snapshot_one_poisoned_session_keeps_the_others_overlay(self):
+        from power_atlas import web as web_mod
+
+        class Partly:
+            def sessions_with_pending_permission(self):
+                return frozenset()
+
+            def workflow_state(self, sid):
+                if sid == "bad":
+                    raise RuntimeError("boom")
+                return {"good": "working", "pause": "waiting"}.get(sid)
+
+        got = web_mod._workflow_states(Partly(), ["good", "bad", "pause", "plain"])
+        assert got == {"good": "working", "pause": "waiting"}
+
+    def test_workflow_state_snapshot_logs_a_repeated_fault_with_a_traceback_once(self, caplog):
+        from power_atlas import web as web_mod
+
+        class Flaky:
+            broken = True
+
+            def sessions_with_pending_permission(self):
+                return frozenset()
+
+            def workflow_state(self, sid):
+                if self.broken:
+                    raise RuntimeError("boom")
+                return "working"
+
+        sv = Flaky()
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            for _ in range(3):
+                assert web_mod._workflow_states(sv, ["s"]) == {}
+        recs = [r for r in caplog.records if "workflow liveness" in r.getMessage()]
+        assert [bool(r.exc_info) for r in recs] == [True, False, False]
+        assert "failed again, 2 in a row" in recs[1].getMessage()
+        assert "failed again, 3 in a row" in recs[2].getMessage()
+        # A good read resets the count: the next fault is a first one again.
+        sv.broken = False
+        assert web_mod._workflow_states(sv, ["s"]) == {"s": "working"}
+        sv.broken = True
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            web_mod._workflow_states(sv, ["s"])
+        assert [bool(r.exc_info) for r in caplog.records] == [True]
+
+    def test_workflow_state_snapshot_a_failing_permission_read_drops_every_overlay_once_logged(
+            self, caplog):
+        from power_atlas import web as web_mod
+
+        class NoAccessor:
+            def workflow_state(self, sid):
+                return "working"
+
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            assert web_mod._workflow_states(NoAccessor(), ["s"]) == {}
+        assert [bool(r.exc_info) for r in caplog.records] == [True]
+
+    def test_workflow_state_pending_permission_accessor_skips_malformed_entries(
+            self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+        sv = acp_mod._supervisor
+        monkeypatch.setattr(sv, "_pending_permission", {
+            "k1": {"session_id": "asking", "options": [], "kiro_id": 1},
+            "k2": "not a dict", "k3": None, "k4": {"session_id": 5}, "k5": {}})
+        assert sv.sessions_with_pending_permission() == frozenset({"asking"})
+        # The malformed entries neither raise nor lift the protection of "asking".
+        self._children(monkeypatch, asking=("running", 5.0), other=("running", 5.0))
+        assert web_mod._workflow_states(sv, ["asking", "other"]) == {"other": "working"}
 
     # -- call site 1: the listings --------------------------------------------
 

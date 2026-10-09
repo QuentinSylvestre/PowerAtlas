@@ -3275,9 +3275,14 @@ def _acp_availability(session_ids, held,
 
 # Verdicts a workflow overlay may upgrade. For a kiro-cli v3 session the
 # classifier has no "idle": a parent whose turn ended reads `waiting` (the last
-# record is the assistant's, `classify_kiro_v3`), and `idle` is listed for a
-# verdict vocabulary that spells it out. `working` already says what the overlay
-# would; `errored` is the signal the card exists to surface.
+# record is the assistant's, `classify_kiro_v3`). So `waiting` is the verdict
+# that is really upgraded, and `idle` is vocabulary only: nothing in
+# `_resolved_session_status` can produce it today, it is listed so the plan's
+# "upgrade an idle verdict" reads the same if a provider ever spells it out.
+# Consequence: a workflow in the `waiting` state over a `waiting` verdict changes
+# nothing, so the Waiting half of SC-5 cannot be observed (amended 2026-10-08).
+# `working` already says what the overlay would; `errored` is the signal the
+# card exists to surface.
 # 261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3
 _WORKFLOW_IDLE_VERDICTS = frozenset({"waiting", "idle"})
 
@@ -3309,27 +3314,60 @@ def _workflow_states(supervisor, held) -> dict[str, str]:
     where it takes `held` and hands the dict to the `asyncio.to_thread` worker
     as an argument; the worker never calls the supervisor. A session with a
     permission request pending is left out: its verdict is `waiting` because a
-    person must act, and a running workflow must not turn that into `working`.
-    Fails open to no overlay (a status that is only the parent's own) and logs.
+    person must act, and a running workflow must not turn that into `working`
+    (`_Supervisor.sessions_with_pending_permission`; a failure of that read
+    drops every overlay). A failure reading ONE session's workflow state drops
+    only that session's overlay: it fails open to the parent's own status, and
+    is logged once with a traceback, then as a short repeat line
+    (`_workflow_state_fault`).
     261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3
     """
     if supervisor is None or not held:
         return {}
     try:
-        pending = {entry.get("session_id")
-                   for entry in tuple(getattr(supervisor, "_pending_permission", {}).values())
-                   if isinstance(entry, dict)}
-        out: dict[str, str] = {}
-        for sid in held:
-            if sid in pending:
-                continue
-            state = supervisor.workflow_state(sid)
-            if state:
-                out[sid] = state
-        return out
+        pending = supervisor.sessions_with_pending_permission()
     except Exception:
-        log.exception("ACP listing: could not read workflow liveness")
+        # Without it a permission-pending session could not be told apart, so
+        # no overlay at all is the safe side.
+        _workflow_state_fault(_WORKFLOW_PENDING_FAULT)
         return {}
+    _workflow_state_failures.pop(_WORKFLOW_PENDING_FAULT, None)
+    out: dict[str, str] = {}
+    for sid in held:
+        if sid in pending:
+            continue
+        # Per session: one poisoned session loses only its own overlay.
+        try:
+            state = supervisor.workflow_state(sid)
+        except Exception:
+            _workflow_state_fault(sid)
+            continue
+        _workflow_state_failures.pop(sid, None)
+        if state:
+            out[sid] = state
+    return out
+
+
+# Consecutive failures of `_workflow_states`, per session id (or the pending-
+# permission read). Loop-only, like the function. The Overview tile poll runs
+# about every 2 s, so a persistent fault would write ~30 tracebacks a minute
+# without it: the first failure logs the traceback, later ones one short line,
+# the way `_Supervisor._workflow_reap` does. 261008 Phase 3 review.
+_workflow_state_failures: dict[str, int] = {}
+_WORKFLOW_PENDING_FAULT = "(pending permissions)"
+_WORKFLOW_FAULT_MAX_KEYS = 256
+
+
+def _workflow_state_fault(key: str) -> None:
+    if len(_workflow_state_failures) >= _WORKFLOW_FAULT_MAX_KEYS:
+        _workflow_state_failures.clear()  # bound: ids of sessions long closed
+    failures = _workflow_state_failures[key] = _workflow_state_failures.get(key, 0) + 1
+    if failures == 1:
+        log.warning("ACP listing: could not read workflow liveness for %s", key,
+                    exc_info=True)
+    else:
+        log.warning("ACP listing: could not read workflow liveness for %s "
+                    "(failed again, %d in a row)", key, failures)
 
 
 def _acp_status_for_held(sessions, snapshot=None,
