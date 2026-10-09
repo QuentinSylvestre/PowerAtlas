@@ -1181,7 +1181,7 @@
     // showing: a request routed from a workflow step outlives the parent's
     // turn, and Stop is what cancels it (the server cancels the session's
     // pending requests on an idle Stop).
-    var pendingCard = hasPendingPermissionCard();
+    var pendingCard = hasPendingStepPermissionCard();
     stopBtn.hidden = turnActive ? (hasText || !!_steerPending) : !pendingCard;
     stopBtn.disabled = (!turnActive && !pendingCard) || _stopInProgress;
     // Queue+Steer wrapper: visible during turn only when textarea has text
@@ -5276,8 +5276,12 @@
         root: payload && payload.ruleRoot,
       };
       if ((typeof _reqId === 'string' || typeof _reqId === 'number') && _permOptions.length) {
-        addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions, _permConsent, _permRule);
-        // An unsettled card keeps Stop usable even with no turn active.
+        var _permRow = addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions, _permConsent, _permRule);
+        // Only a request routed from a workflow step (the frame says so) keeps
+        // Stop usable with no turn active; see hasPendingStepPermissionCard.
+        if (_permRow && payload && payload.workflowStep === true) {
+          _permRow.dataset.workflowStep = '1';
+        }
         refreshComposerControls();
         // The notification takes a `!replaying` gate even though the row above
         // deliberately does not. The two want opposite things from a reload:
@@ -5818,7 +5822,7 @@
     pickerRender();
   });
   stopBtn.addEventListener('click', function () {
-    if (!sessionId || (!turnActive && !hasPendingPermissionCard())) return;
+    if (!sessionId || (!turnActive && !hasPendingStepPermissionCard())) return;
     if (!send('cancel', {}, sessionId)) return;
     // SC-5: cancel sent — trigger a rail refresh so the dot state updates
     // promptly rather than waiting for the 60-second polling cycle.

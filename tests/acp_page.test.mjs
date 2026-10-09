@@ -8938,14 +8938,14 @@ check("queue button hidden when turn active but textarea empty", (tpl) => {
 // left showing after the card resolves; a resolved card counted as pending; the
 // in-progress flag latched with no turn to clear it; a turn's own rules
 // (text, steer) disturbed.
-function deliverPermissionCard(page, live, requestId) {
-  page.deliver({
-    type: "permission_request", sessionId: live,
-    payload: {
-      requestId, sessionId: live, toolCall: { title: "Run shell: dir" },
-      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
-    },
-  });
+// `step` false is the parent's OWN request (no `workflowStep` key on the frame).
+function deliverPermissionCard(page, live, requestId, step = true) {
+  const payload = {
+    requestId, sessionId: live, toolCall: { title: "Run shell: dir" },
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  };
+  if (step) payload.workflowStep = true;
+  page.deliver({ type: "permission_request", sessionId: live, payload });
 }
 function resolvePermissionCard(page, live, requestId) {
   page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId } });
@@ -8985,7 +8985,7 @@ check("a card replayed already resolved does not keep Stop on screen", (tpl) => 
   const { page, live } = connected(tpl);
   page.deliver({ type: "history", sessionId: live, payload: { events: [
     { type: "permission_request", sessionId: live, payload: {
-        requestId: "req-A", sessionId: live, toolCall: { title: "t" },
+        requestId: "req-A", sessionId: live, toolCall: { title: "t" }, workflowStep: true,
         options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] } },
     { type: "permission_resolved", sessionId: live, payload: { requestId: "req-A" } },
   ] } });
@@ -9006,6 +9006,23 @@ check("Stop on a pending card with no turn sends cancel and does not latch the i
   deliverPermissionCard(page, live, "req-B");
   assertEqual(page.el("acpStop").disabled, false,
     "no turn means no boundary to clear the in-progress flag: it must not stay latched");
+});
+
+check("the parent's own pending card does not show Stop with no turn (a wake turn shows none) but does during a turn", (tpl) => {
+  const { page, live } = connected(tpl);
+  deliverPermissionCard(page, live, "req-P", false);
+  assertEqual(page.el("acpStop").hidden, true,
+    "a parent's own card (no workflowStep) must not show Stop with no turn: Stop there would only deny it");
+  page.click("acpStop");
+  assertEqual(page.sentOf("cancel").length, 0);
+  // A step's card beside it does show Stop, and settling it hides Stop again.
+  deliverPermissionCard(page, live, "req-S", true);
+  assertEqual(page.el("acpStop").hidden, false);
+  resolvePermissionCard(page, live, "req-S");
+  assertEqual(page.el("acpStop").hidden, true, "the parent's card is still pending but does not count");
+  const turn = connected(tpl, { turnActive: true });
+  deliverPermissionCard(turn.page, turn.live, "req-P", false);
+  assertEqual(turn.page.el("acpStop").hidden, false, "during a turn Stop shows as before");
 });
 
 check("Stop with no turn and no pending card sends nothing", (tpl) => {
@@ -15406,7 +15423,7 @@ function loadDashPicker(opts = {}) {
     // transcript-renderer.js's addPermissionRequest is large and not under test
     // here; what dashHandle does AFTER it (repaint the composer controls so an
     // unsettled card keeps Stop usable) is. The stand-in appends a card row of
-    // the same class and request id, which the REAL hasPendingPermissionCard /
+    // the same class and request id, which the REAL hasPendingStepPermissionCard /
     // markPermissionResolved (lifted below) then read.
     addPermissionRequest: (requestId) => {
       const row = new El("div");
@@ -15678,7 +15695,7 @@ function loadDashPicker(opts = {}) {
   // inline script that calls initXxxDom() and defines dashHandle).
   vm.runInContext(composerChromeSource(), sandbox,
                    { filename: "composer-chrome.js" });
-  for (const fn of ["hasPendingPermissionCard", "findPermissionRequestRow",
+  for (const fn of ["hasPendingStepPermissionCard", "findPermissionRequestRow",
                     "markPermissionResolved", "insidePermissionRuleEditor"]) {
     vm.runInContext(rendererFunctionSource(fn), sandbox,
                     { filename: "transcript-renderer.js#" + fn });
@@ -16693,10 +16710,13 @@ check("Stop button click is a no-op without an attached session or an active tur
 // Likeliest bug spots, first: Stop left hidden with a card and no turn; Stop
 // left showing after the card resolves; the card of ANOTHER state (resolved)
 // counted as pending; a turn's own rules (text, steer) disturbed.
-function dashPermissionCard(p, requestId) {
-  p.sandbox.dashHandle({ type: "permission_request", sessionId: "sess-1", payload: {
+// `step` false is the parent's OWN request (no `workflowStep` key on the frame).
+function dashPermissionCard(p, requestId, step = true) {
+  const payload = {
     requestId, sessionId: "sess-1", toolCall: { title: "t" },
-    options: [{ optionId: "a", name: "Allow", kind: "allow_once" }] } });
+    options: [{ optionId: "a", name: "Allow", kind: "allow_once" }] };
+  if (step) payload.workflowStep = true;
+  p.sandbox.dashHandle({ type: "permission_request", sessionId: "sess-1", payload });
 }
 
 check("dashboard: Stop is hidden with no turn and no pending permission card", () => {
@@ -16722,6 +16742,20 @@ check("dashboard: Stop is visible and enabled for a pending card with no turn, a
                          payload: { requestId: "req-A" } });
   assertEqual(p.sandbox.dashStopBtn.hidden, true, "Stop must hide once the card resolves");
   assertEqual(p.sandbox.dashStopBtn.disabled, true);
+});
+
+check("dashboard: the parent's own pending card does not show Stop with no turn, but does during a turn", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1", dashTurnActive: false });
+  dashPermissionCard(p, "req-P", false);
+  assertEqual(p.sandbox.dashStopBtn.hidden, true,
+    "a parent's own card (no workflowStep) must not show Stop with no turn");
+  p.sandbox.dashStopBtn.dispatch("click");
+  assertEqual(p.sentOf("cancel").length, 0);
+  dashPermissionCard(p, "req-S", true);
+  assertEqual(p.sandbox.dashStopBtn.hidden, false);
+  const t = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1", dashTurnActive: true });
+  dashPermissionCard(t, "req-P", false);
+  assertEqual(t.sandbox.dashStopBtn.hidden, false, "during a turn Stop shows as before");
 });
 
 check("dashboard: with two pending cards Stop stays until the last one resolves", () => {

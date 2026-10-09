@@ -2609,17 +2609,22 @@ function markPermissionResolved(requestId) {
   }
 }
 
-/** Whether the transcript holds a permission card nobody has settled yet (no
+/** Whether the transcript holds a card for a request routed from a workflow
+ *  step (the page marks its row `dataset.workflowStep` from the frame's
+ *  `workflowStep: true`) that nobody has settled yet (no
  *  `acp-permission-resolved` class). The pages keep their Stop button usable
- *  while this is true, even with no turn active: a request routed from a
- *  workflow step outlives the parent's turn (the prompt returns while the run
- *  goes on), and Stop is the only way to cancel its card. A plain row scan, like
+ *  while this is true, even with no turn active: such a request outlives the
+ *  parent's turn (the prompt returns while the run goes on), and Stop is the
+ *  only way to cancel its card. The parent's OWN cards do not count: with no
+ *  turn shown (an agent-initiated wake turn shows none) Stop would only deny
+ *  the card and leave the turn running. A plain row scan, like
  *  findPermissionRequestRow. False before the transcript element is wired. */
-function hasPendingPermissionCard() {
+function hasPendingStepPermissionCard() {
   if (!transcriptEl) return false;
   var rows = transcriptEl.querySelectorAll('.acp-msg-permission');
   for (var i = 0; i < rows.length; i++) {
-    if (!rows[i].classList.contains('acp-permission-resolved')) return true;
+    if (rows[i].dataset.workflowStep === '1'
+        && !rows[i].classList.contains('acp-permission-resolved')) return true;
   }
   return false;
 }

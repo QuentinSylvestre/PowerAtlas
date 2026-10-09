@@ -2743,7 +2743,7 @@ function dashRefreshComposerControls(){
   // With no turn it is visible, and enabled, only while an unsettled
   // permission card is showing (a request routed from a workflow step outlives
   // the parent's turn; Stop cancels it) -- mirrors acp.html.
-  var pendingCard = hasPendingPermissionCard();
+  var pendingCard = hasPendingStepPermissionCard();
   dashStopBtn.hidden = _dashTurnActive ? (hasText || !!_dashSteerPending) : !pendingCard;
   dashStopBtn.disabled = (!_dashTurnActive && !pendingCard) || _dashStopInProgress;
   // Queue+Steer wrapper: visible during turn only when textarea has text.
@@ -3111,7 +3111,7 @@ dashPromptInput.addEventListener('focus', function () {
 // modeOptions/sendModeBtn click wiring (acp.html:5473-5599) as-is, not
 // through composer-chrome.js.
 dashStopBtn.addEventListener('click', function () {
-  if (!_dashAttachedSid || (!_dashTurnActive && !hasPendingPermissionCard())) return;
+  if (!_dashAttachedSid || (!_dashTurnActive && !hasPendingStepPermissionCard())) return;
   if (!send('cancel', {}, _dashAttachedSid)) {
     // Fix 7 (review, Phase 3 fix cycle): mirrors dashSendPrompt()'s own
     // not-connected toast for the same class of failure -- previously this
@@ -5108,7 +5108,7 @@ function dashHandle(frame){
       // passed through as-is; transcript-renderer.js validates each field.
       // 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3: the server's
       // verdict on the "always in new sessions" button (D-31).
-      addPermissionRequest(reqId, sid, title, options, payload && payload.consent, {
+      var permRow = addPermissionRequest(reqId, sid, title, options, payload && payload.consent, {
         eligible: !!payload && payload.ruleEligible === true,
         row: payload && payload.ruleRow,
         label: payload && payload.ruleRowLabel,
@@ -5116,7 +5116,11 @@ function dashHandle(frame){
         // relative resource is relative to, for an absolute prefill.
         root: payload && payload.ruleRoot,
       });
-      // An unsettled card keeps Stop usable even with no turn active.
+      // Only a request routed from a workflow step (the frame says so) keeps
+      // Stop usable with no turn active; see hasPendingStepPermissionCard.
+      if (permRow && payload && payload.workflowStep === true) {
+        permRow.dataset.workflowStep = '1';
+      }
       dashRefreshComposerControls();
     }
     return;
