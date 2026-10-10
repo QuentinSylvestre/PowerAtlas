@@ -1,8 +1,24 @@
 # Dashboard Overview Rehaul: Quota Meters, Interrupted-Session Resume and Git Status
 
 > **Date**: 2026-10-09
-> **Status**: Exploring  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — implemented, live QA pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Rehaul the dashboard Overview; add Claude/Codex quota meters, a quota-interrupted session list with quick and scheduled resume, repo change status (branch in the rail, status in the Overview); fix the stray copy glyph in the panel header
+> **Last Updated**: 2026-10-09 21:09
+> **Memory relied on**: none
+
+## Completion Summary
+
+Implemented directly (no `/qplan`) in commit `d7be0ed`; the intent record is `c904d1c`. Archived with the work not yet tested live, at the owner's instruction: "we can accept and note the fact that we haven't tested yet, I'll treat it as a bug if something goes wrong later".
+
+### Acknowledged at archival
+
+- Accepted: SC-12 live QA against a restarted instance with synthetic transcripts was not done. The five "Open items (execution-contingent)" below are unverified: synthetic hit transcripts, a real statusline payload, behavior at a real hit, `claude.exe` injection on a locked screen and a single-burst Enter write, and whether Codex `rate_limits` are account-wide.
+- Accepted: the full pytest suite is not green. Three tests in `tests/test_web.py` fail (`test_compact_command_fires_compaction_started`, `test_agent_subtask_completion_prefers_raw_output_over_streamed_bubble`, `test_agent_subtask_completion_with_no_prior_stream_emits_bare_chunk`). They fail at the commit before this work as well (`74e5951`), so they are unrelated to it. `node tests/acp_page.test.mjs` passes (1073 of 1073).
+- Accepted: the plan's Risks section asks for an independent review of the resume and console-injection slice before it ships. No review is recorded in this file.
+- Fixed at archival: `plans/ROADMAP.md` listed "Quota-limit auto-schedule" as future work; it now says what shipped and what remains (kiro-cli resume, last-prompt default payload, general timed prompts).
+- Accepted (harness opportunity): `/qexplore` Step 3 wording says `/qplan` will fold the Discovery section away, which is false for direct implementation.
+- Accepted (harness opportunity): the Bash tool on Windows rewrites arguments that start with `/`; a user-memory entry already covers it.
+- Pass 4 (documentation ripple): no renamed or deleted files and no removed identifiers in the slug-matched commits; no findings.
 
 ---
 
