@@ -25,7 +25,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 
 /* Skip link */
 .skip-link { position: absolute; left: -9999px; top: 0; background: var(--surface); color: var(--text); padding: 6px 12px; z-index: 200; border-radius: var(--radius-sm); }
-.skip-link:focus { left: 12px; top: 12px; }
+.kbd-nav .skip-link:focus { left: 12px; top: 12px; }
 
 /* Top bar */
 .topbar { display: flex; align-items: center; padding: 0 16px 0 0; height: 48px; border-bottom: 1px solid var(--border); gap: 10px; flex-shrink: 0; background: var(--topbar-bg); }

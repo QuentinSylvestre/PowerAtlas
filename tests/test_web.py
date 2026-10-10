@@ -5292,8 +5292,13 @@ class TestAcpContentSecurityPolicy:
         # Phase 1) — context indicator, sid/copy widget, debug log panel —
         # same reasoning as prism.js and transcript-renderer.js above.
         assert ('<script nonce="%s" src="/static/composer-chrome.js">' % nonce) in resp.text
+        # The shared <head> skip-link script: keeps the "Skip to content" link
+        # hidden unless the user presses Tab.
+        assert re.search(
+            r'<script nonce="%s" src="/static/skip-link\.js\?v=[^"]*">' % nonce,
+            resp.text)
         tags = re.findall(r"<script\b[^>]*>", resp.text)
-        assert len(tags) == 5, "a script tag was added without a nonce: %s" % tags
+        assert len(tags) == 6, "a script tag was added without a nonce: %s" % tags
         # Every tag, not only the three named above. The count makes adding a
         # script a deliberate act; this makes a nonce-less one a failing test
         # rather than a feature that quietly does nothing in the browser.

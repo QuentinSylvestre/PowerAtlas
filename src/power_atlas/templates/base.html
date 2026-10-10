@@ -11,6 +11,7 @@
    a Content-Security-Policy. Elsewhere it is undefined and this renders exactly
    as it did before, so no policy and no nonce attribute reaches the dashboard. #}
 <script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %} src="/static/htmx.min.js"></script>
+<script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %} src="/static/skip-link.js?v={{ static_version }}"></script>
 </head>
 <body>
 <a href="#workspaces-panel" class="skip-link">Skip to content</a>
