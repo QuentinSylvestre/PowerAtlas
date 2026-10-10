@@ -2,6 +2,12 @@
 
 ## Pattern
 
+### An extracted-function page test fails silently when its vm sandbox lacks a global the function now reads
+
+**Why**: `tests/acp_page.test.mjs` runs slices of `index.html` in a vm box with only the globals each test lists. A missing global becomes a ReferenceError inside a fetch `.then`, which the function's own `.catch(function(){})` swallows. The first symptom on 2026-10-09 was an unrelated-looking assertion ("expected [\"C:\\\\lazy\"], got []").
+**How to apply**: When a slice under test gains a new global (a new `var` or lookup table), add it to every test box that runs that slice. `grep` for the function name in the test file; the same box setup is often repeated across tests.
+**Source**: commit d7be0ed, test "dashboard rail: the 60 s refresh also refreshes an open group the shared listing left lazy" in `tests/acp_page.test.mjs` | **Verified**: 2026-10-09 (session, grep)
+
 ### Page-test fixtures that call a builder twice race on `Date.now()` — freeze the clock or build once
 
 **Why**: An intermittent node failure appeared twice and was nearly dismissed as unreproducible; the F17 test called `ovPlan()` twice, each call stamped `Date.now()`, and a millisecond tick made "unchanged" data look changed (the live-tiles identity test carried the same latent race; both fixed in 7b0089b).
@@ -47,9 +53,9 @@
 
 ### Session-panel updates must be event-driven, not poll-gated (pin/unpin + startup warmup)
 
-**Why**: Pinned sessions took ~10s to move on pin/unpin (waiting for the next `refreshCards()` polling cycle) and ~20s to appear after restart (waiting for the warmup cache to fill on the 15-30s burst timer). The client relied on periodic polling instead of reacting to state changes and lifecycle events.
-**How to apply**: For user-initiated state changes (pin/unpin), move the DOM row immediately in JS (insert before/after `.pinned-separator`, manage the separator lifecycle) rather than waiting for the next `refreshCards()` cycle. For startup latency on cache-dependent UI, emit a `warmup_done` event in `data.py`, expose `/api/warmup-status`, and have the client short-poll (2s) to trigger `refreshCards(true)` the moment warmup finishes.
-**Source**: Session 1ecfaedc (2026-07-17) — pinned-session latency fix; verified `warmup_done` / `warmup-status` / `pinned-separator` present in web.py/data.py/index.html | **Verified**: 2026-07-18
+**Why**: Pinned sessions took ~10s to move on pin/unpin (waiting for the next `refreshCards()` polling cycle) and ~20s to appear after restart (waiting for the warmup cache to fill on the 15-30s burst timer). The client relied on periodic polling instead of reacting to state changes and lifecycle events. On 2026-10-09 the rail showed no git branches for 2+ minutes after launch: the 60 s refresh compared only session states, and the first listing is built before the background git sweep finishes.
+**How to apply**: For user-initiated state changes (pin/unpin), move the DOM row immediately in JS (insert before/after `.pinned-separator`, manage the separator lifecycle) rather than waiting for the next `refreshCards()` cycle. For startup latency on cache-dependent UI, emit a `warmup_done` event in `data.py`, expose `/api/warmup-status`, and have the client short-poll (2s) to trigger `refreshCards(true)` the moment warmup finishes. A periodic refresh that diffs only some row fields never adopts a field the server fills in later, such as a branch label from a background sweep: compare that field too, and re-fetch once when the sweep reports done.
+**Source**: Session 1ecfaedc (2026-07-17) — pinned-session latency fix; verified `warmup_done` / `warmup-status` / `pinned-separator` present in web.py/data.py/index.html + commit d7be0ed, `dashRailRefresh` in `src/power_atlas/templates/index.html` | **Verified**: 2026-10-09 (session, grep)
 
 ### Cache getters must return copies, not references
 
