@@ -423,6 +423,137 @@ class TestLaunchSession:
         assert env["POWER_ATLAS_SESSION"] == "1"
 
 
+class TestLaunchSessionPrompt:
+    """`launch_session(prompt=...)`: `claude --resume <id> "<prompt>"` in a terminal, safely quoted."""
+
+    _WT = LaunchProfile(terminal_command="C:\\wt.exe")
+
+    @staticmethod
+    def _which(name):
+        return {"claude": "C:\\claude.exe", "wt": "C:\\wt.exe", "pwsh": "C:\\pwsh.exe"}.get(name)
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_the_prompt_is_the_last_argument_and_quoted(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = self._which
+        result = launch_session(str(tmp_path), session_id="sess-abc", provider="claude-code",
+                                launch_profile=self._WT, prompt="resume")
+        assert result.success is True
+        script = mock_popen.call_args[0][0][-1]
+        assert script == "& 'claude' '--resume' 'sess-abc' 'resume'"
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_default_args_come_before_the_prompt(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = self._which
+        launch_session(str(tmp_path), session_id="sess-abc", provider="claude-code", default_args="--model haiku",
+                       launch_profile=self._WT, prompt="go on")
+        assert mock_popen.call_args[0][0][-1] == "& 'claude' '--resume' 'sess-abc' '--model' 'haiku' 'go on'"
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_every_quote_character_in_a_prompt_is_doubled(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = self._which
+        launch_session(str(tmp_path), session_id="sess-abc", provider="claude-code",
+                       launch_profile=self._WT, prompt="it's \u2018odd\u2019 \"x\"")
+        script = mock_popen.call_args[0][0][-1]
+        assert script.endswith("'it''s \u2018\u2018odd\u2019\u2019 \"x\"'")
+
+    @pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7 is not installed")
+    def test_the_prompt_reaches_the_program_unchanged_through_a_real_powershell(self):
+        """The quoting is exercised end to end: a prompt full of shell syntax arrives as one argument."""
+        import json
+        import sys
+        prompts = ["resume", "it's here", "say \"hi\"", "$(whoami) `n ; & calc | more", "a  b   c",
+                   "\u2018smart\u2019 \u201cquotes\u201d", "100% {done} [ok] <x> ^caret"]
+        for prompt in prompts:
+            line = _build_powershell_invocation(
+                [sys.executable, "-c", "import sys, json; print(json.dumps(sys.argv[1:]))", prompt])
+            done = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-Command", line],
+                                  capture_output=True, text=True, encoding="utf-8", timeout=60)
+            assert json.loads(done.stdout.strip().splitlines()[-1]) == [prompt], prompt
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_a_prompt_that_could_change_the_command_is_refused(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = self._which
+        for bad in ("-p hello", "--dangerously-skip-permissions", "two\nlines", "tab\there", "x" * 4001):
+            result = launch_session(str(tmp_path), session_id="sess-abc", provider="claude-code",
+                                    launch_profile=self._WT, prompt=bad)
+            assert result.success is False and result.error == "Invalid prompt", repr(bad[:30])
+        mock_popen.assert_not_called()
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_a_provider_that_takes_no_terminal_prompt_refuses_one(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro": "C:\\kiro.exe"}.get(n)
+        result = launch_session(str(tmp_path), provider="kiro-ide", prompt="resume")
+        assert result.success is False and "cannot be started with a prompt" in result.error
+        mock_popen.assert_not_called()
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_a_codex_resume_takes_the_prompt_after_the_id_and_default_arguments(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"codex": "C:\\codex.exe", "wt": "C:\\wt.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
+        sid = "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40"
+        result = launch_session(str(tmp_path), session_id=sid, provider="codex", default_args="--model gpt-x",
+                                launch_profile=self._WT, prompt="carry on")
+        assert result.success is True
+        assert mock_popen.call_args[0][0][-1] == f"& 'codex' 'resume' '{sid}' '--model' 'gpt-x' 'carry on'"
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_windows_terminal_gets_every_semicolon_escaped(self, mock_which, mock_popen, tmp_path):
+        """An unescaped `;` splits a Windows Terminal command line, so a prompt cannot carry one raw."""
+        mock_which.side_effect = self._which
+        result = launch_session(str(tmp_path), session_id="sess-abc", provider="claude-code",
+                                launch_profile=self._WT, prompt="fix a; then b")
+        assert result.success is True
+        script = mock_popen.call_args[0][0][-1]
+        assert script.endswith("'fix a\\; then b'")
+        assert ";" not in script.replace("\\;", "")
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_a_wt_template_escapes_semicolons_too(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = self._which
+        template = "C:\\wt.exe -d {cwd} -- pwsh -NoExit -Command {pscmd}"
+        result = launch_session(str(tmp_path), session_id="sess-abc", provider="claude-code",
+                                launch_profile=LaunchProfile(terminal_command=template), prompt="a; b")
+        assert result.success is True
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[-1].endswith("'a\\; b'")
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_a_template_for_another_program_is_not_semicolon_escaped(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = self._which
+        launch_session(str(tmp_path), session_id="sess-abc", provider="claude-code",
+                       launch_profile=LaunchProfile(terminal_command="myterm --exec {cmd}"), prompt="a; b")
+        assert mock_popen.call_args[0][0][-1] == "a; b"
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_a_prompt_holding_the_escape_sequence_is_refused_for_windows_terminal(self, mock_which, mock_popen, tmp_path):
+        """`\\;` would arrive as a plain `;` after the escaping, so the prompt would not be the one typed."""
+        mock_which.side_effect = self._which
+        result = launch_session(str(tmp_path), session_id="sess-abc", provider="claude-code",
+                                launch_profile=self._WT, prompt="path C:\\dir\\; end")
+        assert result.success is False and "semicolon" in result.error
+        mock_popen.assert_not_called()
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_a_cmd_terminal_refuses_a_prompt(self, mock_which, mock_popen, tmp_path):
+        """cmd.exe re-parses the joined command line: the prompt's words become options and `&` starts a command."""
+        mock_which.side_effect = lambda n: {"claude": "C:\\claude.exe", "cmd": "C:\\Windows\\cmd.exe"}.get(n)
+        for terminal in ("C:\\Windows\\cmd.exe", "C:\\Windows\\cmd.exe /c start {cwd} {cmd}"):
+            result = launch_session(str(tmp_path), session_id="sess-abc", provider="claude-code",
+                                    launch_profile=LaunchProfile(terminal_command=terminal), prompt="resume")
+            assert result.success is False and "cmd.exe" in result.error, terminal
+        mock_popen.assert_not_called()
+
+
 class TestCodexLaunch:
     """261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 2:
     Codex launches as `codex` / `codex resume <uuid>` with no baked flags."""

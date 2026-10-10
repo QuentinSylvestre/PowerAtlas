@@ -358,6 +358,22 @@
          body holds "Loading…" until the Overview script's renderer fills it.
          260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D15 -->
     <div class="dash-overview" id="dashOverview">
+      <!-- Quota: the Claude Code and Codex 5-hour and weekly windows, read from the providers'
+           own files (quota.py). -->
+      <section class="dash-ov-section" id="dashOvQuota" aria-labelledby="dashOvQuotaTitle">
+        <h3 class="dash-ov-title" id="dashOvQuotaTitle">Quota</h3>
+        <div class="dash-ov-body" id="dashOvQuotaBody"><div class="dash-ov-loading">Loading…</div></div>
+      </section>
+      <!-- Needs attention: what is waiting on the user. Sessions a quota limit stopped, and
+           repositories with uncommitted or unpushed work; each kind of item draws into its own
+           block, and the interrupted block stays hidden while there is nothing in it. -->
+      <section class="dash-ov-section" id="dashOvAttention" aria-labelledby="dashOvAttentionTitle">
+        <h3 class="dash-ov-title" id="dashOvAttentionTitle">Needs attention</h3>
+        <div class="dash-ov-body" id="dashOvAttentionBody">
+          <div class="dash-ov-block" id="dashOvInterruptedBlock" hidden></div>
+          <div class="dash-ov-block" id="dashOvReposBlock"><div class="dash-ov-loading">Loading…</div></div>
+        </div>
+      </section>
       <section class="dash-ov-section" id="dashOvLive" aria-labelledby="dashOvLiveTitle">
         <div class="dash-ov-head">
           <h3 class="dash-ov-title" id="dashOvLiveTitle">Live now</h3>
@@ -1071,19 +1087,49 @@ var DASH_OV_TRACKER_STATUS = {
   pending: ['is-pending', 'Pending'],
   other: ['is-other', 'Other']
 };
-function dashOverviewRefreshSummary(){
-  if (_dashOvSummaryBusy || _dashOverviewSignedOut) return;
+// Set when an action finished while a summary request was already in flight: that request began before
+// the action and cannot show its effect, so one more is made as soon as it ends.
+var _dashOvSummaryAgain = false;
+// Set once the git sweep has answered, so the rail is refreshed for branches once.
+var _dashOvGitSeen = false;
+function dashOverviewRefreshSummary(queue){
+  if (_dashOverviewSignedOut) return;
+  if (_dashOvSummaryBusy) {
+    if (queue === true) _dashOvSummaryAgain = true;
+    return;
+  }
   _dashOvSummaryBusy = true;
   dashOverviewFetch(DASH_OV_SUMMARY_URL, null, DASH_OV_SUMMARY_TIMEOUT_MS).then(function(data){
     dashOvRenderPlans(data && data.plans);
     dashOvRenderUsage(data && data.usage, data && data.usage_state);
+    dashOvRenderRepos(data && data.git);
+    // The rail's first listing precedes the first git sweep and shows no branches. Once the sweep is
+    // done, reload the rail once instead of waiting for its 60 s poll.
+    if (!_dashOvGitSeen && data && data.git && data.git.state === 'ready') {
+      _dashOvGitSeen = true;
+      dashRailRefreshSoon();
+    }
+    dashOvRenderQuota(data && data.quota);
+    dashOvRenderInterrupted(data && data.quota && data.quota.interrupted);
     // Null usage (stage 1) and a partial aggregate (stage 2) both come with
-    // "warming": the page keeps re-fetching until the complete one is ready.
-    if (data && data.usage_state === 'warming') dashOvUsageRetrySoon();
+    // "warming": the page keeps re-fetching until the complete one is ready. The
+    // repository sweep warms the same way (its first pass takes a few seconds), and so does a resume
+    // being watched: its outcome lands within a few minutes.
+    var interrupted = data && data.quota && Array.isArray(data.quota.interrupted) ? data.quota.interrupted : [];
+    var resuming = interrupted.some(function(r){ return r && r.resume && r.resume.state === 'watching'; });
+    if (data && (data.usage_state === 'warming' || (data.git && data.git.state === 'warming') || resuming)) dashOvUsageRetrySoon();
   }).catch(function(){
     dashOvPlansFailed();
     dashOvUsageFailed();
-  }).then(function(){ _dashOvSummaryBusy = false; });
+    dashOvFirstLoadFailed('dashOvReposBlock', 'Could not check repositories.');
+    dashOvFirstLoadFailed('dashOvQuotaBody', 'Could not read quota.');
+  }).then(function(){
+    _dashOvSummaryBusy = false;
+    if (_dashOvSummaryAgain) {
+      _dashOvSummaryAgain = false;
+      dashOverviewRefreshSummary();
+    }
+  });
 }
 function dashOvText(tag, cls, text){
   var n = document.createElement(tag);
@@ -1240,6 +1286,451 @@ function dashOvRenderPlans(plans){
   shown.forEach(function(p){ list.appendChild(dashOvPlanRow(p)); });
   body.appendChild(list);
   _dashOvPlansNode = list;
+}
+// Needs attention, repositories block. The server sends only repositories worth a line (tracked
+// changes, commits ahead of the upstream, or local-only commits on a branch with no upstream), most
+// urgent first. Names, branches and paths are free text from disk, so every one is drawn with
+// textContent; the counts go through dashOvCount.
+var _dashOvReposKey = null;
+function dashOvRepoChip(text, cls, title){
+  var chip = dashOvText('span', 'dash-ov-repo-chip' + (cls ? ' ' + cls : ''), text);
+  if (title) chip.title = title;
+  return chip;
+}
+function dashOvRepoRow(repo){
+  var li = document.createElement('li');
+  li.className = 'dash-ov-repo';
+  li.title = String(repo.path == null ? '' : repo.path);
+  li.appendChild(dashOvText('span', 'dash-ov-repo-name', repo.name));
+  li.appendChild(dashOvText('span', 'dash-ov-repo-branch', repo.branch));
+  var chips = document.createElement('span');
+  chips.className = 'dash-ov-repo-chips';
+  var changed = dashOvCount(repo.changed), ahead = dashOvCount(repo.ahead), untracked = dashOvCount(repo.untracked);
+  if (changed) chips.appendChild(dashOvRepoChip(changed + ' changed', 'is-changed', 'Tracked files with uncommitted changes'));
+  if (ahead) chips.appendChild(dashOvRepoChip('↑' + ahead, 'is-ahead', ahead + ' commit' + (ahead === 1 ? '' : 's') + ' not pushed to the upstream'));
+  if (repo.no_upstream === true) chips.appendChild(dashOvRepoChip('no upstream', 'is-ahead', 'This branch has commits that no remote branch has'));
+  if (untracked) chips.appendChild(dashOvRepoChip(untracked + ' untracked', 'is-quiet', 'Untracked files'));
+  li.appendChild(chips);
+  return li;
+}
+// How many repositories show before "Show N more": the list is sorted most urgent first, and this
+// section is shared with the other things that need attention, so it must not push Live now off the
+// screen on a machine with a dozen dirty repositories.
+var DASH_OV_REPOS_SHOWN = 6;
+var _dashOvReposExpanded = false;
+var _dashOvReposLast = null;
+function dashOvRenderRepos(git){
+  if (!git || typeof git !== 'object') return;
+  _dashOvReposLast = git;
+  dashOvDrawRepos();
+}
+function dashOvDrawRepos(){
+  var block = document.getElementById('dashOvReposBlock');
+  var git = _dashOvReposLast;
+  if (!block || !git) return;
+  var repos = Array.isArray(git.repos) ? git.repos.filter(function(r){ return r && typeof r === 'object'; }) : [];
+  var key = null;
+  try {
+    key = (git.state === 'ready' ? 'ready:' : 'warming:') + (_dashOvReposExpanded ? 'all:' : 'cap:') + JSON.stringify(repos);
+  } catch (e) { key = null; }
+  if (key !== null && key === _dashOvReposKey) return;
+  _dashOvReposKey = key;
+  block.textContent = '';
+  if (!repos.length) {
+    block.appendChild(dashOvText('div', 'dash-ov-empty', git.state === 'ready'
+      ? 'No repository has uncommitted or unpushed work'
+      : git.state === 'unavailable'
+        ? 'Git was not found, so repositories cannot be checked.'
+        : 'Checking repositories…'));
+    return;
+  }
+  block.appendChild(dashOvText('div', 'dash-ov-sub', 'Uncommitted or unpushed work'));
+  var list = document.createElement('ul');
+  list.className = 'dash-ov-repos';
+  var shown = _dashOvReposExpanded ? repos : repos.slice(0, DASH_OV_REPOS_SHOWN);
+  shown.forEach(function(r){ list.appendChild(dashOvRepoRow(r)); });
+  block.appendChild(list);
+  if (repos.length > DASH_OV_REPOS_SHOWN) {
+    var more = dashOvText('button', 'acp-btn dash-ov-more', _dashOvReposExpanded
+      ? 'Show fewer'
+      : 'Show ' + (repos.length - DASH_OV_REPOS_SHOWN) + ' more');
+    more.type = 'button';
+    more.setAttribute('aria-expanded', _dashOvReposExpanded ? 'true' : 'false');
+    more.addEventListener('click', function(){
+      _dashOvReposExpanded = !_dashOvReposExpanded;
+      dashOvDrawRepos();
+    });
+    block.appendChild(more);
+  }
+}
+// ---- Quota: the Claude Code and Codex windows, and the sessions a limit stopped ----------------
+// Everything comes from provider files (quota.py). A meter is drawn from one window object,
+// {state, used_percent, resets_at, elapsed, source, captured_at}; the state words and classes are
+// looked up here, never taken from the response, and the only values written into a style are
+// clamped numbers. A reading that is not current says so: "stale since 14:02", "reset", or "no live
+// data", never a 0%.
+var DASH_OV_QUOTA_PROVIDERS = [['claude', 'Claude Code', 'claude-code'], ['codex', 'Codex', 'codex']];
+var DASH_OV_QUOTA_WINDOWS = [['five_hour', '5-hour'], ['seven_day', 'Weekly']];
+var DASH_OV_QUOTA_STATES = {live: 1, stale: 1, limited: 1, reset: 1};
+var DASH_OV_LIMIT_LABEL = {five_hour: '5-hour limit', seven_day: 'weekly limit', daily: 'daily limit', other: 'limit'};
+// Used this far ahead of an even spend of the window (percentage points) reads "ahead of pace".
+var DASH_OV_PACE_MARGIN = 10;
+var _dashOvQuotaKey = null;
+// "14:30" today, "Thu 15 Oct 14:30" on another day, in the browser's own time zone.
+function dashOvClock(epoch){
+  var d = new Date(Number(epoch) * 1000);
+  if (!isFinite(d.getTime())) return '';
+  var time = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  var now = new Date();
+  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) return time;
+  return d.toLocaleDateString([], {weekday: 'short', day: 'numeric', month: 'short'}) + ' ' + time;
+}
+// "in 12 min", "in 2h 14m", "in 3d 4h"; "now" once it has passed.
+function dashOvCountdown(epoch){
+  var s = Math.floor(Number(epoch) - Date.now() / 1000);
+  if (!isFinite(s)) return '';
+  if (s <= 0) return 'now';
+  var m = Math.floor(s / 60);
+  if (m < 1) return 'in <1 min';
+  if (m < 60) return 'in ' + m + ' min';
+  var h = Math.floor(m / 60);
+  if (h < 48) return 'in ' + h + 'h ' + (m % 60) + 'm';
+  return 'in ' + Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+}
+// "resets 14:30 · in 2h 14m". The element remembers its reset time so the page can move the
+// countdown on without drawing the section again.
+function dashOvResetNode(epoch, prefix){
+  var n = document.createElement('span');
+  n.className = 'dash-ov-reset';
+  n.dataset.resets = String(epoch);
+  n.dataset.prefix = prefix || 'resets';
+  dashOvSetReset(n);
+  return n;
+}
+function dashOvSetReset(n){
+  // The "resets tomorrow" label has no time to count down to.
+  if (!n.dataset || n.dataset.resets === undefined) return;
+  var epoch = Number(n.dataset.resets);
+  n.textContent = (n.dataset.prefix || 'resets') + ' ' + dashOvClock(epoch) + ' · ' + dashOvCountdown(epoch);
+}
+function dashOvRefreshCountdowns(root){
+  if (!root) return;
+  root.querySelectorAll('.dash-ov-reset').forEach(dashOvSetReset);
+}
+function dashOvQuotaMeter(label, win){
+  var row = document.createElement('div');
+  row.className = 'dash-ov-qrow';
+  row.appendChild(dashOvText('span', 'dash-ov-qlabel', label));
+  if (!win || typeof win !== 'object') {
+    row.classList.add('is-unknown');
+    row.appendChild(dashOvText('span', 'dash-ov-qunknown', 'no live data'));
+    return row;
+  }
+  var state = DASH_OV_QUOTA_STATES[win.state] === 1 ? win.state : 'live';
+  var pct = typeof win.used_percent === 'number' && isFinite(win.used_percent)
+    ? Math.max(0, Math.min(100, win.used_percent)) : null;
+  var elapsed = typeof win.elapsed === 'number' && isFinite(win.elapsed)
+    ? Math.max(0, Math.min(1, win.elapsed)) : null;
+  row.classList.add('is-' + state);
+  var level = pct === null ? '' : pct >= 90 ? 'critical' : pct >= 70 ? 'high' : '';
+  if (level) row.classList.add('is-' + level);
+  var bar = document.createElement('span');
+  bar.className = 'dash-ov-qbar';
+  if (pct !== null) {
+    var fill = document.createElement('span');
+    fill.className = 'dash-ov-qfill';
+    fill.style.width = pct + '%';
+    bar.appendChild(fill);
+  }
+  if (elapsed !== null && state !== 'reset') {
+    var tick = document.createElement('span');
+    tick.className = 'dash-ov-qtick';
+    tick.style.left = (elapsed * 100) + '%';
+    tick.title = 'Spending the window evenly would put the bar here';
+    bar.appendChild(tick);
+  }
+  row.appendChild(bar);
+  row.appendChild(dashOvText('span', 'dash-ov-qpct', pct === null ? '–' : Math.round(pct) + '%'));
+  // The threshold and pace cues are words, so they do not depend on telling colours apart. The cues
+  // and the reset time share one wrapping line under the bar.
+  var meta = document.createElement('div');
+  meta.className = 'dash-ov-qmeta';
+  if (level) meta.appendChild(dashOvText('span', 'dash-ov-qcue', level));
+  else if (pct !== null && elapsed !== null && state !== 'limited' && pct - elapsed * 100 >= DASH_OV_PACE_MARGIN) {
+    meta.appendChild(dashOvText('span', 'dash-ov-qcue', 'ahead of pace'));
+  }
+  if (state === 'limited') meta.appendChild(dashOvText('span', 'dash-ov-qcue', 'limit reached'));
+  else if (state === 'reset') meta.appendChild(dashOvText('span', 'dash-ov-qcue', 'reset, no reading since'));
+  else if (state === 'stale') {
+    var at = dashOvClock(win.captured_at);
+    meta.appendChild(dashOvText('span', 'dash-ov-qcue', at ? 'stale since ' + at : 'stale'));
+  }
+  if (win.resets_at != null && state !== 'reset') meta.appendChild(dashOvResetNode(win.resets_at));
+  if (meta.childNodes.length) row.appendChild(meta);
+  return row;
+}
+function dashOvCopyText(text, button){
+  var done = function(ok){
+    button.textContent = ok ? 'Copied' : 'Copy failed';
+    setTimeout(function(){ button.textContent = 'Copy'; }, 1500);
+  };
+  try {
+    navigator.clipboard.writeText(text).then(function(){ done(true); }, function(){ done(false); });
+  } catch (e) { done(false); }
+}
+// The statusline snippet, offered while no snapshot exists. PowerAtlas never edits the owner's
+// Claude Code settings; they paste these lines into their own statusline command.
+function dashOvSetupNode(snippet){
+  var box = document.createElement('details');
+  box.className = 'dash-ov-setup';
+  box.appendChild(dashOvText('summary', '', 'Show live Claude quota'));
+  box.appendChild(dashOvText('p', 'dash-ov-setup-note',
+    'Claude Code reports its live percentages only to the statusline command. Add these lines to your ' +
+    'statusline script, after it reads its input, and the numbers appear here after the next message.'));
+  box.appendChild(dashOvText('pre', 'dash-ov-setup-code', snippet));
+  var copy = dashOvText('button', 'acp-btn dash-ov-more', 'Copy');
+  copy.type = 'button';
+  copy.addEventListener('click', function(){ dashOvCopyText(snippet, copy); });
+  box.appendChild(copy);
+  return box;
+}
+function dashOvQuotaCard(spec, data){
+  var card = document.createElement('div');
+  card.className = 'dash-ov-qcard';
+  var head = document.createElement('div');
+  head.className = 'dash-ov-qhead';
+  var icon = document.createElement('img');
+  icon.className = 'dash-ov-tile-icon';
+  icon.alt = '';
+  icon.src = '/api/launcher-icon/provider--' + spec[2];
+  head.appendChild(icon);
+  head.appendChild(dashOvText('span', 'dash-ov-qname', spec[1]));
+  if (data && typeof data.plan === 'string' && data.plan) head.appendChild(dashOvText('span', 'dash-ov-qplan', data.plan));
+  card.appendChild(head);
+  var windows = data && typeof data.windows === 'object' && data.windows ? data.windows : {};
+  DASH_OV_QUOTA_WINDOWS.forEach(function(w){ card.appendChild(dashOvQuotaMeter(w[1], windows[w[0]])); });
+  if (spec[0] === 'claude' && data && data.state === 'no_snapshot' && typeof data.setup === 'string' && data.setup) {
+    card.appendChild(dashOvSetupNode(data.setup));
+  }
+  if (spec[0] === 'codex' && (!data || data.state === 'none')) {
+    card.appendChild(dashOvText('div', 'dash-ov-empty', 'No Codex session has reported its limits yet'));
+  }
+  return card;
+}
+function dashOvRenderQuota(quota){
+  var body = document.getElementById('dashOvQuotaBody');
+  if (!body || !quota || typeof quota !== 'object') return;
+  var key = null;
+  try { key = JSON.stringify({claude: quota.claude, codex: quota.codex}); } catch (e) { key = null; }
+  if (key !== null && key === _dashOvQuotaKey && body.querySelector('.dash-ov-qcards')) {
+    dashOvRefreshCountdowns(body);
+    return;
+  }
+  _dashOvQuotaKey = key;
+  body.textContent = '';
+  var cards = document.createElement('div');
+  cards.className = 'dash-ov-qcards';
+  DASH_OV_QUOTA_PROVIDERS.forEach(function(spec){ cards.appendChild(dashOvQuotaCard(spec, quota[spec[0]])); });
+  body.appendChild(cards);
+}
+// Sessions a limit stopped. Rows come most recent first from the server.
+var _dashOvInterruptedKey = null;
+// What the owner typed into a row's prompt and time fields, kept by session id so a redraw (any row
+// changing state redraws the list) does not throw it away.
+var _dashOvIntDraft = Object.create(null);
+var DASH_OV_QUOTA_POST_TIMEOUT_MS = 30000;
+// "2026-10-09T20:38" in local time, the value format of a datetime-local input.
+function dashOvLocalInput(epoch){
+  var d = new Date(Number(epoch) * 1000);
+  if (!isFinite(d.getTime())) return '';
+  function two(n){ return (n < 10 ? '0' : '') + n; }
+  return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + 'T' + two(d.getHours()) + ':' + two(d.getMinutes());
+}
+function dashOvQuotaPost(path, body){
+  var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  var timer = ctl ? setTimeout(function(){ ctl.abort(); }, DASH_OV_QUOTA_POST_TIMEOUT_MS) : null;
+  return fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                      body: JSON.stringify(body), signal: ctl ? ctl.signal : undefined})
+    .then(function(r){
+      return r.json().catch(function(){ return {ok: false, error: 'Unexpected answer (HTTP ' + r.status + ')'}; });
+    })
+    .catch(function(){ return {ok: false, error: 'Could not reach PowerAtlas'}; })
+    .then(function(ans){ if (timer) clearTimeout(timer); return ans; });
+}
+// The state line and buttons of one interrupted row. Buttons post to /api/quota/* with the session
+// id only: the folder, the reset time and whether the session is stopped at all are read by the server
+// from the transcript.
+// Per session id: whether a request is in flight and the last message, and the row's current buttons
+// and message element. A redraw builds new ones, so the answer to a request that started before it is
+// written to whatever is on screen now, and a second request cannot start while the first runs.
+var _dashOvIntBusy = Object.create(null);
+var _dashOvIntMsg = Object.create(null);
+var _dashOvIntLive = Object.create(null);
+function dashOvIntAnswer(id, text){
+  _dashOvIntMsg[id] = text;
+  var live = _dashOvIntLive[id];
+  if (live) live.msg.textContent = text;
+}
+function dashOvIntSetBusy(id, busy){
+  if (busy) _dashOvIntBusy[id] = true; else delete _dashOvIntBusy[id];
+  var live = _dashOvIntLive[id];
+  if (live) live.buttons.forEach(function(x){ x.disabled = busy; });
+}
+function dashOvIntActions(row, li){
+  var resume = row.resume && typeof row.resume === 'object' ? row.resume : null;
+  var box = document.createElement('div');
+  box.className = 'dash-ov-int-actions';
+  var buttons = [];
+  var msg = document.createElement('div');
+  msg.className = 'dash-ov-int-msg';
+  msg.textContent = _dashOvIntMsg[row.id] || '';
+  _dashOvIntLive[row.id] = {buttons: buttons, msg: msg};
+  var draft = _dashOvIntDraft[row.id];
+  if (!draft) {
+    draft = _dashOvIntDraft[row.id] = {prompt: '', when: row.resets_at != null ? dashOvLocalInput(Number(row.resets_at) + 60) : ''};
+  }
+  function button(label, cls, run){
+    var b = dashOvText('button', 'acp-btn dash-ov-act' + (cls ? ' ' + cls : ''), label);
+    b.type = 'button';
+    b.disabled = !!_dashOvIntBusy[row.id];
+    b.addEventListener('click', function(){
+      if (_dashOvIntBusy[row.id]) return;
+      dashOvIntSetBusy(row.id, true);
+      dashOvIntAnswer(row.id, '');
+      run().then(function(ans){
+        dashOvIntSetBusy(row.id, false);
+        if (ans && ans.ok === true) {
+          dashOvIntAnswer(row.id, ans.persisted === false
+            ? 'Scheduled, but it could not be saved: it will not survive a restart of PowerAtlas.'
+            : ans.mode === 'typed' ? 'Typed into its terminal.'
+            : ans.mode === 'terminal' ? 'Opened a terminal.' : '');
+          dashOverviewRefreshSummary(true);
+        } else {
+          dashOvIntAnswer(row.id, ans && typeof ans.error === 'string' ? ans.error : 'That did not work.');
+        }
+      });
+    });
+    buttons.push(b);
+    return b;
+  }
+  var post = function(path, extra){
+    return function(){ return dashOvQuotaPost(path, Object.assign({session_id: row.id}, extra || {})); };
+  };
+  var state = resume ? resume.state : '';
+  if (state === 'scheduled') {
+    var line = document.createElement('div');
+    line.className = 'dash-ov-int-state';
+    line.appendChild(dashOvResetNode(resume.fire_at, 'Resumes'));
+    if (resume.attempt === 2) line.appendChild(dashOvText('span', '', ' · second attempt'));
+    box.appendChild(line);
+  } else if (state === 'watching') {
+    box.appendChild(dashOvText('div', 'dash-ov-int-state', 'Resuming…'));
+  } else if (state === 'no_activity' || state === 'gave_up' || state === 'error') {
+    box.appendChild(dashOvText('div', 'dash-ov-int-state is-bad', resume.detail || 'The resume did not go through.'));
+  }
+  if (row.can_resume === true && state !== 'watching') {
+    if (state !== 'scheduled') {
+      var opts = document.createElement('details');
+      opts.className = 'dash-ov-int-opts';
+      opts.appendChild(dashOvText('summary', '', 'Prompt and time'));
+      opts.appendChild(dashOvText('div', 'dash-ov-int-note', row.provider === 'codex'
+        ? 'Opens a new terminal and resumes the thread there with this prompt. A thread that is still ' +
+          'open in a terminal is not typed into: continue it there.'
+        : 'If the session’s terminal is still open, the prompt is typed into it and sent along with ' +
+          'anything already written in its prompt box.'));
+      var prompt = document.createElement('input');
+      prompt.type = 'text';
+      prompt.className = 'dash-ov-int-input';
+      prompt.placeholder = 'resume';
+      prompt.maxLength = 2000;
+      prompt.value = draft.prompt;
+      prompt.setAttribute('aria-label', 'What to send when resuming');
+      prompt.addEventListener('input', function(){ draft.prompt = prompt.value; });
+      opts.appendChild(prompt);
+      if (row.resets_at != null && row.state !== 'ready') {
+        var when = document.createElement('input');
+        when.type = 'datetime-local';
+        when.className = 'dash-ov-int-input';
+        when.value = draft.when;
+        when.setAttribute('aria-label', 'When to resume');
+        when.addEventListener('input', function(){ draft.when = when.value; });
+        opts.appendChild(when);
+      }
+      box.appendChild(opts);
+    }
+    var promptNow = function(){ return state === 'scheduled' ? (resume.prompt || '') : draft.prompt; };
+    box.appendChild(button(state === 'no_activity' || state === 'gave_up' || state === 'error' ? 'Resume again' : 'Resume now', 'dash-ov-act-main',
+      function(){ return post('/api/quota/resume', {prompt: promptNow()})(); }));
+    if (state === 'scheduled') {
+      box.appendChild(button('Cancel schedule', '', post('/api/quota/cancel')));
+    } else if (row.resets_at != null && row.state !== 'ready') {
+      box.appendChild(button('Schedule', '', function(){
+        var at = Date.parse(draft.when);
+        return dashOvQuotaPost('/api/quota/schedule', {session_id: row.id, prompt: draft.prompt,
+          fire_at: isFinite(at) ? Math.floor(at / 1000) : undefined});
+      }));
+    }
+  }
+  // Dismiss is always there: it is also the way out of a resume that never reports back.
+  box.appendChild(button('Dismiss', 'dash-ov-act-quiet', post('/api/quota/dismiss')));
+  box.appendChild(msg);
+  li.appendChild(box);
+}
+function dashOvInterruptedRow(row){
+  var li = document.createElement('li');
+  li.className = 'dash-ov-int';
+  li.title = String(row.cwd == null ? '' : row.cwd);
+  var top = document.createElement('div');
+  top.className = 'dash-ov-int-top';
+  if (typeof row.provider === 'string' && /^[a-z0-9-]+$/.test(row.provider)) {
+    var icon = document.createElement('img');
+    icon.className = 'dash-ov-tile-icon';
+    icon.alt = '';
+    icon.src = '/api/launcher-icon/provider--' + row.provider;
+    top.appendChild(icon);
+  }
+  top.appendChild(dashOvText('span', 'dash-ov-int-title', row.title));
+  top.appendChild(dashOvText('span', 'dash-ov-ws', row.name));
+  top.appendChild(dashOvText('span', 'dash-ov-badge dash-ov-badge-stale',
+    DASH_OV_LIMIT_LABEL[row.window] || DASH_OV_LIMIT_LABEL.other));
+  li.appendChild(top);
+  var when = document.createElement('div');
+  when.className = 'dash-ov-int-when';
+  if (row.resets_at == null) {
+    when.appendChild(dashOvText('span', 'dash-ov-reset', row.provider === 'codex' ? 'reset time unknown' : 'resets tomorrow'));
+  } else if (row.state === 'ready') {
+    when.appendChild(dashOvText('span', 'dash-ov-int-ready', 'Quota reset, ready to resume'));
+  } else {
+    when.appendChild(dashOvResetNode(row.resets_at));
+  }
+  li.appendChild(when);
+  dashOvIntActions(row, li);
+  return li;
+}
+function dashOvRenderInterrupted(rows){
+  var block = document.getElementById('dashOvInterruptedBlock');
+  if (!block) return;
+  var shown = Array.isArray(rows) ? rows.filter(function(r){ return r && typeof r === 'object'; }) : [];
+  if (!shown.length) {
+    block.hidden = true;
+    block.textContent = '';
+    _dashOvInterruptedKey = null;
+    return;
+  }
+  var key = null;
+  try { key = JSON.stringify(shown); } catch (e) { key = null; }
+  if (key !== null && key === _dashOvInterruptedKey && !block.hidden) {
+    dashOvRefreshCountdowns(block);
+    return;
+  }
+  _dashOvInterruptedKey = key;
+  block.hidden = false;
+  block.textContent = '';
+  block.appendChild(dashOvText('div', 'dash-ov-sub', 'Stopped by a quota limit'));
+  var list = document.createElement('ul');
+  list.className = 'dash-ov-ints';
+  shown.forEach(function(r){ list.appendChild(dashOvInterruptedRow(r)); });
+  block.appendChild(list);
 }
 // A failed refresh keeps what a section already drew; only a section still
 // showing its first "Loading…" (or the usage skeleton) says it could not load.
@@ -6546,7 +7037,8 @@ function dashRailMergeGroup(incoming){
       cwd: incoming.cwd, name: incoming.name, total: incoming.total,
       session_page: incoming.session_page, has_more: incoming.has_more,
       exists: incoming.exists, pinned: incoming.pinned,
-      active: incoming.active, color: incoming.color, sessions: [],
+      active: incoming.active, color: incoming.color, branch: incoming.branch || '',
+      sessions: [],
     };
     dashRailMergeSessions(fresh, incoming.sessions);
     dashRailGroupsByCwd[key] = fresh;
@@ -6559,6 +7051,7 @@ function dashRailMergeGroup(incoming){
   existing.pinned = incoming.pinned;
   existing.active = incoming.active;
   existing.color = incoming.color;
+  existing.branch = incoming.branch || '';
   // A repeat on a later group page carries session_page: 1 -- adopting it
   // would rewind a workspace already paged into further. Only move forward.
   if (incoming.session_page > existing.session_page) {
@@ -7096,6 +7589,15 @@ function dashRailHeadNode(key, label, countText, opts){
   if (opts && opts.highlight) dashRailSetHighlighted(name, label);
   else name.textContent = label;
   toggle.appendChild(name);
+  // opts.branch: the workspace's git branch, a quiet label beside the name. The repository's
+  // change status is deliberately not here; the Overview carries it.
+  if (opts && opts.branch) {
+    var branchEl = document.createElement('span');
+    branchEl.className = 'acp-rail-group-branch';
+    branchEl.textContent = opts.branch;
+    branchEl.title = 'Git branch: ' + opts.branch;
+    toggle.appendChild(branchEl);
+  }
   var chevron = document.createElement('span');
   chevron.className = 'acp-rail-group-chevron';
   chevron.setAttribute('aria-hidden', 'true');
@@ -7234,7 +7736,7 @@ function dashRailGroupNode(group){
     badge.title = 'This folder no longer exists on disk.';
   }
   var head = dashRailHeadNode('g:' + group.cwd, group.name || group.cwd, countText,
-    {title: group.cwd, badge: badge, dot: !!group.active, highlight: true, defaultCollapsed: !group.pinned, onExpand: function(){
+    {title: group.cwd, badge: badge, dot: !!group.active, highlight: true, branch: group.branch, defaultCollapsed: !group.pinned, onExpand: function(){
       // A lazily-skipped group (server-side lazy skip, never paged) has never
       // been fetched -- session_page is still its initial 0. Load its first
       // page immediately on expand instead of making the user find and click
@@ -7784,6 +8286,7 @@ function dashRailWorkspaceHead(wrap, key, bucket){
   var group = {
     cwd: bucket.key, name: bucket.name, total: bucket.sessions.length,
     sessions: bucket.sessions, exists: first.exists, pinned: !!meta.pinned, color: meta.color || '',
+    branch: meta.branch || '',
     active: bucket.sessions.some(function(s){ return s.live || dashRailAvailability(s.availability) === 'held'; }),
   };
   wrap.dataset.cwd = group.cwd;
@@ -7797,7 +8300,7 @@ function dashRailWorkspaceHead(wrap, key, bucket){
     badge.title = 'This folder no longer exists on disk.';
   }
   var head = dashRailHeadNode(key, group.name, String(group.total),
-    {title: group.cwd, badge: badge, dot: group.active, highlight: true});
+    {title: group.cwd, badge: badge, dot: group.active, highlight: true, branch: group.branch});
   dashRailGroupActions(wrap, head, group);
   wrap.appendChild(head);
 }
@@ -8246,6 +8749,13 @@ function dashRailRefresh(){
     (data.groups || []).forEach(function(g){
       if ((g.sessions || []).length) covered[g.cwd] = true;
       if (dashRailRefreshStates(g)) changed = true;
+      // The first listing after startup goes out before the git sweep has finished, so its groups
+      // carry no branch; a later one does.
+      var shown = dashRailGroupsByCwd['c:' + g.cwd];
+      if (shown && shown.branch !== (g.branch || '')) {
+        shown.branch = g.branch || '';
+        changed = true;
+      }
     });
     if (dashRailRefreshStates({sessions: data.pinned || []})) changed = true;
     if (changed) dashRenderRail();

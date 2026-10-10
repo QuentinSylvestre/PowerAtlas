@@ -106,6 +106,23 @@ def isolated_config(tmp_path, monkeypatch):
     # state and the loaded key are reset because both are process-global.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
     from power_atlas import web as web_mod
+    # The dashboard routes ask `gitstate` for a background sweep, which would discover the
+    # developer's real workspaces and run git in their real repositories. Off for every test, and
+    # the cache cleared; `TestGitState` restores the real `request` where it is the subject.
+    from power_atlas import gitstate as gitstate_mod
+    gitstate_mod.reset()
+    monkeypatch.setattr(gitstate_mod, "request", lambda workspaces: False)
+    # `quota.payload` reads the Claude Code and kiro-cli stores and the newest Codex rollouts, which on
+    # a developer machine are real conversations. Pointed at empty folders for every test; the snapshot
+    # file is already under the redirected CONFIG_DIR. `TestQuota` supplies its own.
+    from power_atlas import resume as resume_mod
+    resume_mod.reset()
+    monkeypatch.setattr(resume_mod, "start_scheduler", lambda: None)   # no background thread per test
+    from power_atlas import quota as quota_mod
+    quota_mod.reset()
+    monkeypatch.setattr(quota_mod, "_roots", lambda: (tmp_path / "no-v3", tmp_path / "no-claude"))
+    monkeypatch.setattr(quota_mod, "_codex_candidates", lambda: [])
+    monkeypatch.setattr(quota_mod, "_codex_all", lambda: [])
     monkeypatch.setattr(config_mod, "LOCAL_SECRET_PATH", tmp_path / "local-secret")
     monkeypatch.setattr(config_mod, "_local_secret_memory", "")
     monkeypatch.setattr(config_mod, "_local_secret_persist_error", "")
@@ -19917,12 +19934,36 @@ class TestDashboardListingEndpoint:
             workspace_settings={r"C:\ws\w0": {"color": "#112233"}}))
         body = client.get(self._PATH, params={"mode": "recent"}).json()
         assert body["workspaces"] == {
-            r"C:\ws\w0": {"pinned": False, "color": "#112233"},
-            r"C:\ws\w1": {"pinned": True, "color": ""},
-            r"C:\ws\w2": {"pinned": False, "color": ""},
+            r"C:\ws\w0": {"pinned": False, "color": "#112233", "branch": ""},
+            r"C:\ws\w1": {"pinned": True, "color": "", "branch": ""},
+            r"C:\ws\w2": {"pinned": False, "color": "", "branch": ""},
         }
         plain = client.get("/api/acp/sessions", params={"mode": "recent"}).json()
         assert "workspaces" not in plain
+
+    def test_the_flat_shape_carries_each_workspace_branch_from_the_git_cache(
+            self, client, multi_collector):
+        """The rail draws the branch beside a workspace header it builds from flat rows, so the
+        per-folder map names it. It is read from the sweep's cache; no git runs on the request."""
+        from power_atlas import data as data_mod, gitstate
+        gitstate._state["by_cwd"][data_mod._normalize_path(r"C:\ws\w0")] = "feat/rail"
+        body = client.get(self._PATH, params={"mode": "recent"}).json()
+        assert body["workspaces"][r"C:\ws\w0"]["branch"] == "feat/rail"
+        assert body["workspaces"][r"C:\ws\w1"]["branch"] == ""
+
+    def test_a_group_carries_its_workspace_branch_and_the_plain_route_does_not(
+            self, client, monkeypatch):
+        from power_atlas import data as data_mod, gitstate
+        cwd = r"C:\ws\gb"
+        monkeypatch.setattr(data_mod, "discover_workspaces_with_counts",
+                            lambda provider=None: [(cwd, 1, "2026-08-03T10:00:00Z", "kiro-cli-v3")])
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        monkeypatch.setattr(data_mod, "get_sessions", lambda *a, **k: [])
+        gitstate._state["by_cwd"][data_mod._normalize_path(cwd)] = "main"
+        group = client.get(self._PATH).json()["groups"][0]
+        assert group["cwd"] == cwd and group["branch"] == "main"
+        plain = client.get("/api/acp/sessions").json()["groups"][0]
+        assert "branch" not in plain
 
     @pytest.fixture
     def grouped_multi_store(self, monkeypatch):
@@ -36037,6 +36078,28 @@ class TestOverviewPlans:
         assert body["usage_state"] == "warming" and body["usage"] is None
         assert [(p["workspace"], p["file"]) for p in body["plans"]] == [("shown", "s.md")]
 
+    def test_route_carries_the_git_block_from_the_sweep_cache(self, client, workspaces):
+        from power_atlas import gitstate
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            body = client.get("/api/dashboard/overview/summary").json()
+        assert body["git"] == {"state": "warming", "repos": []}
+        repo = {"path": "C:\\r\\dirty", "name": "dirty", "branch": "main", "detached": False,
+                "unborn": False, "upstream": True, "ahead": 1, "changed": 2, "untracked": 0,
+                "no_upstream": False}
+        clean = dict(repo, name="clean", changed=0, ahead=0)
+        gitstate._state.update(ready=True, repos=[repo, clean])
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            body = client.get("/api/dashboard/overview/summary").json()
+        assert body["git"]["state"] == "ready"
+        assert [r["name"] for r in body["git"]["repos"]] == ["dirty"]
+
+    def test_route_carries_the_quota_block(self, client, workspaces):
+        with patch("power_atlas.web.load_config", return_value=self._config()):
+            body = client.get("/api/dashboard/overview/summary").json()
+        quota = body["quota"]
+        assert quota["claude"]["state"] == "no_snapshot" and "claude-statusline.json" in quota["claude"]["setup"]
+        assert quota["codex"]["state"] == "none" and quota["interrupted"] == []
+
     def test_route_without_the_hidden_tag_lists_both(self, client, workspaces):
         with patch("power_atlas.web.load_config", return_value=self._config()):
             body = client.get("/api/dashboard/overview/summary").json()
@@ -42319,3 +42382,1501 @@ class TestWorkflowChildrenLiveness:
         from power_atlas import data_kiro_v3 as dv3
         dv3._child_scan.clear()
         assert self._live() is False, "only the unparseable one is left: not live, no error"
+
+
+# ---- gitstate: repository status for the rail's branch and the Overview's "Needs attention" ----
+
+import shutil as _shutil_gs
+import subprocess as _subprocess_gs
+
+from power_atlas import gitstate as _gitstate_gs
+
+# The autouse `isolated_config` turns `gitstate.request` into a no-op for every test; the single-flight
+# test below needs the real one, captured here before any fixture runs.
+_REAL_GITSTATE_REQUEST = _gitstate_gs.request
+
+_GS_PORCELAIN = (
+    "# branch.oid 1111111111111111111111111111111111111111\n"
+    "# branch.head main\n"
+    "# branch.upstream origin/main\n"
+    "# branch.ab +2 -1\n"
+    "1 .M N... 100644 100644 100644 aaaa bbbb a.txt\n"
+    "2 R. N... 100644 100644 100644 aaaa bbbb R100 new.txt\told.txt\n"
+    "u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\n"
+    "? scratch.txt\n"
+    "? notes.txt\n"
+)
+
+
+def _gs_git(root, *args):
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    _subprocess_gs.run(["git", "-C", str(root), *args], check=True, capture_output=True, env=env)
+
+
+@pytest.mark.skipif(_shutil_gs.which("git") is None, reason="git is not installed")
+class TestGitState:
+    """`gitstate`: the parse, the sweep over real throwaway repositories, and the cache."""
+
+    @staticmethod
+    def _repo(tmp_path, name, remote="pushed"):
+        """A repository with one commit. `remote`: "pushed" (upstream set), "unpushed" (a remote
+        exists, nothing pushed), or None (no remote at all)."""
+        root = tmp_path / name
+        root.mkdir()
+        _gs_git(root, "init", "-b", "main")
+        (root / "a.txt").write_text("one\n", encoding="utf-8")
+        _gs_git(root, "add", "a.txt")
+        _gs_git(root, "commit", "-m", "first")
+        if remote:
+            bare = tmp_path / (name + ".git")
+            _gs_git(tmp_path, "init", "--bare", str(bare))
+            _gs_git(root, "remote", "add", "origin", str(bare))
+            if remote == "pushed":
+                _gs_git(root, "push", "-u", "origin", "main")
+        return root
+
+    def test_parse_status_counts_entries_and_reads_the_branch(self):
+        info = _gitstate_gs.parse_status(_GS_PORCELAIN)
+        assert info == {"branch": "main", "detached": False, "unborn": False, "upstream": True,
+                        "ahead": 2, "changed": 3, "untracked": 2}
+
+    def test_parse_status_detached_unborn_and_no_header(self):
+        detached = _gitstate_gs.parse_status(
+            "# branch.oid abcdef1234567890\n# branch.head (detached)\n")
+        assert detached["detached"] is True and detached["branch"] == "detached abcdef1"
+        unborn = _gitstate_gs.parse_status("# branch.oid (initial)\n# branch.head main\n")
+        assert unborn["unborn"] is True and unborn["branch"] == "main"
+        assert _gitstate_gs.parse_status("") is None
+        assert _gitstate_gs.parse_status("? only-untracked.txt\n") is None
+
+    def test_attention_lists_work_not_quiet_repos_and_orders_by_urgency(self):
+        def r(name, **kw):
+            base = {"name": name, "changed": 0, "ahead": 0, "untracked": 0, "no_upstream": False}
+            return {**base, **kw}
+
+        shown = _gitstate_gs.attention([
+            r("quiet"), r("only-untracked", untracked=9), r("ahead", ahead=3),
+            r("dirty", changed=1), r("very-dirty", changed=4), r("local-only", no_upstream=True)])
+        assert [x["name"] for x in shown] == ["very-dirty", "dirty", "ahead", "local-only"]
+
+    def test_sweep_reports_each_repository_once_with_its_state(self, tmp_path):
+        clean = self._repo(tmp_path, "clean")
+        work = self._repo(tmp_path, "work")
+        (work / "a.txt").write_text("two\n", encoding="utf-8")
+        _gs_git(work, "commit", "-am", "second")        # one commit ahead of origin
+        (work / "a.txt").write_text("three\n", encoding="utf-8")  # one tracked change
+        (work / "scratch.txt").write_text("x", encoding="utf-8")  # one untracked file
+        local = self._repo(tmp_path, "local", remote="unpushed")  # commits no remote has
+        scratch = self._repo(tmp_path, "scratch-repo", remote=None)  # nowhere to push to
+        sub = work / "pkg"
+        sub.mkdir()
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+
+        out = _gitstate_gs.sweep([str(clean), str(work), str(sub), str(local), str(scratch),
+                                  str(not_a_repo), r"\\host\share\proj", "relative\\dir"])
+        by_name = {r["name"]: r for r in out["repos"]}
+        assert sorted(by_name) == ["clean", "local", "scratch-repo", "work"]
+        assert by_name["clean"]["changed"] == 0 and by_name["clean"]["ahead"] == 0
+        assert by_name["clean"]["no_upstream"] is False
+        assert (by_name["work"]["changed"], by_name["work"]["ahead"],
+                by_name["work"]["untracked"]) == (1, 1, 1)
+        assert by_name["local"]["upstream"] is False and by_name["local"]["no_upstream"] is True
+        assert by_name["scratch-repo"]["no_upstream"] is False
+        # Two folders in one repository share one probe and both map to its branch.
+        from power_atlas import data
+        assert out["by_cwd"][data._normalize_path(str(sub))] == "main"
+        assert out["by_cwd"][data._normalize_path(str(work))] == "main"
+        assert data._normalize_path(str(not_a_repo)) not in out["by_cwd"]
+        assert [r["name"] for r in _gitstate_gs.attention(out["repos"])] == ["work", "local"]
+
+    def test_status_runs_with_the_repositorys_own_fsmonitor_program_switched_off(self, monkeypatch):
+        """A repository can name a program in `core.fsmonitor` that `git status` then runs; a sweep over
+        every workspace must not run code a cloned repository chose."""
+        calls = []
+        out = "# branch.oid abc\n# branch.head main\n"
+
+        def fake(cwd, *args):
+            calls.append(args)
+            return out if "status" in args else (str(cwd) if args[:1] == ("rev-parse",) else "")
+
+        monkeypatch.setattr(_gitstate_gs.overview, "_git_output", fake)
+        _gitstate_gs.sweep(["C:\\w"])
+        status = [a for a in calls if "status" in a]
+        assert status and all(a[:2] == ("-c", "core.fsmonitor=false") for a in status), status
+
+    def test_a_repository_that_could_not_be_probed_keeps_its_last_result(self, tmp_path, monkeypatch):
+        dirty = self._repo(tmp_path, "dirty")
+        (dirty / "a.txt").write_text("changed\n", encoding="utf-8")
+        calm = self._repo(tmp_path, "calm")
+        first = _gitstate_gs.sweep([str(dirty), str(calm)])
+        assert {r["name"] for r in first["repos"]} == {"dirty", "calm"}
+        # git now fails for one of them (a timeout, a lock): its entry must not vanish.
+        real = _gitstate_gs._probe
+        monkeypatch.setattr(_gitstate_gs, "_probe", lambda root: None if root.endswith("dirty") else real(root))
+        second = _gitstate_gs.sweep([str(dirty), str(calm)], previous=first)
+        by_name = {r["name"]: r for r in second["repos"]}
+        assert by_name["dirty"]["changed"] == 1, "the dirty repository still reads dirty"
+        assert [r["name"] for r in _gitstate_gs.attention(second["repos"])] == ["dirty"]
+        # With nothing to fall back on it is simply absent, as before.
+        assert {r["name"] for r in _gitstate_gs.sweep([str(dirty), str(calm)])["repos"]} == {"calm"}
+
+    def test_a_sweep_that_runs_out_of_time_keeps_the_rest_from_the_last_one(self, tmp_path):
+        work = self._repo(tmp_path, "work")
+        (work / "a.txt").write_text("changed\n", encoding="utf-8")
+        first = _gitstate_gs.sweep([str(work)])
+        late = _gitstate_gs.sweep([str(work)], deadline_s=-1.0, previous=first)
+        assert [r["name"] for r in late["repos"]] == ["work"] and late["repos"][0]["changed"] == 1
+
+    def test_without_git_the_overview_says_so_instead_of_reading_all_clear(self, monkeypatch):
+        monkeypatch.setattr(_gitstate_gs.shutil, "which", lambda name: None)
+        _gitstate_gs._run(lambda: [("C:\\w", "w")])
+        payload = _gitstate_gs.overview_payload(lambda: [])
+        assert payload == {"state": "unavailable", "repos": []}
+
+    def test_run_fills_the_cache_and_the_readers_use_it(self, tmp_path):
+        work = self._repo(tmp_path, "work")
+        (work / "a.txt").write_text("changed\n", encoding="utf-8")
+        assert _gitstate_gs.overview_payload(lambda: []) == {"state": "warming", "repos": []}
+        assert _gitstate_gs.branch_for(str(work)) == ""
+        _gitstate_gs._run(lambda: [(str(work), "work")])
+        assert _gitstate_gs.branch_for(str(work)) == "main"
+        payload = _gitstate_gs.overview_payload(lambda: [])
+        assert payload["state"] == "ready" and [r["name"] for r in payload["repos"]] == ["work"]
+        # The payload is a copy: reshaping it does not touch the cache.
+        payload["repos"][0]["name"] = "mutated"
+        assert _gitstate_gs.overview_payload(lambda: [])["repos"][0]["name"] == "work"
+
+    def test_a_failing_sweep_keeps_the_last_result_and_retries_at_the_normal_pace(self, tmp_path):
+        work = self._repo(tmp_path, "work")
+        _gitstate_gs._run(lambda: [(str(work), "work")])
+
+        def boom():
+            raise RuntimeError("discovery failed")
+
+        _gitstate_gs._run(boom)
+        assert _gitstate_gs.branch_for(str(work)) == "main"
+        assert _gitstate_gs._state["running"] is False
+        assert time.time() - _gitstate_gs._state["at"] < 5, "a failure still moves the clock on"
+
+    def test_request_is_single_flight_and_waits_for_the_cache_to_age(self, monkeypatch):
+        started = []
+
+        class _FakeThread:
+            def __init__(self, target=None, args=(), name="", daemon=False):
+                started.append(name)
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(_gitstate_gs.threading, "Thread", _FakeThread)
+        assert _REAL_GITSTATE_REQUEST(lambda: []) is True
+        assert _REAL_GITSTATE_REQUEST(lambda: []) is False, "one sweep at a time"
+        assert started == ["gitstate-sweep"]
+        _gitstate_gs._state.update(running=False, at=time.time())
+        assert _REAL_GITSTATE_REQUEST(lambda: []) is False, "a fresh cache is not replaced"
+        _gitstate_gs._state.update(at=time.time() - _gitstate_gs.REFRESH_SECONDS - 1)
+        assert _REAL_GITSTATE_REQUEST(lambda: []) is True
+
+
+# ---- quota: Claude/Codex windows and the sessions a limit stopped -------------------------------
+
+import uuid as _uuid_q
+
+from power_atlas import quota as _quota_q
+
+_Q_NOW = 1_800_000_000.0   # a fixed "now", so no test depends on the clock
+
+
+def _q_iso(epoch):
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _q_line(**kw):
+    return json.dumps(kw, separators=(",", ":"))
+
+
+def _q_user(text="please continue", at=_Q_NOW - 100, **extra):
+    return _q_line(type="user", timestamp=_q_iso(at), message={"role": "user", "content": text}, **extra)
+
+
+def _q_assistant(text="Done.", at=_Q_NOW - 90, **extra):
+    return _q_line(type="assistant", timestamp=_q_iso(at),
+                   message={"role": "assistant", "content": [{"type": "text", "text": text}]}, **extra)
+
+
+def _q_hit(resets_at=_Q_NOW + 3600, window="five_hour", at=_Q_NOW - 60, cwd="C:\\dev\\proj", **extra):
+    """The line Claude Code writes when a request is rejected for quota (shape measured 2026-10-09)."""
+    return _q_line(
+        type="assistant", timestamp=_q_iso(at), cwd=cwd, error="rate_limit", isApiErrorMessage=True,
+        apiErrorStatus=429,
+        quotaLimits={"status": "rejected", "resetsAt": resets_at, "rateLimitType": window,
+                     "overageStatus": "rejected", "isUsingOverage": False},
+        message={"role": "assistant", "model": "<synthetic>",
+                 "content": [{"type": "text", "text": "You've hit your session limit"}]}, **extra)
+
+
+_CX_LIMIT_TEXT = ("You\u2019ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit "
+                  "https://chatgpt.com/settings/usage to purchase more credits or try again at {when}.")
+
+
+def _cx_meta(sid, cwd="C:\\dev\\cproj", at=_Q_NOW - 7200):
+    """First line of a Codex rollout (the fields `data_codex.read_meta` returns)."""
+    return _q_line(timestamp=_q_iso(at), type="session_meta",
+                   payload={"id": sid, "cwd": cwd, "originator": "codex-tui", "source": "cli"})
+
+
+def _cx_event(at, kind, **payload):
+    return _q_line(timestamp=_q_iso(at), type="event_msg", payload={"type": kind, **payload})
+
+
+def _cx_reading(at, primary=None, secondary=None):
+    """A `token_count` event; both windows null is the shape measured right before a stop (2026-10-09)."""
+    return _cx_event(at, "token_count", rate_limits={"primary": primary, "secondary": secondary, "plan_type": "plus"})
+
+
+def _cx_window(used, resets_at, minutes=300):
+    return {"used_percent": used, "window_minutes": minutes, "resets_at": resets_at}
+
+
+def _cx_stop(at, when="9:38 PM"):
+    """The `task_complete` a refused turn ends with (shape measured 2026-10-09)."""
+    return _cx_event(at, "task_complete", last_agent_message=None,
+                     error={"message": _CX_LIMIT_TEXT.format(when=when), "codex_error_info": "usage_limit_exceeded"})
+
+
+def _cx_write(tmp_path, sid, lines, age=0.0, name=None):
+    path = tmp_path / (name or f"rollout-2026-10-09T09-00-00-{sid}.jsonl")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.utime(path, (_Q_NOW - age, _Q_NOW - age))
+    return path
+
+
+class TestQuota:
+    """`quota.payload`: hit detection, the Claude snapshot, Codex rollouts and kiro-cli limit errors."""
+
+    @pytest.fixture(autouse=True)
+    def store(self, tmp_path, monkeypatch):
+        self.claude = tmp_path / "claude"
+        self.v3 = tmp_path / "v3"
+        (self.claude / "proj").mkdir(parents=True)
+        self.v3.mkdir()
+        self.tmp = tmp_path
+        monkeypatch.setattr(_quota_q, "_roots", lambda: (self.v3, self.claude))
+        _quota_q.reset()
+
+    def _session(self, lines, age=0.0, name=None):
+        path = self.claude / "proj" / ((name or str(_uuid_q.uuid4())) + ".jsonl")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.utime(path, (_Q_NOW - age, _Q_NOW - age))
+        return path
+
+    def _interrupted(self, now=_Q_NOW):
+        return _quota_q.payload(now)["interrupted"]
+
+    # -- Claude Code: hit lines --
+
+    def test_a_transcript_ending_in_a_hit_is_interrupted_until_the_reset_then_ready(self):
+        path = self._session([_q_user(), _q_hit(resets_at=_Q_NOW + 3600)])
+        [row] = self._interrupted()
+        assert (row["id"], row["provider"], row["window"], row["state"]) == (
+            path.stem, "claude-code", "five_hour", "limited")
+        assert row["resets_at"] == _Q_NOW + 3600 and row["cwd"] == "C:\\dev\\proj" and row["name"] == "proj"
+        [later] = self._interrupted(now=_Q_NOW + 3601)
+        assert later["state"] == "ready"
+
+    def test_bookkeeping_lines_after_a_hit_do_not_continue_the_session(self):
+        self._session([
+            _q_user(), _q_hit(),
+            _q_line(type="system", subtype="turn_duration"),
+            _q_line(type="queue-operation", operation="enqueue"),
+            # A /usage echo is a user line, but not a conversation line.
+            _q_user("<local-command-stdout>Usage ...</local-command-stdout>"),
+            _q_user("meta", isMeta=True),
+            # A sub-agent's line inside the parent file does not continue the parent either.
+            _q_assistant("sub-agent finished", isSidechain=True),
+        ])
+        assert len(self._interrupted()) == 1
+
+    def test_json_with_spaces_after_the_colons_is_read_the_same(self):
+        """Claude Code writes compact JSON today. The prefilter must not depend on it: a transcript
+        written with `json.dumps`' default spacing is found, and one that continues is cleared."""
+        def spaced(line):
+            return json.dumps(json.loads(line))
+
+        self._session([spaced(_q_user()), spaced(_q_hit())])
+        assert len(self._interrupted()) == 1
+        self._session([spaced(_q_user()), spaced(_q_hit()), spaced(_q_user("go on")), spaced(_q_assistant())])
+        assert len(self._interrupted()) == 1, "the continued one stays cleared"
+
+    def test_a_real_message_after_the_hit_clears_it(self):
+        self._session([_q_user(), _q_hit(), _q_user("go on"), _q_assistant("ok")])
+        assert self._interrupted() == []
+
+    def test_only_a_quota_hit_counts(self):
+        # A 400 safeguard refusal, a 429 without quotaLimits, and a normal reply are not interrupted.
+        refusal = _q_line(type="assistant", timestamp=_q_iso(_Q_NOW), isApiErrorMessage=True,
+                          apiErrorStatus=400, error="invalid_request",
+                          message={"role": "assistant", "content": [{"type": "text", "text": "refused"}]})
+        bare_429 = _q_line(type="assistant", timestamp=_q_iso(_Q_NOW), isApiErrorMessage=True,
+                           apiErrorStatus=429, error="rate_limit",
+                           message={"role": "assistant", "content": [{"type": "text", "text": "slow down"}]})
+        self._session([_q_user(), refusal])
+        self._session([_q_user(), bare_429])
+        self._session([_q_user(), _q_assistant()])
+        assert self._interrupted() == []
+        # And at the detector itself, so an expiry rule cannot hide a detector that accepts too much.
+        for line in (refusal, bare_429):
+            assert _quota_q._as_hit(json.loads(line), "s") is None
+        assert _quota_q._as_hit(json.loads(_q_hit()), "s")["window"] == "five_hour"
+
+    def test_a_hit_leaves_the_list_two_days_after_its_reset(self):
+        self._session([_q_user(), _q_hit(resets_at=_Q_NOW + 3600)])
+        assert len(self._interrupted(now=_Q_NOW + 3600 + 47 * 3600)) == 1
+        assert self._interrupted(now=_Q_NOW + 3600 + 49 * 3600) == []
+
+    def test_old_transcripts_and_non_session_files_are_not_read(self, monkeypatch):
+        self._session([_q_user(), _q_hit()], age=_quota_q.HIT_LOOKBACK_SECONDS + 60)
+        self._session([_q_user(), _q_hit()], name="notes")
+        sub = self.claude / "proj" / "subagents"
+        sub.mkdir()
+        (sub / (str(_uuid_q.uuid4()) + ".jsonl")).write_text(_q_hit() + "\n", encoding="utf-8")
+        assert self._interrupted() == []
+
+    def test_a_transcript_is_reread_only_when_it_changes(self, monkeypatch):
+        path = self._session([_q_user(), _q_hit()])
+        reads = []
+        real = _quota_q._read_tail
+        monkeypatch.setattr(_quota_q, "_read_tail", lambda p, size, n: reads.append(p) or real(p, size, n))
+        assert len(self._interrupted()) == 1
+        first = len(reads)
+        assert first >= 1
+        assert len(self._interrupted()) == 1
+        assert len(reads) == first, "an unchanged file must not be read again"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(_q_user("back") + "\n" + _q_assistant("hello") + "\n")
+        os.utime(path, (_Q_NOW + 5, _Q_NOW + 5))
+        assert self._interrupted(now=_Q_NOW + 10) == []
+        assert len(reads) > first
+
+    def test_a_huge_last_line_falls_back_to_a_larger_read(self):
+        big = _q_assistant("x" * (_quota_q._TAIL_BYTES + 10))
+        self._session([_q_user(), _q_hit(), big.replace('"type":"assistant"', '"type":"system"')])
+        assert len(self._interrupted()) == 1
+
+    # -- Claude Code: the statusline snapshot --
+
+    def _snapshot(self, five=None, seven=None, captured=_Q_NOW - 60, raw=None):
+        body = raw if raw is not None else json.dumps({
+            "captured_at": captured,
+            "rate_limits": {k: v for k, v in (("five_hour", five), ("seven_day", seven)) if v is not None}})
+        (self.tmp / _quota_q.SNAPSHOT_NAME).write_text(body, encoding="utf-8")
+
+    def test_without_a_snapshot_the_claude_meters_are_unknown_and_the_snippet_is_offered(self):
+        claude = _quota_q.payload(_Q_NOW)["claude"]
+        assert claude["state"] == "no_snapshot"
+        assert claude["windows"] == {"five_hour": None, "seven_day": None}
+        assert "claude-statusline.json" in claude["setup"] and "case \"$input\"" in claude["setup"]
+        assert "jq" not in claude["setup"], "the snippet must not add a process to every refresh"
+
+    def test_a_snapshot_gives_percent_reset_and_how_far_through_the_window_it_is(self):
+        self._snapshot(five={"used_percentage": 28, "resets_at": _Q_NOW + 3600},
+                       seven={"used_percentage": 37.5, "resets_at": _Q_NOW + 86400})
+        claude = _quota_q.payload(_Q_NOW)["claude"]
+        assert claude["state"] == "ready" and "setup" not in claude
+        five = claude["windows"]["five_hour"]
+        assert (five["state"], five["used_percent"], five["resets_at"], five["source"]) == (
+            "live", 28.0, _Q_NOW + 3600, "statusline")
+        assert five["elapsed"] == pytest.approx(0.8)
+        assert claude["windows"]["seven_day"]["used_percent"] == 37.5
+
+    def test_the_raw_statusline_payload_is_read_and_its_age_is_the_files(self):
+        """What the snippet writes is the payload as received: `rate_limits` at the top, among other
+        fields, and no `captured_at`. The reading time is then the file's modification time."""
+        payload = {"model": {"display_name": "Sonnet"}, "workspace": {"current_dir": "C:\\x"},
+                   "rate_limits": {"five_hour": {"used_percentage": 28, "resets_at": _Q_NOW + 3600},
+                                   "seven_day": {"used_percentage": 37, "resets_at": _Q_NOW + 86400}}}
+        path = self.tmp / _quota_q.SNAPSHOT_NAME
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        os.utime(path, (_Q_NOW - 60, _Q_NOW - 60))
+        five = _quota_q.payload(_Q_NOW)["claude"]["windows"]["five_hour"]
+        assert (five["state"], five["used_percent"], five["captured_at"]) == ("live", 28.0, _Q_NOW - 60)
+        os.utime(path, (_Q_NOW - 7200, _Q_NOW - 7200))
+        assert _quota_q.payload(_Q_NOW)["claude"]["windows"]["five_hour"]["state"] == "stale"
+
+    @pytest.mark.skipif(_shutil_gs.which("bash") is None, reason="bash is not installed")
+    def test_the_snippet_keeps_the_last_reading_unless_the_payload_carries_limits(self):
+        """The pasted lines, run by a real bash exactly as the statusline script would run them."""
+        home = self.tmp / "LocalAppData"
+        (home / "power-atlas").mkdir(parents=True)
+        target = home / "power-atlas" / _quota_q.SNAPSHOT_NAME
+
+        def run(payload, env_home=home):
+            _subprocess_gs.run(
+                [_shutil_gs.which("bash"), "-c", 'input="$1"\n' + _quota_q.STATUSLINE_SNIPPET, "bash", payload],
+                env={**os.environ, "LOCALAPPDATA": str(env_home)}, check=True, capture_output=True)
+
+        good = ('{"model":{"display_name":"Opus"},"note":"a $HOME `x` \\"q\\" \'s\'",'
+                '"rate_limits":{"five_hour":{"used_percentage":28,"resets_at":1800003600}}}')
+        run(good)
+        assert target.read_text(encoding="utf-8") == good, "the payload is written exactly, whatever is in it"
+        assert [p.name for p in (home / "power-atlas").iterdir()] == [_quota_q.SNAPSHOT_NAME], "no stray files"
+        for skipped in ('{"model":{"display_name":"Opus"}}', '{"rate_limits":null}', '{"rate_limits": null}',
+                        '{"rate_limits":"x"}', ""):
+            run(skipped)
+            assert target.read_text(encoding="utf-8") == good, skipped
+        spaced = '{"rate_limits": {"five_hour": {"used_percentage": 9}}}'
+        run(spaced)
+        assert target.read_text(encoding="utf-8") == spaced
+        # PowerAtlas has not created its folder, or LOCALAPPDATA is unset: nothing is made, nothing fails.
+        run(good, env_home=self.tmp / "elsewhere")
+        assert not (self.tmp / "elsewhere").exists()
+        _subprocess_gs.run([_shutil_gs.which("bash"), "-c", 'unset LOCALAPPDATA\ninput="$1"\n' + _quota_q.STATUSLINE_SNIPPET,
+                            "bash", good], check=True, capture_output=True)
+
+    def test_a_reset_time_in_milliseconds_or_iso_is_read(self):
+        self._snapshot(five={"used_percentage": 5, "resets_at": (_Q_NOW + 3600) * 1000},
+                       seven={"used_percentage": 6, "resets_at": _q_iso(_Q_NOW + 7200)})
+        w = _quota_q.payload(_Q_NOW)["claude"]["windows"]
+        assert w["five_hour"]["resets_at"] == _Q_NOW + 3600
+        assert w["seven_day"]["resets_at"] == _Q_NOW + 7200
+
+    def test_an_old_snapshot_is_stale_and_a_passed_reset_reads_reset_not_a_percentage(self):
+        self._snapshot(five={"used_percentage": 40, "resets_at": _Q_NOW + 3600},
+                       seven={"used_percentage": 90, "resets_at": _Q_NOW - 5}, captured=_Q_NOW - 3600)
+        w = _quota_q.payload(_Q_NOW)["claude"]["windows"]
+        assert w["five_hour"]["state"] == "stale" and w["five_hour"]["used_percent"] == 40.0
+        assert w["seven_day"]["state"] == "reset" and w["seven_day"]["used_percent"] is None
+
+    def test_a_missing_window_stays_unknown_and_a_percentage_is_clamped(self):
+        self._snapshot(five={"used_percentage": 140, "resets_at": _Q_NOW + 60})
+        w = _quota_q.payload(_Q_NOW)["claude"]["windows"]
+        assert w["five_hour"]["used_percent"] == 100.0
+        assert w["seven_day"] is None
+
+    def test_a_half_written_snapshot_keeps_the_last_good_reading(self):
+        self._snapshot(five={"used_percentage": 11, "resets_at": _Q_NOW + 60})
+        assert _quota_q.payload(_Q_NOW)["claude"]["windows"]["five_hour"]["used_percent"] == 11.0
+        self._snapshot(raw='{"captured_at": 1800000000, "rate_li')
+        assert _quota_q.payload(_Q_NOW)["claude"]["windows"]["five_hour"]["used_percent"] == 11.0
+
+    def test_an_open_hit_marks_the_window_full_but_only_when_it_is_newer_than_the_snapshot(self):
+        self._session([_q_user(), _q_hit(resets_at=_Q_NOW + 3000, at=_Q_NOW - 30)])
+        self._snapshot(five={"used_percentage": 60, "resets_at": _Q_NOW + 3000}, captured=_Q_NOW - 600)
+        five = _quota_q.payload(_Q_NOW)["claude"]["windows"]["five_hour"]
+        assert (five["state"], five["used_percent"], five["source"]) == ("limited", 100.0, "hit")
+        # A snapshot taken after the hit wins: the window has room again.
+        self._snapshot(five={"used_percentage": 10, "resets_at": _Q_NOW + 9000}, captured=_Q_NOW - 5)
+        five = _quota_q.payload(_Q_NOW)["claude"]["windows"]["five_hour"]
+        assert (five["state"], five["used_percent"]) == ("live", 10.0)
+
+    def test_a_hit_alone_gives_a_full_meter_with_no_snapshot(self):
+        self._session([_q_user(), _q_hit(resets_at=_Q_NOW + 3000, window="seven_day")])
+        w = _quota_q.payload(_Q_NOW)["claude"]["windows"]
+        assert w["five_hour"] is None
+        assert (w["seven_day"]["state"], w["seven_day"]["used_percent"]) == ("limited", 100.0)
+
+    # -- review fixes: folders, hostile numbers and files, ids, repeated reads --
+
+    def test_the_row_names_the_folder_the_session_started_in(self):
+        sid = str(_uuid_q.uuid4())
+        path = self.claude / "proj" / (sid + ".jsonl")
+        path.write_text("\n".join([_q_user(cwd="C:\\dev\\proj"), _q_hit(cwd="C:\\dev\\proj\\src")]) + "\n",
+                        encoding="utf-8")
+        os.utime(path, (_Q_NOW, _Q_NOW))
+        [row] = self._interrupted()
+        assert row["cwd"] == "C:\\dev\\proj" and row["name"] == "proj"
+
+    def test_a_hit_whose_reset_time_is_not_a_finite_number_is_not_a_hit(self):
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            line = re.sub(r'"resetsAt":[^,}]+', '"resetsAt":' + bad, _q_hit())
+            assert '"resetsAt":' + bad in line
+            self._session([_q_user(), line])
+        assert self._interrupted() == []
+
+    def test_non_finite_snapshot_numbers_read_as_unknown_not_as_a_full_bar(self):
+        path = self.tmp / _quota_q.SNAPSHOT_NAME
+        path.write_text('{"rate_limits":{"five_hour":{"used_percentage":NaN,"resets_at":Infinity},'
+                        '"seven_day":{"used_percentage":Infinity,"resets_at":NaN}}}', encoding="utf-8")
+        for win in _quota_q.payload(_Q_NOW)["claude"]["windows"].values():
+            assert win["used_percent"] is None and win["resets_at"] is None and win["elapsed"] is None
+        json.dumps(_quota_q.payload(_Q_NOW), allow_nan=False)
+
+    def test_a_snapshot_that_is_huge_or_absurdly_nested_is_ignored_without_failing(self):
+        path = self.tmp / _quota_q.SNAPSHOT_NAME
+        path.write_text('{"x":"' + "a" * (_quota_q.MAX_SNAPSHOT_BYTES + 10) + '"}', encoding="utf-8")
+        assert _quota_q.payload(_Q_NOW)["claude"]["state"] == "no_snapshot"
+        path.write_text("[" * 200_000, encoding="utf-8")
+        assert _quota_q.payload(_Q_NOW)["claude"]["state"] == "no_snapshot"
+
+    def test_a_session_id_must_be_a_whole_uuid_before_it_reaches_the_folder_search(self):
+        sid, path = str(_uuid_q.uuid4()), None
+        path = self._session([_q_user(), _q_hit()], name=sid)
+        assert _quota_q.claude_session_path(sid) == path
+        for bad in ("../" + sid, "*", sid.upper(), sid + "/x", "x/" + sid, "", None, 5):
+            assert _quota_q.claude_session_path(bad) is None, bad
+
+    def test_unchanged_kiro_logs_and_codex_rollouts_are_not_read_again(self, monkeypatch):
+        self._kiro("sess_m", [self._limit(_Q_NOW - 40)])
+        rollout = self._rollout("rollout-memo.jsonl", {
+            "primary": {"used_percent": 1.0, "window_minutes": 300, "resets_at": _Q_NOW + 60}})
+        monkeypatch.setattr(_quota_q, "_codex_candidates", lambda: [rollout])
+        kiro_reads, codex_reads = [], []
+        real_kiro, real_codex = _quota_q._read_tail, _quota_q.overview._read_tail
+        monkeypatch.setattr(_quota_q, "_read_tail", lambda p, s, n: kiro_reads.append(p) or real_kiro(p, s, n))
+        monkeypatch.setattr(_quota_q.overview, "_read_tail",
+                            lambda *a, **k: codex_reads.append(a[0]) or real_codex(*a, **k))
+        for _ in range(3):
+            _quota_q.payload(_Q_NOW)
+        kiro_logs = [p for p in kiro_reads if p.name == "messages.jsonl"]
+        assert len(kiro_logs) == 1, "the kiro log is read once, then remembered"
+        assert len([p for p in codex_reads if p == rollout]) == 1, "so is the rollout"
+        with rollout.open("a", encoding="utf-8") as fh:
+            fh.write(_q_line(type="event_msg", timestamp=_q_iso(_Q_NOW), payload={
+                "type": "token_count", "rate_limits": {"primary": {"used_percent": 2.0, "window_minutes": 300,
+                                                                   "resets_at": _Q_NOW + 60}}}) + "\n")
+        os.utime(rollout, (_Q_NOW + 5, _Q_NOW + 5))
+        assert _quota_q.payload(_Q_NOW)["codex"]["windows"]["five_hour"]["used_percent"] == 2.0
+
+    # -- Codex --
+
+    def _rollout(self, name, limits, at=_Q_NOW - 120, extra=()):
+        path = self.tmp / name
+        rows = [_q_line(type="event_msg", timestamp=_q_iso(at - 1), payload={"type": "agent_message"})]
+        rows.append(_q_line(type="event_msg", timestamp=_q_iso(at),
+                            payload={"type": "token_count", "rate_limits": limits}))
+        rows.extend(extra)
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        return path
+
+    def test_codex_windows_come_from_the_newest_rollout_and_map_by_length(self, monkeypatch):
+        limits = {"primary": {"used_percent": 19.0, "window_minutes": 300, "resets_at": _Q_NOW + 1800},
+                  "secondary": {"used_percent": 22.0, "window_minutes": 10080, "resets_at": _Q_NOW + 86400},
+                  "plan_type": "plus"}
+        path = self._rollout("rollout-a.jsonl", limits)
+        monkeypatch.setattr(_quota_q, "_codex_candidates", lambda: [path])
+        codex = _quota_q.payload(_Q_NOW)["codex"]
+        assert codex["state"] == "ready" and codex["plan"] == "plus"
+        assert codex["windows"]["five_hour"]["used_percent"] == 19.0
+        assert codex["windows"]["seven_day"]["used_percent"] == 22.0
+        assert codex["windows"]["five_hour"]["source"] == "rollout"
+
+    def test_codex_skips_a_rollout_with_no_limits_and_reads_none_when_nothing_has_any(self, monkeypatch):
+        bare = self.tmp / "rollout-bare.jsonl"
+        bare.write_text(_q_line(type="event_msg", payload={"type": "agent_message"}) + "\n", encoding="utf-8")
+        good = self._rollout("rollout-good.jsonl", {
+            "primary": {"used_percent": 1.0, "window_minutes": 300, "resets_at": _Q_NOW + 60}})
+        monkeypatch.setattr(_quota_q, "_codex_candidates", lambda: [bare, good])
+        assert _quota_q.payload(_Q_NOW)["codex"]["windows"]["five_hour"]["used_percent"] == 1.0
+        monkeypatch.setattr(_quota_q, "_codex_candidates", lambda: [bare])
+        none = _quota_q.payload(_Q_NOW)["codex"]
+        assert none["state"] == "none" and none["windows"]["five_hour"] is None
+
+    def test_a_trailing_codex_event_with_null_windows_does_not_hide_the_last_real_reading(self, monkeypatch):
+        """Measured 2026-10-09: the last `token_count` of a live rollout can carry `rate_limits` with
+        `primary` and `secondary` both null. The reading before it is still the latest real one."""
+        real = {"primary": {"used_percent": 33.0, "window_minutes": 300, "resets_at": _Q_NOW + 600},
+                "secondary": {"used_percent": 44.0, "window_minutes": 10080, "resets_at": _Q_NOW + 86400},
+                "plan_type": "plus"}
+        trailing = _q_line(type="event_msg", timestamp=_q_iso(_Q_NOW - 5), payload={
+            "type": "token_count", "rate_limits": {"primary": None, "secondary": None, "plan_type": "plus"}})
+        path = self._rollout("rollout-null-tail.jsonl", real, extra=[trailing])
+        monkeypatch.setattr(_quota_q, "_codex_candidates", lambda: [path])
+        codex = _quota_q.payload(_Q_NOW)["codex"]
+        assert codex["windows"]["five_hour"]["used_percent"] == 33.0
+        assert codex["windows"]["seven_day"]["used_percent"] == 44.0
+
+    def test_a_codex_window_past_its_reset_reads_reset(self, monkeypatch):
+        path = self._rollout("rollout-old.jsonl", {
+            "primary": {"used_percent": 90.0, "window_minutes": 300, "resets_at": _Q_NOW - 10}})
+        monkeypatch.setattr(_quota_q, "_codex_candidates", lambda: [path])
+        five = _quota_q.payload(_Q_NOW)["codex"]["windows"]["five_hour"]
+        assert five["state"] == "reset" and five["used_percent"] is None
+
+    # -- Codex: threads a usage limit stopped --
+
+    def _cx(self, monkeypatch, *rollouts):
+        monkeypatch.setattr(_quota_q, "_codex_all", lambda: list(rollouts))
+        monkeypatch.setattr(_quota_q.data_codex, "thread_title", lambda sid: "codex work")
+
+    def _cx_stopped(self, monkeypatch, tail=(), reading=True, when="9:38 PM", age=0.0, hit_at=_Q_NOW - 60,
+                    resets_at=_Q_NOW + 3600, minutes=300):
+        sid = str(_uuid_q.uuid4())
+        lines = [_cx_meta(sid), _cx_event(hit_at - 30, "task_started")]
+        if reading:
+            lines.append(_cx_reading(hit_at - 3, primary=_cx_window(100.0, resets_at, minutes)))
+        # Measured: the event right before the stop reports both windows as null.
+        lines += [_cx_reading(hit_at - 1), _cx_stop(hit_at, when), *tail]
+        path = _cx_write(self.tmp, sid, lines, age=age)
+        self._cx(monkeypatch, path)
+        return sid, path
+
+    def test_a_codex_turn_a_limit_refused_is_interrupted_until_the_reset_then_ready(self, monkeypatch):
+        sid, _ = self._cx_stopped(monkeypatch)
+        [row] = self._interrupted()
+        assert (row["id"], row["provider"], row["window"], row["state"], row["title"]) == (
+            sid, "codex", "five_hour", "limited", "codex work")
+        assert row["resets_at"] == _Q_NOW + 3600 and row["hit_at"] == _Q_NOW - 60
+        assert row["cwd"] == "C:\\dev\\cproj" and row["name"] == "cproj"
+        [later] = self._interrupted(now=_Q_NOW + 3601)
+        assert later["state"] == "ready"
+
+    def test_the_window_is_the_full_one_and_a_weekly_one_is_named_by_its_length(self, monkeypatch):
+        self._cx_stopped(monkeypatch, minutes=10080, resets_at=_Q_NOW + 86400)
+        [row] = self._interrupted()
+        assert row["window"] == "seven_day" and row["resets_at"] == _Q_NOW + 86400
+
+    def test_a_reading_that_is_not_full_or_already_reset_is_not_taken_for_the_reset(self, monkeypatch):
+        """The stop says a limit was hit; a 40% reading, or a full one whose reset had passed, is no answer."""
+        for window in (_cx_window(40.0, _Q_NOW + 7000), _cx_window(100.0, _Q_NOW - 500)):
+            sid = str(_uuid_q.uuid4())
+            path = _cx_write(self.tmp, sid, [_cx_meta(sid), _cx_reading(_Q_NOW - 70, primary=window),
+                                             _cx_stop(_Q_NOW - 60, "11:11 PM")])
+            self._cx(monkeypatch, path)
+            [row] = self._interrupted()
+            assert row["window"] == "other" and row["resets_at"] != window["resets_at"]
+            _quota_q.reset()
+
+    def test_without_a_reading_the_reset_comes_from_the_clock_time_in_the_message(self, monkeypatch):
+        target = dt.datetime.fromtimestamp(_Q_NOW + 3600).replace(second=0, microsecond=0)
+        clock = target.strftime("%I:%M %p").lstrip("0")
+        self._cx_stopped(monkeypatch, reading=False, when=clock)
+        [row] = self._interrupted()
+        assert row["resets_at"] == target.timestamp() and row["window"] == "other"
+
+    def test_a_clock_time_already_past_today_means_tomorrow(self, monkeypatch):
+        earlier = dt.datetime.fromtimestamp(_Q_NOW - 3600).replace(second=0, microsecond=0)
+        self._cx_stopped(monkeypatch, reading=False, when=earlier.strftime("%I:%M %p").lstrip("0"))
+        [row] = self._interrupted()
+        assert row["resets_at"] == (earlier + dt.timedelta(days=1)).timestamp()
+
+    def test_a_stop_with_no_reset_anywhere_is_listed_without_one_and_cannot_be_resumed(self, monkeypatch):
+        self._cx_stopped(monkeypatch, reading=False, when="soon")
+        [row] = self._interrupted()
+        assert row["resets_at"] is None and row["state"] == "limited"
+        [shown] = _resume_r.decorate([row], _Q_NOW)
+        assert shown["can_resume"] is False
+        assert self._interrupted(now=_Q_NOW + 49 * 3600) == [], "and it is not kept for ever"
+
+    def test_a_turn_started_after_the_stop_means_the_thread_carried_on(self, monkeypatch):
+        self._cx_stopped(monkeypatch, tail=[_cx_event(_Q_NOW + 5, "task_started")])
+        assert self._interrupted(now=_Q_NOW + 10) == []
+
+    def test_bookkeeping_after_the_stop_does_not_continue_the_thread(self, monkeypatch):
+        """Measured: a `thread_settings_applied` event was appended after the stop when the thread was reopened."""
+        self._cx_stopped(monkeypatch, tail=[_cx_event(_Q_NOW + 5, "thread_settings_applied", thread_settings={})])
+        assert len(self._interrupted(now=_Q_NOW + 10)) == 1
+
+    def test_a_clean_turn_end_and_a_different_error_are_not_a_stop(self, monkeypatch):
+        sid = str(_uuid_q.uuid4())
+        clean = _cx_write(self.tmp, sid, [_cx_meta(sid), _cx_event(_Q_NOW - 5, "task_complete", error=None)])
+        sid2 = str(_uuid_q.uuid4())
+        other = _cx_write(self.tmp, sid2, [_cx_meta(sid2), _cx_event(_Q_NOW - 5, "task_complete", error={
+            "message": "boom", "codex_error_info": "internal_server_error"})])
+        self._cx(monkeypatch, clean, other)
+        assert self._interrupted() == []
+
+    def test_the_words_quoted_in_another_kind_of_record_do_not_end_a_turn(self, monkeypatch):
+        """A response item that merely carries the type text, newer than the stop, is not a turn record."""
+        quoted = _q_line(timestamp=_q_iso(_Q_NOW), type="response_item",
+                         payload={"type": "task_started", "note": "event_msg"})
+        self._cx_stopped(monkeypatch, tail=[quoted])
+        assert len(self._interrupted(now=_Q_NOW + 10)) == 1
+
+    def test_an_old_stop_is_dropped_two_days_after_its_reset_and_an_old_file_is_not_read(self, monkeypatch):
+        self._cx_stopped(monkeypatch)
+        assert self._interrupted(now=_Q_NOW + 3600 + 48 * 3600 + 1) == []
+        self._cx_stopped(monkeypatch, age=10 * 86400)
+        assert self._interrupted() == []
+
+    def test_a_rollout_without_a_session_meta_is_skipped_not_fatal(self, monkeypatch):
+        sid = str(_uuid_q.uuid4())
+        bad = _cx_write(self.tmp, sid, [_cx_event(_Q_NOW - 5, "agent_message"), _cx_stop(_Q_NOW - 1)])
+        good_sid, good = self._cx_stopped(monkeypatch)
+        self._cx(monkeypatch, bad, good)
+        assert [r["id"] for r in self._interrupted()] == [good_sid]
+
+    def test_find_hit_names_the_provider_from_the_id_and_progress_follows_the_thread(self, monkeypatch):
+        sid, path = self._cx_stopped(monkeypatch)
+        assert _quota_q.find_hit(sid, _Q_NOW)["provider"] == "codex"
+        assert _quota_q.find_hit(str(_uuid_q.uuid4()), _Q_NOW) is None
+        monkeypatch.setattr(_quota_q.data_codex, "rollout_path", lambda s: path if s == sid else None)
+        progress = _quota_q.codex_progress(sid)
+        assert progress["kind"] == "hit" and progress["hit"]["resets_at"] == _Q_NOW + 3600
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(_cx_event(_Q_NOW + 5, "task_started") + "\n")
+        assert _quota_q.codex_progress(sid)["kind"] == "reply"
+        assert _quota_q.codex_progress(str(_uuid_q.uuid4())) is None
+
+    def test_an_unchanged_rollout_is_not_read_again(self, monkeypatch):
+        _sid, path = self._cx_stopped(monkeypatch)
+        reads = []
+        real = _quota_q.overview._read_tail
+        monkeypatch.setattr(_quota_q.overview, "_read_tail", lambda *a, **k: reads.append(a[0]) or real(*a, **k))
+        for _ in range(3):
+            self._interrupted()
+        assert reads.count(path) == 1
+
+    # -- kiro-cli --
+
+    def _kiro(self, name, rows, age=0.0, cwd="C:\\dev\\kproj"):
+        d = self.v3 / "hash" / name
+        d.mkdir(parents=True)
+        (d / "session.json").write_text(json.dumps({"title": "kiro work", "workspacePaths": [cwd]}),
+                                        encoding="utf-8")
+        path = d / "messages.jsonl"
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        os.utime(path, (_Q_NOW - age, _Q_NOW - age))
+
+    @staticmethod
+    def _kiro_row(at, **payload):
+        return json.dumps({"id": "x", "timestamp": _q_iso(at), "payload": payload}, separators=(",", ":"))
+
+    def _limit(self, at):
+        return self._kiro_row(at, type="session_metadata", key="displayError",
+                              value={"errorType": "UsageLimitReachedError",
+                                     "message": "You've reached your daily usage limit."})
+
+    def test_a_kiro_session_whose_turn_ended_in_a_usage_limit_is_listed_without_a_reset_time(self):
+        self._kiro("sess_1", [self._kiro_row(_Q_NOW - 50, type="user", content="hi"), self._limit(_Q_NOW - 40),
+                              self._kiro_row(_Q_NOW - 39, type="turn_end")])
+        [row] = self._interrupted()
+        assert (row["id"], row["provider"], row["window"], row["resets_at"], row["state"]) == (
+            "sess_1", "kiro-cli-v3", "daily", None, "limited")
+        assert row["title"] == "kiro work" and row["cwd"] == "C:\\dev\\kproj"
+
+    def test_a_kiro_session_that_went_on_or_is_old_or_failed_otherwise_is_not_listed(self):
+        self._kiro("sess_2", [self._limit(_Q_NOW - 40), self._kiro_row(_Q_NOW - 5, type="user", content="again")])
+        self._kiro("sess_3", [self._limit(_Q_NOW - 49 * 3600)], age=0)
+        self._kiro("sess_4", [self._kiro_row(_Q_NOW - 40, type="session_metadata", key="displayError",
+                                             value={"errorType": "AuthError", "message": "x"})])
+        assert self._interrupted() == []
+
+    # -- the payload as a whole --
+
+    def test_one_provider_failing_leaves_the_others(self, monkeypatch):
+        self._kiro("sess_9", [self._limit(_Q_NOW - 40)])
+
+        def boom(now):
+            raise RuntimeError("unreadable")
+
+        monkeypatch.setattr(_quota_q, "_scan_claude", boom)
+        body = _quota_q.payload(_Q_NOW)
+        assert [r["provider"] for r in body["interrupted"]] == ["kiro-cli-v3"]
+        assert body["claude"]["state"] == "no_snapshot"
+
+    def test_interrupted_rows_are_ordered_most_recent_first(self):
+        self._session([_q_user(), _q_hit(at=_Q_NOW - 500)], name=str(_uuid_q.UUID(int=1)))
+        self._session([_q_user(), _q_hit(at=_Q_NOW - 50)], name=str(_uuid_q.UUID(int=2)))
+        self._kiro("sess_5", [self._limit(_Q_NOW - 200)])
+        assert [r["id"] for r in self._interrupted()] == [
+            str(_uuid_q.UUID(int=2)), "sess_5", str(_uuid_q.UUID(int=1))]
+
+
+# ---- resume: quick and scheduled resume of sessions a quota limit stopped ------------------------
+
+import subprocess
+
+from power_atlas import consoleinject as _consoleinject_r
+from power_atlas import resume as _resume_r
+
+
+# The autouse `isolated_config` makes `start_scheduler` a no-op for every test; the one test of the thread
+# itself needs the real function, captured here before any fixture runs.
+_REAL_START_SCHEDULER = _resume_r.start_scheduler
+# The same for `_relaunch`, which `TestResume` replaces; the test of what it passes to the launcher needs it.
+_REAL_RELAUNCH = _resume_r._relaunch
+
+
+class _FakeSnap:
+    """What `presence.get_snapshot()` answers: which sessions have a validated process."""
+
+    def __init__(self, pids=None, entrypoint="cli", status="idle"):
+        self._pids = pids or {}
+        self._entrypoint = entrypoint
+        self._status = status
+
+    def pid_for(self, provider, sid):
+        return self._pids.get((provider, sid))
+
+    def session_entrypoint(self, provider, sid):
+        return self._entrypoint
+
+    def reported_status(self, provider, sid):
+        return self._status
+
+    def is_live(self, provider, cwd, sid):
+        return (provider, sid) in self._pids
+
+
+class TestResume:
+    @pytest.fixture(autouse=True)
+    def env(self, tmp_path, monkeypatch):
+        self.claude = tmp_path / "claude"
+        (self.claude / "proj").mkdir(parents=True)
+        self.v3 = tmp_path / "v3"
+        self.v3.mkdir()
+        self.tmp = tmp_path
+        monkeypatch.setattr(_quota_q, "_roots", lambda: (self.v3, self.claude))
+        _quota_q.reset()
+        _resume_r.reset()
+        self.snap = _FakeSnap()
+        monkeypatch.setattr(_resume_r.presence, "get_snapshot", lambda force=False: self.snap)
+        self.launched, self.typed, self.toasts = [], [], []
+        self.launch_ok = (True, "")
+        monkeypatch.setattr(_resume_r, "_relaunch",
+                            lambda row, prompt: self.launched.append((row["id"], row["cwd"], prompt)) or self.launch_ok)
+        monkeypatch.setattr(_resume_r, "_type_into",
+                            lambda pid, text: self.typed.append((pid, text)) or (True, ""))
+        monkeypatch.setattr(_resume_r.notifications, "notify_quota",
+                            lambda label, msg: self.toasts.append((label, msg)))
+        from power_atlas.config import Config
+        self.config = Config(notifications={"enabled": True})
+        monkeypatch.setattr("power_atlas.config.load_config", lambda: self.config)
+
+    def _stopped(self, resets_at=_Q_NOW + 3600, extra=()):
+        sid = str(_uuid_q.uuid4())
+        path = self.claude / "proj" / (sid + ".jsonl")
+        path.write_text("\n".join([_q_user(), _q_hit(resets_at=resets_at), *extra]) + "\n", encoding="utf-8")
+        os.utime(path, (_Q_NOW, _Q_NOW))
+        return sid, path
+
+    @staticmethod
+    def _append(path, *lines, at=_Q_NOW + 4000):
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.utime(path, (at, at))
+
+    def _file(self):
+        return json.loads((self.tmp / _resume_r.STATE_NAME).read_text(encoding="utf-8"))
+
+    # -- the prompt --
+
+    def test_prompt_defaults_loses_control_characters_and_refuses_what_could_pass_as_an_option(self):
+        clean = _resume_r.clean_prompt
+        assert clean(None) == ("resume", "") and clean("   ") == ("resume", "")
+        assert clean("go\non\t now\x00") == ("go on now", "")
+        assert clean("-p hello")[1] and clean("--dangerously-skip-permissions")[1]
+        assert clean("x" * (_resume_r.MAX_PROMPT_CHARS + 1))[1]
+        assert clean(5)[1]
+        assert clean("x" * _resume_r.MAX_PROMPT_CHARS)[1] == ""
+
+    # -- resume now --
+
+    def test_a_stopped_session_with_a_closed_terminal_is_relaunched_with_the_prompt(self):
+        sid, _ = self._stopped()
+        assert _resume_r.resume_now(sid, "carry on", now=_Q_NOW + 3700) == {"ok": True, "mode": "terminal"}
+        assert self.launched == [(sid, "C:\\dev\\proj", "carry on")]
+        assert self.typed == []
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW + 3701)["interrupted"], _Q_NOW + 3701)
+        assert row["resume"]["state"] == "watching" and row["can_resume"] is True
+
+    def test_a_second_resume_while_one_is_being_watched_is_refused(self):
+        sid, _ = self._stopped()
+        assert _resume_r.resume_now(sid, now=_Q_NOW + 3700)["ok"] is True
+        again = _resume_r.resume_now(sid, now=_Q_NOW + 3701)
+        assert again["ok"] is False and "already being resumed" in again["error"]
+        assert len(self.launched) == 1
+
+    def test_ids_that_are_not_a_stopped_claude_session_start_nothing(self):
+        sid, _ = self._stopped()
+        other = str(_uuid_q.uuid4())
+        for bad, text in ((None, "session id"), ("../x", "session id"), (other, "no longer stopped")):
+            result = _resume_r.resume_now(bad, now=_Q_NOW)
+            assert result["ok"] is False and text in result["error"], bad
+        assert _resume_r.resume_now(sid, "-x", now=_Q_NOW)["ok"] is False
+        assert self.launched == [] and self.typed == []
+
+    def test_the_folder_comes_from_the_transcript_not_from_the_request(self):
+        sid, _ = self._stopped()
+        _resume_r.resume_now(sid, "x", now=_Q_NOW + 3700)
+        assert self.launched[0][1] == "C:\\dev\\proj"
+
+    def test_a_failed_launch_is_reported_remembered_and_not_retried(self):
+        sid, _ = self._stopped()
+        self.launch_ok = (False, "'claude' not found on PATH")
+        result = _resume_r.resume_now(sid, now=_Q_NOW + 3700)
+        assert result == {"ok": False, "error": "'claude' not found on PATH"}
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW + 3701)["interrupted"], _Q_NOW + 3701)
+        assert row["resume"]["state"] == "error" and "not found" in row["resume"]["detail"]
+        _resume_r.tick(_Q_NOW + 3800)
+        assert len(self.launched) == 1, "an error is never retried"
+
+    # -- a terminal that is still open --
+
+    def test_typing_into_an_open_terminal_waits_for_the_reset(self):
+        sid, _ = self._stopped()
+        self.snap = _FakeSnap({("claude-code", sid): 4242})
+        early = _resume_r.resume_now(sid, "go", now=_Q_NOW + 100)
+        assert early["ok"] is False and "has not reset" in early["error"]
+        assert self.typed == [] and self.launched == []
+        ok = _resume_r.resume_now(sid, "go", now=_Q_NOW + 3700)
+        assert ok == {"ok": True, "mode": "typed"}
+        assert self.typed == [(4242, "go")] and self.launched == []
+
+    def test_typing_needs_the_transcript_to_still_end_at_the_hit(self, monkeypatch):
+        sid, path = self._stopped()
+        self.snap = _FakeSnap({("claude-code", sid): 4242})
+        # The session continued by hand: it is no longer listed, so nothing is typed.
+        self._append(path, _q_user("I carried on by hand", at=_Q_NOW + 3000), _q_assistant("ok", at=_Q_NOW + 3001))
+        assert _resume_r.resume_now(sid, now=_Q_NOW + 3700)["ok"] is False
+        assert self.typed == [] and self.launched == []
+        # And the second look, taken just before typing: if the transcript moved between the row being
+        # read and the keystrokes, nothing is typed either.
+        sid2, _ = self._stopped()
+        self.snap = _FakeSnap({("claude-code", sid2): 4343})
+        monkeypatch.setattr(_resume_r.quota, "transcript_progress",
+                            lambda p: {"kind": "reply", "at": _Q_NOW + 3699, "hit": None})
+        moved = _resume_r.resume_now(sid2, now=_Q_NOW + 3700)
+        assert moved["ok"] is False and "moved on" in moved["error"]
+        assert self.typed == []
+
+    def test_a_live_session_with_no_known_process_is_never_relaunched_or_typed_into(self):
+        sid, _ = self._stopped()
+        snap = _FakeSnap()
+        snap.is_live = lambda provider, cwd, s: True
+        self.snap = snap
+        result = _resume_r.resume_now(sid, now=_Q_NOW + 3700)
+        assert result["ok"] is False and "cannot type into" in result["error"]
+        assert self.typed == [] and self.launched == []
+
+    # -- Codex threads --
+
+    def _cx_stopped(self, monkeypatch, resets_at=_Q_NOW + 3600, locked=False, reading=True):
+        sid = str(_uuid_q.uuid4())
+        lines = [_cx_meta(sid), _cx_event(_Q_NOW - 90, "task_started")]
+        if reading:
+            lines.append(_cx_reading(_Q_NOW - 63, primary=_cx_window(100.0, resets_at)))
+        lines += [_cx_reading(_Q_NOW - 61), _cx_stop(_Q_NOW - 60, "11:11 PM")]
+        path = _cx_write(self.tmp, sid, lines)
+        monkeypatch.setattr(_quota_q, "_codex_all", lambda: [path])
+        monkeypatch.setattr(_quota_q.data_codex, "thread_title", lambda s: "codex work")
+        monkeypatch.setattr(_quota_q.data_codex, "rollout_path", lambda s: path if s == sid else None)
+        monkeypatch.setattr(_resume_r.data_codex, "session_writer_locked", lambda s: locked)
+        return sid, path
+
+    def test_a_stopped_codex_thread_with_no_terminal_open_is_relaunched_with_the_prompt(self, monkeypatch):
+        sid, _ = self._cx_stopped(monkeypatch)
+        assert _resume_r.resume_now(sid, "carry on", now=_Q_NOW + 3700) == {"ok": True, "mode": "terminal"}
+        assert self.launched == [(sid, "C:\\dev\\cproj", "carry on")]
+        assert self.typed == []
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW + 3701)["interrupted"], _Q_NOW + 3701)
+        assert row["provider"] == "codex" and row["can_resume"] is True
+        assert row["resume"]["state"] == "watching" and _resume_r._runs[0]["provider"] == "codex"
+
+    def test_the_relaunch_names_the_codex_provider_and_its_own_default_arguments(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(_resume_r.launcher, "launch_session", lambda **kw: seen.update(kw) or types.SimpleNamespace(
+            success=True, error=""))
+        from power_atlas.config import Config
+        monkeypatch.setattr("power_atlas.config.load_config", lambda: Config(provider_settings={
+            "codex": {"default_args": "--model gpt-x"}, "claude-code": {"default_args": "--wrong"}}))
+        sid = str(_uuid_q.uuid4())
+        for provider, args in (("codex", "--model gpt-x"), ("claude-code", "--wrong")):
+            seen.clear()
+            ok, error = _REAL_RELAUNCH({"id": sid, "cwd": "C:\\dev\\cproj", "title": "t", "provider": provider}, "go")
+            assert (ok, error) == (True, "")
+            assert (seen["provider"], seen["session_id"], seen["prompt"], seen["default_args"]) == (
+                provider, sid, "go", args)
+
+    def test_a_codex_thread_open_in_a_terminal_is_never_typed_into_or_relaunched(self, monkeypatch):
+        sid, _ = self._cx_stopped(monkeypatch, locked=True)
+        refused = _resume_r.resume_now(sid, now=_Q_NOW + 3700)
+        assert refused["ok"] is False and "Continue it there" in refused["error"]
+        assert self.typed == [] and self.launched == []
+
+    def test_a_codex_stop_with_no_known_reset_cannot_be_resumed_or_scheduled(self, monkeypatch):
+        sid, _ = self._cx_stopped(monkeypatch, reading=False)
+        monkeypatch.setattr(_quota_q, "_message_reset", lambda message, hit_at: None)
+        for result in (_resume_r.resume_now(sid, now=_Q_NOW + 3700), _resume_r.schedule(sid, now=_Q_NOW)):
+            assert result["ok"] is False and "not known" in result["error"]
+        assert self.launched == []
+
+    def test_a_codex_thread_can_be_scheduled_and_the_schedule_relaunches_it(self, monkeypatch):
+        sid, _ = self._cx_stopped(monkeypatch, resets_at=_Q_NOW + 3600)
+        assert _resume_r.schedule(sid, "go", now=_Q_NOW)["fire_at"] == _Q_NOW + 3660
+        _resume_r.tick(_Q_NOW + 3661)
+        assert self.launched == [(sid, "C:\\dev\\cproj", "go")]
+
+    def test_a_turn_that_starts_after_a_codex_resume_ends_the_watch_quietly(self, monkeypatch):
+        sid, path = self._cx_stopped(monkeypatch)
+        self._launch(sid)
+        _resume_r.tick(_Q_NOW + 3710)
+        assert _resume_r._runs[0]["state"] == "watching", "nothing new yet, and not yet judged slow"
+        self._append(path, _cx_event(_Q_NOW + 3705, "task_started"))
+        _resume_r.tick(_Q_NOW + 3710)
+        assert _resume_r._runs == [] and self.toasts == []
+
+    def test_a_codex_resume_that_is_stopped_again_later_is_armed_once_more(self, monkeypatch):
+        sid, path = self._cx_stopped(monkeypatch)
+        self._launch(sid)
+        self._append(path, _cx_event(_Q_NOW + 3702, "task_started"),
+                     _cx_reading(_Q_NOW + 3703, primary=_cx_window(100.0, _Q_NOW + 20000)),
+                     _cx_stop(_Q_NOW + 3704, "11:11 PM"))
+        _resume_r.tick(_Q_NOW + 3710)
+        assert [(s["attempt"], s["fire_at"]) for s in self._file()["schedules"]] == [(2, _Q_NOW + 20060)]
+        assert self.toasts and "Still limited" in self.toasts[0][1]
+
+    def test_a_codex_resume_that_shows_no_activity_is_reported(self, monkeypatch):
+        sid, _ = self._cx_stopped(monkeypatch)
+        self._launch(sid)
+        _resume_r.tick(_Q_NOW + 3700 + _resume_r.NO_ACTIVITY_SECONDS + 1)
+        assert _resume_r._runs[0]["state"] == "no_activity" and self.toasts
+
+    # -- schedules --
+
+    def test_a_schedule_defaults_to_a_minute_after_the_reset_and_is_kept_on_disk(self):
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        assert _resume_r.schedule(sid, "go", now=_Q_NOW) == {"ok": True, "fire_at": _Q_NOW + 3660, "persisted": True}
+        saved = self._file()["schedules"]
+        assert [(s["session_id"], s["fire_at"], s["prompt"], s["attempt"]) for s in saved] == [
+            (sid, _Q_NOW + 3660, "go", 1)]
+        _resume_r.reset()   # a new process reads the file
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW)["interrupted"], _Q_NOW)
+        assert row["resume"] == {"state": "scheduled", "fire_at": _Q_NOW + 3660, "attempt": 1, "prompt": "go"}
+
+    def test_scheduling_again_replaces_and_a_time_before_the_reset_is_moved_to_it(self):
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, "one", now=_Q_NOW)
+        assert _resume_r.schedule(sid, "two", fire_at=_Q_NOW + 10, now=_Q_NOW)["fire_at"] == _Q_NOW + 3600
+        assert _resume_r.schedule(sid, "three", fire_at=_Q_NOW + 5000, now=_Q_NOW)["fire_at"] == _Q_NOW + 5000
+        assert [s["prompt"] for s in self._file()["schedules"]] == ["three"]
+        assert _resume_r.schedule(sid, "x", fire_at="soon", now=_Q_NOW)["ok"] is False
+
+    def test_scheduling_is_refused_once_the_quota_has_reset_and_cancel_removes_one(self):
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        assert "already reset" in _resume_r.schedule(sid, now=_Q_NOW + 3601)["error"]
+        _resume_r.schedule(sid, now=_Q_NOW)
+        assert _resume_r.cancel(sid) == {"ok": True}
+        assert self._file()["schedules"] == []
+        assert _resume_r.cancel(sid)["ok"] is False
+
+    def test_a_damaged_state_file_reads_as_empty_and_odd_entries_are_ignored(self):
+        sid, _ = self._stopped()
+        (self.tmp / _resume_r.STATE_NAME).write_text("{ not json", encoding="utf-8")
+        assert _resume_r.decorate(_quota_q.payload(_Q_NOW)["interrupted"], _Q_NOW)[0].get("resume") is None
+        _resume_r.reset()
+        good = {"id": "a", "session_id": sid, "cwd": "C:\\x", "prompt": "p", "fire_at": _Q_NOW + 9,
+                "resets_at": _Q_NOW + 8, "attempt": 1}
+        (self.tmp / _resume_r.STATE_NAME).write_text(json.dumps({"schedules": [
+            good, {**good, "id": "b", "session_id": "../x"}, {**good, "id": "c", "attempt": 7},
+            {**good, "id": "d", "fire_at": "x"}, "junk"]}), encoding="utf-8")
+        _resume_r.decorate([], _Q_NOW)   # loads the file
+        assert [s["id"] for s in _resume_r._state["schedules"]] == ["a"]
+
+    def test_at_start_a_schedule_whose_time_passed_is_dropped_and_a_future_one_kept(self):
+        past, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        future, _ = self._stopped(resets_at=_Q_NOW + 7200)
+        _resume_r.schedule(past, now=_Q_NOW)
+        _resume_r.schedule(future, now=_Q_NOW)
+        _resume_r.reset()
+        assert _resume_r.restore(now=_Q_NOW + 4000) == 1
+        assert [s["session_id"] for s in self._file()["schedules"]] == [future]
+        assert self.launched == [] and self.typed == [], "a dropped schedule is never fired late"
+
+    def test_every_schedule_due_in_the_same_tick_fires_in_that_tick(self):
+        a, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        b, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        c, _ = self._stopped(resets_at=_Q_NOW + 9000)
+        for sid in (a, b, c):
+            _resume_r.schedule(sid, "go", now=_Q_NOW)
+        _resume_r.tick(_Q_NOW + 3661)
+        assert sorted(x[0] for x in self.launched) == sorted([a, b])
+        assert [s["session_id"] for s in self._file()["schedules"]] == [c]
+
+    # -- dismissing --
+
+    def test_a_dismissed_stop_is_hidden_until_the_session_is_stopped_again(self):
+        sid, path = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, now=_Q_NOW)
+        assert _resume_r.dismiss(sid, now=_Q_NOW) == {"ok": True}
+        assert _resume_r.decorate(_quota_q.payload(_Q_NOW)["interrupted"], _Q_NOW) == []
+        assert self._file()["schedules"] == [], "dismissing cancels its schedule"
+        # The same session hits the limit again with a new reset time: a new stop, listed again.
+        self._append(path, _q_user("again", at=_Q_NOW + 4000), _q_hit(resets_at=_Q_NOW + 20000, at=_Q_NOW + 4001))
+        rows = _resume_r.decorate(_quota_q.payload(_Q_NOW + 4002)["interrupted"], _Q_NOW + 4002)
+        assert [r["id"] for r in rows] == [sid]
+        assert _resume_r.dismiss("nope", now=_Q_NOW)["ok"] is False
+
+    # -- watching what a resume did --
+
+    def _launch(self, sid, now=_Q_NOW + 3700, attempt=1):
+        assert _resume_r.resume_now(sid, "go", attempt=attempt, now=now)["ok"] is True
+
+    def test_a_reply_after_the_resume_ends_the_watch_without_a_toast(self):
+        sid, path = self._stopped()
+        self._launch(sid)
+        self._append(path, _q_user("go", at=_Q_NOW + 3702), _q_assistant("on it", at=_Q_NOW + 3704))
+        _resume_r.tick(_Q_NOW + 3710)
+        assert _resume_r._runs == [] and self.toasts == []
+
+    def test_a_new_hit_with_a_later_reset_arms_one_more_attempt_from_the_new_time(self):
+        sid, path = self._stopped(resets_at=_Q_NOW + 3600)
+        self._launch(sid)
+        self._append(path, _q_user("go", at=_Q_NOW + 3702),
+                     _q_hit(resets_at=_Q_NOW + 12000, at=_Q_NOW + 3703))
+        _resume_r.tick(_Q_NOW + 3710)
+        [saved] = self._file()["schedules"]
+        assert (saved["session_id"], saved["attempt"], saved["fire_at"]) == (sid, 2, _Q_NOW + 12060)
+        assert _resume_r._runs == []
+        assert any("Resuming again" in t[1] for t in self.toasts)
+
+    def test_the_second_attempt_failing_gives_up_with_a_toast_and_no_third(self):
+        sid, path = self._stopped(resets_at=_Q_NOW + 3600)
+        self._launch(sid, attempt=2)
+        self._append(path, _q_user("go", at=_Q_NOW + 3702), _q_hit(resets_at=_Q_NOW + 30000, at=_Q_NOW + 3703))
+        _resume_r.tick(_Q_NOW + 3710)
+        saved = self._file()["schedules"] if (self.tmp / _resume_r.STATE_NAME).exists() else []
+        assert saved == [], "no third attempt is armed"
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW + 3711)["interrupted"], _Q_NOW + 3711)
+        assert row["resume"]["state"] == "gave_up"
+        assert any("Giving up" in t[1] for t in self.toasts)
+
+    def test_a_hit_that_does_not_move_the_reset_time_is_not_retried(self):
+        sid, path = self._stopped(resets_at=_Q_NOW + 3600)
+        self._launch(sid)
+        self._append(path, _q_user("go", at=_Q_NOW + 3702), _q_hit(resets_at=_Q_NOW + 3600, at=_Q_NOW + 3703))
+        _resume_r.tick(_Q_NOW + 3710)
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW + 3711)["interrupted"], _Q_NOW + 3711)
+        assert row["resume"]["state"] == "gave_up"
+
+    def test_no_activity_for_three_minutes_ends_the_watch_with_a_toast_and_is_not_retried(self):
+        sid, _ = self._stopped()
+        self._launch(sid)
+        _resume_r.tick(_Q_NOW + 3700 + _resume_r.NO_ACTIVITY_SECONDS - 5)
+        assert self.toasts == []
+        _resume_r.tick(_Q_NOW + 3700 + _resume_r.NO_ACTIVITY_SECONDS + 5)
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW + 3900)["interrupted"], _Q_NOW + 3900)
+        assert row["resume"]["state"] == "no_activity" and "No activity" in row["resume"]["detail"]
+        assert len(self.toasts) == 1
+        _resume_r.tick(_Q_NOW + 9999)
+        assert len(self.toasts) == 1 and len(self.launched) == 1
+
+    def test_a_prompt_nobody_answered_reads_as_no_reply_not_as_success(self):
+        sid, path = self._stopped()
+        self._launch(sid)
+        self._append(path, _q_user("go", at=_Q_NOW + 3702))
+        _resume_r.tick(_Q_NOW + 3710)
+        assert _resume_r._runs[0]["state"] == "watching"
+        # The prompt landed, so the first reply may legitimately take longer than the no-activity wait.
+        _resume_r.tick(_Q_NOW + 3700 + _resume_r.NO_ACTIVITY_SECONDS + 5)
+        assert _resume_r._runs[0]["state"] == "watching"
+        _resume_r.tick(_Q_NOW + 3700 + _resume_r.PROMPT_REPLY_SECONDS + 5)
+        assert _resume_r._runs[0]["state"] == "no_activity" and "No reply" in _resume_r._runs[0]["detail"]
+
+    def test_toasts_are_silent_when_notifications_are_off(self):
+        from power_atlas.config import Config
+        self.config = Config(notifications={"enabled": False})
+        sid, _ = self._stopped()
+        self._launch(sid)
+        _resume_r.tick(_Q_NOW + 3700 + _resume_r.NO_ACTIVITY_SECONDS + 5)
+        assert self.toasts == []
+
+    def test_kiro_rows_are_listed_but_have_no_resume_buttons(self):
+        d = self.v3 / "h" / "sess_k1"
+        d.mkdir(parents=True)
+        (d / "messages.jsonl").write_text(json.dumps({"timestamp": _q_iso(_Q_NOW - 5), "payload": {
+            "type": "session_metadata", "key": "displayError",
+            "value": {"errorType": "UsageLimitReachedError"}}}) + "\n", encoding="utf-8")
+        os.utime(d / "messages.jsonl", (_Q_NOW, _Q_NOW))
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW)["interrupted"], _Q_NOW)
+        assert row["provider"] == "kiro-cli-v3" and row["can_resume"] is False
+        assert _resume_r.resume_now("sess_k1", now=_Q_NOW)["ok"] is False
+
+
+    # -- review fixes: numbers, races, the open terminal, folders --
+
+    def test_a_time_that_is_not_a_finite_number_is_refused_and_never_stored_or_sent_back(self):
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        for bad in (float("nan"), float("inf"), -float("inf"), "soon", True):
+            assert _resume_r.schedule(sid, fire_at=bad, now=_Q_NOW)["ok"] is False, bad
+        too_far = _Q_NOW + 3600 + _resume_r.MAX_FIRE_AHEAD_SECONDS + 1
+        assert "too far" in _resume_r.schedule(sid, fire_at=too_far, now=_Q_NOW)["error"]
+        assert not (self.tmp / _resume_r.STATE_NAME).exists()
+        # What the Overview sends to the browser is always valid JSON.
+        rows = _resume_r.decorate(_quota_q.payload(_Q_NOW)["interrupted"], _Q_NOW)
+        json.dumps(rows, allow_nan=False)
+
+    def test_a_state_file_holding_nan_or_infinity_is_dropped_entry_by_entry(self):
+        sid, _ = self._stopped()
+        good = {"id": "a", "session_id": sid, "cwd": "C:\\x", "prompt": "p", "fire_at": _Q_NOW + 9,
+                "resets_at": _Q_NOW + 8, "attempt": 1}
+        text = json.dumps({"schedules": [good, {**good, "id": "b", "fire_at": 0}]}).replace(
+            '"fire_at": 0', '"fire_at": NaN')
+        (self.tmp / _resume_r.STATE_NAME).write_text(text, encoding="utf-8")
+        _resume_r.decorate([], _Q_NOW)
+        assert [s["id"] for s in _resume_r._state["schedules"]] == ["a"]
+
+    def test_only_control_characters_in_a_prompt_mean_the_default_not_an_empty_prompt(self):
+        assert _resume_r.clean_prompt("\x00") == ("resume", "")
+        assert _resume_r.clean_prompt("\n\t") == ("resume", "")
+
+    def test_a_second_resume_of_a_session_cannot_launch_alongside_one_still_starting(self, monkeypatch):
+        sid, _ = self._stopped()
+        started, release, results = threading.Event(), threading.Event(), []
+
+        def slow(row, prompt):
+            self.launched.append((row["id"], prompt))
+            started.set()
+            release.wait(10)
+            return True, ""
+
+        monkeypatch.setattr(_resume_r, "_relaunch", slow)
+        first = threading.Thread(target=lambda: results.append(_resume_r.resume_now(sid, "a", now=_Q_NOW + 3700)))
+        first.start()
+        assert started.wait(10), "the first launch did not start"
+        second = _resume_r.resume_now(sid, "b", now=_Q_NOW + 3701)
+        release.set()
+        first.join(10)
+        assert second["ok"] is False and "already being resumed" in second["error"]
+        assert results == [{"ok": True, "mode": "terminal"}] and len(self.launched) == 1
+
+    def test_one_scheduled_resume_raising_does_not_cost_the_others_theirs(self, monkeypatch):
+        ids = [self._stopped(resets_at=_Q_NOW + 3600)[0] for _ in range(3)]
+        for sid in ids:
+            _resume_r.schedule(sid, "go", now=_Q_NOW)
+        real, calls = _resume_r.resume_now, []
+
+        def flaky(sid, *args, **kwargs):
+            calls.append(sid)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            return real(sid, *args, **kwargs)
+
+        monkeypatch.setattr(_resume_r, "resume_now", flaky)
+        _resume_r.tick(_Q_NOW + 3661)
+        assert len(calls) == 3 and len(self.launched) == 2
+        assert any("did not start" in t[1] for t in self.toasts), "the one that raised is reported"
+
+    def test_cancelling_reaches_a_schedule_that_has_not_started_even_mid_tick(self, monkeypatch):
+        a, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        b, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(a, now=_Q_NOW)
+        _resume_r.schedule(b, now=_Q_NOW)
+        real, calls = _resume_r.resume_now, []
+
+        def first_cancels_the_second(sid, *args, **kwargs):
+            calls.append(sid)
+            if len(calls) == 1:
+                _resume_r.cancel(b if sid == a else a)
+            return real(sid, *args, **kwargs)
+
+        monkeypatch.setattr(_resume_r, "resume_now", first_cancels_the_second)
+        _resume_r.tick(_Q_NOW + 3661)
+        assert len(calls) == 1, "the schedule cancelled while the first was firing never fired"
+
+    def test_a_schedule_overdue_by_ten_minutes_is_dropped_and_never_fired_late(self):
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, now=_Q_NOW)
+        _resume_r.tick(_Q_NOW + 3660 + _resume_r.LATE_SECONDS + 5)    # the PC slept through it
+        assert self.launched == [] and self.toasts == []
+        assert self._file()["schedules"] == []
+
+    def test_a_schedule_for_a_session_already_continued_by_hand_drops_without_a_word(self):
+        sid, path = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, now=_Q_NOW)
+        self._append(path, _q_user("by hand", at=_Q_NOW + 3000), _q_assistant("ok", at=_Q_NOW + 3001))
+        _resume_r.tick(_Q_NOW + 3661)
+        assert self.launched == [] and self.toasts == []
+        assert _resume_r._runs == [], "no phantom error row either"
+
+    def test_a_schedule_made_for_one_stop_does_not_resume_the_session_after_a_different_one(self):
+        sid, path = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, now=_Q_NOW)
+        self._append(path, _q_user("again", at=_Q_NOW + 3000), _q_hit(resets_at=_Q_NOW + 20000, at=_Q_NOW + 3001))
+        _resume_r.tick(_Q_NOW + 3661)
+        assert self.launched == [] and self.typed == []
+
+    def test_typing_needs_an_interactive_terminal_session_that_is_not_waiting_on_a_dialog(self):
+        sid, _ = self._stopped()
+        for snap, words in ((_FakeSnap({("claude-code", sid): 4242}, entrypoint="sdk-cli"), "not running in an interactive"),
+                            (_FakeSnap({("claude-code", sid): 4242}, entrypoint=""), "not running in an interactive"),
+                            (_FakeSnap({("claude-code", sid): 4242}, status="waiting"), "waiting on a question")):
+            self.snap = snap
+            refused = _resume_r.resume_now(sid, now=_Q_NOW + 3700)
+            assert refused["ok"] is False and words in refused["error"], words
+        assert self.typed == [] and self.launched == []
+        self.snap = _FakeSnap({("claude-code", sid): 4242})
+        assert _resume_r.resume_now(sid, now=_Q_NOW + 3700)["ok"] is True and self.typed
+
+    def test_a_typed_prompt_cannot_open_with_a_shell_or_slash_command_escape(self):
+        sid, _ = self._stopped()
+        self.snap = _FakeSnap({("claude-code", sid): 4242})
+        for prompt in ("!del *", "/exit"):
+            refused = _resume_r.resume_now(sid, prompt, now=_Q_NOW + 3700)
+            assert refused["ok"] is False and "cannot start with" in refused["error"], prompt
+        assert self.typed == []
+
+    def test_a_session_whose_transcript_records_no_folder_is_not_resumed(self, monkeypatch):
+        sid, _ = self._stopped()
+        real = _quota_q.find_hit
+        monkeypatch.setattr(_quota_q, "find_hit", lambda s, now=None: {**real(s, now), "cwd": ""})
+        refused = _resume_r.resume_now(sid, now=_Q_NOW + 3700)
+        assert refused["ok"] is False and "folder" in refused["error"] and self.launched == []
+
+    def test_the_folder_is_where_the_session_started_not_where_it_had_moved_to(self):
+        sid = str(_uuid_q.uuid4())
+        path = self.claude / "proj" / (sid + ".jsonl")
+        path.write_text("\n".join([_q_user(cwd="C:\\dev\\proj"), _q_hit(cwd="C:\\dev\\proj\\src\\deep")]) + "\n",
+                        encoding="utf-8")
+        os.utime(path, (_Q_NOW, _Q_NOW))
+        _resume_r.resume_now(sid, "x", now=_Q_NOW + 3700)
+        assert self.launched == [(sid, "C:\\dev\\proj", "x")]
+
+    def test_a_resume_is_not_judged_slow_while_its_prompt_is_still_waiting_for_a_reply(self):
+        sid, path = self._stopped()
+        self._launch(sid)
+        self._append(path, _q_user("go", at=_Q_NOW + 3702))
+        _resume_r.tick(_Q_NOW + 3700 + _resume_r.NO_ACTIVITY_SECONDS + 60)
+        assert _resume_r._runs[0]["state"] == "watching" and self.toasts == []
+        # ... and a hit that arrives after that long a wait is still followed up.
+        self._append(path, _q_hit(resets_at=_Q_NOW + 30000, at=_Q_NOW + 3900))
+        _resume_r.tick(_Q_NOW + 3960)
+        assert [s["attempt"] for s in self._file()["schedules"]] == [2]
+
+    def test_a_watch_that_finds_its_run_gone_acts_on_nothing(self):
+        sid, path = self._stopped(resets_at=_Q_NOW + 3600)
+        self._launch(sid)
+        stale = dict(_resume_r._runs[0])            # what a tick holds while it reads the transcript
+        self._append(path, _q_user("go", at=_Q_NOW + 3702), _q_hit(resets_at=_Q_NOW + 20000, at=_Q_NOW + 3703))
+        _resume_r.dismiss(sid, now=_Q_NOW + 3704)   # the owner dismisses meanwhile
+        assert _resume_r._watch(stale, _Q_NOW + 3710) == "done"
+        assert self._file()["schedules"] == [] and self.toasts == []
+
+    def test_a_failed_save_is_said_in_the_answer_and_the_schedule_still_holds_in_memory(self, monkeypatch):
+        sid, _ = self._stopped()
+        monkeypatch.setattr(_resume_r, "_state_path", lambda: self.tmp)    # a directory: writing it fails
+        answer = _resume_r.schedule(sid, now=_Q_NOW)
+        assert answer["ok"] is True and answer["persisted"] is False
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW)["interrupted"], _Q_NOW)
+        assert row["resume"]["state"] == "scheduled"
+
+    def test_the_scheduler_thread_starts_once_ticks_and_stops_cleanly(self, monkeypatch):
+        ticks = []
+        monkeypatch.setattr(_resume_r, "TICK_SECONDS", 0.05)
+        monkeypatch.setattr(_resume_r, "tick", lambda now=None: ticks.append(1))
+        _REAL_START_SCHEDULER()
+        _REAL_START_SCHEDULER()
+        try:
+            names = [t.name for t in threading.enumerate() if t.name == "resume-scheduler"]
+            assert names == ["resume-scheduler"], "a second start must not add a second thread"
+            deadline = time.time() + 5
+            while len(ticks) < 2 and time.time() < deadline:
+                time.sleep(0.02)
+            assert len(ticks) >= 2
+        finally:
+            _resume_r.stop_scheduler()
+        assert not [t for t in threading.enumerate() if t.name == "resume-scheduler"]
+        assert _resume_r._scheduler == [None, None]
+
+
+# ---- consoleinject: typing into another process's console -------------------------------------
+
+@pytest.mark.skipif(sys.platform != "win32", reason="console input is a Windows API")
+class TestConsoleInject:
+    def test_text_with_control_characters_empty_or_long_is_refused_before_anything_is_typed(self):
+        for bad in ("", "   ", None, 5, "a\nb", "a\x1b[31mb", "x" * (_consoleinject_r.MAX_TEXT_CHARS + 1)):
+            with pytest.raises(_consoleinject_r.InjectError):
+                _consoleinject_r.check_text(bad)
+        assert _consoleinject_r.check_text("resume") == "resume"
+
+    def test_a_process_that_is_not_claude_code_is_refused_by_name(self):
+        # This very test process is python.exe: a real, running, valid pid that is not claude.exe.
+        with pytest.raises(_consoleinject_r.InjectError, match="not Claude Code"):
+            _consoleinject_r.inject(os.getpid(), "resume")
+
+    def test_pids_that_are_not_running_or_not_pids_are_refused(self):
+        for bad in (0, -4, True, "12", None, 4_000_000_000):
+            with pytest.raises(_consoleinject_r.InjectError):
+                _consoleinject_r.inject(bad, "resume")
+
+    def test_the_helper_reads_only_the_names_it_was_built_with(self):
+        """The helper's entry point takes a pid and text and nothing else: a request that names other
+        images or another delay is not a way in."""
+        done = subprocess.run(
+            [sys.executable, "-P", "-c", "from power_atlas.consoleinject import main; raise SystemExit(main())"],
+            input=json.dumps({"pid": os.getpid(), "text": "resume", "allowed_images": ["python.exe"]}),
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src")})
+        answer = json.loads(done.stdout.strip().splitlines()[-1])
+        assert answer["ok"] is False and "not Claude Code" in answer["error"] and done.returncode == 1
+
+    def test_keystrokes_arrive_as_typed_text_then_enter(self, tmp_path):
+        """A real console: a child with its own hidden console reads one line and writes it to a file."""
+        out = tmp_path / "got.txt"
+        # The child also notes when the last character and the Enter key were read: Claude Code takes a
+        # text-and-Enter burst for a paste and does not submit it, so the Enter must come after a pause.
+        script = ("import sys, msvcrt, time, json\n"
+                  f"open({str(out)!r} + '.ready', 'w').write('1')\n"
+                  "chars = []\n"
+                  "last = time.perf_counter()\n"
+                  "while True:\n"
+                  "    ch = msvcrt.getwch()\n"
+                  "    now = time.perf_counter()\n"
+                  "    if ch == '\\r':\n"
+                  "        break\n"
+                  "    chars.append(ch)\n"
+                  "    last = now\n"
+                  f"open({str(out)!r}, 'w', encoding='utf-8').write(json.dumps({{'text': ''.join(chars), 'gap': now - last}}))\n")
+        child = subprocess.Popen([sys.executable, "-c", script], creationflags=subprocess.CREATE_NO_WINDOW,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.time() + 20
+            while not Path(str(out) + ".ready").exists() and time.time() < deadline:
+                time.sleep(0.05)
+            assert Path(str(out) + ".ready").exists(), "the child did not start"
+            time.sleep(0.3)
+            helper = subprocess.run(
+                [sys.executable, "-P", "-c",
+                 "import json, sys; from power_atlas import consoleinject as c; "
+                 f"n = c.inject({child.pid}, 'resume it\\u2019s fine', enter_delay=0.3, allowed_images=('python.exe',)); "
+                 "print(json.dumps({'n': n}))"],
+                capture_output=True, text=True, encoding="utf-8", timeout=60,
+                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src")})
+            assert helper.returncode == 0, helper.stdout + helper.stderr
+            child.wait(timeout=20)
+            got = json.loads(out.read_text(encoding="utf-8"))
+            assert got["text"] == "resume it\u2019s fine"
+            assert got["gap"] >= 0.2, "Enter arrived with the text instead of after a pause: %.3f s" % got["gap"]
+        finally:
+            if child.poll() is None:
+                child.kill()
+
+
+# ---- the quota routes -------------------------------------------------------------------------
+
+class TestQuotaRoutes:
+    _PATHS = ("/api/quota/resume", "/api/quota/schedule", "/api/quota/cancel", "/api/quota/dismiss")
+
+    def test_each_route_hands_the_session_id_and_prompt_to_the_resume_module(self, client, monkeypatch):
+        seen = []
+        monkeypatch.setattr(_resume_r, "resume_now", lambda sid, prompt: seen.append(("now", sid, prompt)) or {"ok": True})
+        monkeypatch.setattr(_resume_r, "schedule", lambda sid, prompt, at: seen.append(("sched", sid, prompt, at)) or {"ok": True})
+        monkeypatch.setattr(_resume_r, "cancel", lambda sid: seen.append(("cancel", sid)) or {"ok": True})
+        monkeypatch.setattr(_resume_r, "dismiss", lambda sid: seen.append(("dismiss", sid)) or {"ok": True})
+        body = {"session_id": "s1", "prompt": "go", "fire_at": 5, "cwd": "C:\\evil", "extra": 1}
+        for path in self._PATHS:
+            assert client.post(path, json=body).json() == {"ok": True}
+        assert seen == [("now", "s1", "go"), ("sched", "s1", "go", 5), ("cancel", "s1"), ("dismiss", "s1")]
+
+    def test_a_body_that_is_not_a_json_object_is_refused_without_calling_anything(self, client, monkeypatch):
+        called = []
+        monkeypatch.setattr(_resume_r, "resume_now", lambda *a: called.append(a) or {"ok": True})
+        for path in self._PATHS:
+            for raw in ("not json", "[1, 2]", ""):
+                answer = client.post(path, content=raw, headers={"Content-Type": "application/json"}).json()
+                assert answer == {"ok": False, "error": "Invalid JSON body"}, (path, raw)
+        assert called == []
+
+    def test_the_routes_need_the_local_cookie_and_a_same_origin_request(self, client, anonymous_client):
+        for path in self._PATHS:
+            assert anonymous_client.post(path, json={"session_id": "x"}).status_code == 403
+            assert client.post(path, json={"session_id": "x"}, headers={"Origin": "http://evil.com"}).status_code == 403
+
+    def test_the_routes_are_not_reachable_from_a_remote_peer(self):
+        import power_atlas.web as web_mod
+        for path in self._PATHS:
+            assert path not in web_mod._REMOTE_ALLOWED_PATHS

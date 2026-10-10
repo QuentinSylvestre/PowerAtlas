@@ -1298,6 +1298,69 @@ def test_presence_unavailable_returns_empty():
     assert snap.is_live("claude-code", "/w", "id") is False
 
 
+class TestPidFor:
+    """`Snapshot.pid_for`: the pid a validated Claude sidecar names, which `resume` types into.
+
+    A wrong pid here sends keystrokes to the wrong console, so only a record that passed the
+    process-identity checks may produce one."""
+
+    _START = 1_790_000_000.0  # POSIX seconds the fake process started
+
+    @staticmethod
+    def _filetime(epoch):
+        return str(int(epoch * 10_000_000) + 116_444_736_000_000_000)
+
+    def _sidecar(self, tmp_path, *, pid=4242, sid="sid-pidfor", proc_start=None, entrypoint="cli", started=None):
+        record = {"pid": pid, "sessionId": sid, "cwd": "C:\\Work", "entrypoint": entrypoint,
+                  "status": "idle", "startedAt": int((self._START if started is None else started) * 1000)}
+        if proc_start is not None:
+            record["procStart"] = proc_start
+        (tmp_path / f"{pid}.json").write_text(json.dumps(record), encoding="utf-8")
+        return tmp_path
+
+    def test_a_live_claude_process_that_matches_the_sidecar_gives_its_pid(self, tmp_path):
+        side = self._sidecar(tmp_path, proc_start=self._filetime(self._START))
+        snap = _scan_with([_FakeProc("claude", ["claude"], cwd="C:\\Work", pid=4242, create_time=self._START)],
+                          claude_dir=side)
+        assert snap.pid_for("claude-code", "sid-pidfor") == 4242
+
+    def test_a_recycled_pid_gives_none(self, tmp_path):
+        """The pid now belongs to a process that started later than the sidecar's `procStart`."""
+        side = self._sidecar(tmp_path, proc_start=self._filetime(self._START))
+        snap = _scan_with([_FakeProc("claude", ["claude"], cwd="C:\\Work", pid=4242,
+                                     create_time=self._START + 3600)], claude_dir=side)
+        assert snap.pid_for("claude-code", "sid-pidfor") is None
+        assert snap.is_live("claude-code", "C:\\Work", "sid-pidfor") is False
+
+    def test_a_pid_now_held_by_an_unrelated_program_gives_none(self, tmp_path):
+        side = self._sidecar(tmp_path, proc_start=self._filetime(self._START))
+        snap = _scan_with([_FakeProc("svchost", ["svchost.exe", "-k", "netsvcs"], pid=4242,
+                                     create_time=self._START)], claude_dir=side)
+        assert snap.pid_for("claude-code", "sid-pidfor") is None
+
+    def test_a_session_found_only_by_its_command_line_has_no_pid(self):
+        """`--resume <id>` proves the session is live but names no validated process to type into."""
+        snap = _scan_with([_FakeProc("claude", ["claude", "--resume", "argv-only"], cwd="C:\\Work",
+                                     pid=4242, create_time=self._START)])
+        assert snap.is_live("claude-code", "C:\\Work", "argv-only") is True
+        assert snap.pid_for("claude-code", "argv-only") is None
+
+    def test_an_unknown_session_gives_none(self, tmp_path):
+        side = self._sidecar(tmp_path, proc_start=self._filetime(self._START))
+        snap = _scan_with([_FakeProc("claude", ["claude"], cwd="C:\\Work", pid=4242, create_time=self._START)],
+                          claude_dir=side)
+        assert snap.pid_for("claude-code", "another-session") is None
+        assert snap.pid_for("codex", "sid-pidfor") is None
+
+    def test_the_entrypoint_is_reported_so_the_caller_can_refuse_a_headless_session(self, tmp_path):
+        """`pid_for` does not filter on it: `resume` refuses sdk-cli itself, so the value has to arrive."""
+        side = self._sidecar(tmp_path, entrypoint="sdk-cli", proc_start=self._filetime(self._START))
+        snap = _scan_with([_FakeProc("claude", ["claude", "-p"], cwd="C:\\Work", pid=4242,
+                                     create_time=self._START)], claude_dir=side)
+        assert snap.pid_for("claude-code", "sid-pidfor") == 4242
+        assert snap.session_entrypoint("claude-code", "sid-pidfor") == "sdk-cli"
+
+
 # --- Phase 2: Fresh session detection (probable_fresh_session) ---
 
 from types import SimpleNamespace

@@ -47,6 +47,9 @@ from .config import (load_config, save_config, ConfigUnreadableError,
                      ACP_PERMISSION_MODES)
 from . import agent_profile, autostart, data, data_codex, data_codex_state, icons, launcher, lock_owner, notifications, presence
 from . import overview
+from . import gitstate
+from . import quota
+from . import resume
 from . import hotkeys
 from . import quiet_log
 from . import permission_rows
@@ -1392,9 +1395,13 @@ async def lifespan(app_instance):
     # 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 5
     if _TURN_WATCH_THREAD and sys.platform == "win32":
         _turn_watcher.start()
+    # Scheduled resumes of sessions a quota limit stopped. Drops the ones whose time passed while
+    # PowerAtlas was down, then ticks every few seconds.
+    resume.start_scheduler()
     try:
         yield
     finally:
+        resume.stop_scheduler()
         _turn_watcher.stop()  # first: it is a daemon thread, so exit never waits on it
         task.cancel()
         usage_stop.set()
@@ -3849,6 +3856,9 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     # mapping, and every session in a group shares the group's own hash dir.
     hash_by_sid: dict[str, str] = {}
     exists_flags = _acp_exists_flags([w[0] for w in page_groups])
+    if include_provider:
+        # Dashboard only: the group header shows the branch, read from the git sweep's cache.
+        gitstate.request(_overview_workspaces)
     for index, (ws_cwd, ws_count, _updated, ws_provs) in enumerate(page_groups):
         ws_norm = _normalize_path(ws_cwd)
         is_pinned_folder = include_provider and ws_norm in pinned_folders_norm
@@ -3869,6 +3879,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                 # above), so this needs no separate guard the way the
                 # non-lazy meta dict's color field does below.
                 "color": _resolve_workspace_color(ws_cwd, config),
+                "branch": gitstate.branch_for(ws_cwd),
             }
             rows.append((meta, []))
             continue
@@ -3928,6 +3939,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             meta["pinned"] = is_pinned_folder
             meta["active"] = is_active
             meta["color"] = _resolve_workspace_color(ws_cwd, config)
+            meta["branch"] = gitstate.branch_for(ws_cwd)
         rows.append((meta, page_tagged))
 
     # Pinned sessions from workspaces outside the current page (dashboard/ACP
@@ -4212,9 +4224,11 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
         # the spelling the rows carry.
         from .data import _normalize_path
         pinned_folders = frozenset(_normalize_path(f) for f in config.pinned_folders)
+        gitstate.request(_overview_workspaces)
         payload["workspaces"] = {
             ws_cwd: {"pinned": _normalize_path(ws_cwd) in pinned_folders,
-                     "color": _resolve_workspace_color(ws_cwd, config)}
+                     "color": _resolve_workspace_color(ws_cwd, config),
+                     "branch": gitstate.branch_for(ws_cwd)}
             for ws_cwd in order
         }
     return payload
@@ -4462,7 +4476,15 @@ def _overview_summary() -> dict:
             plans = overview.scan_plans(_overview_workspaces())
             _overview_plans_cache[:] = [time.monotonic(), plans, key]
     usage, usage_state = overview.usage_payload(_overview_filters_cached)
-    return {"plans": plans, "usage": usage, "usage_state": usage_state}
+    # Quota meters and the sessions a limit stopped, read from provider files (each transcript is
+    # re-read only when it changed), with each session's resume state and the dismissed ones removed.
+    quota_block = quota.payload()
+    quota_block["interrupted"] = resume.decorate(quota_block["interrupted"], quota_block["now"])
+    # Repository status comes from the background sweep's cache, never from a git call on this
+    # thread; the sweep starts here when the cache is stale.
+    return {"plans": plans, "usage": usage, "usage_state": usage_state,
+            "git": gitstate.overview_payload(_overview_workspaces),
+            "quota": quota_block}
 
 
 @app.get(_DASHBOARD_OVERVIEW_SUMMARY_PATH)
@@ -4479,6 +4501,57 @@ async def api_dashboard_overview_summary(response: Response):
     """
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(_overview_summary)
+
+
+# --- Resuming sessions a quota limit stopped ---------------------------------------------
+# Four loopback-only writes (none is in `_REMOTE_ALLOWED_PATHS`), behind the same cookie and
+# Origin/Referer rule as every other POST. Each takes a session id and reads everything else (the
+# folder, the reset time, whether it is stopped at all) from the transcript on disk, never from the
+# request. The work happens in `resume.py`; these only parse and answer `{"ok": ..., ...}`.
+
+async def _quota_body(request: Request) -> dict | None:
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+@app.post("/api/quota/resume")
+async def api_quota_resume(request: Request):
+    """Resume a stopped session now: `{"session_id": ..., "prompt": ...}` (prompt optional)."""
+    body = await _quota_body(request)
+    if body is None:
+        return {"ok": False, "error": "Invalid JSON body"}
+    return await asyncio.to_thread(resume.resume_now, body.get("session_id"), body.get("prompt"))
+
+
+@app.post("/api/quota/schedule")
+async def api_quota_schedule(request: Request):
+    """Arm a resume: `{"session_id", "prompt"?, "fire_at"?}`; `fire_at` is epoch seconds."""
+    body = await _quota_body(request)
+    if body is None:
+        return {"ok": False, "error": "Invalid JSON body"}
+    return await asyncio.to_thread(resume.schedule, body.get("session_id"), body.get("prompt"),
+                                   body.get("fire_at"))
+
+
+@app.post("/api/quota/cancel")
+async def api_quota_cancel(request: Request):
+    """Cancel a session's scheduled resume: `{"session_id"}`."""
+    body = await _quota_body(request)
+    if body is None:
+        return {"ok": False, "error": "Invalid JSON body"}
+    return await asyncio.to_thread(resume.cancel, body.get("session_id"))
+
+
+@app.post("/api/quota/dismiss")
+async def api_quota_dismiss(request: Request):
+    """Hide a stopped session's current stop from the Overview: `{"session_id"}`."""
+    body = await _quota_body(request)
+    if body is None:
+        return {"ok": False, "error": "Invalid JSON body"}
+    return await asyncio.to_thread(resume.dismiss, body.get("session_id"))
 
 
 # --- The dashboard Overview's live tiles ----------------------------------

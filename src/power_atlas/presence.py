@@ -395,7 +395,8 @@ class Snapshot:
                  sid_reason: dict[tuple[str, str], str] | None = None,
                  sid_kind: dict[tuple[str, str], str] | None = None,
                  sid_entrypoint: dict[tuple[str, str], str] | None = None,
-                 codex_procs: dict[int, tuple[float, str, int | None]] | None = None):
+                 codex_procs: dict[int, tuple[float, str, int | None]] | None = None,
+                 sid_pid: dict[tuple[str, str], int] | None = None):
         # live_sids: {(provider, session_id)}
         # live_cwds: {(provider, normalized_cwd)}
         self._live_sids = live_sids
@@ -429,6 +430,20 @@ class Snapshot:
         # classified against this map by `web._codex_holder_verdict`; this module only
         # records what the scan saw. 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 3 (D8)
         self._codex_procs = dict(codex_procs or {})
+        # sid_pid: {(provider, session_id) -> pid of the process a validated sidecar names}. Only a
+        # sidecar that passed the liveness checks in `_scan` (the pid is a live process of that
+        # provider and its start time agrees) is here, so a recycled pid is never in it. Trailing and
+        # keyword-defaulted for the same reason as the fields above.
+        self._sid_pid = dict(sid_pid or {})
+
+    def pid_for(self, provider: str, session_id: str) -> int | None:
+        """The pid of the live process serving this exact session, or None.
+
+        Sidecar-backed providers only (claude-code today); a session that argv alone identified
+        has no pid here. Whoever types into that process's console must still check what the
+        process is.
+        """
+        return self._sid_pid.get((provider, session_id))
 
     def codex_procs(self) -> dict[int, tuple[float, str, int | None]]:
         """Every Codex process the scan saw: ``{pid: (create_time, kind, parent_pid)}``."""
@@ -629,6 +644,7 @@ def _scan() -> Snapshot:
     sid_reason: dict[tuple[str, str], str] = {}
     sid_kind: dict[tuple[str, str], str] = {}
     sid_entrypoint: dict[tuple[str, str], str] = {}
+    sid_pid: dict[tuple[str, str], int] = {}
     # pid -> (provider, create_time) for live provider processes only. A
     # sidecar is trusted only against one of these, which is both the cheap
     # guard and the strong one: a recycled pid almost always lands on some
@@ -772,6 +788,7 @@ def _scan() -> Snapshot:
                 continue
             key = (provider, sid)
             live_sids.add(key)
+            sid_pid[key] = pid
             if status:
                 sid_status[key] = status
             if reason:
@@ -804,7 +821,7 @@ def _scan() -> Snapshot:
     codex_procs = {pid: (ct, kind, live_parent(ct, parent))
                    for pid, (ct, kind, parent) in codex_raw.items()}
     return Snapshot(live_sids, live_cwds, sid_to_cwd, sid_status, sid_reason,
-                    sid_kind, sid_entrypoint, codex_procs=codex_procs)
+                    sid_kind, sid_entrypoint, codex_procs=codex_procs, sid_pid=sid_pid)
 
 
 def get_snapshot(force: bool = False) -> Snapshot:

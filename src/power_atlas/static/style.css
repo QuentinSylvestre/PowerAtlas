@@ -1234,6 +1234,9 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-copy-btn { background: none; border: none; padding: 2px; margin-left: 2px; cursor: pointer; color: var(--text-dim); opacity: 0.6; display: inline-flex; align-items: center; vertical-align: middle; border-radius: 3px; transition: color 0.15s, opacity 0.15s; }
 .acp-copy-btn:hover, .acp-copy-btn:focus-visible { opacity: 1; color: var(--text-muted); }
 .acp-copy-btn--ok { color: var(--success) !important; opacity: 1 !important; }
+/* Explicit because `display: inline-flex` above beats the UA's [hidden] rule. Without it the
+   glyph stayed visible beside the Debug log pill whenever no session id was attached. */
+.acp-copy-btn[hidden] { display: none; }
 /* Stop and Close both end something the user cannot get back in place, so they
    read as destructive rather than as two more grey buttons in the row. */
 .acp-danger:hover { border-color: #f87171; color: #f87171; }
@@ -1507,6 +1510,72 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .dash-ov-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .dash-ov-chip { display: inline-flex; align-items: baseline; gap: 6px; padding: 1px 8px; border-radius: 10px; background: var(--surface); font-size: 11px; }
 .dash-ov-chip-n { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* Needs attention: one block per kind of item, each with a quiet sub-label. The repository rows
+   carry their state in words ("3 changed", "↑2"), the colour only reinforces it. */
+.dash-ov-sub { margin-bottom: 4px; font-size: 11px; color: var(--text-dim); }
+.dash-ov-repos { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dash-ov-repo { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 8px; border-radius: var(--radius-sm); font-size: 12.5px; }
+.dash-ov-repo:hover { background: var(--surface-hover); }
+.dash-ov-repo-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.dash-ov-repo-branch { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 11px; color: var(--text-dim); }
+.dash-ov-repo-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.dash-ov-repo-chip { padding: 0 7px; border-radius: 10px; background: var(--surface); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.dash-ov-repo-chip.is-changed { background: rgba(245, 158, 11, 0.14); color: var(--amber); }
+.dash-ov-repo-chip.is-ahead { background: var(--accent-dim); color: var(--accent); }
+.dash-ov-repo-chip.is-quiet { color: var(--text-dim); }
+.dash-ov-more { margin-top: 6px; font-size: 11px; }
+/* Quota strip: one card per provider, two meters each. The tick on a bar is where an even spend of
+   the window would be, so a fill past it is ahead of pace; the words beside the bar say the same, so
+   nothing here depends on colour alone. */
+.dash-ov-qcards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.dash-ov-qcard { min-width: 0; padding: 8px 10px; border: 1px solid var(--card-border); border-radius: var(--radius-sm); background: var(--surface); }
+.dash-ov-qhead { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; min-width: 0; }
+.dash-ov-qname { font-size: 12.5px; font-weight: 600; }
+.dash-ov-qplan { margin-left: auto; font-size: 10.5px; color: var(--text-dim); text-transform: capitalize; }
+.dash-ov-qrow { display: grid; grid-template-columns: 4.2em minmax(40px, 1fr) 3em; align-items: center; gap: 4px 8px; padding: 2px 0; font-size: 11.5px; }
+.dash-ov-qlabel { color: var(--text-muted); }
+.dash-ov-qbar { position: relative; display: block; height: 6px; border-radius: 3px; background: var(--card-bg); }
+.dash-ov-qfill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--accent); }
+.dash-ov-qtick { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: var(--text-muted); opacity: 0.8; }
+.dash-ov-qpct { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.dash-ov-qmeta { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 0 8px; }
+.dash-ov-qcue, .dash-ov-reset { font-size: 11px; color: var(--text-dim); }
+.dash-ov-qunknown { grid-column: 2 / -1; color: var(--text-dim); font-style: italic; }
+.dash-ov-qrow.is-high .dash-ov-qfill { background: var(--amber); }
+.dash-ov-qrow.is-high .dash-ov-qcue, .dash-ov-qrow.is-high .dash-ov-qpct { color: var(--amber); }
+.dash-ov-qrow.is-critical .dash-ov-qfill, .dash-ov-qrow.is-limited .dash-ov-qfill { background: #ef4444; }
+.dash-ov-qrow.is-critical .dash-ov-qcue, .dash-ov-qrow.is-critical .dash-ov-qpct,
+.dash-ov-qrow.is-limited .dash-ov-qcue, .dash-ov-qrow.is-limited .dash-ov-qpct { color: #ef4444; }
+.dash-ov-qrow.is-stale .dash-ov-qfill, .dash-ov-qrow.is-reset .dash-ov-qfill { opacity: 0.45; }
+.dash-ov-setup { grid-column: 1 / -1; margin-top: 6px; font-size: 11.5px; color: var(--text-muted); }
+.dash-ov-setup summary { cursor: pointer; color: var(--accent); }
+.dash-ov-setup-note { margin: 6px 0 4px; }
+.dash-ov-setup-code { margin: 0; padding: 6px 8px; overflow-x: auto; border-radius: var(--radius-sm); background: var(--card-bg); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 10.5px; color: var(--text); }
+@media (max-width: 700px) { .dash-ov-qcards { grid-template-columns: minmax(0, 1fr); } }
+/* Sessions a quota limit stopped. */
+.dash-ov-block:not([hidden]) + .dash-ov-block { margin-top: 10px; }
+.dash-ov-ints { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dash-ov-int { padding: 5px 8px; border-radius: var(--radius-sm); font-size: 12.5px; }
+.dash-ov-int:hover { background: var(--surface-hover); }
+.dash-ov-int-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dash-ov-int-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.dash-ov-int-when { margin: 2px 0 0 20px; font-size: 11px; color: var(--text-dim); }
+.dash-ov-int-ready { color: var(--success); }
+/* Resume controls of an interrupted row: a state line, an optional prompt/time editor, then buttons. */
+.dash-ov-int-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 6px 0 2px 20px; }
+.dash-ov-int-state { flex-basis: 100%; font-size: 11.5px; color: var(--text-muted); }
+.dash-ov-int-state.is-bad { color: var(--amber); }
+.dash-ov-int-opts { flex-basis: 100%; font-size: 11.5px; color: var(--text-muted); }
+.dash-ov-int-opts summary { cursor: pointer; color: var(--text-dim); }
+.dash-ov-int-note { margin: 4px 0 2px; font-size: 11px; color: var(--text-dim); }
+.dash-ov-int-input { display: block; width: 100%; max-width: 420px; margin-top: 4px; padding: 3px 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card-bg); color: var(--text); font: inherit; font-size: 12px; box-sizing: border-box; }
+.dash-ov-int-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.dash-ov-act { font-size: 11.5px; }
+.dash-ov-act-main { border-color: var(--accent); color: var(--accent); }
+.dash-ov-act-quiet { color: var(--text-dim); }
+.dash-ov-act:disabled { opacity: 0.5; cursor: default; }
+.dash-ov-int-msg { flex-basis: 100%; font-size: 11.5px; color: var(--text-muted); }
+.dash-ov-int-msg:empty { display: none; }
 .dash-ov-usage-note { margin-top: 12px; font-size: 11px; font-style: italic; color: var(--text-dim); }
 /* Stage 2 of the usage warm pass: the Claude Code tokens lack the sub-agent
    transcripts. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE */
@@ -2360,6 +2429,8 @@ mark.rail-hit { background: color-mix(in srgb, var(--accent) 32%, transparent); 
 .acp-rail-group-add { flex-shrink: 0; width: 24px; height: 24px; padding: 0; line-height: 1; font-size: 14px; background: transparent; border-color: transparent; color: var(--text-dim); }
 .acp-rail-group-add:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 .acp-rail-group-name { font-size: 12px; font-weight: 600; letter-spacing: -0.2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The workspace's git branch, a quiet monospace label that gives way before the name does. */
+.acp-rail-group-branch { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 10px; color: var(--text-dim); }
 .acp-rail-group-count { margin-left: auto; flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 /* 14 of 65 real workspaces name a directory that is gone, one of them holding
    208 sessions. Amber rather than red: the sessions are still readable records

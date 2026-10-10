@@ -91,6 +91,12 @@ def notify_agent_error(label: str, message: str) -> None:
     _fire_toast(f"PowerAtlas — {label}", f"Error: {detail}")
 
 
+def notify_quota(label: str, message: str) -> None:
+    """Something about a quota limit the user would want to know: a resume that produced no
+    activity, or one that was stopped by the limit again. Fires one toast; the caller decides when."""
+    _fire_toast(f"PowerAtlas — {label}", message.strip() or "see the Overview")
+
+
 def _fire_toast(title: str, body: str) -> None:
     """Platform dispatch. The single seam tests patch -- keep it that way.
 

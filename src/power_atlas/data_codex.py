@@ -1086,6 +1086,16 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
     return ""
 
 
+@_safe("thread_title", str)
+def thread_title(session_id: str) -> str:
+    """The name a listing shows for one thread: the user-given name from the session index, else the cut
+    of its first prompt, else "". The same choice `load_sessions` makes, for one id."""
+    if not isinstance(session_id, str):
+        return ""
+    name = _thread_names(_index_state()).get(session_id.lower())
+    return name or get_first_prompt(session_id, "")[:80]
+
+
 def _cap_value(value, depth: int = 0):
     """Bound a tool argument for display: strings to _ARG_CHARS, lists and dicts to
     _ARG_ITEMS (a final "(+N more)" element or key counts what was dropped), and

@@ -183,6 +183,37 @@ def _is_windows_terminal(terminal: str) -> bool:
     return Path(terminal).stem.lower() == "wt"
 
 
+_TEMPLATE_PLACEHOLDERS = ("{cwd}", "{cmd}", "{pscmd}", "{title}", "{wt_profile}")
+
+
+def _is_template(terminal: str) -> bool:
+    return any(p in terminal for p in _TEMPLATE_PLACEHOLDERS)
+
+
+def _runs_wt(terminal: str) -> bool:
+    """True when the command runs Windows Terminal: `wt` itself, or a template whose program is `wt`."""
+    first = terminal.split()[0] if terminal.split() else ""
+    return Path(first.strip("\"'")).stem.lower() == "wt"
+
+
+def _wt_escape(value: str) -> str:
+    """Windows Terminal reads an unescaped `;` anywhere in its command line, quoted or not, as the end of
+    one sub-command and the start of the next (measured 2026-10-09: a `;` inside a quoted `-Command`
+    argument made `wt` run a truncated command). `\\;` reaches the program as a plain `;`."""
+    return value.replace(";", "\\;")
+
+
+def _terminal_takes_prompt(terminal: str) -> bool:
+    """True when a prompt can be passed through this terminal form without a shell reading it again.
+
+    Windows Terminal, PowerShell and the Linux terminals take arguments as separate elements or as a
+    single-quoted PowerShell literal. The `cmd.exe` forms join the arguments into one string that cmd.exe
+    parses, where a prompt's extra words become options and its `"` and `&` can start a second command."""
+    if _is_template(terminal):
+        return not _template_invokes_cmd(terminal)
+    return Path(terminal).stem.lower() in ("wt", "pwsh") or Path(terminal).stem.lower() in _LINUX_TERMINALS
+
+
 def launch_session(
     cwd: str,
     session_id: str | None = None,
@@ -190,11 +221,24 @@ def launch_session(
     default_args: str = "",
     launch_profile: LaunchProfile | None = None,
     session_title: str = "",
+    prompt: str = "",
 ) -> LaunchResult:
-    """Launch a provider session in a terminal (or directly for non-terminal providers). Returns result, never raises."""
+    """Launch a provider session in a terminal (or directly for non-terminal providers). Returns result, never raises.
+
+    `prompt`, for a terminal-based provider only, is passed as the last argument, so the resumed session
+    starts by answering it (`claude --resume <id> "<prompt>"`). It reaches the command line through the same
+    quoting as every other argument; it is also refused when it could change what that argument means:
+    a leading "-" would read as an option, and a control character ends a statement in a script.
+    """
     profile = launch_profile or LaunchProfile()
     binary = _PROVIDER_BINARY.get(provider, provider)
     display = _PROVIDER_DISPLAY.get(provider, provider)
+
+    if prompt:
+        if not _PROVIDER_TERMINAL.get(provider, True):
+            return LaunchResult(False, session_id, cwd, error=f"{display} cannot be started with a prompt")
+        if prompt.startswith("-") or _CONTROL_CHARS_RE.search(prompt) or len(prompt) > 4000:
+            return LaunchResult(False, session_id, cwd, error="Invalid prompt")
 
     if not shutil.which(binary):
         return LaunchResult(
@@ -267,6 +311,14 @@ def launch_session(
         return LaunchResult(False, session_id, cwd, error=str(e))
     if default_args:
         cli_args += extra_args
+    if prompt:
+        if not _terminal_takes_prompt(terminal):
+            return LaunchResult(False, session_id, cwd, error=(
+                "A prompt cannot be passed through a cmd.exe terminal. Use Windows Terminal or PowerShell."))
+        if _runs_wt(terminal) and "\\;" in prompt:
+            return LaunchResult(False, session_id, cwd, error=(
+                "In Windows Terminal a prompt cannot hold a backslash followed by a semicolon."))
+        cli_args.append(prompt)
 
     title = f"{display} - {Path(cwd).name}" + (f" - {session_title}" if session_title else "")
 
@@ -384,13 +436,15 @@ def _build_template_command(template: str, cwd: str, kiro_args: list[str], title
     """
     parts = re.split(r"(\{cwd\}|\{cmd\}|\{pscmd\}|\{title\}|\{wt_profile\})", template)
     result: list[str] = []
+    # A template that runs Windows Terminal gets every substituted value `;`-escaped (see `_wt_escape`).
+    esc = _wt_escape if _runs_wt(template) else (lambda v: v)
     for part in parts:
         if part == "{cwd}":
-            result.append(cwd)
+            result.append(esc(cwd))
         elif part == "{cmd}":
-            result.extend(kiro_args)
+            result.extend(esc(a) for a in kiro_args)
         elif part == "{pscmd}":
-            result.append(_build_powershell_invocation(kiro_args))
+            result.append(esc(_build_powershell_invocation(kiro_args)))
         elif part == "{title}":
             result.append(_template_title(template, title))
         elif part == "{wt_profile}":
@@ -445,22 +499,22 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
     """Build terminal-specific command list. Returns None if cwd is unsafe for cmd."""
     t = Path(terminal).stem.lower()
 
-    if "{cwd}" in terminal or "{cmd}" in terminal or "{pscmd}" in terminal or "{title}" in terminal or "{wt_profile}" in terminal:
+    if _is_template(terminal):
         return _build_template_command(terminal, cwd, kiro_args, title=title, wt_profile=wt_profile)
 
     if t == "wt":
         cmd = [terminal]
         if title:
             cmd += ["--title", _sanitize_title(title)]
-        cmd += ["-p", wt_profile, "-d", cwd]
+        cmd += ["-p", wt_profile, "-d", _wt_escape(cwd)]
         # Use pwsh -NoExit -Command to preserve MCP server connections
         pwsh = shutil.which("pwsh")
         if pwsh:
-            ps_command = _build_powershell_invocation(kiro_args)
+            ps_command = _wt_escape(_build_powershell_invocation(kiro_args))
             cmd += ["--", pwsh, "-NoExit", "-Command", ps_command]
         else:
             # pwsh not found — fall back to direct args
-            cmd += ["--", *kiro_args]
+            cmd += ["--", *(_wt_escape(a) for a in kiro_args)]
         return cmd
     if t == "pwsh":
         location = _build_powershell_location(cwd, title)

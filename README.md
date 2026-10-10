@@ -146,9 +146,40 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   attachments, a read-only sub-agent/crew panel for fan-outs and workflow steps (a step that stops reporting reads "no longer reporting"), and automatic reconnect with exponential
   backoff if the connection drops. `/acp` remains the only surface reachable from another device — the
   dashboard's panel is loopback-only, like the rest of the dashboard
+- A workspace header in the dashboard rail shows the folder's git branch beside its name, wherever the
+  rail draws a workspace header. The repository's change status is in the Overview instead.
 - When no session is open, the dashboard's right panel shows an **Overview**. Like the rest of the
   dashboard, it is loopback-only. It reads transcript files and never subscribes to a session, so it
-  does not suppress notifications. It has three sections:
+  does not suppress notifications. Top to bottom it has:
+  - *Quota* shows the 5-hour and weekly windows of Claude Code and Codex: percent used, a tick where
+    an even spend of the window would be, and when the window resets (a clock time and a countdown).
+    A reading that is not current says so (`stale since 14:02`, `reset, no reading since`, `no live
+    data`), and the words `high`, `critical` and `ahead of pace` accompany the colours. Codex needs
+    no setup: its limits are read from the newest rollout. Claude Code reports live percentages only
+    to the statusline command, so until you add the few lines the card offers ("Show live Claude
+    quota") to your own statusline script, Claude shows only what a limit hit in a transcript says.
+    The lines copy the latest statusline payload, when it carries `rate_limits`, to
+    `claude-statusline.json` in PowerAtlas's folder under `%LOCALAPPDATA%` (a shell match and one
+    write, no extra process); PowerAtlas never edits your Claude Code settings and never reads its
+    credentials. The agent playbook's `providers/claude/statusline-command.sh` already has them.
+  - *Needs attention* lists what is waiting on you. *Stopped by a quota limit* lists the Claude Code
+    sessions whose last message is a quota hit and the Codex threads whose last turn a usage limit
+    refused (and kiro-cli sessions that stopped on a usage limit, which have no reset time), with the
+    window, the reset time, and a session leaves the list when its conversation goes on, when you
+    dismiss it, or two days after the reset. For a Claude Code session, **Resume now** opens a
+    terminal running `claude --resume <id> "<prompt>"`, or, when the session's terminal is still open
+    and the quota has reset, types the prompt into it. For a Codex thread it opens a terminal running
+    `codex resume <id> "<prompt>"`; a thread that is still open in a terminal is never typed into, and
+    the row says to continue it there. A Codex stop takes its reset time from the last full window
+    in the rollout, else from the message's "try again at" clock time; with neither, the row says the
+    reset time is unknown and offers only Dismiss.
+    **Schedule** does the same a minute after the reset (or at a time you choose) while PowerAtlas is
+    running. The prompt defaults to `resume`. A schedule that comes due while PowerAtlas is not
+    running is dropped at the next start. If the quota had not really reset, the resume is armed once
+    more for the new reset time; if nothing happens within three minutes you get a toast (when
+    notifications are on). *Uncommitted or unpushed work* lists repositories with tracked changes,
+    commits ahead of their upstream, or a branch with local-only commits and no upstream; untracked
+    files show as a quiet count. It is read in the background about once a minute and never fetches.
   - *Live now* shows up to 8 tiles, one per live session. Each tile shows the last few events of the
     transcript: assistant text, tool calls, and ✓/✗ results. Tiles refresh about every 2 s while the
     Overview and the browser tab are both visible. The All/PowerAtlas filter narrows the list to the

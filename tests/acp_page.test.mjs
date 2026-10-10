@@ -15067,8 +15067,27 @@ function loadDashPicker(opts = {}) {
   byId.get("dashPanelTitle").textContent = "Overview";
   byId.set("dashHome", new El("button"));
   byId.get("dashHome").hidden = true;
-  for (const id of ["dashOverview", "dashOvLive", "dashOvPlans", "dashOvUsage"]) {
+  for (const id of ["dashOverview", "dashOvQuota", "dashOvAttention", "dashOvLive", "dashOvPlans", "dashOvUsage"]) {
     byId.set(id, new El("div"));
+  }
+  // The Quota body starts on "Loading…"; the interrupted block starts hidden and empty, as in the markup.
+  byId.set("dashOvQuotaBody", new El("div"));
+  {
+    const loading = new El("div");
+    loading.className = "dash-ov-loading";
+    loading.textContent = "Loading…";
+    byId.get("dashOvQuotaBody").appendChild(loading);
+  }
+  byId.set("dashOvInterruptedBlock", new El("div"));
+  byId.get("dashOvInterruptedBlock").hidden = true;
+  // Needs attention holds one block per kind of item; the repositories block starts on the
+  // markup's "Loading…" line.
+  byId.set("dashOvReposBlock", new El("div"));
+  {
+    const loading = new El("div");
+    loading.className = "dash-ov-loading";
+    loading.textContent = "Loading…";
+    byId.get("dashOvReposBlock").appendChild(loading);
   }
   // The Active plans body, holding the markup's "Loading…" line until the
   // first summary lands. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
@@ -21422,6 +21441,7 @@ check("dashboard rail: the 60 s refresh also refreshes an open group the shared 
   let renders = 0;
   const box = {
     dashRailGroups: groups, dashRailFlat: [], dashRailPinned: [], dashRailGroupPage: 1, dashRailMode: "project",
+    dashRailGroupsByCwd: Object.fromEntries(groups.map((g) => ["c:" + g.cwd, g])),
     dashRailBusy: false, dashRailFilter: "", DASH_RAIL_GROUP_SIZE: 10, DASH_RAIL_PROJECT_PAGE_SIZE: 10,
     window: { _activeProvider: "all", _activeTag: "", _activeTimeFilter: "" },
     dashRailLoadAcp: () => {},
@@ -21434,7 +21454,7 @@ check("dashboard rail: the 60 s refresh also refreshes an open group the shared 
       if (params.cwd === "C:\\lazy") {
         return Promise.resolve({ groups: [{ cwd: "C:\\lazy", sessions: [{ ...codexRow, status: "idle" }] }] });
       }
-      return Promise.resolve({ groups: [{ cwd: "C:\\covered", sessions: [row("k1", "kiro-cli-v3", { live: true })] },
+      return Promise.resolve({ groups: [{ cwd: "C:\\covered", branch: "main", sessions: [row("k1", "kiro-cli-v3", { live: true })] },
                                         { cwd: "C:\\lazy", sessions: [] }], pinned: [] });
     },
   };
@@ -21447,6 +21467,8 @@ check("dashboard rail: the 60 s refresh also refreshes an open group the shared 
     "only an open group the listing left lazy, holding a live or Codex row, is refreshed on its own");
   assertEqual(codexRow.status, "idle", "and its row follows the answer");
   assert(renders >= 1, "the rail is drawn again");
+  // The first listing after startup precedes the git sweep, so a group has no branch until a later poll.
+  assertEqual(groups[2].branch, "main", "a branch the first listing lacked appears on the next refresh");
 });
 
 check("dashboard rail: at most three open lazy groups are refreshed on their own per tick", async () => {
@@ -21457,6 +21479,7 @@ check("dashboard rail: at most three open lazy groups are refreshed on their own
   const fetched = [];
   const box = {
     dashRailGroups: groups, dashRailFlat: [], dashRailPinned: [], dashRailGroupPage: 1, dashRailMode: "project",
+    dashRailGroupsByCwd: Object.fromEntries(groups.map((g) => ["c:" + g.cwd, g])),
     dashRailBusy: false, dashRailFilter: "", DASH_RAIL_GROUP_SIZE: 10, DASH_RAIL_PROJECT_PAGE_SIZE: 10,
     window: { _activeProvider: "all", _activeTag: "", _activeTimeFilter: "" },
     dashRailLoadAcp: () => {}, dashRenderRail: () => {},
@@ -22409,6 +22432,583 @@ check("mcpIndicatorHiddenRuleIsClassScoped", () => {
   assert(/^\.acp-mcp-indicator\[hidden\]\s*\{[^}]*display:\s*none\s*!important/m.test(css),
     "style.css has no class-scoped `.acp-mcp-indicator[hidden] { display: none !important }` " +
     "rule, so the dashboard's indicator ignores its hidden attribute");
+});
+
+// The copy glyph beside the session-id label is hidden with the `hidden` attribute while no
+// session id is attached. `.acp-copy-btn { display: inline-flex }` beats the UA's [hidden] rule,
+// so without its own rule the bare glyph showed next to the Debug log pill on both pages (seen
+// 2026-10-09 in the dashboard's Overview and read-only transcripts). Source check, same reason as
+// above: the DOM stand-in has no cascade. Comments stripped so prose cannot satisfy it.
+check("copyButtonHiddenRuleExists", () => {
+  const css = fs.readFileSync(
+    path.join(HERE, "..", "src", "power_atlas", "static", "style.css"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  assert(/^\.acp-copy-btn\[hidden\]\s*\{[^}]*display:\s*none/m.test(css),
+    "style.css has no `.acp-copy-btn[hidden] { display: none }` rule, so the copy glyph " +
+    "stays visible with no session attached");
+});
+
+// ---- Overview "Needs attention": repositories with uncommitted or unpushed work; rail branch ----
+
+function ovRepo(over = {}) {
+  return Object.assign({
+    path: "C:\\dev\\proj", name: "proj", branch: "main", detached: false, unborn: false,
+    upstream: true, ahead: 0, changed: 0, untracked: 0, no_upstream: false,
+  }, over);
+}
+
+function ovRepoRows(p) {
+  return p.el("dashOvReposBlock").querySelectorAll(".dash-ov-repo");
+}
+
+check("dashboard overview repos: a row shows name and branch, with a chip for each kind of work", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderRepos({ state: "ready", repos: [
+    ovRepo({ name: "alpha", branch: "feat/x", changed: 3, ahead: 2, untracked: 5 }),
+    ovRepo({ name: "beta", no_upstream: true }),
+  ] });
+  const [a, b] = ovRepoRows(p);
+  assertEqual(a.querySelector(".dash-ov-repo-name").textContent, "alpha");
+  assertEqual(a.querySelector(".dash-ov-repo-branch").textContent, "feat/x");
+  assertEqual(a.querySelector(".is-changed").textContent, "3 changed");
+  assertEqual(a.querySelector(".is-ahead").textContent, "\u21912");
+  assertEqual(a.querySelector(".is-quiet").textContent, "5 untracked");
+  assertEqual(a.querySelectorAll(".dash-ov-repo-chip").length, 3);
+  assertEqual(b.querySelector(".is-ahead").textContent, "no upstream");
+  assertEqual(b.querySelector(".is-changed"), null, "no changes, no changed chip");
+  assertEqual(b.querySelector(".is-quiet"), null, "no untracked files, no quiet chip");
+  assertEqual(a.title, "C:\\dev\\proj", "the full path rides on the row's tooltip");
+});
+
+check("dashboard overview repos: empty means clean once the sweep is ready, and checking while it warms", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderRepos({ state: "warming", repos: [] });
+  assertEqual(p.el("dashOvReposBlock").textContent, "Checking repositories\u2026");
+  p.sandbox.dashOvRenderRepos({ state: "ready", repos: [] });
+  assertEqual(p.el("dashOvReposBlock").textContent, "No repository has uncommitted or unpushed work");
+  p.sandbox.dashOvRenderRepos(null);
+  assertEqual(p.el("dashOvReposBlock").textContent, "No repository has uncommitted or unpushed work",
+    "a summary without a git block leaves what is drawn");
+});
+
+check("dashboard overview repos: the same data keeps the nodes, changed data redraws", () => {
+  const p = loadDashPicker();
+  const git = () => ({ state: "ready", repos: [ovRepo({ changed: 1 })] });
+  p.sandbox.dashOvRenderRepos(git());
+  const [first] = ovRepoRows(p);
+  p.sandbox.dashOvRenderRepos(git());
+  assert(ovRepoRows(p)[0] === first, "an identical refresh must not rebuild the rows");
+  p.sandbox.dashOvRenderRepos({ state: "ready", repos: [ovRepo({ changed: 2 })] });
+  assertEqual(ovRepoRows(p)[0].querySelector(".is-changed").textContent, "2 changed");
+});
+
+check("dashboard overview repos: only the first six show, and Show N more reveals the rest and back", () => {
+  const p = loadDashPicker();
+  const repos = Array.from({ length: 9 }, (_, i) => ovRepo({ name: "r" + i, changed: 9 - i }));
+  p.sandbox.dashOvRenderRepos({ state: "ready", repos });
+  assertEqual(ovRepoRows(p).length, 6, "capped at six");
+  const more = () => p.el("dashOvReposBlock").querySelector(".dash-ov-more");
+  assertEqual(more().textContent, "Show 3 more");
+  assertEqual(more().getAttribute("aria-expanded"), "false");
+  more().dispatch("click");
+  assertEqual(ovRepoRows(p).length, 9, "all nine after the click");
+  assertEqual(more().textContent, "Show fewer");
+  assertEqual(more().getAttribute("aria-expanded"), "true");
+  p.sandbox.dashOvRenderRepos({ state: "ready", repos });
+  assertEqual(ovRepoRows(p).length, 9, "a refresh keeps the list expanded");
+  more().dispatch("click");
+  assertEqual(ovRepoRows(p).length, 6);
+  p.sandbox.dashOvRenderRepos({ state: "ready", repos: repos.slice(0, 6) });
+  assertEqual(more(), null, "six or fewer needs no toggle");
+});
+
+check("dashboard overview repos: names and branches are drawn as text, counts as whole numbers", () => {
+  const p = loadDashPicker();
+  const evil = "<img src=x onerror=alert(1)>";
+  p.sandbox.dashOvRenderRepos({ state: "ready", repos: [
+    ovRepo({ name: evil, branch: evil, changed: "7; drop", ahead: -4, untracked: 1.9 }),
+  ] });
+  const [row] = ovRepoRows(p);
+  assertEqual(row.querySelector(".dash-ov-repo-name").textContent, evil);
+  assertEqual(row.querySelector(".dash-ov-repo-branch").textContent, evil);
+  assertEqual(row.querySelector(".is-changed"), null, "a non-numeric count is no count");
+  assertEqual(row.querySelector(".is-ahead"), null, "a negative count is no count");
+  assertEqual(row.querySelector(".is-quiet").textContent, "1 untracked");
+});
+
+check("dashboard overview repos: the summary draws them, and a failed first load says so", async () => {
+  const p = loadDashPicker();
+  ovSummaryFetch(p, { plans: [], usage: null, usage_state: "cold",
+                      git: { state: "ready", repos: [ovRepo({ name: "alpha", changed: 1 })] } });
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  assertEqual(ovRepoRows(p).length, 1);
+  const q = loadDashPicker();
+  q.sandbox.fetch = () => Promise.reject(new Error("down"));
+  q.sandbox.dashOverviewRefreshSummary();
+  await q.settle(); await q.settle();
+  assertEqual(q.el("dashOvReposBlock").textContent, "Could not check repositories.");
+});
+
+// ---- Overview quota strip and interrupted sessions ------------------------------------------------
+
+const ovNowS = () => Math.floor(Date.now() / 1000);
+
+function ovWin(over = {}) {
+  return Object.assign({ state: "live", used_percent: 28, resets_at: ovNowS() + 3 * 3600 + 30,
+                         elapsed: 0.4, source: "statusline", captured_at: ovNowS() - 60 }, over);
+}
+
+function ovQuota(over = {}) {
+  return Object.assign({
+    claude: { state: "ready", captured_at: ovNowS() - 60, windows: {
+      five_hour: ovWin(), seven_day: ovWin({ used_percent: 37, resets_at: ovNowS() + 5 * 86400 + 6 * 3600 + 30, elapsed: 0.2 }) } },
+    codex: { state: "ready", captured_at: ovNowS() - 60, plan: "plus", windows: {
+      five_hour: ovWin({ used_percent: 19, source: "rollout" }), seven_day: null } },
+    interrupted: [],
+  }, over);
+}
+
+const ovRows = (p) => p.el("dashOvQuotaBody").querySelectorAll(".dash-ov-qrow");
+
+check("dashboard overview quota: a card per provider with 5-hour and weekly meters, percent, tick and reset", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderQuota(ovQuota());
+  const cards = p.el("dashOvQuotaBody").querySelectorAll(".dash-ov-qcard");
+  assertEqual(cards.length, 2);
+  assertEqual(cards[0].querySelector(".dash-ov-qname").textContent, "Claude Code");
+  assertEqual(cards[1].querySelector(".dash-ov-qplan").textContent, "plus");
+  const [five, week] = cards[0].querySelectorAll(".dash-ov-qrow");
+  assertEqual(five.querySelector(".dash-ov-qlabel").textContent, "5-hour");
+  assertEqual(five.querySelector(".dash-ov-qpct").textContent, "28%");
+  assertEqual(five.querySelector(".dash-ov-qfill").style.width, "28%");
+  assertEqual(five.querySelector(".dash-ov-qtick").style.left, "40%");
+  assert(/^resets .+ \u00b7 in 3h 0m$/.test(five.querySelector(".dash-ov-reset").textContent),
+    "reset reads clock time and countdown: " + five.querySelector(".dash-ov-reset").textContent);
+  assertEqual(week.querySelector(".dash-ov-qlabel").textContent, "Weekly");
+  assert(/in 5d 6h$/.test(week.querySelector(".dash-ov-reset").textContent), "weekly counts in days");
+  assertEqual(five.querySelector(".dash-ov-qcue"), null, "28% at 40% elapsed is under pace and says nothing");
+  assertEqual(cards[1].querySelectorAll(".dash-ov-qrow")[1].querySelector(".dash-ov-qunknown").textContent,
+    "no live data", "a window the provider did not report is unknown, not 0%");
+});
+
+check("dashboard overview quota: high, critical and ahead-of-pace are said in words", () => {
+  const p = loadDashPicker();
+  const q = ovQuota();
+  q.claude.windows.five_hour = ovWin({ used_percent: 72, elapsed: 0.9 });
+  q.claude.windows.seven_day = ovWin({ used_percent: 95, elapsed: 0.99 });
+  q.codex.windows.five_hour = ovWin({ used_percent: 60, elapsed: 0.3 });
+  p.sandbox.dashOvRenderQuota(q);
+  const rows = ovRows(p);
+  assertEqual(rows[0].querySelector(".dash-ov-qcue").textContent, "high");
+  assert(rows[0].classList.contains("is-high"));
+  assertEqual(rows[1].querySelector(".dash-ov-qcue").textContent, "critical");
+  assert(rows[1].classList.contains("is-critical"));
+  assertEqual(rows[2].querySelector(".dash-ov-qcue").textContent, "ahead of pace");
+});
+
+check("dashboard overview quota: a stale, limited or reset reading says so and a reset one shows no percentage", () => {
+  const p = loadDashPicker();
+  const q = ovQuota();
+  q.claude.windows.five_hour = ovWin({ state: "stale", captured_at: ovNowS() - 7200 });
+  q.claude.windows.seven_day = ovWin({ state: "limited", used_percent: 100, source: "hit" });
+  q.codex.windows.five_hour = ovWin({ state: "reset", used_percent: null, resets_at: ovNowS() - 5, elapsed: null });
+  p.sandbox.dashOvRenderQuota(q);
+  const rows = ovRows(p);
+  assert(/^stale since /.test(rows[0].querySelector(".dash-ov-qcue").textContent));
+  assertEqual(rows[0].querySelector(".dash-ov-qpct").textContent, "28%", "stale keeps its last value, labelled");
+  assertEqual(rows[1].querySelector(".dash-ov-qcue").textContent, "critical");
+  assert(rows[1].querySelectorAll(".dash-ov-qcue").some((n) => n.textContent === "limit reached"));
+  assertEqual(rows[2].querySelector(".dash-ov-qpct").textContent, "\u2013");
+  assertEqual(rows[2].querySelector(".dash-ov-qfill"), null, "no bar fill without a percentage");
+  assertEqual(rows[2].querySelector(".dash-ov-qtick"), null);
+  assertEqual(rows[2].querySelector(".dash-ov-reset"), null, "a passed reset is not shown as upcoming");
+  assertEqual(rows[2].querySelector(".dash-ov-qcue").textContent, "reset, no reading since");
+});
+
+check("dashboard overview quota: with no Claude snapshot the card offers the snippet, and Codex says nothing reported", () => {
+  const p = loadDashPicker();
+  const snippet = "pa_dir=\"$LOCALAPPDATA/power-atlas\"\njq -ce '{x: 1}'";
+  p.sandbox.dashOvRenderQuota(ovQuota({
+    claude: { state: "no_snapshot", captured_at: null, setup: snippet, windows: { five_hour: null, seven_day: null } },
+    codex: { state: "none", captured_at: null, plan: "", windows: { five_hour: null, seven_day: null } },
+  }));
+  const cards = p.el("dashOvQuotaBody").querySelectorAll(".dash-ov-qcard");
+  assertEqual(cards[0].querySelectorAll(".dash-ov-qunknown").length, 2, "both Claude windows are unknown");
+  assertEqual(cards[0].querySelector(".dash-ov-setup-code").textContent, snippet);
+  assertEqual(cards[0].querySelector("summary").textContent, "Show live Claude quota");
+  assertEqual(cards[1].querySelector(".dash-ov-setup"), null, "Codex needs no setup");
+  assertEqual(cards[1].querySelector(".dash-ov-empty").textContent, "No Codex session has reported its limits yet");
+});
+
+check("dashboard overview quota: the same data keeps the nodes and only moves the countdown; new data redraws", () => {
+  const p = loadDashPicker();
+  const body = p.el("dashOvQuotaBody");
+  const q = ovQuota();
+  p.sandbox.dashOvRenderQuota(q);
+  const cards = body.querySelector(".dash-ov-qcards");
+  const reset = body.querySelector(".dash-ov-reset");
+  // Pretend the clock moved on: the countdown is re-derived from the node's own reset time.
+  reset.dataset.resets = String(ovNowS() + 20 * 60 + 30);
+  p.sandbox.dashOvRenderQuota(q);
+  assert(body.querySelector(".dash-ov-qcards") === cards, "identical data must not rebuild the cards");
+  assert(body.querySelector(".dash-ov-reset") === reset, "the reset node is the same node");
+  assert(/in 20 min$/.test(reset.textContent), "the countdown moved on: " + reset.textContent);
+  const changed = ovQuota();
+  changed.claude.windows.five_hour.used_percent = 50;
+  p.sandbox.dashOvRenderQuota(changed);
+  assert(body.querySelector(".dash-ov-qcards") !== cards, "changed data redraws");
+  assertEqual(ovRows(p)[0].querySelector(".dash-ov-qpct").textContent, "50%");
+});
+
+check("dashboard overview quota: numbers are clamped, unknown states fall back, text is text", () => {
+  const p = loadDashPicker();
+  const evil = "<img src=x onerror=alert(1)>";
+  const q = ovQuota();
+  q.claude.windows.five_hour = ovWin({ state: "bogus", used_percent: 140, elapsed: -3 });
+  q.codex.plan = evil;
+  p.sandbox.dashOvRenderQuota(q);
+  const five = ovRows(p)[0];
+  assertEqual(five.querySelector(".dash-ov-qfill").style.width, "100%");
+  assertEqual(five.querySelector(".dash-ov-qtick").style.left, "0%");
+  assert(five.classList.contains("is-live"), "an unknown state reads as live, never as a class from the server");
+  assertEqual(p.el("dashOvQuotaBody").querySelectorAll(".dash-ov-qplan")[0].textContent, evil);
+});
+
+check("dashboard overview quota: the clock and countdown helpers", () => {
+  const p = loadDashPicker();
+  const s = p.sandbox, now = ovNowS();
+  assertEqual(s.dashOvCountdown(now + 30), "in <1 min");
+  assertEqual(s.dashOvCountdown(now + 12 * 60 + 30), "in 12 min");
+  assertEqual(s.dashOvCountdown(now + 2 * 3600 + 14 * 60 + 30), "in 2h 14m");
+  assertEqual(s.dashOvCountdown(now + 3 * 86400 + 4 * 3600 + 30), "in 3d 4h");
+  assertEqual(s.dashOvCountdown(now - 1), "now");
+  assertEqual(s.dashOvCountdown("garbage"), "");
+  assertEqual(s.dashOvClock("garbage"), "");
+  const today = s.dashOvClock(now), later = s.dashOvClock(now + 3 * 86400);
+  assert(today.length > 0 && /\d/.test(today), "a time of day is drawn: " + today);
+  assert(later.length > today.length, "another day adds the date: " + later + " vs " + today);
+});
+
+function ovInterrupted(over = {}) {
+  return Object.assign({ id: "u1", provider: "claude-code", title: "Fix the thing", cwd: "C:\\dev\\proj", name: "proj",
+                         window: "five_hour", resets_at: ovNowS() + 3600 + 30, hit_at: ovNowS() - 60, state: "limited" }, over);
+}
+
+check("dashboard overview interrupted: rows show title, workspace, window and the reset, and an empty list hides the block", () => {
+  const p = loadDashPicker();
+  const block = p.el("dashOvInterruptedBlock");
+  assertEqual(block.hidden, true, "hidden while there is nothing");
+  p.sandbox.dashOvRenderInterrupted([
+    ovInterrupted(),
+    ovInterrupted({ id: "u2", window: "seven_day", state: "ready", title: "Second" }),
+    ovInterrupted({ id: "sess_k", provider: "kiro-cli-v3", window: "daily", resets_at: null, title: "Kiro job" }),
+  ]);
+  assertEqual(block.hidden, false);
+  const rows = block.querySelectorAll(".dash-ov-int");
+  assertEqual(rows.length, 3);
+  assertEqual(rows[0].querySelector(".dash-ov-int-title").textContent, "Fix the thing");
+  assertEqual(rows[0].querySelector(".dash-ov-ws").textContent, "proj");
+  assertEqual(rows[0].querySelector(".dash-ov-badge").textContent, "5-hour limit");
+  assert(/^resets .+ \u00b7 in 1h 0m$/.test(rows[0].querySelector(".dash-ov-reset").textContent));
+  assertEqual(rows[1].querySelector(".dash-ov-badge").textContent, "weekly limit");
+  assertEqual(rows[1].querySelector(".dash-ov-int-ready").textContent, "Quota reset, ready to resume");
+  assertEqual(rows[2].querySelector(".dash-ov-badge").textContent, "daily limit");
+  assertEqual(rows[2].querySelector(".dash-ov-reset").textContent, "resets tomorrow");
+  assertEqual(rows[0].querySelector(".dash-ov-tile-icon").src, "/api/launcher-icon/provider--claude-code");
+  p.sandbox.dashOvRenderInterrupted([]);
+  assertEqual(block.hidden, true);
+  assertEqual(block.textContent, "", "nothing left drawn in it");
+  assertEqual(block.querySelectorAll(".dash-ov-int").length, 0);
+});
+
+// ---- resume controls on an interrupted row ----------------------------------------------------
+
+function ovPosts(p, answer = { ok: true, mode: "terminal" }) {
+  const posts = [];
+  p.sandbox.fetch = (url, opts) => {
+    if (opts && opts.method === "POST") {
+      posts.push({ url: String(url), body: JSON.parse(opts.body) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(answer) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ plans: [], usage: null, usage_state: "cold" }) });
+  };
+  return posts;
+}
+
+const ovButtons = (row) => row.querySelectorAll("button").map((b) => b.textContent);
+const ovButton = (row, label) => row.querySelectorAll("button").find((b) => b.textContent === label);
+
+function ovIntRow(p, over = {}) {
+  p.sandbox.dashOvRenderInterrupted([ovInterrupted(Object.assign({ can_resume: true }, over))]);
+  return p.el("dashOvInterruptedBlock").querySelector(".dash-ov-int");
+}
+
+check("dashboard overview resume: a stopped Claude row offers Resume now, Schedule and Dismiss, and a prompt and time to edit", () => {
+  const p = loadDashPicker();
+  const row = ovIntRow(p);
+  assertEqual(JSON.stringify(ovButtons(row)), JSON.stringify(["Resume now", "Schedule", "Dismiss"]));
+  const [prompt, when] = row.querySelectorAll("input");
+  assertEqual(prompt.type, "text");
+  assertEqual(prompt.placeholder, "resume");
+  assertEqual(when.type, "datetime-local");
+  assert(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(when.value), "the time starts at a minute after the reset: " + when.value);
+});
+
+check("dashboard overview resume: a stopped Codex row offers the same buttons and says it opens a new terminal", () => {
+  const p = loadDashPicker();
+  const row = ovIntRow(p, { id: "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40", provider: "codex" });
+  assertEqual(JSON.stringify(ovButtons(row)), JSON.stringify(["Resume now", "Schedule", "Dismiss"]));
+  assertEqual(row.querySelector(".dash-ov-tile-icon").src, "/api/launcher-icon/provider--codex");
+  const note = row.querySelector(".dash-ov-int-note").textContent;
+  assert(/Opens a new terminal/.test(note) && /continue it there/.test(note), "the Codex note is missing: " + note);
+  assert(!/typed into it/.test(note), "the Claude note must not describe a Codex row: " + note);
+});
+
+check("dashboard overview resume: a Codex stop with no reset time says so and offers only Dismiss", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderInterrupted([ovInterrupted({ provider: "codex", window: "other", resets_at: null, can_resume: false })]);
+  const row = p.el("dashOvInterruptedBlock").querySelector(".dash-ov-int");
+  assertEqual(row.querySelector(".dash-ov-reset").textContent, "reset time unknown");
+  assertEqual(JSON.stringify(ovButtons(row)), JSON.stringify(["Dismiss"]));
+});
+
+check("dashboard overview resume: Resume now posts only the session id and the prompt, and a second click waits", async () => {
+  const p = loadDashPicker();
+  const posts = ovPosts(p);
+  const row = ovIntRow(p);
+  row.querySelectorAll("input")[0].value = "carry on";
+  row.querySelectorAll("input")[0].dispatch("input");
+  ovButton(row, "Resume now").dispatch("click");
+  ovButton(row, "Resume now").dispatch("click");   // while the first is in flight
+  assertEqual(posts.length, 1, "one request at a time");
+  assertEqual(posts[0].url, "/api/quota/resume");
+  assertEqual(JSON.stringify(posts[0].body), JSON.stringify({ session_id: "u1", prompt: "carry on" }));
+  assertEqual(ovButton(row, "Resume now").disabled, true, "buttons are off while it runs");
+  await p.settle(); await p.settle();
+  assertEqual(row.querySelector(".dash-ov-int-msg").textContent, "Opened a terminal.");
+  assertEqual(ovButton(row, "Resume now").disabled, false);
+});
+
+check("dashboard overview resume: Schedule posts the chosen time as epoch seconds, and a refusal is shown on the row", async () => {
+  const p = loadDashPicker();
+  const posts = ovPosts(p, { ok: false, error: "The quota has already reset. Use Resume now." });
+  const row = ovIntRow(p);
+  const when = row.querySelectorAll("input")[1];
+  when.value = "2031-03-04T05:06";
+  when.dispatch("input");
+  ovButton(row, "Schedule").dispatch("click");
+  assertEqual(posts[0].url, "/api/quota/schedule");
+  assertEqual(posts[0].body.session_id, "u1");
+  assertEqual(posts[0].body.fire_at, Math.floor(new Date("2031-03-04T05:06").getTime() / 1000));
+  await p.settle(); await p.settle();
+  assertEqual(row.querySelector(".dash-ov-int-msg").textContent, "The quota has already reset. Use Resume now.");
+});
+
+check("dashboard overview resume: what was typed survives the list being redrawn", () => {
+  const p = loadDashPicker();
+  let row = ovIntRow(p);
+  const prompt = row.querySelectorAll("input")[0];
+  prompt.value = "my own words";
+  prompt.dispatch("input");
+  row.querySelectorAll("input")[1].value = "2031-03-04T05:06";
+  row.querySelectorAll("input")[1].dispatch("input");
+  row = ovIntRow(p, { title: "Renamed, so the list is drawn again" });
+  assertEqual(row.querySelectorAll("input")[0].value, "my own words");
+  assertEqual(row.querySelectorAll("input")[1].value, "2031-03-04T05:06");
+});
+
+check("dashboard overview resume: a scheduled row shows when it fires and offers Cancel, and a watched one only says Resuming", async () => {
+  const p = loadDashPicker();
+  const posts = ovPosts(p);
+  const row = ovIntRow(p, { resume: { state: "scheduled", fire_at: ovNowS() + 3660 + 30, attempt: 2, prompt: "go" } });
+  assertEqual(JSON.stringify(ovButtons(row)), JSON.stringify(["Resume now", "Cancel schedule", "Dismiss"]));
+  assert(/^Resumes .+ · in 1h 1m/.test(row.querySelector(".dash-ov-int-state").textContent), row.querySelector(".dash-ov-int-state").textContent);
+  assert(/second attempt/.test(row.querySelector(".dash-ov-int-state").textContent));
+  assertEqual(row.querySelectorAll("input").length, 0, "no editors while a schedule is armed");
+  ovButton(row, "Resume now").dispatch("click");
+  assertEqual(posts[0].body.prompt, "go", "Resume now uses the scheduled prompt");
+  await p.settle(); await p.settle();
+  ovButton(row, "Cancel schedule").dispatch("click");
+  assertEqual(posts[1].url, "/api/quota/cancel");
+  const watching = ovIntRow(p, { resume: { state: "watching", attempt: 1, detail: "", mode: "terminal" } });
+  assertEqual(JSON.stringify(ovButtons(watching)), JSON.stringify(["Dismiss"]),
+    "a watched resume offers only the way out of one that never reports back");
+  assertEqual(watching.querySelector(".dash-ov-int-state").textContent, "Resuming…");
+});
+
+check("dashboard overview resume: a request in flight survives a redraw, and its answer lands on the new row", async () => {
+  const p = loadDashPicker();
+  let answer = null;
+  p.sandbox.fetch = (url, opts) => {
+    if (opts && opts.method === "POST") {
+      return new Promise((resolve) => {
+        answer = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, mode: "typed" }) });
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ plans: [], usage: null, usage_state: "cold" }) });
+  };
+  const first = ovIntRow(p);
+  ovButton(first, "Resume now").dispatch("click");
+  const fresh = ovIntRow(p, { title: "Redrawn while the request ran" });
+  assert(fresh !== first, "the list was drawn again");
+  assert(fresh.querySelectorAll("button").every((b) => b.disabled), "the new row's buttons are off while it runs");
+  ovButton(fresh, "Resume now").dispatch("click");
+  assertEqual(typeof answer, "function", "the first request is still the only one");
+  answer();
+  await p.settle(); await p.settle();
+  assertEqual(fresh.querySelector(".dash-ov-int-msg").textContent, "Typed into its terminal.");
+  assert(fresh.querySelectorAll("button").every((b) => !b.disabled), "the buttons come back on the row on screen");
+  const again = ovIntRow(p, { title: "Redrawn after the answer" });
+  assertEqual(again.querySelector(".dash-ov-int-msg").textContent, "Typed into its terminal.",
+    "the last answer is kept across a redraw, not lost with the old row");
+});
+
+check("dashboard overview resume: a schedule the server could not save says it will not survive a restart", async () => {
+  const p = loadDashPicker();
+  ovPosts(p, { ok: true, persisted: false });
+  const row = ovIntRow(p);
+  ovButton(row, "Schedule").dispatch("click");
+  await p.settle(); await p.settle();
+  assertEqual(row.querySelector(".dash-ov-int-msg").textContent,
+    "Scheduled, but it could not be saved: it will not survive a restart of PowerAtlas.");
+});
+
+check("dashboard overview resume: the row says an unsent prompt in the terminal is sent along", () => {
+  const p = loadDashPicker();
+  const row = ovIntRow(p);
+  const note = row.querySelector(".dash-ov-int-note");
+  assert(note && /already written in its prompt box/.test(note.textContent), "the note is missing: " + (note && note.textContent));
+});
+
+check("dashboard overview: a refresh asked for while one is in flight runs once more when it ends, and only once", async () => {
+  const p = loadDashPicker();
+  await p.settle(); await p.settle();
+  const releases = [];
+  const urls = [];
+  p.sandbox.fetch = (url) => {
+    urls.push(String(url));
+    return new Promise((resolve) => {
+      releases.push(() => resolve({ ok: true, status: 200, json: () => Promise.resolve({ plans: [], usage: null, usage_state: "cold" }) }));
+    });
+  };
+  p.sandbox.dashOverviewRefreshSummary();
+  p.sandbox.dashOverviewRefreshSummary(true);
+  p.sandbox.dashOverviewRefreshSummary(true);
+  p.sandbox.dashOverviewRefreshSummary();
+  assertEqual(urls.length, 1, "one request at a time");
+  releases[0]();
+  await p.settle(); await p.settle(); await p.settle();
+  assertEqual(urls.length, 2, "the queued refresh ran after the first ended");
+  releases[1]();
+  await p.settle(); await p.settle(); await p.settle();
+  assertEqual(urls.length, 2, "an unqueued refresh is dropped, and a queued one runs once");
+});
+
+check("dashboard overview repositories: a missing git reads as that, not as a clean tree", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashOvRenderRepos({ state: "unavailable", repos: [] });
+  assertEqual(p.el("dashOvReposBlock").textContent, "Git was not found, so repositories cannot be checked.");
+  p.sandbox.dashOvRenderRepos({ state: "ready", repos: [] });
+  assertEqual(p.el("dashOvReposBlock").textContent, "No repository has uncommitted or unpushed work");
+});
+
+check("dashboard overview resume: an ended resume says why and offers Resume again", () => {
+  const p = loadDashPicker();
+  for (const state of ["no_activity", "gave_up", "error"]) {
+    const row = ovIntRow(p, { resume: { state, attempt: 1, detail: "It did not go through: " + state, mode: "" } });
+    assertEqual(row.querySelector(".dash-ov-int-state").textContent, "It did not go through: " + state);
+    assert(row.querySelector(".dash-ov-int-state").classList.contains("is-bad"));
+    assertEqual(JSON.stringify(ovButtons(row)), JSON.stringify(["Resume again", "Schedule", "Dismiss"]));
+  }
+});
+
+check("dashboard overview resume: after the reset only Resume now is offered, and a kiro row can only be dismissed", () => {
+  const p = loadDashPicker();
+  const ready = ovIntRow(p, { state: "ready" });
+  assertEqual(JSON.stringify(ovButtons(ready)), JSON.stringify(["Resume now", "Dismiss"]));
+  assertEqual(ready.querySelectorAll("input").length, 1, "a prompt, but no time to schedule");
+  const kiro = ovIntRow(p, { provider: "kiro-cli-v3", window: "daily", resets_at: null, can_resume: false });
+  assertEqual(JSON.stringify(ovButtons(kiro)), JSON.stringify(["Dismiss"]));
+});
+
+check("dashboard overview resume: a failed request reads as a message, not as silence", async () => {
+  const p = loadDashPicker();
+  const row = ovIntRow(p);
+  p.sandbox.fetch = () => Promise.reject(new Error("down"));
+  ovButton(row, "Dismiss").dispatch("click");
+  await p.settle(); await p.settle();
+  assertEqual(row.querySelector(".dash-ov-int-msg").textContent, "Could not reach PowerAtlas");
+});
+
+check("dashboard overview resume: a row's messages and states are text, not markup", () => {
+  const p = loadDashPicker();
+  const evil = "<img src=x onerror=alert(1)>";
+  const row = ovIntRow(p, { resume: { state: "error", attempt: 1, detail: evil, mode: "" } });
+  assertEqual(row.querySelector(".dash-ov-int-state").textContent, evil);
+});
+
+check("dashboard overview interrupted: text is text, a strange provider id draws no icon", () => {
+  const p = loadDashPicker();
+  const evil = "<img src=x onerror=alert(1)>";
+  p.sandbox.dashOvRenderInterrupted([ovInterrupted({ title: evil, name: evil, provider: "../x\"onerror=1" })]);
+  const row = p.el("dashOvInterruptedBlock").querySelector(".dash-ov-int");
+  assertEqual(row.querySelector(".dash-ov-int-title").textContent, evil);
+  assertEqual(row.querySelector(".dash-ov-tile-icon"), null);
+});
+
+check("dashboard overview quota: the summary draws the strip and the interrupted list", async () => {
+  const p = loadDashPicker();
+  ovSummaryFetch(p, { plans: [], usage: null, usage_state: "cold", git: { state: "ready", repos: [] },
+                      quota: Object.assign(ovQuota(), { interrupted: [ovInterrupted()] }) });
+  p.sandbox.dashOverviewRefreshSummary();
+  await p.settle(); await p.settle();
+  assertEqual(p.el("dashOvQuotaBody").querySelectorAll(".dash-ov-qcard").length, 2);
+  assertEqual(p.el("dashOvInterruptedBlock").querySelectorAll(".dash-ov-int").length, 1);
+  const q = loadDashPicker();
+  q.sandbox.fetch = () => Promise.reject(new Error("down"));
+  q.sandbox.dashOverviewRefreshSummary();
+  await q.settle(); await q.settle();
+  assertEqual(q.el("dashOvQuotaBody").textContent, "Could not read quota.");
+});
+
+check("dashboard rail: a workspace header shows the git branch beside the name, and none without one", () => {
+  const slice = dashRailCut("function dashRailHeadNode(key, label, countText, opts){",
+                            "// Per-workspace-row dropdown menus");
+  const box = {
+    document: { createElement: (tag) => new El(tag) },
+    dashRailIsCollapsed: () => false, dashRailCollapsed: Object.create(null), dashRailFocus: null,
+    dashRenderRail: () => {}, dashRailSetHighlighted: (el, text) => { el.textContent = text; },
+  };
+  vm.createContext(box);
+  vm.runInContext(slice, box, { filename: "index.html#rail-head" });
+  const withBranch = box.dashRailHeadNode("g:/ws", "ws", "3", { title: "/ws", branch: "feat/rail" });
+  const label = withBranch.querySelector(".acp-rail-group-branch");
+  assertEqual(label.textContent, "feat/rail");
+  assertEqual(label.title, "Git branch: feat/rail");
+  const without = box.dashRailHeadNode("g:/ws2", "ws2", "3", { title: "/ws2", branch: "" });
+  assertEqual(without.querySelector(".acp-rail-group-branch"), null, "no branch, no label");
+  assertEqual(withBranch.querySelector(".acp-rail-group-name").textContent, "ws", "the name is unchanged");
+});
+
+check("dashboard rail: a refreshed group adopts the branch the server now reports", () => {
+  const slice = dashRailCut("function dashRailMergeGroup(incoming){", "/** Move a workspace group to the front");
+  const box = {
+    dashRailGroupsByCwd: Object.create(null), dashRailGroups: [],
+    dashRailMergeSessions: () => {},
+  };
+  vm.createContext(box);
+  vm.runInContext(slice, box, { filename: "index.html#rail-merge" });
+  const incoming = (branch) => ({ cwd: "C:\\ws\\a", name: "a", total: 1, session_page: 1, has_more: false,
+                                  exists: true, pinned: false, active: false, color: "", branch, sessions: [] });
+  const key = "c:C:\\ws\\a";
+  box.dashRailMergeGroup(incoming("main"));
+  assertEqual(box.dashRailGroupsByCwd[key].branch, "main");
+  box.dashRailMergeGroup(incoming("feat/y"));
+  assertEqual(box.dashRailGroupsByCwd[key].branch, "feat/y");
+  box.dashRailMergeGroup(incoming(undefined));
+  assertEqual(box.dashRailGroupsByCwd[key].branch, "", "an unknown branch clears the label");
+  assertEqual(box.dashRailGroups.length, 1, "one group, merged in place");
 });
 
 // ---- 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review --------------
