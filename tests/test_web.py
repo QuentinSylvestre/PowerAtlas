@@ -42626,6 +42626,19 @@ def _q_hit(resets_at=_Q_NOW + 3600, window="five_hour", at=_Q_NOW - 60, cwd="C:\
                  "content": [{"type": "text", "text": "You've hit your session limit"}]}, **extra)
 
 
+def _q_bash():
+    """The bash the statusline script runs under on Windows: Git's. A bare `bash` on PATH can be the WSL
+    launcher (System32), which reads LOCALAPPDATA and paths differently, so it is never taken."""
+    git = _shutil_gs.which("git")
+    if git:
+        for rel in ("bin/bash.exe", "usr/bin/bash.exe"):
+            candidate = Path(git).resolve().parent.parent / rel
+            if candidate.is_file():
+                return str(candidate)
+    found = _shutil_gs.which("bash")
+    return found if found and "system32" not in found.lower() else None
+
+
 _CX_LIMIT_TEXT = ("You\u2019ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit "
                   "https://chatgpt.com/settings/usage to purchase more credits or try again at {when}.")
 
@@ -42814,7 +42827,7 @@ class TestQuota:
         os.utime(path, (_Q_NOW - 7200, _Q_NOW - 7200))
         assert _quota_q.payload(_Q_NOW)["claude"]["windows"]["five_hour"]["state"] == "stale"
 
-    @pytest.mark.skipif(_shutil_gs.which("bash") is None, reason="bash is not installed")
+    @pytest.mark.skipif(_q_bash() is None, reason="Git Bash is not installed")
     def test_the_snippet_keeps_the_last_reading_unless_the_payload_carries_limits(self):
         """The pasted lines, run by a real bash exactly as the statusline script would run them."""
         home = self.tmp / "LocalAppData"
@@ -42823,7 +42836,7 @@ class TestQuota:
 
         def run(payload, env_home=home):
             _subprocess_gs.run(
-                [_shutil_gs.which("bash"), "-c", 'input="$1"\n' + _quota_q.STATUSLINE_SNIPPET, "bash", payload],
+                [_q_bash(), "-c", 'input="$1"\n' + _quota_q.STATUSLINE_SNIPPET, "bash", payload],
                 env={**os.environ, "LOCALAPPDATA": str(env_home)}, check=True, capture_output=True)
 
         good = ('{"model":{"display_name":"Opus"},"note":"a $HOME `x` \\"q\\" \'s\'",'
@@ -42841,7 +42854,7 @@ class TestQuota:
         # PowerAtlas has not created its folder, or LOCALAPPDATA is unset: nothing is made, nothing fails.
         run(good, env_home=self.tmp / "elsewhere")
         assert not (self.tmp / "elsewhere").exists()
-        _subprocess_gs.run([_shutil_gs.which("bash"), "-c", 'unset LOCALAPPDATA\ninput="$1"\n' + _quota_q.STATUSLINE_SNIPPET,
+        _subprocess_gs.run([_q_bash(), "-c", 'unset LOCALAPPDATA\ninput="$1"\n' + _quota_q.STATUSLINE_SNIPPET,
                             "bash", good], check=True, capture_output=True)
 
     def test_a_reset_time_in_milliseconds_or_iso_is_read(self):
@@ -43085,6 +43098,94 @@ class TestQuota:
             "message": "boom", "codex_error_info": "internal_server_error"})])
         self._cx(monkeypatch, clean, other)
         assert self._interrupted() == []
+
+    def test_an_interrupted_or_cleanly_finished_turn_after_the_stop_means_the_thread_carried_on(self, monkeypatch):
+        for tail in ([_cx_event(_Q_NOW + 5, "turn_aborted", reason="interrupted")],
+                     [_cx_event(_Q_NOW + 5, "task_complete", error=None)]):
+            self._cx_stopped(monkeypatch, tail=tail)
+            assert self._interrupted(now=_Q_NOW + 10) == [], tail
+
+    def test_both_windows_full_means_the_later_reset_and_either_role_counts(self, monkeypatch):
+        full = _quota_q._full_window
+        both = {"primary": _cx_window(100.0, _Q_NOW + 3600), "secondary": _cx_window(100.0, _Q_NOW + 2 * 86400, 10080)}
+        assert full(both, _Q_NOW) == ("seven_day", _Q_NOW + 2 * 86400)
+        assert full({"secondary": _cx_window(100.0, _Q_NOW + 3600)}, _Q_NOW) == ("five_hour", _Q_NOW + 3600)
+        assert full({"primary": _cx_window(100.0, _Q_NOW + 3600), "secondary": _cx_window(40.0, _Q_NOW + 9e4, 10080)},
+                    _Q_NOW) == ("five_hour", _Q_NOW + 3600), "a window that is not full is not the one"
+
+    def test_a_window_counts_as_full_from_99_percent_and_as_weekly_from_a_day(self):
+        full = _quota_q._full_window
+        assert full({"primary": _cx_window(98.9, _Q_NOW + 60)}, _Q_NOW) is None
+        assert full({"primary": _cx_window(99.0, _Q_NOW + 60)}, _Q_NOW) == ("five_hour", _Q_NOW + 60)
+        assert full({"primary": _cx_window(100.0, _Q_NOW + 60, 1439)}, _Q_NOW)[0] == "five_hour"
+        assert full({"primary": _cx_window(100.0, _Q_NOW + 60, 1440)}, _Q_NOW)[0] == "seven_day"
+        assert full({"primary": _cx_window("100", _Q_NOW + 60)}, _Q_NOW) is None
+        assert full({"primary": _cx_window(float("nan"), _Q_NOW + 60)}, _Q_NOW) is None
+
+    def test_a_reset_further_off_than_any_window_is_not_a_reset(self):
+        assert _quota_q._full_window({"primary": _cx_window(100.0, 1e300)}, _Q_NOW) is None
+        assert _quota_q._full_window({"primary": _cx_window(100.0, _Q_NOW + 9 * 86400)}, _Q_NOW) is None
+
+    def test_twelve_oclock_in_the_message_is_noon_or_midnight(self):
+        hit = dt.datetime.fromtimestamp(_Q_NOW).replace(hour=9, minute=0, second=0).timestamp()
+        for text, hour in (("12:05 AM", 0), ("12:05 PM", 12), ("1:30 PM", 13), ("11:59 PM", 23)):
+            got = dt.datetime.fromtimestamp(_quota_q._message_reset("try again at " + text + ".", hit))
+            assert (got.hour, got.minute) == (hour, int(text.split(":")[1][:2])), text
+        assert _quota_q._message_reset("try again at 13:00 PM", hit) is None
+        assert _quota_q._message_reset("try again at 9:61 PM", hit) is None
+
+    def test_a_hit_inside_the_minute_the_message_names_does_not_wait_a_day(self):
+        base = dt.datetime.fromtimestamp(_Q_NOW).replace(hour=21, minute=38, second=30, microsecond=0)
+        got = _quota_q._message_reset("try again at 9:38 PM.", base.timestamp())
+        assert got == base.replace(second=0).timestamp()
+        later = _quota_q._message_reset("try again at 9:38 PM.", base.timestamp() + 31)
+        assert later == (base.replace(second=0) + dt.timedelta(days=1)).timestamp()
+
+    def test_a_line_that_is_not_an_object_does_not_hide_every_stopped_thread(self, monkeypatch):
+        """Measured by review: a JSON array holding the words raised out of the scan and dropped every row."""
+        junk = ['["event_msg","task_complete"]', '"event_msg task_started"', '123 "event_msg" "task_started"']
+        self._cx_stopped(monkeypatch, tail=junk)
+        [row] = self._interrupted(now=_Q_NOW + 10)
+        assert row["provider"] == "codex"
+
+    def test_one_rollout_that_raises_is_skipped_and_not_asked_again(self, monkeypatch):
+        sid, good = self._cx_stopped(monkeypatch)
+        bad_sid = str(_uuid_q.uuid4())
+        bad = _cx_write(self.tmp, bad_sid, [_cx_meta(bad_sid), _cx_stop(_Q_NOW - 5)])
+        self._cx(monkeypatch, bad, good)
+        real, calls = _quota_q._codex_end, []
+
+        def flaky(path, size):
+            calls.append(path)
+            if path == bad:
+                raise RuntimeError("unexpected shape")
+            return real(path, size)
+
+        monkeypatch.setattr(_quota_q, "_codex_end", flaky)
+        for _ in range(2):
+            assert [r["id"] for r in self._interrupted()] == [sid]
+        assert calls.count(bad) == 1, "a rollout that raised is not read again until it changes"
+
+    def test_a_stop_with_no_time_of_its_own_takes_the_files(self, monkeypatch):
+        sid = str(_uuid_q.uuid4())
+        stop = _q_line(type="event_msg", payload={"type": "task_complete", "error": {
+            "message": "x", "codex_error_info": "usage_limit_exceeded"}})
+        path = _cx_write(self.tmp, sid, [_cx_meta(sid), _cx_reading(_Q_NOW - 70, primary=_cx_window(100.0, _Q_NOW + 3600)), stop],
+                         age=100)
+        self._cx(monkeypatch, path)
+        [row] = self._interrupted()
+        assert row["hit_at"] == _Q_NOW - 100 and row["resets_at"] == _Q_NOW + 3600
+
+    def test_a_reading_older_than_the_first_window_is_still_found(self, monkeypatch):
+        """A turn with more than the first read window of output between the last reading and the stop."""
+        sid = str(_uuid_q.uuid4())
+        filler = _q_line(type="response_item", payload={"type": "function_call_output",
+                                                        "output": "x" * (_quota_q._TAIL_BYTES + 1000)})
+        path = _cx_write(self.tmp, sid, [_cx_meta(sid), _cx_reading(_Q_NOW - 70, primary=_cx_window(100.0, _Q_NOW + 3600)),
+                                         filler, _cx_stop(_Q_NOW - 60, "no clock time here")])
+        self._cx(monkeypatch, path)
+        [row] = self._interrupted()
+        assert row["window"] == "five_hour" and row["resets_at"] == _Q_NOW + 3600
 
     def test_the_words_quoted_in_another_kind_of_record_do_not_end_a_turn(self, monkeypatch):
         """A response item that merely carries the type text, newer than the stop, is not a turn record."""
@@ -43408,6 +43509,22 @@ class TestResume:
         _resume_r.tick(_Q_NOW + 3661)
         assert self.launched == [(sid, "C:\\dev\\cproj", "go")]
 
+    def test_scheduling_a_codex_thread_that_is_open_in_a_terminal_says_so_but_still_arms_it(self, monkeypatch):
+        sid, _ = self._cx_stopped(monkeypatch, resets_at=_Q_NOW + 3600, locked=True)
+        answer = _resume_r.schedule(sid, "go", now=_Q_NOW)
+        assert answer["ok"] is True and answer["open_terminal"] is True
+        assert [s["session_id"] for s in self._file()["schedules"]] == [sid], "the terminal may be closed before then"
+        monkeypatch.setattr(_resume_r.data_codex, "session_writer_locked", lambda s: False)
+        assert _resume_r.schedule(sid, "go", now=_Q_NOW)["open_terminal"] is False
+
+    def test_a_schedule_taken_off_the_list_when_the_row_is_dismissed_does_not_fire(self, monkeypatch):
+        sid, _ = self._cx_stopped(monkeypatch, resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, "go", now=_Q_NOW)
+        with _resume_r._lock:
+            _resume_r._state["dismissed"].append({"session_id": sid, "key_at": _Q_NOW + 3600, "at": _Q_NOW})
+        _resume_r.tick(_Q_NOW + 3661)
+        assert self.launched == [] and self.toasts == []
+
     def test_a_turn_that_starts_after_a_codex_resume_ends_the_watch_quietly(self, monkeypatch):
         sid, path = self._cx_stopped(monkeypatch)
         self._launch(sid)
@@ -43427,6 +43544,14 @@ class TestResume:
         assert [(s["attempt"], s["fire_at"]) for s in self._file()["schedules"]] == [(2, _Q_NOW + 20060)]
         assert self.toasts and "Still limited" in self.toasts[0][1]
 
+    def test_a_rollout_that_cannot_be_followed_reads_as_no_progress_not_as_a_crash(self, monkeypatch):
+        sid, _ = self._cx_stopped(monkeypatch)
+        self._launch(sid)
+        monkeypatch.setattr(_quota_q, "_codex_end", lambda path, size: 1 / 0)
+        assert _quota_q.codex_progress(sid) is None
+        _resume_r.tick(_Q_NOW + 3710)    # the watch asks, gets nothing, and keeps waiting
+        assert _resume_r._runs[0]["state"] == "watching"
+
     def test_a_codex_resume_that_shows_no_activity_is_reported(self, monkeypatch):
         sid, _ = self._cx_stopped(monkeypatch)
         self._launch(sid)
@@ -43437,7 +43562,8 @@ class TestResume:
 
     def test_a_schedule_defaults_to_a_minute_after_the_reset_and_is_kept_on_disk(self):
         sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
-        assert _resume_r.schedule(sid, "go", now=_Q_NOW) == {"ok": True, "fire_at": _Q_NOW + 3660, "persisted": True}
+        assert _resume_r.schedule(sid, "go", now=_Q_NOW) == {
+            "ok": True, "fire_at": _Q_NOW + 3660, "persisted": True, "open_terminal": False}
         saved = self._file()["schedules"]
         assert [(s["session_id"], s["fire_at"], s["prompt"], s["attempt"]) for s in saved] == [
             (sid, _Q_NOW + 3660, "go", 1)]

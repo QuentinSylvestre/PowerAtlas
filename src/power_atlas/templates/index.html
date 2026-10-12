@@ -1602,6 +1602,8 @@ function dashOvIntActions(row, li){
         if (ans && ans.ok === true) {
           dashOvIntAnswer(row.id, ans.persisted === false
             ? 'Scheduled, but it could not be saved: it will not survive a restart of PowerAtlas.'
+            : ans.open_terminal === true
+            ? 'Scheduled. This thread is open in a terminal: close it before then, or the resume will be refused.'
             : ans.mode === 'typed' ? 'Typed into its terminal.'
             : ans.mode === 'terminal' ? 'Opened a terminal.' : '');
           dashOverviewRefreshSummary(true);

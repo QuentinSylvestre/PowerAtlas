@@ -166,7 +166,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     sessions whose last message is a quota hit and the Codex threads whose last turn a usage limit
     refused (and kiro-cli sessions that stopped on a usage limit, which have no reset time), with the
     window, the reset time, and a session leaves the list when its conversation goes on, when you
-    dismiss it, or two days after the reset. For a Claude Code session, **Resume now** opens a
+    dismiss it, or two days after the reset (two days after the stop, when no reset time is known). For a Claude Code session, **Resume now** opens a
     terminal running `claude --resume <id> "<prompt>"`, or, when the session's terminal is still open
     and the quota has reset, types the prompt into it. For a Codex thread it opens a terminal running
     `codex resume <id> "<prompt>"`; a thread that is still open in a terminal is never typed into, and
@@ -174,7 +174,9 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     in the rollout, else from the message's "try again at" clock time; with neither, the row says the
     reset time is unknown and offers only Dismiss.
     **Schedule** does the same a minute after the reset (or at a time you choose) while PowerAtlas is
-    running. The prompt defaults to `resume`. A schedule that comes due while PowerAtlas is not
+    running. The prompt defaults to `resume`. A Codex thread that is open in a terminal can be
+    scheduled, and the row says to close that terminal before the time or the resume is refused.
+    A schedule that comes due while PowerAtlas is not
     running is dropped at the next start. If the quota had not really reset, the resume is armed once
     more for the new reset time; if nothing happens within three minutes you get a toast (when
     notifications are on). *Uncommitted or unpushed work* lists repositories with tracked changes,

@@ -163,8 +163,8 @@ re-litigate a settled word. General programming vocabulary does not belong here.
 - **app mode** — the PowerAtlas window as a normal framed taskbar window, opened by a double-tap of
   the peek shortcut or tray **Open PowerAtlas**. Windows only.
 - **hit** — a transcript record that a quota limit refused a request: for Claude Code, an
-  assistant line with `isApiErrorMessage`, status 429 and `quotaLimits.status` `rejected`; for Codex, a
-  `task_complete` event whose `error.codex_error_info` is `usage_limit_exceeded`. **Not "error"
+  assistant line with `apiErrorStatus` 429 and a `quotaLimits` object that carries a `resetsAt`; for
+  Codex, a `task_complete` event whose `error.codex_error_info` is `usage_limit_exceeded`. **Not "error"
   or "rate limit"**: a 429 without those `quotaLimits`, or any other Codex error, is not a hit.
 - **interrupted** — a session whose last conversation line (Claude Code: sidechain and meta lines
   skipped) or last turn record (Codex) is a hit. A session that carried on after a hit is not interrupted. **Not "stopped" or "blocked"** in code;

@@ -6,14 +6,15 @@ Two ways to resume, chosen by whether the session's terminal is still open:
 * **Closed**: PowerAtlas opens a Windows Terminal tab running `claude --resume <id> "<prompt>"` (or
   `codex resume <id> "<prompt>"`) in the session's folder (`launcher.launch_session`). The session starts
   by answering the prompt.
-* **Open** (Claude Code only): a hit leaves the TUI at its prompt, so the prompt is typed into that console by a helper
-  process (`consoleinject`). Nothing is typed unless all of these hold: the process is the one
+* **Open** (Claude Code only): a hit leaves the TUI at its prompt, so the prompt is typed into that console
+  by a helper process (`consoleinject`). Nothing is typed unless all of these hold: the process is the one
   PowerAtlas's presence scan validated for this exact session, it is an interactive terminal session
   (not a `claude -p` run that shares its parent's console), the TUI is not waiting on a dialog, the
   transcript still ends at the hit, and the reset time has passed. The prompt may not start with `!` or
   `/` there, because the TUI would run it as a shell or slash command. Whatever sits unsent in the TUI's
-  prompt box is submitted with it: nothing can read that box from outside, so the Overview says so. A Codex
-thread open in a terminal is never typed into (its writer lock is held): the owner is told to continue it there.
+  prompt box is submitted with it: nothing can read that box from outside, so the Overview says so.
+  A Codex thread open in a terminal is never typed into (its writer lock is held): the owner is told to
+  continue it there.
 
 A resume is reserved for its session before anything slow happens, so a click that races a due schedule
 (or two tabs) cannot start two. It is then watched in the transcript. A reply means it worked. A new hit
@@ -284,8 +285,10 @@ def resume_now(session_id, prompt=None, attempt: int = 1, now: float | None = No
 
 def schedule(session_id, prompt=None, fire_at=None, now: float | None = None) -> dict:
     """Arm a resume for `fire_at` (default: a minute after the reset). One schedule per session.
-    `{"ok": True, "fire_at": ..., "persisted": bool}`; `persisted` is False when it could not be saved,
-    in which case it holds until PowerAtlas restarts and no longer."""
+    `{"ok": True, "fire_at": ..., "persisted": bool, "open_terminal": bool}`; `persisted` is False when it
+    could not be saved, in which case it holds until PowerAtlas restarts and no longer. `open_terminal` is
+    True for a Codex thread that is open in a terminal now: it is armed anyway (the terminal may be closed
+    before the time), and the answer says it will be refused if it is still open then."""
     now = time.time() if now is None else now
     if not _valid_session_id(session_id):
         return _refuse("That is not a session id")
@@ -316,7 +319,8 @@ def schedule(session_id, prompt=None, fire_at=None, now: float | None = None) ->
         _state["schedules"] = [s for s in _state["schedules"] if s["session_id"] != session_id] + [record]
         _runs[:] = [r for r in _runs if r["session_id"] != session_id]
         persisted = _save()
-    return {"ok": True, "fire_at": when, "persisted": persisted}
+    return {"ok": True, "fire_at": when, "persisted": persisted,
+            "open_terminal": row["provider"] == "codex" and data_codex.session_writer_locked(session_id)}
 
 
 def cancel(session_id) -> dict:
@@ -457,6 +461,12 @@ def tick(now: float | None = None) -> None:
             _save()
         if now - due["fire_at"] > LATE_SECONDS:
             log.info("A scheduled resume was %d s overdue and was dropped, not fired late", now - due["fire_at"])
+            continue
+        # A dismissal that landed after the schedule was taken off the list could not remove it.
+        with _lock:
+            dismissed = any(d["session_id"] == due["session_id"] and abs(d["key_at"] - due["resets_at"]) < 1.0
+                            for d in _state["dismissed"])
+        if dismissed:
             continue
         try:
             result = resume_now(due["session_id"], due["prompt"], attempt=due["attempt"], now=now,

@@ -418,8 +418,10 @@ def _codex_all() -> list[Path]:
 
 
 def _message_reset(message, hit_at: float) -> float | None:
-    """The reset time a limit message gives as a clock time, as epoch seconds: the next time after the hit
-    that the local clock reads it. None when there is no such phrase or the hour is not one."""
+    """The reset time a limit message gives as a clock time, as epoch seconds: that minute on the local
+    clock, today, or tomorrow when the whole minute is already behind the hit (the message has minute
+    resolution, so a hit inside the named minute is not behind it). None when there is no such phrase or
+    the hour is not one."""
     match = _TRY_AGAIN_AT.search(message) if isinstance(message, str) else None
     if not match:
         return None
@@ -430,11 +432,15 @@ def _message_reset(message, hit_at: float) -> float | None:
     try:
         base = dt.datetime.fromtimestamp(hit_at)
         at = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if at.timestamp() <= hit_at:
+        if at.timestamp() + 60 <= hit_at:
             at += dt.timedelta(days=1)
         return at.timestamp()
     except (OverflowError, OSError, ValueError):
         return None
+
+
+# A window is at most a week long, so a reset further off than this is not one.
+_MAX_RESET_AHEAD_SECONDS = 8 * 86400
 
 
 def _full_window(limits, hit_at: float) -> tuple[str, float] | None:
@@ -448,7 +454,7 @@ def _full_window(limits, hit_at: float) -> tuple[str, float] | None:
         used, reset = raw.get("used_percent"), _epoch(raw.get("resets_at"))
         if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
             continue
-        if used < 99.0 or reset is None or reset <= hit_at:
+        if used < 99.0 or reset is None or reset <= hit_at or reset > hit_at + _MAX_RESET_AHEAD_SECONDS:
             continue
         minutes = raw.get("window_minutes")
         name = "seven_day" if isinstance(minutes, (int, float)) and minutes >= 24 * 60 else "five_hour"
@@ -457,62 +463,79 @@ def _full_window(limits, hit_at: float) -> tuple[str, float] | None:
     return best
 
 
+def _last_turn_record(lines: list[bytes]) -> tuple[int, dict, float | None] | None:
+    """`(index, payload, epoch)` of the last turn record in `lines`, or None. Matched on the line's
+    `type` and the payload's `type`, never as text: a rollout routinely quotes these words in tool output."""
+    for i in range(len(lines) - 1, -1, -1):
+        raw = lines[i]
+        if b'"event_msg"' not in raw or not any(word in raw for word in _CODEX_TURN_RECORDS):
+            continue
+        try:
+            obj = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "event_msg":
+            continue
+        payload = obj.get("payload")
+        if isinstance(payload, dict) and payload.get("type") in ("task_started", "task_complete", "turn_aborted"):
+            return i, payload, _epoch(obj.get("timestamp"))
+    return None
+
+
+def _last_reading(lines: list[bytes]) -> dict | None:
+    """The last real `rate_limits` in `lines`: the event right before a stop usually carries one with both
+    windows null, which says nothing."""
+    for raw in reversed(lines):
+        if b'"rate_limits"' not in raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        payload = obj.get("payload") if isinstance(obj, dict) else None
+        limits = payload.get("rate_limits") if isinstance(payload, dict) else None
+        if isinstance(limits, dict) and (isinstance(limits.get("primary"), dict)
+                                         or isinstance(limits.get("secondary"), dict)):
+            return limits
+    return None
+
+
 def _codex_end(path: Path, size: int) -> dict | None:
     """Where a rollout's last turn stands: `{kind, at, hit}`, or None when it has no turn record.
 
     `kind` is "hit" (the last turn record is a `task_complete` a usage limit refused; `hit` is
     `{hit_at, window, resets_at}`, `resets_at` None when no source names one) or "reply" (any other
-    turn record: a turn started, ended or was aborted). The record is matched on its `type` and
-    `payload.type`, never as text: a rollout routinely quotes these words in tool output.
+    turn record: a turn started, ended or was aborted). A record with no time of its own takes the file's.
+    When the larger window is needed to find the stop, or the reading that dates it, it is read once.
     """
+    result = None
     for length in (_TAIL_BYTES, _TAIL_BYTES_LARGE):
         lines = overview._read_tail(path, max(0, size - length), min(length, size), shared=True).split(b"\n")
-        found = None
-        for i in range(len(lines) - 1, -1, -1):
-            raw = lines[i]
-            if b'"event_msg"' not in raw or not any(word in raw for word in _CODEX_TURN_RECORDS):
-                continue
-            try:
-                obj = json.loads(raw)
-            except (ValueError, RecursionError):
-                continue
-            payload = obj.get("payload") if isinstance(obj, dict) else None
-            if (obj.get("type") == "event_msg" and isinstance(payload, dict)
-                    and payload.get("type") in ("task_started", "task_complete", "turn_aborted")):
-                found = (i, payload, _epoch(obj.get("timestamp")) or 0.0)
-                break
+        found = _last_turn_record(lines)
         if found is None:
             if size <= length:
                 return None
             continue
         index, payload, at = found
+        if at is None:
+            at = path.stat().st_mtime
         error = payload.get("error") if payload.get("type") == "task_complete" else None
         if not isinstance(error, dict) or error.get("codex_error_info") != _CODEX_LIMIT_CODE:
             return {"kind": "reply", "at": at, "hit": None}
-        # The reading that says which window is full: the last real one before the stop. The event
-        # right before it usually carries `rate_limits` with both windows null.
-        reading = None
-        for raw in reversed(lines[:index]):
-            if b'"rate_limits"' not in raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except (ValueError, RecursionError):
-                continue
-            limits = obj.get("payload", {}).get("rate_limits") if isinstance(obj, dict) and isinstance(obj.get("payload"), dict) else None
-            if isinstance(limits, dict) and (isinstance(limits.get("primary"), dict) or isinstance(limits.get("secondary"), dict)):
-                reading = limits
-                break
+        reading = _last_reading(lines[:index])
         full = _full_window(reading, at)
         if full is None:
-            reset = _message_reset(error.get("message"), at)
-            full = ("other", reset) if reset is not None else ("other", None)
-        return {"kind": "hit", "at": at, "hit": {"hit_at": at, "window": full[0], "resets_at": full[1]}}
-    return None
+            full = ("other", _message_reset(error.get("message"), at))
+        result = {"kind": "hit", "at": at, "hit": {"hit_at": at, "window": full[0], "resets_at": full[1]}}
+        if reading is not None or size <= length:
+            return result
+    return result
 
 
 def _codex_stop(path: Path, st) -> dict | None:
-    """The hit that ends the rollout at `path`, or None. Memoised on `(mtime_ns, size)`."""
+    """The hit that ends the rollout at `path`, or None. Memoised on `(mtime_ns, size)`; a rollout that
+    cannot be read this time is asked again at the next look, one that raised something else is not
+    (it would raise again, every poll)."""
     key = str(path)
     with _lock:
         memo = _codex_end_memo.get(key)
@@ -522,6 +545,9 @@ def _codex_stop(path: Path, st) -> dict | None:
         end = _codex_end(path, st.st_size)
     except OSError:
         return None
+    except Exception:
+        log.exception("Quota: could not read the end of a Codex rollout")
+        end = None
     hit = end["hit"] if end and end["kind"] == "hit" else None
     with _lock:
         _codex_end_memo[key] = (st.st_mtime_ns, st.st_size, hit)
@@ -538,6 +564,9 @@ def codex_progress(session_id: str) -> dict | None:
     try:
         return _codex_end(path, path.stat().st_size)
     except OSError:
+        return None
+    except Exception:
+        log.exception("Quota: could not follow a Codex thread")
         return None
 
 

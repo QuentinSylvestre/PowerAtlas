@@ -22874,6 +22874,16 @@ check("dashboard overview resume: a schedule the server could not save says it w
     "Scheduled, but it could not be saved: it will not survive a restart of PowerAtlas.");
 });
 
+check("dashboard overview resume: a schedule for a thread open in a terminal says to close it first", async () => {
+  const p = loadDashPicker();
+  ovPosts(p, { ok: true, persisted: true, open_terminal: true });
+  const row = ovIntRow(p, { id: "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40", provider: "codex" });
+  ovButton(row, "Schedule").dispatch("click");
+  await p.settle(); await p.settle();
+  assertEqual(row.querySelector(".dash-ov-int-msg").textContent,
+    "Scheduled. This thread is open in a terminal: close it before then, or the resume will be refused.");
+});
+
 check("dashboard overview resume: the row says an unsent prompt in the terminal is sent along", () => {
   const p = loadDashPicker();
   const row = ovIntRow(p);
