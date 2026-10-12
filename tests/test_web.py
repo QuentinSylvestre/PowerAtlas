@@ -23629,26 +23629,28 @@ class TestAcpCommandsExecuteHandler:
         assert ack is not None, "Expected a commands_execute_result ack for skill name"
         assert ack["payload"]["name"] == "qplan"
 
-    def test_compact_command_fires_compaction_started(self, acp_session):
-        """/compact via commands_execute broadcasts a compaction started frame
-        and adds the session to _compacting."""
+    def test_compact_command_announces_no_compaction_of_its_own(self, acp_session):
+        """Manual compaction is not supported over the v3 ACP (56d82ff removed the premature
+        banner): /compact via commands_execute is forwarded like any command, and a compaction
+        frame appears only when kiro-cli itself reports one."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         _queued(conn)
+        forwarded = []
 
         async def fake_execute(self_ignored, session_id, name):
+            forwarded.append(name)
             return {}
 
-        with patch.object(acp_mod._Supervisor, "commands_execute", fake_execute):
-            asyncio.run(acp_mod._handle_commands_execute(
-                conn, sid, {"name": "compact"}))
-
         try:
+            with patch.object(acp_mod._Supervisor, "commands_execute", fake_execute):
+                asyncio.run(acp_mod._handle_commands_execute(
+                    conn, sid, {"name": "compact"}))
             frames = _queued(conn)
-            compaction_frames = [f for f in frames if f["type"] == "compaction"]
-            assert len(compaction_frames) == 1
-            assert compaction_frames[0]["payload"]["status"] == "started"
-            assert sid in acp_mod._supervisor._compacting
+            assert forwarded == ["compact"]
+            assert [f for f in frames if f["type"] == "compaction"] == []
+            assert sid not in acp_mod._supervisor._compacting
+            assert any(f["type"] == "commands_execute_result" for f in frames)
         finally:
             acp_mod._supervisor._compacting.discard(sid)
 
@@ -27043,11 +27045,14 @@ class TestSupervisor:
                 raw_output="The complete final answer."))
 
             events = sv3.subagent_history[agent_subtask_id].events()
-            assert events[-1]["type"] == "rendered", events
+            # Phase 4 of 261007 records the completing tool_update on the sub-task's own channel
+            # after its text, so the answer is the last text frame, not the last frame.
+            text_frames = [e for e in events if e["type"] in ("chunk", "rendered")]
+            assert text_frames[-1]["type"] == "rendered", events
             assert "The complete final answer." in json.dumps(
-                events[-1]["payload"]["tokens"]), (
+                text_frames[-1]["payload"]["tokens"]), (
                 "completion must prefer rawOutput over the streamed bubble")
-            assert "trunc" not in json.dumps(events[-1]["payload"]["tokens"]), (
+            assert "trunc" not in json.dumps(text_frames[-1]["payload"]["tokens"]), (
                 "the truncated streamed text must not survive into the "
                 "replacement rendering")
             assert not any(
@@ -27085,8 +27090,10 @@ class TestSupervisor:
                 raw_output="The only answer."))
 
             events = sv3.subagent_history[agent_subtask_id].events()
-            assert events[-1]["type"] == "chunk", events
-            assert events[-1]["payload"]["text"] == "The only answer."
+            text_frames = [e for e in events if e["type"] in ("chunk", "rendered")]
+            assert [e["type"] for e in text_frames] == ["chunk"], events
+            assert text_frames[-1]["payload"]["text"] == "The only answer."
+            assert events[-1]["type"] == "tool_update", "the completion itself is recorded after its text"
         finally:
             self._cleanup_registry(acp_mod)
 
