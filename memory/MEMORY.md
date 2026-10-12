@@ -2,6 +2,18 @@
 
 ## Pattern
 
+### A Codex quota stop is a `task_complete` error event, and the `rate_limits` right before it is null
+
+**Why**: Detecting a Codex thread a usage limit stopped looked impossible while no real stop had been seen (`rate_limit_reached_type` is always null). A real stop (2026-10-09) is an `event_msg` with `payload.type` `task_complete` and `payload.error.codex_error_info` `usage_limit_exceeded`; the `token_count` event just before it carries `rate_limits` with both windows null, so reading only the newest `rate_limits` loses the reset time. The message ends "try again at 9:38 PM." (local clock, no date; only the 5-hour form has been seen).
+**How to apply**: Decide "interrupted" from the LAST turn record (`task_started`, `task_complete`, `turn_aborted`), matched on `type` and `payload.type`, never as text. Take the reset from the last real full window before the stop (search past null readings, in the larger read window if needed), else the message clock time, else unknown. Rollout timestamps are UTC; the message time is local. Keep these in `quota._codex_end`; a weekly stop's message form is unobserved.
+**Source**: `src/power_atlas/quota.py` `_codex_end` and `TestQuota` Codex tests, commits d7be0ed and bfea8f8 | **Verified**: 2026-10-12 (session, live resume of a real stopped thread)
+
+### A bare `bash` on PATH can be WSL's launcher, so a test that runs the statusline snippet must use Git's bash
+
+**Why**: `tests/test_web.py::TestQuota::test_the_snippet_keeps_the_last_reading_unless_the_payload_carries_limits` passed from the Bash tool and failed from the PowerShell tool with `FileNotFoundError` on the snapshot file. `shutil.which("bash")` returned the System32 WSL launcher in the second shell, which reads `LOCALAPPDATA` and paths differently. Claude Code runs the real statusline script under Git Bash.
+**How to apply**: Use `_q_bash()` in `tests/test_web.py` (Git's `bin/bash.exe`, never a System32 path) for any test that executes shell text the way the statusline does; skip when Git Bash is absent. Run the suite from either tool shell to catch this class.
+**Source**: `tests/test_web.py` `_q_bash`, commit bfea8f8 | **Verified**: 2026-10-12 (session, ran the test from both tool shells)
+
 ### An extracted-function page test fails silently when its vm sandbox lacks a global the function now reads
 
 **Why**: `tests/acp_page.test.mjs` runs slices of `index.html` in a vm box with only the globals each test lists. A missing global becomes a ReferenceError inside a fetch `.then`, which the function's own `.catch(function(){})` swallows. The first symptom on 2026-10-09 was an unrelated-looking assertion ("expected [\"C:\\\\lazy\"], got []").
