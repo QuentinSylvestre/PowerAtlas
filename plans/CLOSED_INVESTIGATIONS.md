@@ -27,10 +27,22 @@
 - **Timing kills it.** ACP **6.82 s cold** (n=6 fresh processes) and **5.87 s warm** (n=8, same process) versus a re-measured filesystem baseline of **1,041 ms cold / 0.004 ms warm** (30 s TTL cache). Spawn and handshake are free (0.08-0.11 s) — the list call itself *is* the cost. Payload is 1.80 MiB (~334 bytes/session); parsing it into PowerAtlas's shape is ~19 ms, i.e. negligible. So it is ~6.5× slower cold and effectively unbounded times slower warm, for the same data.
 - **It is the same data.** Set difference against the raw `sessions\cli\*.json` meta set is **zero in both directions** — `_kiro.dev/session/list` is the v2 filesystem store re-derived by kiro-cli, not a separate index.
 - **The apparent coverage win is sub-agent noise.** ACP returns 5,652 vs PowerAtlas's 1,120, but **all 4,532 extra sessions carry a `parent_session_id`** — they are the `/qreview` and `/qdev` sub-agent fan-outs that the four `parent_session_id` guards in `data_kiro.py` deliberately skip. `1,120 + 4,532 = 5,652` exactly. No user session is hidden.
-- **Swapping would lose coverage.** PowerAtlas reports 58 workspaces to ACP's 55 because `discover_workspaces` (`data_kiro.py`) merges sqlite `conversations_v2` keys, contributing 3 cwds that exist in no file store. ACP cannot see them.
+- **Swapping would lose coverage.** PowerAtlas reports 58 workspaces to ACP's 55 because `discover_workspaces` (`data_kiro.py`) merges sqlite `conversations_v2` keys, contributing 3 cwds that exist in no file store. ACP cannot see them. *Superseded 2026-09-17*: `data_kiro.py` was deleted with v2 support, so PowerAtlas no longer reads the sqlite keys and this coverage edge is gone. See *Closed — kiro-cli's sqlite `conversations_v2` store* below.
 - *Undocumented param found*: `{"cwd": "<path>"}` **is honoured** and cuts a single-workspace query to **1.45 s / 659 sessions**. `limit`, `offset`, `cursor`, `includeSubagents`, `parentSessionId` are all **silently ignored** — unknown params raise no error, so absence of an error is not evidence a param exists. Still slower than the full 1,041 ms filesystem scan.
 
 **Would reopen if**: kiro-cli stops writing the v2 `sessions\cli\` store, or PowerAtlas needs a per-session field the filesystem store does not carry. The `{cwd}`-scoped form is the only shape worth revisiting, and only for a single workspace — never as a global replacement.
+
+---
+
+## Closed — kiro-cli's sqlite `conversations_v2` store
+
+**Verdict: closed, not parked. Decided 2026-09-17, when v2 support was removed.** Moved here from the roadmap's `[P2b] Session stores PowerAtlas cannot see` on 2026-10-12.
+
+- **What the store is.** "Classic" kiro-cli conversations live in `conversations_v2` inside `%LOCALAPPDATA%\Kiro-Cli\data.sqlite3` and have no file on disk, so no filesystem scan can see them.
+- **The only surface that lists them.** `kiro-cli chat --list-sessions -f json` tags each entry `source: "classic"`. Measured 2026-07-24 (commit `87a742b`; kiro-cli 2.14.x, the build in use that day): about 2.13 s per query, and scoped to the cwd, not global.
+- **Why it is closed.** PowerAtlas stopped reading this store when v2 support was removed on 2026-09-17 (`data_kiro.py` deleted). A sqlite reader would bring back v2 infrastructure for sessions kiro-cli itself no longer creates. kiro-cli v3 sessions are covered by the `kiro-cli-v3` provider, shipped 2026-08-18.
+
+**Would reopen if**: kiro-cli starts writing new sessions to `conversations_v2` again, or a user needs a classic conversation that exists nowhere else. Cheapest re-check: run `kiro-cli chat --list-sessions -f json` in a workspace and look for a `source: "classic"` entry newer than 2026-09-17.
 
 ---
 
