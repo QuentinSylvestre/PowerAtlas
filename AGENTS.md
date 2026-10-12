@@ -172,3 +172,12 @@ re-litigate a settled word. General programming vocabulary does not belong here.
 - **Stopped by a quota limit** — the Overview's list of interrupted sessions, with the reset time and
   the Resume now, Schedule and Dismiss controls. UI text only; code and docs say "interrupted".
   Settled 2026-10-09, `plans/261009_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS.md`.
+- **approval** — a pending permission request for a tool call (`session/request_permission`), shown as
+  a card on the session and as a row in the Overview's "Needs attention". **Not "permission prompt"**
+  in UI text.
+- **question** — an agent's `user_input` question, arriving as `_kiro/userInput` and answered with one
+  of its options or free text. **Not "clarifying question"** in UI text, though older roadmap entries
+  use that phrase.
+- **step question** — a workflow step's warning-severity `send_message`, which reaches the parent as
+  `_kiro/session/notify` and marks the step waiting. **Not "step notification"**. Settled 2026-10-12,
+  `plans/261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES.md`.
