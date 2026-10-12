@@ -323,7 +323,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .panels-container { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 /* Widths are custom properties now, not literal min/max-width (panel resize,
    dashboard/ACP-merge QA follow-up): the JS below sets `--dash-left-w`/
-   `--dash-center-w` on the root element, clamped to the same [240,340] /
+   `--dash-center-w` on the root element, clamped to the same [130,340] /
    window-derived ranges a drag goes through, and these two `var(...)`
    fallbacks are what the page looks like before that script runs at all --
    280px and 50% are exactly today's pre-resize layout (fixed 280px rail,
@@ -683,10 +683,10 @@ script { display: none; }
 /* Compact icon grid (launcher panel redesign): 3 columns fit the real
    280px .left-panel comfortably at ~79px per tile. Vertical layout (icon
    over name) instead of the old horizontal row. */
-/* auto-fill, not a fixed count: the panel is user-resizable (240-340px,
+/* auto-fill, not a fixed count: the panel is user-resizable (130-340px,
    dashLeftResize) and this reacts to that live -- 2 columns at the 280px
-   default (90px minimum keeps a 3rd from squeezing in there), same as a
-   narrower resize, but a wide enough resize gets a 3rd column for free,
+   default (90px minimum keeps a 3rd from squeezing in there), 1 column
+   below ~218px, and a wide enough resize gets a 3rd column for free,
    with no JS involved on this half of the feature. auto-fill over auto-fit:
    with few launchers, unfilled tracks stay empty space rather than
    stretching the existing tiles to an oversized width. */
