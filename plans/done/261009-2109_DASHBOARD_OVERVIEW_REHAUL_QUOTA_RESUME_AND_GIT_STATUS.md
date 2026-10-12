@@ -20,6 +20,17 @@ Implemented directly (no `/qplan`) in commit `d7be0ed`; the intent record is `c9
 - Accepted (harness opportunity): the Bash tool on Windows rewrites arguments that start with `/`; a user-memory entry already covers it.
 - Pass 4 (documentation ripple): no renamed or deleted files and no removed identifiers in the slug-matched commits; no findings.
 
+### Since archival
+
+- The three failing tests listed above were stale, not regressions; fixed in `95fb725`. The full suite and `node tests/acp_page.test.mjs` pass.
+- Codex support was added (decision Q12 below): stopped Codex threads are detected and resumed by a relaunch in a new terminal. A real Codex stop was resumed on a schedule on 2026-10-12 and fired as designed.
+- Two independent reviews (senior engineer; reliability with a security lens) of the Codex extension found no High issues; the findings that held up are fixed in `bfea8f8`.
+- Still unverified live: typing into an open Claude Code terminal and the "not really reset" re-arm, both of which need a real Claude Code quota block.
+
+## Follow-up Work (Deferred)
+
+- A single Codex rollout event line larger than the larger read window (8 MB) after a stop hides that thread from the list (`quota._codex_end` finds no turn record and the miss is remembered). User: accepted — implausible in practice; handle only if it is ever seen.
+
 ---
 
 ## Intent
