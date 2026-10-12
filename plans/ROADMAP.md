@@ -25,7 +25,7 @@
 ## Table of Contents
 
 ### Priority ranking
-- [Ranking table](#where-to-start--ranked-2026-10-12) — 8 items ranked by payoff/effort, with tier and one-line rationale each, plus a positioning note against Kiro Crew and the parallel-agent tools
+- [Ranking table](#where-to-start--ranked-2026-10-12) — 5 items ranked by payoff/effort, with tier and one-line rationale each, plus a positioning note against Kiro Crew and the parallel-agent tools
 
 ### Automation & Workflows
 - **Dispatch no-interactive tasks** — fire a kiro-cli task without a terminal; `--no-interactive` leaves no session trail so ACP is the right path, but unattended safety is still unsettled
@@ -67,15 +67,12 @@
 - **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; ~27k tokens saved when measured on 2.16.0, due a re-measure; now part of the unattended item above
 - **Approvals and questions in "Needs attention"** — add pending permission requests and clarifying questions to the Overview's "Needs attention" section, borrowed from Kiro Crew's activity view
 - **A fresh git worktree per session** — a checkbox in the new-session picker; table stakes in Conductor, Crystal and Vibe Kanban, and two `/acp` sessions in one workspace share a working tree today
-- **Spike: drive Claude Code over ACP through an adapter** — would make `/acp` multi-provider; Kiro Crew already does this (corrected 2026-09-28), so it is a capability, not a differentiator
 - **Drive Codex from `/acp` through `@agentclientprotocol/codex-acp`** *(deferred)* — Codex has no ACP support of its own; the adapter's Windows behaviour and `session/list` support are unmeasured
-- **Expose the effort level** — every ACP session starts at `max`; the agent offers low, medium, high and max, but `/acp` has no control to change it
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely
 - **Reconsider the Yolo default** — in Yolo, Protected emits no rules, so the default posture is Always blocked plus allow-all, weaker than the Manual design suggests
 - **Crew verification spikes** — five one-off checks, run in a throwaway VM or Windows profile, each a trigger for reopening the 2026-09-28 keep-and-borrow decision
 
 ### Misc
-- **[SECURITY] `/partials/launchers` leaks custom-launcher `env`** — any signed-in local caller's GET returns the credentials `_launchers_without_env` exists to strip, because the tile partial renders them after all; re-checked open 2026-10-12
 - **[SECURITY — accepted] No NetBird access policy restricts this host** — a decision with its own reopen condition
 - **Claude Code sidecar fields inventory** — full table of every field PowerAtlas reads (or could read) from `~/.claude/sessions/<pid>.json`
 - **Public-ids hook coverage gaps** — what `_check_public_ids.py` still cannot catch in a public repository: home paths and user names, ids written without hyphens, and commits made by cherry-pick, rebase or revert
@@ -130,21 +127,18 @@
 > spike passes, or when ACP work stops being something the user wants to build.
 >
 > **What would invalidate it**: the unattended keystone shipping — *Decide permission requests by rule for unattended sessions*, under
-> `## Session Control & Integration`, ranked 6 below, which gates the unattended
+> `## Session Control & Integration`, ranked 4 below, which gates the unattended
 > `## Automation & Workflows` items (dispatch, scheduled tasks and chained launches); or kiro-cli gaining — or being found to already have — a per-request permission mechanism on
 > `acp` + v3, which would restore the keystone to a design problem rather than a question for the
 > vendor. The `$ARGUMENTS` re-check has been run (negative, 2026-09-19) and is no longer pending.
 
 | # | Item | Tier | Why here |
 |---|---|---|---|
-| 1 | *[SECURITY] `/partials/launchers` leaks custom-launcher `env`* (Misc) | hours | A verified leak of real tokens to any signed-in caller, re-checked open 2026-10-12. The fix is known: strip `env` in `partials_launchers`, or stop the tile rendering it, plus a test whose launcher has a non-empty `env` |
-| 2 | *`_note_subagent_action` filters its crew frame with the wrong map* | hours | A one-line fix with a known test shape. It drops the crew panel when a fan-out wave and a workflow coexist, which workflows now make reachable |
-| 3 | *Expose the effort level* | hours to a day | Every ACP turn runs at `max` and pays for it in tokens and time. The agent already advertises the option and accepts `session/set_config_option`; only the control is missing |
-| 4 | *Approvals and questions in "Needs attention"* | days | Cheaper than when it was ranked 4th on 2026-09-19: the Overview section and its per-kind blocks shipped 2026-10-09, so this is two more blocks, not a new surface. It answers which session a permission toast is about |
-| 5 | *`_kiro/session/notify` has no handler* | hours to a day | A workflow step's question to the user is only logged today, so it never reaches the page. It is also the only pause signal, so it unblocks the unverified Waiting state of workflow liveness |
-| 6 | *Decide permission requests by rule for unattended sessions* | week | The keystone: it gates dispatch, scheduled tasks and chained launches, and it is the Auto mode decider. The mechanism is proven; a probe of when a queued steer reaches the agent and a bounded wait are still missing. Decide *Reconsider the Yolo default* alongside it, since both set the default posture |
-| 7 | *A fresh git worktree per session* | days | Removes the working-tree collision between parallel sessions in one workspace, sharper while Yolo is the default. Decide the rail grouping and the cleanup of finished worktrees before building |
-| 8 | *Spike: Claude Code over ACP through an adapter* | week | A capability PowerAtlas would want for itself, not a differentiator (Crew already does it). A spike with a go/no-go exit, and it needs a driver abstraction and Always blocked extended to the second driver |
+| 1 | *`_note_subagent_action` filters its crew frame with the wrong map* | hours | A one-line fix with a known test shape. It drops the crew panel when a fan-out wave and a workflow coexist, which workflows now make reachable. **In `/qexplore`, 2026-10-12** |
+| 2 | *Approvals and questions in "Needs attention"* | days | The Overview section and its per-kind blocks shipped 2026-10-09, so this is two more blocks, not a new surface. It answers which session a permission toast is about. **In `/qexplore`, 2026-10-12** |
+| 3 | *`_kiro/session/notify` has no handler* | hours to a day | A workflow step's question to the user is only logged today, so it never reaches the page. It is also the only pause signal, so it unblocks the unverified Waiting state of workflow liveness. **In `/qexplore`, 2026-10-12** |
+| 4 | *Decide permission requests by rule for unattended sessions* | week | The keystone: it gates dispatch, scheduled tasks and chained launches, and it is the Auto mode decider. The mechanism is proven; a probe of when a queued steer reaches the agent and a bounded wait are still missing. Decide *Reconsider the Yolo default* alongside it. **Skipped for now, 2026-10-12** |
+| 5 | *A fresh git worktree per session* | days | Removes the working-tree collision between parallel sessions in one workspace, sharper while Yolo is the default. Decide the rail grouping and the cleanup of finished worktrees before building. **Skipped for now, 2026-10-12** |
 
 **Parked, deliberately**: creating a session in a workspace that has none · secret-aware
 custom-launcher env vars (shape (a) — durable, not urgent) · the `None` → `"working"` fallback
@@ -357,22 +351,12 @@ cost first) · the Electron app.
   - *Why* — worktree isolation per agent is the one feature Conductor, Crystal, Vibe Kanban and Claude Squad all share. Two `/acp` sessions created in the same workspace today edit the same working tree, and nothing warns.
   - *What it touches* — the picker (`acp.html` and the dashboard copy shipped 2026-09-19), `_handle_new`/`new_session` for the cwd, and the rail: a worktree path is a distinct cwd, so it becomes its own workspace group in the rail and in kiro-cli's session store unless grouped back under its parent. Decide the grouping before building; cleanup of finished worktrees is a second decision.
 
-- **Spike: drive Claude Code over ACP through an adapter** — make `/acp` a second-provider surface by running a Claude Code ACP adapter as a second supervised process.
-  - *Why it is open* — `plans/CLOSED_INVESTIGATIONS.md` closes *taking over* a Claude Code session already live in someone's terminal (the `messagingSocketPath` and remote-control entries). Starting a **new** Claude Code session over ACP from PowerAtlas is a different question, and one nobody has asked of the code. It is no longer a differentiator: Kiro Crew already drives Claude Code through `@agentclientprotocol/claude-agent-acp` (corrected 2026-09-28; this line used to say Crew was kiro-only by design). That package is the adapter to spike against. Crew's source shows how it launches it, with `CLAUDE_CODE_EXECUTABLE` pointing the adapter at the `claude` binary (`src/kiro_crew/acp/client.py` L365-376, L2138-2156).
-  - *A security gap to close before shipping* — the Always blocked and Protected rules are compiled into kiro-cli's derived agent (`compile_block` in `agent_profile.py`), so a Claude Code session would not see them. Extend Always blocked to the second driver before it drives anything.
-  - *What it would cost* — the supervisor is kiro-specific in more than its binary: `_build_kas_session_params`, the `_kiro/*` extension methods, the token fulfilment, the session-store paths for `_lock_holder_v3`. A second provider means a driver abstraction, not a config change. Spike first: confirm an adapter exists for the installed Claude Code, that it answers `initialize`/`session/new`/`session/prompt` over stdio, and what its permission and session-persistence story is. Budget a week; exit with a go/no-go, not a feature.
-
 - **Drive Codex from `/acp` through `@agentclientprotocol/codex-acp`** *(deferred)* — make `/acp` start, resume and prompt Codex threads, as it does for kiro-cli. The user decided it out of scope while planning `261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB` (its D2, Follow-up Work 1); this entry keeps what was found.
   - *Measured, 2026-10-02, Codex 0.160.0 on Windows 11* — Codex has no built-in ACP support: no `acp` command, and no ACP feature flag among its 154.
   - *Stated for the adapter, not run* — `@agentclientprotocol/codex-acp` 2.1.1 is a Node package under the Apache-2.0 licence, maintained under the ACP organisation. It starts the Codex App Server and supports `session/new`, `session/load`, permission requests and four modes. PowerAtlas has not installed or run it.
   - *Unknown* — whether it runs on Windows, whether it supports `session/list`, and how a session it drives would appear in the Codex store and the live dot. All three are unmeasured.
-  - *What it would cost* — the supervisor in `acp.py` is kiro-cli-specific, so this needs a driver abstraction, the same one the Claude Code spike above needs, and a permission model for Codex's approval policy and sandbox. Always blocked and Protected are compiled into kiro-cli's derived agent and would not reach a Codex session either.
+  - *What it would cost* — the supervisor in `acp.py` is kiro-cli-specific, so this needs a driver abstraction, and a permission model for Codex's approval policy and sandbox. Always blocked and Protected are compiled into kiro-cli's derived agent and would not reach a Codex session either.
   - *Reopen when* — the adapter's Windows behaviour and its `session/load` are measured. A spike, as for Claude Code, would exit with a go or no-go.
-
-- **Expose the effort level** — let the user pick an ACP session's effort instead of the fixed default of `max`.
-  - *What exists* — `DEFAULT_EFFORT_LEVEL` in `acp.py` is `"max"`, applied through the agent's `effortLevel` config option on `session/new`, and on `session/load` when the session has no stored level (`4a6902b`). kiro-cli's own default is `high`, and `kiro-cli acp` does not read the `chat.modelDefaults` effort the terminal UI uses, so before this an ACP session ran one level below the same terminal session (measured 2026-10-05, kiro-cli 2.27.1).
-  - *What is missing* — a control. A fresh session advertises `effortLevel` as a select with low, medium, high and max, and `session/set_config_option` accepts it, but neither `/acp` nor the dashboard composer offers it, so `max` cannot be lowered for a cheap task. The constant also ignores the user's `cli.json`, which the tool-search forwarding does read.
-  - *To decide* — a per-session picker in the composer chrome, a global setting, or mirroring `cli.json`. Higher effort costs more tokens and time per turn, so the picker is the shape that makes `max` safe as the default.
 
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely.
 
@@ -389,13 +373,6 @@ cost first) · the Electron app.
 ---
 
 ## Misc
-
-- **[SECURITY] `/partials/launchers` renders custom-launcher `env`, defeating `_launchers_without_env`.** Found 2026-09-21 during the permission/credential exploration; verified by reading both files, not inferred.
-  - *The defect* — `partials_launchers` in `web.py` renders `config.custom_launchers` **raw**, with no stripping call, and `templates/partials/launcher_tile.html` emits the env whenever a launcher has a non-empty `env`. Since `6f9a1b8` (2026-09-24) it prints up to six `KEY=value` rows in the tile tooltip, with a `tojson` fallback for a non-mapping. So one GET from any signed-in local caller returns the values in plain text. Re-checked open on 2026-10-12.
-  - *Why it survived* — `_launchers_without_env`'s docstring in `web.py` enumerates the three payloads it fixed and justifies leaving this one alone with the assertion "the tile partial never renders `env`". That sentence is false. The defence was reasoned about and got one template line wrong.
-  - *Why no test caught it* — the single test on this route configures its sample launcher with `env: {}`, which is falsy, so the `{% if %}` branch never executes. The test passes and observes nothing.
-  - *Exposure* — the docstring records that the live config carries `AUTH_TOKEN_PRODUCTION` and `AUTH_TOKEN_STAGING`. `/partials/launchers` is a GET, and `same_origin_guard`'s Origin/Referer check is POST-only by design, so this path has no CSRF guard of its own. Since the loopback gate shipped it needs a valid `pa_local` cookie, so it is reachable by any signed-in local caller rather than by any local process; the cookie is `SameSite=Strict`, which keeps a page on another site from riding it.
-  - *Relation to the loopback credential* — SC-5 of `plans/done/260924-0525_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md` has shipped and gates this route as a side effect of default-deny, which removed the anonymous reachability. **It does not fix the leak**: any credentialed caller, and the page itself, still receive the credentials. The stripping fix is independent and should not wait on that plan.
 
 - **[SECURITY — accepted, 2026-08-03] No NetBird access policy restricts this host, and that is now a decision rather than an oversight.** Measured 2026-07-31: `netbird status -d` enumerates **all 17** account peers in this host's network map, including machines belonging to other people (`akita`, `paros-g`, `nuc-chicago`, `ec2amaz-tv495hp`, `macbook-air-de-polestar`, …), so the stock `Default` (All → All) policy is still enabled.
   - *Measured 2026-08-03* — all inbound File and Printer Sharing rules (TCP 139, TCP 445) are **disabled** at the Windows Firewall level. The genuine exposure was UDP 137/138 (Network Discovery), admitted by two rules scoped to the Private profile. The WireGuard tunnel is classified Private, so those rules apply to NetBird peers.
