@@ -8728,6 +8728,52 @@ function dashRailRefreshStates(incoming){
   });
   return changed;
 }
+// The refresh above only updates rows the rail already holds, so a session or workspace created
+// after the page loaded (a terminal `/clear` makes a new session id) would stay invisible until a
+// reload. This adds them. Only sessions newer than the newest one the group holds count as new:
+// the poll asks for more rows per group than a collapsed group holds, and the extra ones are older.
+// A workspace the rail has never listed goes in at the position the server gave it, before the
+// first rail group that follows it in `listing` (the response's group order, pinned tier first).
+// A group the rail holds with no sessions loaded is lazy: only its count follows.
+function dashRailAddNew(incoming, listing){
+  var existing = dashRailGroupsByCwd['c:' + incoming.cwd];
+  if (!existing) {
+    dashRailMergeGroup(incoming);
+    var added = dashRailGroupsByCwd['c:' + incoming.cwd];
+    var later = Object.create(null);
+    listing.slice(listing.indexOf(incoming) + 1).forEach(function(g){ later[g.cwd] = true; });
+    var at = dashRailGroups.findIndex(function(g){ return g !== added && later[g.cwd]; });
+    if (at >= 0) { dashRailGroups.pop(); dashRailGroups.splice(at, 0, added); }
+    return true;
+  }
+  var changed = false;
+  if (existing.sessions.length) {
+    var have = Object.create(null);
+    var newest = -Infinity;
+    existing.sessions.forEach(function(s){
+      have[s.id] = true;
+      var t = Date.parse(s.updated_at);
+      if (t > newest) newest = t;
+    });
+    var fresh = (incoming.sessions || []).filter(function(s){
+      return !have[s.id] && Date.parse(s.updated_at) > newest;
+    });
+    if (fresh.length) {
+      Array.prototype.unshift.apply(existing.sessions, fresh);
+      changed = true;
+    }
+  }
+  if (typeof incoming.total === 'number' && incoming.total !== existing.total) {
+    existing.total = incoming.total;
+    changed = true;
+  }
+  return changed;
+}
+// What a listing was asked for. A reload or filter change that lands while a poll is in flight
+// leaves that poll's answer describing a different rail, which must not add rows to it.
+function dashRailRefreshKey(){
+  return [window._activeProvider, window._activeTag, window._activeTimeFilter, dashRailFilter].join('\u0001');
+}
 function dashRailRefresh(){
   dashRailLoadAcp();
   if (dashRailMode !== 'project') {
@@ -8735,6 +8781,7 @@ function dashRailRefresh(){
     return;
   }
   if (dashRailBusy) return;
+  var sentKey = dashRailRefreshKey();
   dashRailFetch({
     group_page: 1, group_size: DASH_RAIL_GROUP_SIZE * Math.max(1, dashRailGroupPage),
     // Refreshes every visible group's *first* page in one shared-size request
@@ -8749,8 +8796,11 @@ function dashRailRefresh(){
   }).then(function(data){
     var changed = false;
     var covered = Object.create(null);
-    (data.groups || []).forEach(function(g){
+    var listing = data.groups || [];
+    var addable = !dashRailBusy && sentKey === dashRailRefreshKey();
+    listing.forEach(function(g){
       if ((g.sessions || []).length) covered[g.cwd] = true;
+      if (addable && dashRailAddNew(g, listing)) changed = true;
       if (dashRailRefreshStates(g)) changed = true;
       // The first listing after startup goes out before the git sweep has finished, so its groups
       // carry no branch; a later one does.

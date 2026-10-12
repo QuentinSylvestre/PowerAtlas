@@ -21319,6 +21319,95 @@ check("dashboard rail: the 60 s refresh picks up a changed resume_locked, in bot
   assertEqual(box.dashRailRefreshStates(fresh({ resume_locked: false })), false, "false and omitted are the same state");
 });
 
+// A session or workspace that appears after the page loaded (a terminal `/clear` makes a new session
+// id) was invisible until a reload, because the 60 s refresh only updated rows the rail already held.
+function loadRailAddNew(groups) {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  const cut = (start, end) => {
+    const from = src.indexOf(start);
+    const to = src.indexOf(end, from);
+    assert(from >= 0 && to > from, `${start} moved in index.html`);
+    return src.slice(from, to);
+  };
+  const box = { dashRailGroups: groups, dashRailGroupsByCwd: Object.create(null), dashRailFilter: "" };
+  groups.forEach((g) => { box.dashRailGroupsByCwd["c:" + g.cwd] = g; });
+  vm.createContext(box);
+  vm.runInContext(cut("function dashRailMergeSessions(group, rows){", "/** Move a workspace group to the front"), box);
+  vm.runInContext(cut("function dashRailAddNew(incoming, listing){", "function dashRailRefresh(){"), box);
+  const ids = (g) => g.sessions.map((s) => s.id).join(",");
+  const order = () => box.dashRailGroups.map((g) => g.cwd).join(",");
+  return { box, ids, order, src };
+}
+const railSession = (id, updated) => ({ id, updated_at: updated, title: id });
+const railGroup = (cwd, sessions, extra) => ({ cwd, name: cwd, total: sessions.length, session_page: 1, has_more: false, sessions, ...extra });
+
+check("dashboard rail: the 60 s refresh adds a session created after the page loaded, newest first, and nothing older", () => {
+  const known = railGroup("w1", [railSession("b", "2026-10-12T22:10:00+00:00"), railSession("a", "2026-10-12T20:00:00+00:00")]);
+  const { box, ids } = loadRailAddNew([known]);
+  // The poll asks for more rows than a collapsed group holds: "old" is older than everything held, so it is not new.
+  const incoming = railGroup("w1", [
+    railSession("new2", "2026-10-12T22:20:00+00:00"), railSession("new1", "2026-10-12T22:15:00+00:00"),
+    railSession("b", "2026-10-12T22:10:00+00:00"), railSession("a", "2026-10-12T20:00:00+00:00"),
+    railSession("old", "2026-10-01T00:00:00+00:00"),
+  ], { total: 5 });
+  assertEqual(box.dashRailAddNew(incoming, [incoming]), true, "new rows are a change");
+  assertEqual(ids(known), "new2,new1,b,a", "new rows go first in server order, the older extra is not added");
+  assertEqual(known.total, 5, "the count follows");
+  assertEqual(box.dashRailAddNew(incoming, [incoming]), false, "the same listing again is no change");
+  assertEqual(ids(known), "new2,new1,b,a");
+});
+
+check("dashboard rail: the refresh counts a resumed old session as new, and ignores a pinned row listed first", () => {
+  const known = railGroup("w1", [railSession("b", "2026-10-12T22:10:00+00:00")]);
+  const { box, ids } = loadRailAddNew([known]);
+  // The server lists a workspace's pinned rows first, so a known pinned row can precede the new one.
+  const incoming = railGroup("w1", [
+    railSession("b", "2026-10-12T22:10:00+00:00"), railSession("resumed", "2026-10-12T22:30:00+00:00"),
+  ]);
+  assertEqual(box.dashRailAddNew(incoming, [incoming]), true);
+  assertEqual(ids(known), "resumed,b");
+});
+
+check("dashboard rail: the refresh leaves a lazy group's rows alone and only follows its count", () => {
+  const lazy = railGroup("w1", [], { total: 4 });
+  const { box, ids } = loadRailAddNew([lazy]);
+  const incoming = railGroup("w1", [railSession("x", "2026-10-12T22:10:00+00:00")], { total: 5 });
+  assertEqual(box.dashRailAddNew(incoming, [incoming]), true, "a changed count is a change");
+  assertEqual(ids(lazy), "", "no rows are loaded into a lazy group");
+  assertEqual(lazy.total, 5);
+  assertEqual(box.dashRailAddNew(incoming, [incoming]), false, "an unchanged count is no change");
+});
+
+check("dashboard rail: the refresh adds a brand-new workspace at the position the server gave it", () => {
+  const a = railGroup("A", [railSession("a1", "2026-10-12T21:00:00+00:00")]);
+  const b = railGroup("B", [railSession("b1", "2026-10-12T20:00:00+00:00")]);
+  const { box, ids, order } = loadRailAddNew([a, b]);
+  // A workspace nobody has used yet sorts first: it goes ahead of A.
+  const fresh = railGroup("N", [railSession("n1", "2026-10-12T22:00:00+00:00")]);
+  const listing = [fresh, railGroup("A", []), railGroup("B", [])];
+  assertEqual(box.dashRailAddNew(fresh, listing), true);
+  assertEqual(order(), "N,A,B", "the new workspace leads");
+  assertEqual(ids(box.dashRailGroupsByCwd["c:N"]), "n1", "with its session");
+  // A workspace the server lists last (shifted in from a page the rail has not loaded) goes last, not first.
+  const tail = railGroup("Z", [railSession("z1", "2026-10-01T00:00:00+00:00")]);
+  assertEqual(box.dashRailAddNew(tail, [fresh, railGroup("A", []), railGroup("B", []), tail]), true);
+  assertEqual(order(), "N,A,B,Z", "a trailing workspace stays at the end");
+  // And one in the middle goes between its neighbours.
+  const mid = railGroup("M", [railSession("m1", "2026-10-05T00:00:00+00:00")]);
+  assertEqual(box.dashRailAddNew(mid, [fresh, railGroup("A", []), mid, railGroup("B", []), tail]), true);
+  assertEqual(order(), "N,A,M,B,Z", "a middle workspace sits before the next one it precedes");
+  assertEqual(box.dashRailAddNew(mid, [mid]), false, "an existing workspace with nothing new is no change");
+});
+
+check("dashboard rail: the refresh adds rows only while the rail still matches what the poll asked for", () => {
+  const { src } = loadRailAddNew([]);
+  const from = src.indexOf("function dashRailRefresh(){");
+  const body = src.slice(from, src.indexOf("function dashRailRefreshOpenGroups", from));
+  assert(/var sentKey = dashRailRefreshKey\(\);/.test(body), "the poll records what it asked for");
+  assert(/var addable = !dashRailBusy && sentKey === dashRailRefreshKey\(\);/.test(body), "and re-checks it, and that no load is mid-flight, when the answer lands");
+  assert(/addable && dashRailAddNew\(g, listing\)/.test(body), "adding is gated on that check");
+});
+
 // 261002_CODEX_LIVE_STATUS_CONTEXT_PRESSURE_AND_SUBAGENT_USAGE_FROM_STATE_DB Phase 4 (D12): a Codex thread a terminal holds carries `working` or `idle`; the dot, the 60 s
 // refresh and the metadata strip follow the raw value, never dashRailRowStatus (which turns an
 // empty value into `working`).
