@@ -1,8 +1,11 @@
 # ACP Needs Attention: Approvals, Agent Questions and Workflow Step Messages
 
 > **Date**: 2026-10-12
-> **Status**: Exploring  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: <set by /qclose at archival>
 > **Scope**: List pending approvals, agent questions and workflow step questions in the dashboard Overview's "Needs attention" with a `(N)` title count; declare kiro-cli's `userInput` capability and answer `_kiro/userInput`; handle `_kiro/session/notify` and paused workflow runs; fix `_note_subagent_action`'s crew-frame filter
+> **Memory relied on**: none
+> **Estimated effort**: 2-3 days
 
 ---
 
@@ -42,95 +45,506 @@ Desired outcome: one place that shows everything waiting on the user, with each 
 
 ---
 
-## Exploration Discovery
-<!-- Transient: /qplan folds these into the planning sections and removes this section. -->
+## 1) Current State
 
-### Existing patterns & constraints
+Code is cited by function or heading, with a line number as a hint only (lines drift). Runtime facts carry the command and date that established them.
 
-- **Pending permissions.** `_pending_permission` (`acp.py:3723`) maps an opaque id to `{session_id, options, kiro_id}` plus `workflow_child` for a routed step request (`acp.py:6884-6895`). It stores no title, consent or timestamp; those exist only in the recorded `permission_request` frame (`_emit`, `acp.py:6957`). `sessions_with_pending_permission()` (`acp.py:5069-5081`) returns session ids only and is read only by `_workflow_states` (`web.py:3348-3387`). Removal paths: answer (`_handle_permission_response`, `acp.py:8919-8993`), turn-end sweep keeping live step requests (`acp.py:8740`, `8661`), Stop with and without a turn (`acp.py:9066`, `9092`), close (`acp.py:7307`), step dropped (`_cancel_step_permissions`, `acp.py:4830-4868`), detach (`acp.py:3939-3947`).
-- **Workflow-step routing.** `_workflow_step_parent` (`acp.py:5124-5142`) and the `[workflow step <name>]` prefix (`acp.py:6951-6956`) are the precedent for routing a step's request to the parent.
-- **Unknown agent requests are refused.** `_on_agent_request` (`acp.py:6636-6653`) routes only `session/request_permission`; anything else gets a WARNING and a refusal. `_kiro/userInput` must be added there.
-- **Client capabilities.** `_kiro_client_capabilities()` (`acp.py:1013-1027`) builds `_meta.kiro` for `initialize`; `userInput` goes there.
-- **Overview data.** The summary route (`web.py:4448-4505`) runs in a worker thread and never reads the supervisor. The live route (`web.py:4627-4647`) snapshots `held`, `_workflow_states` and `_inflight_ids` on the loop and passes them to the thread: the pattern to copy. Live tiles are capped at 8 (`overview.py:417`), so a pending session may have no tile. Both routes are loopback-only (`web.py:4560-4564`).
-- **Overview rendering.** "Needs attention" blocks (`index.html:370-376`) are keyed by a JSON string and rebuilt only on change (`dashOvRenderInterrupted`, `index.html:1713-1737`; `dashOvDrawRepos`, `index.html:1328-1366`). Opening a session: `dashOvOpenTile` → `openSessionTranscript({sid, provider, cwd}, …)` (`index.html:1920-1924`). Polling stops while a transcript is open or the tab is hidden (`index.html:1010-1030`, `1776-1848`). `index.html` never sets `document.title`; `acp.html` sets it from the `title` frame (`acp.html:1262`, `5098`, `5230`).
-- **Crew frames.** `_emit_subagents_frame` (`acp.py:7532-7575`) uses one value as both payload filter and `toolCallId`; `_subagents_payload` keeps entries whose `fan_out_id` matches (`acp.py:7504-7529`). v2 rows are tagged from `crew_spawn_toolcallids` (`acp.py:4700-4702`), wave and workflow rows from `_active_fan_out_wave` (`acp.py:5583-5584`, `6437-6443`). `_note_subagent_action` (`acp.py:4716-4735`) is the only v3-path call site passing the v2 map. Clients: `setCrew` (`acp.html:2005-2074`) and `dashSetCrew` (`index.html:4454-4527`) are mirrors.
-- **Workflow state.** `_workflow_children[parent][child] = (state, last_seen)` with `state` running or waiting, written only by `_workflow_set` (`acp.py:4775`). `_workflow_reopen_row(entry, "waiting")` (`acp.py:5207`) exists. `workflow_state` returns waiting only when no fresh child is running (`acp.py:5043-5067`). The overlay upgrades only a waiting or idle verdict and leaves pending-permission sessions alone (`web.py:3326-3345`). Waiting bound 6 h (`acp.py:689`), running bound 600 s (`acp.py:682`). `_workflow_outcome` (`acp.py:5398-5412`) maps any status but `completed` to `failed`. `_kiro/workflow/*` frames are routed by `parentSessionId` (`acp.py:5414+`).
-- **`_kiro/session/notify` today.** Not matched by the workflow router (`acp.py:5983-5985`); `_stamp_activity(parent)` runs, `_workflow_touch` does not (the parent is not a step), and it falls through to the INFO log (`acp.py:6385-6396`). The `user_message_chunk` branch deliberately leaves `system-notification` chunks alone (`acp.py:6061-6066`).
-- **Frames.** `envelope()` rejects any type not in `SERVER_TYPES` (`acp.py:200-250`, `1715-1727`); `TestAcpServerTypeGuard` (`tests/test_web.py:3093-3115`) checks every declared type. A recorded frame (`_emit`) replays on reconnect within `HISTORY_MAXLEN = 2000` / 2 MiB (`acp.py:374-375`); a broadcast does not. Remote sockets get permission frames minus the `rule*` fields (`acp.py:1542-1572`).
-- **Toasts.** `_notify` (`acp.py:1615`) through `_notify_from_acp` (`web.py:1002-1037`): `permission_request` always toasts when notifications are on; `turn_end` and `agent_error` only when unwatched.
-- **Text cleaning.** `_clean_step_label` (`docs/KNOWLEDGE.md` § ACP permission wire shapes, "Workflow step approvals") drops control and bidi characters, replaces brackets and clips to 60.
-- **Governance (`AGENTS.md`).** Python changes need a restart, never without the user's grant; template and static changes need only a hard reload. `tests/acp_page.test.mjs` bans `innerHTML` and has no CSS engine (any `display` rule on a `hidden`-toggled element needs a `[hidden]{display:none}` companion). The harness pre-registers Overview element ids in `byId` (`tests/acp_page.test.mjs:15070-15090`); new block ids must be added there. `isolated_config` seams in `tests/test_web.py`. Terminology: "Stopped by a quota limit" for the interrupted list, "permission mode" not "posture".
-- **Tests to extend.** `TestAcpSubagentActivity` (`tests/test_web.py:11797-11830`, v2 route only, both maps empty, so it does not pin the bug), `TestAcpFanOutIdFiltering` (`23967`), `TestAcpWorkflowNotifications` (`12331`, including workflow permission routing `13785-14096`), `TestWorkflowLivenessStatus` (`41544`), `TestOverviewLive` (`36502`), `TestNotificationPolicy` (`10838`), `TestAcpUnrecognizedNotificationLogLevel` (`3597`); page tests for crew panels (`tests/acp_page.test.mjs:6280+`), permission cards (`8948-9003`, `12427-12480`) and Attention blocks (`22451-22550`).
+### Pending permissions (`acp.py`)
 
-### Measurements taken during exploration
+- `_Supervisor._pending_permission` (`__init__`, ~3723) maps an opaque id to `{session_id, options, kiro_id}`, plus `workflow_child` for a request routed from a workflow step. It stores no text, kind or creation time; the title exists only in the recorded `permission_request` frame.
+- `_on_agent_request` (~6636) routes `_kiro/auth/getAccessToken`, `session/request_permission`, the secret methods and `_kiro/openExternalUrl`. Anything else is logged at WARNING and refused through `_refuse`.
+- `_on_permission_request` (~6745) is the pattern a question handler copies. It validates the id and options. It routes a tracked step's request to the parent through `_workflow_step_parent` (~5124) and prefixes the title with `[workflow step <name>]` through `_workflow_step_label`. It mints the opaque id and stores the entry. It then emits the recorded `permission_request` frame, raises the `_notify("permission_request", …)` toast and runs `_workflow_touch(step)`.
+- Every path that removes an entry without the user's answer replies through `_Supervisor._answer_permission_cancelled(kiro_id, why)` (~4410), which writes the permission shape `{"outcome": {"outcome": "cancelled"}}`. The call sites:
+  - detach: the `permission_resolved` broadcast loop, then `_pending_permission.clear()` (~3939). It writes no reply, because the agent is gone.
+  - `_cancel_step_permissions` (~4830).
+  - the malformed-request refusal in `_on_permission_request` (~6871).
+  - close (~7307, through `_pop_pending_permissions`).
+  - the turn-end sweep in `_handle_prompt`'s `finally` (~8661 and ~8736).
+  - Stop, in turn (~9066) and with no turn (~9092).
+- `_pop_pending_permissions` (module level, ~8740) pops the entries, announces each with `permission_resolved` and returns them for the caller to answer.
+- `_handle_permission_response` (~8919) answers one entry. Its ordering is load-bearing: (a) unknown id, (b) ownership by `conn.session_id`, (c) `optionId` must be in `{opt["optionId"] for opt in entry["options"]}`, (d) pop, (e) reply. Step (c) raises `KeyError` on an entry whose options have no `optionId`.
+- `sessions_with_pending_permission()` (~5069) returns the owning session ids. It feeds `web.py`'s `_workflow_states` overlay, so a parent with a pending request is not turned from waiting to working.
 
-All on kiro-cli 2.29.1, 2026-10-12, from a second `kiro-cli acp --agent-engine v3` process driven by a scratch script built on `tools/acp_permission_probe.Probe` (never the running PowerAtlas). Six runs; all 10 probe sessions deleted afterwards (each checked to be created inside the task window).
+### Shared transcript renderer
 
-- **Agent questions (quick-spec, n=2 runs, 7 questions).** Without the capability: each question was a `tool_call` with `_meta.kiro.toolId: "user_input"`, then `session_info_update` kind `pending_interaction` (`interactionType: "user_input"`, `question`, `options`), then `session/request_permission` whose options were all `kind: "allow_once"` with the choice labels as names and the question as `toolCall.title`; after the answer, `interaction_resolved`. With `_meta.kiro.userInput: true`: the same `tool_call` and `pending_interaction`, then a `_kiro/userInput` request `{sessionId, toolCallId, question, options: [{title, description, recommended}]}`; reply `{action: "answered", answer: "<free text>"}` was accepted (`interaction_resolved` with `outcome: "answered"`). Bundle reading, not run: a free-form question with no options and no capability is skipped to the next phase (`freeFormQuestion.count` metric, disposition `advanced`); a non-answered reply to `_kiro/userInput` makes kiro-cli move to the next phase.
-- **`userInput` scope (bundle).** `userInputCapability` is read in 6 places, all on the question paths, plus one check that allows spec modes in a sandbox environment (`kis()`); PowerAtlas sessions are not sandboxed.
-- **Workflow step questions (n=4 runs, one step each).** Every run: the step's warning `send_message` reached the parent as `_kiro/session/notify` (`sender: "step"`, `severity: "warning"`, `callerSessionId` = the step), and kiro-cli ran a parent wake turn (`agentInitiated: true`) relaying the question. The user's answer, sent as a parent prompt, went to the step as `_kiro/session/notify` with `sessionId` = the step, `callerSessionId` = the parent, `sender: "parent"`, `severity: "info"`, followed by `steering_injected` on the step; the step then finished (`success` notify, `node_complete`, `run_complete` `completed`). In 3 of 4 runs the step stayed in its turn while waiting; the parent's `focus_update` stayed `in_progress` with `runningWorkflows: 1`, so kiro-cli gave no waiting signal besides the notify. In 1 of 4 runs the step ended its turn: kiro-cli sent `node_paused` (`workflowId`, `nodeId`, `nodePath`, `reason`, no `sessionId`), `_kiro/workflow/paused` (`pauseReason`), and `run_complete` with `status: "paused"`; the parent's `focus_update` read `waiting_on_user` with `activity.pausedWorkflows: 1`. That paused run was not answered, so its resume path is unmeasured.
-- **`tool_call_chunk` from workflow steps: none** in 4 runs (steps sent `tool_call` and `tool_call_update` only). The `_note_subagent_action` bug is not reachable through workflows on 2.29.1. v3 sub-task rows are keyed by `agentSubtaskId`, not a session id, so a chunk cannot reach them either.
-- **Production log** (`orchestrator.log` and 3 rotations, full scan): 58 `_kiro/session/notify`, all `sender: "step"`, all `severity: "success"`; 0 `node_paused` or `workflow/paused`; 0 refused agent requests; 24 `_kiro/system/notify` (`level: "warning"`, "The model response paused unexpectedly…"), a separate notification not in scope.
+- The permission card is built once in `static/transcript-renderer.js`: `addPermissionRequest` (~1917), `findPermissionRequestRow` (~2577), `markPermissionResolved` (~2596, disables `button` elements only) and `hasPendingStepPermissionCard` (~2622). `acp.html` and `index.html` call it from their `permission_request` and `permission_resolved` handlers. The page harness loads these functions by name (`rendererFunctionSource` list in `tests/acp_page.test.mjs`).
 
-### Risks & mitigations
+### Client capabilities and toasts
 
-- **A paused run's resume is unmeasured.** Mitigation: keep the run tracked as waiting under the 6 h bound and move the step back to running on any later step activity; probe a real pause and resume during `/qdev` (prompt a step to end its turn after asking) and record it in `docs/KNOWLEDGE.md`.
-- **Abandoning a `_kiro/userInput` request.** The non-answered reply is read from the bundle, not run. Mitigation: measure it in the `/qdev` probe before relying on it; never reply with a JSON-RPC error until measured (a permission error was once read as approval, `tools/acp_permission_probe.py` K3 note).
-- **`_kiro/userInput` from a workflow step is assumed.** No step asked a `user_input` question in the probes. Mitigation: route it like permission requests through `_workflow_step_parent`, and record it as unverified until observed.
-- **Double rendering after `session/load`.** A live step-message row plus the replayed `system-notification` chunk. Mitigation: render the replayed chunk as the same system row (SC-4), and check a load in live QA.
-- **History eviction.** A pending request whose recorded frame falls out of the 2000-event / 2 MiB history has no card after reconnect. The attention list reads the supervisor store, so it still shows the item. Pre-existing; not fixed here.
-- **Background-tab throttling.** Browsers may slow a hidden tab's timers to about once a minute, so the title count can lag that long.
-- **Agent-authored text** (questions, options, step messages) reaches the Overview and transcripts. Mitigation: clean and clip on the server, `textContent` on the client; the attention endpoint stays loopback-only.
-- **Wrong fix for item 1.** Passing the wave map would break the v2 path. Mitigation: filter by the changed entry's own `fan_out_id` (SC-7).
+- `_kiro_client_capabilities()` (~1012) builds `clientCapabilities._meta.kiro` for `initialize`.
+- `_notify` sends toasts through `web.py`'s `_notify_from_acp` (~1002). There, `if event == "permission_request":` (~1026) is the branch that always toasts while notifications are on.
 
-### Resolved decisions
+### Frames
 
-- Q1: How should the three follow-ups be split? — A: ok (recommended: one combined project file, keep item 1's fix) — Decision: one combined project file; item 1's fix stays in scope as a small phase.
-- Q2: Declare the `userInput` capability and answer `_kiro/userInput`, or keep the permission-card fallback? — A: ok (recommended: declare it) — Decision: declare `_meta.kiro.userInput: true`; add a question card with option descriptions, the recommended mark and a free-text answer on both pages.
-- Q3: How does "Needs attention" get its items, and how far does the title count reach? — A: ok (recommended: a dedicated endpoint polled in every mode, title count on the dashboard only) — Decision: a loopback-only attention endpoint built from a loop-side supervisor snapshot, polled about every 5 s in every mode; `(N)` title prefix on the dashboard only.
-- Q4: Which kinds of item go in the list? — A: ok (recommended: approvals, questions and step questions; no unwatched turn ends; rows open the session) — Decision: approvals, agent questions and workflow step questions; each row shows kind, session title and workspace, text and age, and opens the session; no answering from the Overview; unwatched turn ends excluded.
-- Q5: Where does a step's `send_message` text appear? — A: ok (recommended: split) — Decision: every severity updates the step's crew-row action; `warning` and `error` also add a recorded system row to the parent transcript; replayed `system-notification` chunks render as that row; text cleaned like `_clean_step_label` with a message-length clip.
-- Q6: What does a step question do to the step, and how is a paused run shown? — A: ok (recommended: mark waiting at once; back to running on parent reply, step tool call or `node_complete`; paused run kept waiting, header "Paused") — Decision: as recommended; the resume path for a run kiro-cli really paused stays unmeasured until probed.
+- `SERVER_TYPES` (~200) is checked by `envelope()`, and `TestAcpServerTypeGuard` checks every declared type. `CLIENT_TYPES` (~193) gates inbound frames; `permission_response` is dispatched around ~7847.
+- `_emit` records a frame and replays it on reconnect, within `HISTORY_MAXLEN = 2000` and 2 MiB. `_registry.broadcast` does not record.
+- `_without_rule_fields` (~1548) strips the `rule*` fields from `permission_request` frames for remote viewers. Every other type passes through unchanged.
 
-Terminology settled in this exploration (for `/qplan`'s Terminology proposal): **approval** (a pending permission request for a tool call; not "permission prompt" in UI text), **question** (an agent's `user_input` question, whether it arrives as `_kiro/userInput` or as the permission-card fallback; not "clarifying question" in UI text, though the roadmap used that phrase), **step question** (a workflow step's warning-severity `send_message`; not "step notification"). "Needs attention" stays the section name.
+### Workflow state (`acp.py`)
 
-### Open items
+- `_workflow_children[parent][child] = (state, last_seen)` is written only by `_workflow_set` (~4775). `workflow_state` (~5061) returns `"waiting"` only when no fresh child is running. The waiting bound is `_WORKFLOW_WAITING_STALE_S` (6 h) and the running bound `_WORKFLOW_CHILD_STALE_S` (600 s).
+- `_workflow_touch` (~5157) refreshes a tracked child and preserves its state by design. It never flips waiting to running.
+- `_workflow_reopen_row(entry, state)` (~5207) sets `status` and `action` to waiting or running.
+- `_on_workflow_notification` (~5414) handles `_kiro/workflow/*` frames:
+  - `node_paused` already goes to `_on_workflow_node_done(parent, params, "waiting")`. The measured shape (`workflowId`, `nodeId`, `nodePath`, `reason`, `parentSessionId`; probe run1, 2026-10-12) resolves through the `(parent, workflowId, nodeId)` index, so this path works. Its comment still says "Shape not measured".
+  - `_kiro/workflow/paused` is logged only.
+  - `_on_workflow_run_done` (~5655) reads `_workflow_outcome(status)`, which maps anything other than `completed` to `failed` (~5398). For every child of the run it calls `_workflow_drop_child` and `_workflow_finish_row`, then pops `_workflow_runs` and calls `_workflow_mark_ended`.
+  - So `run_complete` with `status: "paused"` marks the waiting step **failed** and forgets the run. This is the SC-6 defect.
 
-- *Execution-contingent:* the resume path for a run kiro-cli paused (`run_complete` `status: "paused"`); needs a probe that reproduces the pause and then answers.
-- *Execution-contingent:* kiro-cli's handling of a non-answered `_kiro/userInput` reply, and which `action` value to send; measure before Stop, close and turn end rely on it.
-- *Execution-contingent:* whether a workflow step can send `_kiro/userInput`, and with which `sessionId`.
-- *Deterministic:* where the `(N)` title prefix composes with any future dashboard title write (none exists today).
-- *Deterministic:* the message-length clip for step text and question text (reuse `MAX_ERROR_DETAIL_CHARS` or `MAX_PERMISSION_TITLE_CHARS`, `acp.py:649`).
+### `_on_notification` order and `_kiro/session/notify` (`acp.py` ~5975 onward)
 
-### Assumptions (unconfirmed)
+1. The workflow router.
+2. `_stamp_activity(params.sessionId)`.
+3. `_workflow_touch(sessionId)` when the id is a sub-agent session.
+4. The early-frame buffer for an unregistered id while `_reserved > 0`.
+5. The method branches.
 
-Disclosed at the assumptions checkpoint; the user replied "no let's go" without changes.
+`_kiro/session/notify` matches none of the branches and falls through to the INFO log at the end (~6385). A notify addressed to a step (`sessionId` = the step) would be caught by the early-frame buffer if a `session/new` happened to be in flight. The new handler must therefore sit after step 3 and before step 4.
 
-- A question raises a desktop toast like a permission request: always, when notifications are on (Quality attributes / UX).
-- The question card offers no extra Skip button; kiro-cli supplies its own "Skip remaining questions" option (UX flow).
-- `_kiro/userInput` cards reach remote viewers the way permission cards do; the attention endpoint stays loopback-only (Quality attributes: security).
-- One supervisor store holds approvals and questions with text, options, kind and creation time; step questions live in a per-step record beside `_workflow_children` (Data model).
-- `_note_subagent_action` filters by the changed entry's own `fan_out_id` (Design space, item 1).
+### The `user_message_chunk` branch (~6044)
 
-### Recommended approach
+It leaves `_meta.kiro.notification` chunks as ordinary user chunks. On `session/load`, a step's `send_message` replays as a user chunk tagged `notification.kind == "system-notification"` with `status`, `agentName`, `nodeName`, `sender` and `replay: true` (`docs/KNOWLEDGE.md` § "`_kiro/workflow/*` notification family", Q7). It renders as a user bubble today.
 
-Five phases, in dependency order:
+### Crew frames
 
-1. **Crew-frame fix (SC-7).** Emit `_note_subagent_action`'s frame with the entry's own `fan_out_id`; add the failing-first unit test.
-2. **Pending store and `userInput` (SC-3).** Extend the pending record with kind, text, options and created time; declare `userInput`; accept `_kiro/userInput` in `_on_agent_request` (routed to the parent for a tracked step); add a frame type for the question and a resolved companion (or reuse `permission_resolved`); answer route with free text; non-answered replies on Stop, close, turn end and detach after measuring them; question card on both pages (options with descriptions, recommended mark, free-text box); toast policy for questions. Measure the abandon reply first.
-3. **Step messages and waiting state (SC-4, SC-5, SC-6).** Handle `_kiro/session/notify`: `sender: "step"` updates the row and, for warning and error, emits a recorded system row; warning marks the step waiting; `sender: "parent"` to a step moves it back to running; replayed `system-notification` chunks render as the system row. Map `node_paused` and `run_complete` `status: "paused"` to waiting and a "Paused" header. Probe a real pause and resume and record it in `docs/KNOWLEDGE.md`.
-4. **Attention feed (SC-1, SC-2).** Loop-side snapshot of pending approvals, questions and open step questions with session title, workspace, provider and cwd; loopback-only endpoint; dashboard poller in every mode; new "Needs attention" blocks (approvals and questions, step questions) keyed and rebuilt like the existing ones; `(N)` title prefix.
-5. **Docs and live QA (SC-8).** README row for the attention list and question cards; `docs/KNOWLEDGE.md` sections for `user_input`, `_kiro/session/notify` and paused runs; roadmap entries updated; live QA after a granted restart.
+- `_emit_subagents_frame(parent, crews, fanout_map)` (~7532) filters the payload by `fanout_map.get(parent, _NO_ANCHOR_TOOLCALLID)` and uses the same value as `toolCallId`.
+- v2 rows are tagged from `crew_spawn_toolcallids`; wave and workflow rows from `_active_fan_out_wave`.
+- `_note_subagent_action` (~4716) passes `self.crew_spawn_toolcallids`, so a wave-tagged row is filtered out of that frame. Not reachable through workflows on kiro-cli 2.29.1: steps sent no `tool_call_chunk` in 4 probe runs (2026-10-12).
+- On the clients, `renderCrewPanel` (`acp.html` ~1887) and its mirror (`index.html` ~4335) print "Done (n)" when every row is done and `workflowLive` is false, else "Orchestrating (n)".
+- `subagentState` (`acp.html` ~1965) returns `'working'` for any row that is not done, so a waiting row shows the working dot. The rail's `.status-waiting` colour lives in `style.css` (~561).
 
-### QA environment
+### Overview (`web.py`, `index.html`)
 
-- **Unit tests:** `.venv-PowerAtlas/Scripts/python -m pytest tests/test_web.py --timeout=300`; page tests: `node tests/acp_page.test.mjs`.
-- **Protocol probes:** a second `kiro-cli acp --agent-engine v3` driven by a script built on `tools/acp_permission_probe.Probe` (spawn, token and permission answering), with `_meta.kiro.settings.workflows/goal` enabled for workflow runs and `modeId: "quick-spec"` for questions. A one-step workflow whose step sends a warning `send_message` reproduces step questions; a quick-spec prompt asking for clarifying questions reproduces `user_input` questions. Delete probe sessions afterwards by id and `createdAt` (`~/.kiro/sessions/<hash>/sess_<id>/`; `session.json` has no `cwd`).
-- **Live QA:** needs a PowerAtlas restart (Python changes), granted by the user for that task. Sign in through `/local-auth?code=<code>` per `AGENTS.md` § Verification Setup; drive the pages with the Chrome tools or standalone Playwright from the venv. Manual mode (`POST /api/acp-permissions {"mode":"manual"}`, restore after) produces approvals; a quick-spec session produces questions; a workflow-enabled session (`chat.enableWorkflows`) produces step questions.
+- `api_dashboard_overview_live` (~4630) snapshots `held`, `_workflow_states` and `_inflight_ids` on the loop and hands them to `_overview_live` in a thread. That is the pattern to copy.
+- Overview routes are loopback-only by their absence from `_REMOTE_ALLOWED_PATHS`.
+- Titles come from `_acp_row_title(session)` (~3250) over `data.get_sessions(cwd, "kiro-cli-v3")`, which is cached.
+- The supervisor's session record stores no title. The `focus_update` branch (~6309) emits a `title` frame and keeps nothing.
+- "Needs attention" is `#dashOvAttention` (`index.html` ~370), with blocks `#dashOvInterruptedBlock` and `#dashOvReposBlock`. Both are rebuilt only when their JSON key changes (`dashOvRenderInterrupted` ~1713).
+- `dashOvOpenTile` (~1920) opens a session through `openSessionTranscript({sid, provider, cwd}, tile, {cwd, name})`.
+- The Overview pollers run only while the Overview is showing and the tab is visible (`dashOverviewPoll` ~1022).
+- `index.html` never writes `document.title`.
 
----
+### kiro-cli 2.29.1 facts (probe runs 1-6, a second `kiro-cli acp --agent-engine v3`, 2026-10-12)
+
+- **`_kiro/userInput` request.** With `clientCapabilities._meta.kiro.userInput: true`, a question arrives as `{sessionId, toolCallId, question, options: [{title, description, recommended}]}`. Without the capability it arrives as a `session/request_permission` with `allow_once` options.
+- **Replies, read from the bundle** (`acp-server.js`, the `_kiro/userInput` call site): `o.action==="answered"&&o.answer` answers. Any other action, an empty answer, or an error reply moves kiro-cli to the next phase. In run 5 the answer `"blue"` did not match any option, and the agent said so in its next question. A choice is therefore selected by sending its `title` verbatim.
+- **Step questions.** A step's warning `send_message` reaches the parent as `_kiro/session/notify` `{sessionId: <parent>, callerSessionId: <step>, message, severity, sender: "step", workflowId, nodeId, agentName}`. The parent's relayed answer reaches the step as `{sessionId: <step>, callerSessionId: <parent>, message, severity: "info", sender: "parent"}`. In 1 of 4 runs kiro-cli also sent `node_paused`, `_kiro/workflow/paused` and `run_complete` `status: "paused"`; its resume was not measured.
+- **Production log.** The full scan of `orchestrator.log` and 3 rotations found 58 notifies, all `sender: "step"` and `severity: "success"`.
+
+## 2) Goal
+
+Keep one supervisor store for everything a person must answer: approvals, questions, and step questions tracked beside the workflow children. Answer questions in kiro-cli's native `userInput` shape. Render step messages and paused runs truthfully. Expose the store to a loopback attention endpoint that the dashboard polls into "Needs attention" and a `(N)` page-title count.
+
+## 3) Design Decisions
+
+| Decision | Choice | Alternatives considered | Rationale |
+|---|---|---|---|
+| D1 Plan split (Q1, user "ok" 2026-10-12) | One combined plan; the crew-frame fix is its own small phase | Three plans | Approvals, questions and step questions meet in one store and one list |
+| D2 Question transport (Q2) | Declare `_meta.kiro.userInput: true` and answer `_kiro/userInput` | Keep the permission-card fallback | The fallback drops option descriptions and skips free-form questions unseen |
+| D3 Store | One store, `_pending_permission`, with a new `kind` field (`"approval"` or `"question"`) and new `text` and `created` fields on every entry | A second dict for questions | `_pop_pending_permissions`, `_cancel_step_permissions`, detach and `sessions_with_pending_permission` (and so the waiting overlay) then cover questions unchanged. An entry without `kind` reads as `"approval"` |
+| D4 Abandon reply | New `_Supervisor._answer_pending_cancelled(entry, why)` with a strict rule: `if entry.get("kind") == "question":` reply `{"action": "cancelled"}`; **every other value, missing or unknown, gets the permission `cancelled` outcome**. `kind` is set only by the handler of the JSON-RPC method (`_on_permission_request` or `_on_user_input_request`), never from the agent's payload. Every non-malformed call site in §1 that passes `entry["kiro_id"]` switches to it; the malformed-request refusals keep their own reply. A question entry gets **no** `_workflow_note_step_denied` notice on Stop, close or reap: that notice says a tool call was denied, which is false for a question; the card's resolved state is the only signal. Detach writes nothing for either kind: the agent process is already gone, so SC-3's "detach" case is met by the `permission_resolved` broadcast alone | A JSON-RPC error for questions | The bundle treats any non-`answered` action as next-phase. A misclassified approval answered with the question shape could fail open on kiro-cli's turn-approval path (K3 history), so the default must be the permission shape. Confirmed by Phase 1 |
+| D5 Question frames | New server type `question_request` `{requestId, sessionId, question, options: [{title, description, recommended}], workflowStep?}`, recorded with `_emit`. Resolved by the existing `permission_resolved {requestId}` | A separate `question_resolved` | Both pages already disable a card on `permission_resolved`, and every removal path already emits it |
+| D6 Answer route | New client type `question_response`, either `{requestId, optionIndex}` (an option button) or `{requestId, answer}` (free text), handled by `_handle_question_response` with the same (a)-(e) ordering as `_handle_permission_response`. (c) checks `kind == "question"`, then either `optionIndex` is an `int` (not `bool`) in range, and the reply carries the stored **raw** title of that option, or `answer` is a string, stripped, 1 to `MAX_QUESTION_ANSWER_CHARS` (4000) characters. An empty answer is refused with `empty_answer`; both or neither key is refused with `bad_payload`. **No `await` and nothing that can raise between the lookup (a) and the pop (d)**, so a replayed `requestId` hits `unknown_request`. `_handle_permission_response` gains a `kind` check before its `optionId` check and refuses a question entry with `unknown_request`. Remote viewers can answer, gated exactly like `permission_response` (ownership only), deliberately | Reuse `permission_response` with free text | The option-membership check cannot apply to free text, and a question entry would raise `KeyError` in it |
+| D7 Option answers | The pending entry keeps each option's **raw** title (as kiro-cli sent it, after the type check only) for the reply. The card shows cleaned, clipped copies. A button sends its index, and the server maps it to the raw title, so cleaning or clipping can never turn a choice into an unmatched free-text answer. Free text is the third path. The recommended option gets a "Recommended" badge. No extra Skip button: kiro-cli offers "Skip remaining questions" as an option (assumption confirmed at the /qexplore checkpoint, user "no let's go", 2026-10-12). At most `MAX_QUESTION_OPTIONS` (20) options are kept; extras are dropped and logged at INFO | Send the title from the client | kiro-cli matches the answer against option titles (run 5); a clipped or cleaned title would not match |
+| D8 Text cleaning and limits | One new cleaner, `_clean_agent_text(value, limit)`: whitespace (newlines included) collapses to single spaces, every Unicode category C character is dropped (controls including NUL, bidi overrides and isolates, zero-width, private-use, unassigned), and the result is clipped. Used for the stored `text` of approvals and questions (200, `MAX_PERMISSION_TITLE_CHARS`), the toast text, the question shown on the card (`MAX_QUESTION_TEXT_CHARS`, 2000), option titles and descriptions shown on the card (200 and 500), and step messages (`MAX_ERROR_DETAIL_CHARS`, 512). `_clean_step_label` stays as it is for step names. The stored `text` never includes a `[workflow step …]` prefix; the step label travels as its own field | Clip only | `textContent` does not neutralise bidi overrides or zero-width characters, and a NUL breaks the toast hand-off (`notifications.py`) |
+| D9 Toasts | `question_request` toasts like `permission_request`: always, while notifications are on (assumption confirmed, 2026-10-12). New `notifications.notify_question(text)` ("Question: <text>", a fixed prefix `[workflow step]` for a step's question, as approval toasts do), dispatched from a `question_request` branch in `web.py`'s `_notify_from_acp`. `acp.html`'s `question_request` handler also fires its in-page browser notification with the same `!replaying && _notifyEnabled` gate as the `permission_request` handler (`maybeNotify`) | Unwatched only | A question stops the turn as an approval does |
+| D10 Remote viewers | `question_request` reaches remote sockets unchanged and remote viewers may answer, exactly as with approvals today (`_dispatch` has no remote gate; `_without_rule_fields` touches only `permission_request`). The attention endpoint stays loopback-only (assumption confirmed, 2026-10-12). A remote dashboard's attention poll gets 403 and stops (D19) | Hide questions remotely | A question carries no rule fields and grants nothing an approval does not |
+| D11 Step questions | A per-step record `_workflow_step_questions: dict[child_id, {parent, text, created, label}]` beside `_workflow_children` (assumption confirmed, 2026-10-12). Written by a warning notify from a tracked step. Removed by `_workflow_step_resume`, `_workflow_drop_child`, `_workflow_drop_parent` (close), `_detach` (cleared with the other workflow dicts) and `_workflow_reap_parent` (beside its `_cancel_step_permissions` call). `attention_snapshot` lists a step question only while its child is in `_workflow_live(parent)`, as a second guard | Put step questions in `_pending_permission` | A step question has no JSON-RPC id to answer, and the removal paths would try to reply to it |
+| D12 Step-message rendering (Q5) | Every `sender: "step"` notify sets the row's `action` to the cleaned message. `warning` and `error` also emit a recorded `step_message {step, severity, message}` to the parent. A `system-notification` user chunk **with `_meta.kiro.replay: true`** whose `status` is `warning` or `error` emits the same `step_message`; a replayed one with `success` or `info` is dropped from the transcript (it showed as a user bubble before). A live `system-notification` chunk (no `replay: true`, never observed) stays an ordinary user chunk and is logged at INFO, so it cannot double a live `step_message` | Render every severity in the transcript | Matches the live path, so a reload shows what the live session showed |
+| D13 Waiting and resume (Q6) | A warning notify sets the step `waiting` (`_workflow_set` plus `_workflow_reopen_row(entry, "waiting")`, which also reopens a reaped row, as `node_paused` does), then `action` = message. A step's `_kiro/userInput` question sets the step waiting the same way when stored, so the 6 h waiting bound applies and the 600 s reap cannot cancel it. `_workflow_step_resume(parent, child)` pops the step question and, if the state is waiting, sets running (`status: "working"`, `action: "running"`) unless the step still has a pending question entry in `_pending_permission`. Triggers: a `sender: "parent"` notify whose `sessionId` is the step; a `session/update` with `sessionUpdate == "tool_call"` from a tracked workflow child, handled in `_on_notification` right after the `_workflow_touch(session_id)` call and **before** the early-frame buffer (a step's frames never reach the generic `tool_call` branch while `_reserved > 0`); `node_complete` (through `_workflow_drop_child`) | Resume on any step frame | `_workflow_touch` deliberately preserves state, and a step's housekeeping frames must not clear a question |
+| D14 Paused runs (SC-6) | `_on_workflow_run_done` branches first on `status` (case-insensitive) `"paused"`: each tracked child of the run is set `waiting` and its row reopened as waiting; the run's `_workflow_runs` record is refreshed, not popped, and is **not** marked ended. Then it emits the frame and returns. `node_paused` keeps its route; its comment cites the measured shape | Map paused to done | The step is waiting on a person; marking the run ended would stop a resumed run's frames from re-recording it |
+| D15 "Paused" header | Derived on the client: "Paused (n)" when at least one row has `status === 'waiting'` and no row is working (the wording the user approved in Q6; it also shows while a step question is open in a run kiro-cli did not pause, which is accepted). The state function returns `'waiting'` for a row that is not done and `status === 'waiting'`: `subagentState`, `renderCrewPanel` and `renderSubHead` in `acp.html`; `dashSubagentState`, `dashRenderCrewPanel` and the sub-panel head in `index.html`. Every consumer gets a `waiting` branch: the dot class `status-waiting`, the action text, and CSS for `acp-crew-row-waiting` and `acp-subpanel-status-waiting` in `style.css` (the crew-row rules near `.acp-crew-row-working`) | A `workflowPaused` wire field | A wire field would need setting at both `subagents` build sites (`_emit_subagents_frame` and the subscribe rebuild, ~8281), and they could drift |
+| D16 Crew-frame fix (SC-7) | `_note_subagent_action` emits with `{parent: entry.get("fan_out_id", _NO_ANCHOR_TOOLCALLID)}` as the map. `_on_subagent_list` keeps `crew_spawn_toolcallids`: it builds only v2 rows, which are tagged from that map. A late action for a row of an older wave goes out under that wave's `toolCallId`, which repaints that wave's own panel; accepted, as the path is unreachable on 2.29.1 | Pass `_active_fan_out_wave` | The wave map would hide v2 rows; the entry's own tag is right for both paths |
+| D17 Attention feed (Q3, Q4) | `GET /api/dashboard/attention`, loopback-only, `Cache-Control: no-store`. Built from a loop-side snapshot `_Supervisor.attention_snapshot()` (pure read: kind, session id, text, created, step label, plus each owner's `cwd` and stored title). The worker thread fills a missing title through `_acp_row_title` over `data.get_sessions(cwd, "kiro-cli-v3")`, else "Untitled session" | Fold it into the Overview summary | The summary route never reads the supervisor and polls every 60 s |
+| D18 Title storage | The `focus_update` branch also stores the clipped title on `self.sessions[sid]["title"]` | Read disk every poll | A 5 s poll must not read session files for every item |
+| D19 Poller | Its own `setInterval` of 5000 ms, started by an init function called from the dashboard's existing load path (never a top-level statement, so the page harness controls it), independent of `_dashOverviewActive` and visibility. It renders the block (cheap, keyed) and always writes the title prefix. It stops on a 403 like the Overview requests | Reuse the Overview pollers | SC-2 requires polling while a transcript is open and while the tab is hidden |
+| D20 Title prefix | `document.title = (n > 0 ? '(' + n + ') ' : '') + _dashBaseTitle`, where `_dashBaseTitle` is read once at load. A future writer of the dashboard title must set `_dashBaseTitle` and call the same function | Prefix on every write | `index.html` writes no title today |
+| D21 Row action | A row is a button. If the rail shows the session (`document.querySelector('[data-sid="' + CSS.escape(id) + '"]')`), it opens with `openSessionTranscript({sid, provider, cwd}, item, {cwd, name})`, like `dashOvOpenTile`. Otherwise (a session created in "The agent's own folder" has no rail row) it opens `/acp?sid=` + `encodeURIComponent(id)` in a new tab, the parameter `/acp` already accepts (`ACP_SID`), which only selects and subscribes | Rows without action | Q4; every item must open where it can be answered |
+| D23 Card location | The question card is built once in the shared `static/transcript-renderer.js` as `addQuestionRequest`, beside `addPermissionRequest`, with the row class `acp-msg-permission` and `dataset.requestId`, so `findPermissionRequestRow`, `markPermissionResolved` and `hasPendingStepPermissionCard` find it. `markPermissionResolved` also disables `textarea` elements. The templates only dispatch the frame to it | One copy per template | The permission card already lives there; two copies drift and would miss the shared resolved and Stop logic |
+| D22 Plan of review | One `/qreview` cycle on this plan (user's invocation, 2026-10-12), against the skill's default of up to 3 | 3 cycles | User override, recorded per `## Continuous Improvement` |
+
+## 4) External Dependencies & Costs
+
+### Required external changes
+
+| Category | Change needed | Owner | Status |
+|---|---|---|---|
+| Rollout / cutover | A PowerAtlas restart to load the Python changes, which ends every live ACP session. Needs the user's grant for this task (`AGENTS.md`) | User (grant), agent (restart after grant) | Pending |
+
+### Cost impact
+
+None. kiro-cli usage is unlimited, and no service or dependency is added.
+
+## 5) Implementation Phases
+
+No phase is annotated `[P:N]`. Phases 2-5 all edit `acp.py` and `tests/test_web.py`, and Phase 1 decides Phases 3 and 4.
+
+Unit tests run in every phase:
+- `.venv-PowerAtlas/Scripts/python -m pytest tests/test_web.py --timeout=300`
+- `node tests/acp_page.test.mjs` whenever a template changes.
+
+Live checks of the `[QA]` phases need a PowerAtlas restart granted by the user. Until then, `/qqa` covers those phases with the unit tests and the page tests, records the live part as BLOCKED, and Phase 6 runs it.
+
+### Phase 1: Pre-flight probes
+**Goal**: Settle the three execution-contingent premises before the code that depends on them.
+
+**File scope**: none in the repo (scratch only); results recorded in this plan's §9.
+
+**Covers**: SC-3, SC-6
+
+**Probe driver contract.**
+- A scratch script, never committed, that subclasses `tools/acp_permission_probe.Probe`.
+- It spawns a second `kiro-cli acp --agent-engine v3` and never touches the running PowerAtlas. The token is answered by `_fulfill_token` and never printed.
+- `initialize` declares `_meta.kiro.userInput: true`.
+- `session/new` sends `_meta.kiro.modeId` and `_meta.kiro.settings.workflows/goal.enabled` as the run needs.
+- It answers `_kiro/userInput` with a configurable reply and logs every request and notification, with session ids replaced by roles.
+- Afterwards it deletes the sessions it created, by recorded id, after checking that `createdAt` in `session.json` falls inside the task window (`~/.kiro/sessions/<hash>/sess_<id>/`).
+
+**Probes.**
+1. **Abandon reply.** Run a quick-spec prompt that asks clarifying questions, and answer the first `_kiro/userInput` with `{"action": "cancelled"}`. Expect kiro-cli to move to the next phase, with no hang and no error. Also run one with an empty `answer`.
+2. **A step's `_kiro/userInput`.** Run a one-step workflow whose step is told to use its `user_input` tool. Record whether a `_kiro/userInput` arrives and which `sessionId` it carries.
+3. **Paused-run resume.** Run a one-step workflow whose step sends a warning `send_message` and then ends its turn; repeat up to 4 times until `run_complete` `status: "paused"` appears. Then send the answer as a parent prompt. Record the frames that follow: whether the same step session resumes (its `sessionId` on `tool_call` frames, a parent-to-step notify, `node_complete`), or whether a new `node_start` and new child appear.
+
+4. **Rail verdict for a question.** During probe 1, before answering, check whether kiro-cli wrote a `pending_interaction` record (or another record the transcript classifier reads as waiting) to the session's `messages.jsonl`. The rail's Waiting verdict for a session with an open question depends on it.
+
+**Gate.**
+- If probe 1 hangs or errors, change D4 before Phase 3 (try `{"action": "skipped"}`, then a JSON-RPC error, which the bundle's catch also treats as next-phase) and record the change in §9.
+- If probe 2 shows a step `sessionId`, Phase 3 routes it through `_workflow_step_parent`, as already planned. If no request arrives, keep the routing and mark it unverified.
+- If probe 4 shows no waiting record on disk, Phase 5 also makes `_workflow_states` (`web.py`) report `waiting` for every held session in `sessions_with_pending_permission()`, so the rail matches the attention list.
+- If probe 3 shows a new child on resume, Phase 4 also ends the old waiting row when a new `node_start` arrives for the same `(workflowId, nodeId)`. If probe 3 never pauses in 4 tries, keep D14 and record the resume as unmeasured.
+
+**Exit criteria**:
+- [ ] Probe 1 result (both replies) recorded in §9 with the kiro-cli version
+- [ ] Probe 2 result recorded in §9
+- [ ] Probe 3 result, or "no pause in 4 runs", recorded in §9
+- [ ] Probe 4 result recorded in §9
+- [ ] Every probe session deleted after its `createdAt` check; `git status` shows no change outside this plan file
+
+### Phase 2: Crew-frame filter fix [QA]
+**Goal**: `_note_subagent_action` keeps a wave-tagged row in its frame.
+
+**File scope**: `src/power_atlas/acp.py`, `tests/test_web.py`.
+
+**Covers**: SC-7
+
+Change, in `_note_subagent_action` (a sketch, not the deliverable):
+
+```python
+entry["action"] = title
+_emit_subagents_frame(meta["parent"], self.crews,
+                      {meta["parent"]: entry.get("fan_out_id", _NO_ANCHOR_TOOLCALLID)})
+```
+
+> **Rejected:** passing `self._active_fan_out_wave` — it hides v2 rows tagged from `crew_spawn_toolcallids`. **Use instead:** the entry's own `fan_out_id`.
+
+Test, in `TestAcpSubagentActivity`:
+1. Seed `_active_fan_out_wave[parent] = "w1"` and a crew entry tagged `fan_out_id: "w1"`, registered in `subagent_sessions`.
+2. Capture `_registry.broadcast`.
+3. Call `_note_subagent_action(child, "Reading file")`.
+4. Assert the child is in the payload's `subagents`, and that `toolCallId == "w1"`.
+5. A second test keeps the v2 case: an entry tagged from `crew_spawn_toolcallids` is still emitted.
+
+**Exit criteria**:
+- [ ] The new test fails on the unfixed code (run it before the fix and record the failure in §9)
+- [ ] Both tests pass after the fix; the full `tests/test_web.py` suite passes
+
+### Phase 3: Agent questions through `userInput` [QA]
+**Goal**: kiro-cli's questions reach a card with options, descriptions and free text, are answered in the native shape, and are abandoned safely.
+
+**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/web.py`, `src/power_atlas/notifications.py`, `src/power_atlas/static/transcript-renderer.js`, `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`, `src/power_atlas/static/style.css`, `tests/test_web.py`, `tests/acp_page.test.mjs`.
+
+**Covers**: SC-3
+
+Server (`acp.py`):
+1. `_kiro_client_capabilities()` always sets `kiro["userInput"] = True`, so `_meta.kiro` is no longer empty off Windows. Update its docstring and the three tests that assert its exact value (search `tests/test_web.py` for `_kiro_client_capabilities()`; one is parametrized).
+2. `_on_agent_request` routes `"_kiro/userInput"` to a new `_on_user_input_request(msg)`.
+3. `_on_user_input_request` mirrors `_on_permission_request`:
+   - The same id validation, and the same owner and step routing through `_workflow_step_parent`.
+   - The question is required and options are optional. An empty option list is valid: that is a free-form question.
+   - At most 20 options are kept (D7). Each keeps its raw `title` in the entry and is projected for the frame as `{title, description, recommended: bool}`, cleaned and clipped per D8.
+   - A malformed request with a usable id is answered `{"action": "cancelled"}`; one without a usable id goes to `_refuse`.
+   - It stores `{session_id, kind: "question", kiro_id, text: _clean_agent_text(question, 200), options: <raw titles>, created: time.time()}`, plus `workflow_child` for a step.
+   - It emits the recorded `question_request`. A step's question carries `workflowStep: true` and `workflowStepLabel` (the `_workflow_step_label` value) as separate fields; the question text is never prefixed.
+   - It calls `_notify("question_request", …)`. For a step it sets the step waiting (D13) instead of only touching it.
+4. `_on_permission_request` adds `kind: "approval"`, `text: _clean_agent_text(<unprefixed title>, 200)` and `created` to its entry. The frame's title is unchanged.
+5. `_answer_pending_cancelled(entry, why)` per D4. Every non-malformed call site listed in §1 switches to it. The denial-notice loops in `_pop_pending_permissions` and `_cancel_step_permissions` skip question entries.
+6. Add `"question_request"` to `SERVER_TYPES` and `"question_response"` to `CLIENT_TYPES`, then add `_handle_question_response` per D6 and its dispatch beside `permission_response`. A step question's answer clears nothing in the workflow state; the step's next frames do that (Phase 4).
+
+`notifications.py` and `web.py`: add `notify_question` per D9 and a `question_request` branch in `_notify_from_acp` beside the `permission_request` one.
+
+Pages. Build the card once in `static/transcript-renderer.js` (D23), with `createElement` and `textContent` only; `acp.html` and `index.html` dispatch `question_request` to it:
+1. A `question_request` card shows:
+   - the step label as its own element when `workflowStepLabel` is set;
+   - the question;
+   - one button per option (title, description under it, a "Recommended" badge);
+   - a textarea with a Send button, which stays disabled while the text is empty.
+2. Clicking an option sends `question_response {requestId, optionIndex}`; Send sends `{requestId, answer}`. Either disables the card at once.
+3. The card is disabled (buttons and textarea) and marked answered on `permission_resolved` with the same `requestId`, through `markPermissionResolved`.
+4. `acp.html` fires its in-page notification per D9.
+5. New CSS goes in `style.css`. Any class that sets `display` on an element toggled with `hidden` also gets `[hidden] { display: none; }`.
+6. Stop stays usable for a `workflowStep` question, as it is for a step approval (`hasPendingStepPermissionCard` finds the card).
+7. Add `addQuestionRequest` to the harness's `rendererFunctionSource` list.
+
+Tests:
+- Python:
+  - The capability is present.
+  - A `_kiro/userInput` request stores a question entry and emits the frame.
+  - A step's request is routed to the parent.
+  - A malformed request gets `cancelled`.
+  - Answering by `optionIndex` writes the stored raw title, even when the displayed title was cleaned or clipped; answering by free text writes it stripped; both shapes are `{"action": "answered", "answer": …}`.
+  - An empty answer, an out-of-range or boolean `optionIndex`, and both or neither key are refused.
+  - Two `question_response` frames for one id produce one reply and one `unknown_request`.
+  - More than 20 options are cut to 20.
+  - U+202E and U+0000 in an approval title and in a question never reach the stored `text`, the toast or the card.
+  - An entry whose `kind` is missing or unknown is abandoned with the permission `cancelled` outcome.
+  - `permission_response` on a question entry is refused with `unknown_request` and does not raise.
+  - Stop, close and the turn-end sweep answer a question `{"action": "cancelled"}` and an approval with the permission outcome; a step's question gets no denial notice. Detach broadcasts `permission_resolved` for both kinds and writes nothing.
+  - A step's question sets the step waiting, and the 600 s reap does not cancel it.
+  - `sessions_with_pending_permission` includes a question's owner.
+  - The type guard covers the new types.
+  - The toast policy test covers `question_request`, with `notify_question` added to `TestNotificationPolicy._fire`'s stub list.
+- Page (`tests/acp_page.test.mjs`), on both pages:
+  - The card renders options, descriptions, the badge and free text.
+  - Each answer path sends the right frame.
+  - `permission_resolved` disables the card.
+  - Agent text never reaches `innerHTML`.
+
+**Exit criteria**:
+- [ ] `initialize` carries `_meta.kiro.userInput: true` (unit test)
+- [ ] `sessions_with_pending_permission` docstring says it covers questions too
+- [ ] Every Python and page test listed above passes; the full suites pass
+- [ ] Every call of `_answer_permission_cancelled` outside the malformed-request refusal and the dispatcher is gone (`grep -nE "(await|_spawn_task\().*_answer_permission_cancelled\(" src/power_atlas/acp.py` shows only those two)
+- [ ] Live (after a granted restart, else carried to Phase 6): a quick-spec question answered from a card option, and a free-form question answered with free text, on `/acp`
+
+### Phase 4: Step messages, step waiting state and paused runs [QA]
+**Goal**: A step's messages show on its row and, for warnings and errors, in the transcript. A step question marks the step waiting until it resumes. A paused run reads Paused, never failed.
+
+**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/static/transcript-renderer.js` (if the step-message row is built there beside the other shared rows), `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`, `src/power_atlas/static/style.css`, `tests/test_web.py`, `tests/acp_page.test.mjs`.
+
+**Covers**: SC-4, SC-5, SC-6
+
+Server (`acp.py`):
+1. In `_on_notification`, after the `_workflow_touch` call and before the early-frame buffer, add `if method == "_kiro/session/notify": self._on_session_notify(params); return`. Log the notify at INFO (bounded, as the fall-through did), so the evidence path stays.
+2. `_on_session_notify(params)`:
+   - **`sender == "step"`.** The step is `callerSessionId`, and must be tracked: `_workflow_step_parent(step) == params.sessionId`.
+     - The cleaned message (`_clean_agent_text(message, 512)`) becomes the row's `action` if the row is open, and a `subagents` frame is emitted with `_active_fan_out_wave`.
+     - For `warning` and `error`, emit the recorded `step_message {step: _workflow_step_label(...), severity, message}` to the parent.
+     - For `warning`, also write `_workflow_step_questions[step]`, call `_workflow_set(parent, step, "waiting")` and reopen the row as waiting, keeping `action` = the message.
+   - **`sender == "parent"`, with `sessionId` a tracked step.** Call `_workflow_step_resume(parent, step)`.
+   - A warning on a reaped row reopens it as waiting (D13).
+   - **Anything else.** Log at INFO and change nothing (unknown senders, untracked steps).
+3. `_workflow_step_resume(parent, child)` per D13, called in `_on_notification` right after `self._workflow_touch(session_id)` when `kind == "tool_call"` and the `sessionId` is a tracked workflow child (before the early-frame buffer). Remove step questions in every path D11 lists.
+4. In the `user_message_chunk` branch, a chunk whose `_meta.kiro.notification.kind == "system-notification"` and `_meta.kiro.replay is True` is handled per D12: emit `step_message` for `warning` or `error` (step name from `agentName` or `nodeName`, cleaned), and nothing else. It never touches workflow state. `workflow-progress` chunks stay as they are.
+5. `_on_workflow_run_done` branches on paused per D14, before any drop, finish, pop or mark-ended.
+6. Fix the "Shape not measured" comments on `node_paused` and `_kiro/workflow/paused`. Update the `_workflow_outcome` docstring to note that `paused` never reaches it from `run_complete`.
+7. Add `"step_message"` to `SERVER_TYPES`.
+
+Pages (both mirrors):
+1. `step_message` renders as a system row (`.acp-step-message`, with a severity modifier class) labelled with the step name and the message. Text only.
+2. The state functions, every consumer, the headers and the CSS per D15.
+
+Tests:
+- Python:
+  - A step's warning notify sets the row action, the waiting state, the step question and one recorded `step_message`.
+  - `success` and `info` set the action only.
+  - `error` emits `step_message` without setting waiting.
+  - A notify from an untracked step changes nothing.
+  - A parent-to-step notify resumes the step.
+  - A step `tool_call` resumes it, including while `_reserved > 0`.
+  - A warning on a reaped row reopens it as waiting.
+  - Close, detach and the 6 h reap remove the step question.
+  - `node_complete` drops the question.
+  - Housekeeping frames (`agent_message_chunk`) do not resume it.
+  - A step notify is not swallowed by the early-frame buffer while `_reserved > 0`.
+  - A replayed `system-notification` warning chunk yields one `step_message` and no user chunk; a replayed success chunk yields neither; a live one (no `replay: true`) stays a user chunk.
+  - `run_complete` `status: "paused"` keeps the children waiting and tracked, keeps the run record, does not mark it ended, and leaves no row failed.
+  - A later `node_complete` `completed` still finishes the row.
+  - `node_paused` with the measured shape sets waiting.
+- Page (both pages):
+  - A `step_message` row renders.
+  - A waiting row gets `status-waiting`.
+  - The header reads "Paused (n)" with one waiting row and none working, and "Orchestrating" with one working row.
+
+**Exit criteria**:
+- [ ] Every Python and page test listed above passes; the full suites pass
+- [ ] `_workflow_outcome` docstring notes that `run_complete` `paused` is handled before it
+- [ ] The `_kiro/session/notify` INFO fall-through no longer fires for handled notifies (unit test on the log level, beside `TestAcpUnrecognizedNotificationLogLevel`)
+- [ ] Phase 1 probe 3's outcome applied (old-row handling added if the resume spawned a new child, or "unmeasured" noted in §9)
+- [ ] Live (after a granted restart, else carried to Phase 6): a workflow step question shows on the row, in the transcript and as Waiting; after the answer the row runs again and finishes; a reload or `session/load` shows one step-message row, not two
+
+### Phase 5: Attention feed, "Needs attention" rows and title count [QA]
+**Goal**: The dashboard lists every pending approval, question and step question, and counts them in the page title.
+
+**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/web.py`, `src/power_atlas/templates/index.html`, `src/power_atlas/static/style.css`, `tests/test_web.py`, `tests/acp_page.test.mjs`.
+
+**Covers**: SC-1, SC-2
+
+Server:
+1. `acp.py`: the `focus_update` branch stores the title (D18).
+2. `acp.py`: `_Supervisor.attention_snapshot()` is a pure, loop-only read. It returns a list of `{kind: "approval"|"question"|"step_question", sessionId, text, created, step, cwd, title}`:
+   - from `_pending_permission`, skipping malformed entries;
+   - from `_workflow_step_questions` whose parent is a registered session.
+   It is sorted by `created`, oldest first. `step` is the step label for routed entries and step questions, else `""`.
+3. `web.py`: `_DASHBOARD_ATTENTION_PATH = "/api/dashboard/attention"`, which is not added to `_REMOTE_ALLOWED_PATHS`.
+   - The route takes the snapshot on the loop, with the `acp is None` guard, and calls `_attention_payload(items)` in a thread.
+   - The worker fills the title (D17) and `workspace` (the cwd's base name), and sets `provider: "kiro-cli-v3"`.
+   - It returns `{"items": [...], "count": n}`.
+
+`index.html`:
+1. A new block `<div class="dash-ov-block" id="dashOvAskBlock" hidden></div>`, first inside `#dashOvAttentionBody`.
+2. `dashOvRenderAsk(items)` is keyed by JSON and rebuilt only on change, like `dashOvRenderInterrupted`. Its sub-heading is "Waiting for you". Each row is a button showing:
+   - a kind label ("Approval", "Question", "Step question");
+   - the session title and workspace;
+   - the text, with "<step> · " in front when `step` is set;
+   - the age, from `created`, refreshed with the block's existing countdown pattern or on each poll.
+   Clicking a row runs D21.
+3. The poller and title prefix per D19 and D20.
+4. Harness: add `dashOvAskBlock` to the `byId` pre-registration in `tests/acp_page.test.mjs`. The dashboard harness slices named regions (`DASH_OVERVIEW_NAMES`), so put `dashOvRenderAsk`, the poller and the title function in the Overview region and add their names to that list. Check that the harness's `document` stand-in has a writable `title`; add one if not.
+5. If Phase 1 probe 4 found no waiting record on disk, `_workflow_states` reports `waiting` for held sessions with a pending entry (Phase 1 gate), with a test.
+
+Tests:
+- Python (`TestOverviewLive` neighbourhood):
+  - The route is loopback-only (a remote peer gets 403; loopback without the `pa_local` cookie gets 403).
+  - A step question whose child is no longer fresh is not listed.
+  - It returns approval, question and step-question items with title, workspace and age fields.
+  - A stored `focus_update` title is used; the `_acp_row_title` fallback is used when none is stored.
+  - Malformed entries are skipped.
+  - An answered item disappears on the next call.
+  - The `isolated_config` seams stay in force.
+- Page:
+  - Rows render in order with `textContent`.
+  - A click opens the session with `openSessionTranscript` when the rail has its row, and opens `/acp?sid=<encoded id>` in a new tab when it does not.
+  - The block hides when the list is empty.
+  - The title gets `(N) ` and loses it at zero.
+  - The poller keeps running while a transcript is open and while `visibilityState` is hidden.
+  - `/acp`'s title code is untouched.
+
+**Exit criteria**:
+- [ ] Every Python and page test listed above passes; the full suites pass
+- [ ] `_REMOTE_ALLOWED_PATHS` unchanged (`git diff` shows no edit to it)
+- [ ] Live (after a granted restart, else carried to Phase 6): a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer
+
+### Phase 6: Documentation, roadmap and live QA
+**Goal**: Record the protocol facts and the user-visible surface, then verify everything live.
+
+**File scope**: `README.md`, `docs/KNOWLEDGE.md`, `plans/ROADMAP.md`, `plans/tests/260701_POWERATLAS.md`, `AGENTS.md` (only if the Terminology proposal is saved), this plan.
+
+**Covers**: SC-8
+
+1. Write the documentation updates in §8.
+2. Ask the user for a PowerAtlas restart grant. Once granted, restart via `POST /api/restart` and wait for a fresh "Server ready" line.
+3. Run the live checks carried from Phases 3-5, plus a Manual-mode approval (`POST /api/acp-permissions {"mode":"manual"}`, restored and verified afterwards). Follow `AGENTS.md` § Verification Setup: sign in through `/local-auth?code=<code>`, use one script per call, and close and delete the test sessions after the `createdAt` check.
+
+**Exit criteria**:
+- [ ] `README.md` updated: the "Needs attention" row lists approvals, questions and step questions and the `(N)` title count; the `/acp` feature list mentions question cards with free-text answers
+- [ ] `docs/KNOWLEDGE.md` updated: a `user_input` / `_kiro/userInput` section (request shape, the capability, reply rules, Phase 1 results); `_kiro/session/notify` shapes for both senders; the paused run (`node_paused`, `paused`, `run_complete` `status: "paused"`) and the probe-3 resume result; the "`_workflow_outcome` … revise when a real failure is captured" note updated for `paused`
+- [ ] `plans/tests/260701_POWERATLAS.md` gains the `GET /api/dashboard/attention` section after the Overview summary section
+- [ ] `plans/ROADMAP.md` updated (Low item on resuming after `node_paused` and the Layer 3/4 handled-frames sentence included): the rows "`_note_subagent_action` filters its crew frame with the wrong map", "Approvals and questions in 'Needs attention'" and "`_kiro/session/notify` has no handler" removed from the ranking and body (anchor by those titles), and the ranking renumbered
+- [ ] `pytest tests/test_web.py --timeout=300` and `node tests/acp_page.test.mjs` pass
+- [ ] Every live check of SC-8 passes in a real browser, with the evidence (tool calls, screenshots) cited in §9; or a check is recorded BLOCKED with its reason
+
+## 6) Risk Assessment
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| R1 The abandon reply for `_kiro/userInput` behaves differently from the bundle reading | A stopped question hangs the turn | Phase 1 probe 1 before Phase 3; never a JSON-RPC error until measured (permission errors approve, `tools/acp_permission_probe.py` K3) |
+| R2 A paused run resumes through a new child | The old row stays waiting for up to 6 h | Phase 1 probe 3; Phase 4 closes the old row on a new `node_start` for the same node if so |
+| R3 A step's `_kiro/userInput` is unverified | A step question card could be refused | Route through `_workflow_step_parent` like approvals; Phase 1 probe 2 |
+| R4 Double rendering after `session/load` | Two rows for one step message | Replayed chunks render through the same `step_message` path; Phase 4 live check |
+| R5 A store change misses a removal path | A question is answered with the permission shape (read as next-phase anyway) or left pending | The `grep` exit criterion in Phase 3; tests for Stop, close, the sweep and detach on both kinds |
+| R6 Agent-authored text reaches the Overview and transcripts | Markup or spoofed prefixes | Clean and clip on the server, `textContent` only, `innerHTML` banned by the page harness; the endpoint stays loopback-only |
+| R7 History eviction | A pending card has no frame after a reconnect past 2000 events or 2 MiB | Pre-existing; the attention list reads the store, so the item still shows. Accepted |
+| R8 Background-tab throttling | The title count can lag about a minute in a hidden tab | Accepted browser behaviour |
+| R10 Declaring `userInput` changes behaviour in every permission mode | In Yolo, the old permission-card fallback for a question could be approved without asking; now every question waits for a person | Intended by D2 (Q2); README and KNOWLEDGE state it in Phase 6 |
+| R11 The prompt silence watchdog (`PROMPT_SILENCE_SECONDS`, 1800 s) cancels a turn whose question or approval is left open longer | A question answered after 30 minutes finds its turn cancelled | Escalated for the user's decision (see Review Log); approvals already behave this way |
+| R12 A paused run's resume moves the question to a new child | The old step question would be dropped with the old child | Phase 1 probe 3 decides; Phase 4 moves an open step question to the new child of the same `(workflowId, nodeId)` if probe 3 shows one |
+| R9 A Python change needs a restart that ends every live session | Live QA is blocked without a grant | Ask once in Phase 6; until then live checks are BLOCKED, not skipped |
+
+## 7) Verification
+
+- Automated: `.venv-PowerAtlas/Scripts/python -m pytest tests/test_web.py --timeout=300` and `node tests/acp_page.test.mjs`, after every phase.
+- Protocol: the Phase 1 probes, on a second kiro-cli process only.
+- Live (Phase 6, after a granted restart), in a real browser (Chrome tools or standalone Playwright):
+  - a quick-spec option answer;
+  - a free-text answer;
+  - a Stop while a question is open (the turn moves on and the card disables);
+  - a Manual-mode approval and a question in "Needs attention", with `(N)` in the title while a transcript is open;
+  - a workflow step question on the row, in the transcript, in "Needs attention" and as Waiting, cleared after the answer;
+  - a `session/load` showing one step-message row.
+- Confirm `README.md`, `docs/KNOWLEDGE.md` and `plans/ROADMAP.md` are updated as listed in §8.
+
+## 8) Documentation Updates
+
+| Document | Update needed | Phase |
+|---|---|---|
+| `README.md` | Overview paragraph that begins "*Needs attention* lists what is waiting on you": add the approvals, questions and step questions block and the `(N)` title count. The `/acp` item "**The agent can ask a clarifying question mid-turn, and the page answers it inline.**": options with descriptions, the Recommended badge, free text, and the matching "Needs attention" row | 6 |
+| `docs/KNOWLEDGE.md` | New `_kiro/userInput` section beside "ACP permission wire shapes" (capability, request shape, reply rules, Phase 1 results). The `_kiro/session/notify` shape entry: state that PowerAtlas handles it and with which frame. The "Not measured" list of workflow methods: move `paused` and `node_paused` out. The "Handlers" bullet: `_kiro/workflow/paused` behaviour. The "*`failed` is inferred.*" bullet: `run_complete` `status: "paused"` keeps steps waiting. The "*Waiting.*" bullet and the resume-signal bullet: the warning notify, the resume triggers, the "Paused" header. The replay chunk note ending "skips both": replayed `system-notification` warnings and errors render as a step-message row. The "Orchestrating (N agents)" paragraph: add "Paused (n)". The workflow-step approvals paragraph on `_pending_permission`: entries gain `kind`, `text`, `created`; questions are cancelled through the same paths with `{"action": "cancelled"}` | 6 |
+| `plans/ROADMAP.md` | Remove the three items, anchored by their titles: "`_note_subagent_action` filters its crew frame with the wrong map", "Approvals and questions in "Needs attention"", "`_kiro/session/notify` has no handler". That covers the ranking rows, the body items and the clauses in the "Workflow follow-ups" summary line. Rewrite the Low item "A step resuming after `node_paused` stays `waiting`" to the shipped resume rule, or remove it if Phase 1 measured the resume. Update the Layer 3/4 sentence listing the handled `_kiro/workflow/*` frames. Renumber the ranking | 6 |
+| `plans/tests/260701_POWERATLAS.md` | Add a section after "Overview summary (`GET /api/dashboard/overview/summary`)" for `GET /api/dashboard/attention` (loopback-only, item kinds, title count) | 6 |
+| `src/power_atlas/acp.py` docstrings | `sessions_with_pending_permission` ("a permission request or question"); `_workflow_outcome` (paused never reaches it from `run_complete`); `_answer_permission_cancelled` keeps its plan identifier when wrapped by the dispatcher | 3, 4 |
+
+## Progress Tracker
+
+| # | Phase | Status | Notes |
+|---|---|---|---|
+| 1 | Pre-flight probes | Not started | |
+| 2 | Crew-frame filter fix | Not started | |
+| 3 | Agent questions through `userInput` | Not started | |
+| 4 | Step messages, waiting state, paused runs | Not started | |
+| 5 | Attention feed and title count | Not started | |
+| 6 | Documentation, roadmap and live QA | Not started | Needs a restart grant |
+
+## 9) Implementation Divergences from Plan
+<Reserved -- filled during implementation>
+
+## Follow-up Work (Deferred)
+
+1. **File-based transcript view.** The dashboard's `/api/session-transcript` view of sessions it does not hold still shows replayed `system-notification` records as user bubbles. Out of scope: D12 covers the ACP live and replay path only (Architect review finding #14).
+2. **Pending cards lost to history eviction.** A pending request whose frame falls out of the replay history has no card after a reconnect (R7). Pre-existing; the attention list still shows it.
+
+## Review Log
+
+### 2026-10-12 -- Plan Review (via /qplan, 1 cycle by user request)
+
+Personas: Architect (gap-critic lens), Senior engineer, Security auditor. The doc-impact search ran alongside. 29 findings after merging duplicates (3 High, 10 Medium, 15 Low, 1 Info); 26 resolved in the plan, 3 escalated for the user. Merged findings keep the highest severity; raw per-persona summaries are kept in the session scratchpad.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | The question card was planned twice in the templates, while the permission card lives in `static/transcript-renderer.js` (Arch 1, Sr 1, Sec 11). | Fixed -- D23 builds `addQuestionRequest` there; Phase 3 scope, textarea disable and harness list updated. |
+| 2 | High | A step's routed question kept the step running, so the 600 s reap cancelled it (Arch 2). | Fixed -- D13 sets the step waiting when its question is stored; test added. |
+| 3 | High | Step questions leaked past close, detach and the 6 h reap (Arch 3, Sr 2). | Fixed -- D11 lists every removal path plus a `_workflow_live` filter in the snapshot; tests added. |
+| 4 | Medium | Verbatim option titles could not survive cleaning or clipping, giving a silent wrong answer (Sec 1). | Fixed -- D6/D7 answer by `optionIndex`, mapped to the stored raw title. |
+| 5 | Medium | Approval and question text was clipped but not cleaned of bidi, zero-width or NUL characters (Sec 2). | Fixed -- D8 adds `_clean_agent_text` for stored text, toast and card; test added. |
+| 6 | Medium | The abandon dispatcher could fail open if an approval were misclassified (Sec 3). | Fixed -- D4 defaults every non-question kind to the permission shape; kind set by method only; test added. |
+| 7 | Medium | The "step-frame branch" for the `tool_call` resume did not exist, and the buffer could swallow the frame (Arch 5, Sr 3). | Fixed -- D13 and Phase 4 name the spot after `_workflow_touch`, before the buffer; `_reserved > 0` test. |
+| 8 | Medium | A question toast needed `notifications.notify_question`, the test stub and the in-page notification (Sr 4, Sec 8, Arch 13). | Fixed -- D9, Phase 3 scope and tests updated. |
+| 9 | Medium | Abandoning a step question would post "a tool call was denied" (Arch 4, Sr 5, Sec 9). | Fixed -- D4 skips the denial notice for questions. |
+| 10 | Medium | Whether the rail reads Waiting for an open question was unverified (Arch 6). | Fixed -- Phase 1 probe 4, plus a gated `_workflow_states` overlay in Phase 5. |
+| 11 | Medium | `userInput` changes Yolo behaviour, and the 30-minute silence watchdog can cancel an open question (Arch 7). | Escalated -- R10 records the Yolo change; the watchdog decision is left for the user (R11). |
+| 12 | Medium | The waiting crew state had unlisted consumers, wrong dashboard function names and no CSS (Arch 8, Sr 7). | Fixed -- D15 lists every consumer, the names and the CSS. |
+| 13 | Medium | D21 left the click mechanism open, although `/acp?sid=` exists (Arch 9, Sr 8, Sec 10). | Fixed -- D21 uses the rail when the row exists, else `/acp?sid=` in a new tab, select-only. |
+| 14 | Low | Detach was said to reply to a question, but the agent is gone (Arch 10). | Fixed -- D4 and the Phase 3 test say detach writes nothing. |
+| 15 | Low | D16 did not say why `_on_subagent_list` keeps the v2 map, or what an older-wave frame does (Arch 11, Sr 11). | Fixed -- D16 notes both. |
+| 16 | Low | Phase 1's clean-`git status` criterion conflicted with recording results in this plan (Arch 12). | Fixed -- criterion now excludes this plan file. |
+| 17 | Low | The file-based transcript view still shows replayed step messages as user bubbles (Arch 14). | Fixed -- recorded as Follow-up Work item 1. |
+| 18 | Low | "Paused (n)" also shows for a step question in a run that was not paused (Arch 15, Sr 13). | Escalated -- kept the Q6 wording; the user may prefer "Waiting" for that case. |
+| 19 | Low | Three tests assert the exact `_kiro_client_capabilities` value (Sr 6). | Fixed -- Phase 3 step 1 names them. |
+| 20 | Low | A live `system-notification` chunk could double a step message (Sr 9, Sec OQ2). | Fixed -- D12 gates on `replay: true`; live-chunk test added. |
+| 21 | Low | The dashboard harness slices named regions; a top-level interval would leak into every harness instance (Sr 10). | Fixed -- D19 init function; Phase 5 names the region and the `title` stand-in. |
+| 22 | Low | The Phase 3 grep criterion also matched the definition and a docstring (Sr 12). | Fixed -- criterion matches call sites only. |
+| 23 | Low | The no-await rule between lookup and pop was not stated (Sec 4). | Fixed -- D6 states it; double-answer test added. |
+| 24 | Low | Remote answering of questions needed its reasoning recorded (Sec 5). | Fixed -- D10 records it. |
+| 25 | Low | The option count was unbounded (Sec 6). | Fixed -- D7 caps at 20; test added. |
+| 26 | Low | A `[workflow step …]` prefix in question text could be spoofed (Sec 7). | Fixed -- `workflowStepLabel` travels as its own field. |
+| 27 | Info | The attention endpoint's loopback gate is correct (Sec 12). | Fixed -- a no-cookie 403 test added. |
+| 28 | Low | A routed approval also keeps its step running, so the 600 s reap cancels an unanswered step approval (Arch OQ4). | Escalated -- an existing approval behaviour; the user decides whether to apply D13's waiting rule to approvals too. |
+| 29 | Low | A warning on a reaped row should reopen it, and a resumed run may move the question to a new child (Sr OQ2, OQ3). | Fixed -- D13 reopens reaped rows; R12 and Phase 4 handle the new child. |
+
+Override recorded per `## Continuous Improvement`: review cycles, default up to 3 (`/qplan` auto-fix loop), user override 1 ("1 qreview cycle", 2026-10-12). No re-review ran after the fixes.
 
 ## Harness Improvement Opportunities
 
 - Step 1.5's three code-tracing briefs overlapped heavily on this scope: all three enumerated the same `_emit_subagents_frame` call sites and pending-permission removal paths — cost: about 630k sub-agent tokens for roughly one report's worth of distinct facts — suggested change: when Step 1 already names the call sites, tell the subsystem brief to skip enumerations the directed brief owns.
 - The decisive findings (the `user_input` question path, the paused-run mapping) came from probes and a vendor-bundle grep, not from the trio — cost: the trio's "clarifying question" answer was "no mechanism found", which would have shaped the interview wrongly without the probes — suggested change: add "grep the vendor bundle for the concept" to the Probe gate's examples when the work integrates with a third-party protocol.
+- The doc-impact sub-agent and the persona reviewers cover overlapping ground: three personas independently found that the card belongs in `transcript-renderer.js` — cost: three reviewers each spent about 15 tool calls on the same discovery — suggested change: have the planner list the shared modules a UI phase touches (grep the existing sibling feature's function names) before review, so reviewers check it rather than discover it.
+- With a 1-cycle cap, 26 fixes went into the plan without any re-review — cost: unclear; regressions in the fixes go unchecked until `/qdev` — suggested change: when the user caps cycles at 1, offer a cheap diff-only check of the applied fixes that does not count as a cycle.
