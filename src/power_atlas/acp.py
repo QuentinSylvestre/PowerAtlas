@@ -6445,36 +6445,53 @@ class _Supervisor:
         on the session record (``stop_requested_at``) and the running wait is
         woken. If the agent has not answered ``CANCEL_GRACE_SECONDS`` later,
         ``_await_prompt`` raises ``AgentTimeout`` and the turn ends locally;
-        the agent's tool processes may keep running until PowerAtlas exits.
+        the agent's own turn may carry on (its frames can still arrive), and
+        its tool processes may keep running until PowerAtlas exits.
         Without it, a live agent that ignores the cancel would hold the
         session until the 24 h ceiling, since a quiet turn is never ended.
         The raise sits in the wait rather than here so that the one turn
         boundary still comes from that ``finally``. The record is cleared when
-        the next prompt or command starts, so an old Stop never ends a new
-        turn. Recorded only after the write succeeds: a refused write reaches
-        the page as an error, and the turn should not end on a cancel the
-        agent never received.
+        the next prompt or command starts (``clear_stop``), and it is written
+        only for the turn that was running when Stop was pressed, so an old
+        Stop never ends a new turn. Only the first Stop of a turn is kept.
+        Recorded only after the write succeeds: a refused write reaches the
+        page as an error, and the turn should not end on a cancel the agent
+        never received.
         """
         if session_id not in self.sessions:
             raise AgentRejected("That session no longer exists on this agent.")
         if not self.alive():
             raise AgentDied("The agent is not running.")
+        # The turn this Stop is for, read before the write's `await`. The write
+        # can be slow; if that turn ends and the next one starts meanwhile,
+        # `clear_stop` has moved `turn_seq` on, and recording the Stop then
+        # would end a turn that started after it (Reliability review, High).
+        turn = self.sessions[session_id].get("turn_seq")
         await self._notify("session/cancel", {"sessionId": session_id})
         meta = self.sessions.get(session_id)
         if meta is None:
             return
-        meta["stop_requested_at"] = time.monotonic()
+        if meta.get("turn_seq") != turn:
+            log.info("ACP cancel: session=%s; the Stop's turn ended before its "
+                     "cancel was written, so it is not recorded", session_id)
+            return
+        # The first Stop of a turn sets the deadline: pressing Stop again must
+        # not push the fallback back.
+        meta.setdefault("stop_requested_at", time.monotonic())
         waker = self._prompt_wakers.get(session_id)
         if waker is not None:
             waker.set()
 
     def clear_stop(self, session_id) -> None:
-        """Forget a recorded Stop (D26). Called when a prompt or a slash
-        command starts, with no ``await`` between its ``inflight`` claim and
-        this, so a Stop from an earlier turn cannot end the new one."""
+        """Start a new turn's Stop state (D26): forget any recorded Stop and
+        advance ``turn_seq``, so a Stop meant for an earlier turn, including
+        one whose cancel write is still in flight, cannot end this one.
+        Called when a prompt or a slash command starts, with no ``await``
+        between its ``inflight`` claim and this."""
         meta = self.sessions.get(session_id)
         if meta is not None:
             meta.pop("stop_requested_at", None)
+            meta["turn_seq"] = meta.get("turn_seq", 0) + 1
 
     async def steer(self, session_id: str, text: str) -> dict:
         """Inject a mid-turn steer message via ``_session/steer``.

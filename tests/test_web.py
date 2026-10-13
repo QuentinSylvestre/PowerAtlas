@@ -12240,7 +12240,10 @@ class TestAcpPromptWait:
                 sup._loop = None
                 sup._pending.clear()
 
-        return asyncio.run(run()), written
+        outcome = asyncio.run(run())
+        # Every wait removes its own Stop event, however it ended.
+        assert sid not in acp_mod._supervisor._prompt_wakers
+        return outcome, written
 
     @staticmethod
     def _pending(sup):
@@ -12431,7 +12434,10 @@ class TestAcpStopFallback:
                 sup._loop = None
                 sup._pending.clear()
 
-        return asyncio.run(run()), written
+        outcome = asyncio.run(run())
+        # Every wait removes its own Stop event, however it ended.
+        assert acp_mod._supervisor._prompt_wakers == {}
+        return outcome, written
 
     @staticmethod
     async def _await_request(sup, written, method, count=1):
@@ -12534,6 +12540,89 @@ class TestAcpStopFallback:
             {"turn": "end", "stopReason": "cancelled"},
             {"turn": "end", "stopReason": "end_turn"}]
         assert self._errors(acp_mod, sid) == []
+
+    def test_a_stop_whose_cancel_write_lands_late_does_not_end_the_next_turn(
+            self, acp_fast):
+        """Reliability review (High): turn 1's cancel write is held until
+        turn 1 has ended on its own and turn 2 has started. Turn 2 started
+        after that Stop, so the Stop must not end it."""
+        import threading
+        acp_mod, _ = acp_fast
+        acp_mod.PROMPT_TICK_SECONDS = 3.0
+        acp_mod.CANCEL_GRACE_SECONDS = 0.2
+        sid = _live_session(acp_mod)
+        conn = self._conn(acp_mod, sid)
+        gate = threading.Event()
+        written = []
+
+        def fake_write(self, obj):
+            if obj.get("method") == "session/cancel":
+                gate.wait(5)
+            written.append(obj)
+
+        async def run():
+            sup = acp_mod._supervisor
+            sup._loop = asyncio.get_running_loop()
+            try:
+                with patch.object(acp_mod._Supervisor, "_write", fake_write), \
+                        patch.object(acp_mod._Supervisor, "alive",
+                                     lambda self: True):
+                    first = asyncio.ensure_future(
+                        acp_mod._handle_prompt(conn, sid, {"prompt": "one"}))
+                    fut = await self._await_request(sup, written, "session/prompt")
+                    stop = asyncio.ensure_future(acp_mod._handle_cancel(conn, sid))
+                    await asyncio.sleep(0.05)
+                    fut.set_result({"stopReason": "end_turn"})
+                    await first
+                    second = asyncio.ensure_future(
+                        acp_mod._handle_prompt(conn, sid, {"prompt": "two"}))
+                    fut = await self._await_request(
+                        sup, written, "session/prompt", 2)
+                    gate.set()
+                    await stop
+                    await asyncio.sleep(0.6)    # three times the grace
+                    ended_early = second.done()
+                    fut.set_result({"stopReason": "end_turn"})
+                    await second
+                    return ended_early
+            finally:
+                gate.set()
+                sup._loop = None
+                sup._pending.clear()
+
+        assert asyncio.run(run()) is False, "turn 1's Stop ended turn 2"
+        assert self._turn_ends(acp_mod, sid) == [
+            {"turn": "end", "stopReason": "end_turn"},
+            {"turn": "end", "stopReason": "end_turn"}]
+        assert self._errors(acp_mod, sid) == []
+        assert acp_mod._supervisor._prompt_wakers == {}
+
+    def test_a_second_stop_does_not_push_the_fallback_back(self, acp_fast):
+        """The first Stop of a turn sets the deadline. A later press keeps it,
+        so pressing Stop repeatedly cannot hold a hung turn open."""
+        acp_mod, _ = acp_fast
+        acp_mod.PROMPT_TICK_SECONDS = 3.0
+        acp_mod.CANCEL_GRACE_SECONDS = 0.7
+        sid = _live_session(acp_mod)
+        conn = self._conn(acp_mod, sid)
+
+        async def scenario(sup, written):
+            turn = asyncio.ensure_future(
+                acp_mod._handle_prompt(conn, sid, {"prompt": "go"}))
+            await self._await_request(sup, written, "session/prompt")
+            first_stop = time.monotonic()
+            await acp_mod._handle_cancel(conn, sid)
+            await asyncio.sleep(0.5)
+            assert not turn.done()
+            await acp_mod._handle_cancel(conn, sid)
+            await turn
+            return time.monotonic() - first_stop
+
+        elapsed, written = self._run(acp_mod, scenario)
+        # Measured from the first Stop: a second Stop that reset the deadline
+        # would end the turn at 0.5 + 0.7 = 1.2 s or later.
+        assert 0.7 <= elapsed < 0.7 + 0.4, elapsed
+        assert self._errors(acp_mod, sid) == [("agent_timeout", self.D26_MESSAGE)]
 
     def test_the_same_fallback_ends_a_slash_command(self, acp_fast):
         acp_mod, _ = acp_fast

@@ -514,8 +514,9 @@ Three things are worth knowing before leaving a long task running:
 
 - **A turn runs until it ends, you stop it, or 24 hours pass.** A quiet turn is never cancelled for
   being quiet: one waiting on an approval or a question waits until it is answered. **Stop** ends the
-  turn within a few seconds even if the agent does not answer the cancel; the agent's tool processes
-  may then keep running until PowerAtlas exits. A 24-hour absolute ceiling applies regardless, so a
+  turn within a few seconds even if the agent does not answer the cancel. The agent ignored the cancel,
+  so its own turn may then carry on and its output may still arrive, and its tool processes may keep
+  running until PowerAtlas exits. A 24-hour absolute ceiling applies regardless, so a
   turn cannot hold a session open forever.
 - **Idle sessions are reclaimed.** A session with no tab attached, no turn running and no load in
   flight is released locally after `acp_idle_ttl_seconds` (default 30 minutes), without waiting for
