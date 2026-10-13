@@ -472,10 +472,18 @@ Tests:
   - `/acp`'s title code is untouched.
 
 **Exit criteria**:
-- [ ] Every Python and page test listed above passes; the full suites pass
-- [ ] `_REMOTE_ALLOWED_PATHS` unchanged (`git diff` shows no edit to it)
+- [x] Every Python and page test listed above passes; the full suites pass
+- [x] `_REMOTE_ALLOWED_PATHS` unchanged (`git diff` shows no edit to it)
 - [ ] Live (after a granted restart, else carried to Phase 7): a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer
-- [ ] (deferred from Phase 4) Past the 6 h waiting bound, the attention list and the waiting override agree with the rail for a step question that outlives `workflow_state` (Phase 4 reliability review finding 4): either both still show it, or neither does, with a test
+- [x] (deferred from Phase 4) Past the 6 h waiting bound, the attention list and the waiting override agree with the rail for a step question that outlives `workflow_state` (Phase 4 reliability review finding 4): either both still show it, or neither does, with a test
+
+Implementation (2026-10-13, code: 71033de)
+`acp.py`: the `focus_update` branch also stores the cleaned title on a held session (D18); the emitted `title` frame is unchanged. New `_Supervisor.attention_snapshot()`, a loop-only read returning one item per pending approval or question and per open step question, oldest first, `{kind, sessionId, text, created, step, cwd, title}`; a routed entry's `step` comes from `_workflow_step_label`; a step question needs a held parent and a child still in `_workflow_children[parent]`. `web.py`: new loopback-only `GET /api/dashboard/attention` (`no-store`, `acp is None` guard), snapshot on the loop and `_attention_payload` in a worker thread filling `workspace`, `provider`, `age` and the title (stored, else the cleaned `_acp_row_title`, else "Untitled session"). Waiting override: `_awaiting_person_ids` (from `sessions_awaiting_person()`, on the loop) and `_person_override_status`, threaded through `_acp_status_for_held`, `_acp_listing`, `_acp_flat_listing`, `_overview_live`, both listing routes, the live Overview route and `/api/session-availability`; `_workflow_states` excludes the same set. `index.html` and `style.css`: `#dashOvAskBlock` ("Waiting for you") first in Needs attention, `dashOvRenderAsk` keyed by JSON, button rows with kind label, title, workspace, "step · text" and age; a click opens through the rail row or `/acp?sid=` in a new tab; a 5 s poller started from `DOMContentLoaded` (`dashAttentionStart`), running in every mode; `dashSetAttentionTitle` writes the `(N) ` prefix on `_dashBaseTitle`. 16 tests in `TestDashboardAttention` and 7 page checks; the harness gained `document.title`, `querySelector`, `CSS.escape`, `window.open` and `dashOvAskBlock`. Fixture changes with no expected value changed: five `_overview_live` stubs gained `awaiting=None`; three fake supervisors renamed their method to `sessions_awaiting_person`. pytest 3379 passed, 1 skipped; node 1109 passed.
+
+Implementation (2026-10-13, code: b13bcd0)
+Review fixes. One shared validity rule: `_awaiting_entry_owner` and `_awaiting_step_parent` (a step question counts only while its child is tracked, by membership), read by both `sessions_awaiting_person` and `attention_snapshot`; the snapshot additionally leaves out owners that are not held. Entries with odd `text` or `created` are now listed (text "", created None sorted last) rather than skipped, so the list and the override agree without weakening the sweeper. The stale `_on_permission_request` comment names `sessions_awaiting_person()`. `_awaiting_person_ids` and `api_dashboard_attention` log failures through `_workflow_state_fault`. A row's age is the server's `age` plus the time since that poll arrived, so a wrong browser clock does not skew it. New tests: the override on `/api/dashboard/sessions` grouped and `mode=recent` and on `/api/acp/sessions?mode=recent` (each of the four listing call sites now fails it when removed), a malformed entry or untracked step question neither listed nor overriding, the throttled fault logging, and a page check for the clock-skew-free age. pytest 3384 passed, 1 skipped; node 1110 passed.
+
+Orchestrator notes: the change descriptions above are condensed from the sub-agent returns. The live criterion is deferred to Phase 7 and added to its exit criteria. QA carried to Phase 7 with the batched restart. The changed malformed-entry test expectation cites review finding 5. No re-review of b13bcd0: the one-cycle cap applies and the fixes were tests, logging, a comment, a client age display and a validity helper whose tests pin both readers.
 
 ### Phase 6: Remove the prompt silence watchdog [QA]
 **Goal**: A turn is no longer cancelled for silence; only Stop (with its local fallback) or the 24 h ceiling ends it.
@@ -537,6 +545,7 @@ Tests:
 - [ ] (deferred from Phase 3) Live: a quick-spec question answered from a card option, and a free-form question answered with free text, on `/acp` (file scope: no file; a live check)
 - [ ] (deferred from Phase 4) Live: a workflow step question shows on the row, in the transcript and as Waiting; after the answer the row runs again and finishes; a reload or `session/load` shows one step-message row, not two (file scope: no file; a live check)
 - [ ] (deferred from Phase 4) `docs/KNOWLEDGE.md` notes that a step past `_WORKFLOW_CHILD_MAX_AGE_S` that resumes through its own `tool_call` keeps its old staleness clock, so a step that waited more than 600 s reads "no longer reporting" at the next reap (user decision 2026-10-12: accept)
+- [ ] (deferred from Phase 5) Live: a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer (file scope: no file; a live check)
 
 ## 6) Risk Assessment
 
@@ -589,7 +598,7 @@ Tests:
 | 2 | Crew-frame filter fix | Complete | code: 68b5f8e, 3ce782e |
 | 3 | Agent questions through `userInput` | Complete | code: 82e0119, 6223be4, b0cabe5, ad12a39; live check deferred to Phase 7 |
 | 4 | Step messages, waiting state, paused runs | Complete | code: f6d4d71, cdfa879, 25fd7bc; live check deferred to Phase 7 |
-| 5 | Attention feed and title count | Not started | |
+| 5 | Attention feed and title count | Complete | code: 71033de, b13bcd0; live check deferred to Phase 7 |
 | 6 | Remove the prompt silence watchdog | Not started | |
 | 7 | Documentation, roadmap and live QA | Not started | Restart granted 2026-10-12 |
 
@@ -611,6 +620,15 @@ All runs used a second `kiro-cli acp --agent-engine v3` spawned by a scratch dri
 - **Resume re-sends `run_start` and `node_start` (Phase 4).** A resumed paused run re-sends `run_start` for the tracked `workflowId` and `node_start` for the tracked `nodeId` with the same step `sessionId`. No new child appears, so the R2/R12 new-child handling is not needed. Phase 4 must accept these frames again without resetting the run or the row.
 - **Slash commands unmeasured (R11).** `_kiro.dev/commands/execute` errors on 2.29.1, so the effect of Stop during a slash command is unmeasured. D26 still covers the command path. Outside this plan: PowerAtlas's `commands_execute` sends the refused shape. `orchestrator.log` and 3 rotations have 0 `PersistenceClassification` lines, so it is not confirmed in production.
 - **A step paused after `success` (D13, D14).** In the probe-3 resume, the step reported `success`, and kiro-cli then sent `node_paused` (`reason: "Awaiting next user message on step session."`) and `run_complete` `status: "paused"`, with no `node_complete`. User decision, 2026-10-12 ("A"): keep D14 as written. The step shows waiting, the crew header reads "Paused", and the parent reads Waiting, because kiro-cli itself holds the run unfinished. No step question is created, since that needs a warning notify, so it does not appear in "Needs attention".
+
+### Divergences from Phase 5
+
+- **One validity rule for the list and the override.** `sessions_awaiting_person` and `attention_snapshot` share one rule: an entry counts when it has a string owner; a step question counts while its child is tracked. Entries with odd text or time are listed rather than skipped, because `sessions_awaiting_person` also guards the idle sweeper and any entry with an owner is a request kiro-cli still waits on. A step-question record whose child is no longer tracked no longer holds its parent from the sweep; no request sits behind it, and dropping the child removes it (D11).
+- **Past the 6 h bound (deferred from Phase 4).** A step question stays listed and keeps the parent Waiting, by membership in `_workflow_children[parent]`, so the list, the override and the rail agree.
+- **Poller on 403.** The attention poller uses its own fetch and stops quietly on a 403, clearing the count; the Overview's own requests still report a sign-out.
+- **Override and `errored`.** The waiting override lifts working and idle to waiting and leaves `errored` unchanged, matching `_workflow_overlay_status`.
+- **Held owners only.** The snapshot leaves out entries whose owner the supervisor does not hold, matching the override.
+- **Server `age`.** Each item carries `age` in whole seconds; the client shows `age` plus the time since the poll arrived, and keeps it out of the re-render key.
 
 ### Divergences from Phase 4
 
@@ -779,6 +797,21 @@ Implementation health: Green.
 | 12 | Low | [Re-review] No page check replayed a resolved approval card. | Fixed -- page check (25fd7bc). |
 
 Rows 1-9 come from the two persona reviews (run sequentially for mutation testing; Reliability 6 of 7 mutations killed, Senior 4 of 5 page mutations killed). The re-review of cdfa879 ran under `/qdev` Step 6 item 4a because the fixes added the replay cases and the reopen. Row 11 is the user turn "OK for reco" answering the A/B question on 2026-10-12. Full pytest over `tests/`: 5382 passed, 3 skipped (Senior reviewer); final `tests/test_web.py` 3363 passed, 1 skipped; node 1102 passed.
+
+### 2026-10-13 -- Implementation Review (after Phase 5, persona: Security auditor, Senior engineer)
+
+Implementation health: Green.
+5 findings (0 High, 1 Medium, 4 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | [Senior] No test pinned the waiting override on the flat listing or `/api/dashboard/sessions`; removing it stayed green. | Fixed -- parametrized override test over both modes and routes; each call-site mutation now fails (b13bcd0). |
+| 2 | Low | [Security] Two new failure logs wrote a traceback on every request while the supervisor read failed. | Fixed -- both log through `_workflow_state_fault` (b13bcd0). |
+| 3 | Low | [Senior] The server `age` field was never read by the client. | Fixed -- the client shows `age` plus time since receipt, removing clock skew (b13bcd0). |
+| 4 | Low | [Senior] A comment in `_on_permission_request` named the old overlay read. | Fixed -- comment names `sessions_awaiting_person()` (b13bcd0). |
+| 5 | Low | [Senior] The override and the list used different validity checks, so a session could read Waiting with nothing listed. | Fixed -- one shared rule for both readers; recorded in §9 (b13bcd0). |
+
+Security ran five mutations (remote gate, cookie gate, stored and fallback title cleaning, override), all killed; full pytest over `tests/` 5416 passed. Senior confirmed every Server, page and test bullet, mutation-tested SC-2's every-mode polling two ways (both killed), and found the two uncovered call sites. Reviewers ran sequentially. No re-review of b13bcd0 (one-cycle cap; see the implementation notes).
 
 ## Harness Improvement Opportunities
 
