@@ -13116,6 +13116,51 @@ class TestAcpWorkflowNotifications:
         after = {e["sessionId"]: e for e in self._last_payload(watcher)}
         assert "child-c7" in after and after["child-c7"]["done"] is True
 
+    @pytest.mark.parametrize("hold", ["approval", "step_question"])
+    def test_workflow_a_held_stale_step_keeps_its_wave_across_turns_and_resubscribe(
+            self, wf, hold):
+        """A step a person still has to answer keeps its row in every crew
+        frame once it is no longer fresh (D25): the turn-start and turn-end
+        pops of `_active_fan_out_wave` must not drop the wave its entry is
+        tagged with, or `_subagents_payload` filters the row out."""
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        sv._on_agent_subtask_open(self.P, "task-t9", {"name": "explorer"}, "tc-t9")
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        assert sv.crews[self.P]["child-c7"]["fan_out_id"] == "task-t9"
+        sv.crews[self.P]["task-t9"]["done"] = True
+        if hold == "approval":
+            sv._on_agent_request(self._ask("child-c7", 71))
+            bound = acp_mod._WORKFLOW_CHILD_STALE_S
+        else:
+            self._step_says(acp_mod, "warning", "Which colour?")
+            bound = acp_mod._WORKFLOW_WAITING_STALE_S
+        state = sv._workflow_children[self.P]["child-c7"][0]
+        sv._workflow_children[self.P]["child-c7"] = (
+            state, time.monotonic() - bound - 5)
+        assert sv.has_active_workflow(self.P) is False
+        assert sv._workflow_step_awaits_person(self.P, "child-c7") is True
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            self._run_turn(acp_mod, "end_turn")
+        assert written == []                       # nothing cancelled
+        assert sv._active_fan_out_wave.get(self.P) == "task-t9"
+        _queued(watcher)
+        acp_mod._emit_subagents_frame(self.P, sv.crews, sv._active_fan_out_wave)
+        rows = {e["sessionId"]: e for e in self._last_payload(watcher)}
+        assert "child-c7" in rows and rows["child-c7"]["done"] is False
+        late = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(late, self.P)
+        frames = [f for f in _queued(late) if f["type"] == "subagents"]
+        assert len(frames) == 1
+        assert frames[0]["payload"]["toolCallId"] == "task-t9"
+        assert [e["sessionId"] for e in frames[0]["payload"]["subagents"]] == ["child-c7"]
+        # A second turn keeps it too (the turn-start pop runs with no live child).
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            self._run_turn(acp_mod, "end_turn")
+        assert sv._active_fan_out_wave.get(self.P) == "task-t9"
+        assert written == []
+
     def test_workflow_order_is_monotonic_across_eviction(self, wf):
         acp_mod, sv = wf
         with patch.object(acp_mod, "MAX_SUBAGENTS_PER_SESSION", 2):
@@ -13531,6 +13576,50 @@ class TestAcpWorkflowNotifications:
             assert acp_mod._sweep_awaiting_failures == 0
         finally:
             acp_mod._sweep_awaiting_failures = 0
+            acp_mod._sweep_held_logged.clear()
+
+    def test_sweep_held_log_is_pruned_on_release_and_on_close(self, acp_fast, caplog):
+        """`_sweep_held_logged`: a session released (nothing open) leaves the
+        set, so a later hold logs again; a session no longer held leaves it
+        even while its entry is still there."""
+        acp_mod, _ = acp_fast
+        sv = acp_mod._supervisor
+        _live_session(acp_mod, self.P)
+        entry = {"session_id": self.P, "kind": "approval", "options": [],
+                 "kiro_id": 71, "text": "Run shell: dir", "created": time.time()}
+
+        def idle(old):
+            sv.sessions[self.P]["last_used"] = time.monotonic() - (
+                acp_mod.ACP_IDLE_TTL_SECONDS + 1 if old else 0)
+
+        def tick():
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+                _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+
+        try:
+            with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+                sv._pending_permission["k1"] = entry
+                idle(True)
+                tick()
+                assert acp_mod._sweep_held_logged == {self.P}
+                sv._pending_permission.clear()        # released, not idle now
+                idle(False)
+                tick()
+                assert self.P in sv.sessions
+                assert acp_mod._sweep_held_logged == set()
+                sv._pending_permission["k1"] = entry  # held again
+                idle(True)
+                tick()
+                assert acp_mod._sweep_held_logged == {self.P}
+                kept = [r for r in caplog.records
+                        if "keeping idle session" in r.getMessage()]
+                assert len(kept) == 2
+                sv.sessions.pop(self.P)               # closed, entry still there
+                tick()
+                assert acp_mod._sweep_held_logged == set()
+        finally:
+            sv._pending_permission.clear()
             acp_mod._sweep_held_logged.clear()
 
     def test_workflow_cap_eviction_stops_tracking_the_evicted_child_only(self, wf):
@@ -14334,7 +14423,7 @@ class TestAcpWorkflowNotifications:
         assert web_mod._workflow_states(sv, [self.P, self.P2]) == {
             self.P: "working", self.P2: "working"}
         sv._on_agent_request(self._ask("child-c7", 71))
-        assert sv.sessions_with_pending_permission() == frozenset({self.P})
+        assert sv.sessions_awaiting_person() == frozenset({self.P})
         assert web_mod._workflow_states(sv, [self.P, self.P2]) == {self.P2: "working"}
 
     def test_workflow_permission_request_stop_cancels_the_routed_request(self, wf):
@@ -14349,7 +14438,7 @@ class TestAcpWorkflowNotifications:
         assert written == [{"jsonrpc": "2.0", "id": 71,
                             "result": {"outcome": {"outcome": "cancelled"}}}]
         assert sv._pending_permission == {}
-        assert sv.sessions_with_pending_permission() == frozenset()
+        assert sv.sessions_awaiting_person() == frozenset()
         # The card is disabled on the parent's page.
         assert any(f["type"] == "permission_resolved" and f["payload"] == {"requestId": opaque}
                    for f in sv.history[self.P].events())
@@ -14749,7 +14838,7 @@ class TestAcpWorkflowNotifications:
         assert frames[0]["payload"]["toolCall"]["title"] == "[workflow step wf-writer] from p2"
         assert [(e["session_id"], e["kiro_id"]) for e in sv._pending_permission.values()
                 ] == [(self.P2, 81)]
-        assert sv.sessions_with_pending_permission() == frozenset({self.P2})
+        assert sv.sessions_awaiting_person() == frozenset({self.P2})
 
     def test_workflow_permission_request_is_refused_unless_its_step_is_tracked_with_a_live_parent(
             self, wf, caplog):
@@ -16052,7 +16141,7 @@ class TestAcpWorkflowNotifications:
         assert [e["type"] for e in sv.history[self.P].events()
                 ].count("question_request") == 1
         assert toasts == [("question_request", self.P, "Where should we start?")]
-        assert sv.sessions_with_pending_permission() == frozenset({self.P})
+        assert sv.sessions_awaiting_person() == frozenset({self.P})
 
     def test_question_with_no_options_is_a_free_form_question(self, wf):
         acp_mod, sv = wf
@@ -16317,7 +16406,92 @@ class TestAcpWorkflowNotifications:
         assert (row["status"], row["action"], row["done"]) == ("waiting", "waiting", False)
         subs = [f for f in out if f["type"] == "subagents"]
         assert subs and subs[-1]["payload"]["subagents"][0]["status"] == "waiting"
-        assert sv.sessions_with_pending_permission() == frozenset({self.P})
+        assert sv.sessions_awaiting_person() == frozenset({self.P})
+
+    def test_answering_a_steps_routed_question_sets_the_step_running(self, wf):
+        """A routed `_kiro/userInput` set the step waiting; once it is answered
+        and nothing else of the step is open, the step runs again without
+        waiting for its next tool_call."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        rid = self._pending_frames(conn, "question_request")[0]["payload"]["requestId"]
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+        _queued(conn)
+        written = self._answer_q(acp_mod, conn, {"requestId": rid, "answer": "b.py"})
+        assert [w["id"] for w in written] == [71]
+        assert sv._workflow_children[self.P]["child-c7"][0] == "running"
+        row = sv.crews[self.P]["child-c7"]
+        assert (row["status"], row["action"], row["done"]) == ("working", "running", False)
+        assert self._last_payload(conn)[0]["status"] == "working"
+        assert sv.workflow_state(self.P) == "working"
+
+    def test_a_steps_routed_question_removed_with_an_approval_still_open_keeps_it_waiting(
+            self, wf):
+        """Both sides of the "nothing else open" boundary: the step stays
+        waiting while its approval is open, and runs again once the approval,
+        the last open request, is answered."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        rid = self._pending_frames(conn, "question_request")[0]["payload"]["requestId"]
+        sv._on_agent_request(self._ask("child-c7", 72))
+        opaque = self._pending_frames(conn)[0]["payload"]["requestId"]
+        self._answer_q(acp_mod, conn, {"requestId": rid, "answer": "b.py"})
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+        assert sv.crews[self.P]["child-c7"]["status"] == "waiting"
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])):
+            asyncio.run(acp_mod._handle_permission_response(
+                conn, self.P, {"requestId": opaque, "optionId": "allow"}))
+        assert sv._workflow_children[self.P]["child-c7"][0] == "running"
+        assert sv.crews[self.P]["child-c7"]["status"] == "working"
+
+    def test_an_approval_answered_on_a_paused_step_leaves_it_waiting(self, wf):
+        """Only a step a question set waiting runs again: a step kiro-cli
+        paused (`node_paused`) stays waiting when its approval is answered."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
+        sv._on_agent_request(self._ask("child-c7", 72))
+        opaque = self._pending_frames(conn)[0]["payload"]["requestId"]
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])):
+            asyncio.run(acp_mod._handle_permission_response(
+                conn, self.P, {"requestId": opaque, "optionId": "allow"}))
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+
+    def test_answering_a_routed_question_clears_the_held_flag(self, wf):
+        """`_handle_question_response`'s `_workflow_unhold`: a held step's
+        flag goes once its question is answered, so a later hold logs again."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        rid = self._pending_frames(conn, "question_request")[0]["payload"]["requestId"]
+        sv._workflow_children[self.P]["child-c7"] = ("waiting", 1000.0)
+        sv._workflow_reap(now=1000.0 + acp_mod._WORKFLOW_WAITING_STALE_S + 1.0)
+        assert sv._workflow_child_meta["child-c7"].get("held_logged") is True
+        self._answer_q(acp_mod, conn, {"requestId": rid, "answer": "b.py"})
+        assert "held_logged" not in sv._workflow_child_meta["child-c7"]
+
+    def test_a_finished_held_steps_cancelled_approval_clears_the_held_flag(self, wf):
+        """`_cancel_step_permissions`' `_workflow_unhold`: the step's end
+        cancels its approval and clears the flag its hold set."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._on_agent_request(self._ask("child-c7", 71))
+        sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
+        sv._workflow_reap(now=1000.0 + acp_mod._WORKFLOW_CHILD_STALE_S + 1.0)
+        assert sv._workflow_child_meta["child-c7"].get("held_logged") is True
+        spawned = []
+        with patch.object(acp_mod, "_spawn_task", spawned.append):
+            self._complete(acp_mod, "wf-k7x", "step-one")
+        for coro in spawned:
+            coro.close()
+        assert len(spawned) == 1 and sv._pending_permission == {}
+        assert "held_logged" not in sv._workflow_child_meta["child-c7"]
 
     def test_parent_question_has_no_workflow_step_fields(self, wf):
         acp_mod, sv = wf
@@ -16838,6 +17012,27 @@ class TestAcpWorkflowNotifications:
         out = chunk("string replay", "warning", "true")    # only a real True
         assert [f["type"] for f in out] == ["chunk"]
         assert sv._workflow_step_questions == {} and sv._workflow_children == {}
+
+    def test_replayed_step_message_label_is_cleaned(self, wf):
+        """A replayed warning's `agentName` is agent-authored: format and
+        control characters go and brackets become parentheses
+        (`_clean_step_label`'s documented rules), so it cannot fake or close
+        the "[workflow step ...]" prefix."""
+        acp_mod, sv = wf
+        view = self._watch(acp_mod)
+        kiro = {"notification": {
+            "kind": "system-notification", "status": "warning",
+            "workflowId": "wf-k7x", "agentName": "[x] wf\u202eco\x00der]",
+            "nodeName": "ask-step", "sender": "step", "notifyId": "notify-2"},
+            "source": "steer", "replay": True}
+        _notify(acp_mod, "session/update", {"sessionId": self.P, "update": {
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "Which colour?"},
+            "_meta": {"kiro": kiro}}})
+        out = _queued(view)
+        assert [f["payload"] for f in out if f["type"] == "step_message"] == [{
+            "step": "workflow step (x) wfcoder)", "severity": "warning",
+            "message": "Which colour?"}]
 
     def test_run_complete_paused_keeps_steps_waiting_and_the_run_tracked(self, wf):
         acp_mod, sv = wf
@@ -39581,7 +39776,7 @@ class TestDashboardAttention:
     def test_a_failing_supervisor_read_is_logged_once_with_a_traceback(
             self, client, monkeypatch, caplog):
         """Review fix 2: the override's read and the feed's snapshot log the
-        first failure with a traceback, then a short line, and a good read
+        first failure with a traceback, then at most a short line a minute, and a good read
         resets the count."""
         from power_atlas import web as web_mod
         monkeypatch.setattr(web_mod, "_workflow_state_failures", {})
@@ -39603,7 +39798,7 @@ class TestDashboardAttention:
                 assert client.get(self._PATH).json() == {"items": [], "count": 0}
         for key in (web_mod._AWAITING_PERSON_FAULT, web_mod._ATTENTION_FAULT):
             recs = [r for r in caplog.records if key in r.getMessage()]
-            assert [bool(r.exc_info) for r in recs] == [True, False, False], key
+            assert [bool(r.exc_info) for r in recs] == [True], key  # back-off: one line a minute
         state["broken"] = False
         assert web_mod._awaiting_person_ids(sv, {"s"}) == frozenset()
         assert client.get(self._PATH).status_code == 200
@@ -43851,9 +44046,9 @@ class TestWorkflowLivenessStatus:
             for _ in range(3):
                 assert web_mod._workflow_states(sv, ["s"]) == {}
         recs = [r for r in caplog.records if "workflow liveness" in r.getMessage()]
-        assert [bool(r.exc_info) for r in recs] == [True, False, False]
-        assert "failed again, 2 in a row" in recs[1].getMessage()
-        assert "failed again, 3 in a row" in recs[2].getMessage()
+        # Back-off (final review of 261012): three failures within a minute
+        # log the first one only.
+        assert [bool(r.exc_info) for r in recs] == [True]
         # A good read resets the count: the next fault is a first one again.
         sv.broken = False
         assert web_mod._workflow_states(sv, ["s"]) == {"s": "working"}
@@ -43862,6 +44057,32 @@ class TestWorkflowLivenessStatus:
         with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
             web_mod._workflow_states(sv, ["s"])
         assert [bool(r.exc_info) for r in caplog.records] == [True]
+
+    def test_workflow_state_fault_logs_at_most_one_short_line_a_minute_per_key(
+            self, caplog, monkeypatch):
+        """Both sides of the 60 s boundary, per key: a repeat 59.9 s after the
+        last line is silent, one at 60 s logs the running count, and a second
+        key keeps its own clock."""
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_workflow_state_failures", {})
+        monkeypatch.setattr(web_mod, "_workflow_state_fault_logged", {})
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            web_mod._workflow_state_fault("a", now=500.0)
+            web_mod._workflow_state_fault("a", now=520.0)
+            web_mod._workflow_state_fault("b", now=530.0)
+            web_mod._workflow_state_fault("a", now=559.9)
+            web_mod._workflow_state_fault("a", now=560.0)
+            web_mod._workflow_state_fault("a", now=600.0)
+            web_mod._workflow_state_fault("b", now=589.0)
+            web_mod._workflow_state_fault("b", now=590.0)
+            web_mod._workflow_state_fault("a", now=620.0)
+        lines = [(r.getMessage(), bool(r.exc_info)) for r in caplog.records]
+        base = "ACP listing: could not read workflow liveness for "
+        assert lines == [
+            (base + "a", True), (base + "b", True),
+            (base + "a (failed again, 4 in a row)", False),
+            (base + "b (failed again, 3 in a row)", False),
+            (base + "a (failed again, 6 in a row)", False)]
 
     def test_workflow_state_snapshot_a_failing_permission_read_drops_every_overlay_once_logged(
             self, caplog):
@@ -43883,7 +44104,7 @@ class TestWorkflowLivenessStatus:
         monkeypatch.setattr(sv, "_pending_permission", {
             "k1": {"session_id": "asking", "options": [], "kiro_id": 1},
             "k2": "not a dict", "k3": None, "k4": {"session_id": 5}, "k5": {}})
-        assert sv.sessions_with_pending_permission() == frozenset({"asking"})
+        assert sv.sessions_awaiting_person() == frozenset({"asking"})
         # The malformed entries neither raise nor lift the protection of "asking".
         self._children(monkeypatch, asking=("running", 5.0), other=("running", 5.0))
         assert web_mod._workflow_states(sv, ["asking", "other"]) == {"other": "working"}

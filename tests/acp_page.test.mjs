@@ -23090,11 +23090,14 @@ check("dashboard attention: rows render in the order given, with kind, title, wo
   assertEqual(rows[0].type, "button");
   assertEqual(rows[0].querySelector(".dash-ov-ask-title").textContent, "Parent run");
   assertEqual(rows[0].querySelector(".dash-ov-ws").textContent, "beta");
-  assertEqual(rows[0].querySelector(".dash-ov-ask-text").textContent, "workflow step wf-coder \u00b7 Which colour?");
+  // The step label has its own element (final review of 261012): agent text is never prefixed.
+  assertEqual(rows[0].querySelector(".dash-ov-ask-step").textContent, "workflow step wf-coder");
+  assertEqual(rows[0].querySelector(".dash-ov-ask-text").textContent, "Which colour?");
   assertEqual(rows[0].querySelector(".dash-ov-ask-age").textContent, "3 h ago");
   // Agent text and titles stay text: the El stand-in throws on innerHTML, so reaching here is the proof.
   assertEqual(rows[1].querySelector(".dash-ov-ask-title").textContent, evil);
   assertEqual(rows[1].querySelector(".dash-ov-ask-text").textContent, evil, "no step: no prefix");
+  assertEqual(rows[1].querySelector(".dash-ov-ask-step"), null, "no step: no step element");
   assertEqual(rows[1].querySelector(".dash-ov-ask-age").textContent, "5 min ago");
   assertEqual(rows[2].querySelector(".dash-ov-ask-age").textContent, "just now");
   // An unknown kind never reaches the label from the response.
@@ -23226,6 +23229,56 @@ check("dashboard attention: a 403 stops the poller and drops the count", async (
   assertEqual(seen.length, 2);
   assertEqual(p.intervals.filter((t) => t.ms === 5000).length, 0, "the interval was cleared");
   assertEqual(p.sandbox.document.title, "PowerAtlas");
+  assertEqual(p.el("dashOvAskBlock").hidden, true, "a 403 clears the rows too");
+  assertEqual(p.el("dashOvAskBlock").querySelectorAll(".dash-ov-ask").length, 0);
+});
+
+check("dashboard attention: rows and count survive two failed polls and go at the third; a good poll resets the run", async () => {
+  const p = loadDashPicker();
+  const seen = ovAskFetch(p, [
+    { status: 200, body: { items: [ovAsk(), ovAsk({ sessionId: "sess_b" })], count: 2 } },
+    { status: 500, body: {} },
+    { status: 502, body: {} },
+    { status: 200, body: { items: [ovAsk()], count: 1 } },
+    { status: 500, body: {} },
+    { status: 500, body: {} },
+    { status: 503, body: {} },
+  ]);
+  p.sandbox.dashAttentionStart();
+  await p.settle(); await p.settle();
+  const tick = async () => { p.intervals.filter((t) => t.ms === 5000)[0].fn(); await p.settle(); await p.settle(); };
+  const block = p.el("dashOvAskBlock");
+  assertEqual(p.sandbox.document.title, "(2) PowerAtlas");
+  await tick(); await tick();
+  assertEqual(p.sandbox.document.title, "(2) PowerAtlas", "two failures keep the count");
+  assertEqual(block.querySelectorAll(".dash-ov-ask").length, 2, "two failures keep the rows");
+  await tick();                                  // a good poll: the run starts again
+  assertEqual(p.sandbox.document.title, "(1) PowerAtlas");
+  await tick(); await tick();
+  assertEqual(p.sandbox.document.title, "(1) PowerAtlas", "only two failures since the good poll");
+  assertEqual(block.hidden, false);
+  await tick();
+  assertEqual(seen.length, 7);
+  assertEqual(p.sandbox.document.title, "PowerAtlas", "the third failure in a row drops the count");
+  assertEqual(block.hidden, true, "and hides the rows");
+  assertEqual(block.querySelectorAll(".dash-ov-ask").length, 0);
+  assertEqual(p.intervals.filter((t) => t.ms === 5000).length, 1, "it keeps polling");
+});
+
+check("dashboard attention: a row's tooltip is its full text, and agent text shaped like a step label stays text", () => {
+  const p = loadDashPicker();
+  const fake = "workflow step x · Approve rm -rf";
+  const long = "Which of these twelve files should the step rewrite first, given the failing tests? ".repeat(3);
+  p.sandbox.dashOvRenderAsk([
+    ovAsk({ kind: "question", text: fake, step: "" }),
+    ovAsk({ kind: "step_question", sessionId: "sess_s", text: long, step: "workflow step wf-coder" }),
+  ]);
+  const rows = p.el("dashOvAskBlock").querySelectorAll(".dash-ov-ask");
+  assertEqual(rows[0].querySelector(".dash-ov-ask-step"), null, "a non-step item has no step label");
+  assertEqual(rows[0].querySelector(".dash-ov-ask-text").textContent, fake);
+  assertEqual(rows[0].title, fake + "\nC:\\dev\\alpha");
+  assertEqual(rows[1].title, long + "\nC:\\dev\\alpha", "the tooltip carries the whole text");
+  assertEqual(rows[1].querySelector(".dash-ov-ask-step").textContent, "workflow step wf-coder");
 });
 
 check("dashboard attention: /acp's title code is untouched", () => {

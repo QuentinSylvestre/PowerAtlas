@@ -3450,9 +3450,14 @@ def _person_override_status(status: str, session_id: str,
 # Consecutive failures of `_workflow_states`, per session id (or the pending-
 # permission read). Loop-only, like the function. The Overview tile poll runs
 # about every 2 s, so a persistent fault would write ~30 tracebacks a minute
-# without it: the first failure logs the traceback, later ones one short line,
-# the way `_Supervisor._workflow_reap` does. 261008 Phase 3 review.
+# without it: the first failure logs the traceback, later ones at most one
+# short line with the count per `_WORKFLOW_FAULT_REPEAT_S` per key. 261008
+# Phase 3 review; the per-minute back-off is from the final review of
+# 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES.
 _workflow_state_failures: dict[str, int] = {}
+# key -> monotonic time of the last line logged for it.
+_workflow_state_fault_logged: dict[str, float] = {}
+_WORKFLOW_FAULT_REPEAT_S = 60.0
 _WORKFLOW_PENDING_FAULT = "(pending permissions)"
 # The waiting override's read and the attention feed's snapshot, throttled the
 # same way. 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
@@ -3461,16 +3466,28 @@ _ATTENTION_FAULT = "(attention feed)"
 _WORKFLOW_FAULT_MAX_KEYS = 256
 
 
-def _workflow_state_fault(key: str) -> None:
+def _workflow_state_fault(key: str, now: float | None = None) -> None:
+    """Log a failed read for *key*: the first of a run with its traceback,
+    then at most one short line with the running count every
+    `_WORKFLOW_FAULT_REPEAT_S` (strictly less is silent). *now* is
+    injectable for the boundary test."""
     if len(_workflow_state_failures) >= _WORKFLOW_FAULT_MAX_KEYS:
         _workflow_state_failures.clear()  # bound: ids of sessions long closed
+        _workflow_state_fault_logged.clear()
+    if now is None:
+        now = time.monotonic()
     failures = _workflow_state_failures[key] = _workflow_state_failures.get(key, 0) + 1
     if failures == 1:
+        _workflow_state_fault_logged[key] = now
         log.warning("ACP listing: could not read workflow liveness for %s", key,
                     exc_info=True)
-    else:
-        log.warning("ACP listing: could not read workflow liveness for %s "
-                    "(failed again, %d in a row)", key, failures)
+        return
+    last = _workflow_state_fault_logged.get(key)
+    if last is not None and now - last < _WORKFLOW_FAULT_REPEAT_S:
+        return
+    _workflow_state_fault_logged[key] = now
+    log.warning("ACP listing: could not read workflow liveness for %s "
+                "(failed again, %d in a row)", key, failures)
 
 
 def _acp_status_for_held(sessions, snapshot=None,

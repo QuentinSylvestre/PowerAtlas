@@ -364,9 +364,11 @@
         <h3 class="dash-ov-title" id="dashOvQuotaTitle">Quota</h3>
         <div class="dash-ov-body" id="dashOvQuotaBody"><div class="dash-ov-loading">Loading…</div></div>
       </section>
-      <!-- Needs attention: what is waiting on the user. Sessions a quota limit stopped, and
-           repositories with uncommitted or unpushed work; each kind of item draws into its own
-           block, and the interrupted block stays hidden while there is nothing in it. -->
+      <!-- Needs attention: what is waiting on the user. Approvals, questions and step questions
+           (#dashOvAskBlock, "Waiting for you", fed by its own poller), sessions a quota limit
+           stopped, and repositories with uncommitted or unpushed work; each kind of item draws
+           into its own block, and the waiting and interrupted blocks stay hidden while there is
+           nothing in them. -->
       <section class="dash-ov-section" id="dashOvAttention" aria-labelledby="dashOvAttentionTitle">
         <h3 class="dash-ov-title" id="dashOvAttentionTitle">Needs attention</h3>
         <div class="dash-ov-body" id="dashOvAttentionBody">
@@ -1741,7 +1743,8 @@ function dashOvRenderInterrupted(rows){
 // (dashAttentionStart, never a top-level statement) and independent of the
 // Overview: it keeps polling while a transcript is open and while the tab is
 // hidden, because it also writes the page title's "(N) " count (D19, D20).
-// One request in flight; a 403 stops it quietly (a remote dashboard gets one
+// One request in flight; a 403 stops it quietly and clears the rows and the
+// count, as three failed polls in a row do (a remote dashboard gets one
 // on every loopback-only route, and the signed-out note is the Overview's to
 // give). Every string is set with textContent; the kind label comes from a
 // fixed map, never from the response.
@@ -1752,6 +1755,8 @@ var DASH_ATTENTION_TIMEOUT_MS = 15000;
 var DASH_ATTENTION_KIND_LABEL = {approval: 'Approval', question: 'Question', step_question: 'Step question'};
 var _dashAttentionTimer = null;
 var _dashAttentionBusy = false;
+var DASH_ATTENTION_MAX_FAILURES = 3;
+var _dashAttentionFailures = 0;
 var _dashOvAskKey = null;
 // The page title without the count, read once at load (dashAttentionStart).
 // A future writer of the dashboard title sets this and calls
@@ -1793,7 +1798,10 @@ function dashOvAskRow(item, receivedAt){
   var b = document.createElement('button');
   b.type = 'button';
   b.className = 'dash-ov-ask';
-  b.title = String(item.cwd == null ? '' : item.cwd);
+  var text = String(item.text == null ? '' : item.text);
+  var cwd = String(item.cwd == null ? '' : item.cwd);
+  // The text cell is one line with an ellipsis: the tooltip has all of it.
+  b.title = text + (cwd ? '\n' + cwd : '');
   var top = document.createElement('span');
   top.className = 'dash-ov-ask-top';
   top.appendChild(dashOvText('span', 'dash-ov-badge dash-ov-ask-kind',
@@ -1803,9 +1811,14 @@ function dashOvAskRow(item, receivedAt){
   var age = dashOvText('span', 'dash-ov-ask-age', dashOvAskAge(item.age, receivedAt));
   top.appendChild(age);
   b.appendChild(top);
+  // The server's step label has its own element, so agent text that merely
+  // starts "workflow step x · " cannot pass for a step's item.
+  var line = document.createElement('span');
+  line.className = 'dash-ov-ask-line';
   var step = item.step ? String(item.step) : '';
-  b.appendChild(dashOvText('span', 'dash-ov-ask-text',
-    (step ? step + ' · ' : '') + String(item.text == null ? '' : item.text)));
+  if (step) line.appendChild(dashOvText('span', 'dash-ov-ask-step', step));
+  line.appendChild(dashOvText('span', 'dash-ov-ask-text', text));
+  b.appendChild(line);
   b.addEventListener('click', function(){ dashOvOpenAsk(item); });
   return b;
 }
@@ -1864,20 +1877,27 @@ function dashAttentionTick(){
     return r.json();
   }).then(function(data){
     settled();
+    _dashAttentionFailures = 0;
     var items = data && Array.isArray(data.items) ? data.items : [];
     dashOvRenderAsk(items, Date.now());
     dashSetAttentionTitle(items.length);
   }, function(){
     // A failed poll keeps what was drawn; the next tick asks again. After a
-    // 403 the count is dropped, since nothing will refresh it.
+    // 403, or DASH_ATTENTION_MAX_FAILURES failures in a row, the rows and the
+    // count go: nothing is refreshing them, and stale ones would mislead.
     settled();
-    if (_dashAttentionTimer === null) dashSetAttentionTitle(0);
+    _dashAttentionFailures += 1;
+    if (_dashAttentionTimer === null || _dashAttentionFailures >= DASH_ATTENTION_MAX_FAILURES) {
+      dashOvRenderAsk([]);
+      dashSetAttentionTitle(0);
+    }
   });
 }
 // Idempotent: a second call keeps the one interval.
 function dashAttentionStart(){
   if (_dashBaseTitle === null) _dashBaseTitle = String(document.title || '');
   if (_dashAttentionTimer !== null) return;
+  _dashAttentionFailures = 0;
   _dashAttentionTimer = setInterval(dashAttentionTick, DASH_ATTENTION_MS);
   dashAttentionTick();
 }

@@ -5267,24 +5267,6 @@ class _Supervisor:
             return None
         return "working" if any(s == "running" for s, _ in live.values()) else "waiting"
 
-    def sessions_with_pending_permission(self) -> frozenset[str]:
-        """Ids of the sessions that have a permission request or an agent
-        question waiting for a person.
-
-        Both kinds live in ``_pending_permission`` (an approval and a
-        `_kiro/userInput` question, each keyed by its owning session), so a
-        session with an open question counts too.
-        Loop-only: it iterates a snapshot of ``_pending_permission``, which the
-        loop mutates. An entry that is not a dict, or has no string
-        ``session_id``, is skipped, so one malformed entry never hides the
-        others. Read by ``web.py``'s status call sites so a running workflow
-        does not turn a parent's own ``waiting`` into ``working``.
-        """
-        return frozenset(
-            entry["session_id"]
-            for entry in tuple(self._pending_permission.values())
-            if isinstance(entry, dict) and isinstance(entry.get("session_id"), str))
-
     @staticmethod
     def _awaiting_entry_owner(entry) -> str | None:
         """The owning session of a ``_pending_permission`` entry a person
@@ -5422,10 +5404,28 @@ class _Supervisor:
                    and entry.get("workflow_child") == child_id
                    for entry in tuple(self._pending_permission.values()))
 
+    def _workflow_holds_step(self, parent_id: str) -> bool:
+        """True while any tracked workflow step of *parent_id* waits on a
+        person (`_workflow_step_awaits_person`). A pure read. Loop-only.
+
+        What keeps the parent's ``_active_fan_out_wave`` entry at a turn
+        boundary once the held step is no longer fresh: its crew row is tagged
+        with that wave, and `_subagents_payload` would filter it out of every
+        later frame if the wave were dropped (D25).
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+        """
+        return any(self._workflow_step_awaits_person(parent_id, child_id)
+                   for child_id in tuple(self._workflow_children.get(parent_id) or ()))
+
     def _workflow_unhold(self, entry) -> None:
         """Called after a pending entry is removed: once its step has nothing
         left open, clear the ``held_logged`` flag, so a later hold of the
-        same step is logged again (`_log_held_step`). Never raises."""
+        same step is logged again (`_log_held_step`). If a routed question set
+        the step waiting (the meta's ``question_wait``), the step also runs
+        again (`_workflow_step_run_again`) once its last open request is gone,
+        whichever kind that last one was: no ``tool_call`` may follow to clear
+        it. A step waiting for any other reason (``node_paused``) is left
+        waiting. Never raises."""
         try:
             child_id = entry.get("workflow_child") if isinstance(entry, dict) else None
             parent_id = entry.get("session_id") if isinstance(entry, dict) else None
@@ -5436,6 +5436,9 @@ class _Supervisor:
             meta = self._workflow_child_meta.get(child_id)
             if meta is not None:
                 meta.pop("held_logged", None)
+                if meta.pop("question_wait", None):
+                    self._workflow_step_run_again(parent_id, child_id,
+                                                  step_frame=False)
         except Exception:
             log.exception("ACP could not clear the held flag of a workflow step")
 
@@ -5470,6 +5473,15 @@ class _Supervisor:
         self._workflow_drop_step_question(parent_id, child_id)
         if answered:
             self._workflow_drop_last_warning(parent_id, child_id)
+        self._workflow_step_run_again(parent_id, child_id, step_frame=step_frame)
+
+    def _workflow_step_run_again(self, parent_id: str, child_id: str, *,
+                                 step_frame: bool) -> None:
+        """Set a step tracked as waiting running again, once nothing of it
+        waits on a person. The shared tail of `_workflow_step_resume` and of a
+        routed question's removal (`_workflow_unhold`); it drops nothing. A
+        step not tracked, or not waiting, keeps its state. Loop-only (it
+        writes)."""
         current = self._workflow_children.get(parent_id, {}).get(child_id)
         if current is None or current[0] != "waiting":
             return
@@ -7829,10 +7841,12 @@ class _Supervisor:
             # The step waits on a person: waiting, so the 6 h bound applies
             # (D13). Guarded: the question is already stored and shown.
             try:
-                self._workflow_set(owner_id, step_id, "waiting")
-                row = (self.crews.get(owner_id) or {}).get(step_id)
-                if row is not None and (not row["done"] or row.get("reaped")):
-                    self._workflow_reopen_row(row, "waiting")
+                # Remembered so the question's removal can set the step
+                # running again (`_workflow_unhold`).
+                step_meta = self._workflow_child_meta.get(step_id)
+                if step_meta is not None:
+                    step_meta["question_wait"] = True
+                if self._workflow_mark_step_waiting(owner_id, step_id):
                     _emit_subagents_frame(owner_id, self.crews,
                                           self._active_fan_out_wave)
             except Exception:
@@ -9480,7 +9494,9 @@ async def _handle_prompt(conn, session_id, payload):
     # Kept while a workflow child is live: its crew entry is tagged with this
     # wave (`_on_workflow_node_start`), and `_subagents_payload` would filter
     # it out once the wave id changed.
-    if not _supervisor.has_active_workflow(session_id):
+    # Kept as well while a step waits on a person, fresh or not (D25).
+    if (not _supervisor.has_active_workflow(session_id)
+            and not _supervisor._workflow_holds_step(session_id)):
         _supervisor._active_fan_out_wave.pop(session_id, None)
     log.info("ACP turn start: session=%s (%d chars, %d image(s))",
              session_id, len(text), len(images))
@@ -9585,7 +9601,8 @@ async def _handle_prompt(conn, session_id, payload):
             _finished_crew_toolcallid = _crew_toolcallid(session_id)
             _had_crew = session_id in _supervisor.crews or bool(_finished_crew_toolcallid)
             _supervisor.crew_spawn_toolcallids.pop(session_id, None)
-            if not _wf_live:  # see the turn-start pop: live workflow entries are tagged with it
+            # See the turn-start pop: live and held workflow entries are tagged with it.
+            if not _wf_live and not _supervisor._workflow_holds_step(session_id):
                 _supervisor._active_fan_out_wave.pop(session_id, None)
             if _had_crew and session_id not in _supervisor.crews:
                 _registry.broadcast(session_id, envelope(
