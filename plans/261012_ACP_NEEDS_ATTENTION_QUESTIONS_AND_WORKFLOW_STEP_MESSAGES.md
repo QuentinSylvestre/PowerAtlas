@@ -518,11 +518,22 @@ Tests:
   - A `config.toml` holding `acp_prompt_silence_seconds = 7201` loads without error, and the key is gone after a save.
 
 **Exit criteria**:
-- [ ] `grep -rn "PROMPT_SILENCE_SECONDS\|acp_prompt_silence_seconds\|_await_inactivity\|_INACTIVITY\b\|_stamp_activity\|last_activity" src tests README.md` returns only the `_LEGACY_KEYS` entry, the legacy-config test, the test module's incident docstring and `overview.py`'s unrelated `last_activity` output field
-- [ ] `grep -n -i "silence" src/power_atlas/acp.py` hits only text unrelated to a turn bound (each remaining hit named in §9)
-- [ ] The new tests pass (the no-cancel test failed before the change, and the D26 ignore-the-cancel test failed before the change); the full suites pass
-- [ ] `README.md` updated: the config example line removed, the "bounded by silence" bullet and the permission-section sentence rewritten
+- [x] `grep -rn "PROMPT_SILENCE_SECONDS\|acp_prompt_silence_seconds\|_await_inactivity\|_INACTIVITY\b\|_stamp_activity\|last_activity" src tests README.md` returns only the `_LEGACY_KEYS` entry, the legacy-config test, the test module's incident docstring and `overview.py`'s unrelated `last_activity` output field
+- [x] `grep -n -i "silence" src/power_atlas/acp.py` hits only text unrelated to a turn bound (each remaining hit named in §9)
+- [x] The new tests pass (the no-cancel test failed before the change, and the D26 ignore-the-cancel test failed before the change); the full suites pass
+- [x] `README.md` updated: the config example line removed, the "bounded by silence" bullet and the permission-section sentence rewritten
 - [ ] Live (batched into Phase 7's restart): the settings menu no longer lists the silence setting
+
+Implementation (2026-10-13, code: d2fbc36)
+The commit's subject and body wrongly carry the Phase 4 text (see §9); the change is Phase 6's. `acp.py`: `PROMPT_SILENCE_SECONDS`, the silence deadline in the wait (the `last_activity` and `queued_behind` extensions), `_stamp_activity` and both calls, the `last_activity` field and the `apply_config` rebinding are removed; `_await_inactivity` is `_await_prompt` and `_INACTIVITY` is `_PROMPT_WAIT`, with rewritten docstrings and comments; the `_V3_SESSION_STALE_SECONDS` comment rests on its own measurement; every comment describing the silence bound is reworded. D26: `cancel()` writes `session/cancel`, then records `meta["stop_requested_at"]` and wakes the wait through `_prompt_wakers`; `_await_prompt` races one shielded future against the wake event, re-reads the Stop each pass and caps each slice at the remaining grace; after `CANCEL_GRACE_SECONDS` with no answer it logs a WARNING ("did not answer Stop") and raises the D26 `AgentTimeout`, writing no second cancel; `clear_stop` runs at the start of a prompt and of a slash command, right after `inflight.add`. `config.py`: the field is gone and the name is in `_LEGACY_KEYS`. `web.py` and `index.html`: the key leaves the settings payload, type, bound and restart lists and the restart label. `README.md`: config entry removed, the turn-bound bullet and the permission-section sentence rewritten. Tests: silence-premise and `last_activity` tests removed or reduced to their `last_used` half; `TestAcpInactivityCeiling` renamed `TestAcpPromptWait`; new `test_a_quiet_turn_is_never_cancelled_for_silence`, the ceiling test asserting no early cancel, `TestAcpStopFallback` (ignored Stop, honoured Stop, next turn, slash command) and the legacy-key load-and-drop test. Before the change, the quiet-turn test failed ("The agent went silent for 0s…"), the ignored-Stop test ended at 3.21 s against a 1.2 s bound, and the slash-command test at 2.79 s. pytest 3376 passed, 1 skipped; `tests/test_config.py` 113 passed; node 1110 passed.
+
+Implementation (2026-10-13, code: ca988d8)
+Review fixes. `clear_stop` clears `stop_requested_at` and advances `meta["turn_seq"]`; `cancel()` reads it before the write and records the Stop only if unchanged after (else an INFO line). The Stop is recorded with `setdefault`, so a second Stop keeps the first deadline. The README bullet says the agent's own turn may carry on and its output may still arrive. New tests: a late cancel write does not end the next turn; a second Stop does not push the fallback back (both failed on d2fbc36); waker cleanup asserted after every Stop and prompt-wait scenario. pytest 3378 passed, 1 skipped.
+
+Implementation (2026-10-13, code: fa49c87)
+Re-review fixes. `cancel()` returns a bool; when the Stop is dropped (turn moved on, or record gone), `_handle_cancel` returns before its cascade, so a late Stop no longer cancels the next turn's approvals or stops its workflow steps. `turn_seq` comes from a supervisor-wide counter, so a rebuilt record never repeats a value. The late-write helper now opens an approval and a workflow step on turn 2 and asserts both survive; a new test replaces the record between turns. One test stub's return changed from None to True for the new contract. pytest 3379 passed, 1 skipped; node 1110 passed.
+
+Orchestrator notes: the change descriptions above are condensed from the sub-agent returns. The live criterion is deferred to Phase 7 and added to its exit criteria. QA carried to Phase 7 with the batched restart.
 
 ### Phase 7: Documentation, roadmap and live QA
 **Goal**: Record the protocol facts and the user-visible surface, then verify everything live.
@@ -546,6 +557,7 @@ Tests:
 - [ ] (deferred from Phase 4) Live: a workflow step question shows on the row, in the transcript and as Waiting; after the answer the row runs again and finishes; a reload or `session/load` shows one step-message row, not two (file scope: no file; a live check)
 - [ ] (deferred from Phase 4) `docs/KNOWLEDGE.md` notes that a step past `_WORKFLOW_CHILD_MAX_AGE_S` that resumes through its own `tool_call` keeps its old staleness clock, so a step that waited more than 600 s reads "no longer reporting" at the next reap (user decision 2026-10-12: accept)
 - [ ] (deferred from Phase 5) Live: a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer (file scope: no file; a live check)
+- [ ] (deferred from Phase 6) Live: the settings menu no longer lists the silence setting (file scope: no file; a live check)
 
 ## 6) Risk Assessment
 
@@ -560,7 +572,7 @@ Tests:
 | R7 History eviction | A pending card has no frame after a reconnect past 2000 events or 2 MiB | Pre-existing; the attention list reads the store, so the item still shows. Accepted |
 | R8 Background-tab throttling | The title count can lag about a minute in a hidden tab | Accepted browser behaviour |
 | R10 Declaring `userInput` changes behaviour in every permission mode | In Yolo, the old permission-card fallback for a question could be approved without asking; now every question waits for a person | Intended by D2 (Q2); README and KNOWLEDGE state it in Phase 7 |
-| R11 No silence bound on a turn or slash command (D24) | A turn parked on an unanswered approval or question holds its session slot until answered or stopped, and a remote device can do that on purpose (bounded by `MAX_SESSIONS`). A live agent that hangs is ended only by Stop or the 24 h ceiling | Accepted by the user, 2026-10-12. Stop ends the turn locally within `CANCEL_GRACE_SECONDS` + 1 s if kiro-cli does not answer the cancel (D26); any viewer's Stop releases a parked turn; the agent's tool processes may outlive a locally ended turn until PowerAtlas exits, as with the ceiling. Phase 1 probe 5 measures the command case |
+| R11 No silence bound on a turn or slash command (D24) | A turn parked on an unanswered approval or question holds its session slot until answered or stopped, and a remote device can do that on purpose (bounded by `MAX_SESSIONS`). A live agent that hangs is ended only by Stop or the 24 h ceiling | Accepted by the user, 2026-10-12. Stop ends the turn locally within `CANCEL_GRACE_SECONDS` + 1 s if kiro-cli does not answer the cancel (D26); any viewer's Stop releases a parked turn; the agent's own turn may keep running after a locally ended turn (it ignored the cancel), so its frames may still arrive, and its tool processes may outlive it until PowerAtlas exits, as with the ceiling (Phase 6 review). Phase 1 probe 5 measures the command case |
 | R12 A paused run's resume moves the question to a new child | The old step question would be dropped with the old child | Phase 1 probe 3 decides; Phase 4 moves an open step question to the new child of the same `(workflowId, nodeId)` if probe 3 shows one |
 | R13 A step that dies silently keeps its open approval or question (D25) | The item stays in "Needs attention", the parent reads Waiting, and the session holds a slot (bounded by `MAX_SESSIONS`) with no automatic exit | Accepted with D25. The exits are answer, Stop, close and a restart. The idle sweep is no longer an exit: by the user's decision of 2026-10-12 ("A", after a Light council, 3-0), `_sweepable` refuses a session awaiting a person (Phase 3 review). KNOWLEDGE states the exits (Phase 7) |
 | R9 A Python change needs a restart that ends every live session | Live checks end any session in use | Restart granted for this task (2026-10-12); batch each phase's live checks into one restart |
@@ -599,7 +611,7 @@ Tests:
 | 3 | Agent questions through `userInput` | Complete | code: 82e0119, 6223be4, b0cabe5, ad12a39; live check deferred to Phase 7 |
 | 4 | Step messages, waiting state, paused runs | Complete | code: f6d4d71, cdfa879, 25fd7bc; live check deferred to Phase 7 |
 | 5 | Attention feed and title count | Complete | code: 71033de, b13bcd0; live check deferred to Phase 7 |
-| 6 | Remove the prompt silence watchdog | Not started | |
+| 6 | Remove the prompt silence watchdog | Complete | code: d2fbc36 (subject wrongly says phase 4), ca988d8, fa49c87; live check deferred to Phase 7 |
 | 7 | Documentation, roadmap and live QA | Not started | Restart granted 2026-10-12 |
 
 ## 9) Implementation Divergences from Plan
@@ -620,6 +632,15 @@ All runs used a second `kiro-cli acp --agent-engine v3` spawned by a scratch dri
 - **Resume re-sends `run_start` and `node_start` (Phase 4).** A resumed paused run re-sends `run_start` for the tracked `workflowId` and `node_start` for the tracked `nodeId` with the same step `sessionId`. No new child appears, so the R2/R12 new-child handling is not needed. Phase 4 must accept these frames again without resetting the run or the row.
 - **Slash commands unmeasured (R11).** `_kiro.dev/commands/execute` errors on 2.29.1, so the effect of Stop during a slash command is unmeasured. D26 still covers the command path. Outside this plan: PowerAtlas's `commands_execute` sends the refused shape. `orchestrator.log` and 3 rotations have 0 `PersistenceClassification` lines, so it is not confirmed in production.
 - **A step paused after `success` (D13, D14).** In the probe-3 resume, the step reported `success`, and kiro-cli then sent `node_paused` (`reason: "Awaiting next user message on step session."`) and `run_complete` `status: "paused"`, with no `node_complete`. User decision, 2026-10-12 ("A"): keep D14 as written. The step shows waiting, the crew header reads "Paused", and the parent reads Waiting, because kiro-cli itself holds the run unfinished. No step question is created, since that needs a warning notify, so it does not appear in "Needs attention".
+
+### Divergences from Phase 6
+
+- **Wrong subject on d2fbc36.** The Phase 6 code commit carries the Phase 4 message: a refused scratch-file Write left an earlier phase's message file in place for `git commit -F`. Amend is banned; user decision "B" (2026-10-13): leave it and record it here. ca988d8 and fa49c87 carry correct Phase 6 subjects.
+- **Wait shape.** `_await_prompt` creates one shield before its loop and races it each pass against the Stop event with `asyncio.wait`, instead of `wait_for(shield(fut), tick)`. The shield's property holds: the future is never cancelled and callbacks do not pile up.
+- **Stop pinned to its turn.** `cancel()` records the Stop after the `session/cancel` write and only if the supervisor-wide `turn_seq` is unchanged, so a late write never ends or touches the next turn, and no turn ends on a cancel the agent never received. A dropped Stop skips the whole Stop cascade. A second Stop keeps the first deadline. Wake events live in `_prompt_wakers`, so the session record stays plain data.
+- **Tests reduced, not deleted.** Some `TestAcpActivityStamp` tests keep their `last_used` half, since only `last_activity` went away.
+- **Remaining `silence` hits in `acp.py`, none about a turn bound.** The base64 decode comment ("would reproduce the same silence one layer earlier"); a Manual row pattern that can "silence" a permission card (two hits); a socket writer that fails "in silence"; the load-pending ceiling drifting "in silence".
+- **Other first-grep hits.** `config.py`'s `_LEGACY_KEYS` comment, and `last_activity` in `index.html`, `tests/acp_page.test.mjs` and the overview tests, all reading `overview.py`'s unrelated output field.
 
 ### Divergences from Phase 5
 
@@ -813,9 +834,26 @@ Implementation health: Green.
 
 Security ran five mutations (remote gate, cookie gate, stored and fallback title cleaning, override), all killed; full pytest over `tests/` 5416 passed. Senior confirmed every Server, page and test bullet, mutation-tested SC-2's every-mode polling two ways (both killed), and found the two uncovered call sites. Reviewers ran sequentially. No re-review of b13bcd0 (one-cycle cap; see the implementation notes).
 
+### 2026-10-13 -- Implementation Review (after Phase 6, persona: Reliability engineer)
+
+Implementation health: Green.
+6 findings (1 High, 1 Medium, 4 Low), including 2 from a diff-only re-review of the first fix.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | A Stop for turn N could end turn N+1 when its cancel write landed late, breaking D26 (reproduced). | Fixed -- `turn_seq` pins the Stop to its turn; regression test (ca988d8). |
+| 2 | Low | Waker cleanup in `_await_prompt` had no test. | Fixed -- every Stop and prompt-wait scenario asserts no waker remains (ca988d8). |
+| 3 | Low | Each extra Stop press pushed the fallback deadline back. | Fixed -- the first Stop of a turn is kept (ca988d8). |
+| 4 | Low | README and R11 named only tool processes as outliving a locally ended turn. | Fixed -- both say the agent's own turn may carry on (ca988d8; R11 in the plan). |
+| 5 | Medium | [Re-review] A dropped late Stop still ran its cascade, cancelling the next turn's approvals and workflow steps. | Fixed -- `cancel()` returns a bool and `_handle_cancel` stops on False; test (fa49c87). |
+| 6 | Low | [Re-review] A per-record `turn_seq` could repeat after a record was rebuilt (ABA). | Fixed -- supervisor-wide counter; test (fa49c87). |
+
+The first review ran four mutations (wake-on-Stop, both `clear_stop` sites, waker cleanup); the cleanup one survived (row 2). The re-review of ca988d8 ran under `/qdev` Step 6 item 4a because the High fix changed concurrency code; its four mutations were all killed. Full `tests/test_web.py` plus `tests/test_config.py`: 3489 passed, 1 skipped (first review).
+
 ## Harness Improvement Opportunities
 
 - Step 1.5's three code-tracing briefs overlapped heavily on this scope: all three enumerated the same `_emit_subagents_frame` call sites and pending-permission removal paths — cost: about 630k sub-agent tokens for roughly one report's worth of distinct facts — suggested change: when Step 1 already names the call sites, tell the subsystem brief to skip enumerations the directed brief owns.
 - The decisive findings (the `user_input` question path, the paused-run mapping) came from probes and a vendor-bundle grep, not from the trio — cost: the trio's "clarifying question" answer was "no mechanism found", which would have shaped the interview wrongly without the probes — suggested change: add "grep the vendor bundle for the concept" to the Probe gate's examples when the work integrates with a third-party protocol.
 - The doc-impact sub-agent and the persona reviewers cover overlapping ground: three personas independently found that the card belongs in `transcript-renderer.js` — cost: three reviewers each spent about 15 tool calls on the same discovery — suggested change: have the planner list the shared modules a UI phase touches (grep the existing sibling feature's function names) before review, so reviewers check it rather than discover it.
 - With a 1-cycle cap, 26 fixes went into the plan without any re-review — cost: unclear; regressions in the fixes go unchecked until `/qdev` — suggested change: when the user caps cycles at 1, offer a cheap diff-only check of the applied fixes that does not count as a cycle.
+- A sub-agent's Write to a scratch commit-message file was refused because an earlier phase had left a file of the same name, and `git commit -F` then committed the stale Phase 4 message on the Phase 6 code (d2fbc36) — cost: a wrong commit subject that amend cannot fix under the ban, a user decision, and a commit-pairing gap — suggested change: `/qdev` briefs require a per-phase unique message file name, or `-m`, and a `git log -1 --format=%s` check right after the commit.
