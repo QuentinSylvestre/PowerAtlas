@@ -11854,6 +11854,82 @@ class TestAcpSubagentActivity:
         assert any(e["type"] == "chunk" and e["payload"]["text"] == "hello from sub"
                    for e in events)
 
+    @staticmethod
+    def _seed_wave_row(acp_mod, parent, child, fan_out_id):
+        """A wave-tagged crew row shaped like `_on_agent_subtask_open`'s."""
+        crew = acp_mod._supervisor.crews.setdefault(parent, {})
+        crew[child] = {
+            "role": "worker", "task": "t", "sessionName": "",
+            "status": "pending", "action": "", "done": False, "error": "",
+            "order": len(crew), "startedAt": 1.0, "stoppedAt": None,
+            "fan_out_id": fan_out_id, "spawnToolCallId": "spawn-" + child,
+        }
+        acp_mod._supervisor.subagent_sessions[child] = {"parent": parent}
+
+    def test_action_frame_keeps_a_wave_tagged_row_under_its_own_wave(
+            self, acp_store):
+        """261012 Phase 2, D16 (SC-7): the action frame is filtered by the
+        row's own `fan_out_id`, not by `crew_spawn_toolcallids` (which never
+        holds a wave id, so the row was filtered out of its own frame). A row
+        of an older wave goes out under that older wave's id (D16), and each
+        frame still excludes the other wave's row."""
+        acp_mod, _ = acp_store
+        sup = acp_mod._supervisor
+        sid = _live_session(acp_mod)
+        # A v2 anchor that differs from both waves, so an implementation that
+        # still reads `crew_spawn_toolcallids` cannot pass by accident.
+        sup.crew_spawn_toolcallids[sid] = "v2-spawn-tc"
+        self._seed_wave_row(acp_mod, sid, "sub-old", "wave-old")
+        self._seed_wave_row(acp_mod, sid, "sub-new", "wave-new")
+        sup._active_fan_out_wave[sid] = "wave-new"
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+        _queued(conn)
+
+        sup._note_subagent_action("sub-new", "Reading file")
+        frames = [f for f in _queued(conn) if f["type"] == "subagents"]
+        assert len(frames) == 1
+        payload = frames[0]["payload"]
+        assert [r["sessionId"] for r in payload["subagents"]] == ["sub-new"]
+        assert payload["subagents"][0]["action"] == "Reading file"
+        assert payload["toolCallId"] == "wave-new"
+
+        # The older wave's row: its own tag, not the active wave (D16).
+        sup._note_subagent_action("sub-old", "Writing file")
+        frames = [f for f in _queued(conn) if f["type"] == "subagents"]
+        assert len(frames) == 1
+        payload = frames[0]["payload"]
+        assert [r["sessionId"] for r in payload["subagents"]] == ["sub-old"]
+        assert payload["subagents"][0]["action"] == "Writing file"
+        assert payload["toolCallId"] == "wave-old"
+
+    def test_action_frame_keeps_a_v2_row_under_its_spawn_toolcallid(
+            self, acp_store):
+        """261012 Phase 2, D16: a v2 row, tagged from `crew_spawn_toolcallids`
+        by `_on_subagent_list`, is still emitted under that id. A stale
+        `_active_fan_out_wave` entry for the same parent must not hide it."""
+        acp_mod, _ = acp_store
+        sup = acp_mod._supervisor
+        sid = _live_session(acp_mod)
+        sup.inflight.add(sid)
+        sup.crew_spawn_toolcallids[sid] = "v2-spawn-tc"
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer", "status": {"type": "working"}},
+        ]})
+        assert sup.crews[sid]["sub-1"]["fan_out_id"] == "v2-spawn-tc"
+        sup._active_fan_out_wave[sid] = "wave-stale"
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+        _queued(conn)
+
+        sup._note_subagent_action("sub-1", "Reading file")
+        frames = [f for f in _queued(conn) if f["type"] == "subagents"]
+        assert len(frames) == 1
+        payload = frames[0]["payload"]
+        assert [r["sessionId"] for r in payload["subagents"]] == ["sub-1"]
+        assert payload["subagents"][0]["action"] == "Reading file"
+        assert payload["toolCallId"] == "v2-spawn-tc"
+
 
 class TestAcpSubagentsFrameDelivery:
 

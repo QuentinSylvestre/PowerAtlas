@@ -4732,7 +4732,13 @@ class _Supervisor:
         if entry is None or entry["done"] or entry["action"] == title:
             return
         entry["action"] = title
-        _emit_subagents_frame(meta["parent"], self.crews, self.crew_spawn_toolcallids)
+        # Filter by the row's own tag, not `crew_spawn_toolcallids`: that map
+        # tags v2 rows only, so a wave-tagged row was filtered out of its own
+        # frame. The row's tag is right for both kinds; a row of an older wave
+        # repaints that wave's panel (plan 261012, D16).
+        _emit_subagents_frame(
+            meta["parent"], self.crews,
+            {meta["parent"]: entry.get("fan_out_id", _NO_ANCHOR_TOOLCALLID)})
 
     def _evict_finished_subagents(self, parent_id: str) -> None:
         """Keep one session's remembered crew under MAX_SUBAGENTS_PER_SESSION.
