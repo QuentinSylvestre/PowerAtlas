@@ -3417,18 +3417,20 @@ def _awaiting_person_ids(supervisor, held) -> frozenset[str] | None:
 
     `None` when there is no supervisor reading (no supervisor, or the read
     failed): no session is overridden, so a failure fails open to each
-    session's own status (`_person_override_status`).
+    session's own status (`_person_override_status`). A failure is logged
+    with a traceback once, then as a short repeat line (`_workflow_state_fault`).
     261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 5 step 5
     """
     if supervisor is None:
         return None
     try:
         awaiting = supervisor.sessions_awaiting_person()
-        return frozenset(sid for sid in held if sid in awaiting)
+        out = frozenset(sid for sid in held if sid in awaiting)
     except Exception:
-        log.warning("ACP listing: could not read the sessions awaiting a person",
-                    exc_info=True)
+        _workflow_state_fault(_AWAITING_PERSON_FAULT)
         return None
+    _workflow_state_failures.pop(_AWAITING_PERSON_FAULT, None)
+    return out
 
 
 def _person_override_status(status: str, session_id: str,
@@ -3452,6 +3454,10 @@ def _person_override_status(status: str, session_id: str,
 # the way `_Supervisor._workflow_reap` does. 261008 Phase 3 review.
 _workflow_state_failures: dict[str, int] = {}
 _WORKFLOW_PENDING_FAULT = "(pending permissions)"
+# The waiting override's read and the attention feed's snapshot, throttled the
+# same way. 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+_AWAITING_PERSON_FAULT = "(sessions awaiting a person)"
+_ATTENTION_FAULT = "(attention feed)"
 _WORKFLOW_FAULT_MAX_KEYS = 256
 
 
@@ -4718,7 +4724,10 @@ def _attention_payload(items: list[dict]) -> dict:
     Blocking; runs off the loop.
 
     Each item gains `workspace` (the cwd's base name), `provider` and `age`
-    (whole seconds since `created`, never negative). A title the supervisor
+    (whole seconds since `created` by the server's clock, never negative;
+    `None` when `created` is unknown). The page shows `age` plus the time since
+    it received the poll, so a browser clock that disagrees with this one
+    never skews the age. A title the supervisor
     did not store (no `focus_update` yet) is the rail's, `_acp_row_title` over
     the cached `data.get_sessions`, cleaned like a stored one (D18), else
     "Untitled session". One failed read costs only that item its title.
@@ -4747,7 +4756,8 @@ def _attention_payload(items: list[dict]) -> dict:
         sid = str(item.get("sessionId") or "")
         title = str(item.get("title") or "") or _disk_title(cwd, sid) or _ATTENTION_UNTITLED
         created = item.get("created")
-        age = int(max(0.0, now - created)) if isinstance(created, (int, float)) else 0
+        age = (int(max(0.0, now - created))
+               if isinstance(created, (int, float)) and not isinstance(created, bool) else None)
         out.append({
             "kind": item.get("kind"),
             "sessionId": sid,
@@ -4770,7 +4780,8 @@ async def api_dashboard_attention(response: Response):
     The snapshot is taken here, on the loop, where supervisor state lives,
     with the listing routes' `acp is None` guard; titles that need a disk read
     are filled in a worker thread. A failed snapshot reads as nothing pending
-    and is logged.
+    and is logged with a traceback once, then as a short repeat line
+    (`_workflow_state_fault`): the dashboard polls every 5 s.
     """
     response.headers["Cache-Control"] = "no-store"
     sup = getattr(acp, "_supervisor", None) if acp is not None else None
@@ -4779,9 +4790,9 @@ async def api_dashboard_attention(response: Response):
     try:
         items = sup.attention_snapshot()
     except Exception:
-        log.warning("attention: could not read the supervisor's pending items",
-                    exc_info=True)
+        _workflow_state_fault(_ATTENTION_FAULT)
         return {"items": [], "count": 0}
+    _workflow_state_failures.pop(_ATTENTION_FAULT, None)
     return await asyncio.to_thread(_attention_payload, items)
 
 

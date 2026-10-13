@@ -1762,11 +1762,14 @@ function dashSetAttentionTitle(n){
   var count = dashOvCount(n);
   document.title = (count > 0 ? '(' + count + ') ' : '') + _dashBaseTitle;
 }
-// "3 min ago" from a `created` in epoch seconds; '' when it is not a number.
-function dashOvAskAge(created){
-  var t = Number(created);
-  if (typeof created !== 'number' || !isFinite(t)) return '';
-  return dashOvAgo(new Date(t * 1000).toISOString());
+// "3 min ago" from the server's `age` (seconds, by the server's clock) plus
+// the time since this page received it (`receivedAt`, Date.now() then), so a
+// browser clock that disagrees with the server's never skews it. '' when the
+// server sent no age.
+function dashOvAskAge(age, receivedAt){
+  if (typeof age !== 'number' || !isFinite(age)) return '';
+  var since = typeof receivedAt === 'number' && isFinite(receivedAt) ? Math.max(0, Date.now() - receivedAt) : 0;
+  return dashOvAgo(new Date(Date.now() - Math.max(0, age) * 1000 - since).toISOString());
 }
 // Open the session an item belongs to (D21): through the rail when the rail
 // shows it, like an Overview tile; otherwise (a session created in "The
@@ -1786,7 +1789,7 @@ function dashOvOpenAsk(item){
   }
   window.open('/acp?sid=' + encodeURIComponent(sid), '_blank', 'noopener');
 }
-function dashOvAskRow(item){
+function dashOvAskRow(item, receivedAt){
   var b = document.createElement('button');
   b.type = 'button';
   b.className = 'dash-ov-ask';
@@ -1797,8 +1800,7 @@ function dashOvAskRow(item){
     DASH_ATTENTION_KIND_LABEL[item.kind] || 'Waiting'));
   top.appendChild(dashOvText('span', 'dash-ov-ask-title', item.title));
   top.appendChild(dashOvText('span', 'dash-ov-ws', item.workspace));
-  var age = dashOvText('span', 'dash-ov-ask-age', dashOvAskAge(item.created));
-  age._dashOvCreated = item.created;
+  var age = dashOvText('span', 'dash-ov-ask-age', dashOvAskAge(item.age, receivedAt));
   top.appendChild(age);
   b.appendChild(top);
   var step = item.step ? String(item.step) : '';
@@ -1807,8 +1809,9 @@ function dashOvAskRow(item){
   b.addEventListener('click', function(){ dashOvOpenAsk(item); });
   return b;
 }
-function dashOvRenderAsk(items){
+function dashOvRenderAsk(items, receivedAt){
   var block = document.getElementById('dashOvAskBlock');
+  if (typeof receivedAt !== 'number') receivedAt = Date.now();
   if (!block) return;
   var shown = Array.isArray(items) ? items.filter(function(r){
     return r && typeof r === 'object' && typeof r.sessionId === 'string' && r.sessionId;
@@ -1820,7 +1823,8 @@ function dashOvRenderAsk(items){
     return;
   }
   // `age` changes every poll; the key leaves it out so an unchanged list is
-  // not rebuilt (a focused row keeps the focus), and only the ages move.
+  // not rebuilt (a focused row keeps the focus), and only the ages move, to
+  // this poll's values (same key, so the same rows in the same order).
   var key = null;
   try {
     key = JSON.stringify(shown.map(function(r){
@@ -1828,8 +1832,8 @@ function dashOvRenderAsk(items){
     }));
   } catch (e) { key = null; }
   if (key !== null && key === _dashOvAskKey && !block.hidden) {
-    block.querySelectorAll('.dash-ov-ask-age').forEach(function(n){
-      n.textContent = dashOvAskAge(n._dashOvCreated);
+    block.querySelectorAll('.dash-ov-ask-age').forEach(function(n, i){
+      n.textContent = shown[i] ? dashOvAskAge(shown[i].age, receivedAt) : '';
     });
     return;
   }
@@ -1839,7 +1843,7 @@ function dashOvRenderAsk(items){
   block.appendChild(dashOvText('div', 'dash-ov-sub', 'Waiting for you'));
   var list = document.createElement('div');
   list.className = 'dash-ov-asks';
-  shown.forEach(function(r){ list.appendChild(dashOvAskRow(r)); });
+  shown.forEach(function(r){ list.appendChild(dashOvAskRow(r, receivedAt)); });
   block.appendChild(list);
 }
 function dashAttentionStop(){
@@ -1861,7 +1865,7 @@ function dashAttentionTick(){
   }).then(function(data){
     settled();
     var items = data && Array.isArray(data.items) ? data.items : [];
-    dashOvRenderAsk(items);
+    dashOvRenderAsk(items, Date.now());
     dashSetAttentionTitle(items.length);
   }, function(){
     // A failed poll keeps what was drawn; the next tick asks again. After a

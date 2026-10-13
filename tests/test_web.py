@@ -39090,8 +39090,13 @@ class TestDashboardAttention:
             ("approval", self._P, "Run npm test", "", self._CWD_P, "Stored parent title"),
         ]
 
-    def test_snapshot_skips_malformed_entries_and_reads_a_missing_kind_as_approval(
+    def test_snapshot_skips_malformed_entries_and_keeps_entries_with_odd_fields(
             self, monkeypatch):
+        """One validity rule with `sessions_awaiting_person` (review fix 5):
+        only an entry without a usable owner (or parent) is malformed. An odd
+        `text` reads as "" and an odd `created` as None, sorted last, because
+        such an entry is still a request a person must answer and still holds
+        its session Waiting; hiding it would make the two disagree."""
         sv = self._sv(monkeypatch)
         now = time.time()
         sv.sessions[self._P] = {"cwd": self._CWD_P}
@@ -39114,7 +39119,19 @@ class TestDashboardAttention:
         sv._workflow_children[self._P] = {"k2": ("waiting", time.monotonic()),
                                           "k3": ("waiting", time.monotonic())}
         got = [(i["kind"], i["text"], i["created"]) for i in sv.attention_snapshot()]
-        assert got == [("approval", "ok", now - 5), ("approval", "ok", now - 1)]
+        assert got == [
+            ("approval", "", now - 5),       # e: text None reads as ""
+            ("approval", "ok", now - 5),     # i: no kind reads as approval
+            ("approval", "ok", now - 1),     # j: "Question" is not "question"
+            ("approval", "ok", None),        # f, g, h: no usable time, last
+            ("approval", "ok", None),
+            ("approval", "ok", None),
+            ("step_question", "x", None),    # k3
+        ]
+        # The same entries decide the override: the malformed ones (a, b, c,
+        # k1, k2) count for nobody; "d" counts for a session not held, which
+        # neither the list nor any status reads.
+        assert sv.sessions_awaiting_person() == frozenset({self._P, "sess_not-held"})
 
     def test_a_step_question_whose_child_is_no_longer_tracked_is_not_listed(self, monkeypatch):
         sv = self._world(monkeypatch)
@@ -39278,6 +39295,85 @@ class TestDashboardAttention:
         return {r["id"]: r["status"] for r in client.get(
             "/api/acp/sessions", params={"cwd": cwd, "session_size": 50}
         ).json()["groups"][0]["sessions"]}
+
+    def test_a_malformed_entry_neither_lists_nor_overrides(
+            self, client, monkeypatch, acp_listing_store):
+        """Review fix 5: `sessions_awaiting_person` and `attention_snapshot`
+        read one validity rule, so a session never reads Waiting with nothing
+        listed for it."""
+        from power_atlas.status_classifier import SemanticStatus as S
+        sv, cwd = self._held_world(monkeypatch, acp_listing_store, {"busy": S.WORKING})
+        sv._pending_permission.update({
+            "bad1": {"session_id": 7, "text": "busy?", "created": time.time()},
+            "bad2": ["busy"]})
+        # A step question whose child is no longer tracked counts for nobody.
+        sv._workflow_children["busy"] = {}
+        sv._workflow_step_questions["gone-child"] = {
+            "parent": "busy", "text": "?", "created": time.time(), "label": "l"}
+        assert sv.sessions_awaiting_person() == frozenset()
+        assert client.get(self._PATH).json() == {"items": [], "count": 0}
+        assert self._rail(client, cwd) == {"busy": "working"}
+        # Track the child again: both see it at once.
+        sv._workflow_children["busy"] = {"gone-child": ("waiting", time.monotonic())}
+        assert sv.sessions_awaiting_person() == frozenset({"busy"})
+        assert client.get(self._PATH).json()["count"] == 1
+        assert self._rail(client, cwd) == {"busy": "waiting"}
+
+    @pytest.mark.parametrize("path, params", [
+        ("/api/dashboard/sessions", {"session_size": 50}),
+        ("/api/dashboard/sessions", {"mode": "recent"}),
+        ("/api/acp/sessions", {"mode": "recent"}),
+    ])
+    def test_override_reaches_the_dashboard_rail_and_the_flat_listings(
+            self, client, monkeypatch, acp_listing_store, path, params):
+        """Review fix 1: the grouped dashboard route and both flat ("recent")
+        listings apply the override too."""
+        from power_atlas import data as data_mod
+        from power_atlas.status_classifier import SemanticStatus as S
+        verdicts = {"asking": S.WORKING, "plain": S.WORKING}
+        sv, cwd = self._held_world(monkeypatch, acp_listing_store, verdicts)
+        sv._pending_permission["q"] = {"session_id": "asking", "kind": "question",
+                                       "options": [], "kiro_id": 1, "text": "?",
+                                       "created": time.time()}
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        rows = [(_acp_row(s, cwd=cwd), "kiro-cli-v3") for s in verdicts]
+        monkeypatch.setattr(data_mod, "get_all_sessions_paginated",
+                            lambda *a, **k: (rows, False))
+        body = client.get(path, params=dict(params, cwd=cwd)).json()
+        listed = body["sessions"] if "sessions" in body else body["groups"][0]["sessions"]
+        assert {r["id"]: r["status"] for r in listed} == {"asking": "waiting", "plain": "working"}
+
+    def test_a_failing_supervisor_read_is_logged_once_with_a_traceback(
+            self, client, monkeypatch, caplog):
+        """Review fix 2: the override's read and the feed's snapshot log the
+        first failure with a traceback, then a short line, and a good read
+        resets the count."""
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_workflow_state_failures", {})
+        sv = self._sv(monkeypatch)
+        state = {"broken": True}
+
+        def boom():
+            if state["broken"]:
+                raise RuntimeError("boom")
+            return frozenset()
+
+        monkeypatch.setattr(sv, "sessions_awaiting_person", boom)
+        real_snap = sv.attention_snapshot
+        monkeypatch.setattr(sv, "attention_snapshot",
+                            lambda: boom() and [] if state["broken"] else real_snap())
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            for _ in range(3):
+                assert web_mod._awaiting_person_ids(sv, {"s"}) is None
+                assert client.get(self._PATH).json() == {"items": [], "count": 0}
+        for key in (web_mod._AWAITING_PERSON_FAULT, web_mod._ATTENTION_FAULT):
+            recs = [r for r in caplog.records if key in r.getMessage()]
+            assert [bool(r.exc_info) for r in recs] == [True, False, False], key
+        state["broken"] = False
+        assert web_mod._awaiting_person_ids(sv, {"s"}) == frozenset()
+        assert client.get(self._PATH).status_code == 200
+        assert web_mod._AWAITING_PERSON_FAULT not in web_mod._workflow_state_failures
+        assert web_mod._ATTENTION_FAULT not in web_mod._workflow_state_failures
 
     def test_override_ranks_waiting_above_working_and_keeps_errored(
             self, client, monkeypatch, acp_listing_store):

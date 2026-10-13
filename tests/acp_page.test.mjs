@@ -23075,9 +23075,10 @@ check("dashboard attention: rows render in the order given, with kind, title, wo
   const now = Date.now() / 1000;
   p.sandbox.dashOvRenderAsk([
     ovAsk({ kind: "step_question", sessionId: "sess_p", text: "Which colour?", created: now - 3 * 3600,
-            step: "workflow step wf-coder", title: "Parent run", workspace: "beta" }),
-    ovAsk({ kind: "question", sessionId: "sess_q", text: evil, created: now - 5 * 60, title: evil, workspace: "gamma" }),
-    ovAsk({ created: now - 10 }),
+            age: 3 * 3600, step: "workflow step wf-coder", title: "Parent run", workspace: "beta" }),
+    ovAsk({ kind: "question", sessionId: "sess_q", text: evil, created: now - 5 * 60, age: 5 * 60,
+            title: evil, workspace: "gamma" }),
+    ovAsk({ created: now - 10, age: 10 }),
   ]);
   assertEqual(block.hidden, false);
   assertEqual(block.querySelector(".dash-ov-sub").textContent, "Waiting for you");
@@ -23113,15 +23114,31 @@ check("dashboard attention: an unchanged list keeps its rows and only moves the 
   const first = block.querySelector(".dash-ov-ask");
   const age = first.querySelector(".dash-ov-ask-age");
   assertEqual(age.textContent, "2 min ago");
-  age.textContent = "stale";
-  // Same item, a later poll: `age` differs, the key does not.
-  p.sandbox.dashOvRenderAsk([Object.assign({}, item, { age: 125 })]);
+  // Same item, a later poll: `age` differs, the key does not. The age moves to
+  // the new poll's value in place.
+  p.sandbox.dashOvRenderAsk([Object.assign({}, item, { age: 7200 })]);
   assert(block.querySelector(".dash-ov-ask") === first, "the row was rebuilt for an unchanged list");
-  assertEqual(age.textContent, "2 min ago", "the age was refreshed in place");
+  assertEqual(age.textContent, "2 h ago", "the age was refreshed in place from the new poll");
   // A changed text rebuilds.
   p.sandbox.dashOvRenderAsk([Object.assign({}, item, { text: "Run npm ci" })]);
   assert(block.querySelector(".dash-ov-ask") !== first, "a changed item must be redrawn");
   assertEqual(block.querySelector(".dash-ov-ask-text").textContent, "Run npm ci");
+});
+
+check("dashboard attention: the age is the server's age plus the time since the poll, never the browser clock against created", () => {
+  const p = loadDashPicker();
+  const block = p.el("dashOvAskBlock");
+  const now = Date.now();
+  // A server clock an hour ahead of the browser: `created` is "in the future"
+  // here, but the server says the item is 2 minutes old.
+  p.sandbox.dashOvRenderAsk([ovAsk({ created: now / 1000 + 3600, age: 120 })], now);
+  assertEqual(block.querySelector(".dash-ov-ask-age").textContent, "2 min ago");
+  // Received 10 minutes ago: 2 + 10 minutes.
+  p.sandbox.dashOvRenderAsk([ovAsk({ sessionId: "sess_z", created: 0, age: 120 })], now - 10 * 60 * 1000);
+  assertEqual(block.querySelector(".dash-ov-ask-age").textContent, "12 min ago");
+  // No age from the server: nothing drawn rather than a guess.
+  p.sandbox.dashOvRenderAsk([ovAsk({ sessionId: "sess_n", age: null })], now);
+  assertEqual(block.querySelector(".dash-ov-ask-age").textContent, "");
 });
 
 check("dashboard attention: a click opens the session through the rail when it has a row, else /acp in a new tab", () => {

@@ -5295,19 +5295,57 @@ class _Supervisor:
             for entry in tuple(self._pending_permission.values())
             if isinstance(entry, dict) and isinstance(entry.get("session_id"), str))
 
+    @staticmethod
+    def _awaiting_entry_owner(entry) -> str | None:
+        """The owning session of a ``_pending_permission`` entry a person
+        must answer, or None for a malformed one (not a dict, or no string
+        ``session_id``). The ONE validity rule `sessions_awaiting_person` and
+        `attention_snapshot` share, so a session never reads Waiting with
+        nothing listed for it, or the reverse. Deliberately minimal: an entry
+        with a usable owner is a JSON-RPC request kiro-cli waits on, so the
+        idle sweeper must keep counting it even if its text or time is odd.
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+        """
+        if isinstance(entry, dict) and isinstance(entry.get("session_id"), str):
+            return entry["session_id"]
+        return None
+
+    def _awaiting_step_parent(self, child_id, record) -> str | None:
+        """The parent of an open step question, or None for a malformed one
+        (not a dict, no string ``parent``) or one whose child is no longer in
+        ``_workflow_children[parent]`` (D11's second guard). Plain membership,
+        not freshness: the reap never drops a step waiting on a person (D25),
+        so past the 6 h waiting bound the question still counts while
+        ``workflow_state`` reads None. Shared like `_awaiting_entry_owner`.
+        """
+        if not isinstance(record, dict) or not isinstance(record.get("parent"), str):
+            return None
+        parent_id = record["parent"]
+        if child_id not in (self._workflow_children.get(parent_id) or {}):
+            return None
+        return parent_id
+
     def sessions_awaiting_person(self) -> frozenset[str]:
         """Sessions a person still has to answer: the owners of every entry in
         ``_pending_permission`` (approvals and questions, a workflow step's
         included, since those are keyed by the parent) plus the parents of
-        open step questions. A pure read. Loop-only.
+        open step questions, by the validity rules `attention_snapshot` uses
+        (`_awaiting_entry_owner`, `_awaiting_step_parent`). A pure read.
+        Loop-only.
 
-        Read by the idle sweeper (`_sweepable`'s ``awaits_person``).
+        Read by the idle sweeper (`_sweepable`'s ``awaits_person``) and by
+        ``web.py``'s waiting override and workflow-overlay exclusion.
         261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
         """
-        owners = set(self.sessions_with_pending_permission())
-        for record in tuple(self._workflow_step_questions.values()):
-            if isinstance(record, dict) and isinstance(record.get("parent"), str):
-                owners.add(record["parent"])
+        owners = set()
+        for entry in tuple(self._pending_permission.values()):
+            owner_id = self._awaiting_entry_owner(entry)
+            if owner_id is not None:
+                owners.add(owner_id)
+        for child_id, record in tuple(self._workflow_step_questions.items()):
+            parent_id = self._awaiting_step_parent(child_id, record)
+            if parent_id is not None:
+                owners.add(parent_id)
         return frozenset(owners)
 
     def attention_snapshot(self) -> list[dict]:
@@ -5324,23 +5362,17 @@ class _Supervisor:
         come from the owner's session record; ``title`` is ``""`` until a
         ``focus_update`` stored one (D18).
 
-        A malformed entry is skipped, never raised on: not a dict, an owner
-        that is not a string or not a session this supervisor holds, a
-        ``text`` that is not a string, or a ``created`` that is not a finite
-        number (it would break the sort for every other item).
-
-        A step question is listed while its parent is held and its child is
-        still in ``_workflow_children[parent]``, by plain membership, not
-        freshness: the reap never drops a step waiting on a person (D25), so
-        past the 6 h waiting bound ``workflow_state`` reads None while the
-        question is still open, and ``sessions_awaiting_person`` (the status
-        override) still holds the parent. Membership keeps this list and that
-        override in agreement.
+        Which entries count is decided by the same predicates as
+        `sessions_awaiting_person`, so this list and the waiting override
+        agree for every held session. On top, an owner this supervisor does
+        not hold is left out (nothing to open; the override reads held
+        sessions only). A ``text`` that is not a string reads as ``""``, and a
+        ``created`` that is not a finite number as ``None``, sorted last, so
+        an odd field never hides an item a person must answer and never
+        breaks the sort.
         261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D11, D17
         """
-        def _owner(session_id):
-            if not isinstance(session_id, str):
-                return None
+        def _meta(session_id):
             meta = self.sessions.get(session_id)
             return meta if isinstance(meta, dict) else None
 
@@ -5351,46 +5383,36 @@ class _Supervisor:
 
         items: list[dict] = []
         for entry in tuple(self._pending_permission.values()):
-            if not isinstance(entry, dict):
-                continue
-            owner_id = entry.get("session_id")
-            meta = _owner(owner_id)
-            text = entry.get("text")
-            created = _when(entry.get("created"))
-            if meta is None or not isinstance(text, str) or created is None:
+            owner_id = self._awaiting_entry_owner(entry)
+            meta = _meta(owner_id) if owner_id is not None else None
+            if meta is None:
                 continue
             child_id = entry.get("workflow_child")
             items.append({
                 "kind": "question" if entry.get("kind") == "question" else "approval",
                 "sessionId": owner_id,
-                "text": text,
-                "created": created,
+                "text": _as_text(entry.get("text")),
+                "created": _when(entry.get("created")),
                 "step": (self._workflow_step_label(owner_id, child_id)
                          if isinstance(child_id, str) else ""),
                 "cwd": _as_text(meta.get("cwd")),
                 "title": _as_text(meta.get("title")),
             })
         for child_id, record in tuple(self._workflow_step_questions.items()):
-            if not isinstance(record, dict):
-                continue
-            parent_id = record.get("parent")
-            meta = _owner(parent_id)
-            text = record.get("text")
-            created = _when(record.get("created"))
-            if meta is None or not isinstance(text, str) or created is None:
-                continue
-            if child_id not in (self._workflow_children.get(parent_id) or {}):
+            parent_id = self._awaiting_step_parent(child_id, record)
+            meta = _meta(parent_id) if parent_id is not None else None
+            if meta is None:
                 continue
             items.append({
                 "kind": "step_question",
                 "sessionId": parent_id,
-                "text": text,
-                "created": created,
+                "text": _as_text(record.get("text")),
+                "created": _when(record.get("created")),
                 "step": _as_text(record.get("label")),
                 "cwd": _as_text(meta.get("cwd")),
                 "title": _as_text(meta.get("title")),
             })
-        items.sort(key=lambda item: item["created"])
+        items.sort(key=lambda item: (item["created"] is None, item["created"] or 0.0))
         return items
 
     def _workflow_step_awaits_person(self, parent_id: str, child_id: str) -> bool:
@@ -7543,8 +7565,9 @@ class _Supervisor:
         clean_title = _clean_agent_text(title, MAX_PERMISSION_TITLE_CHARS)
         # Keyed by the OWNER: for a workflow step that is the parent, so the
         # existing lookups by session id (Stop, the turn-end sweep, the
-        # overlay's `sessions_with_pending_permission`, the answer route's
-        # ownership check) work unchanged. `workflow_child` is present only on
+        # status override and the workflow overlay's exclusion, both read
+        # through `sessions_awaiting_person()`, the attention feed, the answer
+        # route's ownership check) work unchanged. `workflow_child` is present only on
         # a routed entry; the turn-end sweep reads it. `kind`, `text` and
         # `created`: 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D3.
         self._pending_permission[opaque_id] = {
