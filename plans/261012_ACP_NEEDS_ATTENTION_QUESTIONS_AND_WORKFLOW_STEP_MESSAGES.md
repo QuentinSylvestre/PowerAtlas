@@ -407,11 +407,22 @@ Tests:
   - The header reads "Paused (n)" with one waiting row and none working, and "Orchestrating" with one working row.
 
 **Exit criteria**:
-- [ ] Every Python and page test listed above passes; the full suites pass
-- [ ] `_workflow_outcome` docstring notes that `run_complete` `paused` is handled before it
-- [ ] The `_kiro/session/notify` INFO fall-through no longer fires for handled notifies (unit test on the log level, beside `TestAcpUnrecognizedNotificationLogLevel`)
-- [ ] Phase 1 probe 3's outcome applied (old-row handling added if the resume spawned a new child, or "unmeasured" noted in §9)
+- [x] Every Python and page test listed above passes; the full suites pass
+- [x] `_workflow_outcome` docstring notes that `run_complete` `paused` is handled before it
+- [x] The `_kiro/session/notify` INFO fall-through no longer fires for handled notifies (unit test on the log level, beside `TestAcpUnrecognizedNotificationLogLevel`)
+- [x] Phase 1 probe 3's outcome applied (old-row handling added if the resume spawned a new child, or "unmeasured" noted in §9)
 - [ ] Live (after a granted restart, else carried to Phase 7): a workflow step question shows on the row, in the transcript and as Waiting; after the answer the row runs again and finishes; a reload or `session/load` shows one step-message row, not two
+
+Implementation (2026-10-12, code: f6d4d71)
+`_on_notification` handles `_kiro/session/notify` in a new `_on_session_notify`, after `_workflow_touch` and before the early-frame buffer, logging every notify at INFO; a `tool_call` from a tracked step calls `_workflow_step_resume` in the same place. A step's message (`sender: "step"`, step = `callerSessionId`, tracked under `sessionId`) is cleaned to 512 characters and set as the open row's `action` for every severity; `warning` and `error` also record `step_message {step, severity, message}` on the parent; `warning` writes `_workflow_step_questions[step]` and sets the step waiting, reopening a reaped row. A parent-to-step notify resumes the step. `_workflow_step_resume` removes the step question and sets a waiting step running unless a request is still open. Step questions are removed in `_workflow_drop_child` (node_complete, run_complete, Stop, eviction) and `_workflow_drop_parent` (close). A replayed `system-notification` chunk gives the same `step_message` for warning and error and nothing otherwise; a live one stays a user chunk with an INFO line. `run_complete` `status: "paused"` is handled before `_workflow_outcome`: tracked steps waiting, finished rows untouched, the run record refreshed and never popped or marked ended. A re-sent `run_start` and `node_start` reset nothing. Comments and the `_workflow_outcome` docstring cite the measured shapes; `step_message` is in `SERVER_TYPES`. Pages: `addStepMessage` in `static/transcript-renderer.js` (textContent only, severity class from a fixed list), dispatched by both templates; the D15 waiting state in both templates (state functions, `status-waiting` dot, `acp-crew-row-waiting`, sub-panel head, "Paused (n)" header); waiting colours and `.acp-step-message*` in `style.css`. About 25 workflow tests plus page checks; pytest 3345 passed, 1 skipped; node 1099 passed; 9 server and 4 page mutations each failed a test.
+
+Implementation (2026-10-12, code: cdfa879)
+Review fixes. A warning also stores its record in `_workflow_step_last_warning`; a `node_paused` whose reason mentions "user input" and "send_message" (`_is_send_message_pause`) reopens a step question that a step `tool_call` had removed (`_workflow_reopen_step_question`), cleared on the parent's answer, the step's end, close and detach. Both resume paths use `_workflow_step_awaits_person`. Only a step's own `tool_call` resume respects `_WORKFLOW_CHILD_MAX_AGE_S` (`_workflow_set(..., seen=)`, `_workflow_child_capped`). `_step_message_text` supplies "asked a question" / "sent a message" for an empty warning or error. `_workflow_step_label`'s docstring names all its uses. `renderTranscriptFrame` gained `step_message`, `permission_request`, `question_request` and `permission_resolved` cases for the dashboard's history replay. Tests for each, including the index-only guard and the dashboard sub-panel waiting head. pytest 3362 passed, 1 skipped; node 1101 passed.
+
+Implementation (2026-10-12, code: 25fd7bc)
+Re-review fixes. `_workflow_reopen_step_question` deletes the remembered warning once it reopens a question, so the reopen is one-shot (`test_question_reopen_is_one_shot`). A page check replays a resolved step approval card disabled and a pending one answerable on the dashboard. pytest 3363 passed, 1 skipped; node 1102 passed.
+
+Orchestrator notes: the change descriptions above are condensed from the sub-agent returns, not pasted verbatim. The live criterion is deferred to Phase 7 and added to Phase 7's exit criteria. QA carried to Phase 7 with the batched restart. The changed page expectation (status-thinking to status-waiting) cites D15; the changed resume-rule test cites review finding 7 and is recorded in §9.
 
 ### Phase 5: Attention feed, "Needs attention" rows and title count [QA]
 **Goal**: The dashboard lists every pending approval, question and step question, and counts them in the page title.
@@ -464,6 +475,7 @@ Tests:
 - [ ] Every Python and page test listed above passes; the full suites pass
 - [ ] `_REMOTE_ALLOWED_PATHS` unchanged (`git diff` shows no edit to it)
 - [ ] Live (after a granted restart, else carried to Phase 7): a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer
+- [ ] (deferred from Phase 4) Past the 6 h waiting bound, the attention list and the waiting override agree with the rail for a step question that outlives `workflow_state` (Phase 4 reliability review finding 4): either both still show it, or neither does, with a test
 
 ### Phase 6: Remove the prompt silence watchdog [QA]
 **Goal**: A turn is no longer cancelled for silence; only Stop (with its local fallback) or the 24 h ceiling ends it.
@@ -523,6 +535,8 @@ Tests:
 - [ ] `pytest tests/test_web.py --timeout=300` and `node tests/acp_page.test.mjs` pass
 - [ ] Every live check of SC-8 passes in a real browser, with the evidence (tool calls, screenshots) cited in §9; or a check is recorded BLOCKED with its reason
 - [ ] (deferred from Phase 3) Live: a quick-spec question answered from a card option, and a free-form question answered with free text, on `/acp` (file scope: no file; a live check)
+- [ ] (deferred from Phase 4) Live: a workflow step question shows on the row, in the transcript and as Waiting; after the answer the row runs again and finishes; a reload or `session/load` shows one step-message row, not two (file scope: no file; a live check)
+- [ ] (deferred from Phase 4) `docs/KNOWLEDGE.md` notes that a step past `_WORKFLOW_CHILD_MAX_AGE_S` that resumes through its own `tool_call` keeps its old staleness clock, so a step that waited more than 600 s reads "no longer reporting" at the next reap (user decision 2026-10-12: accept)
 
 ## 6) Risk Assessment
 
@@ -574,7 +588,7 @@ Tests:
 | 1 | Pre-flight probes | Complete | code: none; results in §9 |
 | 2 | Crew-frame filter fix | Complete | code: 68b5f8e, 3ce782e |
 | 3 | Agent questions through `userInput` | Complete | code: 82e0119, 6223be4, b0cabe5, ad12a39; live check deferred to Phase 7 |
-| 4 | Step messages, waiting state, paused runs | Not started | |
+| 4 | Step messages, waiting state, paused runs | Complete | code: f6d4d71, cdfa879, 25fd7bc; live check deferred to Phase 7 |
 | 5 | Attention feed and title count | Not started | |
 | 6 | Remove the prompt silence watchdog | Not started | |
 | 7 | Documentation, roadmap and live QA | Not started | Restart granted 2026-10-12 |
@@ -597,6 +611,17 @@ All runs used a second `kiro-cli acp --agent-engine v3` spawned by a scratch dri
 - **Resume re-sends `run_start` and `node_start` (Phase 4).** A resumed paused run re-sends `run_start` for the tracked `workflowId` and `node_start` for the tracked `nodeId` with the same step `sessionId`. No new child appears, so the R2/R12 new-child handling is not needed. Phase 4 must accept these frames again without resetting the run or the row.
 - **Slash commands unmeasured (R11).** `_kiro.dev/commands/execute` errors on 2.29.1, so the effect of Stop during a slash command is unmeasured. D26 still covers the command path. Outside this plan: PowerAtlas's `commands_execute` sends the refused shape. `orchestrator.log` and 3 rotations have 0 `PersistenceClassification` lines, so it is not confirmed in production.
 - **A step paused after `success` (D13, D14).** In the probe-3 resume, the step reported `success`, and kiro-cli then sent `node_paused` (`reason: "Awaiting next user message on step session."`) and `run_complete` `status: "paused"`, with no `node_complete`. User decision, 2026-10-12 ("A"): keep D14 as written. The step shows waiting, the crew header reads "Paused", and the parent reads Waiting, because kiro-cli itself holds the run unfinished. No step question is created, since that needs a warning notify, so it does not appear in "Needs attention".
+
+### Divergences from Phase 4
+
+- **One resume rule (D13).** A waiting step goes running only when it has no open approval or question entry (`_workflow_step_awaits_person`), on the parent-answer, `tool_call` and re-sent `node_start` paths. D13 named only a pending question entry; review finding 7 asked for one rule. An open approval therefore keeps a waiting step waiting after the parent answers.
+- **Re-sent `node_start`.** A resume re-sends `node_start` for the tracked step (probe 3); it sets a waiting step running only when nothing is open, and never drops an open step question.
+- **Waiting row keeps its message.** `node_paused` and `run_complete` `paused` keep the action of an already-open waiting row (the step question's message) instead of writing "waiting".
+- **Replayed step label.** Replayed `step_message` frames name the step "workflow step <name>", like the live path, where plan step 4 said the bare `_clean_step_label` name; D12 asks that a replay match the live frame.
+- **Question reopen after a step `tool_call`.** A step `tool_call` after its warning removes the step question (D13). A following `node_paused` with the send_message reason reopens it once from the remembered warning, so SC-5's question text survives.
+- **Age cap.** Only a step's own `tool_call` resume respects `_WORKFLOW_CHILD_MAX_AGE_S`; the parent-answer resume, entering waiting and the paused branch still refresh the clock, so the 6 h waiting bound holds. Consequence accepted by the user (2026-10-12, "OK for reco"): a step past the cap that waited more than 600 s and resumes through its own `tool_call` reads "no longer reporting" at the next reap. Phase 7 documents it.
+- **Dashboard history replay.** `renderTranscriptFrame` now also renders `step_message`, `permission_request`, `question_request` and `permission_resolved`, so cards and step rows survive a dashboard reconnect; `/acp` replays through its own dispatch and never reaches these cases.
+- **Foreign parent notifies.** A parent-to-step notify whose `callerSessionId` is not the step's parent is ignored; sender and severity are lower-cased before comparison.
 
 ### Divergences from Phase 3
 
@@ -732,6 +757,28 @@ Implementation health: Green.
 | 13 | Low | [Re-review] `held_logged` was never cleared, so a second hold of a step was not logged. | Fixed -- `_workflow_unhold` clears it at the four removal sites (ad12a39). |
 
 Reviewers ran sequentially because both mutation-tested. Security: six mutations killed (D4 default, ownership, strict kind, boolean index, permission-route kind guard, cleaner). Reliability: eight mutations, two survived (findings 3 and 4, now fixed); full suites green. The four implementer divergences were judged sound by both. Because the fixes added substantial code after the one-cycle review (the sweeper guard, the card reopen), a diff-only re-review of 82e0119..b0cabe5 ran under `/qdev` Step 6 item 4a; it found no regressions and the four Lows in rows 10-13. Raw per-persona summaries are kept in the session scratchpad (`review_p3`).
+
+### 2026-10-12 -- Implementation Review (after Phase 4, persona: Reliability engineer, Senior engineer)
+
+Implementation health: Green.
+12 findings (0 High, 2 Medium, 10 Low), including 3 Low from a diff-only re-review of the fixes.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | [Reliability] A step `tool_call` after its warning removed the step question before `node_paused`, losing the text (SC-5). | Fixed -- remembered warning reopens the question on a send_message pause, one-shot (cdfa879, 25fd7bc). |
+| 2 | Medium | [Senior] The dashboard's history replay dropped `step_message` (and the cards), so they never survived a reconnect. | Fixed -- `renderTranscriptFrame` renders the four frame types; page checks (cdfa879). |
+| 3 | Low | [Reliability] The paused branch's index-only guard was untested. | Fixed -- test seeds an index-only child (cdfa879). |
+| 4 | Low | [Reliability] Resume and paused paths refresh a step's clock past `_WORKFLOW_CHILD_MAX_AGE_S`. | Fixed -- a step's own `tool_call` resume now respects the cap; other paths documented (cdfa879). |
+| 5 | Low | [Reliability] Past the 6 h bound, a step question outlives `workflow_state`, so the rail and "Needs attention" disagree. | Fixed -- deferred to Phase 5's attention and override work as an exit criterion. |
+| 6 | Low | [Reliability] An empty warning message created a blank step question. | Fixed -- fallback texts "asked a question" and "sent a message" (cdfa879). |
+| 7 | Low | [Senior] The dashboard sub-panel head's waiting branch was untested. | Fixed -- page check mirrors the /acp one (cdfa879). |
+| 8 | Low | [Senior] The two resume paths used different rules for "waiting on a person". | Fixed -- both use `_workflow_step_awaits_person`; recorded in §9 (cdfa879). |
+| 9 | Low | [Senior] `_workflow_step_label`'s docstring named only the approval card. | Fixed -- docstring covers all uses (cdfa879). |
+| 10 | Low | [Re-review] A remembered warning could reopen old text after a later send_message pause. | Fixed -- the reopen clears the record (25fd7bc). |
+| 11 | Low | [Re-review] A step past the age cap that waited over 600 s reads "no longer reporting" right after its own `tool_call` resume. | User: accepted -- "OK for reco" (2026-10-12): the cap's intended semantics; Phase 7 documents it. |
+| 12 | Low | [Re-review] No page check replayed a resolved approval card. | Fixed -- page check (25fd7bc). |
+
+Rows 1-9 come from the two persona reviews (run sequentially for mutation testing; Reliability 6 of 7 mutations killed, Senior 4 of 5 page mutations killed). The re-review of cdfa879 ran under `/qdev` Step 6 item 4a because the fixes added the replay cases and the reopen. Row 11 is the user turn "OK for reco" answering the A/B question on 2026-10-12. Full pytest over `tests/`: 5382 passed, 3 skipped (Senior reviewer); final `tests/test_web.py` 3363 passed, 1 skipped; node 1102 passed.
 
 ## Harness Improvement Opportunities
 
