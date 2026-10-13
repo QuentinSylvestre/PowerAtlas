@@ -1030,6 +1030,12 @@ def _notify_from_acp(event: str, session_id: str, cwd: str, detail: str,
             # No `watched` gate either: a question stops the turn as an
             # approval does (261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D9).
             notifications.notify_question(label, detail)
+        elif event == "step_question":
+            # A workflow step's warning `send_message` asks a person too, and
+            # the step waits until the parent passes an answer on: the same
+            # ungated toast (user decision 2026-10-13, option A). `detail`
+            # already carries the fixed "[workflow step] " prefix.
+            notifications.notify_question(label, detail)
         elif event == "turn_end":
             if not watched and detail in _NOTIFY_STOP_REASONS:
                 notifications.notify_turn_end(label, detail)
@@ -3374,7 +3380,7 @@ def _workflow_states(supervisor, held) -> dict[str, str]:
         # no overlay at all is the safe side.
         _workflow_state_fault(_WORKFLOW_PENDING_FAULT)
         return {}
-    _workflow_state_failures.pop(_WORKFLOW_PENDING_FAULT, None)
+    _workflow_state_recovered(_WORKFLOW_PENDING_FAULT)
     out: dict[str, str] = {}
     for sid in held:
         if sid in pending:
@@ -3385,7 +3391,7 @@ def _workflow_states(supervisor, held) -> dict[str, str]:
         except Exception:
             _workflow_state_fault(sid)
             continue
-        _workflow_state_failures.pop(sid, None)
+        _workflow_state_recovered(sid)
         if state:
             out[sid] = state
     return out
@@ -3429,7 +3435,7 @@ def _awaiting_person_ids(supervisor, held) -> frozenset[str] | None:
     except Exception:
         _workflow_state_fault(_AWAITING_PERSON_FAULT)
         return None
-    _workflow_state_failures.pop(_AWAITING_PERSON_FAULT, None)
+    _workflow_state_recovered(_AWAITING_PERSON_FAULT)
     return out
 
 
@@ -3464,6 +3470,13 @@ _WORKFLOW_PENDING_FAULT = "(pending permissions)"
 _AWAITING_PERSON_FAULT = "(sessions awaiting a person)"
 _ATTENTION_FAULT = "(attention feed)"
 _WORKFLOW_FAULT_MAX_KEYS = 256
+
+
+def _workflow_state_recovered(key: str) -> None:
+    """A good read for *key*: forget its failure count and its last-logged
+    time, so neither dict keeps a key past its recovery."""
+    _workflow_state_failures.pop(key, None)
+    _workflow_state_fault_logged.pop(key, None)
 
 
 def _workflow_state_fault(key: str, now: float | None = None) -> None:
@@ -4809,7 +4822,7 @@ async def api_dashboard_attention(response: Response):
     except Exception:
         _workflow_state_fault(_ATTENTION_FAULT)
         return {"items": [], "count": 0}
-    _workflow_state_failures.pop(_ATTENTION_FAULT, None)
+    _workflow_state_recovered(_ATTENTION_FAULT)
     return await asyncio.to_thread(_attention_payload, items)
 
 

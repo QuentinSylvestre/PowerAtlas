@@ -10951,10 +10951,20 @@ class TestNotificationPolicy:
                                          watched=False)] == ["notify_agent_error"]
         assert self._fire(monkeypatch, "agent_error", "boom", watched=True) == []
 
+    def test_step_question_notifies_even_when_watched_with_its_text(self, monkeypatch):
+        """User decision 2026-10-13 (option A): a step question toasts like an
+        agent question, through `notify_question`, whether or not watched."""
+        for watched in (True, False):
+            calls = self._fire(monkeypatch, "step_question",
+                               "[workflow step] Which colour?", watched=watched)
+            assert [c[0] for c in calls] == ["notify_question"], watched
+            assert calls[0][2] == "[workflow step] Which colour?"
+
     def test_disabled_suppresses_everything(self, monkeypatch):
         for event, detail in (("turn_end", "end_turn"),
                               ("permission_request", "x"),
                               ("question_request", "x"),
+                              ("step_question", "x"),
                               ("agent_error", "x")):
             assert self._fire(monkeypatch, event, detail, watched=False,
                               enabled=False) == []
@@ -13116,7 +13126,7 @@ class TestAcpWorkflowNotifications:
         after = {e["sessionId"]: e for e in self._last_payload(watcher)}
         assert "child-c7" in after and after["child-c7"]["done"] is True
 
-    @pytest.mark.parametrize("hold", ["approval", "step_question"])
+    @pytest.mark.parametrize("hold", ["approval", "question", "step_question"])
     def test_workflow_a_held_stale_step_keeps_its_wave_across_turns_and_resubscribe(
             self, wf, hold):
         """A step a person still has to answer keeps its row in every crew
@@ -13132,6 +13142,9 @@ class TestAcpWorkflowNotifications:
         if hold == "approval":
             sv._on_agent_request(self._ask("child-c7", 71))
             bound = acp_mod._WORKFLOW_CHILD_STALE_S
+        elif hold == "question":
+            sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+            bound = acp_mod._WORKFLOW_WAITING_STALE_S
         else:
             self._step_says(acp_mod, "warning", "Which colour?")
             bound = acp_mod._WORKFLOW_WAITING_STALE_S
@@ -16462,6 +16475,81 @@ class TestAcpWorkflowNotifications:
                 conn, self.P, {"requestId": opaque, "optionId": "allow"}))
         assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
 
+    @pytest.mark.parametrize("pause", ["node_paused", "run_paused"])
+    def test_a_step_kiro_paused_after_its_question_stays_waiting_when_answered(
+            self, wf, pause):
+        """Frame order question stored, then a workflow frame sets the step
+        waiting, then the answer: kiro-cli paused the step, so the answer to
+        the question must not set it running."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        rid = self._pending_frames(conn, "question_request")[0]["payload"]["requestId"]
+        if pause == "node_paused":
+            self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one")
+        else:
+            self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="paused")
+        self._answer_q(acp_mod, conn, {"requestId": rid, "answer": "b.py"})
+        assert sv._pending_permission == {}
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+        assert sv.crews[self.P]["child-c7"]["status"] == "waiting"
+
+    @pytest.mark.parametrize("how", ["stop", "close"])
+    def test_an_out_of_turn_stop_or_close_cancelling_a_routed_question_sets_the_step_running(
+            self, wf, how):
+        """No turn in flight: Stop and close pop the routed question; the step
+        it set waiting runs again until its own end. Close drops the session's
+        tracking right after, so it is checked through the row's last frame."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+        _queued(conn)
+        seen = []
+        real = acp_mod._Supervisor._workflow_step_run_again
+
+        def spy(self_, parent_id, child_id, *, step_frame):
+            real(self_, parent_id, child_id, step_frame=step_frame)
+            state = self_._workflow_children.get(parent_id, {}).get(child_id)
+            seen.append((child_id, state[0] if state else None, step_frame))
+
+        written = []
+        with patch.object(acp_mod._Supervisor, "_workflow_step_run_again", spy), \
+                patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            if how == "stop":
+                asyncio.run(acp_mod._handle_cancel(conn, self.P))
+            else:
+                asyncio.run(sv.close_session(self.P))
+        assert written == [{"jsonrpc": "2.0", "id": 71, "result": {"action": "cancelled"}}]
+        assert ("child-c7", "running", False) in seen, seen
+
+    def test_a_capped_steps_tool_call_after_its_answered_question_keeps_its_clock(
+            self, wf):
+        """A step past `_WORKFLOW_CHILD_MAX_AGE_S` whose routed question is
+        answered while its step question is still open: its own tool_call drops
+        the step question, and the resume that follows must keep the old clock
+        (its frames no longer prove it alive), whichever path runs it."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        rid = self._pending_frames(conn, "question_request")[0]["payload"]["requestId"]
+        self._step_says(acp_mod, "warning", "Which colour?")
+        self._answer_q(acp_mod, conn, {"requestId": rid, "answer": "b.py"})
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+        now = time.monotonic()
+        sv._workflow_child_meta["child-c7"]["started"] = (
+            now - acp_mod._WORKFLOW_CHILD_MAX_AGE_S - 10)
+        old_seen = now - 100.0
+        sv._workflow_children[self.P]["child-c7"] = ("waiting", old_seen)
+        sv._workflow_step_resume(self.P, "child-c7", answered=False, step_frame=True)
+        state, seen = sv._workflow_children[self.P]["child-c7"]
+        assert state == "running"
+        assert seen == old_seen
+        assert "question_wait" not in sv._workflow_child_meta["child-c7"]
+
     def test_answering_a_routed_question_clears_the_held_flag(self, wf):
         """`_handle_question_response`'s `_workflow_unhold`: a held step's
         flag goes once its question is answered, so a later hold logs again."""
@@ -16746,6 +16834,35 @@ class TestAcpWorkflowNotifications:
         assert [e["payload"] for e in sv.history[self.P].events()
                 if e["type"] == "step_message"] == self._step_messages(out)
         assert sv.sessions_awaiting_person() == frozenset({self.P})
+
+    def test_only_a_step_warning_raises_a_toast_and_only_once(self, wf):
+        """Option A (user decision 2026-10-13): one notify per warning that
+        opens a step question, for the parent, with the fixed prefix; success,
+        info and error raise none, and neither does the one-shot reopen after
+        node_paused or a replayed warning."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        toasts = []
+        with patch.object(acp_mod, "_notify", lambda *a: toasts.append(a)):
+            for severity in ("success", "info", "error"):
+                self._step_says(acp_mod, severity, "wrote 3 files")
+            assert toasts == []
+            self._step_says(acp_mod, "warning", "Which colour?")
+            assert toasts == [("step_question", self.P, "[workflow step] Which colour?")]
+            # A tool_call pops the question, node_paused reopens it: no toast.
+            sv._workflow_step_resume(self.P, "child-c7", answered=False, step_frame=True)
+            self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one",
+                       reason="Step requested user input via send_message.")
+            assert "child-c7" in sv._workflow_step_questions
+            kiro = {"notification": {"kind": "system-notification", "status": "warning",
+                                     "workflowId": "wf-k7x", "agentName": "wf-coder",
+                                     "sender": "step", "notifyId": "notify-3"},
+                    "source": "steer", "replay": True}
+            _notify(acp_mod, "session/update", {"sessionId": self.P, "update": {
+                "sessionUpdate": "user_message_chunk",
+                "content": {"type": "text", "text": "Which colour?"},
+                "_meta": {"kiro": kiro}}})
+        assert len(toasts) == 1
 
     @pytest.mark.parametrize("severity", ["success", "info", "SUCCESS"])
     def test_step_success_and_info_set_the_action_only(self, wf, severity):
@@ -44052,6 +44169,9 @@ class TestWorkflowLivenessStatus:
         # A good read resets the count: the next fault is a first one again.
         sv.broken = False
         assert web_mod._workflow_states(sv, ["s"]) == {"s": "working"}
+        # Recovery forgets the key in both dicts, so neither grows forever.
+        assert "s" not in web_mod._workflow_state_failures
+        assert "s" not in web_mod._workflow_state_fault_logged
         sv.broken = True
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="power_atlas.web"):

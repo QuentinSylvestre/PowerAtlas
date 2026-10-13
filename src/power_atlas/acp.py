@@ -4973,19 +4973,23 @@ class _Supervisor:
             self._cancel_step_permissions(
                 parent_id, child_id, "the workflow step is no longer tracked")
 
-    def _workflow_drop_step_question(self, parent_id: str, child_id: str) -> bool:
+    def _workflow_drop_step_question(self, parent_id: str, child_id: str, *,
+                                     step_frame: bool = False) -> bool:
         """Forget one step's open step question (a warning ``send_message``).
 
         Only a record whose ``parent`` matches is removed. Clears the step's
-        held flag once nothing is left open (`_workflow_unhold`). True if a
-        record was removed. Loop-only (it writes). Never raises.
+        held flag once nothing is left open (`_workflow_unhold`, which gets
+        *step_frame*: True when the step's own ``tool_call`` caused the drop,
+        so a capped step keeps its old clock). True if a record was removed.
+        Loop-only (it writes). Never raises.
         261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D11
         """
         record = self._workflow_step_questions.get(child_id)
         if not isinstance(record, dict) or record.get("parent") != parent_id:
             return False
         self._workflow_step_questions.pop(child_id, None)
-        self._workflow_unhold({"session_id": parent_id, "workflow_child": child_id})
+        self._workflow_unhold({"session_id": parent_id, "workflow_child": child_id},
+                              step_frame=step_frame)
         return True
 
     def _workflow_drop_last_warning(self, parent_id: str, child_id: str) -> None:
@@ -5417,14 +5421,18 @@ class _Supervisor:
         return any(self._workflow_step_awaits_person(parent_id, child_id)
                    for child_id in tuple(self._workflow_children.get(parent_id) or ()))
 
-    def _workflow_unhold(self, entry) -> None:
+    def _workflow_unhold(self, entry, *, step_frame: bool = False) -> None:
         """Called after a pending entry is removed: once its step has nothing
         left open, clear the ``held_logged`` flag, so a later hold of the
-        same step is logged again (`_log_held_step`). If a routed question set
-        the step waiting (the meta's ``question_wait``), the step also runs
-        again (`_workflow_step_run_again`) once its last open request is gone,
-        whichever kind that last one was: no ``tool_call`` may follow to clear
-        it. A step waiting for any other reason (``node_paused``) is left
+        same step is logged again (`_log_held_step`).
+
+        The step also runs again (`_workflow_step_run_again`, given
+        *step_frame*) once its last open request is gone, whichever kind that
+        last one was, when its own routed question set it waiting and nothing
+        since has: the meta's ``question_wait``. No ``tool_call`` may follow to
+        clear it. A workflow frame that sets the step waiting (``node_paused``,
+        ``run_complete`` paused) forgets the flag
+        (`_workflow_forget_question_wait`), so a step kiro-cli paused stays
         waiting. Never raises."""
         try:
             child_id = entry.get("workflow_child") if isinstance(entry, dict) else None
@@ -5438,7 +5446,7 @@ class _Supervisor:
                 meta.pop("held_logged", None)
                 if meta.pop("question_wait", None):
                     self._workflow_step_run_again(parent_id, child_id,
-                                                  step_frame=False)
+                                                  step_frame=step_frame)
         except Exception:
             log.exception("ACP could not clear the held flag of a workflow step")
 
@@ -5470,10 +5478,20 @@ class _Supervisor:
         alive (`_workflow_touch`). Loop-only (it writes).
         261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
         """
-        self._workflow_drop_step_question(parent_id, child_id)
+        self._workflow_drop_step_question(parent_id, child_id, step_frame=step_frame)
         if answered:
             self._workflow_drop_last_warning(parent_id, child_id)
         self._workflow_step_run_again(parent_id, child_id, step_frame=step_frame)
+
+    def _workflow_forget_question_wait(self, child_id: str) -> None:
+        """Forget that a routed question set this step waiting. Called where a
+        workflow frame sets the step waiting (``node_paused``, ``run_complete``
+        paused): kiro-cli paused it, so answering the question must not set it
+        running (`_workflow_unhold`). Not in `_workflow_mark_step_waiting`,
+        which the question path calls too. Loop-only (it writes)."""
+        meta = self._workflow_child_meta.get(child_id)
+        if meta is not None:
+            meta.pop("question_wait", None)
 
     def _workflow_step_run_again(self, parent_id: str, child_id: str, *,
                                  step_frame: bool) -> None:
@@ -6153,6 +6171,7 @@ class _Supervisor:
             # the row already waits (a step question's message). A reaped row
             # is reopened: the step is plainly still there.
             self._workflow_mark_step_waiting(parent_id, child_id)
+            self._workflow_forget_question_wait(child_id)
             if _is_send_message_pause(params.get("reason")):
                 self._workflow_reopen_step_question(parent_id, child_id)
         else:
@@ -6210,6 +6229,7 @@ class _Supervisor:
             waiting = sorted(c for c in children if c in tracked)
             for child_id in waiting:
                 self._workflow_mark_step_waiting(parent_id, child_id)
+                self._workflow_forget_question_wait(child_id)
             if (parent_id, workflow_id) in self._workflow_runs:
                 self._workflow_runs[(parent_id, workflow_id)] = time.monotonic()
             log.info("ACP workflow run %.80s of %s paused: %d step(s) kept "
@@ -6612,6 +6632,13 @@ class _Supervisor:
                 self._workflow_step_questions[step_id] = record
                 self._workflow_step_last_warning[step_id] = dict(record)
                 changed = self._workflow_mark_step_waiting(parent_id, step_id)
+                # A toast like an agent question's, whether or not the parent
+                # is watched (D9's rule, user decision 2026-10-13, option A).
+                # Only here: a reopen after node_paused and a replayed chunk
+                # are not new questions. Same short fixed prefix as a step's
+                # approval, so a long step name cannot use up the budget.
+                _notify("step_question", parent_id,
+                        f"[workflow step] {message}"[:MAX_PERMISSION_TITLE_CHARS])
             row = (self.crews.get(parent_id) or {}).get(step_id)
             if row is not None and not row["done"] and message and row["action"] != message:
                 row["action"] = message
