@@ -25,7 +25,7 @@ Implemented directly (no `/qplan`) in commit `d7be0ed`; the intent record is `c9
 - The three failing tests listed above were stale, not regressions; fixed in `95fb725`. The full suite and `node tests/acp_page.test.mjs` pass.
 - Codex support was added (decision Q12 below): stopped Codex threads are detected and resumed by a relaunch in a new terminal. A real Codex stop was resumed on a schedule on 2026-10-12 and fired as designed.
 - Two independent reviews (senior engineer; reliability with a security lens) of the Codex extension found no High issues; the findings that held up are fixed in `bfea8f8`.
-- Still unverified live: typing into an open Claude Code terminal and the "not really reset" re-arm, both of which need a real Claude Code quota block.
+- Verified live on 2026-10-12 against a real Claude Code 5-hour block (two sessions, reset 8:00 PM): the early Resume now was refused with "the quota has not reset yet" and typed nothing; a Schedule for 8:01 PM fired at 8:01:06 and a manual Resume now at 8:01:41 each put one `resume` user line in the transcript, and Claude answered within 6 seconds. Not yet verified live: the closed-terminal relaunch for Claude Code, and the "not really reset" re-arm.
 
 ## Follow-up Work (Deferred)
 
