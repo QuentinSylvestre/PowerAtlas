@@ -1,7 +1,7 @@
 # ACP Needs Attention: Approvals, Agent Questions and Workflow Step Messages
 
 > **Date**: 2026-10-12
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: List pending approvals, agent questions and workflow step questions in the dashboard Overview's "Needs attention" with a `(N)` title count; declare kiro-cli's `userInput` capability and answer `_kiro/userInput`; handle `_kiro/session/notify` and paused workflow runs; fix `_note_subagent_action`'s crew-frame filter
 > **Memory relied on**: none
@@ -223,11 +223,16 @@ Live checks of the `[QA]` phases need a PowerAtlas restart. The user granted res
 - If probe 3 shows a new child on resume, Phase 4 also ends the old waiting row when a new `node_start` arrives for the same `(workflowId, nodeId)`. If probe 3 never pauses in 4 tries, keep D14 and record the resume as unmeasured.
 
 **Exit criteria**:
-- [ ] Probe 1 result (both replies) recorded in §9 with the kiro-cli version
-- [ ] Probe 2 result recorded in §9
-- [ ] Probe 3 result, or "no pause in 4 runs", recorded in §9
-- [ ] Probes 4 and 5 results recorded in §9
-- [ ] Every probe session deleted after its `createdAt` check; `git status` shows no change outside this plan file
+- [x] Probe 1 result (both replies) recorded in §9 with the kiro-cli version
+- [x] Probe 2 result recorded in §9
+- [x] Probe 3 result, or "no pause in 4 runs", recorded in §9
+- [x] Probes 4 and 5 results recorded in §9
+- [x] Every probe session deleted after its `createdAt` check; `git status` shows no change outside this plan file
+
+Implementation (2026-10-12, code: none)
+All five probes ran against a second `kiro-cli acp --agent-engine v3` process (kiro-cli-chat 2.29.1) started by a scratch driver, an extended copy of the exploration's `wfprobe.py`; the original was not edited and the running PowerAtlas was not touched. Run files are `runA.json` to `runE.json` in the session scratchpad's `phase1` folder; the `texts` fields in runD and runE contain real step session ids, so they are never copied into the repo. Probe 1: both the `{"action":"cancelled"}` reply and the empty answer moved kiro-cli on with `end_turn`, so D4 is unchanged. Probe 2: no `_kiro/userInput` arrived from a step in 2 runs; steps list no `user_input` tool, so the routing is kept and marked unverified. Probe 3: the run paused on the first try and resumed in the same child, with `run_start` and `node_start` re-sent for the tracked run and child; after a `success` notify the step ended paused again (`reason: "Awaiting next user message on step session."`). Probe 4: an open question leaves a `pending_interaction` record that the classifier reads as Waiting. Probe 5: `_kiro.dev/commands/execute` was refused with `-32603` (`PersistenceClassification`), so a cancel during a command was not measured; a cancel with a question open ended the turn in 0.05 s, and a late `cancelled` reply was harmless. Cleanup matched sessions by recorded id plus a `createdAt` inside the window: 10 found, 10 deleted, 0 on re-run.
+
+Orchestrator notes: the git-status criterion was read as "no change caused by the probes". `plans/done/261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS.md` was modified by another session at 20:04, before the probe window opened at 20:06, and is left untouched. Per-phase review deferred to Step 9: results-only phase, about 15 lines of prose in one file, no executable code. QA: SKIP (no `[QA]` annotation, no runtime surface).
 
 ### Phase 2: Crew-frame filter fix [QA]
 **Goal**: `_note_subagent_action` keeps a wave-tagged row in its frame.
@@ -543,7 +548,7 @@ Tests:
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Pre-flight probes | Not started | |
+| 1 | Pre-flight probes | Complete | code: none; results in §9 |
 | 2 | Crew-frame filter fix | Not started | |
 | 3 | Agent questions through `userInput` | Not started | |
 | 4 | Step messages, waiting state, paused runs | Not started | |
@@ -552,7 +557,22 @@ Tests:
 | 7 | Documentation, roadmap and live QA | Not started | Restart granted 2026-10-12 |
 
 ## 9) Implementation Divergences from Plan
-<Reserved -- filled during implementation>
+
+### Phase 1 probe results (kiro-cli 2.29.1, 2026-10-12)
+
+All runs used a second `kiro-cli acp --agent-engine v3` spawned by a scratch driver (a copy of the exploration's `wfprobe.py`, extended), with `_meta.kiro.userInput: true` declared. The running PowerAtlas was not touched. Session ids appear as roles (`parent`, `child-1`). Run files are scratch only: `runA.json`, `runB.json`, `runC.json`, `runC2.json`, `runD.json`, `runD2.json` and `runE.json` in the session scratchpad's `phase1` folder.
+
+- **Probe 1, abandon reply (measured, runA and runB).** Quick-spec mode, the run-5 prompt. The question arrived as `_kiro/userInput` `{sessionId: parent, toolCallId, question, options}`, preceded by a `tool_call` (`user_input`, `pending`) and a `session_info_update` `pending_interaction` (`interactionType: "user_input"`). Reply `{"action": "cancelled"}` (runA): kiro-cli emitted `interaction_resolved` `outcome: "cancelled"`, asked no further question, and the turn ended `end_turn` 24 s later, with no error and no hang. Reply `{"action": "answered", "answer": ""}` (runB): `interaction_resolved` `outcome: "answered"`, no further question, `end_turn` 24 s later; the agent read it as "the user opted to skip". In both runs the parent agent then asked its remaining questions as plain text. **Skip option**: titled `"Skip questions"` (not "Skip remaining questions", which is its description: "Skip remaining questions and go straight to generating the task list"), and it was the **last** option in all four question runs (4 or 5 options, none `recommended`). D7's first-19-plus-last rule keeps it. **Gate: D4 unchanged**; the Phase 3 malformed-request reply needs no change.
+- **Probe 2, a step's `_kiro/userInput` (measured, runD and runD2).** A one-step workflow told to call `user_input`. No `_kiro/userInput` arrived in either run. In runD (step agent `wf-coder`) the step asked through `send_message` `warning` instead. In runD2 the step was told to list its tools if it had no `user_input`: it reported `execute_pwsh, fs_write, web_fetch, disclose_context, send_message` (agent `kirocrew-worker`). Inferred: workflow step sessions have no `user_input` tool on 2.29.1, so step questions arrive only as warning notifies. **Gate: routing through `_workflow_step_parent` kept, marked unverified.**
+- **Probe 3, paused-run resume (measured, runE; pauses also in runD and runD2).** The run-1 prompt paused on the first try: step `send_message` `warning`, step `turn_end`, then `node_paused` `{workflowId, nodeId, reason: "Step requested user input via send_message.", parentSessionId}`, `_kiro/workflow/paused` `{workflowId, pauseReason, parentSessionId}` and `run_complete` `status: "paused"` (3 of 3 workflow runs paused today). The parent prompt "Blue." produced, in order: a parent `tool_call` Send Message, a notify `{sessionId: child-1, callerSessionId: parent, sender: "parent", severity: "info"}`, then a **second `run_start` for the same `workflowId`** and a **`node_start` for the same `nodeId` carrying the same step `sessionId` (child-1)**. No new child. The step then sent a `success` notify and ended its turn, and kiro-cli sent **another** `node_paused` (`reason: "Awaiting next user message on step session."`), `paused` (`"Step 'ask-step' is waiting for the next user message."`) and `run_complete` `status: "paused"`. No `node_complete` arrived in the 90 s drain. Whether a further parent message would complete the node was not measured. **Gate: no new child, so Phase 4 needs no old-row handling for a new child (R2 and R12 do not occur).** Two shapes Phase 4 must handle and the orchestrator should decide on: (a) a resume re-sends `run_start` and the step's `node_start` for a run and child already tracked; (b) a step that finished its work and reported `success` can end paused, not completed, with a different `reason`, so D13/D14 as written would show it waiting for up to 6 h.
+- **Probe 4, rail verdict (measured, runA, runB, runC, runC2).** While the question was open, before any reply, the session's `messages.jsonl` ended with a `pending_interaction` record (tail: `turn_start, steering_inclusion, assistant, assistant, session_metadata, sub_agent_start, pending_interaction`). After the reply an `interaction_resolved` record followed. `status_classifier` reads `pending_interaction` as WAITING, so the rail reads Waiting from disk alone for a quick-spec question. Recorded for the knowledge base; no gate.
+- **Probe 5, Stop during a command and during a question (measured, runA, runB, runC, runC2).** `_kiro.dev/commands/execute` `{sessionId, command: {command: "compact", args: {}}}` was **refused at once** with JSON-RPC `-32603` "Internal error", `data.details`: `[PersistenceClassification] Ext method "_kiro.dev/commands/execute" has no persistence classification` (runA). So a cancel during a command could not be measured on 2.29.1, and the palette slash-command path appears broken on this version (inferred from one call; outside this plan). A typed `/compact` prompt cancelled after 0.3 s returned `stopReason: "cancelled"` in 0.33 s (runB). `session/cancel` sent 3 s after a `_kiro/userInput` arrived, with the request left unanswered: the prompt returned `stopReason: "cancelled"` within 0.05 s, the `user_input` tool call and the sub-agent went `failed`, and kiro-cli sent no `interaction_resolved` and no cancel for the open request (runC). A `{"action": "cancelled"}` reply sent 5 s after that turn ended was accepted without error: kiro-cli emitted `interaction_resolved` `outcome: "cancelled"`, and the next prompt on the session ran normally (runC2). **Gate: R11 gets the note that the cancel during a slash command is unmeasured because `commands/execute` errors on 2.29.1; Stop with an open question ends the turn, and D4's late `cancelled` reply on Stop is harmless.**
+
+### Divergences from Phase 1
+
+- **Skip option title (D7).** The measured title is `"Skip questions"`, last in 4 of 4 runs; "Skip remaining questions" is the start of its description. The first-19-plus-last rule still keeps it; only D7's wording was wrong.
+- **Resume re-sends `run_start` and `node_start` (Phase 4).** A resumed paused run re-sends `run_start` for the tracked `workflowId` and `node_start` for the tracked `nodeId` with the same step `sessionId`. No new child appears, so the R2/R12 new-child handling is not needed. Phase 4 must accept these frames again without resetting the run or the row.
+- **Slash commands unmeasured (R11).** `_kiro.dev/commands/execute` errors on 2.29.1, so the effect of Stop during a slash command is unmeasured. D26 still covers the command path. Outside this plan: PowerAtlas's `commands_execute` sends the refused shape. `orchestrator.log` and 3 rotations have 0 `PersistenceClassification` lines, so it is not confirmed in production.
 
 ## Follow-up Work (Deferred)
 
