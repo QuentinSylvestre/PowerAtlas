@@ -316,17 +316,13 @@ remote_bind_address = ""  # "" = loopback only (the default; a version bump neve
                           # not 0.0.0.0 — to also listen there. Needs a fixed port above and a
                           # restart. Read the "Remote access" section before enabling it.
 
-# ACP session limits. All three are read once at startup, so a change needs a restart; the settings
+# ACP session limits. Both are read once at startup, so a change needs a restart; the settings
 # panel says so rather than pretending a live effect.
 acp_max_sessions = 8  # 1-16. Concurrent kiro-cli ACP sessions. Each costs ~3 processes and ~161 MB
                       # (measured on kiro-cli 2.16.0), so 8 is roughly 1.5 GB at the cap.
 acp_idle_ttl_seconds = 1800  # 300-86400. A session with no attached tab, no running turn and no
                              # in-flight load is terminated after this long idle, on a 60 s sweep.
                              # Its transcript stays on disk, so it can be resumed later.
-acp_prompt_silence_seconds = 1800  # 60-86400. A turn is cancelled after this much SILENCE from the
-                                  # agent — not this much total time — so a long turn that keeps
-                                  # streaming is never cut off. A 24-hour absolute ceiling still
-                                  # applies, so one chunk per window cannot run forever.
 
 # ACP permission mode. Set from the Settings dialog's "Agent permissions" section, without a restart.
 # A hand edit of the mode (or the rules) takes effect when the next new Default session is started, and
@@ -516,10 +512,11 @@ shows nothing, correctly.
 
 Three things are worth knowing before leaving a long task running:
 
-- **A turn is bounded by silence, not by duration.** A turn that keeps streaming runs as long as it
-  needs; one that goes quiet for `acp_prompt_silence_seconds` (default 30 minutes) is cancelled agent
-  side. A 24-hour absolute ceiling applies regardless, so a turn emitting one chunk per window cannot
-  hold a session open forever.
+- **A turn runs until it ends, you stop it, or 24 hours pass.** A quiet turn is never cancelled for
+  being quiet: one waiting on an approval or a question waits until it is answered. **Stop** ends the
+  turn within a few seconds even if the agent does not answer the cancel; the agent's tool processes
+  may then keep running until PowerAtlas exits. A 24-hour absolute ceiling applies regardless, so a
+  turn cannot hold a session open forever.
 - **Idle sessions are reclaimed.** A session with no tab attached, no turn running and no load in
   flight is released locally after `acp_idle_ttl_seconds` (default 30 minutes), without waiting for
   wire-level confirmation from the agent — kiro-cli's v3 protocol offers none to wait for. The
@@ -666,7 +663,7 @@ command may need asking too. kiro-cli offers
 **Always deny** lasts for the current session only, and the button says so: kiro-cli keeps the rule in
 memory, writes nothing to disk, and a new session asks again. Denying
 leaves the tool call failed with nothing written. Nothing answers on your behalf: a session nobody is
-watching waits at its first such request until the silence timeout above cancels the turn.
+watching waits at its first such request until someone answers it or presses **Stop**.
 `plans/ROADMAP.md`'s item on deciding permission requests by rule for unattended sessions is what would
 change that.
 

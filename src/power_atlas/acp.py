@@ -550,8 +550,9 @@ MAX_COMPACTION_SUMMARY_CHARS = 32 * 1024
 COMPACTION_BACKSTOP_SECONDS = 30.0
 
 # The kiro-private notification carrying a *pre-announcement* tool-call chunk
-# — a method distinct from plain ``session/update`` (see ``_stamp_activity``'s
-# P0-3 note). **Not sub-agent-exclusive**: measured 2026-08-11 against a real
+# — a method distinct from plain ``session/update`` that carries a
+# ``sessionId`` and a ``tool_call_chunk`` (measured on kiro-cli 2.16.0).
+# **Not sub-agent-exclusive**: measured 2026-08-11 against a real
 # kiro-cli 2.16.2 subprocess, spawned and driven directly (outside
 # PowerAtlas) through a 3-stage ``subagent`` fan-out — it also fires for the
 # *parent* session's own tool calls, including one that ran before any
@@ -1249,9 +1250,9 @@ MAX_SESSIONS = 8
 
 # How long a session may sit unused before the sweeper releases it, and how
 # often the sweeper looks. "Unused" is `last_used` — prompts and subscriber
-# attach/detach — deliberately *not* `last_activity`, which any agent
-# notification advances. See `_stamp_activity` for why the two cannot share a
-# field. Both are rebound by `apply_config`/rebindable by tests.
+# attach/detach — deliberately never an agent notification, so a chatty agent
+# cannot keep its own sessions permanently unsweepable (see `touch_used`).
+# Both are rebound by `apply_config`/rebindable by tests.
 ACP_IDLE_TTL_SECONDS = 1800.0
 SWEEP_INTERVAL_SECONDS = 60.0
 # How long the agent may run with no session at all before the sweeper stops
@@ -1276,35 +1277,35 @@ _WATCHDOG_MAX_ERRORS = 3  # consecutive exceptions before the watchdog cancels i
 INITIALIZE_TIMEOUT_SECONDS = 30.0
 REQUEST_TIMEOUT_SECONDS = 90.0
 
-# A prompt is the one request whose duration is the model's, not the channel's,
-# and it is the one request bounded by **silence** rather than by wall clock.
+# A prompt is the one request whose duration is the model's, not the channel's.
 #
-# The wall-clock ceiling this replaces (600 s) answered the wrong question. A
-# turn running tools under `-a` is legitimately minutes to hours, so the bound
-# abandoned working turns; and because `_request` popped the future and raised
-# without sending any cancellation, the agent carried on working while
-# `_handle_prompt`'s finally cleared `inflight` — the session read idle while
-# actively running. What the ceiling exists for is detecting an agent that has
-# *stopped*, and silence is what that actually looks like.
+# A quiet turn is never ended for being quiet (D24 of
+# ``plans/261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES.md``,
+# the user's decision of 2026-10-12). A turn parked on an approval or on a
+# question the agent asked can wait for hours, and a turn running tools under
+# `-a` is legitimately minutes to hours. A turn ends when the agent ends it,
+# when a person presses Stop (with the local fallback ``cancel`` describes), or
+# at the absolute ceiling below. A 600 s wall-clock ceiling and then a
+# no-output window stood here before; both ended turns that were still working
+# or still waiting on a person.
 #
-# `PROMPT_TICK_SECONDS` is how often the wait wakes to re-read the deadline, so
-# worst-case cancel latency is `silence + tick`. `PROMPT_SILENCE_SECONDS` is
-# the window with no notification of any kind that condemns a turn.
+# `PROMPT_TICK_SECONDS` is how often the wait wakes to re-check the ceiling and
+# the session record. A Stop does not wait for the tick: the wait wakes on it.
 PROMPT_TICK_SECONDS = 15.0
-PROMPT_SILENCE_SECONDS = 1800.0
 
 # The safety property the wall clock used to provide, kept deliberately.
 #
-# Without it a turn emitting one chunk just under the silence window runs
-# forever — and `inflight` makes that session simultaneously un-closable
+# Without it a live agent that never ends its turn runs it forever, and
+# `inflight` makes that session simultaneously un-closable
 # (`_handle_close` refuses `turn_in_progress`) and un-sweepable (sweep
 # condition 3), so its memory and its processes are unreclaimable for the
-# app's lifetime with no operator path short of a restart. "Long turns" means
-# generous, not unbounded.
+# app's lifetime with no operator path short of a Stop or a restart. "Long
+# turns" means generous, not unbounded.
 PROMPT_ABSOLUTE_MAX_SECONDS = 86400.0
 
-# How long the ceiling waits, after writing `session/cancel`, for the
-# outstanding `session/prompt` to answer before giving up on it.
+# How long the ceiling, and a person's Stop, wait after `session/cancel` for
+# the outstanding `session/prompt` to answer before giving up on it (D26 for
+# Stop: see ``_Supervisor.cancel``).
 #
 # Sized against a measurement rather than a worst case. On kiro-cli 2.16.0 the
 # cancel is honoured at the protocol layer and the prompt answers
@@ -1319,11 +1320,12 @@ PROMPT_ABSOLUTE_MAX_SECONDS = 86400.0
 # What this grace does **not** buy is the tool's OS children. Measured
 # 2026-08-01: neither `session/cancel` nor `_kiro.dev/session/terminate` kills
 # them — a `pwsh.exe`/`PING.EXE` pair survived both, and only the Windows job
-# object closing at process exit reaped them. See `_await_inactivity`.
+# object closing at process exit reaped them. See `_await_prompt`.
 CANCEL_GRACE_SECONDS = 3.0
 
-# What the prompt path passes in `timeout` to ask for the inactivity ceiling
-# instead of a wall-clock one.
+# What the prompt and slash-command paths pass in `timeout` to ask for the
+# prompt wait (`_await_prompt`: Stop or the absolute ceiling ends it) instead
+# of a wall-clock ceiling.
 #
 # A sentinel in the existing slot rather than a new parameter, and the reason is
 # the test suite rather than taste: ~19 fixed-signature `_request` stubs would
@@ -1331,7 +1333,7 @@ CANCEL_GRACE_SECONDS = 3.0
 # replacing the very function whose new behaviour is under test. `_request`
 # branches on it with `is` *before* its try block, because the wall-clock arm
 # formats `{timeout:.0f}` into its message and a sentinel would blow up there.
-_INACTIVITY = object()
+_PROMPT_WAIT = object()
 
 # How long the tree-kill fast path waits for the tree to actually go, so that
 # teardown has a post-condition rather than only an intent.
@@ -3186,9 +3188,9 @@ def _new_session_record(cwd: str, mode: str = DEFAULT_TASK_MODE) -> dict:
     case, which also has no subscriber — would otherwise be missing the key
     entirely and be the first thing the sweeper touched.
 
-    ``created`` is wall-clock and only ever rendered. ``last_used`` and
-    ``last_activity`` are monotonic and only ever subtracted. Two clocks in one
-    record, stated here rather than left to be rediscovered.
+    ``created`` is wall-clock and only ever rendered. ``last_used`` is
+    monotonic and only ever subtracted. Two clocks in one record, stated here
+    rather than left to be rediscovered.
 
     ``mode`` is the agent the session runs: the ``modeId`` PowerAtlas bound
     (``session/new``), or at ``session/load`` the persisted ``agentMode``
@@ -3204,7 +3206,6 @@ def _new_session_record(cwd: str, mode: str = DEFAULT_TASK_MODE) -> dict:
         "cwd": cwd,
         "created": time.time(),
         "last_used": now,
-        "last_activity": now,
         "mode": mode,
     }
 
@@ -3401,17 +3402,12 @@ _V3_HOLDER_PID_UNKNOWN: Final[int] = -1
 _V3_HELD_STATUSES: Final[frozenset[str]] = frozenset({"in_progress", "waiting_on_user"})
 
 # How stale session.json's mtime must be, while status still reads held,
-# before _lock_holder_v3 stops trusting it. An independent constant rather
-# than a reference to PROMPT_SILENCE_SECONDS -- the rebindable prompt-timeout
-# knob (apply_config rebinds it; Final here would contradict that), and this
-# is a different question (file staleness, not RPC silence)
-# that happens to warrant the same order of magnitude: it is sized to match
-# PROMPT_SILENCE_SECONDS's own default (1800s / 30min), the window
-# _Supervisor already uses elsewhere in this module to judge a turn dead from
-# silence alone -- see PROMPT_SILENCE_SECONDS's own comment. Live probe
-# evidence (ACP v3 production-hardening, same session that informed
-# data_kiro_v3.py's cache-invalidation comment): KAS's session.json writes
-# during an active turn are bursty and milestone-tied, not a continuous
+# before _lock_holder_v3 stops trusting it. It answers one question only --
+# how long session.json may go unwritten during a live turn -- and 1800s
+# (30 min) rests on this measurement alone. Live probe evidence (ACP v3
+# production-hardening, same session that informed data_kiro_v3.py's
+# cache-invalidation comment): KAS's session.json writes during an active
+# turn are bursty and milestone-tied, not a continuous
 # heartbeat -- observed gaps of roughly 25-40s between writes in one 75s
 # turn -- so 1800s gives on the order of 60x margin over normal operation
 # before staleness is even considered. The one real residual: a single
@@ -3609,6 +3605,10 @@ class _Supervisor:
         # turn id, so the fan-out would interleave them into one transcript
         # with nothing able to separate them again.
         self.inflight: set[str] = set()
+        # session id -> the event a running `_await_prompt` wakes on when a
+        # Stop is recorded (D26). Held here, not on the session record, so the
+        # record stays plain data; each wait removes its own entry.
+        self._prompt_wakers: dict[str, asyncio.Event] = {}
         # Sessions with a `session/close` in flight. Claimed before the first
         # await of `close_session`, so two `close` frames for one session cannot
         # both reach the agent — the second would be refused by an agent that
@@ -3666,7 +3666,7 @@ class _Supervisor:
         # (the expected order — kiro-cli announces a sub-agent before it talks)
         # is recorded rather than silently dropped the way an unregistered
         # session's frames already are (see the module docstring's isolation
-        # note and `_stamp_activity`'s P0-4).
+        # note and ``SUBAGENT_LIST_METHOD``'s docstring).
         self.subagent_history: dict[str, _History] = {}
         # `crew_spawn_anchors`: toolCallId -> session_id. Records which session
         # emitted a `subagent` tool call that has not yet been consumed by
@@ -4227,9 +4227,10 @@ class _Supervisor:
                        timeout: float = REQUEST_TIMEOUT_SECONDS):
         """Send a request and await its result. Always bounded.
 
-        ``timeout`` carries either a number of seconds or the ``_INACTIVITY``
-        sentinel, which asks for the silence-based ceiling instead. The
-        signature is unchanged on purpose — see ``_INACTIVITY``.
+        ``timeout`` carries either a number of seconds or the ``_PROMPT_WAIT``
+        sentinel, which asks for the prompt wait instead: no wall clock, ended
+        by Stop or the absolute ceiling (``_await_prompt``). The signature is
+        unchanged on purpose — see ``_PROMPT_WAIT``.
         """
         loop = self._loop
         if loop is None:
@@ -4243,11 +4244,11 @@ class _Supervisor:
         # Read with `is` and read *here*, above the try: the wall-clock arm
         # below formats `{timeout:.0f}` into its message, which a sentinel
         # cannot survive.
-        inactivity = timeout is _INACTIVITY
+        prompt_wait = timeout is _PROMPT_WAIT
         try:
             await asyncio.to_thread(self._write, payload)
-            if inactivity:
-                return await self._await_inactivity(
+            if prompt_wait:
+                return await self._await_prompt(
                     fut, method, params.get("sessionId"))
             try:
                 return await asyncio.wait_for(fut, timeout)
@@ -4258,101 +4259,126 @@ class _Supervisor:
         finally:
             self._pending.pop(request_id, None)
 
-    async def _await_inactivity(self, fut: asyncio.Future, method: str,
-                                session_id):
-        """Await a request bounded by agent *silence* rather than wall clock.
+    async def _await_prompt(self, fut: asyncio.Future, method: str,
+                            session_id):
+        """Await a prompt or slash command with no wall-clock bound.
 
-        Three properties are load-bearing and none of them is obvious.
+        Only three things end the wait: the agent's answer, a person's Stop
+        when the agent does not honour it (D26), and the absolute ceiling.
+        A lack of output is not one of them (D24): a turn parked on an
+        approval or a question can wait for hours.
 
-        **The future is shielded on every pass.** ``asyncio.wait_for`` cancels
-        the future it is given when its timeout expires, so handing it the bare
-        pending future would destroy it on the first tick and the real answer
-        would arrive to a future nobody holds — dropped by ``_on_response`` as
-        "late or unmatched". ``shield`` detaches its callback when the outer
-        wait is cancelled, so the callbacks do not accumulate across a
-        four-hour turn either.
+        **The future is shielded, once.** The pending future must survive
+        every pass: if it were cancelled, the real answer would arrive to a
+        future nobody holds and ``_on_response`` would drop it as "late or
+        unmatched". One ``shield`` is made before the loop and raced on each
+        pass with ``asyncio.wait``, which never cancels what it is given and
+        removes its own callback when it returns, so nothing accumulates on
+        the future across a long turn. The shield is cancelled on the way out,
+        which leaves the future itself untouched.
 
-        **The deadline is seeded locally at send time, not read from
-        ``last_activity``.** A session idle for twenty minutes with a tab
-        attached is unswept but already "silent" by the shared stamp, so
-        seeding from it would kill that session's next prompt on the first tick
-        before the agent had any chance to answer.
+        **Stop's local fallback (D26).** ``cancel`` records the Stop on the
+        session record (``stop_requested_at``) and sets this wait's event in
+        ``_prompt_wakers``, so the wait wakes on the Stop rather than at its
+        next tick. The record is read again on every pass, which also catches a
+        Stop that landed before the wait registered its event (the prompt's
+        write sits between ``inflight`` and here). When the future has not
+        resolved ``CANCEL_GRACE_SECONDS`` after the Stop, the wait raises
+        ``AgentTimeout``. The raise sits here, not in ``cancel``, so the one
+        turn boundary is still emitted by ``_handle_prompt``'s ``finally``.
+        Nothing more is written to the agent: the Stop already sent
+        ``session/cancel``.
 
-        **There is a hard stop as well.** See ``PROMPT_ABSOLUTE_MAX_SECONDS``.
+        **There is a hard stop.** See ``PROMPT_ABSOLUTE_MAX_SECONDS``. On
+        expiry the turn is cancelled agent-side rather than merely abandoned.
 
-        On expiry the turn is cancelled agent-side rather than merely
-        abandoned. What that does and does not achieve is measured, not
-        assumed: on kiro-cli 2.16.0 the ACP turn really does end (the
-        outstanding prompt answers ``cancelled`` in ~9 ms), and the tool's OS
-        children really do not die — a shell the agent started keeps running,
-        invisible to ``inflight``, to the sweeper and to the per-session memory
-        figure, until PowerAtlas exits and its job object takes the whole tree.
-        That orphan is a recorded residual of this design, not an oversight.
+        What a cancel does and does not achieve is measured, not assumed: on
+        kiro-cli 2.16.0 the ACP turn really does end (the outstanding prompt
+        answers ``cancelled`` in ~9 ms), and the tool's OS children really do
+        not die — a shell the agent started keeps running, invisible to
+        ``inflight``, to the sweeper and to the per-session memory figure,
+        until PowerAtlas exits and its job object takes the whole tree. That
+        orphan is a recorded residual of this design, for the ceiling and for
+        a turn the Stop fallback ended, not an oversight.
         """
         started = time.monotonic()
-        deadline = started + PROMPT_SILENCE_SECONDS
         hard_stop = started + PROMPT_ABSOLUTE_MAX_SECONDS
-        while True:
-            try:
-                return await asyncio.wait_for(
-                    asyncio.shield(fut), PROMPT_TICK_SECONDS)
-            except asyncio.TimeoutError:
-                pass
-            meta = self.sessions.get(session_id)
-            if meta is None:
-                # Closed under us, or `_detach` cleared the whole dict when the
-                # agent died. Fall through to a bare `await` so whatever the
-                # future already carries — typically the typed `AgentDied`
-                # `_detach` set on it — is what surfaces, rather than a timeout
-                # this loop invented.
-                #
-                # That final `await fut` is unbounded, and what bounds it is an
-                # invariant held elsewhere: **no path pops a session record out
-                # from under a turn in flight without first resolving that
-                # turn's pending future.** `inflight` is what enforces it —
-                # `_handle_close` refuses a session with `turn_in_progress` and
-                # the sweeper's condition 4 skips one, so neither can reach
-                # `close_session` while this loop is running. The one popper
-                # that can is `_detach`, and it sets `AgentDied` on every
-                # pending future *before* clearing `sessions`. Add a route that
-                # drops the record without settling the future and this line
-                # hangs forever, holding `inflight` — and therefore the
-                # session's close and its sweep — with it.
-                break
-            last = meta.get("last_activity")
-            if last is not None:
-                deadline = max(deadline, last + PROMPT_SILENCE_SECONDS)
-            now = time.monotonic()
-            # Held behind another session's turn: kiro-cli says nothing about
-            # this session until that turn ends, which is waiting, not silence.
-            # Only while that turn is still in flight, so a missed `turn_start`
-            # cannot exempt the session forever; the absolute ceiling still
-            # applies.
-            behind = meta.get("queued_behind")
-            if behind is not None and behind in self.inflight:
-                deadline = max(deadline, now + PROMPT_SILENCE_SECONDS)
-            if now <= deadline and now <= hard_stop:
-                continue
-            capped = now > hard_stop
-            log.warning(
-                "ACP %s: cancelling session=%s after %.0fs (%s); the agent's "
-                "own tool processes are NOT reaped by this",
-                method, session_id, now - started,
-                "absolute ceiling" if capped else "silence")
-            await self._notify("session/cancel", {"sessionId": session_id})
-            # Bounded grace. An honoured cancel lands its final frame inside
-            # it, and `_handle_prompt` then releases `inflight` behind a turn
-            # that has really ended — without it, prompt #2 can interleave with
-            # turn #1 in one transcript with no turn id to separate them.
-            with contextlib.suppress(asyncio.TimeoutError):
-                return await asyncio.wait_for(
-                    asyncio.shield(fut), CANCEL_GRACE_SECONDS)
-            raise AgentTimeout(
-                f"The agent went silent for {PROMPT_SILENCE_SECONDS:.0f}s "
-                f"during '{method}'; the turn was cancelled."
-                if not capped else
-                f"'{method}' ran past the {PROMPT_ABSOLUTE_MAX_SECONDS:.0f}s "
-                "ceiling and was cancelled.")
+        guard = asyncio.shield(fut)
+        waker = asyncio.Event()
+        self._prompt_wakers[session_id] = waker
+        try:
+            while True:
+                meta = self.sessions.get(session_id)
+                stop_at = None if meta is None else meta.get("stop_requested_at")
+                wait = PROMPT_TICK_SECONDS
+                if stop_at is not None:
+                    wait = min(wait, max(
+                        0.0, stop_at + CANCEL_GRACE_SECONDS - time.monotonic()))
+                stop_task = asyncio.ensure_future(waker.wait())
+                try:
+                    await asyncio.wait({guard, stop_task}, timeout=wait,
+                                       return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    stop_task.cancel()
+                if guard.done():
+                    return guard.result()
+                waker.clear()
+                meta = self.sessions.get(session_id)
+                if meta is None:
+                    # Closed under us, or `_detach` cleared the whole dict when
+                    # the agent died. Fall through to a bare `await` so whatever
+                    # the future already carries — typically the typed
+                    # `AgentDied` `_detach` set on it — is what surfaces, rather
+                    # than a timeout this loop invented.
+                    #
+                    # That final `await fut` is unbounded, and what bounds it is
+                    # an invariant held elsewhere: **no path pops a session
+                    # record out from under a turn in flight without first
+                    # resolving that turn's pending future.** `inflight` is what
+                    # enforces it — `_handle_close` refuses a session with
+                    # `turn_in_progress` and the sweeper's condition 4 skips
+                    # one, so neither can reach `close_session` while this loop
+                    # is running. The one popper that can is `_detach`, and it
+                    # sets `AgentDied` on every pending future *before* clearing
+                    # `sessions`. Add a route that drops the record without
+                    # settling the future and this line hangs forever, holding
+                    # `inflight` — and therefore the session's close and its
+                    # sweep — with it.
+                    break
+                now = time.monotonic()
+                stop_at = meta.get("stop_requested_at")
+                if stop_at is not None and now >= stop_at + CANCEL_GRACE_SECONDS:
+                    log.warning(
+                        "ACP %s: session=%s did not answer Stop within %.1fs; "
+                        "the turn was ended here, and the agent's own tool "
+                        "processes are NOT reaped by this",
+                        method, session_id, now - stop_at)
+                    raise AgentTimeout(
+                        "The agent did not answer Stop; the turn was ended "
+                        "here. Its tool processes may still be running.")
+                if now <= hard_stop:
+                    continue
+                log.warning(
+                    "ACP %s: cancelling session=%s after %.0fs (absolute "
+                    "ceiling); the agent's own tool processes are NOT reaped "
+                    "by this", method, session_id, now - started)
+                await self._notify("session/cancel", {"sessionId": session_id})
+                # Bounded grace. An honoured cancel lands its final frame
+                # inside it, and `_handle_prompt` then releases `inflight`
+                # behind a turn that has really ended — without it, prompt #2
+                # can interleave with turn #1 in one transcript with no turn id
+                # to separate them.
+                await asyncio.wait({guard}, timeout=CANCEL_GRACE_SECONDS)
+                if guard.done():
+                    return guard.result()
+                raise AgentTimeout(
+                    f"'{method}' ran past the {PROMPT_ABSOLUTE_MAX_SECONDS:.0f}s "
+                    "ceiling and was cancelled.")
+        finally:
+            if self._prompt_wakers.get(session_id) is waker:
+                del self._prompt_wakers[session_id]
+            if not guard.done():
+                guard.cancel()
         return await fut
 
     async def _notify(self, method: str, params: dict) -> None:
@@ -4588,55 +4614,12 @@ class _Supervisor:
             return
         await self._answer_permission_cancelled(entry.get("kiro_id"), why)
 
-    def _stamp_activity(self, session_id) -> None:
-        """Record that the agent has just said *something* about a session.
-
-        Keyed on **"does this notification carry a session id"**, not on a
-        method allowlist, and stamped above the branch dispatch rather than
-        inside it. Both readings were measured against kiro-cli 2.16.0 rather
-        than chosen:
-
-        * ``_kiro.dev/session/update`` exists as a method *distinct* from
-          ``session/update``, carries a ``sessionId`` and a
-          ``tool_call_chunk``, and falls through this function's dispatch
-          entirely. It is genuine agent liveness. A method allowlist naming
-          ``session/update`` and ``METADATA_METHOD`` would miss it.
-        * At least six ``sessionUpdate`` kinds exist and only three have
-          branches here, so a turn emitting nothing but ``agent_thought_chunk``
-          or ``plan`` for the silence window would be judged silent and
-          cancelled — a working turn killed by its own ceiling.
-        * ``_kiro.dev/subagent/list_update`` carries **no** ``sessionId`` at
-          all, which is why the null path below is a real case rather than
-          defensive padding.
-
-        This advances ``last_activity`` and deliberately **not** ``last_used``.
-        They answer opposed questions — "is the agent still working?" versus
-        "has nobody used this session?" — and sharing one field would let a
-        chatty agent keep its own sessions permanently unsweepable, defeating
-        the sweeper with no error anywhere.
-
-        ``time.monotonic`` and not ``time.time``: both readers compare elapsed
-        intervals and must not be moved by a clock adjustment. That does put
-        two clocks in one record — ``created`` is wall-clock and is only ever
-        rendered, never subtracted.
-        """
-        if not isinstance(session_id, str):
-            return
-        meta = self.sessions.get(session_id)
-        if meta is None:
-            # Closed, or detached when the agent died. Never recreate the
-            # record: `at_capacity()` would count the resurrected entry against
-            # MAX_SESSIONS forever and the sweeper would re-issue terminate for
-            # it every tick. `record()` and `_note_context()` model the idiom.
-            return
-        meta["last_activity"] = time.monotonic()
-
     def _set_queued_behind(self, session_id: str, behind: str | None) -> None:
         """Record (or clear) that kiro-cli is holding this session's prompt
         behind another session's turn, and tell the pages when that changes.
 
-        ``meta["queued_behind"]`` is the other session's id. `_await_inactivity`
-        reads it so the wait is not counted as the agent going silent.
+        ``meta["queued_behind"]`` is the other session's id. The pages read the
+        ``queue_status`` frame to show that the prompt is waiting its turn.
         """
         meta = self.sessions.get(session_id)
         if meta is None:
@@ -4654,8 +4637,12 @@ class _Supervisor:
         """Record that a *person* used this session. Resets the sweeper clock.
 
         Advanced by a prompt and by a subscriber attaching or detaching —
-        never by an agent notification, for the reason ``_stamp_activity``
-        gives. Same non-resurrecting write, same monotonic clock.
+        never by an agent notification: "has nobody used this session?" is a
+        question about people, and an agent stamp would let a chatty agent keep
+        its own sessions permanently unsweepable, defeating the sweeper with no
+        error anywhere. Never recreates a closed record (`at_capacity()` would
+        count it forever). ``time.monotonic``, because the sweeper subtracts it
+        and a clock adjustment must not move it.
         """
         if not isinstance(session_id, str):
             return
@@ -4668,7 +4655,7 @@ class _Supervisor:
         """Handle one ``_kiro.dev/subagent/list_update`` notification.
 
         Carries no ``sessionId`` of its own (measured — see
-        ``SUBAGENT_LIST_METHOD``'s docstring and ``_stamp_activity``'s P0-4),
+        ``SUBAGENT_LIST_METHOD``'s docstring),
         so the crew it describes has to be attributed some other way. With
         **exactly one** session mid-``session/prompt`` the attribution is
         unambiguous. With zero in-flight the notification is dropped. With
@@ -5074,8 +5061,8 @@ class _Supervisor:
     def _workflow_touch_if_emptied(self, parent_id: str, was_tracked: bool) -> None:
         """Count the end of a parent's last tracked child as a use of the parent.
 
-        Workflow frames stamp only ``last_activity``, never ``last_used`` (a
-        chatty agent must not keep a session alive). A workflow longer than
+        Workflow frames never stamp ``last_used`` (a chatty agent must not
+        keep a session alive). A workflow longer than
         ``ACP_IDLE_TTL_SECONDS`` with no tab attached therefore leaves the
         parent already past the TTL, and the agent-initiated wake turn that
         follows ``run_complete`` is not in ``inflight``: the next sweeper tick
@@ -5933,9 +5920,6 @@ class _Supervisor:
                      "is not a live session" if isinstance(parent_id, str)
                      else "missing")
             return
-        # The workflow is the parent's activity: without this a long run with
-        # no other output reads as silence to the prompt watchdog.
-        self._stamp_activity(parent_id)
         # Every frame of a recorded run proves the run is alive (run-level
         # tracking, `_workflow_runs`). A frame of a run that this supervisor saw
         # end (Stop, `run_complete`, expiry: `_workflow_ended`) never records
@@ -6441,26 +6425,56 @@ class _Supervisor:
             result = await self._request(
                 "session/prompt",
                 {"sessionId": session_id, "prompt": blocks},
-                timeout=_INACTIVITY,
+                timeout=_PROMPT_WAIT,
             )
         finally:
             self.touch_used(session_id)
         return result or {}
 
     async def cancel(self, session_id: str) -> None:
-        """Ask the agent to end the turn in flight on a session.
+        """Ask the agent to end the turn in flight on a session, with a local
+        fallback when it does not (D26).
 
         Nothing here waits for the turn to end, and nothing here ends it: the
-        outstanding ``session/prompt`` is what returns, with
+        outstanding ``session/prompt`` (or slash command) is what returns, with
         ``stopReason: "cancelled"``, and ``_handle_prompt``'s own ``finally``
         is what emits the turn boundary the page reads. Ending the turn from
         this side as well would race that task into emitting two.
+
+        The fallback: after the ``session/cancel`` write, the Stop is recorded
+        on the session record (``stop_requested_at``) and the running wait is
+        woken. If the agent has not answered ``CANCEL_GRACE_SECONDS`` later,
+        ``_await_prompt`` raises ``AgentTimeout`` and the turn ends locally;
+        the agent's tool processes may keep running until PowerAtlas exits.
+        Without it, a live agent that ignores the cancel would hold the
+        session until the 24 h ceiling, since a quiet turn is never ended.
+        The raise sits in the wait rather than here so that the one turn
+        boundary still comes from that ``finally``. The record is cleared when
+        the next prompt or command starts, so an old Stop never ends a new
+        turn. Recorded only after the write succeeds: a refused write reaches
+        the page as an error, and the turn should not end on a cancel the
+        agent never received.
         """
         if session_id not in self.sessions:
             raise AgentRejected("That session no longer exists on this agent.")
         if not self.alive():
             raise AgentDied("The agent is not running.")
         await self._notify("session/cancel", {"sessionId": session_id})
+        meta = self.sessions.get(session_id)
+        if meta is None:
+            return
+        meta["stop_requested_at"] = time.monotonic()
+        waker = self._prompt_wakers.get(session_id)
+        if waker is not None:
+            waker.set()
+
+    def clear_stop(self, session_id) -> None:
+        """Forget a recorded Stop (D26). Called when a prompt or a slash
+        command starts, with no ``await`` between its ``inflight`` claim and
+        this, so a Stop from an earlier turn cannot end the new one."""
+        meta = self.sessions.get(session_id)
+        if meta is not None:
+            meta.pop("stop_requested_at", None)
 
     async def steer(self, session_id: str, text: str) -> dict:
         """Inject a mid-turn steer message via ``_session/steer``.
@@ -6499,13 +6513,14 @@ class _Supervisor:
         in the handler guards verify it is non-falsy and that the session
         exists before reaching this method.
 
-        Uses the inactivity sentinel (same as ``session/prompt``) so a long
-        command that keeps streaming is never cut off at the wall-clock ceiling.
+        Uses the prompt wait (same as ``session/prompt``): a long command is
+        never cut off at a wall-clock ceiling, and Stop's local fallback and
+        the absolute ceiling end it as they end a turn.
         """
         result = await self._request(
             "_kiro.dev/commands/execute",
             {"sessionId": session_id, "command": {"command": name, "args": {}}},
-            timeout=_INACTIVITY,
+            timeout=_PROMPT_WAIT,
         )
         return result or {}
 
@@ -6606,21 +6621,17 @@ class _Supervisor:
     def _on_notification(self, msg: dict) -> None:
         method = msg.get("method")
         params = msg.get("params") or {}
-        # Workflow frames first: before `_stamp_activity` and before the SC-1
-        # buffer below. Measured 2026-10-08 (docs/KNOWLEDGE.md): the outer
-        # `params.sessionId` is ABSENT on most of them (and, on the one frame
-        # type that has it, is the CHILD's id, never in `self.sessions`), so
-        # both of those would act on nothing or buffer the frame under the
-        # wrong id. The parent is `params.parentSessionId`; the router stamps
-        # activity on it so the prompt-silence watchdog does not cancel a long
-        # workflow turn.
+        # Workflow frames first: before the SC-1 buffer below. Measured
+        # 2026-10-08 (docs/KNOWLEDGE.md): the outer `params.sessionId` is
+        # ABSENT on most of them (and, on the one frame type that has it, is
+        # the CHILD's id, never in `self.sessions`), so the buffer would take
+        # the frame under the wrong id. The parent is `params.parentSessionId`.
         if isinstance(method, str) and method.startswith("_kiro/workflow/"):
             self._on_workflow_notification(method, params)
             return
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
         session_id = params.get("sessionId")
-        self._stamp_activity(session_id)
         # A workflow step's own frames carry the child's sessionId. They are
         # the only sign of life during a long step (the workflow family itself
         # is silent between a step's `node_start` and `node_complete`), so
@@ -6962,7 +6973,7 @@ class _Supervisor:
                 # another session's turn (`activeSessionId`) and runs this one
                 # when that ends. No first-party client renders this (the TUI
                 # drives one session; KiroCrew has no handler), so the wait was
-                # invisible and `_await_inactivity` counted it as agent silence.
+                # invisible; `queue_status` shows it on the pages.
                 _behind = _kiro_meta.get("activeSessionId")
                 if isinstance(session_id, str) and isinstance(_behind, str) and _behind:
                     self._set_queued_behind(session_id, _behind)
@@ -6997,7 +7008,7 @@ class _Supervisor:
                     # Its own fire point rather than folding into turn end: a
                     # `display_error` does not necessarily end the turn, so
                     # waiting for the turn-end notification could mean waiting
-                    # until the silence timeout.
+                    # until someone presses Stop.
                     _notify("agent_error", session_id, _err_message)
                 return
             if _info_kind in ("user_message_id_assigned", "turn_end", "pending_interaction"):
@@ -7652,8 +7663,8 @@ class _Supervisor:
             _perm_payload["workflowStep"] = True
         _emit(owner_id, envelope("permission_request", _perm_payload, owner_id))
         # Notified unconditionally, unlike turn end: this request has stopped
-        # the turn and will keep it stopped until a human answers or the
-        # silence timeout cancels it, so "someone has the page open" is not
+        # the turn and will keep it stopped until a human answers it or
+        # presses Stop, so "someone has the page open" is not
         # evidence anyone has seen it.
         _notify("permission_request", owner_id,
                 toast_title[:MAX_PERMISSION_TITLE_CHARS])
@@ -9428,6 +9439,7 @@ async def _handle_prompt(conn, session_id, payload):
                "This session is still answering the previous prompt.")
         return
     _supervisor.inflight.add(session_id)
+    _supervisor.clear_stop(session_id)
     _evict_crew_children(session_id, keep_history=False, broadcast_empty=True)
     # Workflow children whose rows went at an earlier turn end (history kept
     # then for click-to-view) are released now; a row still shown keeps its own.
@@ -9561,15 +9573,17 @@ async def _handle_prompt(conn, session_id, payload):
             # After the emit, so the transcript is already consistent for anyone the
             # notification brings back to the page. Every way a turn can end reaches
             # this `finally` -- normal completion, AcpError, an unexpected
-            # exception, the silence-timeout AgentTimeout, and a user cancel -- so
+            # exception, the ceiling's or Stop fallback's AgentTimeout, and a
+            # user cancel -- so
             # this one call site covers them all; the consumer filters on
             # `stop_reason` rather than this module guessing which endings matter.
             _notify("turn_end", session_id, stop_reason)
         finally:
             # Last, so a slow or failing write delays nothing above. An entry
             # still here means the turn ended without its request being answered
-            # -- most usefully a silence timeout, where kiro-cli is still blocked
-            # on it and `cancelled` is what releases it as a deny. When the agent
+            # -- most usefully the ceiling or the Stop fallback, where kiro-cli
+            # is still blocked on it and `cancelled` is what releases it as a
+            # deny. When the agent
             # is dead the write fails, and `_answer_permission_cancelled` logs it
             # rather than raising out of this `finally`.
             # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
@@ -10227,6 +10241,7 @@ async def _handle_commands_execute(conn, session_id, payload):
     _supervisor.touch_used(session_id)
     log.info("ACP commands_execute: session=%s name=%r", session_id, name)
     _supervisor.inflight.add(session_id)
+    _supervisor.clear_stop(session_id)
     try:
         result = await _supervisor.commands_execute(session_id, name)
     except AcpError as exc:
@@ -10611,16 +10626,12 @@ def apply_config(config) -> None:
     hand-edited number would trade a wrong session cap for no application at
     all. The write path is where a bad value is refused by name.
     """
-    global MAX_SESSIONS, ACP_IDLE_TTL_SECONDS, PROMPT_SILENCE_SECONDS
+    global MAX_SESSIONS, ACP_IDLE_TTL_SECONDS
     MAX_SESSIONS = _clamped(config, "acp_max_sessions", MAX_SESSIONS, 1, 16)
     ACP_IDLE_TTL_SECONDS = float(_clamped(
         config, "acp_idle_ttl_seconds", ACP_IDLE_TTL_SECONDS, 300, 86400))
-    PROMPT_SILENCE_SECONDS = float(_clamped(
-        config, "acp_prompt_silence_seconds", PROMPT_SILENCE_SECONDS,
-        60, 86400))
-    log.info("ACP config applied: max_sessions=%d idle_ttl=%.0fs "
-             "prompt_silence=%.0fs", MAX_SESSIONS, ACP_IDLE_TTL_SECONDS,
-             PROMPT_SILENCE_SECONDS)
+    log.info("ACP config applied: max_sessions=%d idle_ttl=%.0fs",
+             MAX_SESSIONS, ACP_IDLE_TTL_SECONDS)
 
 
 def _clamped(config, name: str, fallback, low: int, high: int):

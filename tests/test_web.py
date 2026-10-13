@@ -1992,7 +1992,7 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     # `browser_hotkey`: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
     # puts it in both payloads.
     expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "peek_mode", "browser_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
-                     "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds",
+                     "acp_max_sessions", "acp_idle_ttl_seconds",
                      "remote_bind_address", "restart_to_apply", "in_force",
                      "restart_pending", "local_secret",
                      # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS
@@ -4498,15 +4498,15 @@ class TestAcpPromptDispatch:
                 patch.object(acp_mod._Supervisor, "alive", lambda self: True):
             asyncio.run(acp_mod._handle_prompt(conn_a, sid, {"prompt": "ping"}))
 
-        # The third element is the `_INACTIVITY` sentinel, not a number: the
-        # prompt path is the one request bounded by agent silence rather than
-        # by wall clock, and it asks for that through the existing `timeout`
+        # The third element is the `_PROMPT_WAIT` sentinel, not a number: the
+        # prompt path is the one request with no wall-clock bound (Stop or the
+        # absolute ceiling ends it), and it asks for that through the existing `timeout`
         # slot so `_request`'s signature — and the ~19 fixed-signature stubs
         # in this file that replace it — stay valid.
         assert calls == [("session/prompt",
                           {"sessionId": sid,
                            "prompt": [{"type": "text", "text": "ping"}]},
-                          acp_mod._INACTIVITY)]
+                          acp_mod._PROMPT_WAIT)]
         expected = [
             ("chunk", {"role": "user", "text": "ping"}),
             ("meta", {"turn": "start"}),
@@ -7669,9 +7669,7 @@ class TestAcpSessionClose:
 
     def test_close_during_a_turn_is_refused(self, acp_session):
         """The outstanding `session/prompt` would sit on a session the agent no
-        longer has until the inactivity ceiling gives up on it — up to
-        PROMPT_SILENCE_SECONDS plus a tick, and up to
-        PROMPT_ABSOLUTE_MAX_SECONDS if the agent keeps talking."""
+        longer has until Stop or PROMPT_ABSOLUTE_MAX_SECONDS ended it."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         acp_mod._supervisor.inflight.add(sid)
@@ -8301,7 +8299,7 @@ class TestAcpSessionRecordHoldsNoDeadState:
         # "always allow" eligibility reads
         # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-31).
         assert set(acp_mod._supervisor.sessions["records-0001"]) == {
-            "cwd", "created", "last_used", "last_activity", "mode"}
+            "cwd", "created", "last_used", "mode"}
         assert acp_mod._supervisor.sessions["records-0001"]["mode"] == "kiro_default"
 
     def test_a_loaded_session_records_only_what_is_read(self, acp_store):
@@ -8316,7 +8314,7 @@ class TestAcpSessionRecordHoldsNoDeadState:
         # D-31: the modeId the reload sent (the module-wide gate answers "in
         # effect", so the derived agent).
         assert set(acp_mod._supervisor.sessions["records-0002"]) == {
-            "cwd", "created", "last_used", "last_activity", "mode"}
+            "cwd", "created", "last_used", "mode"}
         assert acp_mod._supervisor.sessions["records-0002"]["mode"] == \
             acp_mod.DERIVED_AGENT_NAME
 
@@ -11177,7 +11175,7 @@ def _snap_waiting(reason, status="waiting"):
     )
 
 
-# --- ACP session lifecycle: activity stamps, inactivity ceiling, sweeper ---
+# --- ACP session lifecycle: use stamp, prompt wait, sweeper ---
 
 
 @pytest.fixture
@@ -11185,19 +11183,18 @@ def acp_fast(acp_store):
     """The lifecycle constants rebound small, restored afterwards.
 
     Every timing behaviour in this section is measured in the real constants'
-    units — 900 s of silence, a 4 h ceiling, a 30 min TTL, a 60 s sweep — so a
-    test that honoured them would burn 600-900 s of wall clock to assert one
+    units — a 15 s tick, a 24 h ceiling, a 30 min TTL, a 60 s sweep — so a
+    test that honoured them would burn minutes of wall clock to assert one
     branch. They are module-level rebindable names for exactly this reason, and
-    the ratios between them are preserved: tick << silence << absolute max.
+    the ratio between them is preserved: tick << absolute max.
     """
     acp_mod, store = acp_store
     saved = {name: getattr(acp_mod, name) for name in (
-        "PROMPT_TICK_SECONDS", "PROMPT_SILENCE_SECONDS",
+        "PROMPT_TICK_SECONDS",
         "PROMPT_ABSOLUTE_MAX_SECONDS", "CANCEL_GRACE_SECONDS",
         "ACP_IDLE_TTL_SECONDS", "SWEEP_INTERVAL_SECONDS", "MAX_SESSIONS",
         "WATCHDOG_INTERVAL_SECONDS")}
     acp_mod.PROMPT_TICK_SECONDS = 0.01
-    acp_mod.PROMPT_SILENCE_SECONDS = 0.08
     acp_mod.PROMPT_ABSOLUTE_MAX_SECONDS = 30.0
     acp_mod.CANCEL_GRACE_SECONDS = 0.05
     acp_mod.ACP_IDLE_TTL_SECONDS = 0.05
@@ -11264,16 +11261,16 @@ def _run_bounded(factory, seconds=15.0):
 
 
 class TestAcpActivityStamp:
-    """``last_activity`` and ``last_used`` answer opposed questions.
+    """``last_used`` answers "has nobody used this session?".
 
-    "Is the agent still working?" is asked by the inactivity ceiling and must
-    count *any* sign of life. "Has nobody used this session?" is asked by the
-    sweeper and must ignore agent-generated noise entirely. One field serving
-    both would let a chatty agent keep its own sessions permanently
-    unsweepable, with no error anywhere to say so.
+    It is asked by the sweeper and must ignore agent-generated noise entirely:
+    an agent stamp would let a chatty agent keep its own sessions permanently
+    unsweepable, with no error anywhere to say so. (A second, agent-driven
+    stamp fed the prompt silence watchdog and went with it: D24 of
+    261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES.)
     """
 
-    def test_a_new_session_carries_both_stamps_before_any_notification(
+    def test_a_new_session_carries_its_use_stamp_before_any_notification(
             self, acp_store):
         """The sweeper reads ``last_used`` on every tick, so a session created
         and never prompted — the "socket went away during session/new" case,
@@ -11289,9 +11286,8 @@ class TestAcpActivityStamp:
             asyncio.run(acp_mod._supervisor.new_session(str(store)))
         meta = acp_mod._supervisor.sessions["never-prompted-1"]
         assert isinstance(meta["last_used"], float)
-        assert isinstance(meta["last_activity"], float)
 
-    def test_a_loaded_session_carries_both_stamps(self, acp_store):
+    def test_a_loaded_session_carries_its_use_stamp(self, acp_store):
         acp_mod, store = acp_store
 
         async def answers(self, method, params, timeout=None):
@@ -11302,62 +11298,18 @@ class TestAcpActivityStamp:
             asyncio.run(acp_mod._supervisor.load_session("loaded-1", str(store)))
         meta = acp_mod._supervisor.sessions["loaded-1"]
         assert isinstance(meta["last_used"], float)
-        assert isinstance(meta["last_activity"], float)
 
-    @pytest.mark.parametrize("method, update", [
-        # The three kinds the dispatch below the stamp actually branches on.
-        ("session/update", {"sessionUpdate": "agent_message_chunk",
-                            "content": {"type": "text", "text": "x"}}),
-        # No `status` key on purpose: kiro-cli 2.16.0 does not send one on a
-        # `tool_call` frame, so anything deciding "a tool is running" from
-        # `update["status"]` reads None every time.
-        ("session/update", {"sessionUpdate": "tool_call", "toolCallId": "t1",
-                            "title": "Running: ping", "kind": "execute"}),
-        # The fall-through: at least six update kinds exist and three have
-        # branches, so a turn emitting only these would be judged silent.
-        ("session/update", {"sessionUpdate": "agent_thought_chunk"}),
-        ("session/update", {"sessionUpdate": "plan"}),
-        ("session/update", {"sessionUpdate": "current_mode_update"}),
-        # Measured on kiro-cli 2.16.0: a method *distinct* from
-        # `session/update`, carrying a sessionId and a `tool_call_chunk`, which
-        # falls through the dispatch entirely. A method allowlist would miss
-        # it and could cancel a working turn.
-        ("_kiro.dev/session/update", {"sessionUpdate": "tool_call_chunk"}),
-    ])
-    def test_any_notification_carrying_a_session_id_advances_last_activity(
-            self, acp_store, method, update):
+    def test_the_metadata_method_does_not_count_as_use(self, acp_store):
+        """`_kiro.dev/metadata` is agent bookkeeping; counting it as *use*
+        would make an idle session with a talkative agent unsweepable
+        forever."""
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
         meta = acp_mod._supervisor.sessions[sid]
-        meta["last_activity"] = 0.0
-        _notify(acp_mod, method, {"sessionId": sid, "update": update})
-        assert meta["last_activity"] > 0.0
-
-    def test_the_metadata_method_advances_activity_but_not_use(self, acp_store):
-        """The whole point of two fields. `_kiro.dev/metadata` is agent
-        bookkeeping; counting it as *use* would make an idle session with a
-        talkative agent unsweepable forever."""
-        acp_mod, _ = acp_store
-        sid = _live_session(acp_mod)
-        meta = acp_mod._supervisor.sessions[sid]
-        meta["last_activity"] = 0.0
         meta["last_used"] = 0.0
         _notify(acp_mod, acp_mod.METADATA_METHOD,
                 {"sessionId": sid, acp_mod.CONTEXT_PERCENT_KEY: 12.5})
-        assert meta["last_activity"] > 0.0
         assert meta["last_used"] == 0.0
-
-    def test_a_notification_with_no_session_id_is_a_real_null_path(
-            self, acp_store):
-        """`_kiro.dev/subagent/list_update` is the observed case: the one
-        `_kiro.dev/*` notification measured without a sessionId at all."""
-        acp_mod, _ = acp_store
-        sid = _live_session(acp_mod)
-        acp_mod._supervisor.sessions[sid]["last_activity"] = 0.0
-        _notify(acp_mod, "_kiro.dev/subagent/list_update", {"subagents": []})
-        _notify(acp_mod, "session/update",
-                {"update": {"sessionUpdate": "agent_thought_chunk"}})
-        assert acp_mod._supervisor.sessions[sid]["last_activity"] == 0.0
 
     def test_a_notification_after_the_record_is_gone_does_not_recreate_it(
             self, acp_store):
@@ -11450,13 +11402,10 @@ class TestAcpActivityStamp:
         assert acp_mod._sweepable(
             sid, meta, time.monotonic(), has_active_workflow=False, awaits_person=False) is True
 
-    def test_agent_chatter_inside_a_turn_moves_activity_and_not_use(
-            self, acp_store):
-        """Both fields in motion at once, which is the only place the split
-        can actually be observed. The agent talking mid-turn is liveness — the
-        ceiling must see it — and it is not *use*: if it advanced `last_used`
-        a talkative agent could hold a session past the sweeper indefinitely
-        without a person ever touching it."""
+    def test_agent_chatter_inside_a_turn_is_not_use(self, acp_store):
+        """The agent talking mid-turn is not *use*: if it advanced
+        `last_used` a talkative agent could hold a session past the sweeper
+        indefinitely without a person ever touching it."""
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
         meta = acp_mod._supervisor.sessions[sid]
@@ -11466,18 +11415,15 @@ class TestAcpActivityStamp:
             # Zeroed *after* the turn-start stamp landed, so anything the agent
             # says next has to move each field visibly or not at all.
             meta["last_used"] = 0.0
-            meta["last_activity"] = 0.0
             _notify(acp_mod, "session/update",
                     {"sessionId": sid,
                      "update": {"sessionUpdate": "agent_thought_chunk"}})
             _notify(acp_mod, acp_mod.METADATA_METHOD,
                     {"sessionId": sid, acp_mod.CONTEXT_PERCENT_KEY: 12.5})
-            seen["activity"] = meta["last_activity"]
             seen["used"] = meta["last_used"]
             return {}
 
         self._prompt(acp_mod, sid, during)
-        assert seen["activity"] > 0.0
         assert seen["used"] == 0.0
         # And the turn ending is use again, whatever the agent did in between.
         assert meta["last_used"] > 0.0
@@ -12248,8 +12194,9 @@ class TestAcpSubagentEviction:
         assert set(crew) == {"sub-1", "sub-2"}
 
 
-class TestAcpInactivityCeiling:
-    """The turn ceiling, driven directly.
+class TestAcpPromptWait:
+    """The prompt wait (no wall clock; Stop or the absolute ceiling), driven
+    directly.
 
     It lives inside ``_request``, and ~30 doubles in this file replace that
     function wholesale — so nothing reaching ``_handle_prompt`` exercises a
@@ -12258,7 +12205,7 @@ class TestAcpInactivityCeiling:
     """
 
     def _drive(self, acp_mod, sid, scenario):
-        """Run one ``_request`` in inactivity mode alongside ``scenario``.
+        """Run one ``_request`` in prompt-wait mode alongside ``scenario``.
 
         Returns ``(outcome, written)`` where ``outcome`` is the result or the
         exception the request raised, and ``written`` is every JSON-RPC object
@@ -12276,7 +12223,7 @@ class TestAcpInactivityCeiling:
                 with patch.object(acp_mod._Supervisor, "_write", fake_write):
                     task = asyncio.ensure_future(sup._request(
                         "session/prompt", {"sessionId": sid},
-                        timeout=acp_mod._INACTIVITY))
+                        timeout=acp_mod._PROMPT_WAIT))
                     # Let the request register its pending future and reach the
                     # wait; `scenario` reads `_pending` on its first line.
                     await asyncio.sleep(0)
@@ -12302,8 +12249,8 @@ class TestAcpInactivityCeiling:
     def test_a_turn_that_keeps_streaming_outlives_the_old_wall_clock(
             self, acp_fast):
         """The behaviour SC-8 exists for. The old bound was 600 s of wall
-        clock whatever the agent was doing; this turn runs for many multiples
-        of its silence window and completes, because something kept arriving.
+        clock whatever the agent was doing; this turn runs for many ticks and
+        completes when the agent answers.
         """
         acp_mod, _ = acp_fast
         sid = _live_session(acp_mod)
@@ -12321,53 +12268,15 @@ class TestAcpInactivityCeiling:
         assert outcome == {"stopReason": "end_turn"}
         assert [o.get("method") for o in written] == ["session/prompt"]
 
-    def test_only_unhandled_update_kinds_still_count_as_life(self, acp_fast):
-        """`agent_thought_chunk`, `plan` and `current_mode_update` reach no
-        branch in `_on_notification`, and `_kiro.dev/session/update` reaches
-        none either. Stamping above the dispatch on the *presence of a session
-        id* is what stops a turn emitting nothing else being cancelled."""
-        acp_mod, _ = acp_fast
-        sid = _live_session(acp_mod)
-
-        async def scenario(sup, task, written):
-            for kind in ("plan", "current_mode_update", "agent_thought_chunk",
-                         "plan", "current_mode_update", "tool_call_chunk"):
-                await asyncio.sleep(acp_mod.PROMPT_SILENCE_SECONDS / 3)
-                _notify(acp_mod, "_kiro.dev/session/update",
-                        {"sessionId": sid, "update": {"sessionUpdate": kind}})
-            assert not task.done()
-            self._pending(sup).set_result({"stopReason": "end_turn"})
-
-        outcome, written = self._drive(acp_mod, sid, scenario)
-        assert outcome == {"stopReason": "end_turn"}
-        assert "session/cancel" not in [o.get("method") for o in written]
-
-    def test_silence_past_the_window_cancels_agent_side_and_raises(
-            self, acp_fast):
-        """The other half of SC-8. The old path popped the future and raised
-        without telling the agent anything, so it kept working while the
-        session read idle."""
-        acp_mod, _ = acp_fast
-        sid = _live_session(acp_mod)
-
-        async def scenario(sup, task, written):
-            return
-
-        outcome, written = self._drive(acp_mod, sid, scenario)
-        assert isinstance(outcome, acp_mod.AgentTimeout)
-        assert "silent" in str(outcome)
-        cancels = [o for o in written if o.get("method") == "session/cancel"]
-        assert cancels and cancels[0]["params"] == {"sessionId": sid}
-        # A notification, not a request: a cancel that itself awaited an answer
-        # would be a Stop button that hangs.
-        assert "id" not in cancels[0]
-
     def test_a_cancel_honoured_inside_the_grace_returns_the_real_answer(
             self, acp_fast):
         """Measured at 9 ms on kiro-cli 2.16.0, and matched on the pending
         future rather than dropped — which is why `CANCEL_GRACE_SECONDS` is
-        seconds rather than the 30 s an unmeasured worst case bought."""
+        seconds rather than the 30 s an unmeasured worst case bought. Reached
+        through the absolute ceiling, the one path that still writes the cancel
+        from inside the wait."""
         acp_mod, _ = acp_fast
+        acp_mod.PROMPT_ABSOLUTE_MAX_SECONDS = 0.05
         sid = _live_session(acp_mod)
 
         async def scenario(sup, task, written):
@@ -12383,41 +12292,27 @@ class TestAcpInactivityCeiling:
         assert [o.get("method") for o in written] == [
             "session/prompt", "session/cancel"]
 
-    def test_a_prompt_on_a_long_idle_session_gets_a_full_window(self, acp_fast):
-        """The deadline is seeded locally at send time. Reading the shared
-        `last_activity` as the baseline would kill the first prompt on any
-        session idle longer than the silence window — a session idle 20 minutes
-        with a tab attached is unswept and already "silent"."""
-        acp_mod, _ = acp_fast
-        sid = _live_session(acp_mod)
-        acp_mod._supervisor.sessions[sid]["last_activity"] = (
-            time.monotonic() - 10 * acp_mod.PROMPT_SILENCE_SECONDS)
-
-        async def scenario(sup, task, written):
-            # Several ticks, and comfortably inside one silence window: the
-            # naive version dies on the very first tick.
-            await asyncio.sleep(acp_mod.PROMPT_SILENCE_SECONDS / 3)
-            assert not task.done(), "cancelled before the agent could answer"
-            self._pending(sup).set_result({"stopReason": "end_turn"})
-
-        outcome, written = self._drive(acp_mod, sid, scenario)
-        assert outcome == {"stopReason": "end_turn"}
-        assert "session/cancel" not in [o.get("method") for o in written]
-
     def test_a_turn_past_the_absolute_ceiling_is_cancelled_even_while_talking(
             self, acp_fast):
-        """Without this a turn emitting one chunk just under the silence
-        window runs forever, and `inflight` makes that session simultaneously
-        un-closable and un-sweepable for the app's lifetime."""
+        """Without this a live agent that never ends its turn runs it forever,
+        and `inflight` makes that session simultaneously un-closable and
+        un-sweepable for the app's lifetime. The cancel is written only once
+        the ceiling has passed, never before it."""
         acp_mod, _ = acp_fast
-        acp_mod.PROMPT_SILENCE_SECONDS = 30.0
-        acp_mod.PROMPT_ABSOLUTE_MAX_SECONDS = 0.05
+        acp_mod.PROMPT_ABSOLUTE_MAX_SECONDS = 0.2
         sid = _live_session(acp_mod)
 
         async def scenario(sup, task, written):
-            for _ in range(60):
+            started = time.monotonic()
+            for _ in range(200):
                 if task.done():
                     return
+                # 0.9: the request started a hair before `started`.
+                if (time.monotonic() - started
+                        < 0.9 * acp_mod.PROMPT_ABSOLUTE_MAX_SECONDS):
+                    assert "session/cancel" not in [
+                        o.get("method") for o in written], \
+                        "cancelled before the ceiling"
                 await asyncio.sleep(acp_mod.PROMPT_TICK_SECONDS / 2)
                 _notify(acp_mod, "session/update",
                         {"sessionId": sid,
@@ -12447,10 +12342,27 @@ class TestAcpInactivityCeiling:
         assert isinstance(outcome, acp_mod.AgentDied)
         assert "session/cancel" not in [o.get("method") for o in written]
 
+    def test_a_quiet_turn_is_never_cancelled_for_silence(self, acp_fast):
+        """SC-9 / D24: no notification at all for 0.3 s, thirty ticks, and the
+        turn is still waiting. A person may take hours over an open approval
+        or question, and silence is no longer a reason to end a turn."""
+        acp_mod, _ = acp_fast
+        acp_mod.PROMPT_TICK_SECONDS = 0.01
+        sid = _live_session(acp_mod)
+
+        async def scenario(sup, task, written):
+            await asyncio.sleep(0.3)
+            assert not task.done(), "a quiet turn was ended"
+            self._pending(sup).set_result({"stopReason": "end_turn"})
+
+        outcome, written = self._drive(acp_mod, sid, scenario)
+        assert outcome == {"stopReason": "end_turn"}
+        assert [o.get("method") for o in written] == ["session/prompt"]
+
     def test_the_request_signature_is_unchanged(self):
         """19 fixed-signature stubs in this file replace `_request` wholesale.
         A new parameter would raise `TypeError` in every one of them, which is
-        why the inactivity mode travels in the existing `timeout` slot."""
+        why the prompt-wait mode travels in the existing `timeout` slot."""
         import inspect
         from power_atlas import acp as acp_mod
         params = list(inspect.signature(
@@ -12480,6 +12392,178 @@ class TestAcpInactivityCeiling:
         with pytest.raises(acp_mod.AgentTimeout) as exc:
             asyncio.run(run())
         assert "within 0s" in str(exc.value)
+
+
+class TestAcpStopFallback:
+    """D26: Stop ends a turn locally when the agent does not answer the cancel.
+
+    Driven through the real handlers and the real ``_request``, with only
+    ``_write`` and ``alive`` replaced, so the turn boundary the page reads is
+    the one ``_handle_prompt``'s ``finally`` emits. Every test sets a tick far
+    longer than ``CANCEL_GRACE_SECONDS`` + 1 s: a fallback that waited for the
+    next tick instead of waking on the Stop misses the bound.
+    """
+
+    D26_MESSAGE = ("The agent did not answer Stop; the turn was ended here. "
+                   "Its tool processes may still be running.")
+
+    def _conn(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _run(self, acp_mod, scenario):
+        written = []
+
+        def fake_write(self, obj):
+            written.append(obj)
+
+        async def run():
+            sup = acp_mod._supervisor
+            sup._loop = asyncio.get_running_loop()
+            try:
+                with patch.object(acp_mod._Supervisor, "_write", fake_write), \
+                        patch.object(acp_mod._Supervisor, "alive",
+                                     lambda self: True):
+                    return await asyncio.wait_for(scenario(sup, written), 15)
+            finally:
+                sup._loop = None
+                sup._pending.clear()
+
+        return asyncio.run(run()), written
+
+    @staticmethod
+    async def _await_request(sup, written, method, count=1):
+        for _ in range(3000):
+            ids = [o["id"] for o in written if o.get("method") == method]
+            if len(ids) >= count and ids[-1] in sup._pending:
+                return sup._pending[ids[-1]]
+            await asyncio.sleep(0.001)
+        raise AssertionError(f"{method} was never written")
+
+    @staticmethod
+    def _turn_ends(acp_mod, sid):
+        return [e["payload"] for e in acp_mod._supervisor.history[sid].events()
+                if e["type"] == "meta" and e["payload"].get("turn") == "end"]
+
+    @staticmethod
+    def _errors(acp_mod, sid):
+        return [(e["payload"]["code"], e["payload"]["message"])
+                for e in acp_mod._supervisor.history[sid].events()
+                if e["type"] == "error"]
+
+    def test_an_agent_that_ignores_stop_has_its_turn_ended_after_the_grace(
+            self, acp_fast):
+        acp_mod, _ = acp_fast
+        acp_mod.PROMPT_TICK_SECONDS = 3.0
+        acp_mod.CANCEL_GRACE_SECONDS = 0.2
+        sid = _live_session(acp_mod)
+        conn = self._conn(acp_mod, sid)
+
+        async def scenario(sup, written):
+            turn = asyncio.ensure_future(
+                acp_mod._handle_prompt(conn, sid, {"prompt": "go"}))
+            await self._await_request(sup, written, "session/prompt")
+            stopped = time.monotonic()
+            await acp_mod._handle_cancel(conn, sid)
+            await turn
+            return time.monotonic() - stopped
+
+        elapsed, written = self._run(acp_mod, scenario)
+        # Both sides of the bound: never before the grace, and within grace + 1 s.
+        assert 0.2 <= elapsed < 0.2 + 1.0, elapsed
+        # The Stop's own cancel is the only one: the fallback writes nothing.
+        assert [o.get("method") for o in written] == [
+            "session/prompt", "session/cancel"]
+        assert self._turn_ends(acp_mod, sid) == [
+            {"turn": "end", "stopReason": "error"}]
+        assert self._errors(acp_mod, sid) == [("agent_timeout", self.D26_MESSAGE)]
+        assert sid not in acp_mod._supervisor.inflight
+
+    def test_an_agent_that_honours_stop_returns_its_real_answer(
+            self, acp_fast, caplog):
+        acp_mod, _ = acp_fast
+        acp_mod.PROMPT_TICK_SECONDS = 3.0
+        acp_mod.CANCEL_GRACE_SECONDS = 0.4
+        sid = _live_session(acp_mod)
+        conn = self._conn(acp_mod, sid)
+
+        async def scenario(sup, written):
+            turn = asyncio.ensure_future(
+                acp_mod._handle_prompt(conn, sid, {"prompt": "go"}))
+            fut = await self._await_request(sup, written, "session/prompt")
+            await acp_mod._handle_cancel(conn, sid)
+            await asyncio.sleep(0.1)
+            fut.set_result({"stopReason": "cancelled"})
+            await turn
+
+        with caplog.at_level(logging.WARNING, logger=acp_mod.log.name):
+            self._run(acp_mod, scenario)
+        assert self._turn_ends(acp_mod, sid) == [
+            {"turn": "end", "stopReason": "cancelled"}]
+        assert self._errors(acp_mod, sid) == []
+        assert "did not answer Stop" not in caplog.text
+
+    def test_a_stop_in_one_turn_does_not_end_the_next_turn_early(
+            self, acp_fast):
+        acp_mod, _ = acp_fast
+        acp_mod.PROMPT_TICK_SECONDS = 3.0
+        acp_mod.CANCEL_GRACE_SECONDS = 0.2
+        sid = _live_session(acp_mod)
+        conn = self._conn(acp_mod, sid)
+
+        async def scenario(sup, written):
+            first = asyncio.ensure_future(
+                acp_mod._handle_prompt(conn, sid, {"prompt": "one"}))
+            fut = await self._await_request(sup, written, "session/prompt")
+            await acp_mod._handle_cancel(conn, sid)
+            fut.set_result({"stopReason": "cancelled"})
+            await first
+            second = asyncio.ensure_future(
+                acp_mod._handle_prompt(conn, sid, {"prompt": "two"}))
+            fut = await self._await_request(sup, written, "session/prompt", 2)
+            # Past the grace of the first turn's Stop, measured from now.
+            await asyncio.sleep(0.5)
+            assert not second.done(), "the old Stop ended the next turn"
+            fut.set_result({"stopReason": "end_turn"})
+            await second
+
+        self._run(acp_mod, scenario)
+        assert self._turn_ends(acp_mod, sid) == [
+            {"turn": "end", "stopReason": "cancelled"},
+            {"turn": "end", "stopReason": "end_turn"}]
+        assert self._errors(acp_mod, sid) == []
+
+    def test_the_same_fallback_ends_a_slash_command(self, acp_fast):
+        acp_mod, _ = acp_fast
+        acp_mod.PROMPT_TICK_SECONDS = 3.0
+        acp_mod.CANCEL_GRACE_SECONDS = 0.2
+        sid = _live_session(acp_mod)
+        conn = self._conn(acp_mod, sid)
+        # A Stop left over from an earlier turn: the command's dispatch must
+        # clear it, or the command ends at once.
+        acp_mod._supervisor.sessions[sid]["stop_requested_at"] = time.monotonic()
+
+        async def scenario(sup, written):
+            cmd = asyncio.ensure_future(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "/context"}))
+            await self._await_request(sup, written, "_kiro.dev/commands/execute")
+            await asyncio.sleep(0.4)
+            assert not cmd.done(), "a stale Stop ended the command"
+            stopped = time.monotonic()
+            await acp_mod._handle_cancel(conn, sid)
+            await cmd
+            return time.monotonic() - stopped
+
+        elapsed, written = self._run(acp_mod, scenario)
+        assert 0.2 <= elapsed < 0.2 + 1.0, elapsed
+        frames = _queued(conn)
+        assert [(f["payload"]["code"], f["payload"]["message"])
+                for f in frames if f["type"] == "error"] == [
+            ("agent_timeout", self.D26_MESSAGE)]
+        assert not [f for f in frames if f["type"] == "commands_execute_result"]
+        assert sid not in acp_mod._supervisor.inflight
 
 
 class TestAcpWorkflowNotifications:
@@ -12769,7 +12853,6 @@ class TestAcpWorkflowNotifications:
             self, wf, parent):
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")   # real state to disturb
-        sv.sessions[self.P]["last_activity"] = 0.0
         before = copy.deepcopy((sv.crews, sv._workflow_children, sv._workflow_node_index,
                                 sv.subagent_sessions, sv._crew_order_next))
         sessions_before = set(sv.sessions)
@@ -12782,7 +12865,6 @@ class TestAcpWorkflowNotifications:
         assert (sv.crews, sv._workflow_children, sv._workflow_node_index,
                 sv.subagent_sessions, sv._crew_order_next) == before
         assert set(sv.sessions) == sessions_before
-        assert sv.sessions[self.P]["last_activity"] == 0.0     # nobody was stamped
 
     @pytest.mark.parametrize("fields, creates", [
         ({"nodePath": "a/b", "sessionId": "child-c9"}, True),
@@ -12827,7 +12909,7 @@ class TestAcpWorkflowNotifications:
             sv._on_notification({"method": "_kiro/workflow/" + kind, "params": params})
         assert (sv.crews, sv._workflow_children, sv._workflow_node_index) == before
 
-    def test_workflow_routing_needs_no_outer_session_id_and_stamps_the_parent(self, wf):
+    def test_workflow_routing_needs_no_outer_session_id(self, wf):
         acp_mod, sv = wf
         # Measured: run_start, node_complete and run_complete carry no
         # sessionId; the second node_start carries the CHILD's.
@@ -12841,9 +12923,7 @@ class TestAcpWorkflowNotifications:
             ("run_complete", {"workflowId": "wf-k7x", "status": "completed"}),
         ]
         for kind, fields in steps:
-            sv.sessions[self.P]["last_activity"] = 0.0
             self._send(acp_mod, kind, **fields)
-            assert sv.sessions[self.P]["last_activity"] > 0.0, kind
         assert sv.crews[self.P]["child-c7"]["done"] is True
         assert "child-c7" not in sv.sessions      # a child never becomes a session
 
@@ -17462,7 +17542,22 @@ class TestAcpConfiguredLimits:
         assert acp_mod.MAX_SESSIONS == 8
         assert Config().acp_max_sessions == 8
         assert Config().acp_idle_ttl_seconds == 1800
-        assert Config().acp_prompt_silence_seconds == 1800
+
+    def test_a_stored_silence_setting_loads_and_is_dropped_on_save(
+            self, isolated_config):
+        """D24 config migration: the removed watchdog's key is a legacy key.
+        A file still holding it loads without error, the rest of the file is
+        read, and the next save writes it out of the file."""
+        from power_atlas.config import load_config, save_config
+        _write_config(isolated_config,
+                      "acp_max_sessions = 5\nacp_prompt_silence_seconds = 7201\n")
+        config = load_config()
+        assert config.acp_max_sessions == 5
+        assert not hasattr(config, "acp_prompt_silence_seconds")
+        save_config(config)
+        text = (isolated_config / "config.toml").read_text(encoding="utf-8")
+        assert "acp_prompt_silence_seconds" not in text
+        assert "acp_max_sessions = 5" in text
 
     def test_it_stays_a_module_attribute(self):
         """Nine sites in this file read `acp.MAX_SESSIONS`; moving it onto
@@ -17471,15 +17566,13 @@ class TestAcpConfiguredLimits:
         assert "MAX_SESSIONS" in vars(acp_mod)
         assert not hasattr(acp_mod._supervisor, "MAX_SESSIONS")
 
-    def test_apply_config_rebinds_all_three(self, acp_fast):
+    def test_apply_config_rebinds_both(self, acp_fast):
         acp_mod, _ = acp_fast
         from power_atlas.config import Config
         acp_mod.apply_config(Config(acp_max_sessions=5,
-                                    acp_idle_ttl_seconds=600,
-                                    acp_prompt_silence_seconds=120))
+                                    acp_idle_ttl_seconds=600))
         assert acp_mod.MAX_SESSIONS == 5
         assert acp_mod.ACP_IDLE_TTL_SECONDS == 600.0
-        assert acp_mod.PROMPT_SILENCE_SECONDS == 120.0
         # The refusal the operator reads has to quote the cap in force.
         assert "5 sessions" in acp_mod._session_limit_message()
 
@@ -17489,8 +17582,6 @@ class TestAcpConfiguredLimits:
         ("acp_max_sessions", "MAX_SESSIONS", True),
         ("acp_idle_ttl_seconds", "ACP_IDLE_TTL_SECONDS", 299),
         ("acp_idle_ttl_seconds", "ACP_IDLE_TTL_SECONDS", 86401),
-        ("acp_prompt_silence_seconds", "PROMPT_SILENCE_SECONDS", 59),
-        ("acp_prompt_silence_seconds", "PROMPT_SILENCE_SECONDS", 86401),
     ])
     def test_an_out_of_range_value_is_named_and_the_value_in_force_kept(
             self, acp_fast, caplog, field, attr, bad):
@@ -18985,7 +19076,6 @@ class TestSettingsSurface:
     @pytest.mark.parametrize("key,value", [
         ("acp_max_sessions", 0), ("acp_max_sessions", 17),
         ("acp_idle_ttl_seconds", 299), ("acp_idle_ttl_seconds", 86401),
-        ("acp_prompt_silence_seconds", 59), ("acp_prompt_silence_seconds", 86401),
     ])
     def test_out_of_range_values_are_refused(self, key, value, client):
         body = client.post("/api/save-setting",
@@ -19014,14 +19104,13 @@ class TestSettingsSurface:
             "int settings without a bound: "
             f"{sorted(unbounded - set(_SETTING_BOUNDS))}")
         assert set(_SETTING_BOUNDS) == {
-            "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds"}
+            "acp_max_sessions", "acp_idle_ttl_seconds"}
         assert set(_SETTING_BOUNDS) <= set(_SETTING_TYPES)
 
     def test_the_startup_only_keys_say_restart_to_apply(self, client):
         from power_atlas.web import _RESTART_TO_APPLY
         assert {"acp_max_sessions", "acp_idle_ttl_seconds",
-                "acp_prompt_silence_seconds", "remote_bind_address",
-                "port"} <= _RESTART_TO_APPLY
+                "remote_bind_address", "port"} <= _RESTART_TO_APPLY
         body = client.get("/api/settings").json()
         assert set(body["restart_to_apply"]) == set(_RESTART_TO_APPLY)
 
@@ -29212,7 +29301,7 @@ class TestSupervisor:
 
     def test_display_error_calls_the_notify_hook(self, monkeypatch):
         """A mid-turn error is its own fire point: it need not end the turn,
-        so waiting for turn end could mean waiting for the silence timeout."""
+        so waiting for turn end could mean waiting until someone presses Stop."""
         from power_atlas import acp as acp_mod
         sv3 = self._sv3(monkeypatch)
         sid = "sess_dispedhook-0000-0000-0000-000001"
@@ -29893,8 +29982,8 @@ class TestSupervisor:
             self._cleanup_registry(acp_mod)
 
     def test_turn_end_sweep_answers_swept_requests_cancelled(self, monkeypatch):
-        """K2. A request still pending when the turn ends -- most usefully a
-        silence timeout, where kiro-cli is still blocked on it -- is answered
+        """K2. A request still pending when the turn ends -- most usefully the
+        ceiling or the Stop fallback, where kiro-cli is still blocked on it -- is answered
         `cancelled`, which releases it as a deny. Only the finishing
         session's."""
         import asyncio
@@ -29912,7 +30001,7 @@ class TestSupervisor:
             "session_id": other, "options": [], "kiro_id": 22}
 
         async def timed_out(self, session_id, text, images):
-            raise acp_mod.AgentTimeout("silence")
+            raise acp_mod.AgentTimeout("ceiling")
 
         written = []
         try:

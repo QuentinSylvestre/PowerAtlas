@@ -6114,7 +6114,6 @@ async def api_settings():
         "autostart": autostart_enabled,
         "acp_max_sessions": config.acp_max_sessions,
         "acp_idle_ttl_seconds": config.acp_idle_ttl_seconds,
-        "acp_prompt_silence_seconds": config.acp_prompt_silence_seconds,
         # The address only; the secret is served by `/api/remote-access` alone.
         "remote_bind_address": config.remote_bind_address,
         # Which keys are restart-only. A property of the setting, unchanging.
@@ -6413,7 +6412,6 @@ _SETTING_TYPES: dict[str, type] = {
     # must say **restart to apply** — see `_RESTART_TO_APPLY` below.
     "acp_max_sessions": int,
     "acp_idle_ttl_seconds": int,
-    "acp_prompt_silence_seconds": int,
     "remote_bind_address": str,
     # The kiro-cli agent the derived ACP agent is built from. A name, never a
     # path (D-8), validated on the write path below by
@@ -6432,15 +6430,13 @@ _SETTING_TYPES: dict[str, type] = {
 _SETTING_BOUNDS: dict[str, tuple[int, int]] = {
     "acp_max_sessions": (1, 16),
     "acp_idle_ttl_seconds": (300, 86400),
-    "acp_prompt_silence_seconds": (60, 86400),
 }
 
 # Keys whose value is read exactly once at startup. Returned to the settings UI
 # so it can say so, rather than appearing to take effect and silently doing
 # nothing until the next launch.
 _RESTART_TO_APPLY = frozenset({
-    "port", "acp_max_sessions", "acp_idle_ttl_seconds",
-    "acp_prompt_silence_seconds", "remote_bind_address",
+    "port", "acp_max_sessions", "acp_idle_ttl_seconds", "remote_bind_address",
     # `peek_hotkey` is consumed once, at startup, by
     # `create_peek(server_url, config.peek_hotkey, config.peek_mode,
     # config.browser_hotkey)`; `PeekWindow.__init__` parses it into its chord

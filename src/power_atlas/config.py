@@ -48,8 +48,12 @@ _DEFAULT_TERMINAL_COMMAND = "wt new-tab --title {title} -p {wt_profile} -d {cwd}
 # `acp_permissions_enabled` is the on/off switch the permission modes replaced;
 # `load_config` migrates it into `acp_permission_mode`
 # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-8, D-27).
+# `acp_prompt_silence_seconds` was the prompt silence watchdog's window, removed
+# with the watchdog; it is not migrated, only dropped
+# (261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D24).
 _LEGACY_KEYS = frozenset({"trust_all_tools", "terminal_command",
-                          "acp_permissions_enabled"})
+                          "acp_permissions_enabled",
+                          "acp_prompt_silence_seconds"})
 
 # The permission modes that can be stored (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL
 # D-2). Auto is shown in the settings menu but is not storable until its decider
@@ -118,7 +122,7 @@ class Config:
     # `at_capacity()` runs on the event loop and `load_config()` is an uncached
     # whole-file TOML parse, so a read there reproduces the stall `_handle_new`
     # already threads out to avoid. The consequence a settings UI has to state
-    # is that changing any of the three needs a restart to take effect.
+    # is that changing either of the two needs a restart to take effect.
     #
     # 8 is the measured default, not a guess: one agent carrying eight sessions
     # was measured 2026-08-01 (`plans/260731_ACP_REMOTE_CLIENT_PRODUCTIZATION.md`).
@@ -126,7 +130,6 @@ class Config:
     # never raising, and ~16 routes call it on the loop.
     acp_max_sessions: int = 8
     acp_idle_ttl_seconds: int = 1800
-    acp_prompt_silence_seconds: int = 1800
     # The single non-loopback address PowerAtlas additionally listens on, and
     # the single non-loopback name `web._ALLOWED_HOSTS` admits. Empty means
     # loopback-only, which is the default and the state a version bump must
