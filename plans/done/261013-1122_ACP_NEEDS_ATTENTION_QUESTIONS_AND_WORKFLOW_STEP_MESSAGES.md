@@ -2,10 +2,25 @@
 
 > **Date**: 2026-10-12
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-10-13 11:22
 > **Scope**: List pending approvals, agent questions and workflow step questions in the dashboard Overview's "Needs attention" with a `(N)` title count; declare kiro-cli's `userInput` capability and answer `_kiro/userInput`; handle `_kiro/session/notify` and paused workflow runs; fix `_note_subagent_action`'s crew-frame filter
 > **Memory relied on**: none
 > **Estimated effort**: 2-3 days
+
+## Completion Summary
+
+All seven phases are complete. The dashboard's "Needs attention" lists pending approvals, agent questions and workflow step questions with a `(N)` page-title count; agent questions arrive through kiro-cli's `userInput` and render as cards with options, descriptions and free text; step messages and paused runs render truthfully; the prompt silence watchdog is gone and Stop ends a turn locally when the agent ignores it; no automatic path cancels a request waiting on a person. Final suites: `tests/test_web.py` 3397 passed, 1 skipped; node 1112 passed. Live QA passed in a real browser, including a 33-minute held approval in Manual mode.
+
+### Acknowledged at archival
+
+- **Follow-up plan intended** (Follow-up Work items 1 and 2): the file-based transcript view's replayed step messages, and pending cards lost to history eviction. Both are in `plans/ROADMAP.md` ("Needs attention residuals").
+- **Accepted** (doc ripple, D2): the kiro-cli delegation entry in `memory/MEMORY.md` still describes the removed silence watchdog; routed to the `/qdream lightweight` run at archival.
+- Pass 4 fixed one stale reference: `plans/tests/260701_POWERATLAS.md` no longer lists `acp_prompt_silence_seconds` among the save-setting keys.
+- Accepted (harness opportunity): Step 1.5's three code-tracing briefs overlapped heavily on this scope.
+- Accepted (harness opportunity): the decisive findings came from probes and a vendor-bundle grep, not the trio.
+- Accepted (harness opportunity): three plan reviewers independently found that the card belongs in `transcript-renderer.js`.
+- Accepted (harness opportunity): with a 1-cycle cap, plan fixes went in without re-review.
+- Promoted: `/qdev` Rules now require a unique commit-message file name per commit and a `git log -1 --format=%s` check (agent-playbook `db3af15`).
 
 ---
 
@@ -924,6 +939,10 @@ QA verification: PASS (8 checks across /acp, the dashboard, workflow steps, sett
 | 21 | Low | [Cycle 2] Missing tests: routed-question wave hold, question-pause-answer order, out-of-turn Stop or close resuming. | Fixed -- three tests (23bf2fd). |
 
 Cycle 1 ran the three personas in parallel, each mutating only a private `git archive` copy: Senior killed 7 of 7 mutations, Security 10 of 11, Reliability 12 of 15 (survivors became rows 6 and 7). Cycle 2 (`a387bfd..59f38a8`) killed 9 of 9 and found rows 3 and 17-21. The cycle cap was then reached; the user directed "fill all six now + option A" (2026-10-13) for the cycle-2 findings and the toast. Final suites at 611a10d: `tests/test_web.py` 3397 passed, 1 skipped; `tests/test_config.py` 113 passed; node 1112 passed. Raw per-persona summaries are in the session scratchpad (`review_s9`).
+
+### 2026-10-13 -- Divergence verification (at archival)
+
+Every entry in §9 was judged by a reviewer or decided by the user. Phase 1: the skip-option title and the "Slash commands unmeasured" entry are records only; the re-sent `run_start`/`node_start` handling was verified by the Phase 4 Reliability review; the step paused after `success` is the user's decision "A". Phase 3: both Phase 3 reviewers judged the four implementer divergences sound; the sweeper guard is the user's decision "A"; the approval-title cleaning, the refusal `requestId` and the crew-over-cap warning were review fixes checked by the diff-only re-review. Phase 4: the Reliability reviewer judged all eight declared divergences sound; the reopen, the one resume rule and the dashboard replay were checked by the diff-only re-review; the age-cap consequence is the user's "OK for reco". Phase 5: the Security reviewer judged each declared divergence acceptable; the shared validity rule was checked by the Step 9 Senior engineer review. Phase 6: the wrong subject on d2fbc36 is the user's decision "B"; the Reliability reviewer judged the wait shape and the reduced tests sound, and the Stop pinning was checked by the re-review. Step 9: the cycle-2 review checked the kept wave, `question_wait` and the poller; the toast is the user's option A. The Phase 7 doc changes were checked by the Step 9 Senior engineer review.
 
 ## Harness Improvement Opportunities
 
