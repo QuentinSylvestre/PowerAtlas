@@ -806,6 +806,32 @@ function addSystemMessage(text) {
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
+/** Append a workflow step's message (a `step_message` frame) as a system row:
+ *  the step's name, then its message. Both pages dispatch the frame here, live
+ *  and on replay (the frame is recorded).
+ *  SECURITY: textContent only. `severity` comes off the wire, so the modifier
+ *  class is picked from a fixed list, never built from the value.
+ *  261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D12 */
+function addStepMessage(step, severity, message) {
+  var stick = stuckToBottom();
+  var row = document.createElement('div');
+  row.className = 'acp-step-message ' + (
+    severity === 'error' ? 'acp-step-message-error'
+      : severity === 'warning' ? 'acp-step-message-warning'
+      : 'acp-step-message-info');
+  var who = document.createElement('span');
+  who.className = 'acp-step-message-step';
+  who.textContent = typeof step === 'string' && step ? step : 'workflow step';
+  var body = document.createElement('span');
+  body.className = 'acp-step-message-text';
+  body.textContent = typeof message === 'string' ? message : '';
+  row.appendChild(who);
+  row.appendChild(body);
+  transcriptEl.appendChild(row);
+  if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  return row;
+}
+
 // ---- tool-call rendering ---------------------------------------------------
 //
 // A status this map does not list renders as no badge rather than as a raw

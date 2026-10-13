@@ -2036,6 +2036,8 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
    working, finished, or failed. */
 .acp-subpanel-status-error { color: #f87171; }
 .acp-subpanel-status-done { color: var(--text-dim); }
+/* A workflow step waiting on a person (D15, 261012): the rail's waiting colour. */
+.acp-subpanel-status-waiting { color: #f59e0b; }
 
 /* Crew panel — lean rows replacing the old card-button design */
 .acp-crew-panel  { display:flex; flex-direction:column; gap:2px; padding:6px 8px; margin:4px 0; border-left:2px solid var(--border); flex-shrink:0; }
@@ -2048,7 +2050,16 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .acp-crew-action { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .acp-crew-row-working .acp-crew-action { color:#3b82f6; }  /* matches status-thinking dot */
 .acp-crew-row-error   .acp-crew-action { color:#ef4444; }  /* matches status-errored dot */
+.acp-crew-row-waiting .acp-crew-action { color:#f59e0b; }  /* matches status-waiting dot */
 .acp-crew-elapsed { font-variant-numeric:tabular-nums; color:var(--text-dim); white-space:nowrap; flex-shrink:0; }
+
+/* A workflow step's warning or error message (`step_message`, 261012 D12):
+   a system row with the step's name, then its text. Text only. */
+.acp-step-message { margin: 4px 14px; padding: 6px 10px; border-left: 3px solid var(--border); border-radius: var(--radius-sm); font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
+.acp-step-message-step { font-weight: 600; margin-right: 8px; color: var(--text-muted); }
+.acp-step-message-warning { border-left-color: #f59e0b; }
+.acp-step-message-error { border-left-color: #ef4444; }
+.acp-step-message-info { border-left-color: var(--border); }
 
 .acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; position: relative; }
 .acp-composer-row { display: flex; gap: 8px; align-items: stretch; position: relative; }

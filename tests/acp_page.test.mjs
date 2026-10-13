@@ -6748,11 +6748,12 @@ check("crew row has status-errored dot for error entry", (tpl) => {
 });
 
 // Workflow steps (261008 Phase 2) arrive as ordinary crew entries whose
-// sessionId is a real child session id. The row reads only `done`/`error`
-// for its state and `action` for its text, so a paused step ("waiting") shows
-// as a working row labelled "waiting", and a failed one (done + error text)
-// as an errored row. The entry shape is what `_on_workflow_node_start` and
-// `_on_workflow_node_done` write; no status string is read by the renderer.
+// sessionId is a real child session id. The row reads `done`/`error` and, for
+// an open row, `status === 'waiting'` for its state, and `action` for its
+// text. A paused step ("waiting") gets the waiting dot (261012 D15; before
+// D15 it shared the working dot), and a failed one (done + error text) is an
+// errored row. The entry shape is what `_on_workflow_node_start` and
+// `_on_workflow_node_done` write.
 check("workflow crew rows: running, waiting and failed render sensibly", (tpl) => {
   const { page, live } = connected(tpl);
   const now = Date.now() / 1000;
@@ -6779,7 +6780,10 @@ check("workflow crew rows: running, waiting and failed render sensibly", (tpl) =
   assert(cls(rows[0]).includes("status-thinking"), "running step shows the working dot");
   assertEqual(text(rows[1], ".acp-crew-action"), "waiting",
               "a paused step must say it is waiting, not just 'working'");
-  assert(cls(rows[1]).includes("status-thinking"), "waiting step is not done");
+  // D15 (261012): a waiting step gets the waiting dot, not the working one.
+  assert(cls(rows[1]).includes("status-waiting"), "waiting step shows the waiting dot");
+  assert(!cls(rows[1]).includes("status-thinking"), "waiting step is not shown working");
+  assert(rows[1].className.includes("acp-crew-row-waiting"), "waiting row class");
   assert(!rows[1].className.includes("acp-crew-row-error") &&
          !rows[1].className.includes("acp-crew-row-done"),
          "a waiting step is not shown as finished");
@@ -6787,6 +6791,72 @@ check("workflow crew rows: running, waiting and failed render sensibly", (tpl) =
   assert(cls(rows[2]).includes("status-errored"), "failed step shows the error dot");
   assert(String(page.one("acpTranscript", ".acp-crew-header").textContent)
          .startsWith("Orchestrating"), "the crew is not all done while a step waits");
+});
+
+// 261012 D15: "Paused (n)" when at least one row waits and none works. One
+// waiting row beside one done row is Paused; add a working row and it is
+// Orchestrating again; an all-done crew is still Done.
+const WAIT_ROW = (now, extra = {}) => Object.assign({
+  sessionId: "sess_00000000-0000-4000-8000-0000000000f1", role: "ask-step",
+  task: "wf-asker", sessionName: "wf-asker", status: "waiting",
+  action: "Which colour?", done: false, error: "", startedAt: now - 5,
+  stoppedAt: null }, extra);
+
+check("crew header reads 'Paused' with a waiting row and none working", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  const hdr = () => page.one("acpTranscript", ".acp-crew-header").textContent;
+  page.deliver(subagentsFrame(live, [WAIT_ROW(now), GAP_ROWS(now)[0]], "", true));
+  assertEqual(hdr(), "Paused (2 agents)", "waiting + done reads Paused");
+  page.deliver(subagentsFrame(live, [WAIT_ROW(now)], "", false));
+  assertEqual(hdr(), "Paused (1 agent)", "workflowLive does not matter for Paused");
+  page.deliver(subagentsFrame(live, [WAIT_ROW(now), WAIT_ROW(now, {
+    sessionId: "sess_00000000-0000-4000-8000-0000000000f2", status: "working",
+    action: "running" })], "", true));
+  assertEqual(hdr(), "Orchestrating (2 agents)", "one working row: Orchestrating");
+  // A finished row whose status still says waiting is done, not waiting.
+  page.deliver(subagentsFrame(live, [WAIT_ROW(now, { done: true, stoppedAt: now })], "", false));
+  assertEqual(hdr(), "Done (1 agent)", "a done row is never waiting");
+});
+
+check("a waiting crew row shows its message and the waiting dot; the sub-panel head says waiting", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [WAIT_ROW(now), WAIT_ROW(now, {
+    sessionId: "sess_00000000-0000-4000-8000-0000000000f3", action: "" })]));
+  const rows = page.all("acpTranscript", ".acp-crew-row");
+  assertEqual(rows[0].querySelector(".acp-crew-action").textContent, "Which colour?");
+  assertEqual(rows[1].querySelector(".acp-crew-action").textContent, "waiting",
+              "no action text falls back to 'waiting', not 'working'");
+  assert(String(rows[0].querySelector(".session-status").className).split(/\s+/)
+         .includes("status-waiting"), "the waiting dot");
+  rows[0].dispatch("click");
+  const head = page.el("acpSubStatus");
+  assertEqual(String(head.className), "acp-subpanel-status acp-subpanel-status-waiting");
+  assertEqual(head.textContent, "Which colour?");
+});
+
+check("a step_message frame renders a system row with the step and the message", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "step_message", sessionId: live, payload: {
+    step: "workflow step wf-asker", severity: "warning",
+    message: "<b>Which</b> colour?" } });
+  page.deliver({ type: "step_message", sessionId: live, payload: {
+    step: "workflow step wf-coder", severity: "error", message: "build failed" } });
+  page.deliver({ type: "step_message", sessionId: live, payload: {
+    step: "", severity: "x\" onclick=\"y", message: "odd" } });
+  const rows = page.all("acpTranscript", ".acp-step-message");
+  assertEqual(rows.length, 3, "one row per frame");
+  assertEqual(rows[0].querySelector(".acp-step-message-step").textContent,
+              "workflow step wf-asker");
+  assertEqual(rows[0].querySelector(".acp-step-message-text").textContent,
+              "<b>Which</b> colour?", "text, never markup");
+  assertEqual(String(rows[0].className), "acp-step-message acp-step-message-warning");
+  assertEqual(String(rows[1].className), "acp-step-message acp-step-message-error");
+  assertEqual(String(rows[2].className), "acp-step-message acp-step-message-info",
+              "an unknown severity never reaches the class name");
+  assertEqual(rows[2].querySelector(".acp-step-message-step").textContent, "workflow step");
+  assertEqual(page.all("acpTranscript", ".acp-msg-user").length, 0, "not a user bubble");
 });
 
 // A workflow step the server reaped (stopped reporting past its bound) is sent
@@ -15461,6 +15531,12 @@ function loadDashPicker(opts = {}) {
       dashMainTranscriptEl.appendChild(row);
       return row;
     },
+    // transcript-renderer.js's step-message row (261012 D12); the real one is
+    // checked in the /acp sandbox, which loads the whole renderer. Records
+    // what dashHandle passed it.
+    addStepMessage: function () {
+      (sandbox._stepMessageCalls = sandbox._stepMessageCalls || []).push([...arguments]);
+    },
     dashUpdateCloseButton: () => {},
     // dashHandle's generic `error` case tail (index.html, outside both
     // extracted regions' own concerns) calls these for a refusal that falls
@@ -18124,6 +18200,42 @@ check("dashboard: crew header stays 'Orchestrating' while workflowLive is true a
   assertEqual(hdr(), "Done (1 agent)", "a legacy frame without the field must not keep it live");
   p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, "", "true"));
   assertEqual(hdr(), "Done (1 agent)", "only a boolean true counts");
+});
+
+// 261012 D15, mirroring the /acp checks: a waiting row (open, status
+// 'waiting') gets the waiting dot and its message, and the header reads
+// "Paused (n)" while no row works.
+check("dashboard: crew header reads 'Paused' with a waiting row and none working", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  const waiting = { sessionId: "sub-w", role: "ask-step", task: "", sessionName: "wf-asker",
+    status: "waiting", action: "Which colour?", done: false, error: "", startedAt: now - 5 };
+  const done = { sessionId: "sub-d", role: "step-one", task: "", status: "done", action: "",
+    done: true, error: "", startedAt: now - 9, stoppedAt: now - 6 };
+  const working = Object.assign({}, waiting, { sessionId: "sub-r", status: "working",
+    action: "running" });
+  const hdr = () => p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [waiting, done], "", true));
+  assertEqual(hdr(), "Paused (2 agents)", "waiting + done reads Paused");
+  const rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
+  assert(String(rows[0].querySelector(".session-status").className).split(/\s+/)
+    .includes("status-waiting"), "the waiting dot");
+  assert(rows[0].className.includes("acp-crew-row-waiting"), "the waiting row class");
+  assertEqual(rows[0].querySelector(".acp-crew-action").textContent, "Which colour?");
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [waiting, working], "", true));
+  assertEqual(hdr(), "Orchestrating (2 agents)", "one working row: Orchestrating");
+  assertEqual(p.sandbox.dashSubagentState(Object.assign({}, waiting, { action: "" })), "waiting");
+  assertEqual(p.sandbox.dashSubagentState(Object.assign({}, waiting, { done: true })), "done",
+    "a done row is never waiting");
+  assertEqual(p.sandbox.dashSubagentState(null), "working");
+});
+
+check("dashboard: a step_message frame reaches the shared step-message row", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle({ type: "step_message", sessionId: "sess-1", payload: {
+    step: "workflow step wf-asker", severity: "warning", message: "Which colour?" } });
+  assertEqual(JSON.stringify(p.sandbox._stepMessageCalls), JSON.stringify([
+    ["workflow step wf-asker", "warning", "Which colour?"]]));
 });
 
 check("dashboard: crew header: an errored row with workflowLive true reads Orchestrating, row unchanged", () => {

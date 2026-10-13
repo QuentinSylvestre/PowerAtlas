@@ -243,6 +243,12 @@ SERVER_TYPES = frozenset({
     # by the same `permission_resolved`. See `_Supervisor._on_user_input_request`.
     # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D5
     "question_request",
+    # A workflow step's warning or error `send_message` (`_kiro/session/notify`,
+    # or its replayed `system-notification` chunk), shown as a system row on
+    # the parent's transcript. Recorded, so a reconnect shows it again. See
+    # `_Supervisor._on_session_notify`.
+    # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D12
+    "step_message",
     # v3-only (SC-3, plan Phase 3 of 260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS):
     # `_kiro/mcp/status` notification; see `_on_notification`.
     "mcp_servers",
@@ -4931,9 +4937,28 @@ class _Supervisor:
         for key in [k for k, v in self._workflow_node_index.items()
                     if k[0] == parent_id and v == child_id]:
             self._workflow_node_index.pop(key, None)
+        # The step's open step question goes with its tracking (D11): nothing
+        # will answer it now. Popped before the entries below, so their
+        # `_workflow_unhold` sees a step with nothing left open.
+        self._workflow_drop_step_question(parent_id, child_id)
         if self._pending_permission:
             self._cancel_step_permissions(
                 parent_id, child_id, "the workflow step is no longer tracked")
+
+    def _workflow_drop_step_question(self, parent_id: str, child_id: str) -> bool:
+        """Forget one step's open step question (a warning ``send_message``).
+
+        Only a record whose ``parent`` matches is removed. Clears the step's
+        held flag once nothing is left open (`_workflow_unhold`). True if a
+        record was removed. Loop-only (it writes). Never raises.
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D11
+        """
+        record = self._workflow_step_questions.get(child_id)
+        if not isinstance(record, dict) or record.get("parent") != parent_id:
+            return False
+        self._workflow_step_questions.pop(child_id, None)
+        self._workflow_unhold({"session_id": parent_id, "workflow_child": child_id})
+        return True
 
     def _workflow_note_step_denied(self, parent_id: str, child_id: str) -> None:
         """Make a denied (or cancelled) tool call of a workflow step visible.
@@ -5021,6 +5046,9 @@ class _Supervisor:
         self._workflow_children.pop(parent_id, None)
         for key in [k for k in self._workflow_node_index if k[0] == parent_id]:
             self._workflow_node_index.pop(key, None)
+        for child_id in [c for c, q in tuple(self._workflow_step_questions.items())
+                         if isinstance(q, dict) and q.get("parent") == parent_id]:
+            self._workflow_step_questions.pop(child_id, None)
         self._workflow_clear_runs(parent_id)
         self._workflow_ended.pop(parent_id, None)
         self._crew_order_next.pop(parent_id, None)
@@ -5268,6 +5296,62 @@ class _Supervisor:
                 meta.pop("held_logged", None)
         except Exception:
             log.exception("ACP could not clear the held flag of a workflow step")
+
+    def _workflow_step_has_open_question(self, parent_id: str, child_id: str) -> bool:
+        """True while a step has an open `_kiro/userInput` question entry in
+        ``_pending_permission``. A pure read. Loop-only."""
+        return any(isinstance(entry, dict)
+                   and entry.get("kind") == "question"
+                   and entry.get("session_id") == parent_id
+                   and entry.get("workflow_child") == child_id
+                   for entry in tuple(self._pending_permission.values()))
+
+    def _workflow_step_resume(self, parent_id: str, child_id: str) -> None:
+        """A waiting workflow step is running again (D13).
+
+        Called on a parent-to-step ``_kiro/session/notify`` (the parent relayed
+        an answer) and on a ``tool_call`` from the step. Pops the step's open
+        step question, then, if the step is tracked as waiting, sets it running
+        and reopens its row as running, unless it still has an open
+        `_kiro/userInput` question entry: that question still waits on a
+        person. A step not tracked, or not waiting, keeps its state. Loop-only
+        (it writes). 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+        """
+        self._workflow_drop_step_question(parent_id, child_id)
+        current = self._workflow_children.get(parent_id, {}).get(child_id)
+        if current is None or current[0] != "waiting":
+            return
+        if self._workflow_step_has_open_question(parent_id, child_id):
+            return
+        self._workflow_set(parent_id, child_id, "running")
+        row = (self.crews.get(parent_id) or {}).get(child_id)
+        if row is not None and (not row["done"] or row.get("reaped")):
+            self._workflow_reopen_row(row, "running")
+        log.info("ACP workflow step %s of %s resumed: running", child_id, parent_id)
+        if row is not None:
+            _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
+
+    def _workflow_mark_step_waiting(self, parent_id: str, child_id: str) -> bool:
+        """Set a tracked step waiting and its row to match. True if the row
+        changed. Loop-only (it writes).
+
+        A row that is already open and waiting keeps its ``action``: a step
+        question's message stays on the row when kiro-cli's ``node_paused``
+        and ``run_complete`` ``paused`` follow it (probe 3 order: warning
+        notify, step ``turn_end``, ``node_paused``, ``paused``,
+        ``run_complete``). A row going from running to waiting reads
+        "waiting". A finished row is never reopened, a reaped one is.
+        """
+        self._workflow_set(parent_id, child_id, "waiting")
+        row = (self.crews.get(parent_id) or {}).get(child_id)
+        if row is None:
+            return False
+        if not row["done"] and row.get("status") == "waiting":
+            return False
+        if not row["done"] or row.get("reaped"):
+            self._workflow_reopen_row(row, "waiting")
+            return True
+        return False
 
     def _log_held_step(self, parent_id: str, child_id: str, where: str) -> None:
         """Log at INFO, once per child, that *where* left a step alone because
@@ -5607,6 +5691,12 @@ class _Supervisor:
         ``node_complete`` at all). The rule: ``"completed"`` is done; any other
         non-empty string is failed, with the string as the error text. Revise
         when a real failure is captured (docs/KNOWLEDGE.md).
+
+        ``run_complete`` with ``status: "paused"`` never reaches this rule:
+        `_on_workflow_run_done` handles it first and keeps the run's steps
+        waiting (261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+        D14). ``node_complete`` has no paused value; a step pause is
+        ``node_paused``.
         """
         if isinstance(status, str):
             s = status.strip()
@@ -5676,14 +5766,21 @@ class _Supervisor:
             terminal, _err = self._workflow_outcome(params.get("status"))
             self._on_workflow_node_done(parent_id, params, terminal)
         elif method == "_kiro/workflow/node_paused":
-            # A step waiting for the user (send_message severity 'warning'),
-            # NOT a failure: keep it tracked. Shape not measured.
+            # A step waiting for the user, NOT a failure: keep it tracked.
+            # Measured (kiro-cli 2.29.1, 2026-10-12): `{workflowId, nodeId,
+            # nodePath, reason, parentSessionId}`, no child id. `reason` was
+            # "Step requested user input via send_message." after a warning
+            # notify, and "Awaiting next user message on step session." after
+            # a resumed step reported success (user decision "A": shown
+            # waiting either way).
             self._on_workflow_node_done(parent_id, params, "waiting")
         elif method == "_kiro/workflow/run_complete":
             self._on_workflow_run_done(parent_id, params)
         elif method == "_kiro/workflow/paused":
             # Run-level pause. Does NOT clear children: the run is suspended,
-            # not finished. Shape not measured.
+            # not finished. Measured (kiro-cli 2.29.1, 2026-10-12):
+            # `{workflowId, pauseReason, parentSessionId}`, sent between
+            # `node_paused` and `run_complete` `status: "paused"`; logged only.
             log.info("ACP workflow run paused: parent=%s (children kept)", parent_id)
         else:
             # loop_iteration, watch_poll, steps_queued, recipes_changed:
@@ -5725,7 +5822,8 @@ class _Supervisor:
         like ``_on_subagent_list``: a repeat never resets ``startedAt``,
         ``order`` or history and never re-opens a step that finished. The one
         exception is a row ``_workflow_reap`` closed with no verdict: a repeat
-        proves the step is alive and reopens it.
+        proves the step is alive and reopens it. A repeat for a waiting step
+        with nothing open (a paused run resuming) sets it running.
         """
         child_id = params.get("sessionId")
         node_id = _as_text(params.get("nodeId"))
@@ -5747,9 +5845,18 @@ class _Supervisor:
             if not existing["done"] or existing.get("reaped"):
                 state = self._workflow_children.get(parent_id, {}).get(
                     child_id, ("running", 0.0))[0]
+                # A paused run's resume re-sends the step's node_start with the
+                # same child (probe 3, kiro-cli 2.29.1): the step is active
+                # again, so a waiting step runs, unless it still waits on a
+                # person (an open step question or request stays, and so does
+                # its waiting state). The row, run and history are kept.
+                resumed = (state == "waiting"
+                           and not self._workflow_step_awaits_person(parent_id, child_id))
+                if resumed:
+                    state = "running"
                 self._workflow_set(parent_id, child_id, state)
                 self._workflow_node_index[(parent_id, workflow_id, node_id)] = child_id
-                if existing.get("reaped"):
+                if existing.get("reaped") or resumed:
                     self._workflow_reopen_row(existing, state)
                     reopened = True
             if existing["done"] and not reopened:
@@ -5823,7 +5930,10 @@ class _Supervisor:
         node_id = _as_text(params.get("nodeId"))
         child_id = self._workflow_node_index.get((parent_id, workflow_id, node_id))
         if child_id is None and terminal_status == "waiting":
-            # node_paused's shape is unmeasured; accept a child id if it has one.
+            # The measured node_paused (`workflowId`, `nodeId`, `nodePath`,
+            # `reason`, `parentSessionId`; kiro-cli 2.29.1, 2026-10-12) has no
+            # child id and resolves through the index above. Defensive: accept
+            # a tracked child id should a later build add one.
             sid = params.get("sessionId")
             if isinstance(sid, str) and sid in self._workflow_children.get(parent_id, {}):
                 child_id = sid
@@ -5833,12 +5943,11 @@ class _Supervisor:
             return
         entry = (self.crews.get(parent_id) or {}).get(child_id)
         if terminal_status == "waiting":
-            self._workflow_set(parent_id, child_id, "waiting")
-            if entry is not None and (not entry["done"] or entry.get("reaped")):
-                # A waiting step is not stopped: stoppedAt stays None so its
-                # elapsed timer keeps running. The row's text is `action`.
-                # (A reaped row is reopened: the step is plainly still there.)
-                self._workflow_reopen_row(entry, "waiting")
+            # A waiting step is not stopped: stoppedAt stays None so its
+            # elapsed timer keeps running. The row's text is `action`, kept if
+            # the row already waits (a step question's message). A reaped row
+            # is reopened: the step is plainly still there.
+            self._workflow_mark_step_waiting(parent_id, child_id)
         else:
             # Removal is unconditional, even when the crew entry is gone: the
             # turn-end sweep and `_evict_crew_children` can drop it while the
@@ -5863,9 +5972,17 @@ class _Supervisor:
         ``_workflow_outcome`` to the children still tracked. Scoped to the
         frame's ``workflowId`` when it has one, so a second run of the same
         parent is left alone.
+
+        ``status: "paused"`` (any case) is not an end (D14): the run's steps
+        that are still tracked are set waiting, their rows reopened as waiting
+        under the usual guard (a finished row stays finished, an index-only
+        child is not tracked again), and the run's record is refreshed, never
+        popped nor marked ended, so its resume (kiro-cli re-sends ``run_start``
+        and the step's ``node_start``, probe 3) finds it as it was.
         """
         workflow_id = _as_text(params.get("workflowId"))
-        terminal, error = self._workflow_outcome(params.get("status"))
+        status = params.get("status")
+        paused = isinstance(status, str) and status.strip().lower() == "paused"
         indexed = {
             child: wf for (p, wf, _node), child in self._workflow_node_index.items()
             if p == parent_id}
@@ -5881,6 +5998,18 @@ class _Supervisor:
         # the same way, never every run of the parent.
         children = {child for child in set(indexed) | set(self._workflow_children.get(parent_id, ()))
                     if run_of(child) == workflow_id}
+        if paused:
+            tracked = self._workflow_children.get(parent_id, {})
+            waiting = sorted(c for c in children if c in tracked)
+            for child_id in waiting:
+                self._workflow_mark_step_waiting(parent_id, child_id)
+            if (parent_id, workflow_id) in self._workflow_runs:
+                self._workflow_runs[(parent_id, workflow_id)] = time.monotonic()
+            log.info("ACP workflow run %.80s of %s paused: %d step(s) kept "
+                     "waiting", workflow_id, parent_id, len(waiting))
+            _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
+            return
+        terminal, error = self._workflow_outcome(status)
         crew = self.crews.get(parent_id) or {}
         changed = False
         was_tracked = parent_id in self._workflow_children
@@ -6172,6 +6301,99 @@ class _Supervisor:
         )
         return result or {}
 
+    def _emit_step_message(self, parent_id: str, step: str, severity: str,
+                           message: str) -> None:
+        """Record a ``step_message`` system row on the parent's transcript."""
+        _flush_bubble(parent_id, emit_fn=_emit)
+        _emit(parent_id, envelope("step_message", {
+            "step": step, "severity": severity, "message": message}, parent_id))
+
+    def _on_session_notify(self, params) -> None:
+        """Handle ``_kiro/session/notify``: a workflow step's ``send_message``
+        to its parent, or the parent's answer relayed to a step.
+
+        Measured shapes (kiro-cli 2.29.1, 2026-10-12): a step's message is
+        ``{sessionId: <parent>, callerSessionId: <step>, message, severity,
+        sender: "step", workflowId, nodeId, agentName}``; the parent's answer
+        is ``{sessionId: <step>, callerSessionId: <parent>, message, severity:
+        "info", sender: "parent"}``.
+
+        From a tracked step, every severity sets the step's open row
+        ``action`` to the cleaned message. ``warning`` and ``error`` also
+        record a ``step_message`` on the parent. ``warning`` is the step
+        asking a person: it opens a step question and sets the step waiting
+        (a reaped row reopens). A parent-to-step notify resumes the step
+        (`_workflow_step_resume`). Anything else (another sender, an
+        untracked step, a malformed frame) is logged and changes nothing.
+        Logged at INFO in every case, bounded, as the fall-through did.
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D11-D13
+        """
+        if log.isEnabledFor(logging.INFO):
+            log.info("ACP session notify: %.600s", json.dumps(params, default=str))
+        if not isinstance(params, dict):
+            return
+        sender = _as_text(params.get("sender")).strip().lower()
+        if sender == "step":
+            parent_id = params.get("sessionId")
+            step_id = params.get("callerSessionId")
+            if (not isinstance(parent_id, str) or not isinstance(step_id, str)
+                    or self._workflow_step_parent(step_id) != parent_id):
+                log.info("ACP session notify from a step that is not a tracked "
+                         "workflow step of its sessionId; ignored")
+                return
+            severity = _as_text(params.get("severity")).strip().lower()
+            message = _clean_agent_text(params.get("message"), MAX_ERROR_DETAIL_CHARS)
+            label = self._workflow_step_label(parent_id, step_id)
+            changed = False
+            if severity == "warning":
+                self._workflow_step_questions[step_id] = {
+                    "parent": parent_id, "text": message, "created": time.time(),
+                    "label": label}
+                changed = self._workflow_mark_step_waiting(parent_id, step_id)
+            row = (self.crews.get(parent_id) or {}).get(step_id)
+            if row is not None and not row["done"] and message and row["action"] != message:
+                row["action"] = message
+                changed = True
+            if changed:
+                _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
+            if severity in ("warning", "error"):
+                self._emit_step_message(parent_id, label, severity, message)
+            return
+        if sender == "parent":
+            step_id = params.get("sessionId")
+            parent_id = (self._workflow_step_parent(step_id)
+                         if isinstance(step_id, str) else None)
+            caller = params.get("callerSessionId")
+            if parent_id is None or (caller is not None and caller != parent_id):
+                log.info("ACP session notify from a parent to a session that is "
+                         "not its tracked workflow step; ignored")
+                return
+            self._workflow_step_resume(parent_id, step_id)
+            return
+        log.info("ACP session notify with sender %.40r; ignored", sender)
+
+    def _on_replayed_step_message(self, session_id, notification: dict,
+                                  update: dict) -> None:
+        """A replayed ``system-notification`` user chunk (D12).
+
+        ``warning`` and ``error`` give the same ``step_message`` the live
+        notify gave; every other status is dropped from the transcript. The
+        step is named as the live row names it (``workflow step <name>``, the
+        name from ``agentName`` or ``nodeName``). Never touches workflow
+        state: the replay is history, not a step speaking now.
+        """
+        if not isinstance(session_id, str):
+            return
+        status = _as_text(notification.get("status")).strip().lower()
+        if status not in ("warning", "error"):
+            return
+        name = (_clean_step_label(notification.get("agentName"))
+                or _clean_step_label(notification.get("nodeName")))
+        text = _content_text(update.get("content")) or _as_text(update.get("text"))
+        self._emit_step_message(
+            session_id, f"workflow step {name}" if name else "workflow step",
+            status, _clean_agent_text(text, MAX_ERROR_DETAIL_CHARS))
+
     def _on_notification(self, msg: dict) -> None:
         method = msg.get("method")
         params = msg.get("params") or {}
@@ -6196,6 +6418,21 @@ class _Supervisor:
         # they refresh the child's staleness clock. No-op for any other id.
         if isinstance(session_id, str) and session_id in self.subagent_sessions:
             self._workflow_touch(session_id)
+            # A new tool call from a tracked workflow step means it runs again
+            # (D13). Here, before the buffer below: a step's id is never in
+            # `self.sessions`, so with `_reserved > 0` the buffer would take
+            # the frame. The frame then flows on as usual.
+            if kind == "tool_call":
+                _step_parent = self._workflow_step_parent(session_id)
+                if _step_parent is not None:
+                    self._workflow_step_resume(_step_parent, session_id)
+        # A step's message to its parent, or the parent's answer to a step.
+        # Before the buffer for the same reason: a parent-to-step notify
+        # carries the step's id.
+        # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+        if method == "_kiro/session/notify":
+            self._on_session_notify(params)
+            return
         # SC-1: a notification for a session_id not yet registered in
         # self.sessions can arrive while a new_session()/load_session() call
         # is in flight (self._reserved > 0) — KAS's async delivery can beat
@@ -6249,6 +6486,22 @@ class _Supervisor:
             _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
             if not isinstance(_kiro_meta, dict):
                 _kiro_meta = {}
+            if kind == "user_message_chunk":
+                _notification = _kiro_meta.get("notification")
+                if (isinstance(_notification, dict)
+                        and _notification.get("kind") == "system-notification"):
+                    if _kiro_meta.get("replay") is True:
+                        # A step's `send_message` replayed by `session/load`
+                        # (D12): the same system row the live notify gave,
+                        # never a user bubble, and no workflow state.
+                        self._on_replayed_step_message(session_id, _notification,
+                                                       update)
+                        return
+                    # Never observed live: kept as the ordinary user chunk it
+                    # was, so it cannot double a live `step_message`.
+                    log.info("ACP live system-notification chunk on %s kept as a "
+                             "user chunk (status %.40r)", session_id,
+                             _notification.get("status"))
             # SC-5: a sub-agent's own streamed text arrives on this same
             # notification kind, tagged with agentSubtaskId rather than
             # delivered on a separate child session — v3 has none. Route it

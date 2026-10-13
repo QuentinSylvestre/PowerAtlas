@@ -4338,12 +4338,17 @@ function dashRenderCrewPanel(slot) {
     slot.panel.insertBefore(hdr, slot.panel.firstChild);
   }
   var n = slot.entries.length;
+  var noun = n === 1 ? ' agent)' : ' agents)';
+  // D15 (261012): "Paused" while a step waits on a person and none works.
   // workflowLive (the subagents frame's field): a workflow run is still going
   // on, so every row done is only the gap before the next step starts. Absent
   // on older frames and on an emptying frame: reads as false.
-  hdr.textContent = slot.allDone && !slot.workflowLive
-    ? 'Done (' + n + (n === 1 ? ' agent)' : ' agents)')
-    : 'Orchestrating (' + n + (n === 1 ? ' agent)' : ' agents)');
+  var states = slot.entries.map(dashSubagentState);
+  hdr.textContent = states.indexOf('waiting') !== -1 && states.indexOf('working') === -1
+    ? 'Paused (' + n + noun
+    : slot.allDone && !slot.workflowLive
+    ? 'Done (' + n + noun
+    : 'Orchestrating (' + n + noun;
 
   // Remove old rows (keep header)
   while (slot.panel.lastChild && slot.panel.lastChild.className !== 'acp-crew-header') {
@@ -4353,12 +4358,14 @@ function dashRenderCrewPanel(slot) {
   // Append new lean rows
   for (var i = 0; i < slot.entries.length; i++) {
     (function(entry) {
-      var state = dashSubagentState(entry);  // 'working' | 'done' | 'error'
+      var state = dashSubagentState(entry);  // 'working' | 'waiting' | 'done' | 'error'
       var dotClass = state === 'working' ? 'status-thinking'
+                   : state === 'waiting' ? 'status-waiting'
                    : state === 'error'   ? 'status-errored'
                    : 'status-idle';
       var label = dashCrewLabel(entry);
-      var stateText = state === 'error' ? 'errored' : state === 'done' ? dashDoneText(entry) : (entry.action || 'working');
+      var stateText = state === 'error' ? 'errored' : state === 'done' ? dashDoneText(entry)
+        : state === 'waiting' ? (entry.action || 'waiting') : (entry.action || 'working');
 
       var row = document.createElement('button');
       row.type = 'button';
@@ -4401,13 +4408,15 @@ function dashRenderCrewPanel(slot) {
   }
 }
 
-// One of 'working' / 'done' / 'error', shared by the crew panel and the
-// sub-agent panel header. `null`/missing reads as 'working': a slot the
-// panel already has a row for but the crew has no entry for yet is a
-// sub-agent that has not finished, not one that has. Mirrors acp.html's own
-// subagentState (acp.html:1860-1863).
+// One of 'working' / 'waiting' / 'done' / 'error', shared by the crew panel
+// and the sub-agent panel header. `null`/missing reads as 'working': a slot
+// the panel already has a row for but the crew has no entry for yet is a
+// sub-agent that has not finished, not one that has. 'waiting' is a workflow
+// step that is not done and waits on a person (status 'waiting', D15).
+// Mirrors acp.html's own subagentState.
 function dashSubagentState(entry) {
-  if (!entry || !entry.done) return 'working';
+  if (!entry) return 'working';
+  if (!entry.done) return entry.status === 'waiting' ? 'waiting' : 'working';
   return entry.error ? 'error' : 'done';
 }
 
@@ -4597,7 +4606,8 @@ function dashRenderSubHead() {
   var state = dashSubagentState(entry);
   dashSubStatusEl.className = 'acp-subpanel-status acp-subpanel-status-' + state;
   dashSubStatusEl.textContent = state === 'error' ? 'errored: ' + entry.error
-    : state === 'done' ? dashDoneText(entry) : (entry.action || 'working…');
+    : state === 'done' ? dashDoneText(entry)
+    : state === 'waiting' ? (entry.action || 'waiting') : (entry.action || 'working…');
 }
 
 function dashOpenSubagent(sid) {
@@ -5590,6 +5600,13 @@ function dashHandle(frame){
     var errMsg = (payload && typeof payload.message === 'string') ? payload.message : '';
     var errType = (payload && typeof payload.errorType === 'string') ? payload.errorType : '';
     addMessage('error', (errType ? '[' + errType + '] ' : '') + errMsg);
+    return;
+  }
+  if (type === 'step_message') {
+    // 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D12;
+    // mirrors acp.html's step_message branch (shared renderer row).
+    addStepMessage(payload && payload.step, payload && payload.severity,
+                   payload && payload.message);
     return;
   }
   if (type === 'permission_request') {
