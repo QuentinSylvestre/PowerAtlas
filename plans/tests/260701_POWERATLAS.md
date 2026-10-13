@@ -144,7 +144,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ## 2. Web API + UI (`web.py` + `templates/`)
 
-> **2.1–2.25 and 2.28–2.29 are the dashboard surface, and it is no longer the whole web surface.** 2.26 and 2.27 are ACP-scoped: they describe the `/api/acp/sessions/delete` route and share the ACP surface's exclusion below. *(Widened 2026-09-28 for the Overview routes, `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE`.)* The ACP surface —
+> **2.1–2.25 and 2.28–2.30 are the dashboard surface, and it is no longer the whole web surface.** 2.26 and 2.27 are ACP-scoped: they describe the `/api/acp/sessions/delete` route and share the ACP surface's exclusion below. *(Widened 2026-09-28 for the Overview routes, `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE`, and 2026-10-13 for the attention feed, 2.30, whose populated cases need a held kiro-cli session and so share the ACP exclusion.)* The ACP surface —
 > `/acp`, the `/ws/acp` WebSocket, `GET /api/acp/sessions`, `/remote-auth` and the two loopback-only
 > `/api/remote-access*` routes — has no brief here. **The reason changed on 2026-08-01 and the scoping
 > did not.** It was originally scoped out as a throwaway prototype; `260731_ACP_REMOTE_CLIENT_PRODUCTIZATION`
@@ -176,7 +176,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **probes**: normal load; empty data (empty-state per panel); a partial erroring (toast, skeletons); verify `aria-busy` removed after workspace swap; slow backend keeps skeletons; 4 parallel partial fetches racing.
 - **oracle**: skeletons → cards; `startPinnedPoll` begins after workspace swap.
 - **risks**: parallel-fetch races; poll starts before cards settle; failed htmx leaves skeletons forever.
-- **no-session state** (since `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE`): with no session open, the right panel is the **Overview** (header "Overview"; sections Live now, Active plans, Usage; `dash-mode-overview` on `#sessions-panel`). It is the state `/` loads in, and Home, Escape, clicking the open row again, and a user Close or Delete all return to it. The transcript pane behind it still holds exactly one `.acp-system-msg[data-empty]` child, which the J4 signed-out / create-refusal path relies on. Its two data routes are 2.28 and 2.29.
+- **no-session state** (since `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE`): with no session open, the right panel is the **Overview** (header "Overview"; sections Live now, Active plans, Usage; `dash-mode-overview` on `#sessions-panel`). It is the state `/` loads in, and Home, Escape, clicking the open row again, and a user Close or Delete all return to it. The transcript pane behind it still holds exactly one `.acp-system-msg[data-empty]` child, which the J4 signed-out / create-refusal path relies on. Its two data routes are 2.28 and 2.29; the attention feed (2.30) is polled in every mode, not only while the Overview shows.
 
 ### 2.2 Workspace card expand + lazy-load
 - **what**: clicking a card header toggles collapse and lazy-loads sessions on first expand.
@@ -379,6 +379,13 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **probes**: 403 without the cookie and from a non-loopback peer; the plan list equals an independent glob of `plans/*.md` Status lines over the rail's de-duplicated, non-hidden workspaces; `stale` only on In Progress plans unchanged for more than 7 days, "Ready to close" only on Complete ones; a non-UTF-8 file, a file over 1 MiB and a `\\server\share` workspace are skipped with a 200; after a restart `usage_state` goes `warming` (null, then partial) → `ready`; two requests with no transcript changes report `reparsed == 0` on the second; hiding a workspace removes it from Usage without a re-parse.
 - **oracle**: plans sorted In Progress first, newest first; `progress` is `{done, total, current}`, `{phases}` or `null`; daily bars cover 14 days; context pressure labelled "kiro-cli and Codex" (the Codex row an estimate), tokens "Claude Code only" and a separate Codex tokens block with its sub-agent line (a lifetime total per thread, an upper bound, absent without the state database).
 - **risks**: a dead mapped or `subst` drive can still stall the plan scan up to its deadline; Claude agent time is estimated from timestamps while kiro-cli time is reported; a few `message.id`s present in both a sub-agent file and its parent are counted twice.
+
+### 2.30 Attention feed (`GET /api/dashboard/attention`)
+- **what**: everything a person must answer in the kiro-cli sessions PowerAtlas holds, for the Overview's *Waiting for you* block and the dashboard's `(N)` title count (`261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES`). Returns `{items, count}`; each item carries `kind` (`approval`, `question` or `step_question`), `sessionId`, `text`, `created`, `age` (whole seconds), `step` (the step label for a workflow step's item, else `""`), `cwd`, `title`, `workspace` (the cwd's base name) and `provider` (`kiro-cli-v3`). The snapshot (`_Supervisor.attention_snapshot`) is taken on the loop: one item per `_pending_permission` entry whose owner is held, and one per open step question whose parent is held and whose step is still tracked, oldest first (an item with no usable `created` last). The worker thread fills `title` from the stored `focus_update` title, else the cleaned `_acp_row_title` from `data.get_sessions`, else "Untitled session". A failed snapshot, or no supervisor, returns an empty list. `Cache-Control: no-store`. Not in `_REMOTE_ALLOWED_PATHS`.
+- **how-to-reach**: `GET /api/dashboard/attention`, or open `/`: the dashboard polls it every 5 s from page load, in every mode, including while a transcript is open and while the tab is hidden. *(pa_local)* With no held session the list is empty, which is safe to probe. Populated items need a held kiro-cli session with an open approval (Manual mode), an agent question (for example a Spec task-mode session) or a workflow step question, so those probes fall under the ACP surface's exclusion below and run only in a granted live QA.
+- **probes**: 403 without the cookie and from a non-loopback peer; an empty list with no held session; with items open, each kind appears once with its session's title and workspace; an answered, stopped or closed item is gone on the next call; a step question whose step is no longer tracked is not listed; the page title reads `(N) PowerAtlas` while N > 0 and `PowerAtlas` at zero, and `/acp`'s title never carries a count; the poll keeps running with a transcript open and with the tab hidden, and stops quietly on a 403 (the count clears); a row click opens the session through its rail row, or `/acp?sid=<encoded id>` in a new tab when the rail has none (a session created in "The agent's own folder").
+- **oracle**: `count == len(items)`; items oldest first; the *Waiting for you* block is first in *Needs attention*, hidden when the list is empty; each row shows the kind label (Approval, Question, Step question), title, workspace, "step · text" when `step` is set, and an age equal to `age` plus the time since the poll arrived (not skewed by the browser clock); all text rendered with `textContent` only; every session listed reads Waiting in the rail and on its Overview tile (the same rule feeds both, `sessions_awaiting_person`).
+- **risks**: agent-authored text on a page with no CSP (cleaned server-side by `_clean_agent_text`: category C characters dropped, clipped to 200); a background tab's timer is throttled by the browser to about once a minute, so the count can lag; the attention list and a pending card can disagree after a reconnect past the 2000-event or 2 MiB replay history (the list reads the store, so the item still shows); a step that died with a request open stays listed until answer, Stop, close or restart.
 
 ---
 
@@ -593,13 +600,13 @@ Per the automatable-only scope decision, these are documented but NOT part of th
 
 ## Coverage manifest (for run mode)
 
-In scope (full briefs): Data layer (1.1–1.12), Web API+UI (2.1–2.25, 2.28–2.29; 2.26–2.27 are ACP-scoped), Launcher Windows subset (3.1–3.8),
+In scope (full briefs): Data layer (1.1–1.12), Web API+UI (2.1–2.25, 2.28–2.30; 2.26–2.27 are ACP-scoped, and 2.30's populated cases need a held kiro-cli session), Launcher Windows subset (3.1–3.8),
 Icons (4.1–4.4), Config (5.1–5.5), Autostart Windows (6.1), Lifecycle Windows subset (7.1–7.6).
 Scoped-out: native tray clicks, peek native behavior, all Linux paths (see above), and the ACP surface
 (`/acp`, `/ws/acp`, `GET /api/acp/sessions`, `/remote-auth`, `/api/remote-access*`) — see the note under
 §2, whose *reason* changed on 2026-08-01 while the scoping did not: that surface is product now, not a
 prototype, and it stays out because probing it spawns a real `-a` agent and writes to the user's session
-store, not because it is disposable. *(Corrected 2026-09-23: not `-a`; see the dated note under §2.)* **2.1–2.25 and 2.28–2.29 are the dashboard web surface, not the whole web
+store, not because it is disposable. *(Corrected 2026-09-23: not `-a`; see the dated note under §2.)* **2.1–2.25 and 2.28–2.30 are the dashboard web surface, not the whole web
 surface**; a run that covers all of §2 must not report the web layer as fully covered. Two further
 scoping notes for anyone widening this: the remote authorization controls are inert from loopback by
 design, so covering them means driving a non-loopback peer with the user's explicit authorization; and

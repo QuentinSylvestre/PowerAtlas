@@ -162,7 +162,18 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     `claude-statusline.json` in PowerAtlas's folder under `%LOCALAPPDATA%` (a shell match and one
     write, no extra process); PowerAtlas never edits your Claude Code settings and never reads its
     credentials. The agent playbook's `providers/claude/statusline-command.sh` already has them.
-  - *Needs attention* lists what is waiting on you. *Stopped by a quota limit* lists the Claude Code
+  - *Needs attention* lists what is waiting on you. *Waiting for you* comes first: one row per
+    pending approval, agent question and workflow step question in every kiro-cli session PowerAtlas
+    holds, oldest first. A row shows its kind (Approval, Question or Step question), the session title
+    and workspace, the request or question text (with the step's name in front for a workflow step)
+    and how long it has waited. Clicking a row opens that session, where the item is answered; a
+    session that has no row in the rail opens on `/acp` in a new tab. A row leaves the list within
+    about 5 seconds of being answered, stopped or closed. The dashboard's page title starts with the
+    number of these items, for example `(2) PowerAtlas`, and the list and the count keep refreshing
+    every 5 seconds while a transcript is open and while the tab is in the background (browsers may
+    slow a background tab to about once a minute). `/acp` titles carry no count. A session with an
+    item open reads Waiting in the rail and on its Overview tile, even mid-turn.
+    *Stopped by a quota limit* lists the Claude Code
     sessions whose last message is a quota hit and the Codex threads whose last turn a usage limit
     refused (and kiro-cli sessions that stopped on a usage limit, which have no reset time), with the
     window, the reset time, and a session leaves the list when its conversation goes on, when you
@@ -701,10 +712,21 @@ from it could be mistaken for an address; add host names in the rule editor inst
 power prompts have not been measured to match a pattern, so the button is not offered there.
 
 **The agent can ask a clarifying question mid-turn, and the page answers it inline.** When the agent
-needs you to choose between options before continuing, the question and its choices render as buttons
-directly in the transcript, and the turn stays paused until you click one. Answering (from any tab, or
-on reload) marks the request resolved everywhere it's shown; a request answered elsewhere never shows
-as still-pending.
+asks a question (for example in the Spec task mode), it renders as a card in the transcript: the
+question, one button per option with its description under the title, a **Recommended** badge on the
+option the agent suggests, and a box for an answer in your own words. Click an option, or type an
+answer and press **Send**. A question with no options shows only the box. kiro-cli usually adds its own
+**Skip questions** option last. The turn stays paused until you answer, in every permission mode,
+Yolo included, and the question also appears in the dashboard's *Needs attention* list. Answering (from
+any tab, or on reload) marks the card answered everywhere it is shown. **Stop** while a question is
+open ends the turn and the card goes inactive; the agent then carries on without your answer.
+
+A workflow step can also ask you something. Its message shows on the step's row in the crew panel and
+as a row in the parent's transcript, the step reads waiting, the crew header reads "Paused" while no
+other step is running, and the
+question is listed in *Needs attention*. Answer it by sending the parent session a message; the parent
+passes it on to the step, and the step runs again. A step's warnings and errors appear in the
+transcript the same way, and still appear after a reload.
 
 **The context-usage bar, steering acknowledgement, and the session title** all show up as the UI
 elements you'd expect, fed by the protocol's own notification frames — nothing to configure
