@@ -11410,14 +11410,14 @@ class TestAcpActivityStamp:
         # `has_active_workflow` is a required keyword since cycle 4 (user
         # request: a default fails open); this test is about the turn-end stamp.
         assert acp_mod._sweepable(
-            sid, meta, time.monotonic(), has_active_workflow=False) is False
+            sid, meta, time.monotonic(), has_active_workflow=False, awaits_person=False) is False
         # Positive control. Put the record back the way deleting the turn-end
         # stamp would leave it and the same session really is swept, so the
         # assertion above is about the stamp rather than about some other
         # condition quietly holding this session back.
         meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
         assert acp_mod._sweepable(
-            sid, meta, time.monotonic(), has_active_workflow=False) is True
+            sid, meta, time.monotonic(), has_active_workflow=False, awaits_person=False) is True
 
     def test_agent_chatter_inside_a_turn_moves_activity_and_not_use(
             self, acp_store):
@@ -13187,6 +13187,56 @@ class TestAcpWorkflowNotifications:
         assert self.P2 not in sv.sessions
         assert self.P2 not in sv._workflow_children
 
+    @pytest.mark.parametrize("held", ["approval", "question", "step_question", None])
+    def test_sweep_keeps_an_idle_parent_whose_step_awaits_a_person(
+            self, acp_fast, held, caplog):
+        """User decision 2026-10-12 (option A): the idle sweeper never closes
+        a session a person still has to answer. The parent is idle past the
+        TTL, has no subscriber and no turn, and its only step is stale past
+        both staleness bounds; with an open approval, question or step
+        question it is kept over two sweeps, nothing is written to the agent,
+        the entry stays and one INFO line says why. With nothing open (the
+        control) the same session is swept."""
+        acp_mod, _ = acp_fast
+        sv = acp_mod._supervisor
+        _live_session(acp_mod, self.P)
+        try:
+            self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+            if held == "approval":
+                sv._on_agent_request(self._ask("child-c7", 71))
+            elif held == "question":
+                sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+            elif held == "step_question":
+                sv._workflow_step_questions["child-c7"] = {
+                    "parent": self.P, "text": "Which file?", "created": time.time(),
+                    "label": "workflow step wf-coder"}
+            state = sv._workflow_children[self.P]["child-c7"][0]
+            sv._workflow_children[self.P]["child-c7"] = (
+                state, time.monotonic() - 7 * 3600.0)
+            sv.sessions[self.P]["last_used"] = (
+                time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
+            written = []
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self_: True), \
+                    caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+                _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+                _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+            if held is None:
+                assert self.P not in sv.sessions
+                return
+            assert self.P in sv.sessions
+            assert written == []
+            if held == "step_question":
+                assert "child-c7" in sv._workflow_step_questions
+            else:
+                assert [e["kiro_id"] for e in sv._pending_permission.values()] == [71]
+            kept = [r for r in caplog.records if "keeping idle session" in r.getMessage()]
+            assert len(kept) == 1
+        finally:
+            sv._pending_permission.clear()
+            sv._workflow_step_questions.clear()
+            acp_mod._sweep_held_logged.clear()
+
     def test_workflow_cap_eviction_stops_tracking_the_evicted_child_only(self, wf):
         """The per-session cap path in `_evict_finished_subagents`: rows that
         are done but were never completed by a frame (a sweep or reap marked
@@ -13701,8 +13751,8 @@ class TestAcpWorkflowNotifications:
         meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
         now = time.monotonic()
         # Positive control: this exact session is otherwise sweepable.
-        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=False) is True
-        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=True) is False
+        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=False, awaits_person=False) is True
+        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=True, awaits_person=False) is False
 
     def test_workflow_sweep_once_keeps_a_parent_with_a_live_child_until_it_goes_stale(
             self, acp_fast):
@@ -14679,13 +14729,15 @@ class TestAcpWorkflowNotifications:
         now = time.monotonic()
         # Positive control: the live step is what blocks the sweep.
         assert acp_mod._sweepable(self.P, meta, now,
-                                  has_active_workflow=sv.has_active_workflow(self.P)) is False
+                                  has_active_workflow=sv.has_active_workflow(self.P),
+                                  awaits_person=False) is False
         self._cancel(acp_mod)
         sv.inflight.discard(self.P)
         acp_mod._registry.detach(next(iter(acp_mod._registry.subscribers[self.P])))
         meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
         assert acp_mod._sweepable(self.P, meta, time.monotonic(),
-                                  has_active_workflow=sv.has_active_workflow(self.P)) is True
+                                  has_active_workflow=sv.has_active_workflow(self.P),
+                                  awaits_person=False) is True
 
     # -- run-level tracking: the crew header's `workflowLive` flag -----------
     #
@@ -15033,7 +15085,8 @@ class TestAcpWorkflowNotifications:
         assert sv.has_active_workflow(self.P) is False
         assert sv.workflow_state(self.P) is None
         assert acp_mod._sweepable(self.P, meta, time.monotonic(),
-                                  has_active_workflow=sv.has_active_workflow(self.P)) is True
+                                  has_active_workflow=sv.has_active_workflow(self.P),
+                                  awaits_person=False) is True
 
     # -- reconnect ----------------------------------------------------------
 
@@ -15251,7 +15304,8 @@ class TestAcpWorkflowNotifications:
         meta = sv.sessions[self.P]
         meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
         assert acp_mod._sweepable(self.P, meta, time.monotonic(),
-                                  has_active_workflow=sv.has_active_workflow(self.P)) is True
+                                  has_active_workflow=sv.has_active_workflow(self.P),
+                                  awaits_person=False) is True
 
     def test_workflow_late_frames_after_run_complete_do_not_record_the_run_again(self, wf):
         acp_mod, sv = wf
@@ -15835,7 +15889,10 @@ class TestAcpWorkflowNotifications:
         bullet; the approval card's title is cleaned but not clipped)."""
         acp_mod, sv = wf
         conn = self._watch(acp_mod)
-        bad = "rm‮ -rf\x00 /tmp/x\n\nnow"
+        bad = "rm\u202e -rf\x00 /tmp/x\n\nnow"
+        # The approval card keeps its line breaks (a multi-line command keeps
+        # its layout); stored text, toasts and the question card collapse them.
+        card_clean = "rm -rf /tmp/x\n\nnow"
         toasts = []
         with patch.object(acp_mod, "_notify", lambda *a: toasts.append(a)):
             sv._on_agent_request(self._ask(self.P, 5, title=bad))
@@ -15844,7 +15901,7 @@ class TestAcpWorkflowNotifications:
         clean = "rm -rf /tmp/x now"
         approval_card = [f for f in sv.history[self.P].events()
                          if f["type"] == "permission_request"]
-        assert approval_card[0]["payload"]["toolCall"]["title"] == clean
+        assert approval_card[0]["payload"]["toolCall"]["title"] == card_clean
         kinds = {e["kind"]: e for e in sv._pending_permission.values()}
         assert kinds["approval"]["text"] == clean
         assert kinds["question"]["text"] == clean

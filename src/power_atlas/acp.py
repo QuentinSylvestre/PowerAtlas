@@ -1934,6 +1934,24 @@ def _clean_agent_text(value, limit: int) -> str:
     return " ".join(kept.split())[:limit].strip()
 
 
+def _clean_agent_lines(value) -> str:
+    """Agent-authored text with its line breaks kept, for the approval card.
+
+    Drops every Unicode category C character (controls, NUL, bidi overrides
+    and isolates, zero-width, private-use, unassigned) except ``\n`` and
+    ``\t``; ``\r\n`` and a lone ``\r`` become ``\n`` first. Nothing is
+    collapsed, stripped or clipped: the card shows the title with
+    ``white-space: pre-wrap``, so a multi-line command keeps the layout it had
+    before (`_on_permission_request`). A non-string is ``""``.
+    261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 3 review
+    """
+    if not isinstance(value, str):
+        return ""
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(ch for ch in value
+                   if ch in "\n\t" or not unicodedata.category(ch).startswith("C"))
+
+
 def _as_text(value) -> str:
     """A payload field the page will render, or ``""`` if it is not a string.
 
@@ -5201,6 +5219,21 @@ class _Supervisor:
             for entry in tuple(self._pending_permission.values())
             if isinstance(entry, dict) and isinstance(entry.get("session_id"), str))
 
+    def sessions_awaiting_person(self) -> frozenset[str]:
+        """Sessions a person still has to answer: the owners of every entry in
+        ``_pending_permission`` (approvals and questions, a workflow step's
+        included, since those are keyed by the parent) plus the parents of
+        open step questions. A pure read. Loop-only.
+
+        Read by the idle sweeper (`_sweepable`'s ``awaits_person``).
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+        """
+        owners = set(self.sessions_with_pending_permission())
+        for record in tuple(self._workflow_step_questions.values()):
+            if isinstance(record, dict) and isinstance(record.get("parent"), str):
+                owners.add(record["parent"])
+        return frozenset(owners)
+
     def _workflow_step_awaits_person(self, parent_id: str, child_id: str) -> bool:
         """True while a workflow step has an open approval, question or step
         question. A pure read. Loop-only.
@@ -7056,11 +7089,11 @@ class _Supervisor:
         # short and fixed: a long step name must not push the dangerous part
         # of the title out of the toast.
         toast_title = clean_title
-        # The card's title is cleaned the same way, but not clipped: a shell
-        # prompt's title is the command, and the whole of it is what a person
-        # approves (D-5 of 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL).
-        # Bidi overrides and NULs must not reach it (Phase 3 review).
-        title = _clean_agent_text(title, len(title))
+        # The card's title loses its control, bidi and zero-width characters
+        # but keeps its line breaks, and is not clipped: a shell prompt's title
+        # is the command, and the whole of it, laid out as sent, is what a
+        # person approves (D-5 of 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL).
+        title = _clean_agent_lines(title)
         if step_id is not None:
             self._pending_permission[opaque_id]["workflow_child"] = step_id
             toast_title = f"[workflow step] {clean_title}"
@@ -9792,12 +9825,18 @@ def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty
 # wholesale by `_detach` when the agent dies.
 _sweep_failures: dict[str, int] = {}
 
+# Sessions the sweeper has logged as kept because they wait on a person, so the
+# INFO line is written once per hold rather than once per tick. Pruned by
+# `_sweep_once` to sessions that are still live and still waiting, so it is
+# bounded like `_sweep_failures`.
+_sweep_held_logged: set[str] = set()
+
 
 def _sweepable(session_id: str, meta: dict, now: float, *,
-               has_active_workflow: bool) -> bool:
+               has_active_workflow: bool, awaits_person: bool) -> bool:
     """Whether one session may be reclaimed on this tick.
 
-    Seven conditions, and each one is a separate way this has already gone wrong
+    Eight conditions, and each one is a separate way this has already gone wrong
     in review (the seventh, ``has_active_workflow``, is answered by the caller
     from ``_Supervisor.has_active_workflow`` and is a REQUIRED keyword: a default
     would fail open, sweeping a session mid-run if a caller forgot it):
@@ -9839,6 +9878,16 @@ def _sweepable(session_id: str, meta: dict, now: float, *,
         return False
     if has_active_workflow:
         return False
+    # 8. Nothing waits on a person: an open approval or question (the
+    # session's own or a workflow step's) or a step question. Closing would
+    # cancel what a person still has to answer, and a step waiting on a
+    # person is skipped by the reap, so its parent may look idle for hours.
+    # REQUIRED keyword for the same reason as `has_active_workflow`; the
+    # caller answers it from `_Supervisor.sessions_awaiting_person`.
+    # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES (user
+    # decision 2026-10-12, option A).
+    if awaits_person:
+        return False
     return True
 
 
@@ -9879,9 +9928,29 @@ async def _sweep_once() -> None:
             del _sweep_failures[gone]
     # `close_session` mutates `sessions`, and a live iterator over a dict that
     # changes size raises RuntimeError.
+    try:
+        awaiting = _supervisor.sessions_awaiting_person()
+    except Exception:
+        # Fail closed: hold every session this tick rather than close one a
+        # person may still have to answer.
+        log.exception("ACP sweeper: reading the open requests failed")
+        awaiting = frozenset(_supervisor.sessions)
+    for held in tuple(_sweep_held_logged):
+        if held not in awaiting or held not in _supervisor.sessions:
+            _sweep_held_logged.discard(held)
     for session_id, meta in tuple(_supervisor.sessions.items()):
+        is_awaiting = session_id in awaiting
         if not _sweepable(session_id, meta, now,
-                          has_active_workflow=_supervisor.has_active_workflow(session_id)):
+                          has_active_workflow=_supervisor.has_active_workflow(session_id),
+                          awaits_person=is_awaiting):
+            if (is_awaiting and session_id not in _sweep_held_logged
+                    and _sweepable(session_id, meta, now,
+                                   has_active_workflow=_supervisor.has_active_workflow(session_id),
+                                   awaits_person=False)):
+                # Once per hold, not once per tick.
+                _sweep_held_logged.add(session_id)
+                log.info("ACP sweeper: keeping idle session %s: it has an open "
+                         "approval or question", session_id)
             continue
         # Claimed in the synchronous prefix, before the first await, exactly as
         # `_handle_close` does. Without it `close_session` leaves the session
