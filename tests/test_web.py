@@ -13237,6 +13237,44 @@ class TestAcpWorkflowNotifications:
             sv._workflow_step_questions.clear()
             acp_mod._sweep_held_logged.clear()
 
+    def test_sweep_holds_every_session_when_the_open_request_read_fails(
+            self, acp_fast, caplog):
+        """Fail closed: if `sessions_awaiting_person` raises, an idle session
+        with nothing open is still kept, the traceback is logged once over two
+        ticks, and no "keeping idle session" line claims an open request."""
+        acp_mod, _ = acp_fast
+        sv = acp_mod._supervisor
+        _live_session(acp_mod, self.P)
+        sv.sessions[self.P]["last_used"] = (
+            time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
+
+        def boom(self_):
+            raise RuntimeError("read failed")
+
+        try:
+            with patch.object(acp_mod._Supervisor, "sessions_awaiting_person", boom), \
+                    patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self_: True), \
+                    caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+                _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+                _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+            assert self.P in sv.sessions
+            failed = [r for r in caplog.records
+                      if "reading the open requests failed" in r.getMessage()]
+            assert len(failed) == 2
+            assert sum(1 for r in failed if r.exc_info) == 1
+            assert not any("keeping idle session" in r.getMessage()
+                           for r in caplog.records)
+            # Recovery: the next good read resets the count and sweeps.
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+                _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+            assert self.P not in sv.sessions
+            assert acp_mod._sweep_awaiting_failures == 0
+        finally:
+            acp_mod._sweep_awaiting_failures = 0
+            acp_mod._sweep_held_logged.clear()
+
     def test_workflow_cap_eviction_stops_tracking_the_evicted_child_only(self, wf):
         """The per-session cap path in `_evict_finished_subagents`: rows that
         are done but were never completed by a frame (a sweep or reap marked
@@ -16128,17 +16166,29 @@ class TestAcpWorkflowNotifications:
                     and "stays over its cap" in r.getMessage()]
         assert len(warnings) == 1
 
-    def test_held_step_is_logged_once_by_the_reap(self, wf, caplog):
+    def test_held_step_is_logged_once_per_hold_by_the_reap(self, wf, caplog):
+        """Once per hold: two reaps of one hold log once; after the request
+        is answered and a new one opens, the second hold is logged again."""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
         sv._on_agent_request(self._ask("child-c7", 71))
+        opaque = self._pending_frames(conn)[0]["payload"]["requestId"]
         now = time.monotonic()
         sv._workflow_children[self.P]["child-c7"] = ("running", now - 3600.0)
         with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
             assert sv._workflow_reap(now) == []
             assert sv._workflow_reap(now) == []
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])):
+                asyncio.run(acp_mod._handle_permission_response(
+                    conn, self.P, {"requestId": opaque, "optionId": "allow"}))
+            assert "held_logged" not in sv._workflow_child_meta["child-c7"]
+            sv._on_agent_request(self._ask("child-c7", 72))
+            sv._workflow_children[self.P]["child-c7"] = ("running", now - 3600.0)
+            assert sv._workflow_reap(now) == []
+            assert sv._workflow_reap(now) == []
         held = [r for r in caplog.records if "waits on a person" in r.getMessage()]
-        assert len(held) == 1 and "reap" in held[0].getMessage()
+        assert len(held) == 2 and all("reap" in r.getMessage() for r in held)
 
     def test_question_logs_dropped_options_and_a_non_list(self, wf, caplog):
         acp_mod, sv = wf

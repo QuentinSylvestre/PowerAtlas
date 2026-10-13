@@ -4986,6 +4986,7 @@ class _Supervisor:
             entry = self._pending_permission.pop(opaque_id, None)
             if entry is None:
                 continue
+            self._workflow_unhold(entry)
             try:
                 _emit(parent_id, envelope(
                     "permission_resolved", {"requestId": opaque_id}, parent_id))
@@ -5250,6 +5251,23 @@ class _Supervisor:
                    and entry.get("session_id") == parent_id
                    and entry.get("workflow_child") == child_id
                    for entry in tuple(self._pending_permission.values()))
+
+    def _workflow_unhold(self, entry) -> None:
+        """Called after a pending entry is removed: once its step has nothing
+        left open, clear the ``held_logged`` flag, so a later hold of the
+        same step is logged again (`_log_held_step`). Never raises."""
+        try:
+            child_id = entry.get("workflow_child") if isinstance(entry, dict) else None
+            parent_id = entry.get("session_id") if isinstance(entry, dict) else None
+            if not isinstance(child_id, str) or not isinstance(parent_id, str):
+                return
+            if self._workflow_step_awaits_person(parent_id, child_id):
+                return
+            meta = self._workflow_child_meta.get(child_id)
+            if meta is not None:
+                meta.pop("held_logged", None)
+        except Exception:
+            log.exception("ACP could not clear the held flag of a workflow step")
 
     def _log_held_step(self, parent_id: str, child_id: str, where: str) -> None:
         """Log at INFO, once per child, that *where* left a step alone because
@@ -7069,7 +7087,9 @@ class _Supervisor:
         opaque_id = secrets.token_urlsafe(16)
         title = _as_text(tool_call.get("title"))
         # The stored text and the toast are cleaned (D8): whitespace collapsed,
-        # control and bidi characters dropped. The frame's title is not.
+        # control and bidi characters dropped, clipped. The frame's title is
+        # only stripped of category-C characters (`_clean_agent_lines` below),
+        # never collapsed or clipped.
         clean_title = _clean_agent_text(title, MAX_PERMISSION_TITLE_CHARS)
         # Keyed by the OWNER: for a workflow step that is the parent, so the
         # existing lookups by session id (Stop, the turn-end sweep, the
@@ -9117,6 +9137,7 @@ def _pop_pending_permissions(session_id: str, *,
         entry = _supervisor._pending_permission.pop(opaque_id, None)
         if entry is None:
             continue
+        _supervisor._workflow_unhold(entry)
         dropped.append(entry)
         popped.append(opaque_id)
     # Announced only after every entry is popped and collected, and each
@@ -9329,6 +9350,7 @@ async def _handle_permission_response(conn, session_id, payload):
         return
     # (d) Pop BEFORE writing the reply — see the docstring above.
     _supervisor._pending_permission.pop(request_id, None)
+    _supervisor._workflow_unhold(entry)
     # SC-9 stale-replay / cross-tab fix (Design Decisions row of that name):
     # broadcast (and record) a `permission_resolved` frame the moment the
     # pending entry is gone, before attempting the agent-side write below —
@@ -9472,6 +9494,7 @@ async def _handle_question_response(conn, session_id, payload):
             return
     # (d) Pop BEFORE writing the reply.
     _supervisor._pending_permission.pop(request_id, None)
+    _supervisor._workflow_unhold(entry)
     _emit(entry["session_id"], envelope(
         "permission_resolved", {"requestId": request_id}, entry["session_id"]))
     # (e) kiro-cli's own id, never the opaque one the page echoed.
@@ -9831,6 +9854,10 @@ _sweep_failures: dict[str, int] = {}
 # bounded like `_sweep_failures`.
 _sweep_held_logged: set[str] = set()
 
+# Consecutive sweeper ticks on which `sessions_awaiting_person` raised, so a
+# persistent fault logs one traceback and then one short line a tick.
+_sweep_awaiting_failures = 0
+
 
 def _sweepable(session_id: str, meta: dict, now: float, *,
                has_active_workflow: bool, awaits_person: bool) -> bool:
@@ -9928,13 +9955,25 @@ async def _sweep_once() -> None:
             del _sweep_failures[gone]
     # `close_session` mutates `sessions`, and a live iterator over a dict that
     # changes size raises RuntimeError.
+    global _sweep_awaiting_failures
+    fallback = False
     try:
         awaiting = _supervisor.sessions_awaiting_person()
+        _sweep_awaiting_failures = 0
     except Exception:
         # Fail closed: hold every session this tick rather than close one a
-        # person may still have to answer.
-        log.exception("ACP sweeper: reading the open requests failed")
+        # person may still have to answer. One traceback, then one short line
+        # a tick, as `_sweep_failures` does.
+        _sweep_awaiting_failures += 1
+        if _sweep_awaiting_failures == 1:
+            log.exception("ACP sweeper: reading the open requests failed; "
+                          "holding every session")
+        else:
+            log.warning("ACP sweeper: reading the open requests failed again "
+                        "(%d consecutive; traceback logged on the first); "
+                        "holding every session", _sweep_awaiting_failures)
         awaiting = frozenset(_supervisor.sessions)
+        fallback = True
     for held in tuple(_sweep_held_logged):
         if held not in awaiting or held not in _supervisor.sessions:
             _sweep_held_logged.discard(held)
@@ -9943,7 +9982,7 @@ async def _sweep_once() -> None:
         if not _sweepable(session_id, meta, now,
                           has_active_workflow=_supervisor.has_active_workflow(session_id),
                           awaits_person=is_awaiting):
-            if (is_awaiting and session_id not in _sweep_held_logged
+            if (is_awaiting and not fallback and session_id not in _sweep_held_logged
                     and _sweepable(session_id, meta, now,
                                    has_active_workflow=_supervisor.has_active_workflow(session_id),
                                    awaits_person=False)):

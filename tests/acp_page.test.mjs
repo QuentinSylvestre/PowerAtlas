@@ -24362,6 +24362,43 @@ check("dashboard: an error frame is handed to the question reopen", () => {
     { code: "empty_answer", message: "Type an answer first.", requestId: "q-S" }]));
 });
 
+check("question card: once its card resolves, an id-less refusal no longer reopens another pending card", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(questionFrame(live, "q-A", { options: [] }));
+  page.deliver(questionFrame(live, "q-B", { options: [] }));
+  const [a, b] = page.el("acpTranscript").querySelectorAll(".acp-msg-question");
+  const boxA = a.querySelector(".acp-question-text");
+  boxA.value = "x";
+  boxA.dispatch("input");
+  a.querySelector(".acp-question-send").dispatch("click");
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: "q-A" } });
+  const boxB = b.querySelector(".acp-question-text");
+  boxB.value = "y";
+  boxB.dispatch("input");
+  b.querySelector(".acp-question-send").dispatch("click");
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: "q-B" } });
+  page.deliver({ type: "error", sessionId: live, payload: { code: "bad_payload", message: "no" } });
+  assertEqual(boxA.disabled, true);
+  assertEqual(boxB.disabled, true);
+  // A fresh card that was never answered stays as it is, too.
+  page.deliver(questionFrame(live, "q-C", { options: [] }));
+  const c = questionCard(page.el("acpTranscript"));
+  page.deliver({ type: "error", sessionId: live, payload: { code: "bad_payload", message: "no" } });
+  assertEqual(c.querySelector(".acp-question-text").disabled, false);
+  assertEqual(c.querySelector(".acp-question-send").disabled, true,
+    "an id-less refusal must not touch a card nobody answered");
+});
+
+check("dashboard: markPermissionResolved clears the id-less refusal fallback", () => {
+  const d = loadDashCard(() => ({ body: {} }));
+  const card = d.sandbox.addQuestionRequest("q-X", "sess-1", "Q?", QUESTION_OPTIONS, "");
+  card.querySelectorAll(".acp-question-option")[0].dispatch("click");
+  assertEqual(d.sandbox.lastAwaitingQuestionId, "q-X");
+  d.sandbox.markPermissionResolved("q-X");
+  assertEqual(d.sandbox.lastAwaitingQuestionId, null);
+  assertEqual(d.sandbox.reopenQuestionAfterRefusal({ code: "bad_payload" }), false);
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

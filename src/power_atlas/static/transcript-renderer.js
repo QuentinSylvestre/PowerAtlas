@@ -2789,6 +2789,12 @@ function markPermissionResolved(requestId) {
   // A question card's free-text box (addQuestionRequest) settles with it.
   var boxes = row.querySelectorAll('textarea');
   for (var j = 0; j < boxes.length; j++) boxes[j].disabled = true;
+  // A settled card is no longer the fallback for an id-less refusal.
+  // `typeof` guard: a sandbox may load this function on its own.
+  if (typeof lastAwaitingQuestionId !== 'undefined'
+      && lastAwaitingQuestionId === String(requestId)) {
+    lastAwaitingQuestionId = null;
+  }
 }
 
 /** Whether the transcript holds a card for a request routed from a workflow
