@@ -16756,6 +16756,28 @@ class TestAcpWorkflowNotifications:
         assert self._last_payload(view)[0]["action"] == "Which colour?"
         assert sv.sessions_awaiting_person() == frozenset({self.P})
 
+    def test_question_reopen_is_one_shot(self, wf):
+        """Review fix: the remembered warning reopens the question once. A
+        second send_message pause with no fresh warning before it does not
+        bring the old text back; a fresh warning arms it again."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        pause = {"workflowId": "wf-k7x", "nodeId": "step-one",
+                 "reason": self.SEND_MESSAGE_PAUSE}
+        self._step_says(acp_mod, "warning", "Which colour?")
+        self._step_tool_call(acp_mod)
+        self._send(acp_mod, "node_paused", **pause)
+        assert sv._workflow_step_questions["child-c7"]["text"] == "Which colour?"
+        self._step_tool_call(acp_mod, tc="t-6")
+        assert sv._workflow_step_questions == {}
+        self._send(acp_mod, "node_paused", **pause)
+        assert sv._workflow_step_questions == {}
+        assert sv.crews[self.P]["child-c7"]["action"] == "waiting"
+        self._step_says(acp_mod, "warning", "Which size?")
+        self._step_tool_call(acp_mod, tc="t-7")
+        self._send(acp_mod, "node_paused", **pause)
+        assert sv._workflow_step_questions["child-c7"]["text"] == "Which size?"
+
     @pytest.mark.parametrize("reason", [
         "Awaiting next user message on step session.", None, "send_message failed"])
     def test_other_pause_reasons_do_not_reopen_the_question(self, wf, reason):

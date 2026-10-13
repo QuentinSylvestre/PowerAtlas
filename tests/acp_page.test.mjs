@@ -18290,6 +18290,30 @@ check("dashboard: a history replay renders step messages and pending and resolve
     JSON.stringify([["question_response", "sess-1"]]), "the replayed card answers its session");
 });
 
+check("dashboard: a replayed resolved approval card replays disabled", () => {
+  const d = loadDashCard(() => ({ body: {} }));
+  [
+    { type: "permission_request", sessionId: "sess-1", payload: {
+      requestId: "p-old", sessionId: "sess-1", toolCall: { title: "rm x" },
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      workflowStep: true } },
+    { type: "permission_resolved", sessionId: "sess-1", payload: { requestId: "p-old" } },
+    { type: "permission_request", sessionId: "sess-1", payload: {
+      requestId: "p-new", sessionId: "sess-1", toolCall: { title: "ls" },
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] } },
+  ].forEach((frame) => d.sandbox.renderTranscriptFrame(frame));
+  const rows = d.transcript.querySelectorAll(".acp-msg-permission");
+  assertEqual(rows.length, 2);
+  assert(rows[0].classList.contains("acp-permission-resolved"), "the resolved card is marked");
+  assert(rows[0].querySelectorAll("button").length > 0 &&
+         rows[0].querySelectorAll("button").every((b) => b.disabled),
+         "the resolved approval replays with every button disabled");
+  assert(rows[1].querySelectorAll("button").some((b) => !b.disabled),
+         "only its own card: the pending one stays answerable");
+  assertEqual(d.sandbox.hasPendingStepPermissionCard(), false,
+    "a resolved step approval no longer keeps Stop usable");
+});
+
 check("dashboard: a step_message frame reaches the shared step-message row", () => {
   const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
   p.sandbox.dashHandle({ type: "step_message", sessionId: "sess-1", payload: {

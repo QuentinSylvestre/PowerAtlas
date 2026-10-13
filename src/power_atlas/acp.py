@@ -5397,7 +5397,8 @@ class _Supervisor:
         ``send_message`` while no step question is open: a ``tool_call`` from
         the step after its warning, in the same turn, popped it (D13). The
         record comes back as it was and the row's open ``action`` shows the
-        message again. True if it was reopened. Loop-only (it writes).
+        message again. The remembered warning is used once and then forgotten.
+        True if it was reopened. Loop-only (it writes).
         """
         if self._workflow_step_questions.get(child_id) is not None:
             return False
@@ -5405,6 +5406,9 @@ class _Supervisor:
         if not isinstance(record, dict) or record.get("parent") != parent_id:
             return False
         self._workflow_step_questions[child_id] = dict(record)
+        # One-shot: a later pause with no fresh warning before it must not
+        # bring this text back again. A fresh warning stores a new record.
+        self._workflow_step_last_warning.pop(child_id, None)
         row = (self.crews.get(parent_id) or {}).get(child_id)
         if row is not None and not row["done"] and record.get("text"):
             row["action"] = record["text"]
