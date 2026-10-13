@@ -1,7 +1,7 @@
 # ACP Needs Attention: Approvals, Agent Questions and Workflow Step Messages
 
 > **Date**: 2026-10-12
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: List pending approvals, agent questions and workflow step questions in the dashboard Overview's "Needs attention" with a `(N)` title count; declare kiro-cli's `userInput` capability and answer `_kiro/userInput`; handle `_kiro/session/notify` and paused workflow runs; fix `_note_subagent_action`'s crew-frame filter
 > **Memory relied on**: none
@@ -341,7 +341,7 @@ Tests:
 - [x] `sessions_with_pending_permission` docstring says it covers questions too
 - [x] Every Python and page test listed above passes; the full suites pass
 - [x] `grep -n "_answer_permission_cancelled(" src/power_atlas/acp.py` shows only the definition, the malformed-request refusal in `_on_permission_request` and the call inside `_answer_pending_cancelled` (the two-line `coro = …` form in `_cancel_step_permissions` included)
-- [ ] Live (after a granted restart, else carried to Phase 7): a quick-spec question answered from a card option, and a free-form question answered with free text, on `/acp`
+- [x] Live (after a granted restart, else carried to Phase 7): a quick-spec question answered from a card option, and a free-form question answered with free text, on `/acp`
 
 Implementation (2026-10-12, code: 82e0119)
 In `src/power_atlas/acp.py`, `_kiro_client_capabilities()` now always declares `_meta.kiro.userInput: true`. `_on_agent_request` sends `_kiro/userInput` to a new `_on_user_input_request`. It validates and routes the request the same way `_on_permission_request` does, including workflow steps through `_workflow_step_parent`, and mints an opaque id. It keeps at most 20 options whose raw title is a non-empty string: the first 19 plus the last one, so kiro-cli's trailing "Skip questions" survives. It stores a `kind: "question"` entry in `_pending_permission` holding the raw `answer_titles`, the cleaned `text` and `created`. It then emits a recorded `question_request` frame with cleaned, clipped text, where `recommended` is true only for a real `true`. A step's question carries `workflowStep` and `workflowStepLabel` as separate fields, and its text is never prefixed. The handler raises a `question_request` toast and sets a step's question to waiting, reopening its row. A malformed request with a usable id gets `{"action":"cancelled"}`; one without a usable id goes to `_refuse`. The new `_clean_agent_text` collapses whitespace, drops every Unicode category C character and clips the result. Approval entries now also carry `kind: "approval"`, `text` and `created`. The new `_answer_pending_cancelled` writes `{"action":"cancelled"}` only for `kind == "question"`; any other value, missing or unknown, gets the permission outcome. Close, the turn-end sweep, both Stop paths and `_cancel_step_permissions` now use it, and a question that is dropped gets no denial notice. The new `_handle_question_response` keeps the (a)-(e) order and accepts either an `optionIndex` (an int, not a bool, in range), mapped to the stored raw title, or a stripped free-text `answer`; refusals are `empty_answer`, `invalid_option` and `bad_payload` (both keys, neither key, a non-string answer, or more than 4000 characters). `_handle_permission_response` refuses a question entry with `unknown_request`. For D25, the reap no longer calls `_cancel_step_permissions`, which lost its `notify` parameter, and the reap, the turn-end loop, `_evict_crew_children` and `_evict_finished_subagents` all skip a step for which the new `_workflow_step_awaits_person` is true. Outside `acp.py`: `notifications.notify_question(label, text)` and a `question_request` branch in `web.py`'s `_notify_from_acp`; `addQuestionRequest` in `static/transcript-renderer.js` (`createElement`/`textContent` only, the permission row class and `dataset.requestId`, step label, question, option buttons with a Recommended badge and description, a textarea whose Send stays disabled while blank; either answer disables the card; `markPermissionResolved` also disables textareas); both templates dispatch `question_request`, set `workflowStep` and refresh the composer controls, and `acp.html` fires its in-page notification behind `!replaying && _notifyEnabled`; `.acp-question-*` rules with `[hidden]` rules in `style.css`. Tests: the capability and exact-entry assertions updated, the two reap-cancels tests replaced by D25 tests, the combined reap-and-close test kept for its close half, and new tests for storage, frame, toast, free-form questions, raw-title mapping, each refusal and both boundaries, double answers, foreign sessions, the 20 cap, U+202E/U+0000, the abandon shape per kind, cross-route refusals, malformed requests, step routing and waiting, Stop/close/sweep/detach for both kinds, no denial notice, `node_complete`, the type guard, the `initialize` handshake and the toast policy; nine server mutations each failed a test. Eight page checks on both pages; three renderer mutations each failed one. pytest 3305 passed, 1 skipped; node 1087 passed.
@@ -411,7 +411,7 @@ Tests:
 - [x] `_workflow_outcome` docstring notes that `run_complete` `paused` is handled before it
 - [x] The `_kiro/session/notify` INFO fall-through no longer fires for handled notifies (unit test on the log level, beside `TestAcpUnrecognizedNotificationLogLevel`)
 - [x] Phase 1 probe 3's outcome applied (old-row handling added if the resume spawned a new child, or "unmeasured" noted in §9)
-- [ ] Live (after a granted restart, else carried to Phase 7): a workflow step question shows on the row, in the transcript and as Waiting; after the answer the row runs again and finishes; a reload or `session/load` shows one step-message row, not two
+- [x] Live (after a granted restart, else carried to Phase 7): a workflow step question shows on the row, in the transcript and as Waiting; after the answer the row runs again and finishes; a reload or `session/load` shows one step-message row, not two
 
 Implementation (2026-10-12, code: f6d4d71)
 `_on_notification` handles `_kiro/session/notify` in a new `_on_session_notify`, after `_workflow_touch` and before the early-frame buffer, logging every notify at INFO; a `tool_call` from a tracked step calls `_workflow_step_resume` in the same place. A step's message (`sender: "step"`, step = `callerSessionId`, tracked under `sessionId`) is cleaned to 512 characters and set as the open row's `action` for every severity; `warning` and `error` also record `step_message {step, severity, message}` on the parent; `warning` writes `_workflow_step_questions[step]` and sets the step waiting, reopening a reaped row. A parent-to-step notify resumes the step. `_workflow_step_resume` removes the step question and sets a waiting step running unless a request is still open. Step questions are removed in `_workflow_drop_child` (node_complete, run_complete, Stop, eviction) and `_workflow_drop_parent` (close). A replayed `system-notification` chunk gives the same `step_message` for warning and error and nothing otherwise; a live one stays a user chunk with an INFO line. `run_complete` `status: "paused"` is handled before `_workflow_outcome`: tracked steps waiting, finished rows untouched, the run record refreshed and never popped or marked ended. A re-sent `run_start` and `node_start` reset nothing. Comments and the `_workflow_outcome` docstring cite the measured shapes; `step_message` is in `SERVER_TYPES`. Pages: `addStepMessage` in `static/transcript-renderer.js` (textContent only, severity class from a fixed list), dispatched by both templates; the D15 waiting state in both templates (state functions, `status-waiting` dot, `acp-crew-row-waiting`, sub-panel head, "Paused (n)" header); waiting colours and `.acp-step-message*` in `style.css`. About 25 workflow tests plus page checks; pytest 3345 passed, 1 skipped; node 1099 passed; 9 server and 4 page mutations each failed a test.
@@ -474,7 +474,7 @@ Tests:
 **Exit criteria**:
 - [x] Every Python and page test listed above passes; the full suites pass
 - [x] `_REMOTE_ALLOWED_PATHS` unchanged (`git diff` shows no edit to it)
-- [ ] Live (after a granted restart, else carried to Phase 7): a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer
+- [x] Live (after a granted restart, else carried to Phase 7): a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer
 - [x] (deferred from Phase 4) Past the 6 h waiting bound, the attention list and the waiting override agree with the rail for a step question that outlives `workflow_state` (Phase 4 reliability review finding 4): either both still show it, or neither does, with a test
 
 Implementation (2026-10-13, code: 71033de)
@@ -522,7 +522,7 @@ Tests:
 - [x] `grep -n -i "silence" src/power_atlas/acp.py` hits only text unrelated to a turn bound (each remaining hit named in §9)
 - [x] The new tests pass (the no-cancel test failed before the change, and the D26 ignore-the-cancel test failed before the change); the full suites pass
 - [x] `README.md` updated: the config example line removed, the "bounded by silence" bullet and the permission-section sentence rewritten
-- [ ] Live (batched into Phase 7's restart): the settings menu no longer lists the silence setting
+- [x] Live (batched into Phase 7's restart): the settings menu no longer lists the silence setting
 
 Implementation (2026-10-13, code: d2fbc36)
 The commit's subject and body wrongly carry the Phase 4 text (see §9); the change is Phase 6's. `acp.py`: `PROMPT_SILENCE_SECONDS`, the silence deadline in the wait (the `last_activity` and `queued_behind` extensions), `_stamp_activity` and both calls, the `last_activity` field and the `apply_config` rebinding are removed; `_await_inactivity` is `_await_prompt` and `_INACTIVITY` is `_PROMPT_WAIT`, with rewritten docstrings and comments; the `_V3_SESSION_STALE_SECONDS` comment rests on its own measurement; every comment describing the silence bound is reworded. D26: `cancel()` writes `session/cancel`, then records `meta["stop_requested_at"]` and wakes the wait through `_prompt_wakers`; `_await_prompt` races one shielded future against the wake event, re-reads the Stop each pass and caps each slice at the remaining grace; after `CANCEL_GRACE_SECONDS` with no answer it logs a WARNING ("did not answer Stop") and raises the D26 `AgentTimeout`, writing no second cancel; `clear_stop` runs at the start of a prompt and of a slash command, right after `inflight.add`. `config.py`: the field is gone and the name is in `_LEGACY_KEYS`. `web.py` and `index.html`: the key leaves the settings payload, type, bound and restart lists and the restart label. `README.md`: config entry removed, the turn-bound bullet and the permission-section sentence rewritten. Tests: silence-premise and `last_activity` tests removed or reduced to their `last_used` half; `TestAcpInactivityCeiling` renamed `TestAcpPromptWait`; new `test_a_quiet_turn_is_never_cancelled_for_silence`, the ceiling test asserting no early cancel, `TestAcpStopFallback` (ignored Stop, honoured Stop, next turn, slash command) and the legacy-key load-and-drop test. Before the change, the quiet-turn test failed ("The agent went silent for 0s…"), the ignored-Stop test ended at 3.21 s against a 1.2 s bound, and the slash-command test at 2.79 s. pytest 3376 passed, 1 skipped; `tests/test_config.py` 113 passed; node 1110 passed.
@@ -552,11 +552,11 @@ Orchestrator notes: the change descriptions above are condensed from the sub-age
 - [x] `plans/tests/260701_POWERATLAS.md` gains the `GET /api/dashboard/attention` section after the Overview summary section
 - [x] `plans/ROADMAP.md` updated (Low item on resuming after `node_paused` and the Layer 3/4 handled-frames sentence included): the rows "`_note_subagent_action` filters its crew frame with the wrong map", "Approvals and questions in 'Needs attention'" and "`_kiro/session/notify` has no handler" removed from the ranking and body (anchor by those titles), and the ranking renumbered
 - [x] `pytest tests/test_web.py --timeout=300` and `node tests/acp_page.test.mjs` pass
-- [ ] Every live check of SC-8 passes in a real browser, with the evidence (tool calls, screenshots) cited in §9; or a check is recorded BLOCKED with its reason
+- [x] Every live check of SC-8 passes in a real browser, with the evidence (tool calls, screenshots) cited in §9; or a check is recorded BLOCKED with its reason
 - [x] (deferred from Phase 3) Live: a quick-spec question answered from a card option, and a free-form question answered with free text, on `/acp` (file scope: no file; a live check)
 - [x] (deferred from Phase 4) Live: a workflow step question shows on the row, in the transcript and as Waiting; after the answer the row runs again and finishes; a reload or `session/load` shows one step-message row, not two (file scope: no file; a live check)
 - [x] (deferred from Phase 4) `docs/KNOWLEDGE.md` notes that a step past `_WORKFLOW_CHILD_MAX_AGE_S` that resumes through its own `tool_call` keeps its old staleness clock, so a step that waited more than 600 s reads "no longer reporting" at the next reap (user decision 2026-10-12: accept)
-- [ ] (deferred from Phase 5) Live: a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer (file scope: no file; a live check)
+- [x] (deferred from Phase 5) Live: a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer (file scope: no file; a live check)
 - [x] (deferred from Phase 6) Live: the settings menu no longer lists the silence setting (file scope: no file; a live check)
 
 Implementation (2026-10-13, code: 74bbbea)
@@ -617,7 +617,7 @@ Orchestrator notes: the description above is condensed from the sub-agent return
 | 4 | Step messages, waiting state, paused runs | Complete | code: f6d4d71, cdfa879, 25fd7bc; live check deferred to Phase 7 |
 | 5 | Attention feed and title count | Complete | code: 71033de, b13bcd0; live check deferred to Phase 7 |
 | 6 | Remove the prompt silence watchdog | Complete | code: d2fbc36 (subject wrongly says phase 4), ca988d8, fa49c87; live check deferred to Phase 7 |
-| 7 | Documentation, roadmap and live QA | In progress | docs: 74bbbea; live checks after Step 9 review, one restart (granted 2026-10-12) |
+| 7 | Documentation, roadmap and live QA | Complete | docs: 74bbbea; live QA PASS after the Step 9 review (see §9 "Live QA") |
 
 ## 9) Implementation Divergences from Plan
 
@@ -648,8 +648,10 @@ PowerAtlas was restarted once under the task's grant (`POST /api/restart`, fresh
 - **Needs attention for a question: PASS.** A "Waiting for you" row (Question, session title, workspace, text, age) and the title `(1) PowerAtlas`; the rail dot read waiting; the prefix stayed with a transcript open across a poll; clicking the row opened the session; after the answer the row and the prefix went within 0.5 s.
 - **Workflow step question: PASS.** A step's warning `send_message` showed a warning step-message row in the transcript, the crew row waiting with the message, the header "Paused (1 agent)", a "Step question" row with the step label in its own element, the title `(1) PowerAtlas` and a waiting rail dot. Prompting the parent with the answer logged the parent-to-step notify and "resumed: running" (with the measured re-sent `run_start` and `node_start`); the row cleared within 3.5 s and the header returned to "Orchestrating". A page reload showed exactly one step-message row.
 - **Settings: PASS.** The settings menu and every settings tab hold no "silence" or "ceiling" text.
-- **Not run.** Manual-mode approval checks (approval row in Needs attention, the 30-minute open approval) await the user's permission to switch permission mode. A `session/load` replay after close was BLOCKED: kiro-cli keeps a closed session loaded, so it cannot be reopened until the idle sweeper or a restart unloads it; the reload check covers the one-row property. The `/acp?sid=` new-tab fallback was not exercised (every test session had a rail row); page tests cover it.
-- **Cleanup.** Four parent sessions closed through `#acpClose`; six session folders (four parents, two step children) deleted after the `createdAt` check. kiro-cli re-created one folder with only `messages.jsonl` while it still holds the session loaded; it needs one more delete after the idle sweeper or a restart unloads it.
+- **Manual-mode approvals: PASS.** With the user's permission ("yes go ahead, you can aslo restart PA", 2026-10-13), permission mode was switched to Manual. An approval card for a shell command appeared on /acp; "Waiting for you" listed an Approval row with the title `(1) PowerAtlas`, which stayed with a transcript open across a poll; clicking the row opened the session; Allow cleared the row and the prefix within 3.5 s and the turn completed.
+- **An approval held for 33 minutes: PASS.** A second approval was left unanswered with no tab open from 10:41:09. At 33 minutes `orchestrator.log` held no `session/cancel`, "went silent", release or cancelled-reply line, and the attention feed still listed it (age 1981 s). A fresh browser showed the row ("33 min ago") and the prefix; `/acp?sid=` replayed the card active with Stop enabled; Allow ran the command and the turn ended `end_turn` 4 s later, and the row cleared within 1.5 s. Permission mode was then restored to `yolo` and read back as `yolo` before and after a final restart.
+- **Not run.** A `session/load` replay after close was BLOCKED: kiro-cli keeps a closed session loaded, so it cannot be reopened until the idle sweeper or a restart unloads it; the reload check covers the one-row property. The `/acp?sid=` new-tab fallback was not exercised (every test session had a rail row); page tests cover it.
+- **Cleanup.** Four parent sessions closed through `#acpClose`; six session folders (four parents, two step children) deleted after the `createdAt` check. kiro-cli re-created two folders with only `messages.jsonl` while it held the sessions loaded; after the final restart both were deleted (first record inside the window), with the two Manual-check sessions, and a re-check finds none left.
 
 ### Divergences from the final review (Step 9)
 
@@ -883,7 +885,7 @@ The first review ran four mutations (wake-on-Stop, both `clear_stop` sites, wake
 Overall implementation health: Green.
 Personas: Senior engineer, Security auditor, Reliability engineer (cycle 1); Reliability and Senior engineer lenses in one diff-only reviewer (cycle 2).
 21 findings (1 High, 2 Medium, 18 Low).
-QA verification: PASS for the non-Manual surfaces (6 checks, 13 probes); Manual-mode approval checks pending the user's permission (see §9 "Live QA").
+QA verification: PASS (8 checks across /acp, the dashboard, workflow steps, settings and the attention endpoint, each with at least two probe categories; see §9 "Live QA").
 
 #### Test execution summary
 
@@ -891,11 +893,11 @@ QA verification: PASS for the non-Manual surfaces (6 checks, 13 probes); Manual-
 |---|---|---|---|
 | 1: Pre-flight probes | not_run | SKIP | Probe phase on a second kiro-cli; no unit tests apply |
 | 2: Crew-frame filter fix | pass | SKIP | Path unreachable live on kiro-cli 2.29.1; unit tests drive the real notification path |
-| 3: Agent questions through `userInput` | pass | pending | Live checks carried to Phase 7 |
-| 4: Step messages, waiting state, paused runs | pass | pending | Live checks carried to Phase 7 |
-| 5: Attention feed and title count | pass | pending | Live checks carried to Phase 7 |
-| 6: Remove the prompt silence watchdog | pass | pending | Live check carried to Phase 7 |
-| 7: Documentation, roadmap and live QA | pass | pending | Docs committed; live checks after the restart |
+| 3: Agent questions through `userInput` | pass | PASS | Verified live in Phase 7 |
+| 4: Step messages, waiting state, paused runs | pass | PASS | Verified live in Phase 7 |
+| 5: Attention feed and title count | pass | PASS | Verified live in Phase 7, Manual mode included |
+| 6: Remove the prompt silence watchdog | pass | PASS | Settings checked live; a 33-minute approval was not cancelled |
+| 7: Documentation, roadmap and live QA | pass | PASS | Docs committed; two restarts under the task's grant |
 
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
