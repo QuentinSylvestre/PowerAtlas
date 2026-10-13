@@ -726,7 +726,7 @@ open ends the turn and the card goes inactive; the question is dropped.
 A workflow step can also ask you something. Its message shows on the step's row in the crew panel and
 as a row in the parent's transcript, the step reads waiting, the crew header reads "Paused" while no
 other step is running, and the
-question is listed in *Needs attention*. Answer it by sending the parent session a message; the parent
+question is listed in *Needs attention* and raises a desktop notification, "Question: [workflow step] ...", like an agent question when notifications are on. Answer it by sending the parent session a message; the parent
 passes it on to the step, and the step runs again. A step's warnings and errors appear in the
 transcript the same way, and still appear after a reload.
 
