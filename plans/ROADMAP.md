@@ -33,6 +33,8 @@
 - **Template prompts** — save reusable per-workspace prompts; build on the read-from-prompt convention rather than `$ARGUMENTS`
 - **Scheduled tasks** — cron-like recurring kiro-cli launches; mechanism is measured and process cost is known, but the auto-permissions gate must come first
 - **Timed prompts** — a one-shot prompt at a wall-clock time; the quota-reset resume for Claude Code and Codex shipped 2026-10-09, the general case and kiro-cli did not
+- **Edit scheduled message** — change or cancel a queued schedule after it has been enabled
+- **Auto-resume** — automatically resume quota-stopped sessions multiple times without user interaction; enabled by default
 - **Chained launches** — when a session finishes, automatically start the next one; works for sessions PowerAtlas drives, not for terminal sessions
 - **Skills support spike, Claude Code half** — how a Claude Code skill receives its arguments; the kiro-cli half is answered
 - **Plan-file shortcuts** — detect `plans/*.md` files and offer one-click `/qdev` buttons; same read-from-prompt convention
@@ -180,6 +182,18 @@ cost first) · the Electron app.
 
 - **Timed prompts** — schedule a one-shot prompt for a specific wall-clock time; e.g. "at 11:50am, resume session X with prompt P"; cross-provider (kiro-cli ACP, Claude Code, kiro-cli terminal, Codex terminal); complements *Scheduled tasks* (recurring launches) but distinct: one-shot, prompt-delivery-focused, and works for sessions PowerAtlas does not own.
   - *Quota-limit auto-schedule* — **partly shipped 2026-10-09** in `plans/done/261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS.md`, not yet tested live: the Overview lists Claude Code and Codex sessions stopped by a quota limit, with the reset time and Quick resume and Schedule resume buttons (a schedule fires at reset plus 60 seconds; the default prompt is "resume", editable). Still open: kiro-cli, which is detect-and-show only with no resume; defaulting the payload to the last user prompt instead of "resume"; and a general one-shot timed prompt at any wall-clock time, which this does not provide.
+
+- **Edit scheduled message** — change or cancel a queued schedule after it has been enabled; applies to quota-reset auto-schedules in the Overview and any future general timed prompts.
+  - *What shipped* — the Overview's *Schedule* button creates a one-shot resume at reset time (`261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS`); no editing or cancellation exists beyond *Dismiss*, which discards the row and the schedule together.
+  - *Shape* — an edit affordance on a pending scheduled row; lets the user change the prompt text and/or the scheduled time before it fires; a separate cancel-schedule action keeps the row without firing.
+  - *Done when* — a pending schedule can be edited (prompt and/or time) and cancelled, and the edited values are used when the schedule fires.
+
+- **Auto-resume** — automatically chain quota-limit resumes without user interaction between cycles; enabled by default; raises a warning when a session is inaccessible before the next resume fires.
+  - *Motivation* — the current *Schedule* flow fires once and stops; a multi-step task running overnight must be rescheduled manually every time the limit resets. Auto-resume repeats until the session finishes or the user opts out.
+  - *Prerequisite — confirm PA-launched terminal access* — auto-resume is only safe for sessions PA can reach. ACP sessions are always reachable; for terminal sessions (regular CLI launch and AI sessions via the workspace quick-action), confirm the launch-tracking record in `launcher.py`/`presence.py` is sufficient to prove PA launched the session and that the terminal is still open at resume time. If the record is insufficient, a launch-tracking store is needed before this ships.
+  - *Warning* — when PA cannot access the session (terminal closed, process exited, ACP session reclaimed by the idle sweeper), surface a persistent warning on the *Stopped by a quota limit* row naming the specific access problem; do not retry silently.
+  - *Default-on, opt-out* — enabled by default; a per-row toggle or global setting lets the user opt out; the opt-out persists per session id across restarts.
+  - *Done when* — a session stopped twice in a row by a quota limit resumes both times without user interaction; a warning appears when PA cannot access the session; the toggle persists across restarts; and the terminal-access confirmation (PA-launched vs. independently opened) is verified for both regular CLI terminals and AI sessions.
 
 - **Chained launches** — when a session finishes, automatically start the next one; works for sessions PowerAtlas drives, not for terminal sessions.
 
