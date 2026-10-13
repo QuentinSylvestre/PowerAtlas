@@ -547,17 +547,22 @@ Orchestrator notes: the change descriptions above are condensed from the sub-age
 3. Run the live checks carried from Phases 3-6, including a session left with an open approval for longer than 30 minutes that is still waiting with its card answerable (start it first, run the other checks meanwhile), plus a Manual-mode approval (`POST /api/acp-permissions {"mode":"manual"}`, restored and verified afterwards). Follow `AGENTS.md` § Verification Setup: sign in through `/local-auth?code=<code>`, use one script per call, and close and delete the test sessions after the `createdAt` check.
 
 **Exit criteria**:
-- [ ] `README.md` updated: the "Needs attention" row lists approvals, questions and step questions and the `(N)` title count; the `/acp` feature list mentions question cards with free-text answers
-- [ ] `docs/KNOWLEDGE.md` updated: a `user_input` / `_kiro/userInput` section (request shape, the capability, reply rules, Phase 1 results); `_kiro/session/notify` shapes for both senders; the paused run (`node_paused`, `paused`, `run_complete` `status: "paused"`) and the probe-3 resume result; the "`_workflow_outcome` … revise when a real failure is captured" note updated for `paused`
-- [ ] `plans/tests/260701_POWERATLAS.md` gains the `GET /api/dashboard/attention` section after the Overview summary section
-- [ ] `plans/ROADMAP.md` updated (Low item on resuming after `node_paused` and the Layer 3/4 handled-frames sentence included): the rows "`_note_subagent_action` filters its crew frame with the wrong map", "Approvals and questions in 'Needs attention'" and "`_kiro/session/notify` has no handler" removed from the ranking and body (anchor by those titles), and the ranking renumbered
+- [x] `README.md` updated: the "Needs attention" row lists approvals, questions and step questions and the `(N)` title count; the `/acp` feature list mentions question cards with free-text answers
+- [x] `docs/KNOWLEDGE.md` updated: a `user_input` / `_kiro/userInput` section (request shape, the capability, reply rules, Phase 1 results); `_kiro/session/notify` shapes for both senders; the paused run (`node_paused`, `paused`, `run_complete` `status: "paused"`) and the probe-3 resume result; the "`_workflow_outcome` … revise when a real failure is captured" note updated for `paused`
+- [x] `plans/tests/260701_POWERATLAS.md` gains the `GET /api/dashboard/attention` section after the Overview summary section
+- [x] `plans/ROADMAP.md` updated (Low item on resuming after `node_paused` and the Layer 3/4 handled-frames sentence included): the rows "`_note_subagent_action` filters its crew frame with the wrong map", "Approvals and questions in 'Needs attention'" and "`_kiro/session/notify` has no handler" removed from the ranking and body (anchor by those titles), and the ranking renumbered
 - [ ] `pytest tests/test_web.py --timeout=300` and `node tests/acp_page.test.mjs` pass
 - [ ] Every live check of SC-8 passes in a real browser, with the evidence (tool calls, screenshots) cited in §9; or a check is recorded BLOCKED with its reason
 - [ ] (deferred from Phase 3) Live: a quick-spec question answered from a card option, and a free-form question answered with free text, on `/acp` (file scope: no file; a live check)
 - [ ] (deferred from Phase 4) Live: a workflow step question shows on the row, in the transcript and as Waiting; after the answer the row runs again and finishes; a reload or `session/load` shows one step-message row, not two (file scope: no file; a live check)
-- [ ] (deferred from Phase 4) `docs/KNOWLEDGE.md` notes that a step past `_WORKFLOW_CHILD_MAX_AGE_S` that resumes through its own `tool_call` keeps its old staleness clock, so a step that waited more than 600 s reads "no longer reporting" at the next reap (user decision 2026-10-12: accept)
+- [x] (deferred from Phase 4) `docs/KNOWLEDGE.md` notes that a step past `_WORKFLOW_CHILD_MAX_AGE_S` that resumes through its own `tool_call` keeps its old staleness clock, so a step that waited more than 600 s reads "no longer reporting" at the next reap (user decision 2026-10-12: accept)
 - [ ] (deferred from Phase 5) Live: a Manual-mode approval and a question appear in "Needs attention" with the title count, open their session on click, and clear within one poll of the answer (file scope: no file; a live check)
 - [ ] (deferred from Phase 6) Live: the settings menu no longer lists the silence setting (file scope: no file; a live check)
+
+Implementation (2026-10-13, code: 74bbbea)
+Documentation half. `README.md`: the Overview *Needs attention* paragraph gains the *Waiting for you* block (approval, question and step question rows, click behaviour, about 5 s clearing, the `(N)` title count and its every-mode poll, no count on `/acp`); the clarifying-question item now covers option buttons with descriptions, the Recommended badge, free text, the trailing "Skip questions", a question waiting in every mode, the Needs attention row and Stop; a new paragraph explains workflow step questions. `docs/KNOWLEDGE.md`: the `_kiro/session/notify` shapes and handling, replayed step messages, `paused` and `node_paused` measured, a "Paused runs and their resume" block, the rewritten *Waiting.* and *Lifetime* bullets (resume rule, one-shot reopen, the skips for steps awaiting a person, the age-cap note deferred from Phase 4), the workflow-step approvals entry (`kind`, `text`, `created`; no reap or timeout cancels; the sweeper hold; the exits), and a new "Agent questions: `user_input` and `_kiro/userInput`" section with the probe results, Stop's local fallback and the refused `commands/execute`. `plans/ROADMAP.md`: the three items removed by title, the resume Low item removed (its residual moved into the Layers 3/4 limits), the handled-frames sentence updated, the ranking renumbered, a new item for slash commands on kiro-cli 2.29.1, and stale silence-ceiling text in the unattended-permissions item fixed. `plans/tests/260701_POWERATLAS.md`: new section 2.30 for `GET /api/dashboard/attention` and the range references widened.
+
+Orchestrator notes: the description above is condensed from the sub-agent return. Order change: the final `/qdev` Step 9 review runs before this phase's restart, so a single granted restart serves both the live checks here and Step 9b's live QA (each restart ends every live ACP session). The doc changes are reviewed in Step 9 rather than per phase.
 
 ## 6) Risk Assessment
 
@@ -612,7 +617,7 @@ Orchestrator notes: the change descriptions above are condensed from the sub-age
 | 4 | Step messages, waiting state, paused runs | Complete | code: f6d4d71, cdfa879, 25fd7bc; live check deferred to Phase 7 |
 | 5 | Attention feed and title count | Complete | code: 71033de, b13bcd0; live check deferred to Phase 7 |
 | 6 | Remove the prompt silence watchdog | Complete | code: d2fbc36 (subject wrongly says phase 4), ca988d8, fa49c87; live check deferred to Phase 7 |
-| 7 | Documentation, roadmap and live QA | Not started | Restart granted 2026-10-12 |
+| 7 | Documentation, roadmap and live QA | In progress | docs: 74bbbea; live checks after Step 9 review, one restart (granted 2026-10-12) |
 
 ## 9) Implementation Divergences from Plan
 
