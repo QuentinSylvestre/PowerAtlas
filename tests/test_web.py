@@ -12541,13 +12541,16 @@ class TestAcpStopFallback:
             {"turn": "end", "stopReason": "end_turn"}]
         assert self._errors(acp_mod, sid) == []
 
-    def test_a_stop_whose_cancel_write_lands_late_does_not_end_the_next_turn(
-            self, acp_fast):
-        """Reliability review (High): turn 1's cancel write is held until
-        turn 1 has ended on its own and turn 2 has started. Turn 2 started
-        after that Stop, so the Stop must not end it."""
+    def _late_stop(self, acp_mod, rebuild_record=False):
+        """Turn 1's cancel write is held until turn 1 has ended on its own and
+        turn 2 has started. With ``rebuild_record`` the session record is
+        replaced between the turns, as `_detach` and a `session/load` do.
+
+        Turn 2 opens an approval and a workflow step before the held write is
+        released. Returns what turn 2 still had 0.6 s (three times the grace)
+        after the write landed, and what had been written by then.
+        """
         import threading
-        acp_mod, _ = acp_fast
         acp_mod.PROMPT_TICK_SECONDS = 3.0
         acp_mod.CANCEL_GRACE_SECONDS = 0.2
         sid = _live_session(acp_mod)
@@ -12574,28 +12577,81 @@ class TestAcpStopFallback:
                     await asyncio.sleep(0.05)
                     fut.set_result({"stopReason": "end_turn"})
                     await first
+                    if rebuild_record:
+                        sup.sessions[sid] = acp_mod._new_session_record(r"C:\scratch")
                     second = asyncio.ensure_future(
                         acp_mod._handle_prompt(conn, sid, {"prompt": "two"}))
                     fut = await self._await_request(
                         sup, written, "session/prompt", 2)
+                    # Turn 2's own open approval, and a running workflow step.
+                    sup._pending_permission["op-late-1"] = {
+                        "session_id": sid, "options": [], "kiro_id": 41,
+                        "kind": "approval", "text": "", "created": time.time()}
+                    _notify(acp_mod, "_kiro/workflow/node_start", {
+                        "parentSessionId": sid, "workflowId": "wf-late",
+                        "nodeId": "step-a", "nodePath": ["wf-late", "step-a"],
+                        "type": "step", "agentName": "wf-coder",
+                        "sessionId": "child-late-1"})
                     gate.set()
                     await stop
-                    await asyncio.sleep(0.6)    # three times the grace
-                    ended_early = second.done()
+                    await asyncio.sleep(0.6)
+                    seen = {
+                        "ended_early": second.done(),
+                        "approval_open": "op-late-1" in sup._pending_permission,
+                        "step_tracked": "child-late-1"
+                                        in sup._workflow_children.get(sid, {}),
+                        "written": [o.get("method") or o.get("id")
+                                    for o in written],
+                        "frames": [(f["type"], f["payload"].get("message"))
+                                   for f in _queued(conn)
+                                   if f["type"] in ("agent_error",
+                                                    "permission_resolved")],
+                    }
                     fut.set_result({"stopReason": "end_turn"})
                     await second
-                    return ended_early
+                    return seen
             finally:
                 gate.set()
                 sup._loop = None
                 sup._pending.clear()
+                sup._pending_permission.pop("op-late-1", None)
 
-        assert asyncio.run(run()) is False, "turn 1's Stop ended turn 2"
+        seen = asyncio.run(run())
+        assert acp_mod._supervisor._prompt_wakers == {}
+        return sid, seen
+
+    def _assert_turn_two_untouched(self, acp_mod, sid, seen):
+        assert seen["ended_early"] is False, "turn 1's Stop ended turn 2"
+        # The late Stop cascades into nothing of turn 2's: the approval is
+        # still open and unanswered, the step is still tracked, and no
+        # 'Stop ended this turn' notice or resolved card reached the page.
+        assert seen["approval_open"] is True
+        assert seen["step_tracked"] is True
+        assert seen["written"] == [
+            "session/prompt", "session/prompt", "session/cancel"]
+        assert seen["frames"] == []
         assert self._turn_ends(acp_mod, sid) == [
             {"turn": "end", "stopReason": "end_turn"},
             {"turn": "end", "stopReason": "end_turn"}]
         assert self._errors(acp_mod, sid) == []
-        assert acp_mod._supervisor._prompt_wakers == {}
+
+    def test_a_stop_whose_cancel_write_lands_late_does_not_end_the_next_turn(
+            self, acp_fast):
+        """Reliability review (High, then Medium on re-review): a Stop that
+        arrives after its turn ended neither ends turn 2 nor runs the Stop
+        cascade against it."""
+        acp_mod, _ = acp_fast
+        sid, seen = self._late_stop(acp_mod)
+        self._assert_turn_two_untouched(acp_mod, sid, seen)
+
+    def test_a_late_stop_does_not_match_a_rebuilt_session_record(
+            self, acp_fast):
+        """Reliability re-review (Low): a record rebuilt between the turns
+        starts afresh, so a per-record turn count would hand turn 2 the same
+        number turn 1 had. The turn token is unique across records."""
+        acp_mod, _ = acp_fast
+        sid, seen = self._late_stop(acp_mod, rebuild_record=True)
+        self._assert_turn_two_untouched(acp_mod, sid, seen)
 
     def test_a_second_stop_does_not_push_the_fallback_back(self, acp_fast):
         """The first Stop of a turn sets the deadline. A later press keeps it,
@@ -14834,7 +14890,8 @@ class TestAcpWorkflowNotifications:
         _queued(conn)
 
         async def cancelled(self_, session_id):
-            return None
+            # True: the Stop was recorded for the turn in flight (D26).
+            return True
 
         with patch.object(acp_mod._Supervisor, "cancel", cancelled):
             asyncio.run(acp_mod._handle_cancel(conn, session))

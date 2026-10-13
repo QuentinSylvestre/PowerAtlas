@@ -3609,6 +3609,9 @@ class _Supervisor:
         # Stop is recorded (D26). Held here, not on the session record, so the
         # record stays plain data; each wait removes its own entry.
         self._prompt_wakers: dict[str, asyncio.Event] = {}
+        # The last turn token `clear_stop` handed out. Supervisor-wide and only
+        # ever increased, so no two turns share one, even across records.
+        self._turn_counter = 0
         # Sessions with a `session/close` in flight. Claimed before the first
         # await of `close_session`, so two `close` frames for one session cannot
         # both reach the agent — the second would be refused by an agent that
@@ -6431,7 +6434,7 @@ class _Supervisor:
             self.touch_used(session_id)
         return result or {}
 
-    async def cancel(self, session_id: str) -> None:
+    async def cancel(self, session_id: str) -> bool:
         """Ask the agent to end the turn in flight on a session, with a local
         fallback when it does not (D26).
 
@@ -6464,34 +6467,40 @@ class _Supervisor:
             raise AgentDied("The agent is not running.")
         # The turn this Stop is for, read before the write's `await`. The write
         # can be slow; if that turn ends and the next one starts meanwhile,
-        # `clear_stop` has moved `turn_seq` on, and recording the Stop then
-        # would end a turn that started after it (Reliability review, High).
+        # `clear_stop` has given the record a new `turn_seq`, and recording
+        # the Stop then would end a turn that started after it (Reliability
+        # review, High). The values come from one supervisor-wide counter, so
+        # a record rebuilt by `_detach` and `session/load` never repeats one.
         turn = self.sessions[session_id].get("turn_seq")
         await self._notify("session/cancel", {"sessionId": session_id})
         meta = self.sessions.get(session_id)
         if meta is None:
-            return
+            return False
         if meta.get("turn_seq") != turn:
             log.info("ACP cancel: session=%s; the Stop's turn ended before its "
                      "cancel was written, so it is not recorded", session_id)
-            return
+            return False
         # The first Stop of a turn sets the deadline: pressing Stop again must
         # not push the fallback back.
         meta.setdefault("stop_requested_at", time.monotonic())
         waker = self._prompt_wakers.get(session_id)
         if waker is not None:
             waker.set()
+        return True
 
     def clear_stop(self, session_id) -> None:
         """Start a new turn's Stop state (D26): forget any recorded Stop and
-        advance ``turn_seq``, so a Stop meant for an earlier turn, including
-        one whose cancel write is still in flight, cannot end this one.
+        give the turn a fresh ``turn_seq``, so a Stop meant for an earlier
+        turn, including one whose cancel write is still in flight, cannot end
+        this one. ``turn_seq`` comes from one supervisor-wide counter, never
+        a per-record count, so it never repeats across a rebuilt record.
         Called when a prompt or a slash command starts, with no ``await``
         between its ``inflight`` claim and this."""
         meta = self.sessions.get(session_id)
         if meta is not None:
             meta.pop("stop_requested_at", None)
-            meta["turn_seq"] = meta.get("turn_seq", 0) + 1
+            self._turn_counter += 1
+            meta["turn_seq"] = self._turn_counter
 
     async def steer(self, session_id: str, text: str) -> dict:
         """Inject a mid-turn steer message via ``_session/steer``.
@@ -10056,7 +10065,7 @@ async def _handle_cancel(conn, session_id):
         return
     log.info("ACP cancel requested: session=%s", session_id)
     try:
-        await _supervisor.cancel(session_id)
+        recorded = await _supervisor.cancel(session_id)
     except AcpError as exc:
         log.warning("ACP session/cancel refused: [%s] %s", exc.code, exc)
         conn.send(error_frame(exc.code, str(exc), session_id))
@@ -10066,6 +10075,11 @@ async def _handle_cancel(conn, session_id):
         conn.send(error_frame(
             "internal_error",
             "Cancelling the turn failed; see orchestrator.log.", session_id))
+        return
+    if not recorded:
+        # The Stop's turn ended (or the session went) while its cancel was
+        # being written. Whatever runs now belongs to a later turn, so none of
+        # the cascade below applies to it (Reliability re-review, Medium).
         return
     # The ACP spec: a client that cancels a turn answers each of that
     # session's pending permission requests with the `cancelled` outcome.
