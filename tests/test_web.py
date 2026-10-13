@@ -11882,11 +11882,17 @@ class TestAcpSubagentActivity:
         self._seed_wave_row(acp_mod, sid, "sub-old", "wave-old")
         self._seed_wave_row(acp_mod, sid, "sub-new", "wave-new")
         sup._active_fan_out_wave[sid] = "wave-new"
+        sup.inflight.add(sid)
         conn = _acp_conn(acp_mod)
         acp_mod._registry.attach(conn, sid)
         _queued(conn)
 
-        sup._note_subagent_action("sub-new", "Reading file")
+        # SC-7: driven through the real path, the child's own tool_call_chunk.
+        _notify(acp_mod, acp_mod.SUBAGENT_ACTIVITY_METHOD, {
+            "sessionId": "sub-new",
+            "update": {"sessionUpdate": "tool_call_chunk",
+                       "toolCallId": "tc-1", "title": "Reading file"},
+        })
         frames = [f for f in _queued(conn) if f["type"] == "subagents"]
         assert len(frames) == 1
         payload = frames[0]["payload"]

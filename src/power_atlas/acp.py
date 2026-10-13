@@ -4735,7 +4735,9 @@ class _Supervisor:
         # Filter by the row's own tag, not `crew_spawn_toolcallids`: that map
         # tags v2 rows only, so a wave-tagged row was filtered out of its own
         # frame. The row's tag is right for both kinds; a row of an older wave
-        # repaints that wave's panel (plan 261012, D16).
+        # repaints that wave's panel (plan 261012, D16). An untagged row (no
+        # `fan_out_id`, only possible in old in-memory state) falls back to the
+        # no-anchor id.
         _emit_subagents_frame(
             meta["parent"], self.crews,
             {meta["parent"]: entry.get("fan_out_id", _NO_ANCHOR_TOOLCALLID)})
