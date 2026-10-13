@@ -18230,6 +18230,66 @@ check("dashboard: crew header reads 'Paused' with a waiting row and none working
   assertEqual(p.sandbox.dashSubagentState(null), "working");
 });
 
+check("dashboard: the sub-panel head of a waiting row with no action says 'waiting'", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-w", role: "ask-step", task: "", sessionName: "wf-asker",
+      status: "waiting", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  const head = p.el("dashSubStatus");
+  assertEqual(String(head.className), "acp-subpanel-status acp-subpanel-status-waiting");
+  assertEqual(head.textContent, "waiting", "not 'working…'");
+});
+
+// Review fix (Phase 4): the dashboard's `history` replay goes through
+// renderTranscriptHistory -> renderTranscriptFrame, which dropped recorded
+// step messages and approval and question cards. Checked through the real
+// renderer (loadDashCard), feeding renderTranscriptFrame the events a
+// `history` frame carries, in order, as renderTranscriptHistory does after its
+// clearTranscript() (which needs the prompt-nav DOM this sandbox lacks).
+check("dashboard: a history replay renders step messages and pending and resolved cards", () => {
+  const d = loadDashCard(() => ({ body: {} }));
+  [
+
+    { type: "step_message", sessionId: "sess-1", payload: {
+      step: "workflow step wf-asker", severity: "warning", message: "Which colour?" } },
+    { type: "question_request", sessionId: "sess-1", payload: {
+      requestId: "q-old", sessionId: "sess-1", question: "Answered?",
+      options: [{ title: "yes", description: "", recommended: false }] } },
+    { type: "permission_resolved", sessionId: "sess-1", payload: { requestId: "q-old" } },
+    { type: "question_request", sessionId: "sess-1", payload: {
+      requestId: "q-new", sessionId: "sess-1", question: "Which file?",
+      options: [{ title: "a.py", description: "", recommended: false }],
+      workflowStep: true, workflowStepLabel: "workflow step wf-coder" } },
+    { type: "permission_request", sessionId: "sess-1", payload: {
+      requestId: "p-1", sessionId: "sess-1", toolCall: { title: "rm x" },
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      workflowStep: true } },
+  ].forEach((frame) => d.sandbox.renderTranscriptFrame(frame));
+  const step = d.transcript.querySelectorAll(".acp-step-message");
+  assertEqual(step.length, 1, "the step message replays");
+  assertEqual(step[0].querySelector(".acp-step-message-text").textContent, "Which colour?");
+  const cards = d.transcript.querySelectorAll(".acp-msg-question");
+  assertEqual(cards.length, 2, "both question cards replay");
+  assert(cards[0].classList.contains("acp-permission-resolved"), "the resolved question is marked");
+  assertEqual(cards[0].querySelector(".acp-question-option").disabled, true,
+    "the resolved question replays disabled");
+  assertEqual(cards[0].querySelector(".acp-question-text").disabled, true);
+  assert(!cards[1].querySelector(".acp-question-option").disabled,
+    "the pending question replays answerable");
+  assertEqual(cards[1].dataset.workflowStep, "1", "a step's card keeps its step flag");
+  const perms = d.transcript.querySelectorAll(".acp-msg-permission")
+    .filter((r) => !r.classList.contains("acp-msg-question"));
+  assertEqual(perms.length, 1, "the approval card replays");
+  assertEqual(perms[0].dataset.workflowStep, "1");
+  assertEqual(d.sandbox.hasPendingStepPermissionCard(), true,
+    "the page's composer refresh after the replay keeps Stop usable");
+  cards[1].querySelector(".acp-question-option").dispatch("click");
+  assertEqual(JSON.stringify(d.sent.map((f) => [f.type, f.sid])),
+    JSON.stringify([["question_response", "sess-1"]]), "the replayed card answers its session");
+});
+
 check("dashboard: a step_message frame reaches the shared step-message row", () => {
   const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
   p.sandbox.dashHandle({ type: "step_message", sessionId: "sess-1", payload: {

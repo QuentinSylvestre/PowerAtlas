@@ -12521,6 +12521,7 @@ class TestAcpWorkflowNotifications:
             acp_mod._supervisor._pending_permission.clear()
             acp_mod._supervisor._workflow_child_meta.clear()
             acp_mod._supervisor._workflow_step_questions.clear()
+            acp_mod._supervisor._workflow_step_last_warning.clear()
 
     def _send(self, acp_mod, kind, **fields):
         fields.setdefault("parentSessionId", self.P)
@@ -16484,23 +16485,37 @@ class TestAcpWorkflowNotifications:
         assert sv.crews[self.P]["child-c7"]["status"] == "waiting"
         assert "child-c7" in sv._workflow_step_questions
 
-    def test_resume_keeps_waiting_while_a_question_entry_is_open(self, wf):
-        """D13: the parent's answer to the step question pops it, but a
-        `_kiro/userInput` question of the same step still waits on a person,
-        so the step stays waiting until that one is answered too."""
+    @pytest.mark.parametrize("entry", ["question", "approval"])
+    def test_resume_keeps_waiting_while_an_entry_is_open(self, wf, entry):
+        """One rule for both resume paths (review fix, Phase 4): the parent's
+        answer pops the step question, but an open approval or `_kiro/userInput`
+        question of the same step still waits on a person, so the step stays
+        waiting until that one is answered too. (The first version blocked on
+        a question entry only, as D13's wording says; the review asked for the
+        rule the re-sent node_start path already used.)"""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
-        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        conn = self._watch(acp_mod)
+        if entry == "question":
+            sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+            frames = self._pending_frames(conn, "question_request")
+        else:
+            sv._on_agent_request(self._ask("child-c7", 71))
+            frames = self._pending_frames(conn)
         self._step_says(acp_mod, "warning", "Which colour?")
         self._parent_says(acp_mod)
         assert sv._workflow_step_questions == {}
         assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
         assert sv.crews[self.P]["child-c7"]["status"] == "waiting"
-        # An open approval does not hold it: D13 names question entries only.
+        # A re-sent node_start follows the same rule.
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+        # Once the entry is gone, the next resume runs the step.
+        assert len(frames) == 1
         sv._pending_permission.clear()
-        sv._on_agent_request(self._ask("child-c7", 72))
-        self._step_says(acp_mod, "warning", "Which colour?")
-        self._parent_says(acp_mod)
+        _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
+            "sessionUpdate": "tool_call", "toolCallId": "t-2", "title": "Write",
+            "kind": "edit", "status": "pending"}})
         assert sv._workflow_children[self.P]["child-c7"][0] == "running"
 
     def test_warning_on_a_reaped_row_reopens_it_as_waiting(self, wf):
@@ -16711,6 +16726,165 @@ class TestAcpWorkflowNotifications:
             c: s for c, (s, _t) in children.items()}
         assert sv.crews[self.P]["child-c7"]["action"] == "Which colour?"
         assert "child-c7" in sv._workflow_step_questions
+
+    SEND_MESSAGE_PAUSE = "Step requested user input via send_message."
+
+    def _step_tool_call(self, acp_mod, tc="t-5", step="child-c7"):
+        _notify(acp_mod, "session/update", {"sessionId": step, "update": {
+            "sessionUpdate": "tool_call", "toolCallId": tc, "title": "Read",
+            "kind": "read", "status": "pending"}})
+
+    def test_tool_call_after_a_warning_then_node_paused_reopens_the_question(self, wf):
+        """Review fix: a step `tool_call` after its warning, in the same turn,
+        pops the step question (D13); the `node_paused` that follows with the
+        send_message reason brings it back with the warning's text."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._step_says(acp_mod, "warning", "Which colour?")
+        created = sv._workflow_step_questions["child-c7"]["created"]
+        self._step_tool_call(acp_mod)
+        assert sv._workflow_step_questions == {}
+        assert sv.crews[self.P]["child-c7"]["action"] == "running"
+        view = self._watch(acp_mod)
+        self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one",
+                   nodePath=["wf-k7x", "step-one"], reason=self.SEND_MESSAGE_PAUSE)
+        assert sv._workflow_step_questions["child-c7"] == {
+            "parent": self.P, "text": "Which colour?", "created": created,
+            "label": "workflow step wf-coder"}
+        row = sv.crews[self.P]["child-c7"]
+        assert (row["status"], row["action"]) == ("waiting", "Which colour?")
+        assert self._last_payload(view)[0]["action"] == "Which colour?"
+        assert sv.sessions_awaiting_person() == frozenset({self.P})
+
+    @pytest.mark.parametrize("reason", [
+        "Awaiting next user message on step session.", None, "send_message failed"])
+    def test_other_pause_reasons_do_not_reopen_the_question(self, wf, reason):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._step_says(acp_mod, "warning", "Which colour?")
+        self._step_tool_call(acp_mod)
+        fields = {"workflowId": "wf-k7x", "nodeId": "step-one"}
+        if reason is not None:
+            fields["reason"] = reason
+        self._send(acp_mod, "node_paused", **fields)
+        assert sv._workflow_step_questions == {}
+        assert sv.crews[self.P]["child-c7"]["action"] == "waiting"
+
+    def test_send_message_pause_reason_matches_case_insensitively(self, wf):
+        acp_mod, _sv = wf
+        assert acp_mod._is_send_message_pause("STEP REQUESTED USER INPUT VIA SEND_MESSAGE")
+        assert not acp_mod._is_send_message_pause("user input")
+        assert not acp_mod._is_send_message_pause(["user input", "send_message"])
+
+    def test_a_parent_answer_forgets_the_remembered_warning(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._step_says(acp_mod, "warning", "Which colour?")
+        self._parent_says(acp_mod)
+        self._send(acp_mod, "node_paused", workflowId="wf-k7x", nodeId="step-one",
+                   reason=self.SEND_MESSAGE_PAUSE)
+        assert sv._workflow_step_questions == {}
+        assert sv._workflow_step_last_warning == {}
+
+    def test_remembered_warning_goes_with_the_step_and_the_parent(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._step_says(acp_mod, "warning", "Which colour?")
+        self._complete(acp_mod, "wf-k7x", "step-one")
+        assert sv._workflow_step_last_warning == {}
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        self._step_says(acp_mod, "warning", "Size?", step="child-c8")
+        sv._workflow_step_last_warning["child-o1"] = {
+            "parent": self.P2, "text": "x", "created": 1.0, "label": "workflow step"}
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])):
+            asyncio.run(sv.close_session(self.P))
+        assert list(sv._workflow_step_last_warning) == ["child-o1"]
+        sv._detach("test detach")
+        assert sv._workflow_step_last_warning == {}
+
+    def test_run_complete_paused_does_not_track_an_index_only_child_again(self, wf):
+        """D14: a child still in the node index but no longer tracked (its
+        tracking was dropped while the index kept it) is left alone."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
+        sv._workflow_children[self.P].pop("child-c8")
+        assert (self.P, "wf-k7x", "step-two") in sv._workflow_node_index
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="paused")
+        assert list(sv._workflow_children[self.P]) == ["child-c7"]
+        assert sv.crews[self.P]["child-c8"]["status"] == "working"
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+
+    def test_step_tool_call_resume_past_the_age_cap_keeps_the_old_clock(self, wf):
+        """Review fix: a step's own `tool_call` past `_WORKFLOW_CHILD_MAX_AGE_S`
+        still sets it running (the state is real) but does not refresh its
+        staleness clock, as `_workflow_touch` refuses to."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._step_says(acp_mod, "warning", "Which colour?")
+        now = time.monotonic()
+        sv._workflow_child_meta["child-c7"]["started"] = (
+            now - acp_mod._WORKFLOW_CHILD_MAX_AGE_S - 5.0)
+        sv._workflow_children[self.P]["child-c7"] = ("waiting", now - 700.0)
+        self._step_tool_call(acp_mod)
+        assert sv._workflow_children[self.P]["child-c7"] == ("running", now - 700.0)
+        # Under the cap the same resume refreshes the clock.
+        sv._workflow_child_meta["child-c7"]["started"] = now - 10.0
+        sv._workflow_children[self.P]["child-c7"] = ("waiting", now - 700.0)
+        self._step_tool_call(acp_mod, tc="t-6")
+        state, seen = sv._workflow_children[self.P]["child-c7"]
+        assert state == "running" and seen >= now
+
+    def test_parent_answer_past_the_age_cap_refreshes_the_clock(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._step_says(acp_mod, "warning", "Which colour?")
+        now = time.monotonic()
+        sv._workflow_child_meta["child-c7"]["started"] = (
+            now - acp_mod._WORKFLOW_CHILD_MAX_AGE_S - 5.0)
+        sv._workflow_children[self.P]["child-c7"] = ("waiting", now - 700.0)
+        self._parent_says(acp_mod)
+        state, seen = sv._workflow_children[self.P]["child-c7"]
+        assert state == "running" and seen >= now
+
+    @pytest.mark.parametrize("severity, raw, expected", [
+        ("warning", "", "asked a question"),
+        ("warning", None, "asked a question"),
+        ("warning", "​ \n", "asked a question"),
+        ("error", 42, "sent a message"),
+    ])
+    def test_empty_step_message_falls_back_to_a_fixed_text(self, wf, severity, raw,
+                                                           expected):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        self._step_says(acp_mod, severity, raw)
+        assert self._step_messages(_queued(view)) == [{
+            "step": "workflow step wf-coder", "severity": severity,
+            "message": expected}]
+        assert sv.crews[self.P]["child-c7"]["action"] == expected
+        if severity == "warning":
+            assert sv._workflow_step_questions["child-c7"]["text"] == expected
+
+    def test_empty_success_message_leaves_the_action_alone(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._step_says(acp_mod, "success", "")
+        assert sv.crews[self.P]["child-c7"]["action"] == "running"
+
+    def test_replayed_empty_warning_falls_back_to_a_fixed_text(self, wf):
+        acp_mod, sv = wf
+        view = self._watch(acp_mod)
+        _notify(acp_mod, "session/update", {"sessionId": self.P, "update": {
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": ""},
+            "_meta": {"kiro": {"notification": {
+                "kind": "system-notification", "status": "warning",
+                "agentName": "wf-asker"}, "replay": True}}}})
+        assert self._step_messages(_queued(view)) == [{
+            "step": "workflow step wf-asker", "severity": "warning",
+            "message": "asked a question"}]
 
     # -- workflow-progress chunks -------------------------------------------
 

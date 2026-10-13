@@ -1940,6 +1940,32 @@ def _clean_agent_text(value, limit: int) -> str:
     return " ".join(kept.split())[:limit].strip()
 
 
+def _is_send_message_pause(reason) -> bool:
+    """True for a ``node_paused`` reason saying the step asked through
+    ``send_message``. Measured (kiro-cli 2.29.1): "Step requested user input
+    via send_message."; matched case-insensitively on "user input" and
+    "send_message", so a reworded sentence still matches."""
+    if not isinstance(reason, str):
+        return False
+    lowered = reason.lower()
+    return "user input" in lowered and "send_message" in lowered
+
+
+# What a step's warning or error shows when its own message is empty or not a
+# string, so a step question and its transcript row are never blank.
+_STEP_MESSAGE_FALLBACK = {"warning": "asked a question", "error": "sent a message"}
+
+
+def _step_message_text(value, severity: str) -> str:
+    """A workflow step's ``send_message`` text, cleaned and clipped like an
+    error detail (`_clean_agent_text`, `MAX_ERROR_DETAIL_CHARS`). Empty for
+    ``warning`` or ``error`` falls back to a fixed text; other severities keep
+    the empty string. 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+    """
+    text = _clean_agent_text(value, MAX_ERROR_DETAIL_CHARS)
+    return text or _STEP_MESSAGE_FALLBACK.get(severity, "")
+
+
 def _clean_agent_lines(value) -> str:
     """Agent-authored text with its line breaks kept, for the approval card.
 
@@ -3750,6 +3776,13 @@ class _Supervisor:
         # notify handler. Cleared in `_detach`.
         # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D11, D25
         self._workflow_step_questions: dict[str, dict] = {}
+        # child session id -> the same record shape: the step's LAST warning,
+        # kept after a `tool_call` resume pops the open question, so the
+        # `node_paused` ("Step requested user input via send_message.") that
+        # follows in the same turn can reopen it. Cleared by a parent's answer,
+        # with the step's tracking (`_workflow_drop_child`), with the parent
+        # (`_workflow_drop_parent`) and in `_detach`.
+        self._workflow_step_last_warning: dict[str, dict] = {}
         # Parents whose crew is over MAX_SUBAGENTS_PER_SESSION only because
         # finished rows are held for a person (D25): warned once, discarded
         # when the crew is back under the cap, popped with the parent and
@@ -4079,6 +4112,7 @@ class _Supervisor:
         self._crew_order_next.clear()
         self._workflow_reap_failures.clear()
         self._workflow_step_questions.clear()
+        self._workflow_step_last_warning.clear()
         self._crew_overflow_warned.clear()
         # Viewers of a workflow step's read-only view are told before its meta
         # goes, as `_workflow_free_orphans` does. Legacy sub-agent viewers get
@@ -4915,14 +4949,16 @@ class _Supervisor:
     # shapes are measured, kiro-cli 2.28.0, docs/KNOWLEDGE.md "`_kiro/workflow/*`
     # notification family". Everything here runs on the event loop.
 
-    def _workflow_set(self, parent_id: str, child_id: str, state: str) -> None:
-        """Record a child as ``state`` ("running" | "waiting") seen just now.
+    def _workflow_set(self, parent_id: str, child_id: str, state: str,
+                      seen: float | None = None) -> None:
+        """Record a child as ``state`` ("running" | "waiting") seen just now,
+        or at *seen* when a caller must not refresh the staleness clock.
 
         The only writer of ``_workflow_children``, so every touch refreshes the
         staleness clock the same way.
         """
         self._workflow_children.setdefault(parent_id, {})[child_id] = (
-            state, time.monotonic())
+            state, time.monotonic() if seen is None else seen)
 
     def _workflow_drop_child(self, parent_id: str, child_id: str) -> None:
         """Forget one child and the node-index entries that point at it.
@@ -4941,6 +4977,7 @@ class _Supervisor:
         # will answer it now. Popped before the entries below, so their
         # `_workflow_unhold` sees a step with nothing left open.
         self._workflow_drop_step_question(parent_id, child_id)
+        self._workflow_drop_last_warning(parent_id, child_id)
         if self._pending_permission:
             self._cancel_step_permissions(
                 parent_id, child_id, "the workflow step is no longer tracked")
@@ -4959,6 +4996,12 @@ class _Supervisor:
         self._workflow_step_questions.pop(child_id, None)
         self._workflow_unhold({"session_id": parent_id, "workflow_child": child_id})
         return True
+
+    def _workflow_drop_last_warning(self, parent_id: str, child_id: str) -> None:
+        """Forget a step's remembered last warning, if it is this parent's."""
+        record = self._workflow_step_last_warning.get(child_id)
+        if isinstance(record, dict) and record.get("parent") == parent_id:
+            self._workflow_step_last_warning.pop(child_id, None)
 
     def _workflow_note_step_denied(self, parent_id: str, child_id: str) -> None:
         """Make a denied (or cancelled) tool call of a workflow step visible.
@@ -5049,6 +5092,9 @@ class _Supervisor:
         for child_id in [c for c, q in tuple(self._workflow_step_questions.items())
                          if isinstance(q, dict) and q.get("parent") == parent_id]:
             self._workflow_step_questions.pop(child_id, None)
+        for child_id in [c for c, q in tuple(self._workflow_step_last_warning.items())
+                         if isinstance(q, dict) and q.get("parent") == parent_id]:
+            self._workflow_step_last_warning.pop(child_id, None)
         self._workflow_clear_runs(parent_id)
         self._workflow_ended.pop(parent_id, None)
         self._crew_order_next.pop(parent_id, None)
@@ -5297,39 +5343,74 @@ class _Supervisor:
         except Exception:
             log.exception("ACP could not clear the held flag of a workflow step")
 
-    def _workflow_step_has_open_question(self, parent_id: str, child_id: str) -> bool:
-        """True while a step has an open `_kiro/userInput` question entry in
-        ``_pending_permission``. A pure read. Loop-only."""
-        return any(isinstance(entry, dict)
-                   and entry.get("kind") == "question"
-                   and entry.get("session_id") == parent_id
-                   and entry.get("workflow_child") == child_id
-                   for entry in tuple(self._pending_permission.values()))
+    def _workflow_child_capped(self, child_id: str, now: float) -> bool:
+        """True once a child is past `_WORKFLOW_CHILD_MAX_AGE_S` since its
+        ``node_start``: its OWN frames no longer refresh its clock (the rule
+        `_workflow_touch` applies). A pure read."""
+        started = (self._workflow_child_meta.get(child_id) or {}).get("started")
+        return started is not None and now - started > _WORKFLOW_CHILD_MAX_AGE_S
 
-    def _workflow_step_resume(self, parent_id: str, child_id: str) -> None:
+    def _workflow_step_resume(self, parent_id: str, child_id: str, *,
+                              answered: bool, step_frame: bool) -> None:
         """A waiting workflow step is running again (D13).
 
-        Called on a parent-to-step ``_kiro/session/notify`` (the parent relayed
-        an answer) and on a ``tool_call`` from the step. Pops the step's open
-        step question, then, if the step is tracked as waiting, sets it running
-        and reopens its row as running, unless it still has an open
-        `_kiro/userInput` question entry: that question still waits on a
-        person. A step not tracked, or not waiting, keeps its state. Loop-only
-        (it writes). 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+        Called on a parent-to-step ``_kiro/session/notify`` (*answered*: the
+        parent relayed an answer) and on a ``tool_call`` from the step
+        (*step_frame*). Pops the step's open step question; an answer also
+        forgets the step's remembered last warning, which a ``tool_call``
+        keeps for a ``node_paused`` that may follow
+        (`_workflow_reopen_step_question`). Then one rule, shared with a
+        re-sent ``node_start``: a step tracked as waiting goes running only
+        when nothing of it still waits on a person
+        (`_workflow_step_awaits_person`, which after the pop means no open
+        approval or question entry in ``_pending_permission``). A step not
+        tracked, or not waiting, keeps its state.
+
+        A *step_frame* resume of a step past the age cap changes the state but
+        not the staleness clock: the step's own frames no longer prove it is
+        alive (`_workflow_touch`). Loop-only (it writes).
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
         """
         self._workflow_drop_step_question(parent_id, child_id)
+        if answered:
+            self._workflow_drop_last_warning(parent_id, child_id)
         current = self._workflow_children.get(parent_id, {}).get(child_id)
         if current is None or current[0] != "waiting":
             return
-        if self._workflow_step_has_open_question(parent_id, child_id):
+        if self._workflow_step_awaits_person(parent_id, child_id):
             return
-        self._workflow_set(parent_id, child_id, "running")
+        if step_frame and self._workflow_child_capped(child_id, time.monotonic()):
+            self._workflow_set(parent_id, child_id, "running", seen=current[1])
+        else:
+            self._workflow_set(parent_id, child_id, "running")
         row = (self.crews.get(parent_id) or {}).get(child_id)
         if row is not None and (not row["done"] or row.get("reaped")):
             self._workflow_reopen_row(row, "running")
         log.info("ACP workflow step %s of %s resumed: running", child_id, parent_id)
         if row is not None:
             _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
+
+    def _workflow_reopen_step_question(self, parent_id: str, child_id: str) -> bool:
+        """Reopen a step's question from its remembered last warning.
+
+        For a ``node_paused`` whose reason says the step asked through
+        ``send_message`` while no step question is open: a ``tool_call`` from
+        the step after its warning, in the same turn, popped it (D13). The
+        record comes back as it was and the row's open ``action`` shows the
+        message again. True if it was reopened. Loop-only (it writes).
+        """
+        if self._workflow_step_questions.get(child_id) is not None:
+            return False
+        record = self._workflow_step_last_warning.get(child_id)
+        if not isinstance(record, dict) or record.get("parent") != parent_id:
+            return False
+        self._workflow_step_questions[child_id] = dict(record)
+        row = (self.crews.get(parent_id) or {}).get(child_id)
+        if row is not None and not row["done"] and record.get("text"):
+            row["action"] = record["text"]
+        log.info("ACP workflow step %s of %s paused for its send_message "
+                 "question; question reopened", child_id, parent_id)
+        return True
 
     def _workflow_mark_step_waiting(self, parent_id: str, child_id: str) -> bool:
         """Set a tracked step waiting and its row to match. True if the row
@@ -5341,6 +5422,13 @@ class _Supervisor:
         notify, step ``turn_end``, ``node_paused``, ``paused``,
         ``run_complete``). A row going from running to waiting reads
         "waiting". A finished row is never reopened, a reaped one is.
+
+        Refreshes the staleness clock even past `_WORKFLOW_CHILD_MAX_AGE_S`:
+        its callers are workflow frames (``node_paused``, ``run_complete``
+        paused), which the cap leaves authoritative, and a step's warning
+        notify, a deliberate request that opens a step question. The 6 h
+        waiting bound starts from this moment; keeping an older clock could
+        make a step that just started waiting stale at once.
         """
         self._workflow_set(parent_id, child_id, "waiting")
         row = (self.crews.get(parent_id) or {}).get(child_id)
@@ -5427,7 +5515,12 @@ class _Supervisor:
         return parent
 
     def _workflow_step_label(self, parent_id: str, child_id: str) -> str:
-        """``workflow step <name>`` for a step's approval card.
+        """``workflow step <name>``: how a workflow step is named to a person.
+
+        Used for the ``[workflow step …]`` prefix of a step's approval card
+        title, the ``workflowStepLabel`` of a step's question card, the
+        ``label`` of a step question, and the ``step`` of a ``step_message``
+        row.
 
         The name is the crew row's ``sessionName`` (the step's ``agentName``),
         else its ``role`` (the node path); with neither, just ``workflow
@@ -5847,9 +5940,12 @@ class _Supervisor:
                     child_id, ("running", 0.0))[0]
                 # A paused run's resume re-sends the step's node_start with the
                 # same child (probe 3, kiro-cli 2.29.1): the step is active
-                # again, so a waiting step runs, unless it still waits on a
-                # person (an open step question or request stays, and so does
-                # its waiting state). The row, run and history are kept.
+                # again, so a waiting step runs, by the rule
+                # `_workflow_step_resume` uses: only when nothing of it waits
+                # on a person. Unlike that resume, a node_start never removes
+                # the step question (it is no answer), so an open one keeps the
+                # step waiting, as an open approval or question entry does.
+                # The row, run and history are kept.
                 resumed = (state == "waiting"
                            and not self._workflow_step_awaits_person(parent_id, child_id))
                 if resumed:
@@ -5948,6 +6044,8 @@ class _Supervisor:
             # the row already waits (a step question's message). A reaped row
             # is reopened: the step is plainly still there.
             self._workflow_mark_step_waiting(parent_id, child_id)
+            if _is_send_message_pause(params.get("reason")):
+                self._workflow_reopen_step_question(parent_id, child_id)
         else:
             # Removal is unconditional, even when the crew entry is gone: the
             # turn-end sweep and `_evict_crew_children` can drop it while the
@@ -6342,13 +6440,14 @@ class _Supervisor:
                          "workflow step of its sessionId; ignored")
                 return
             severity = _as_text(params.get("severity")).strip().lower()
-            message = _clean_agent_text(params.get("message"), MAX_ERROR_DETAIL_CHARS)
+            message = _step_message_text(params.get("message"), severity)
             label = self._workflow_step_label(parent_id, step_id)
             changed = False
             if severity == "warning":
-                self._workflow_step_questions[step_id] = {
-                    "parent": parent_id, "text": message, "created": time.time(),
-                    "label": label}
+                record = {"parent": parent_id, "text": message,
+                          "created": time.time(), "label": label}
+                self._workflow_step_questions[step_id] = record
+                self._workflow_step_last_warning[step_id] = dict(record)
                 changed = self._workflow_mark_step_waiting(parent_id, step_id)
             row = (self.crews.get(parent_id) or {}).get(step_id)
             if row is not None and not row["done"] and message and row["action"] != message:
@@ -6368,7 +6467,7 @@ class _Supervisor:
                 log.info("ACP session notify from a parent to a session that is "
                          "not its tracked workflow step; ignored")
                 return
-            self._workflow_step_resume(parent_id, step_id)
+            self._workflow_step_resume(parent_id, step_id, answered=True, step_frame=False)
             return
         log.info("ACP session notify with sender %.40r; ignored", sender)
 
@@ -6392,7 +6491,7 @@ class _Supervisor:
         text = _content_text(update.get("content")) or _as_text(update.get("text"))
         self._emit_step_message(
             session_id, f"workflow step {name}" if name else "workflow step",
-            status, _clean_agent_text(text, MAX_ERROR_DETAIL_CHARS))
+            status, _step_message_text(text, status))
 
     def _on_notification(self, msg: dict) -> None:
         method = msg.get("method")
@@ -6425,7 +6524,8 @@ class _Supervisor:
             if kind == "tool_call":
                 _step_parent = self._workflow_step_parent(session_id)
                 if _step_parent is not None:
-                    self._workflow_step_resume(_step_parent, session_id)
+                    self._workflow_step_resume(_step_parent, session_id,
+                                               answered=False, step_frame=True)
         # A step's message to its parent, or the parent's answer to a step.
         # Before the buffer for the same reason: a parent-to-step notify
         # carries the step's id.

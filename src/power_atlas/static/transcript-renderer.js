@@ -2985,9 +2985,10 @@ function clearTranscript() {
 // `handle()`: thought (a live-only "still thinking" signal, explicitly
 // suppressed during replay), tool_output (broadcast-only, reaches live
 // viewers and nobody else, so meaningless off a live connection),
-// permission_request/permission_resolved (answerable only over a live
-// socket -- a later phase's concern once the dashboard gains live-attach),
 // agent_error and history_truncated (both tied to the live ring buffer).
+// permission_request, question_request, permission_resolved and step_message
+// were in this list until 261012 Phase 4; they are now handled at the end of
+// the function, for the dashboard's `history` replay only (see there).
 // None of these are ever produced by translate_transcript(), so the
 // dashboard's static panel has no need to feed them through here, and
 // acp.html's own dispatch for them is left untouched rather than routed
@@ -3043,6 +3044,56 @@ function renderTranscriptFrame(frame) {
     if (typeof logLine === 'function') {
       logLine('in', '← ' + type + ' ' + (payload.title || payload.kind || '') +
                     ' [' + (payload.status || '') + ']');
+    }
+    return;
+  }
+  // The recorded rows below reach this function only through the dashboard's
+  // `history` replay (index.html's dashHandle `history` case): both pages
+  // handle the live frames in their own dispatch first, and acp.html replays
+  // its history through that live dispatch. Without these cases a dashboard
+  // reconnect, or opening a held session, dropped every step message and
+  // every approval and question card. Each mirrors the dashboard's live
+  // handler; the composer refresh that follows (Stop for a step card) is the
+  // page's own, run once after the replay.
+  // 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 4
+  var replaySid = typeof payload.sessionId === 'string' ? payload.sessionId
+    : (frame && frame.sessionId);
+  if (type === 'step_message') {
+    addStepMessage(payload.step, payload.severity, payload.message);
+    return;
+  }
+  if (type === 'permission_request') {
+    var permId = payload.requestId;
+    var toolCall = payload.toolCall || {};
+    var permOptions = Array.isArray(payload.options) ? payload.options : [];
+    if ((typeof permId === 'string' || typeof permId === 'number') && permOptions.length) {
+      var permRow = addPermissionRequest(permId, replaySid,
+        typeof toolCall.title === 'string' ? toolCall.title : '', permOptions,
+        payload.consent, {
+          eligible: payload.ruleEligible === true,
+          row: payload.ruleRow,
+          label: payload.ruleRowLabel,
+          root: payload.ruleRoot,
+        });
+      if (permRow && payload.workflowStep === true) permRow.dataset.workflowStep = '1';
+    }
+    return;
+  }
+  if (type === 'question_request') {
+    var qId = payload.requestId;
+    if (typeof qId === 'string' || typeof qId === 'number') {
+      var qRow = addQuestionRequest(qId, replaySid,
+        typeof payload.question === 'string' ? payload.question : '',
+        Array.isArray(payload.options) ? payload.options : [],
+        typeof payload.workflowStepLabel === 'string' ? payload.workflowStepLabel : '');
+      if (qRow && payload.workflowStep === true) qRow.dataset.workflowStep = '1';
+    }
+    return;
+  }
+  if (type === 'permission_resolved') {
+    var resolvedId = payload.requestId;
+    if (typeof resolvedId === 'string' || typeof resolvedId === 'number') {
+      markPermissionResolved(resolvedId);
     }
     return;
   }
