@@ -5848,6 +5848,8 @@ function dashHandle(frame){
   }
   if (type === 'error') {
     if (payload && payload.code === 'mcp_signin_failed') clearMcpSignInPending();
+    // A refused question answer: open its card again (transcript-renderer.js).
+    if (typeof reopenQuestionAfterRefusal === 'function') reopenQuestionAfterRefusal(payload);
     // Phase 3 (SC5): unconditional, at the very top of the handler, before
     // any payload.code branching below -- mirrors acp.html's own error
     // handler exactly (acp.html:5222-5239, its setTurn(turnActive) repaint

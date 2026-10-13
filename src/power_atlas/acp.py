@@ -3726,6 +3726,11 @@ class _Supervisor:
         # notify handler. Cleared in `_detach`.
         # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D11, D25
         self._workflow_step_questions: dict[str, dict] = {}
+        # Parents whose crew is over MAX_SUBAGENTS_PER_SESSION only because
+        # finished rows are held for a person (D25): warned once, discarded
+        # when the crew is back under the cap, popped with the parent and
+        # cleared in `_detach`. Bounded by the registered parents.
+        self._crew_overflow_warned: set[str] = set()
         # child session id -> {"parent", "workflowId", "started" (monotonic)} for
         # every workflow child, set at its id-bearing node_start. Internal; never
         # on the wire. Feeds the age cap (`_workflow_touch`), the per-run scope of
@@ -4050,6 +4055,7 @@ class _Supervisor:
         self._crew_order_next.clear()
         self._workflow_reap_failures.clear()
         self._workflow_step_questions.clear()
+        self._crew_overflow_warned.clear()
         # Viewers of a workflow step's read-only view are told before its meta
         # goes, as `_workflow_free_orphans` does. Legacy sub-agent viewers get
         # nothing here, as before.
@@ -4847,6 +4853,7 @@ class _Supervisor:
         """
         crew = self.crews.get(parent_id)
         if crew is None or len(crew) <= MAX_SUBAGENTS_PER_SESSION:
+            self._crew_overflow_warned.discard(parent_id)
             return
         # A step with an open approval or question is never evicted: dropping
         # it would cancel its request through `_workflow_drop_child` (D25).
@@ -4855,6 +4862,14 @@ class _Supervisor:
              if e["done"] and not self._workflow_step_awaits_person(parent_id, cid)),
             key=lambda cid: crew[cid]["order"])
         overflow = len(crew) - MAX_SUBAGENTS_PER_SESSION
+        if overflow > len(finished) and parent_id not in self._crew_overflow_warned:
+            held = sum(1 for cid, e in crew.items()
+                       if e["done"] and self._workflow_step_awaits_person(parent_id, cid))
+            if held:
+                self._crew_overflow_warned.add(parent_id)
+                log.warning("ACP crew of %s stays over its cap of %d: %d finished "
+                            "workflow step(s) still wait on a person and are kept",
+                            parent_id, MAX_SUBAGENTS_PER_SESSION, held)
         for child_id in finished[:overflow]:
             crew.pop(child_id, None)
             self.subagent_sessions.pop(child_id, None)
@@ -4990,6 +5005,7 @@ class _Supervisor:
         self._workflow_clear_runs(parent_id)
         self._workflow_ended.pop(parent_id, None)
         self._crew_order_next.pop(parent_id, None)
+        self._crew_overflow_warned.discard(parent_id)
         self._workflow_reap_failures.pop(parent_id, None)
         for child_id in [c for c, m in self._workflow_child_meta.items()
                          if m["parent"] == parent_id]:
@@ -5201,6 +5217,18 @@ class _Supervisor:
                    and entry.get("session_id") == parent_id
                    and entry.get("workflow_child") == child_id
                    for entry in tuple(self._pending_permission.values()))
+
+    def _log_held_step(self, parent_id: str, child_id: str, where: str) -> None:
+        """Log at INFO, once per child, that *where* left a step alone because
+        it waits on a person (D25). The flag lives on the child's meta, like
+        the age cap's ``capped``; a child with no meta is logged every time."""
+        meta = self._workflow_child_meta.get(child_id)
+        if meta is not None:
+            if meta.get("held_logged"):
+                return
+            meta["held_logged"] = True
+        log.info("ACP workflow step %s of %s waits on a person; the %s leaves it "
+                 "open", child_id, parent_id, where)
 
     def workflow_run_live(self, session_id: str, now: float | None = None) -> bool:
         """True while a workflow run of the session is going on. A pure read.
@@ -5471,6 +5499,7 @@ class _Supervisor:
                 # person, not "no longer reporting": its row, the crew header
                 # and the request stay as they are (D25).
                 if self._workflow_step_awaits_person(parent_id, child_id):
+                    self._log_held_step(parent_id, child_id, "reap")
                     continue
                 self._workflow_mark_reaped(entry)
                 reaped.append(child_id)
@@ -7027,6 +7056,11 @@ class _Supervisor:
         # short and fixed: a long step name must not push the dangerous part
         # of the title out of the toast.
         toast_title = clean_title
+        # The card's title is cleaned the same way, but not clipped: a shell
+        # prompt's title is the command, and the whole of it is what a person
+        # approves (D-5 of 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL).
+        # Bidi overrides and NULs must not reach it (Phase 3 review).
+        title = _clean_agent_text(title, len(title))
         if step_id is not None:
             self._pending_permission[opaque_id]["workflow_child"] = step_id
             toast_title = f"[workflow step] {clean_title}"
@@ -7155,6 +7189,14 @@ class _Supervisor:
                 if not isinstance(raw_title, str) or not raw_title:
                     continue
                 kept.append(opt)
+            if len(kept) < len(raw_options):
+                log.info("ACP: _kiro/userInput dropped %d option(s) that were "
+                         "not objects or had no title (id=%r)",
+                         len(raw_options) - len(kept), request_id)
+        elif raw_options is not None:
+            log.info("ACP: _kiro/userInput 'options' is a %s, not a list; shown "
+                     "as a free-form question (id=%r)", type(raw_options).__name__,
+                     request_id)
         if len(kept) > MAX_QUESTION_OPTIONS:
             log.info("ACP: _kiro/userInput offered %d usable options; keeping "
                      "the first %d and the last (id=%r)", len(kept),
@@ -8955,6 +8997,8 @@ async def _handle_prompt(conn, session_id, payload):
                     if (_child_id in _wf_tracked
                             and _supervisor._workflow_step_awaits_person(
                                 session_id, _child_id)):
+                        _supervisor._log_held_step(session_id, _child_id,
+                                                   "turn-end sweep")
                         continue
                     if not _entry["done"]:
                         if _child_id in _wf_tracked:
@@ -9344,26 +9388,30 @@ async def _handle_question_response(conn, session_id, payload):
         conn.send(error_frame(
             "bad_payload", "'question_response' needs a requestId.", session_id))
         return
+
+    def refuse(code: str, message: str) -> None:
+        # The refusal names the request, so the page re-opens that card
+        # (the card disables itself the moment it sends).
+        frame = error_frame(code, message, session_id)
+        frame["payload"]["requestId"] = request_id
+        conn.send(frame)
+
     # (a) Unknown or already-answered request — no side effects.
     entry = _supervisor._pending_permission.get(request_id)
     if entry is None:
-        conn.send(error_frame(
-            "unknown_request", "No pending question with that id.", session_id))
+        refuse("unknown_request", "No pending question with that id.")
         return
     # (b) Ownership.
     if conn.session_id != entry.get("session_id"):
-        conn.send(error_frame(
-            "not_subscribed", "Subscribe to this session first.", session_id))
+        refuse("not_subscribed", "Subscribe to this session first.")
         return
     # (c) A question, and a valid answer to it.
     if entry.get("kind") != "question":
-        conn.send(error_frame(
-            "unknown_request", "No pending question with that id.", session_id))
+        refuse("unknown_request", "No pending question with that id.")
         return
     has_index, has_answer = "optionIndex" in payload, "answer" in payload
     if has_index == has_answer:
-        conn.send(error_frame(
-            "bad_payload", "Send either an optionIndex or an answer.", session_id))
+        refuse("bad_payload", "Send either an optionIndex or an answer.")
         return
     titles = entry.get("answer_titles")
     if not isinstance(titles, list):
@@ -9372,27 +9420,22 @@ async def _handle_question_response(conn, session_id, payload):
         index = payload.get("optionIndex")
         if (not isinstance(index, int) or isinstance(index, bool)
                 or not 0 <= index < len(titles)):
-            conn.send(error_frame(
-                "invalid_option", "Not a valid option for this question.",
-                session_id))
+            refuse("invalid_option", "Not a valid option for this question.")
             return
         answer = titles[index]
     else:
         raw = payload.get("answer")
         if not isinstance(raw, str):
-            conn.send(error_frame(
-                "bad_payload", "The answer must be text.", session_id))
+            refuse("bad_payload", "The answer must be text.")
             return
         answer = raw.strip()
         if not answer:
-            conn.send(error_frame(
-                "empty_answer", "Type an answer first.", session_id))
+            refuse("empty_answer", "Type an answer first.")
             return
         if len(answer) > MAX_QUESTION_ANSWER_CHARS:
-            conn.send(error_frame(
-                "bad_payload",
-                f"The answer is longer than {MAX_QUESTION_ANSWER_CHARS} "
-                "characters.", session_id))
+            refuse("bad_payload",
+                   f"The answer is longer than {MAX_QUESTION_ANSWER_CHARS} "
+                   "characters.")
             return
     # (d) Pop BEFORE writing the reply.
     _supervisor._pending_permission.pop(request_id, None)
@@ -9408,8 +9451,7 @@ async def _handle_question_response(conn, session_id, payload):
     except AcpError as exc:
         log.warning("ACP: could not deliver question_response for request %r: %s",
                     entry["kiro_id"], exc)
-        conn.send(error_frame(
-            "internal_error", "Could not deliver the answer.", session_id))
+        refuse("internal_error", "Could not deliver the answer.")
         # The agent channel is broken: tear it down, as a failed approval
         # reply does, rather than leave the agent waiting on this request.
         _supervisor._discard(

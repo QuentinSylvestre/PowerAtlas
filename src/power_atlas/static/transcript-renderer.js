@@ -2013,6 +2013,49 @@ function addPermissionRequest(requestId, sid, title, options, consent, rule) {
  *  findPermissionRequestRow, markPermissionResolved (on the shared
  *  `permission_resolved`) and hasPendingStepPermissionCard find it too.
  *  Returns the row, like addPermissionRequest. `send` is optional, as there. */
+// The server's cap on a free-text answer (acp.py MAX_QUESTION_ANSWER_CHARS).
+// `maxLength` counts UTF-16 units, which is never more than the server's
+// code-point count, so a box the page accepts is never refused as too long.
+var QUESTION_ANSWER_MAX = 4000;
+
+// The refusal codes after which a question card opens again: the server kept
+// the question (acp.py `_handle_question_response`), so the person can answer
+// it once more. `internal_error` comes after the question was settled, so its
+// card is already resolved and stays closed.
+var QUESTION_REOPEN_CODES = {
+  bad_payload: true, empty_answer: true, invalid_option: true,
+  not_subscribed: true, internal_error: true,
+};
+
+// The request id of the question card this page answered last and has not
+// seen settled; the fallback when a refusal names no request.
+var lastAwaitingQuestionId = null;
+
+/** `value` without the leading and trailing characters Python's `str.strip()`
+ *  removes. JS `trim()` keeps U+001C-U+001F and U+0085, which Python strips,
+ *  so a box of only those must not count as an answer either. */
+function questionStrip(value) {
+  return String(value).replace(/^[\s\x1c-\x1f\x85]+|[\s\x1c-\x1f\x85]+$/g, '');
+}
+
+/** Open a question card again after the server refused its answer.
+ *  `payload` is the error frame's payload: its `code` must be one of
+ *  QUESTION_REOPEN_CODES, and its `requestId` names the card (else the card
+ *  this page answered last). A card already settled by `permission_resolved`
+ *  stays closed. Returns whether a card was opened. */
+function reopenQuestionAfterRefusal(payload) {
+  if (!payload || !Object.prototype.hasOwnProperty.call(QUESTION_REOPEN_CODES, payload.code)) {
+    return false;
+  }
+  var id = payload.requestId;
+  var want = (typeof id === 'string' || typeof id === 'number') ? String(id) : lastAwaitingQuestionId;
+  if (want === null || !transcriptEl) return false;
+  var row = findPermissionRequestRow(want);
+  if (!row || typeof row._questionReopen !== 'function') return false;
+  if (lastAwaitingQuestionId === want) lastAwaitingQuestionId = null;
+  return row._questionReopen();
+}
+
 function addQuestionRequest(requestId, sid, question, options, stepLabel) {
   var stick = stuckToBottom();
   var row = document.createElement('div');
@@ -2040,6 +2083,7 @@ function addQuestionRequest(requestId, sid, question, options, stepLabel) {
   var box = document.createElement('textarea');
   box.className = 'acp-question-text';
   box.rows = 2;
+  box.maxLength = QUESTION_ANSWER_MAX;
   box.placeholder = 'Or type an answer';
   var sendBtn = document.createElement('button');
   sendBtn.type = 'button';
@@ -2054,9 +2098,24 @@ function addQuestionRequest(requestId, sid, question, options, stepLabel) {
     box.disabled = true;
     if (btn) btn.classList.add('acp-permission-chosen');
   }
+  // After a refusal (reopenQuestionAfterRefusal): usable again, unless
+  // `permission_resolved` already settled it.
+  row._questionReopen = function () {
+    if (row.classList.contains('acp-permission-resolved')) return false;
+    answered = false;
+    var buttons = row.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].disabled = false;
+      buttons[i].classList.remove('acp-permission-chosen');
+    }
+    box.disabled = false;
+    sendBtn.disabled = questionStrip(box.value) === '';
+    return true;
+  };
   function answer(extra, btn) {
     if (answered) return;
     settle(btn);
+    lastAwaitingQuestionId = String(requestId);
     var payload = {requestId: requestId};
     for (var k in extra) {
       if (Object.prototype.hasOwnProperty.call(extra, k)) payload[k] = extra[k];
@@ -2092,10 +2151,10 @@ function addQuestionRequest(requestId, sid, question, options, stepLabel) {
   });
   if (list.childNodes.length) body.appendChild(list);
   box.addEventListener('input', function () {
-    sendBtn.disabled = answered || box.value.trim() === '';
+    sendBtn.disabled = answered || questionStrip(box.value) === '';
   });
   sendBtn.addEventListener('click', function () {
-    var value = box.value.trim();
+    var value = questionStrip(box.value);
     if (sendBtn.disabled || !value) return;
     answer({answer: value}, sendBtn);
   });

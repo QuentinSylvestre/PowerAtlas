@@ -24277,6 +24277,91 @@ check("dashboard: question_request reaches the shared card and a step's keeps St
   assertEqual(p.sandbox.dashStopBtn.hidden, true, "a parent's own question does not show Stop with no turn");
 });
 
+// Review fixes (Phase 3): a refused answer must not leave the card dead, the
+// box is capped at the server's 4000, and blankness matches Python's strip().
+check("question card: the box is capped at 4000 and a U+001C-U+001F-only answer is blank", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(questionFrame(live, "q-M", { options: [] }));
+  const card = questionCard(page.el("acpTranscript"));
+  const box = card.querySelector(".acp-question-text");
+  assertEqual(box.maxLength, 4000, "the box must not accept more than the server takes");
+  const sendBtn = card.querySelector(".acp-question-send");
+  box.value = "\x1c\x1d \x1e\x1f\x85";
+  box.dispatch("input");
+  assertEqual(sendBtn.disabled, true, "Python strips U+001C-U+001F and U+0085; so must the page");
+  box.value = "\x1fok\x1c";
+  box.dispatch("input");
+  sendBtn.dispatch("click");
+  assertEqual(JSON.stringify(page.sentOf("question_response").map((f) => f.payload)),
+    JSON.stringify([{ requestId: "q-M", answer: "ok" }]));
+});
+
+check("question card: a refusal naming the request opens that card again, not another", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(questionFrame(live, "q-A"));
+  page.deliver(questionFrame(live, "q-B", { options: [] }));
+  const [a, b] = page.el("acpTranscript").querySelectorAll(".acp-msg-question");
+  a.querySelectorAll(".acp-question-option")[0].dispatch("click");
+  const boxB = b.querySelector(".acp-question-text");
+  boxB.value = "text";
+  boxB.dispatch("input");
+  b.querySelector(".acp-question-send").dispatch("click");
+  page.deliver({ type: "error", sessionId: live, payload: {
+    code: "invalid_option", message: "no", requestId: "q-A" } });
+  assert(a.querySelectorAll("button").filter((x) => x.classList.contains("acp-question-option"))
+    .every((x) => !x.disabled), "the refused card's options are usable again");
+  assertEqual(a.querySelector(".acp-question-text").disabled, false);
+  assertEqual(a.querySelector(".acp-question-send").disabled, true,
+    "Send follows the (empty) box, not the reopen");
+  assertEqual(boxB.disabled, true, "the other answered card stays closed");
+  a.querySelectorAll(".acp-question-option")[2].dispatch("click");
+  assertEqual(page.sentOf("question_response").length, 3, "the reopened card answers again");
+});
+
+check("question card: a refusal without a requestId opens the last answered card; resolved and other codes stay closed", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(questionFrame(live, "q-A", { options: [] }));
+  const a = questionCard(page.el("acpTranscript"));
+  const box = a.querySelector(".acp-question-text");
+  box.value = "x";
+  box.dispatch("input");
+  a.querySelector(".acp-question-send").dispatch("click");
+  page.deliver({ type: "error", sessionId: live, payload: { code: "turn_in_progress", message: "busy" } });
+  assertEqual(box.disabled, true, "an unrelated refusal opens nothing");
+  page.deliver({ type: "error", sessionId: live, payload: { code: "empty_answer", message: "no" } });
+  assertEqual(box.disabled, false, "the card this page answered last opens again");
+  assertEqual(a.querySelector(".acp-question-send").disabled, false, "its text is still there");
+  a.querySelector(".acp-question-send").dispatch("click");
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: "q-A" } });
+  page.deliver({ type: "error", sessionId: live, payload: {
+    code: "internal_error", message: "write failed", requestId: "q-A" } });
+  assertEqual(box.disabled, true, "a settled card never opens again");
+});
+
+check("dashboard: the real renderer caps the box and reopens a refused card", () => {
+  const d = loadDashCard(() => ({ body: {} }));
+  const card = d.sandbox.addQuestionRequest("q-D", "sess-1", "Q?", QUESTION_OPTIONS, "");
+  assertEqual(card.querySelector(".acp-question-text").maxLength, 4000);
+  card.querySelectorAll(".acp-question-option")[1].dispatch("click");
+  assertEqual(card.querySelector(".acp-question-text").disabled, true);
+  assertEqual(d.sandbox.reopenQuestionAfterRefusal({ code: "not_subscribed", message: "x" }), true);
+  assert(card.querySelectorAll(".acp-question-option").every((b) => !b.disabled));
+  assertEqual(card.querySelector(".acp-question-text").disabled, false);
+  assertEqual(d.sandbox.reopenQuestionAfterRefusal({ code: "bad_payload", requestId: "q-D" }), true);
+  d.sandbox.markPermissionResolved("q-D");
+  assertEqual(d.sandbox.reopenQuestionAfterRefusal({ code: "bad_payload", requestId: "q-D" }), false);
+});
+
+check("dashboard: an error frame is handed to the question reopen", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1", dashTurnActive: false });
+  const seen = [];
+  p.sandbox.reopenQuestionAfterRefusal = (payload) => { seen.push(payload); return true; };
+  p.sandbox.dashHandle({ type: "error", sessionId: "sess-1", payload: {
+    code: "empty_answer", message: "Type an answer first.", requestId: "q-S" } });
+  assertEqual(JSON.stringify(seen), JSON.stringify([
+    { code: "empty_answer", message: "Type an answer first.", requestId: "q-S" }]));
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

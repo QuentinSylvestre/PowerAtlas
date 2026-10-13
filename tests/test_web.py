@@ -15758,6 +15758,8 @@ class TestAcpWorkflowNotifications:
         assert payload["requestId"] in sv._pending_permission
         out = _queued(conn)
         assert [f["payload"]["code"] for f in out if f["type"] == "error"] == [code]
+        assert [f["payload"]["requestId"] for f in out if f["type"] == "error"] == [
+            payload["requestId"]]
         assert [f for f in out if f["type"] == "permission_resolved"] == []
 
     def test_question_answer_boundaries_last_index_and_4000_characters(self, wf):
@@ -15829,9 +15831,8 @@ class TestAcpWorkflowNotifications:
 
     def test_control_and_bidi_characters_never_reach_text_toast_or_card(self, wf):
         """U+202E and U+0000 in an approval title and in a question: dropped
-        from the stored text and the toast of both, and from the question
-        card. The approval card's own title is unchanged by design (Phase 3
-        step 4)."""
+        from the stored text, the toast and the card of both (Phase 3 tests
+        bullet; the approval card's title is cleaned but not clipped)."""
         acp_mod, sv = wf
         conn = self._watch(acp_mod)
         bad = "rm‮ -rf\x00 /tmp/x\n\nnow"
@@ -15841,6 +15842,9 @@ class TestAcpWorkflowNotifications:
             sv._on_agent_request(_user_input_msg(
                 96, self.P, bad, [{"title": bad, "description": bad}]))
         clean = "rm -rf /tmp/x now"
+        approval_card = [f for f in sv.history[self.P].events()
+                         if f["type"] == "permission_request"]
+        assert approval_card[0]["payload"]["toolCall"]["title"] == clean
         kinds = {e["kind"]: e for e in sv._pending_permission.values()}
         assert kinds["approval"]["text"] == clean
         assert kinds["question"]["text"] == clean
@@ -16036,6 +16040,58 @@ class TestAcpWorkflowNotifications:
             asyncio.run(sv.close_session(self.P))
         assert written == [{"jsonrpc": "2.0", "id": 73, "result": {"action": "cancelled"}}]
         assert self._notices(_queued(conn)) == []
+
+    def test_crew_cap_eviction_keeps_finished_steps_waiting_on_a_person(
+            self, wf, monkeypatch, caplog):
+        """D25 in `_evict_finished_subagents`: with the crew over
+        MAX_SUBAGENTS_PER_SESSION, a finished step with an open approval and
+        one with an open question are not evicted, so nothing is cancelled;
+        a finished step with nothing open is. The crew stays over the cap and
+        one WARNING says so, once."""
+        acp_mod, sv = wf
+        monkeypatch.setattr(acp_mod, "MAX_SUBAGENTS_PER_SESSION", 2)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c8", agentName="wf-asker")
+        sv._on_agent_request(self._ask("child-c7", 71))
+        sv._on_agent_request(_user_input_msg(72, "child-c8", "Which file?", []))
+        self._start(acp_mod, "wf-k7x", "step-done", child="child-c9", agentName="wf-free")
+        for cid in ("child-c7", "child-c8", "child-c9"):
+            sv.crews[self.P][cid]["done"] = True
+        spawned = []
+        with patch.object(acp_mod, "_spawn_task", spawned.append), \
+                caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            self._start(acp_mod, "wf-k7x", "step-four", child="child-d1", agentName="wf-four")
+            self._start(acp_mod, "wf-k7x", "step-five", child="child-d2", agentName="wf-five")
+        assert spawned == []
+        assert sorted(e["kiro_id"] for e in sv._pending_permission.values()) == [71, 72]
+        assert {"child-c7", "child-c8"} <= set(sv.crews[self.P])
+        assert "child-c9" not in sv.crews[self.P]
+        assert len(sv.crews[self.P]) > 2
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING
+                    and "stays over its cap" in r.getMessage()]
+        assert len(warnings) == 1
+
+    def test_held_step_is_logged_once_by_the_reap(self, wf, caplog):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        sv._on_agent_request(self._ask("child-c7", 71))
+        now = time.monotonic()
+        sv._workflow_children[self.P]["child-c7"] = ("running", now - 3600.0)
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            assert sv._workflow_reap(now) == []
+            assert sv._workflow_reap(now) == []
+        held = [r for r in caplog.records if "waits on a person" in r.getMessage()]
+        assert len(held) == 1 and "reap" in held[0].getMessage()
+
+    def test_question_logs_dropped_options_and_a_non_list(self, wf, caplog):
+        acp_mod, sv = wf
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            sv._on_agent_request(_user_input_msg(
+                81, self.P, "Q?", [{"title": "ok"}, {"title": ""}, "x"]))
+            sv._on_agent_request(_user_input_msg(82, self.P, "Q?", {"title": "x"}))
+        text = [r.getMessage() for r in caplog.records]
+        assert any("dropped 2 option(s)" in t for t in text), text
+        assert any("'options' is a dict, not a list" in t for t in text), text
 
     def test_detach_resolves_both_kinds_and_writes_nothing(self, wf):
         acp_mod, sv = wf
@@ -28876,6 +28932,42 @@ class TestSupervisor:
             assert len(discarded) == 1, (
                 "a reply-write failure must proactively discard the process")
             assert "permission" in discarded[0].lower()
+            codes = [f["payload"].get("code") for f in _queued(conn)
+                     if f["type"] == "error"]
+            assert codes == ["internal_error"]
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_question_response_reply_write_failure_calls_discard(
+            self, monkeypatch):
+        """The question route copies the approval route's failure handling
+        (261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D6):
+        a failed reply write means the agent channel is broken, so the page
+        is told and the process is discarded once."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_qwritefail00-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        sv3._pending_permission["q13"] = {
+            "session_id": sid, "kind": "question", "kiro_id": 13,
+            "text": "Q?", "answer_titles": ["Yes"], "created": 0.0}
+
+        discarded = []
+        monkeypatch.setattr(sv3, "_discard", lambda reason: discarded.append(reason))
+
+        def failing_write(self, obj):
+            raise acp_mod.AcpError("write failed")
+
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", failing_write):
+                asyncio.run(acp_mod._handle_question_response(
+                    conn, sid, {"requestId": "q13", "optionIndex": 0}))
+            assert "q13" not in sv3._pending_permission
+            assert len(discarded) == 1
+            assert "question" in discarded[0].lower()
             codes = [f["payload"].get("code") for f in _queued(conn)
                      if f["type"] == "error"]
             assert codes == ["internal_error"]

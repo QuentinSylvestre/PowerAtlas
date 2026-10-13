@@ -5508,6 +5508,9 @@
     if (type === 'error') {
       setPending(false);
       if (payload && payload.code === 'mcp_signin_failed') clearMcpSignInPending();
+      // A refused question answer: the card disabled itself when it sent, and
+      // the server kept the question, so open the card again.
+      reopenQuestionAfterRefusal(payload);
       // A refused `cancel` or `close` leaves its button reading "Stopping…" /
       // "Closing…" and disabled, with no other frame coming to restore it.
       // Re-asserting the turn state the page already holds costs nothing and
