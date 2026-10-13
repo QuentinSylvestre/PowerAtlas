@@ -3110,6 +3110,15 @@ class TestAcpServerTypeGuard:
         for type_ in acp_mod.SERVER_TYPES:
             assert acp_mod.envelope(type_)["type"] == type_
 
+    def test_question_frame_types_are_declared(self):
+        """261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+        D5, D6: the card's frame goes out, its answer comes in."""
+        from power_atlas import acp as acp_mod
+        assert "question_request" in acp_mod.SERVER_TYPES
+        assert acp_mod.envelope("question_request", {})["type"] == "question_request"
+        assert "question_response" in acp_mod.CLIENT_TYPES
+        assert "question_response" not in acp_mod.SERVER_TYPES
+
     def test_error_frame_still_builds(self):
         from power_atlas import acp as acp_mod
         frame = acp_mod.error_frame("bad_payload", "no", "s1")
@@ -7331,6 +7340,18 @@ def _sent(acp_mod, method_calls):
     return write
 
 
+def _user_input_msg(request_id, session_id, question, options=None, **params):
+    """A `_kiro/userInput` request in the shape measured on kiro-cli 2.29.1:
+    ``{sessionId, toolCallId, question, options: [{title, description,
+    recommended}]}``. *options* None leaves the key out."""
+    body = {"sessionId": session_id, "toolCallId": "tc-q", "question": question}
+    if options is not None:
+        body["options"] = options
+    body.update(params)
+    return {"jsonrpc": "2.0", "id": request_id, "method": "_kiro/userInput",
+            "params": body}
+
+
 def _run_bound(acp_mod, factory):
     """Run a coroutine with the supervisor bound to the running loop.
 
@@ -10851,7 +10872,7 @@ class TestNotificationPolicy:
                                 notifications={"enabled": enabled}))
         calls = []
         for name in ("notify_turn_end", "notify_permission_needed",
-                     "notify_agent_error"):
+                     "notify_agent_error", "notify_question"):
             monkeypatch.setattr(
                 web_mod.notifications, name,
                 (lambda n: lambda *a: calls.append((n,) + a))(name))
@@ -10877,6 +10898,25 @@ class TestNotificationPolicy:
                            watched=True)
         assert [c[0] for c in calls] == ["notify_permission_needed"]
 
+    def test_question_notifies_even_when_watched_with_its_text(self, monkeypatch):
+        """D9: a question stops the turn as an approval does."""
+        for watched in (True, False):
+            calls = self._fire(monkeypatch, "question_request",
+                               "[workflow step] Which file?", watched=watched)
+            assert [c[0] for c in calls] == ["notify_question"], watched
+            assert calls[0][2] == "[workflow step] Which file?"
+
+    def test_question_toast_body_names_the_question(self, monkeypatch):
+        from power_atlas import notifications
+        fired = []
+        monkeypatch.setattr(notifications, "_fire_toast",
+                            lambda title, body: fired.append((title, body)))
+        notifications.notify_question("repo · ab12", "Which file?")
+        notifications.notify_question("repo · ab12", "   ")
+        assert fired == [("PowerAtlas — repo · ab12", "Question: Which file?"),
+                         ("PowerAtlas — repo · ab12",
+                          "Question: the agent is waiting for an answer")]
+
     def test_agent_error_notifies_only_when_unwatched(self, monkeypatch):
         assert [c[0] for c in self._fire(monkeypatch, "agent_error", "boom",
                                          watched=False)] == ["notify_agent_error"]
@@ -10885,6 +10925,7 @@ class TestNotificationPolicy:
     def test_disabled_suppresses_everything(self, monkeypatch):
         for event, detail in (("turn_end", "end_turn"),
                               ("permission_request", "x"),
+                              ("question_request", "x"),
                               ("agent_error", "x")):
             assert self._fire(monkeypatch, event, detail, watched=False,
                               enabled=False) == []
@@ -13883,10 +13924,15 @@ class TestAcpWorkflowNotifications:
         assert payload["options"] == self.OPTIONS
         opaque = payload["requestId"]
         assert isinstance(opaque, str) and opaque != "71"
-        # Keyed by the PARENT; kiro's own id (the step's) stays inside.
-        assert sv._pending_permission == {opaque: {
-            "session_id": self.P, "options": self.OPTIONS, "kiro_id": 71,
-            "workflow_child": "child-c7"}}
+        # Keyed by the PARENT; kiro's own id (the step's) stays inside. `kind`,
+        # `text` (unprefixed) and `created` per D3 of
+        # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES.
+        stored = dict(sv._pending_permission[opaque])
+        assert abs(stored.pop("created") - time.time()) < 60
+        assert sv._pending_permission.keys() == {opaque}
+        assert stored == {
+            "session_id": self.P, "kind": "approval", "options": self.OPTIONS,
+            "kiro_id": 71, "text": "Run shell: dir", "workflow_child": "child-c7"}
         # Nothing reaches a viewer of the step's own read-only view.
         assert self._pending_frames(step_view) == []
         # Recorded for replay on the parent, like a parent's own request.
@@ -14122,28 +14168,84 @@ class TestAcpWorkflowNotifications:
             sv.subagent_sessions.clear()
             sv.crews.clear()
 
-    def test_workflow_permission_request_is_cancelled_when_its_step_is_reaped_not_before(
+    def test_workflow_step_with_an_open_request_is_never_reaped_and_a_sibling_still_is(
             self, wf):
-        """Low 2, both sides of the 600 s running bound: a step unseen for 590
-        s keeps its card; one unseen for 601 s is reaped and the card goes."""
+        """D25 (user decision 2026-10-12): a step waiting on a person is not
+        "no longer reporting". Past the 600 s running bound, the step with an
+        open approval keeps its row open, its tracking and its card, and
+        nothing is written to the agent; a sibling step with no request, just
+        as stale, is reaped as before. Once the request is answered, the same
+        step is reaped on the next pass."""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c9", agentName="wf-tester")
         conn = self._watch(acp_mod)
         sv._on_agent_request(self._ask("child-c7", 71))
         opaque = self._pending_frames(conn)[0]["payload"]["requestId"]
         now = time.monotonic()
-        sv._workflow_children[self.P]["child-c7"] = ("running", now - 590.0)
+        sv._workflow_children[self.P]["child-c7"] = ("running", now - 3600.0)
+        sv._workflow_children[self.P]["child-c9"] = ("running", now - 601.0)
         spawned = []
         with patch.object(acp_mod, "_spawn_task", spawned.append):
-            assert sv._workflow_reap(now) == []
-            assert spawned == [] and len(sv._pending_permission) == 1
-            sv._workflow_children[self.P]["child-c7"] = ("running", now - 601.0)
-            assert sv._workflow_reap(now) == ["child-c7"]
-        written = self._run_spawned(acp_mod, spawned)
-        assert written == [{"jsonrpc": "2.0", "id": 71, "result": self.CANCELLED}]
+            assert sv._workflow_reap(now) == ["child-c9"]
+        assert spawned == []
+        assert [e["kiro_id"] for e in sv._pending_permission.values()] == [71]
+        row = sv.crews[self.P]["child-c7"]
+        assert (row["done"], row.get("reaped")) == (False, None)
+        assert "child-c7" in sv._workflow_children[self.P]
+        assert self._pending_frames(conn, "permission_resolved") == []
+        assert sv.crews[self.P]["child-c9"]["status"] == "stale"
+        # Answered: the step is an ordinary stale step again.
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_permission_response(
+                conn, self.P, {"requestId": opaque, "optionId": "allow"}))
+        assert sv._workflow_reap(now) == ["child-c7"]
+
+    def test_workflow_stale_step_with_an_open_request_survives_turn_start_and_end(
+            self, wf):
+        """D25: the parent's next turn start (eviction of done rows) and turn
+        end (the stale-step sweep, then eviction) leave a stale step's open
+        approval and question pending and its row open; the answers given
+        afterwards still reach the step by their own kiro ids, in their own
+        shapes."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(self._ask("child-c7", 71))
+        sv._on_agent_request(_user_input_msg(72, "child-c7", "Pick a colour",
+                                             [{"title": "Red"}, {"title": "Blue"}]))
+        first = _queued(conn)
+        perm_id = [f for f in first if f["type"] == "permission_request"][0]["payload"]["requestId"]
+        question_id = [f for f in first if f["type"] == "question_request"][0]["payload"]["requestId"]
+        stale = time.monotonic() - 7 * 3600.0         # past both staleness bounds
+        sv._workflow_children[self.P]["child-c7"] = ("running", stale)
+        sv.crews[self.P]["child-c7"]["done"] = True    # the worst case for eviction
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            self._run_turn(acp_mod, "end_turn")
+        assert written == []
+        assert sorted(e["kiro_id"] for e in sv._pending_permission.values()) == [71, 72]
+        assert "child-c7" in sv.crews[self.P]
+        assert "child-c7" in sv._workflow_children[self.P]
+        sv.crews[self.P]["child-c7"]["done"] = False
+        sv._workflow_children[self.P]["child-c7"] = ("running", stale)
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            self._run_turn(acp_mod, "end_turn")
+        assert written == []
+        row = sv.crews[self.P]["child-c7"]
+        assert (row["done"], row.get("reaped")) == (False, None)
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_permission_response(
+                conn, self.P, {"requestId": perm_id, "optionId": "allow"}))
+            asyncio.run(acp_mod._handle_question_response(
+                conn, self.P, {"requestId": question_id, "optionIndex": 1}))
+        assert written == [
+            {"jsonrpc": "2.0", "id": 71,
+             "result": {"outcome": {"outcome": "selected", "optionId": "allow"}}},
+            {"jsonrpc": "2.0", "id": 72,
+             "result": {"action": "answered", "answer": "Blue"}}]
         assert sv._pending_permission == {}
-        assert [f["payload"] for f in self._pending_frames(conn, "permission_resolved")] == [
-            {"requestId": opaque}]
 
     def test_workflow_permission_request_refreshes_the_step_clock_so_it_is_not_reaped_early(
             self, wf):
@@ -15478,23 +15580,12 @@ class TestAcpWorkflowNotifications:
             "report success."]
         assert {e["action"] for e in sv.crews[self.P].values()} == {"tool call denied"}
 
-    def test_workflow_close_session_and_reap_give_one_notice_per_step_for_several_requests(
+    def test_workflow_close_session_gives_one_notice_per_step_for_several_requests(
             self, wf):
+        """The close half of the former close-and-reap test: the reap no
+        longer cancels a step's requests (D25), so only close is checked."""
         acp_mod, sv = wf
-        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         view = self._watch(acp_mod)
-        sv._on_agent_request(self._ask("child-c7", 71))
-        sv._on_agent_request(self._ask("child-c7", 73, title="second"))
-        sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
-        _queued(view)
-        spawned = []
-        with patch.object(acp_mod, "_spawn_task", spawned.append):
-            assert sv._workflow_reap(now=1600.001) == ["child-c7"]
-        for coro in spawned:
-            coro.close()
-        assert len(spawned) == 2 and sv._pending_permission == {}
-        assert self._notices(_queued(view)) == [self.DENIED]
-        # close_session
         self._start(acp_mod, "wf-q2m", "step-one", child="child-c3")
         sv._on_agent_request(self._ask("child-c3", 81))
         sv._on_agent_request(self._ask("child-c3", 82, title="second"))
@@ -15530,25 +15621,451 @@ class TestAcpWorkflowNotifications:
         kinds = [f["type"] for f in out]
         assert kinds.index("agent_error") < kinds.index("session_closed")
 
-    def test_workflow_reap_gives_one_denial_notice_and_keeps_the_reaped_row_text(self, wf):
+    def test_workflow_reap_skips_a_step_with_an_open_question_and_sends_nothing(self, wf):
+        """D25 for a question: a step with an open `_kiro/userInput` question
+        (waiting, past even the 6 h waiting bound) is skipped by the reap: no
+        notice, no frame, no write, and its row keeps the waiting text."""
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         view = self._watch(acp_mod)
-        sv._on_agent_request(self._ask("child-c7", 71))
-        sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        sv._workflow_children[self.P]["child-c7"] = ("waiting", 1000.0)
         _queued(view)
         spawned = []
         with patch.object(acp_mod, "_spawn_task", spawned.append):
-            assert sv._workflow_reap(now=1600.001) == ["child-c7"]
-        for coro in spawned:
-            coro.close()
-        assert len(spawned) == 1 and sv._pending_permission == {}
-        out = _queued(view)
-        assert self._notices(out) == [self.DENIED]
+            assert sv._workflow_reap(now=1000.0 + 6 * 3600.0 + 1.0) == []
+        assert spawned == [] and len(sv._pending_permission) == 1
+        assert _queued(view) == []
         row = sv.crews[self.P]["child-c7"]
-        assert (row["done"], row["status"], row["action"]) == (True, "stale", "no longer reporting")
+        assert (row["done"], row["status"], row["action"]) == (False, "waiting", "waiting")
+
+    # -- agent questions (`_kiro/userInput`) ----------------------------------
+    # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 3.
+    # Expected values come from the plan's D3-D9 and the measured request shape,
+    # not from running the code. Likeliest bug spots, pinned first: the option
+    # index mapping to the RAW title (not the cleaned, clipped copy the card
+    # shows), the cap keeping the LAST option (kiro-cli's "Skip questions"),
+    # the answer-shape boundaries, and the abandon reply's kind dispatch
+    # defaulting to the permission shape.
+
+    QOPTS = [
+        {"title": "Requirements", "description": "Start from user stories",
+         "recommended": True},
+        {"title": "Technical design", "description": "", "recommended": "true"},
+        {"title": "Skip questions",
+         "description": "Skip remaining questions and go straight to generating "
+                        "the task list"},
+    ]
+
+    def _question(self, acp_mod, conn, request_id=91, session_id=None,
+                  question="Where should we start?", options=None):
+        acp_mod._supervisor._on_agent_request(_user_input_msg(
+            request_id, session_id or self.P, question,
+            self.QOPTS if options is None else options))
+        frames = self._pending_frames(conn, "question_request")
+        assert len(frames) == 1, frames
+        return frames[0]["payload"]
+
+    def _answer_q(self, acp_mod, conn, payload):
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_question_response(conn, self.P, payload))
+        return written
+
+    def test_question_is_stored_and_shown_with_its_options(self, wf):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        toasts = []
+        with patch.object(acp_mod, "_notify", lambda *a: toasts.append(a)):
+            payload = self._question(acp_mod, conn)
+        opaque = payload["requestId"]
+        assert isinstance(opaque, str) and opaque != "91"
+        assert payload == {
+            "requestId": opaque, "sessionId": self.P,
+            "question": "Where should we start?",
+            "options": [
+                {"title": "Requirements", "description": "Start from user stories",
+                 "recommended": True},
+                # The string "true" is not a recommendation.
+                {"title": "Technical design", "description": "", "recommended": False},
+                {"title": "Skip questions",
+                 "description": "Skip remaining questions and go straight to "
+                                "generating the task list", "recommended": False},
+            ]}
+        stored = dict(sv._pending_permission[opaque])
+        assert abs(stored.pop("created") - time.time()) < 60
+        assert stored == {"session_id": self.P, "kind": "question", "kiro_id": 91,
+                          "text": "Where should we start?",
+                          "answer_titles": ["Requirements", "Technical design",
+                                            "Skip questions"]}
+        assert [e["type"] for e in sv.history[self.P].events()
+                ].count("question_request") == 1
+        assert toasts == [("question_request", self.P, "Where should we start?")]
+        assert sv.sessions_with_pending_permission() == frozenset({self.P})
+
+    def test_question_with_no_options_is_a_free_form_question(self, wf):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(_user_input_msg(92, self.P, "Name the branch."))
+        payload = self._pending_frames(conn, "question_request")[0]["payload"]
+        assert payload["options"] == []
+        written = self._answer_q(acp_mod, conn, {
+            "requestId": payload["requestId"], "answer": "  feature/login \n"})
+        assert written == [{"jsonrpc": "2.0", "id": 92, "result": {
+            "action": "answered", "answer": "feature/login"}}]
+
+    def test_question_option_index_answers_with_the_raw_title(self, wf):
+        """The card shows a cleaned, clipped copy; the answer is the raw title
+        kiro-cli sent, which is what it matches against (run 5)."""
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        long_title = "Keep " + "x" * 300
+        weird = "Use‮ the\nmain  branch"
+        payload = self._question(acp_mod, conn, options=[
+            {"title": "Plain"}, {"title": weird}, {"title": long_title}])
+        shown = [o["title"] for o in payload["options"]]
+        assert shown == ["Plain", "Use the main branch", long_title[:200]]
+        written = self._answer_q(acp_mod, conn, {
+            "requestId": payload["requestId"], "optionIndex": 2})
+        assert [w["result"] for w in written] == [
+            {"action": "answered", "answer": long_title}]
+        payload = self._question(acp_mod, conn, request_id=93, options=[
+            {"title": "Plain"}, {"title": weird}, {"title": long_title}])
+        written = self._answer_q(acp_mod, conn, {
+            "requestId": payload["requestId"], "optionIndex": 1})
+        assert [w["result"] for w in written] == [
+            {"action": "answered", "answer": weird}]
+
+    @pytest.mark.parametrize("body, code", [
+        ({"answer": "   \n\t "}, "empty_answer"),
+        ({"answer": ""}, "empty_answer"),
+        ({"optionIndex": 3}, "invalid_option"),         # == len
+        ({"optionIndex": -1}, "invalid_option"),
+        ({"optionIndex": True}, "invalid_option"),      # bool is not an index
+        ({"optionIndex": 1.0}, "invalid_option"),
+        ({"optionIndex": "1"}, "invalid_option"),
+        ({"optionIndex": 0, "answer": "x"}, "bad_payload"),
+        ({}, "bad_payload"),
+        ({"answer": 7}, "bad_payload"),
+        ({"answer": " " + "a" * 4001 + " "}, "bad_payload"),
+    ])
+    def test_question_bad_answers_are_refused_and_keep_the_entry(self, wf, body, code):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        payload = self._question(acp_mod, conn)
+        written = self._answer_q(acp_mod, conn, dict(body, requestId=payload["requestId"]))
+        assert written == []
+        assert payload["requestId"] in sv._pending_permission
+        out = _queued(conn)
+        assert [f["payload"]["code"] for f in out if f["type"] == "error"] == [code]
+        assert [f for f in out if f["type"] == "permission_resolved"] == []
+
+    def test_question_answer_boundaries_last_index_and_4000_characters(self, wf):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        payload = self._question(acp_mod, conn)
+        assert [w["result"]["answer"] for w in self._answer_q(acp_mod, conn, {
+            "requestId": payload["requestId"], "optionIndex": 2})] == ["Skip questions"]
+        payload = self._question(acp_mod, conn, request_id=94)
+        text = "b" * 4000
+        assert [w["result"]["answer"] for w in self._answer_q(acp_mod, conn, {
+            "requestId": payload["requestId"], "answer": "\n " + text + " "})] == [text]
+
+    def test_question_two_answers_give_one_reply_and_one_unknown_request(self, wf):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        payload = self._question(acp_mod, conn)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_question_response(
+                conn, self.P, {"requestId": payload["requestId"], "optionIndex": 0}))
+            asyncio.run(acp_mod._handle_question_response(
+                conn, self.P, {"requestId": payload["requestId"], "answer": "again"}))
+        assert written == [{"jsonrpc": "2.0", "id": 91, "result": {
+            "action": "answered", "answer": "Requirements"}}]
+        out = _queued(conn)
+        assert [f["payload"] for f in out if f["type"] == "permission_resolved"] == [
+            {"requestId": payload["requestId"]}]
+        assert [f["payload"]["code"] for f in out if f["type"] == "error"] == [
+            "unknown_request"]
+
+    def test_question_answer_from_another_session_is_refused(self, wf):
+        acp_mod, sv = wf
+        _live_session(acp_mod, self.P2)
+        conn = self._watch(acp_mod)
+        stranger = self._watch(acp_mod, self.P2)
+        payload = self._question(acp_mod, conn)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_question_response(
+                stranger, self.P, {"requestId": payload["requestId"], "optionIndex": 0}))
+        assert written == [] and payload["requestId"] in sv._pending_permission
+        assert _queued(stranger)[0]["payload"]["code"] == "not_subscribed"
+
+    def test_question_options_are_cut_to_twenty_keeping_the_last(self, wf):
+        """21 usable options (with unusable ones between them): the first 19
+        and the last are kept, so a trailing "Skip questions" survives; exactly
+        20 are all kept."""
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        raw = []
+        for i in range(21):
+            raw.append({"title": f"opt-{i:02d}" if i < 20 else "Skip‮ questions"})
+            raw.append({"title": ""})                  # unusable: empty title
+            raw.append({"description": "no title"})    # unusable: no title
+            raw.append("not a dict")
+        payload = self._question(acp_mod, conn, options=raw)
+        titles = [o["title"] for o in payload["options"]]
+        assert titles == [f"opt-{i:02d}" for i in range(19)] + ["Skip questions"]
+        entry = sv._pending_permission[payload["requestId"]]
+        assert entry["answer_titles"][19] == "Skip‮ questions"
+        assert len(entry["answer_titles"]) == 20
+        written = self._answer_q(acp_mod, conn, {
+            "requestId": payload["requestId"], "optionIndex": 19})
+        assert written[0]["result"]["answer"] == "Skip‮ questions"
+        payload = self._question(acp_mod, conn, request_id=95, options=[
+            {"title": f"t{i}"} for i in range(20)])
+        assert [o["title"] for o in payload["options"]] == [f"t{i}" for i in range(20)]
+
+    def test_control_and_bidi_characters_never_reach_text_toast_or_card(self, wf):
+        """U+202E and U+0000 in an approval title and in a question: dropped
+        from the stored text and the toast of both, and from the question
+        card. The approval card's own title is unchanged by design (Phase 3
+        step 4)."""
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        bad = "rm‮ -rf\x00 /tmp/x\n\nnow"
+        toasts = []
+        with patch.object(acp_mod, "_notify", lambda *a: toasts.append(a)):
+            sv._on_agent_request(self._ask(self.P, 5, title=bad))
+            sv._on_agent_request(_user_input_msg(
+                96, self.P, bad, [{"title": bad, "description": bad}]))
+        clean = "rm -rf /tmp/x now"
+        kinds = {e["kind"]: e for e in sv._pending_permission.values()}
+        assert kinds["approval"]["text"] == clean
+        assert kinds["question"]["text"] == clean
+        assert toasts == [("permission_request", self.P, clean),
+                          ("question_request", self.P, clean)]
+        frames = self._pending_frames(conn, "question_request")
+        q = frames[0]["payload"]
+        assert q["question"] == clean
+        assert q["options"] == [{"title": clean, "description": clean,
+                                 "recommended": False}]
+        for text in (q["question"], q["options"][0]["title"], kinds["question"]["text"]):
+            assert "‮" not in text and "\x00" not in text
+
+    @pytest.mark.parametrize("kind, result", [
+        (None, {"outcome": {"outcome": "cancelled"}}),          # missing
+        ("approval", {"outcome": {"outcome": "cancelled"}}),
+        ("bogus", {"outcome": {"outcome": "cancelled"}}),       # unknown
+        ("Question", {"outcome": {"outcome": "cancelled"}}),    # strict match
+        ("question", {"action": "cancelled"}),
+    ])
+    def test_answer_pending_cancelled_defaults_to_the_permission_shape(
+            self, wf, kind, result):
+        acp_mod, sv = wf
+        entry = {"session_id": self.P, "kiro_id": 41}
+        if kind is not None:
+            entry["kind"] = kind
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(sv._answer_pending_cancelled(entry, "test"))
+        assert written == [{"jsonrpc": "2.0", "id": 41, "result": result}]
+
+    def test_permission_response_on_a_question_is_unknown_request(self, wf):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        payload = self._question(acp_mod, conn)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_permission_response(
+                conn, self.P, {"requestId": payload["requestId"],
+                               "optionId": "Requirements"}))
+        assert written == [] and payload["requestId"] in sv._pending_permission
+        assert _queued(conn)[0]["payload"]["code"] == "unknown_request"
+
+    def test_question_response_on_an_approval_is_unknown_request(self, wf):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(self._ask(self.P, 5))
+        opaque = self._pending_frames(conn)[0]["payload"]["requestId"]
+        written = self._answer_q(acp_mod, conn, {"requestId": opaque, "optionIndex": 0})
+        assert written == [] and opaque in sv._pending_permission
+        assert _queued(conn)[0]["payload"]["code"] == "unknown_request"
+
+    @pytest.mark.parametrize("msg_params, request_id, refused", [
+        ({"question": ""}, 97, False),                    # no question
+        ({"question": "‮\x00 \n"}, 97, False),       # nothing left once cleaned
+        ({"question": 5}, 97, False),
+        ({"question": "Q?", "sessionId": "sess-nobody"}, 97, False),
+        ({"question": "Q?"}, [1], True),                  # unusable id
+        ({"question": "Q?"}, True, True),                 # bool id
+        ({"question": "Q?"}, None, True),
+    ])
+    def test_malformed_question_is_cancelled_or_refused_and_not_stored(
+            self, wf, msg_params, request_id, refused):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        params = {"sessionId": self.P, "options": self.QOPTS}
+        params.update(msg_params)
+        spawned = []
+        with patch.object(acp_mod, "_spawn_task", spawned.append):
+            sv._on_agent_request({"jsonrpc": "2.0", "id": request_id,
+                                  "method": "_kiro/userInput", "params": params})
+        assert len(spawned) == 1
+        written = self._run_spawned(acp_mod, spawned)
+        if refused:
+            assert written[0]["error"]["code"] == -32601
+        else:
+            assert written == [{"jsonrpc": "2.0", "id": 97,
+                                "result": {"action": "cancelled"}}]
+        assert sv._pending_permission == {}
+        assert self._pending_frames(conn, "question_request") == []
+
+    def test_question_with_non_dict_params_is_cancelled_without_raising(self, wf):
+        acp_mod, sv = wf
+        spawned = []
+        with patch.object(acp_mod, "_spawn_task", spawned.append):
+            sv._on_agent_request({"jsonrpc": "2.0", "id": 98,
+                                  "method": "_kiro/userInput", "params": ["x"]})
+        assert self._run_spawned(acp_mod, spawned) == [
+            {"jsonrpc": "2.0", "id": 98, "result": {"action": "cancelled"}}]
+
+    def test_step_question_is_routed_to_the_parent_and_sets_the_step_waiting(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        parent_view = self._watch(acp_mod)
+        step_view = self._watch(acp_mod, "child-c7")
+        toasts = []
+        with patch.object(acp_mod, "_notify", lambda *a: toasts.append(a)):
+            sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?",
+                                                 [{"title": "a.py"}]))
+        out = _queued(parent_view)
+        q = [f for f in out if f["type"] == "question_request"]
+        assert len(q) == 1 and q[0]["sessionId"] == self.P
+        payload = q[0]["payload"]
+        assert payload["question"] == "Which file?"                 # never prefixed
+        assert payload["workflowStep"] is True
+        assert payload["workflowStepLabel"] == "workflow step wf-coder"
+        entry = sv._pending_permission[payload["requestId"]]
+        assert (entry["session_id"], entry["workflow_child"], entry["kiro_id"]) == (
+            self.P, "child-c7", 71)
+        assert entry["text"] == "Which file?"
+        assert toasts == [("question_request", self.P, "[workflow step] Which file?")]
+        assert self._pending_frames(step_view, "question_request") == []
+        # The step waits on a person: state and row.
+        assert sv._workflow_children[self.P]["child-c7"][0] == "waiting"
+        row = sv.crews[self.P]["child-c7"]
+        assert (row["status"], row["action"], row["done"]) == ("waiting", "waiting", False)
         subs = [f for f in out if f["type"] == "subagents"]
-        assert len(subs) == 1 and subs[0]["payload"]["subagents"][0]["action"] == "no longer reporting"
+        assert subs and subs[-1]["payload"]["subagents"][0]["status"] == "waiting"
+        assert sv.sessions_with_pending_permission() == frozenset({self.P})
+
+    def test_parent_question_has_no_workflow_step_fields(self, wf):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        payload = self._question(acp_mod, conn)
+        assert "workflowStep" not in payload and "workflowStepLabel" not in payload
+
+    def test_stop_close_and_turn_end_abandon_each_kind_in_its_own_shape(self, wf):
+        """Stop (in turn and idle), close and the turn-end sweep: a question
+        gets `{"action": "cancelled"}`, an approval the permission outcome."""
+        acp_mod, sv = wf
+        approval = {"jsonrpc": "2.0", "id": 5, "result": self.CANCELLED}
+        question = {"jsonrpc": "2.0", "id": 6, "result": {"action": "cancelled"}}
+
+        def ask_both():
+            sv._on_agent_request(self._ask(self.P, 5))
+            sv._on_agent_request(_user_input_msg(6, self.P, "Q?", []))
+
+        def by_id(written):
+            return sorted(written, key=lambda w: w["id"])
+
+        # In-turn Stop.
+        ask_both()
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            self._cancel(acp_mod)
+        assert by_id(written) == [approval, question]
+        assert sv._pending_permission == {}
+        sv.inflight.discard(self.P)
+        # Idle Stop.
+        conn = self._watch(acp_mod)
+        ask_both()
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+        assert by_id(written) == [approval, question]
+        # Turn-end sweep.
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            self._run_turn(acp_mod, "end_turn", during=ask_both)
+        assert by_id(written) == [approval, question]
+        assert sv._pending_permission == {}
+        # Close.
+        ask_both()
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(sv.close_session(self.P))
+        assert by_id(written) == [approval, question]
+
+    def test_a_step_question_cancelled_by_stop_or_close_gives_no_denial_notice(self, wf):
+        """The notice says a tool call was denied, which is false for a
+        question (D4). A step approval beside it still gets its notice."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        self._start(acp_mod, "wf-k7x", "step-two", child="child-c9", agentName="wf-tester")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        sv._on_agent_request(self._ask("child-c9", 72))
+        _queued(conn)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+        assert sorted((w["id"], json.dumps(w["result"], sort_keys=True)) for w in written) == [
+            (71, '{"action": "cancelled"}'),
+            (72, '{"outcome": {"outcome": "cancelled"}}')]
+        assert self._notices(_queued(conn)) == [
+            "A tool call of workflow step wf-tester was denied. The step may "
+            "still report success."]
+        # Close with only a step question open: no notice at all.
+        sv._on_agent_request(_user_input_msg(73, "child-c7", "Again?", []))
+        _queued(conn)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(sv.close_session(self.P))
+        assert written == [{"jsonrpc": "2.0", "id": 73, "result": {"action": "cancelled"}}]
+        assert self._notices(_queued(conn)) == []
+
+    def test_detach_resolves_both_kinds_and_writes_nothing(self, wf):
+        acp_mod, sv = wf
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(self._ask(self.P, 5))
+        sv._on_agent_request(_user_input_msg(6, self.P, "Q?", []))
+        ids = sorted(f["payload"]["requestId"] for f in _queued(conn)
+                     if f["type"] in ("permission_request", "question_request"))
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            sv._detach("test detach")
+        assert written == []
+        assert sv._pending_permission == {}
+        assert sorted(f["payload"]["requestId"] for f in _queued(conn)
+                      if f["type"] == "permission_resolved") == ids
+
+    def test_node_complete_abandons_an_open_step_question(self, wf):
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        conn = self._watch(acp_mod)
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        opaque = self._pending_frames(conn, "question_request")[0]["payload"]["requestId"]
+        spawned = []
+        with patch.object(acp_mod, "_spawn_task", spawned.append):
+            self._complete(acp_mod, "wf-k7x", "step-one")
+        assert self._run_spawned(acp_mod, spawned) == [
+            {"jsonrpc": "2.0", "id": 71, "result": {"action": "cancelled"}}]
+        assert sv._pending_permission == {}
+        assert [f["payload"] for f in self._pending_frames(conn, "permission_resolved")] == [
+            {"requestId": opaque}]
 
     def test_workflow_step_finishing_with_a_request_pending_gives_no_denial_notice(self, wf):
         acp_mod, sv = wf
@@ -27314,8 +27831,14 @@ class TestSupervisor:
             # kiro-cli's own id stays inside the entry.
             opaque = payload["requestId"]
             assert isinstance(opaque, str) and opaque != "1", opaque
-            assert sv3._pending_permission == {opaque: {
-                "session_id": sid, "options": options, "kiro_id": 1}}
+            # `kind`, `text` and `created` per D3 of
+            # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES.
+            assert sv3._pending_permission.keys() == {opaque}
+            stored = dict(sv3._pending_permission[opaque])
+            assert abs(stored.pop("created") - time.time()) < 60
+            assert stored == {"session_id": sid, "kind": "approval",
+                              "options": options, "kiro_id": 1,
+                              "text": "Pick a doc"}
             assert payload["sessionId"] == sid
             assert payload["toolCall"]["title"] == "Pick a doc"
             assert payload["options"] == options
@@ -35098,9 +35621,46 @@ class TestAcpMcpSignIn:
         self._cli_json(acp_mod, monkeypatch, tmp_path)
         monkeypatch.setattr(acp_mod, "win32crypt", object())
         assert acp_mod._kiro_client_capabilities() == {
-            "_meta": {"kiro": {"secretStorage": True, "openExternalUrl": True}}}
+            "_meta": {"kiro": {"userInput": True, "secretStorage": True,
+                               "openExternalUrl": True}}}
         monkeypatch.setattr(acp_mod, "win32crypt", None)
-        assert acp_mod._kiro_client_capabilities() == {}
+        # `userInput` does not hinge on the store, so `_meta.kiro` is never
+        # empty (261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D2).
+        assert acp_mod._kiro_client_capabilities() == {
+            "_meta": {"kiro": {"userInput": True}}}
+
+    def test_initialize_declares_user_input(self, acp_session, monkeypatch, tmp_path):
+        """The real handshake sends `_meta.kiro.userInput: true` in
+        `clientCapabilities`, with or without the secret store (D2)."""
+        from unittest.mock import MagicMock
+        from power_atlas import acp as acp_mod
+        self._cli_json(acp_mod, monkeypatch, tmp_path)
+        sup = acp_mod._supervisor
+        for store in (None, object()):
+            monkeypatch.setattr(acp_mod, "win32crypt", store)
+            seen = []
+
+            async def fake_request(self_inner, method, params, timeout=None):
+                seen.append((method, params))
+                return {"agentCapabilities": {}}
+
+            def fake_spawn(self_inner):
+                self_inner._proc = MagicMock()
+                self_inner._proc.poll.return_value = 0
+                self_inner._proc.pid = 9999
+
+            async def go():
+                with patch.object(acp_mod._Supervisor, "_spawn", fake_spawn), \
+                        patch.object(acp_mod._Supervisor, "_request", fake_request):
+                    try:
+                        await sup.ensure_started()
+                    finally:
+                        sup._discard("test teardown")
+
+            _run_bound(acp_mod, go)
+            init = [p for m, p in seen if m == "initialize"]
+            assert len(init) == 1, seen
+            assert init[0]["clientCapabilities"]["_meta"]["kiro"]["userInput"] is True
 
     def test_tool_search_setting_is_forwarded_from_cli_json(self, monkeypatch, tmp_path):
         """kiro-cli's terminal UI forwards `toolSearch.*` from cli.json at
@@ -35116,8 +35676,9 @@ class TestAcpMcpSignIn:
             "toolSearch.minTokens": 2000.5, "chat.enableThinking": True}))
         monkeypatch.setattr(acp_mod, "win32crypt", None)
         # Independent of the secret store: still sent when nothing else is.
-        assert acp_mod._kiro_client_capabilities() == {"_meta": {"kiro": {"settings": {
-            "toolSearch": {"enabled": True, "minPct": 10, "minTokens": 2000.5}}}}}
+        assert acp_mod._kiro_client_capabilities() == {"_meta": {"kiro": {
+            "userInput": True, "settings": {
+                "toolSearch": {"enabled": True, "minPct": 10, "minTokens": 2000.5}}}}}
         monkeypatch.setattr(acp_mod, "win32crypt", object())
         kiro = acp_mod._kiro_client_capabilities()["_meta"]["kiro"]
         assert kiro["secretStorage"] is True and kiro["openExternalUrl"] is True
@@ -35144,7 +35705,9 @@ class TestAcpMcpSignIn:
         self._cli_json(acp_mod, monkeypatch, tmp_path, text)
         monkeypatch.setattr(acp_mod, "win32crypt", None)
         assert acp_mod._kiro_tool_search_settings() is None
-        assert acp_mod._kiro_client_capabilities() == {}
+        # No settings key; only the always-declared `userInput` (D2).
+        assert acp_mod._kiro_client_capabilities() == {
+            "_meta": {"kiro": {"userInput": True}}}
 
     def test_tool_search_numeric_keys_reject_booleans_and_strings(self, monkeypatch, tmp_path):
         from power_atlas import acp as acp_mod

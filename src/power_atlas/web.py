@@ -1026,6 +1026,10 @@ def _notify_from_acp(event: str, session_id: str, cwd: str, detail: str,
         if event == "permission_request":
             # No `watched` gate: the turn is stopped until someone answers.
             notifications.notify_permission_needed(label, detail)
+        elif event == "question_request":
+            # No `watched` gate either: a question stops the turn as an
+            # approval does (261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D9).
+            notifications.notify_question(label, detail)
         elif event == "turn_end":
             if not watched and detail in _NOTIFY_STOP_REASONS:
                 notifications.notify_turn_end(label, detail)

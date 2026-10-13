@@ -1708,6 +1708,26 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
    still shows the question was asked. */
 .acp-msg-permission.acp-permission-resolved { opacity: 0.55; }
 .acp-msg-permission.acp-permission-resolved .acp-permission-option { cursor: default; }
+/* 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 3: the
+   agent question card (transcript-renderer.js `addQuestionRequest`). It reuses
+   the permission row's frame; options stack, each with its description under
+   its title, and a free-text box sits below. Text is agent-authored and
+   clipped server-side, but still wraps rather than widening the transcript.
+   No element here is toggled with `hidden`; the `[hidden]` rules keep it so
+   if one ever is. */
+.acp-question-step { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; overflow-wrap: anywhere; }
+.acp-question-options { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.acp-question-options[hidden] { display: none; }
+.acp-question-option { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; text-align: left; min-width: 0; }
+.acp-question-option[hidden] { display: none; }
+.acp-question-option.acp-permission-chosen { border-color: #fbbf24; color: #fbbf24; }
+.acp-question-option-title { font-weight: 600; overflow-wrap: anywhere; }
+.acp-question-recommended { font-size: 11px; padding: 0 6px; border-radius: 8px; border: 1px solid #fbbf24; color: #fbbf24; }
+.acp-question-option-desc { flex-basis: 100%; font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
+.acp-question-free { display: flex; gap: 8px; align-items: flex-end; margin-top: 8px; }
+.acp-question-free[hidden] { display: none; }
+.acp-question-text { flex: 1; min-width: 0; resize: vertical; font: inherit; }
+.acp-msg-permission.acp-permission-resolved .acp-question-option { cursor: default; }
 /* 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL Phase 3: the "Allow, and always
    in new sessions…" inline row. The prefilled pattern comes from agent text,
    so it wraps and never widens the transcript. */

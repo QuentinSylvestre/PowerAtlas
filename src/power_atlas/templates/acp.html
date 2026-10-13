@@ -5303,6 +5303,36 @@
       }
       return;
     }
+    if (type === 'question_request') {
+      // 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D5: an
+      // agent question (`_kiro/userInput`). Rendered during replay too, like
+      // permission_request: a reload mid-question must bring the card back.
+      // Settled by the shared `permission_resolved` below.
+      var _qId = payload && payload.requestId;
+      var _qSid = (payload && typeof payload.sessionId === 'string')
+        ? payload.sessionId : (frame.sessionId || sessionId);
+      var _qText = (payload && typeof payload.question === 'string') ? payload.question : '';
+      var _qOptions = Array.isArray(payload && payload.options) ? payload.options : [];
+      var _qLabel = (payload && typeof payload.workflowStepLabel === 'string')
+        ? payload.workflowStepLabel : '';
+      if (typeof _qId === 'string' || typeof _qId === 'number') {
+        var _qRow = addQuestionRequest(_qId, _qSid, _qText, _qOptions, _qLabel);
+        // A step's question keeps Stop usable with no turn active, exactly as
+        // a step's approval does; see hasPendingStepPermissionCard.
+        if (_qRow && payload && payload.workflowStep === true) {
+          _qRow.dataset.workflowStep = '1';
+        }
+        refreshComposerControls();
+        // Same gate as permission_request's notification (D9).
+        if (!replaying && _notifyEnabled) {
+          maybeNotify(
+            'PowerAtlas — ' + notifyLabel(),
+            'Question: ' + (_qText.slice(0, NOTIFY_PERMISSION_TITLE_MAX) || 'the agent is waiting for an answer'),
+            'pa-question-' + _qSid);
+        }
+      }
+      return;
+    }
     if (type === 'permission_resolved') {
       // SC-9 review fix: the companion signal to permission_request above --
       // recorded into history the same way (not broadcast-only), so a reload

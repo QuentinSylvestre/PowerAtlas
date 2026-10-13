@@ -81,6 +81,18 @@ def notify_permission_needed(label: str, tool_title: str) -> None:
     _fire_toast(f"PowerAtlas — {label}", f"Needs approval: {detail}")
 
 
+def notify_question(label: str, text: str) -> None:
+    """The agent asked the user a question (`_kiro/userInput`).
+
+    Fires whether or not the session is watched, like an approval: the turn
+    stops until someone answers. *text* arrives cleaned and clamped by the
+    caller, with a fixed ``[workflow step]`` prefix for a step's question.
+    261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D9
+    """
+    detail = text.strip() or "the agent is waiting for an answer"
+    _fire_toast(f"PowerAtlas — {label}", f"Question: {detail}")
+
+
 def notify_agent_error(label: str, message: str) -> None:
     """The agent reported an error mid-turn.
 

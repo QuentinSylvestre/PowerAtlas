@@ -1991,6 +1991,124 @@ function addPermissionRequest(requestId, sid, title, options, consent, rule) {
   return row;
 }
 
+// ---- agent questions (`_kiro/userInput`) --------------------------------
+
+/** Render an agent question (`question_request`) as a card in the transcript:
+ *  the step label when the question comes from a workflow step, the question,
+ *  one button per option (its title, a "Recommended" badge, its description
+ *  under it), and a free-text box with a Send button that stays disabled
+ *  while the box is empty.
+ *  261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D5-D7, D23.
+ *
+ *  SECURITY: every string is agent-authored (the server cleans and clips it,
+ *  acp.py `_clean_agent_text`) and goes in through textContent only.
+ *
+ *  An option button sends `question_response {requestId, optionIndex}`: the
+ *  server answers with the option's raw title, so a clipped or cleaned title
+ *  on the card can never become an unmatched answer. Send sends
+ *  `{requestId, answer}`. Either disables the whole card at once; the
+ *  server's pop-before-write is the real double-answer guard.
+ *
+ *  The row carries the permission card's class and `dataset.requestId`, so
+ *  findPermissionRequestRow, markPermissionResolved (on the shared
+ *  `permission_resolved`) and hasPendingStepPermissionCard find it too.
+ *  Returns the row, like addPermissionRequest. `send` is optional, as there. */
+function addQuestionRequest(requestId, sid, question, options, stepLabel) {
+  var stick = stuckToBottom();
+  var row = document.createElement('div');
+  row.className = 'acp-msg acp-msg-permission acp-msg-question';
+  row.dataset.requestId = String(requestId);
+  var who = document.createElement('span');
+  who.className = 'acp-msg-role';
+  who.textContent = 'question';
+  var body = document.createElement('div');
+  body.className = 'acp-msg-body';
+  if (typeof stepLabel === 'string' && stepLabel) {
+    var step = document.createElement('div');
+    step.className = 'acp-question-step';
+    step.textContent = stepLabel;
+    body.appendChild(step);
+  }
+  var text = document.createElement('div');
+  text.className = 'acp-permission-question';
+  text.textContent = typeof question === 'string' ? question : '';
+  body.appendChild(text);
+  var list = document.createElement('div');
+  list.className = 'acp-question-options';
+  var free = document.createElement('div');
+  free.className = 'acp-question-free';
+  var box = document.createElement('textarea');
+  box.className = 'acp-question-text';
+  box.rows = 2;
+  box.placeholder = 'Or type an answer';
+  var sendBtn = document.createElement('button');
+  sendBtn.type = 'button';
+  sendBtn.className = 'acp-btn acp-question-send';
+  sendBtn.textContent = 'Send';
+  sendBtn.disabled = true;
+  var answered = false;
+  function settle(btn) {
+    answered = true;
+    var buttons = row.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
+    box.disabled = true;
+    if (btn) btn.classList.add('acp-permission-chosen');
+  }
+  function answer(extra, btn) {
+    if (answered) return;
+    settle(btn);
+    var payload = {requestId: requestId};
+    for (var k in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, k)) payload[k] = extra[k];
+    }
+    if (typeof send === 'function') send('question_response', payload, sid);
+  }
+  (Array.isArray(options) ? options : []).forEach(function (opt, index) {
+    var o = (opt && typeof opt === 'object') ? opt : {};
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'acp-btn acp-question-option';
+    var head = document.createElement('span');
+    head.className = 'acp-question-option-title';
+    head.textContent = typeof o.title === 'string' ? o.title : '';
+    btn.appendChild(head);
+    if (o.recommended === true) {
+      var badge = document.createElement('span');
+      badge.className = 'acp-question-recommended';
+      badge.textContent = 'Recommended';
+      btn.appendChild(badge);
+    }
+    if (typeof o.description === 'string' && o.description) {
+      var desc = document.createElement('span');
+      desc.className = 'acp-question-option-desc';
+      desc.textContent = o.description;
+      btn.appendChild(desc);
+    }
+    btn.addEventListener('click', function () {
+      if (btn.disabled) return;
+      answer({optionIndex: index}, btn);
+    });
+    list.appendChild(btn);
+  });
+  if (list.childNodes.length) body.appendChild(list);
+  box.addEventListener('input', function () {
+    sendBtn.disabled = answered || box.value.trim() === '';
+  });
+  sendBtn.addEventListener('click', function () {
+    var value = box.value.trim();
+    if (sendBtn.disabled || !value) return;
+    answer({answer: value}, sendBtn);
+  });
+  free.appendChild(box);
+  free.appendChild(sendBtn);
+  body.appendChild(free);
+  row.appendChild(who);
+  row.appendChild(body);
+  transcriptEl.appendChild(row);
+  if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  return row;
+}
+
 // 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 3: the consent
 // fields shown under a permission question, in reading order. The server
 // allowlists exactly these (acp.py `_project_consent`); anything else on the
@@ -2586,7 +2704,9 @@ function findPermissionRequestRow(requestId) {
 /** Mark a permission-request row as no longer actionable (SC-9 review
  *  fix): a `permission_resolved` frame means the pending state behind it
  *  is gone, whether because it was answered or because the turn ended
- *  while it was still pending. Disables every option button and dims the
+ *  while it was still pending. Also settles a question card
+ *  (addQuestionRequest), whose free-text box is disabled with its buttons.
+ *  Disables every option button and dims the
  *  row so it reads as settled, not fresh-and-clickable. Idempotent: a
  *  row already marked resolved (e.g. the click handler already disabled
  *  its own buttons before the server's echo arrives) is left alone. If no
@@ -2607,6 +2727,9 @@ function markPermissionResolved(requestId) {
     if (insidePermissionRuleEditor(buttons[i], row)) continue;
     buttons[i].disabled = true;
   }
+  // A question card's free-text box (addQuestionRequest) settles with it.
+  var boxes = row.querySelectorAll('textarea');
+  for (var j = 0; j < boxes.length; j++) boxes[j].disabled = true;
 }
 
 /** Whether the transcript holds a card for a request routed from a workflow

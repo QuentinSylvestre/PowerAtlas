@@ -15451,6 +15451,16 @@ function loadDashPicker(opts = {}) {
       dashMainTranscriptEl.appendChild(row);
       return row;
     },
+    // The same stand-in for the question card (the real one is checked in the
+    // full-renderer sandboxes); it records what dashHandle passed it.
+    addQuestionRequest: function (requestId) {
+      (sandbox._questionCalls = sandbox._questionCalls || []).push([...arguments]);
+      const row = new El("div");
+      row.className = "acp-msg acp-msg-permission acp-msg-question";
+      row.dataset.requestId = String(requestId);
+      dashMainTranscriptEl.appendChild(row);
+      return row;
+    },
     dashUpdateCloseButton: () => {},
     // dashHandle's generic `error` case tail (index.html, outside both
     // extracted regions' own concerns) calls these for a refusal that falls
@@ -24082,6 +24092,189 @@ check("dashboard: a launcher tile launches without a workspace, whatever the lau
   assertEqual(posted[1].body.sessions[0].workspace, "/d/codex", "a provider tile uses its own default directory");
   assertEqual(posted[2].body.sessions[0].workspace, "/d/global", "then the global default");
   assertEqual(posted[3].body.cwd, "/w/x", "a custom launcher runs in its own folder");
+});
+
+// ---- agent question cards (`question_request`) --------------------------
+// 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 3.
+// Likeliest bug spots, first: an option button sending its title (or the
+// wrong index) instead of its own index; Send enabled for whitespace-only
+// text or sending it unstripped; the free-text box left editable after
+// `permission_resolved`; a step question not keeping Stop usable.
+
+const QUESTION_OPTIONS = [
+  { title: "Requirements", description: "Start from user stories", recommended: true },
+  { title: "<b>Technical</b> design", description: "", recommended: false },
+  { title: "Skip questions", description: "Skip remaining questions", recommended: false },
+];
+
+function questionFrame(live, requestId, extra = {}) {
+  return { type: "question_request", sessionId: live, payload: Object.assign({
+    requestId, sessionId: live, question: "Where should we <i>start</i>?",
+    options: QUESTION_OPTIONS }, extra) };
+}
+
+function questionCard(transcript) {
+  const rows = transcript.querySelectorAll(".acp-msg-question");
+  return rows[rows.length - 1];
+}
+
+function checkQuestionCardShape(card) {
+  assert(card, "no question card was drawn");
+  assert(card.classList.contains("acp-msg-permission"),
+    "the card must carry the permission row class so the shared resolved/Stop logic finds it");
+  assertEqual(card.querySelector(".acp-permission-question").textContent,
+    "Where should we <i>start</i>?", "the question must be shown as literal text");
+  const opts = card.querySelectorAll(".acp-question-option");
+  assertEqual(opts.length, 3, "one button per option");
+  assertEqual(opts.map((b) => b.querySelector(".acp-question-option-title").textContent).join("|"),
+    "Requirements|<b>Technical</b> design|Skip questions");
+  assertEqual(opts[0].querySelector(".acp-question-recommended").textContent, "Recommended");
+  assertEqual(opts[1].querySelector(".acp-question-recommended"), null,
+    "only the recommended option gets the badge");
+  assertEqual(opts[2].querySelector(".acp-question-recommended"), null);
+  assertEqual(opts[0].querySelector(".acp-question-option-desc").textContent,
+    "Start from user stories");
+  assertEqual(opts[1].querySelector(".acp-question-option-desc"), null,
+    "an empty description draws nothing");
+  const box = card.querySelector(".acp-question-text");
+  assert(box && box.tagName === "TEXTAREA", "the card offers a free-text box");
+  assertEqual(card.querySelector(".acp-question-send").disabled, true,
+    "Send starts disabled with an empty box");
+}
+
+check("question card: options, descriptions, the badge and free text render as text", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(questionFrame(live, "q-1"));
+  const card = questionCard(page.el("acpTranscript"));
+  checkQuestionCardShape(card);
+  assertEqual(card.dataset.requestId, "q-1");
+  assertEqual(card.querySelector(".acp-question-step"), null,
+    "a parent's own question has no step label");
+});
+
+check("question card: an option sends its index and disables the whole card", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(questionFrame(live, "q-2"));
+  const card = questionCard(page.el("acpTranscript"));
+  const opts = card.querySelectorAll(".acp-question-option");
+  opts[1].dispatch("click");
+  const sent = page.sentOf("question_response");
+  assertEqual(sent.length, 1);
+  assertEqual(JSON.stringify(sent[0].payload), JSON.stringify({ requestId: "q-2", optionIndex: 1 }),
+    "the button sends its index, never its title");
+  assertEqual(sent[0].sessionId, live);
+  assert(card.querySelectorAll("button").every((b) => b.disabled), "every button disabled");
+  assertEqual(card.querySelector(".acp-question-text").disabled, true, "the box is disabled too");
+  opts[2].dispatch("click");
+  assertEqual(page.sentOf("question_response").length, 1, "a second click sends nothing");
+});
+
+check("question card: Send stays disabled for blank text and sends the stripped answer", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(questionFrame(live, 7, { options: [] }));
+  const card = questionCard(page.el("acpTranscript"));
+  assertEqual(card.querySelectorAll(".acp-question-option").length, 0, "a free-form question has no buttons");
+  const box = card.querySelector(".acp-question-text");
+  const sendBtn = card.querySelector(".acp-question-send");
+  box.value = "   \n ";
+  box.dispatch("input");
+  assertEqual(sendBtn.disabled, true, "whitespace is not an answer");
+  sendBtn.dispatch("click");
+  assertEqual(page.sentOf("question_response").length, 0, "a blank Send sends nothing");
+  box.value = "  feature/login\n";
+  box.dispatch("input");
+  assertEqual(sendBtn.disabled, false);
+  sendBtn.dispatch("click");
+  const sent = page.sentOf("question_response");
+  assertEqual(JSON.stringify(sent.map((f) => f.payload)),
+    JSON.stringify([{ requestId: 7, answer: "feature/login" }]));
+  assertEqual(sendBtn.disabled, true);
+  assertEqual(box.disabled, true);
+  box.dispatch("input");
+  assertEqual(sendBtn.disabled, true, "typing after the answer cannot re-enable Send");
+});
+
+check("question card: permission_resolved disables its buttons and box, and only its own", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(questionFrame(live, "q-A"));
+  page.deliver(questionFrame(live, "q-B"));
+  const [a, b] = page.el("acpTranscript").querySelectorAll(".acp-msg-question");
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: "q-A" } });
+  assert(a.classList.contains("acp-permission-resolved"));
+  assert(a.querySelectorAll("button").every((x) => x.disabled), "the resolved card's buttons are disabled");
+  assertEqual(a.querySelector(".acp-question-text").disabled, true, "and its box");
+  assert(!b.classList.contains("acp-permission-resolved"), "the other card stays live");
+  assertEqual(b.querySelector(".acp-question-text").disabled, false);
+  assertEqual(b.querySelectorAll(".acp-question-option")[0].disabled, false);
+});
+
+check("question card: a step question shows its label and keeps Stop usable with no turn", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(questionFrame(live, "q-S", { workflowStep: true,
+                                            workflowStepLabel: "workflow step wf-coder" }));
+  const card = questionCard(page.el("acpTranscript"));
+  assertEqual(card.querySelector(".acp-question-step").textContent, "workflow step wf-coder");
+  assertEqual(card.dataset.workflowStep, "1");
+  assertEqual(page.el("acpStop").hidden, false, "a step question keeps Stop on screen");
+  assertEqual(page.el("acpStop").disabled, false);
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: "q-S" } });
+  assertEqual(page.el("acpStop").hidden, true, "Stop hides once the question resolves");
+  // A parent's own question does not show Stop with no turn.
+  page.deliver(questionFrame(live, "q-P"));
+  assertEqual(page.el("acpStop").hidden, true);
+});
+
+// ---- dashboard question cards ---------------------------------------------
+// The real card through the whole renderer (loadDashCard), and dashHandle's
+// dispatch and Stop rule through the picker sandbox.
+
+check("dashboard: the real renderer draws the question card and answers by index or text", () => {
+  const d = loadDashCard(() => ({ body: {} }));
+  const card = d.sandbox.addQuestionRequest("q-1", "sess-1", "Where should we <i>start</i>?",
+                                            QUESTION_OPTIONS, "");
+  checkQuestionCardShape(card);
+  card.querySelectorAll(".acp-question-option")[2].dispatch("click");
+  assertEqual(JSON.stringify(d.sent), JSON.stringify([
+    { type: "question_response", payload: { requestId: "q-1", optionIndex: 2 }, sid: "sess-1" }]));
+  const free = d.sandbox.addQuestionRequest(9, "sess-1", "Name it.", [], "workflow step wf-coder");
+  assertEqual(free.querySelector(".acp-question-step").textContent, "workflow step wf-coder");
+  const box = free.querySelector(".acp-question-text");
+  box.value = " main ";
+  box.dispatch("input");
+  free.querySelector(".acp-question-send").dispatch("click");
+  assertEqual(JSON.stringify(d.sent[1]),
+    JSON.stringify({ type: "question_response", payload: { requestId: 9, answer: "main" }, sid: "sess-1" }));
+});
+
+check("dashboard: markPermissionResolved disables a question card's box and buttons", () => {
+  const d = loadDashCard(() => ({ body: {} }));
+  const card = d.sandbox.addQuestionRequest("q-R", "sess-1", "Q?", QUESTION_OPTIONS, "");
+  d.sandbox.markPermissionResolved("q-R");
+  assert(card.querySelectorAll("button").every((b) => b.disabled));
+  assertEqual(card.querySelector(".acp-question-text").disabled, true);
+  assertEqual(d.sent.length, 0, "settling sends nothing");
+});
+
+check("dashboard: question_request reaches the shared card and a step's keeps Stop usable", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1", dashTurnActive: false });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashHandle({ type: "question_request", sessionId: "sess-1", payload: {
+    requestId: "q-S", sessionId: "sess-1", question: "Which file?",
+    options: [{ title: "a.py", description: "", recommended: false }],
+    workflowStep: true, workflowStepLabel: "workflow step wf-coder" } });
+  const calls = p.sandbox._questionCalls;
+  assertEqual(calls.length, 1);
+  assertEqual(JSON.stringify(calls[0]), JSON.stringify([
+    "q-S", "sess-1", "Which file?", [{ title: "a.py", description: "", recommended: false }],
+    "workflow step wf-coder"]));
+  assertEqual(p.sandbox.dashStopBtn.hidden, false, "a step question keeps Stop on screen");
+  assertEqual(p.sandbox.dashStopBtn.disabled, false);
+  p.sandbox.dashHandle({ type: "permission_resolved", sessionId: "sess-1",
+                         payload: { requestId: "q-S" } });
+  assertEqual(p.sandbox.dashStopBtn.hidden, true, "Stop hides once the question resolves");
+  p.sandbox.dashHandle({ type: "question_request", sessionId: "sess-1", payload: {
+    requestId: "q-P", sessionId: "sess-1", question: "Mine?", options: [] } });
+  assertEqual(p.sandbox.dashStopBtn.hidden, true, "a parent's own question does not show Stop with no turn");
 });
 
 let failed = 0;

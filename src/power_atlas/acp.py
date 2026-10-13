@@ -192,6 +192,10 @@ except Exception as _e:  # pragma: no cover - only when the dep is missing
 CLIENT_TYPES = frozenset({
     "subscribe", "new", "load", "prompt", "cancel", "close", "steer",
     "commands_options", "commands_execute", "permission_response",
+    # A question card's answer: an option's index or free text. See
+    # `_handle_question_response`.
+    # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D6
+    "question_response",
     "mcp_signin",  # the MCP panel's Connect; see `_handle_mcp_signin`
     # The dashboard's Overview: stop watching without closing the socket.
     # See `_handle_unsubscribe`. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE D18
@@ -234,6 +238,11 @@ SERVER_TYPES = frozenset({
     # sequence lands in the correct final "resolved" state on its own,
     # closing both the stale-replay and cross-tab cases with one mechanism.
     "permission_resolved",
+    # An inbound `_kiro/userInput` request: the agent's question, its options
+    # and a free-text answer. Recorded like `permission_request`, and settled
+    # by the same `permission_resolved`. See `_Supervisor._on_user_input_request`.
+    # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D5
+    "question_request",
     # v3-only (SC-3, plan Phase 3 of 260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS):
     # `_kiro/mcp/status` notification; see `_on_notification`.
     "mcp_servers",
@@ -648,6 +657,20 @@ MAX_TITLE_CHARS = 200
 # clamped client-side, and the plan assigns it to Phase 3.
 MAX_PERMISSION_TITLE_CHARS = 200
 
+# Limits for an agent question (`_kiro/userInput`), as shown on its card. The
+# question and option text are cleaned and clipped by `_clean_agent_text`; the
+# raw option titles the answer is sent with are kept unclipped in the pending
+# entry, so a clipped title can never become an unmatched answer. At most
+# MAX_QUESTION_OPTIONS options are kept: the first 19 plus the last, because
+# kiro-cli puts its own "Skip questions" option last (measured, kiro-cli
+# 2.29.1, 4 of 4 runs). A free-text answer is at most MAX_QUESTION_ANSWER_CHARS.
+# 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D6, D7, D8
+MAX_QUESTION_TEXT_CHARS = 2000
+MAX_QUESTION_OPTION_TITLE_CHARS = 200
+MAX_QUESTION_OPTION_DESCRIPTION_CHARS = 500
+MAX_QUESTION_OPTIONS = 20
+MAX_QUESTION_ANSWER_CHARS = 4000
+
 # What `_handle_prompt`/`_handle_close`/`_handle_cancel` answer a frame
 # targeting a sub-agent's own session id with. One string rather than one
 # per call site, so the three refusals cannot read differently for the same
@@ -1018,14 +1041,22 @@ def _kiro_client_capabilities() -> dict:
     OAuth MCP servers behave as before: failed, needing sign-in.
 
     ``settings.toolSearch`` does not hinge on it; see `_kiro_tool_search_settings`.
+
+    ``userInput`` is always declared, so ``_meta.kiro`` is never empty: with it
+    kiro-cli asks its questions as ``_kiro/userInput`` requests, with each
+    option's description and room for a free-text answer
+    (`_Supervisor._on_user_input_request`). Without it a question with options
+    arrived as a permission card without the descriptions, and a free-form one
+    was skipped unseen (measured, kiro-cli 2.29.1).
+    261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D2
     """
-    kiro: dict[str, Any] = {}
+    kiro: dict[str, Any] = {"userInput": True}
     if _secrets.available:
         kiro.update(secretStorage=True, openExternalUrl=True)
     tool_search = _kiro_tool_search_settings()
     if tool_search is not None:
         kiro["settings"] = {"toolSearch": tool_search}
-    return {"_meta": {"kiro": kiro}} if kiro else {}
+    return {"_meta": {"kiro": kiro}}
 
 
 # Overlay steering delivered to every ACP session via _meta.kiro.steering.
@@ -1881,6 +1912,26 @@ def _clean_step_label(value) -> str:
         for ch in " ".join(value.split())
         if not unicodedata.category(ch).startswith("C"))
     return kept.strip()[:60].strip()
+
+
+def _clean_agent_text(value, limit: int) -> str:
+    """Agent-authored text made safe to show and store, clipped to *limit*.
+
+    Whitespace (newlines included) collapses to single spaces, and every
+    Unicode category C character is dropped: controls (NUL included), format
+    characters (bidi overrides and isolates, zero-width), private-use and
+    unassigned. ``textContent`` does not neutralise a bidi override, and a NUL
+    breaks the toast hand-off. A non-string is ``""``. Unlike
+    `_clean_step_label` it keeps square brackets and has no fixed length.
+    261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D8
+    """
+    if not isinstance(value, str):
+        return ""
+    kept = "".join(
+        " " if ch.isspace() else ch
+        for ch in value
+        if ch.isspace() or not unicodedata.category(ch).startswith("C"))
+    return " ".join(kept.split())[:limit].strip()
 
 
 def _as_text(value) -> str:
@@ -3668,6 +3719,13 @@ class _Supervisor:
         # traceback a minute (the `_sweep_failures` idiom). Bounded by the
         # parents with tracked children; popped with them.
         self._workflow_reap_failures: dict[str, int] = {}
+        # child session id -> {"parent", "text", "created", "label"}: a workflow
+        # step's open question (a warning `_kiro/session/notify`). Read here by
+        # `_workflow_step_awaits_person`, so the reap and the turn-boundary
+        # evictions leave a step waiting on a person alone; written by the
+        # notify handler. Cleared in `_detach`.
+        # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D11, D25
+        self._workflow_step_questions: dict[str, dict] = {}
         # child session id -> {"parent", "workflowId", "started" (monotonic)} for
         # every workflow child, set at its id-bearing node_start. Internal; never
         # on the wire. Feeds the age cap (`_workflow_touch`), the per-run scope of
@@ -3712,8 +3770,16 @@ class _Supervisor:
         # agent's request would otherwise match, and approve, a newer request
         # the user never saw.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1).
-        # Value is {"session_id": ..., "options": [...], "kiro_id": ...} — a
-        # plain dict, not an
+        # Value is {"session_id": ..., "options": [...], "kiro_id": ...} for an
+        # approval, and {"session_id": ..., "answer_titles": [...], "kiro_id":
+        # ...} for an agent question (`_kiro/userInput`). Every entry also has
+        # `kind` ("approval" or "question", set only by the handler of the
+        # JSON-RPC method, never from the agent's payload; a missing one reads
+        # as "approval"), `text` (cleaned, without any workflow-step prefix)
+        # and `created` (wall clock), plus `workflow_child` when routed from a
+        # workflow step. One store, so every removal path covers both kinds.
+        # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D3.
+        # Each value is a plain dict, not an
         # asyncio.Future, per the "SC-9 UI shape & pending-request tracking"
         # Design Decisions row: the reply is written directly and
         # synchronously from _handle_permission_response once the client
@@ -3983,6 +4049,7 @@ class _Supervisor:
         self._workflow_ended.clear()
         self._crew_order_next.clear()
         self._workflow_reap_failures.clear()
+        self._workflow_step_questions.clear()
         # Viewers of a workflow step's read-only view are told before its meta
         # goes, as `_workflow_free_orphans` does. Legacy sub-agent viewers get
         # nothing here, as before.
@@ -4430,6 +4497,32 @@ class _Supervisor:
             log.warning("ACP: could not answer permission request id=%r as "
                         "cancelled (%s): %s", kiro_id, why, exc)
 
+    async def _answer_pending_cancelled(self, entry: dict, why: str) -> None:
+        """Abandon one pending entry in the shape its JSON-RPC method expects.
+
+        Strict: only ``kind == "question"`` (a `_kiro/userInput` request) is
+        answered ``{"action": "cancelled"}``, which kiro-cli reads as "move to
+        the next phase" (measured, kiro-cli 2.29.1, also late after a Stop).
+        Every other value, missing or unknown, gets the permission
+        ``cancelled`` outcome through `_answer_permission_cancelled`: answering
+        an approval with the question shape could fail open on kiro-cli's
+        turn-approval path. ``kind`` is set only by the request handlers, never
+        from the agent's payload. Best effort: logs a failure, never raises.
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D4
+        """
+        if entry.get("kind") == "question":
+            try:
+                await asyncio.to_thread(self._write, {
+                    "jsonrpc": "2.0",
+                    "id": entry.get("kiro_id"),
+                    "result": {"action": "cancelled"},
+                })
+            except Exception as exc:
+                log.warning("ACP: could not answer question id=%r as "
+                            "cancelled (%s): %s", entry.get("kiro_id"), why, exc)
+            return
+        await self._answer_permission_cancelled(entry.get("kiro_id"), why)
+
     def _stamp_activity(self, session_id) -> None:
         """Record that the agent has just said *something* about a session.
 
@@ -4755,8 +4848,11 @@ class _Supervisor:
         crew = self.crews.get(parent_id)
         if crew is None or len(crew) <= MAX_SUBAGENTS_PER_SESSION:
             return
+        # A step with an open approval or question is never evicted: dropping
+        # it would cancel its request through `_workflow_drop_child` (D25).
         finished = sorted(
-            (cid for cid, e in crew.items() if e["done"]),
+            (cid for cid, e in crew.items()
+             if e["done"] and not self._workflow_step_awaits_person(parent_id, cid)),
             key=lambda cid: crew[cid]["order"])
         overflow = len(crew) - MAX_SUBAGENTS_PER_SESSION
         for child_id in finished[:overflow]:
@@ -4836,20 +4932,21 @@ class _Supervisor:
                           "workflow step %s of %s", child_id, parent_id)
 
     def _cancel_step_permissions(self, parent_id: str, child_id: str,
-                                 why: str, notify: bool = False) -> None:
-        """Cancel the requests routed from one workflow step. Loop-only.
+                                 why: str) -> None:
+        """Cancel the approvals and questions routed from one workflow step.
 
-        A routed request is answerable only while its step is tracked: once
-        the tracking is dropped (completion, Stop, eviction) or the step is
-        reaped as no longer reporting, nothing is waiting for the answer. Each
-        entry is popped, announced (``permission_resolved``, so every tab
-        disables the card) and answered ``cancelled`` in a task, which the
-        agent reads as a deny. With *notify* (the reap: the step is not known
-        to be over) each cancelled request also gets the denial notice
-        (`_workflow_note_step_denied`); a drop because the step finished does
-        not. Never raises: callers are state writers that must finish.
+        Loop-only. Called only when the step's tracking is dropped
+        (`_workflow_drop_child`: the step finished, or its finished row was
+        evicted), so nothing is waiting for the answer any more. The reap no
+        longer calls it: a step waiting on a person is not "no longer
+        reporting", and the reap and the evictions skip such a step
+        (261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D25).
+        Each entry is popped, announced (``permission_resolved``, so every tab
+        disables the card) and abandoned in a task through
+        `_answer_pending_cancelled`, in the shape its kind expects. No denial
+        notice: the step is over. Never raises: callers are state writers that
+        must finish.
         """
-        noted = False
         for opaque_id in [k for k, v in tuple(self._pending_permission.items())
                           if v.get("session_id") == parent_id
                           and v.get("workflow_child") == child_id]:
@@ -4862,11 +4959,7 @@ class _Supervisor:
             except Exception:
                 log.exception("ACP could not announce permission request %s as "
                               "resolved; session=%s", opaque_id, parent_id)
-            if notify and not noted:
-                # One notice for the step, however many requests it had open.
-                noted = True
-                self._workflow_note_step_denied(parent_id, child_id)
-            coro = self._answer_permission_cancelled(entry["kiro_id"], why)
+            coro = self._answer_pending_cancelled(entry, why)
             try:
                 _spawn_task(coro)
             except Exception:
@@ -5075,8 +5168,12 @@ class _Supervisor:
         return "working" if any(s == "running" for s, _ in live.values()) else "waiting"
 
     def sessions_with_pending_permission(self) -> frozenset[str]:
-        """Ids of the sessions that have a permission request waiting for a person.
+        """Ids of the sessions that have a permission request or an agent
+        question waiting for a person.
 
+        Both kinds live in ``_pending_permission`` (an approval and a
+        `_kiro/userInput` question, each keyed by its owning session), so a
+        session with an open question counts too.
         Loop-only: it iterates a snapshot of ``_pending_permission``, which the
         loop mutates. An entry that is not a dict, or has no string
         ``session_id``, is skipped, so one malformed entry never hides the
@@ -5087,6 +5184,23 @@ class _Supervisor:
             entry["session_id"]
             for entry in tuple(self._pending_permission.values())
             if isinstance(entry, dict) and isinstance(entry.get("session_id"), str))
+
+    def _workflow_step_awaits_person(self, parent_id: str, child_id: str) -> bool:
+        """True while a workflow step has an open approval, question or step
+        question. A pure read. Loop-only.
+
+        What keeps the reap, the turn-end sweep and the evictions from closing
+        or dropping a step a person still has to answer: dropping it would
+        cancel its request through `_workflow_drop_child`.
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D25
+        """
+        question = self._workflow_step_questions.get(child_id)
+        if isinstance(question, dict) and question.get("parent") == parent_id:
+            return True
+        return any(isinstance(entry, dict)
+                   and entry.get("session_id") == parent_id
+                   and entry.get("workflow_child") == child_id
+                   for entry in tuple(self._pending_permission.values()))
 
     def workflow_run_live(self, session_id: str, now: float | None = None) -> bool:
         """True while a workflow run of the session is going on. A pure read.
@@ -5353,12 +5467,13 @@ class _Supervisor:
                 entry = crew.get(child_id)
                 if entry is None or entry["done"]:
                     continue
+                # A step with an open approval or question is waiting on a
+                # person, not "no longer reporting": its row, the crew header
+                # and the request stay as they are (D25).
+                if self._workflow_step_awaits_person(parent_id, child_id):
+                    continue
                 self._workflow_mark_reaped(entry)
                 reaped.append(child_id)
-                if self._pending_permission:
-                    self._cancel_step_permissions(
-                        parent_id, child_id, "the workflow step stopped reporting",
-                        notify=True)
                 log.info("ACP workflow step %s of %s reaped: %s, unseen %.0fs",
                          child_id, parent_id, state, now - seen)
         finally:
@@ -6642,7 +6757,8 @@ class _Supervisor:
                  proc.pid, cwd)
 
     def _on_agent_request(self, msg: dict) -> None:
-        """Handle `_kiro/auth/getAccessToken` and `session/request_permission`;
+        """Handle `_kiro/auth/getAccessToken`, `session/request_permission`,
+        `_kiro/userInput`, the secret methods and `_kiro/openExternalUrl`;
         refuse everything else."""
         method = msg.get("method")
         if method == "_kiro/auth/getAccessToken":
@@ -6650,6 +6766,9 @@ class _Supervisor:
             return
         if method == "session/request_permission":
             self._on_permission_request(msg)
+            return
+        if method == "_kiro/userInput":
+            self._on_user_input_request(msg)
             return
         if method in _SECRET_METHODS and _secrets.available:
             _spawn_task(self._serve_secret(msg))
@@ -6761,7 +6880,9 @@ class _Supervisor:
         `_handle_permission_response` needs to answer it later: keyed by an
         opaque id minted here (the frame's ``requestId``), valued
         ``{"session_id": ..., "options": [...], "kiro_id": <the request's own id>}``
-        (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7, K1)
+        (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7, K1),
+        plus ``kind: "approval"``, the cleaned unprefixed ``text`` and
+        ``created`` (261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D3)
         — see the "SC-9 UI shape & pending-request tracking" Design Decisions
         row in plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md.
 
@@ -6884,24 +7005,31 @@ class _Supervisor:
         # The page sees only this opaque id; the kiro id stays here.
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1).
         opaque_id = secrets.token_urlsafe(16)
+        title = _as_text(tool_call.get("title"))
+        # The stored text and the toast are cleaned (D8): whitespace collapsed,
+        # control and bidi characters dropped. The frame's title is not.
+        clean_title = _clean_agent_text(title, MAX_PERMISSION_TITLE_CHARS)
         # Keyed by the OWNER: for a workflow step that is the parent, so the
         # existing lookups by session id (Stop, the turn-end sweep, the
         # overlay's `sessions_with_pending_permission`, the answer route's
         # ownership check) work unchanged. `workflow_child` is present only on
-        # a routed entry; the turn-end sweep reads it.
+        # a routed entry; the turn-end sweep reads it. `kind`, `text` and
+        # `created`: 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D3.
         self._pending_permission[opaque_id] = {
             "session_id": owner_id,
+            "kind": "approval",
             "options": options,
             "kiro_id": request_id,
+            "text": clean_title,
+            "created": time.time(),
         }
-        title = _as_text(tool_call.get("title"))
         # The desktop toast is clamped to 200 characters, so its prefix is
         # short and fixed: a long step name must not push the dangerous part
         # of the title out of the toast.
-        toast_title = title
+        toast_title = clean_title
         if step_id is not None:
             self._pending_permission[opaque_id]["workflow_child"] = step_id
-            toast_title = f"[workflow step] {title}"
+            toast_title = f"[workflow step] {clean_title}"
             title = f"[{self._workflow_step_label(owner_id, step_id)}] {title}"
             log.info("ACP: session/request_permission from workflow step %s "
                      "routed to parent %s (id=%r)", step_id, owner_id, request_id)
@@ -6970,15 +7098,141 @@ class _Supervisor:
         _notify("permission_request", owner_id,
                 toast_title[:MAX_PERMISSION_TITLE_CHARS])
         if step_id is not None:
-            # A request is proof of life: a step waiting on a person must not
-            # be reaped at the running bound while the card is open. Guarded:
+            # A request is proof of life: refresh the step's clock. Guarded:
             # the request is already stored and shown, so nothing here may
-            # raise out of the callback.
+            # raise out of the callback. The reap also skips a step with an
+            # open request (`_workflow_step_awaits_person`, D25).
             try:
                 self._workflow_touch(step_id)
             except Exception:
                 log.exception("ACP: could not refresh workflow step %s after "
                               "its permission request", step_id)
+
+    def _on_user_input_request(self, msg: dict) -> None:
+        """Handle an inbound `_kiro/userInput` request: the agent's question.
+
+        Declared through ``_meta.kiro.userInput`` (`_kiro_client_capabilities`).
+        Shape, measured on kiro-cli 2.29.1: ``{sessionId, toolCallId, question,
+        options: [{title, description, recommended}]}``. kiro-cli reads
+        ``{"action": "answered", "answer": <text>}`` as the answer and matches
+        it against the option titles, so a choice is answered with its raw
+        title verbatim; any other action, an empty answer or an error moves it
+        to the next phase.
+
+        Mirrors `_on_permission_request`: the same id validation, the same
+        owner and workflow-step routing (`_workflow_step_parent`; a step's
+        `_kiro/userInput` was never observed on 2.29.1, so that path is
+        unverified), an opaque id, one pending entry in ``_pending_permission``
+        with ``kind: "question"``, a recorded ``question_request`` frame and an
+        unconditional toast. The question is required; options are optional,
+        and none is a free-form question. An option is kept only when its raw
+        title is a non-empty string (an empty answer would skip the question),
+        at most MAX_QUESTION_OPTIONS of them: the first 19 and the last, so
+        kiro-cli's own "Skip questions", which it puts last, survives. The
+        entry keeps the raw titles under ``answer_titles``; the frame carries
+        cleaned, clipped copies (`_clean_agent_text`). A step's question sets
+        the step waiting, so the waiting bound applies.
+
+        A malformed request (no registered owner, no usable question, or an id
+        that is not a string or an integer) is answered ``{"action":
+        "cancelled"}`` when its id is usable, and through `_refuse` only when
+        it is not. Never raises out of the callback for a malformed payload.
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D2-D9, D13
+        """
+        request_id = msg.get("id")
+        params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        session_id = params.get("sessionId")
+        question = _clean_agent_text(params.get("question"), MAX_QUESTION_TEXT_CHARS)
+        raw_options = params.get("options")
+        kept: list[dict] = []
+        if isinstance(raw_options, list):
+            for opt in raw_options:
+                if not isinstance(opt, dict):
+                    continue
+                raw_title = opt.get("title")
+                if not isinstance(raw_title, str) or not raw_title:
+                    continue
+                kept.append(opt)
+        if len(kept) > MAX_QUESTION_OPTIONS:
+            log.info("ACP: _kiro/userInput offered %d usable options; keeping "
+                     "the first %d and the last (id=%r)", len(kept),
+                     MAX_QUESTION_OPTIONS - 1, request_id)
+            kept = kept[:MAX_QUESTION_OPTIONS - 1] + kept[-1:]
+        usable_id = (isinstance(request_id, (str, int))
+                     and not isinstance(request_id, bool))
+        owner_id: str | None = None
+        step_id: str | None = None
+        if isinstance(session_id, str) and session_id:
+            if session_id in self.sessions:
+                owner_id = session_id
+            else:
+                step_parent = self._workflow_step_parent(session_id)
+                if step_parent is not None:
+                    owner_id, step_id = step_parent, session_id
+        if not usable_id or not question or owner_id is None:
+            log.warning(
+                "ACP: _kiro/userInput missing a question or a string/integer "
+                "id, or names an unregistered session (id=%r, sessionId=%r) — "
+                "refusing", request_id, session_id)
+            if usable_id:
+                _spawn_task(self._answer_pending_cancelled(
+                    {"kind": "question", "kiro_id": request_id},
+                    "malformed or unregistered question"))
+            else:
+                _spawn_task(self._refuse(request_id, msg.get("method")))
+            return
+        opaque_id = secrets.token_urlsafe(16)
+        entry = {
+            "session_id": owner_id,
+            "kind": "question",
+            "kiro_id": request_id,
+            "text": _clean_agent_text(question, MAX_PERMISSION_TITLE_CHARS),
+            "answer_titles": [opt["title"] for opt in kept],
+            "created": time.time(),
+        }
+        if step_id is not None:
+            entry["workflow_child"] = step_id
+        self._pending_permission[opaque_id] = entry
+        payload: dict = {
+            "requestId": opaque_id,
+            "sessionId": owner_id,
+            "question": question,
+            "options": [{
+                "title": _clean_agent_text(opt["title"],
+                                           MAX_QUESTION_OPTION_TITLE_CHARS),
+                "description": _clean_agent_text(
+                    opt.get("description"), MAX_QUESTION_OPTION_DESCRIPTION_CHARS),
+                # `is True`: an agent-authored "false" string is truthy.
+                "recommended": opt.get("recommended") is True,
+            } for opt in kept],
+        }
+        toast_text = entry["text"]
+        if step_id is not None:
+            # Separate fields: the question text is never prefixed.
+            payload["workflowStep"] = True
+            payload["workflowStepLabel"] = self._workflow_step_label(owner_id, step_id)
+            toast_text = f"[workflow step] {toast_text}"
+            log.info("ACP: _kiro/userInput from workflow step %s routed to "
+                     "parent %s (id=%r)", step_id, owner_id, request_id)
+        _emit(owner_id, envelope("question_request", payload, owner_id))
+        # Unconditional, like an approval: the turn is stopped on it (D9).
+        _notify("question_request", owner_id,
+                toast_text[:MAX_PERMISSION_TITLE_CHARS])
+        if step_id is not None:
+            # The step waits on a person: waiting, so the 6 h bound applies
+            # (D13). Guarded: the question is already stored and shown.
+            try:
+                self._workflow_set(owner_id, step_id, "waiting")
+                row = (self.crews.get(owner_id) or {}).get(step_id)
+                if row is not None and (not row["done"] or row.get("reaped")):
+                    self._workflow_reopen_row(row, "waiting")
+                    _emit_subagents_frame(owner_id, self.crews,
+                                          self._active_fan_out_wave)
+            except Exception:
+                log.exception("ACP: could not mark workflow step %s waiting "
+                              "after its question", step_id)
 
     async def _fulfill_token(self, request_id) -> None:
         """Fetch a fresh OIDC token and deliver it to the agent.
@@ -7317,8 +7571,8 @@ class _Supervisor:
             self._release_session_locally(session_id)
         finally:
             for _entry in _closing_permissions:
-                await self._answer_permission_cancelled(
-                    _entry["kiro_id"], "the session was closed")
+                await self._answer_pending_cancelled(
+                    _entry, "the session was closed")
 
     def _release_session_locally(self, session_id: str) -> None:
         """The synchronous part of `close_session`: drop every local trace."""
@@ -7854,6 +8108,9 @@ def _dispatch(conn: _Connection, frame: dict) -> None:
         return
     if type_ == "permission_response":
         _spawn_task(_handle_permission_response(conn, session_id, payload))
+        return
+    if type_ == "question_response":
+        _spawn_task(_handle_question_response(conn, session_id, payload))
         return
     if type_ == "mcp_signin":
         _spawn_task(_handle_mcp_signin(conn, session_id, payload))
@@ -8693,6 +8950,12 @@ async def _handle_prompt(conn, session_id, payload):
                 for _child_id, _entry in _finishing_crew.items():
                     if _child_id in _wf_live:
                         continue
+                    # A step with an open approval or question is waiting on a
+                    # person: not closed here, as the reap leaves it (D25).
+                    if (_child_id in _wf_tracked
+                            and _supervisor._workflow_step_awaits_person(
+                                session_id, _child_id)):
+                        continue
                     if not _entry["done"]:
                         if _child_id in _wf_tracked:
                             log.info("ACP turn end: finalising stale workflow "
@@ -8741,14 +9004,14 @@ async def _handle_prompt(conn, session_id, payload):
             # rather than raising out of this `finally`.
             # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
             for _swept in _swept_permissions:
-                await _supervisor._answer_permission_cancelled(
-                    _swept["kiro_id"], "turn ended with the request unanswered")
+                await _supervisor._answer_pending_cancelled(
+                    _swept, "turn ended with the request unanswered")
 
 
 def _pop_pending_permissions(session_id: str, *,
                              keep_live_steps: bool = False,
                              notify_denial: bool = True) -> list[dict]:
-    """Drop every pending permission request of one session, announcing each.
+    """Drop every pending approval and question of one session, announcing each.
 
     Pops each entry and emits its ``permission_resolved`` frame, so every tab
     disables the card. Returns the popped entries for the caller to answer
@@ -8796,6 +9059,10 @@ def _pop_pending_permissions(session_id: str, *,
     if not keep_live_steps and notify_denial:
         noted: set[str] = set()
         for entry in dropped:
+            # A question is not a tool call: "a tool call was denied" would be
+            # false. Its card's resolved state is the only signal (D4).
+            if entry.get("kind") == "question":
+                continue
             child_id = entry.get("workflow_child")
             if isinstance(child_id, str) and child_id not in noted:
                 noted.add(child_id)
@@ -8968,6 +9235,14 @@ async def _handle_permission_response(conn, session_id, payload):
         conn.send(error_frame(
             "not_subscribed", "Subscribe to this session first.", session_id))
         return
+    # A question entry has no `options` to check against; it is answered only
+    # through `question_response`. Before (c), which would raise on it.
+    # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D6
+    if entry.get("kind") == "question":
+        conn.send(error_frame(
+            "unknown_request", "No pending permission request with that id.",
+            session_id))
+        return
     # (c) The chosen option must be one this request actually offered.
     option_id = payload.get("optionId")
     valid_option_ids = {opt["optionId"] for opt in entry["options"]}
@@ -9040,6 +9315,107 @@ async def _handle_permission_response(conn, session_id, payload):
             "Permission response delivery failed: could not write reply")
 
 
+async def _handle_question_response(conn, session_id, payload):
+    """Answer a pending `_kiro/userInput` question.
+
+    The same load-bearing order as `_handle_permission_response`: (a) an
+    unknown or already-answered id is refused with no side effects, (b) the
+    stored owner must be this socket's session, (c) the entry must be a
+    question (strictly; anything else is ``unknown_request``) and the answer
+    valid, (d) the entry is popped, then (e) the reply is written. Nothing
+    between (a) and (d) awaits or can raise, so a replayed ``requestId`` hits
+    (a).
+
+    The answer is either ``optionIndex`` (an ``int``, not a ``bool``, in range
+    of the stored options), sent as the option's stored RAW title so that
+    cleaning or clipping on the card can never turn a choice into an unmatched
+    answer, or ``answer``: free text, stripped, 1 to MAX_QUESTION_ANSWER_CHARS
+    characters. Both or neither is ``bad_payload``; an empty answer is
+    ``empty_answer``; an over-long one is ``bad_payload``. The reply is
+    ``{"action": "answered", "answer": <text>}``. Remote viewers may answer,
+    gated by ownership only, exactly like `permission_response` (D10). A step
+    question's answer changes no workflow state; the step's own next frames do.
+    261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D6, D7
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+    request_id = payload.get("requestId")
+    if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
+        conn.send(error_frame(
+            "bad_payload", "'question_response' needs a requestId.", session_id))
+        return
+    # (a) Unknown or already-answered request — no side effects.
+    entry = _supervisor._pending_permission.get(request_id)
+    if entry is None:
+        conn.send(error_frame(
+            "unknown_request", "No pending question with that id.", session_id))
+        return
+    # (b) Ownership.
+    if conn.session_id != entry.get("session_id"):
+        conn.send(error_frame(
+            "not_subscribed", "Subscribe to this session first.", session_id))
+        return
+    # (c) A question, and a valid answer to it.
+    if entry.get("kind") != "question":
+        conn.send(error_frame(
+            "unknown_request", "No pending question with that id.", session_id))
+        return
+    has_index, has_answer = "optionIndex" in payload, "answer" in payload
+    if has_index == has_answer:
+        conn.send(error_frame(
+            "bad_payload", "Send either an optionIndex or an answer.", session_id))
+        return
+    titles = entry.get("answer_titles")
+    if not isinstance(titles, list):
+        titles = []
+    if has_index:
+        index = payload.get("optionIndex")
+        if (not isinstance(index, int) or isinstance(index, bool)
+                or not 0 <= index < len(titles)):
+            conn.send(error_frame(
+                "invalid_option", "Not a valid option for this question.",
+                session_id))
+            return
+        answer = titles[index]
+    else:
+        raw = payload.get("answer")
+        if not isinstance(raw, str):
+            conn.send(error_frame(
+                "bad_payload", "The answer must be text.", session_id))
+            return
+        answer = raw.strip()
+        if not answer:
+            conn.send(error_frame(
+                "empty_answer", "Type an answer first.", session_id))
+            return
+        if len(answer) > MAX_QUESTION_ANSWER_CHARS:
+            conn.send(error_frame(
+                "bad_payload",
+                f"The answer is longer than {MAX_QUESTION_ANSWER_CHARS} "
+                "characters.", session_id))
+            return
+    # (d) Pop BEFORE writing the reply.
+    _supervisor._pending_permission.pop(request_id, None)
+    _emit(entry["session_id"], envelope(
+        "permission_resolved", {"requestId": request_id}, entry["session_id"]))
+    # (e) kiro-cli's own id, never the opaque one the page echoed.
+    try:
+        await asyncio.to_thread(_supervisor._write, {
+            "jsonrpc": "2.0",
+            "id": entry["kiro_id"],
+            "result": {"action": "answered", "answer": answer},
+        })
+    except AcpError as exc:
+        log.warning("ACP: could not deliver question_response for request %r: %s",
+                    entry["kiro_id"], exc)
+        conn.send(error_frame(
+            "internal_error", "Could not deliver the answer.", session_id))
+        # The agent channel is broken: tear it down, as a failed approval
+        # reply does, rather than leave the agent waiting on this request.
+        _supervisor._discard(
+            "Question response delivery failed: could not write reply")
+
+
 async def _handle_cancel(conn, session_id):
     """Interrupt a turn on ``_supervisor``."""
     if not session_id:
@@ -9072,8 +9448,8 @@ async def _handle_cancel(conn, session_id):
         # while an unsettled permission card is pending, so a person reaches
         # this path. The workflow rows are left alone, as before.
         for entry in _pop_pending_permissions(session_id):
-            await _supervisor._answer_permission_cancelled(
-                entry["kiro_id"], "the user stopped the session")
+            await _supervisor._answer_pending_cancelled(
+                entry, "the user stopped the session")
         log.info("ACP cancel: session=%s is not running a turn", session_id)
         return
     log.info("ACP cancel requested: session=%s", session_id)
@@ -9098,8 +9474,8 @@ async def _handle_cancel(conn, session_id):
     # No denial notice here: the Stop notice below and the one 'stopped' frame
     # cover a routed request cancelled with the turn.
     for entry in _pop_pending_permissions(session_id, notify_denial=False):
-        await _supervisor._answer_permission_cancelled(
-            entry["kiro_id"], "the user stopped the turn")
+        await _supervisor._answer_pending_cancelled(
+            entry, "the user stopped the turn")
     # Stop ends the workflow in PowerAtlas's view (user decision 2026-10-09
     # after live QA: a workflow stalls after Stop, no later step starts and no
     # `run_complete` follows). Every tracked workflow child, fresh or stale,
@@ -9325,8 +9701,11 @@ def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty
     # child is live they go as any done row does. The per-session cap
     # (`_evict_finished_subagents`) still applies.
     _keep_workflow_rows = _supervisor.has_active_workflow(session_id)
+    # A step with an open approval or question is never evicted: dropping it
+    # would cancel its request through `_workflow_drop_child` (D25).
     for _child_id in [cid for cid, e in crew.items()
-                      if e["done"] and not (_keep_workflow_rows and e.get("workflow"))]:
+                      if e["done"] and not (_keep_workflow_rows and e.get("workflow"))
+                      and not _supervisor._workflow_step_awaits_person(session_id, cid)]:
         crew.pop(_child_id, None)
         # The row is gone, so a late workflow frame could not finalise it:
         # stop tracking the child too.

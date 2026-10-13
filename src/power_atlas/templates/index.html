@@ -5619,6 +5619,26 @@ function dashHandle(frame){
     }
     return;
   }
+  if (type === 'question_request') {
+    // 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D5: an
+    // agent question, built by the shared renderer (D23) and settled by
+    // `permission_resolved` below.
+    var qId = payload && payload.requestId;
+    var qText = (payload && typeof payload.question === 'string') ? payload.question : '';
+    var qOptions = Array.isArray(payload && payload.options) ? payload.options : [];
+    var qLabel = (payload && typeof payload.workflowStepLabel === 'string')
+      ? payload.workflowStepLabel : '';
+    if (typeof qId === 'string' || typeof qId === 'number') {
+      var qRow = addQuestionRequest(qId, sid, qText, qOptions, qLabel);
+      // A step's question keeps Stop usable with no turn active, exactly as a
+      // step's approval does; see hasPendingStepPermissionCard.
+      if (qRow && payload && payload.workflowStep === true) {
+        qRow.dataset.workflowStep = '1';
+      }
+      dashRefreshComposerControls();
+    }
+    return;
+  }
   if (type === 'permission_resolved') {
     var resolvedId = payload && payload.requestId;
     if (typeof resolvedId === 'string' || typeof resolvedId === 'number') {
