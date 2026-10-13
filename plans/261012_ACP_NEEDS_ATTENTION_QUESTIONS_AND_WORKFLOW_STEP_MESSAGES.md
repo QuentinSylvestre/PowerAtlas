@@ -259,8 +259,16 @@ Test, in `TestAcpSubagentActivity`:
 5. A second test keeps the v2 case: an entry tagged from `crew_spawn_toolcallids` is still emitted.
 
 **Exit criteria**:
-- [ ] The new test fails on the unfixed code (run it before the fix and record the failure in §9)
-- [ ] Both tests pass after the fix; the full `tests/test_web.py` suite passes
+- [x] The new test fails on the unfixed code (run it before the fix and record the failure in §9)
+- [x] Both tests pass after the fix; the full `tests/test_web.py` suite passes
+
+Implementation (2026-10-12, code: 68b5f8e)
+The fix is in `_note_subagent_action` in `src/power_atlas/acp.py`. It used to filter the crew frame through `self.crew_spawn_toolcallids`. It now passes `{meta["parent"]: entry.get("fan_out_id", _NO_ANCHOR_TOOLCALLID)}`, so the frame is filtered by the row's own wave tag (D16), with a short comment. Two tests were added to `TestAcpSubagentActivity` in `tests/test_web.py`: `test_action_frame_keeps_a_wave_tagged_row_under_its_own_wave` seeds rows from two waves and a different v2 anchor, and checks that an action on the active-wave row emits only that row with `toolCallId == "wave-new"`, and that an action on the older-wave row emits only that row with `toolCallId == "wave-old"`; `test_action_frame_keeps_a_v2_row_under_its_spawn_toolcallid` registers a v2 row through the real `SUBAGENT_LIST_METHOD` path with a stale `_active_fan_out_wave` entry and checks it is still emitted with `toolCallId == "v2-spawn-tc"`. Before the fix the wave test failed at its first payload check (`assert [] == ['sub-new']`); the v2 test passed before and after. Full suite after the fix: 3260 passed, 1 skipped.
+
+Implementation (2026-10-12, code: 3ce782e)
+Review auto-fixes. The wave test now drives the active-wave case through the real notification path: a `SUBAGENT_ACTIVITY_METHOD` `tool_call_chunk` from the child `sub-new` through `_on_notification`, which reaches `_note_subagent_action`, and it checks the payload holds only `sub-new`, with action "Reading file" and `toolCallId == "wave-new"`. The older-wave step still calls `_note_subagent_action` directly. With the old `self.crew_spawn_toolcallids` argument restored temporarily, the wave test failed with `assert [] == ['sub-new']` and the v2 test passed. A comment sentence in `_note_subagent_action` says that a row with no `fan_out_id`, which only old in-memory state can hold, falls back to the no-anchor id. Full suite: 3260 passed, 1 skipped.
+
+Orchestrator notes: QA SKIP. The `[QA]` phase has no runtime path to drive: §1 records that steps sent no `tool_call_chunk` in 4 probe runs on kiro-cli 2.29.1, and the unit tests drive the real notification path instead. QA annotation mismatch: consider removing `[QA]` from a phase like this in future plan revisions. Review: one cycle (the user's per-phase cadence); cycle 2 skipped because both cycle-1 findings were Low and the fixes were a test re-route and a comment, re-verified by the implementer's mutation check.
 
 ### Phase 3: Agent questions through `userInput` [QA]
 **Goal**: kiro-cli's questions reach a card with options, descriptions and free text, are answered in the native shape, and are abandoned safely.
@@ -549,7 +557,7 @@ Tests:
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Pre-flight probes | Complete | code: none; results in §9 |
-| 2 | Crew-frame filter fix | Not started | |
+| 2 | Crew-frame filter fix | Complete | code: 68b5f8e, 3ce782e |
 | 3 | Agent questions through `userInput` | Not started | |
 | 4 | Step messages, waiting state, paused runs | Not started | |
 | 5 | Attention feed and title count | Not started | |
@@ -573,6 +581,11 @@ All runs used a second `kiro-cli acp --agent-engine v3` spawned by a scratch dri
 - **Skip option title (D7).** The measured title is `"Skip questions"`, last in 4 of 4 runs; "Skip remaining questions" is the start of its description. The first-19-plus-last rule still keeps it; only D7's wording was wrong.
 - **Resume re-sends `run_start` and `node_start` (Phase 4).** A resumed paused run re-sends `run_start` for the tracked `workflowId` and `node_start` for the tracked `nodeId` with the same step `sessionId`. No new child appears, so the R2/R12 new-child handling is not needed. Phase 4 must accept these frames again without resetting the run or the row.
 - **Slash commands unmeasured (R11).** `_kiro.dev/commands/execute` errors on 2.29.1, so the effect of Stop during a slash command is unmeasured. D26 still covers the command path. Outside this plan: PowerAtlas's `commands_execute` sends the refused shape. `orchestrator.log` and 3 rotations have 0 `PersistenceClassification` lines, so it is not confirmed in production.
+- **A step paused after `success` (D13, D14).** In the probe-3 resume, the step reported `success`, and kiro-cli then sent `node_paused` (`reason: "Awaiting next user message on step session."`) and `run_complete` `status: "paused"`, with no `node_complete`. User decision, 2026-10-12 ("A"): keep D14 as written. The step shows waiting, the crew header reads "Paused", and the parent reads Waiting, because kiro-cli itself holds the run unfinished. No step question is created, since that needs a warning notify, so it does not appear in "Needs attention".
+
+### Phase 2 pre-fix failure
+
+`TestAcpSubagentActivity::test_action_frame_keeps_a_wave_tagged_row_under_its_own_wave`, run on the unfixed `_note_subagent_action` (2026-10-12), failed at its first payload check: `assert [r["sessionId"] for r in payload["subagents"]] == ["sub-new"]` gave `AssertionError: assert [] == ['sub-new']`. The frame was emitted but under the v2 anchor, so the wave-tagged row was filtered out of it. The companion v2 test passed before and after the fix. The wave test also checks D16's older-wave case (the row goes out under its own older wave id), which goes beyond the plan's step list; no divergence from D16.
 
 ## Follow-up Work (Deferred)
 
@@ -658,6 +671,18 @@ The user's decisions were folded in first: D24 removes the prompt silence watchd
 | 31 | Low | The new no-cancel test could pass on unfixed code; the test docstring incident would be deleted (Sr 13, Sr 14). | Fixed -- 0.3 s wait, run before the change; the incident docstring is kept. |
 
 No re-review ran after these fixes (1-cycle cap).
+
+### 2026-10-12 -- Implementation Review (after Phase 2, persona: Senior engineer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | SC-7 asks for a test that drives a `tool_call_chunk`, but the wave test called `_note_subagent_action` directly. | Fixed -- the wave test drives the chunk through `_on_notification` (3ce782e); a mutation check fails it. |
+| 2 | Low | An untagged crew entry now gets the no-anchor `toolCallId` instead of the parent's v2 anchor; only old in-memory state has one. | Fixed -- a comment in `_note_subagent_action` states the fallback (3ce782e). |
+
+The reviewer ran both mutations (the old `crew_spawn_toolcallids` argument and the rejected `_active_fan_out_wave`); each failed the tests, and the file was restored byte for byte. qvalidate `--phase 2 --expect-ticked 2` passed. Cycle 2 skipped under the user's one-cycle-per-phase cadence; both findings were Low.
 
 ## Harness Improvement Opportunities
 
