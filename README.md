@@ -167,8 +167,10 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     holds, oldest first. A row shows its kind (Approval, Question or Step question), the session title
     and workspace, the request or question text (with the step's name in front for a workflow step)
     and how long it has waited. Clicking a row opens that session, where the item is answered; a
-    session that has no row in the rail opens on `/acp` in a new tab. A row leaves the list within
-    about 5 seconds of being answered, stopped or closed. The dashboard's page title starts with the
+    session that has no row in the rail opens on `/acp` in a new tab. An approval or question row
+    leaves the list within about 5 seconds of being answered, stopped or closed. A step question row
+    leaves it when the parent passes your answer on to the step, when the step ends, when you press
+    **Stop** during a turn, or when the session is closed. The dashboard's page title starts with the
     number of these items, for example `(2) PowerAtlas`, and the list and the count keep refreshing
     every 5 seconds while a transcript is open and while the tab is in the background (browsers may
     slow a background tab to about once a minute). `/acp` titles carry no count. A session with an
@@ -719,7 +721,7 @@ answer and press **Send**. A question with no options shows only the box. kiro-c
 **Skip questions** option last. The turn stays paused until you answer, in every permission mode,
 Yolo included, and the question also appears in the dashboard's *Needs attention* list. Answering (from
 any tab, or on reload) marks the card answered everywhere it is shown. **Stop** while a question is
-open ends the turn and the card goes inactive; the agent then carries on without your answer.
+open ends the turn and the card goes inactive; the question is dropped.
 
 A workflow step can also ask you something. Its message shows on the step's row in the crew panel and
 as a row in the parent's transcript, the step reads waiting, the crew header reads "Paused" while no
