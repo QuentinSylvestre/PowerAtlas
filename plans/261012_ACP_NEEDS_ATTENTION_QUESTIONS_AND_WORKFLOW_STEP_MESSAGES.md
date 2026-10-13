@@ -638,6 +638,16 @@ All runs used a second `kiro-cli acp --agent-engine v3` spawned by a scratch dri
 - **Slash commands unmeasured (R11).** `_kiro.dev/commands/execute` errors on 2.29.1, so the effect of Stop during a slash command is unmeasured. D26 still covers the command path. Outside this plan: PowerAtlas's `commands_execute` sends the refused shape. `orchestrator.log` and 3 rotations have 0 `PersistenceClassification` lines, so it is not confirmed in production.
 - **A step paused after `success` (D13, D14).** In the probe-3 resume, the step reported `success`, and kiro-cli then sent `node_paused` (`reason: "Awaiting next user message on step session."`) and `run_complete` `status: "paused"`, with no `node_complete`. User decision, 2026-10-12 ("A"): keep D14 as written. The step shows waiting, the crew header reads "Paused", and the parent reads Waiting, because kiro-cli itself holds the run unfinished. No step question is created, since that needs a warning notify, so it does not appear in "Needs attention".
 
+### Divergences from the final review (Step 9)
+
+- **Held step keeps its wave.** `_workflow_holds_step` keeps `_active_fan_out_wave` at turn start and turn end while a tracked step awaits a person, so its row stays in crew frames (D25). Side effect, documented in KNOWLEDGE: a sub-agent started in a later turn joins that kept wave and shows in the earlier turn's panel.
+- **`sessions_with_pending_permission` deleted.** It lost its last production reader in Phase 5; §1, D3 and the Phase 3 criteria above still name it as the plan was written. `sessions_awaiting_person()` replaces it everywhere.
+- **Routed question resume.** A step that its own `_kiro/userInput` question set waiting (`question_wait`) runs again once its last open request is gone, unless kiro-cli paused it since (`node_paused`, `run_complete` `paused`), which forgets the flag. A capped step keeps its old clock on its own `tool_call`.
+- **Step-question toast (user option A, 2026-10-13).** A warning notify that opens a step question raises "Question: [workflow step] <text>" through `notify_question`, whenever notifications are on. A reopened question and a replayed chunk raise none. D9 named only `question_request`.
+- **Fault-log back-off.** `_workflow_state_fault` logs a traceback once, then at most one line per minute per key; `_workflow_state_recovered` clears both records on a good read. Two existing log expectations changed to match.
+- **Attention poller on failure.** A 403 or three failed polls in a row clear the rows and the `(N)` count.
+- **Step label element.** A "Waiting for you" row shows the step label in its own element and the full text as the tooltip.
+
 ### Divergences from Phase 6
 
 - **Wrong subject on d2fbc36.** The Phase 6 code commit carries the Phase 4 message: a refused scratch-file Write left an earlier phase's message file in place for `git commit -F`. Amend is banned; user decision "B" (2026-10-13): leave it and record it here. ca988d8 and fa49c87 carry correct Phase 6 subjects.
@@ -854,6 +864,51 @@ Implementation health: Green.
 | 6 | Low | [Re-review] A per-record `turn_seq` could repeat after a record was rebuilt (ABA). | Fixed -- supervisor-wide counter; test (fa49c87). |
 
 The first review ran four mutations (wake-on-Stop, both `clear_stop` sites, waker cleanup); the cleanup one survived (row 2). The re-review of ca988d8 ran under `/qdev` Step 6 item 4a because the High fix changed concurrency code; its four mutations were all killed. Full `tests/test_web.py` plus `tests/test_config.py`: 3489 passed, 1 skipped (first review).
+
+### 2026-10-13 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor, Reliability engineer (cycle 1); Reliability and Senior engineer lenses in one diff-only reviewer (cycle 2).
+21 findings (1 High, 2 Medium, 18 Low).
+QA verification: pending (Step 9b, after the granted restart; recorded below when run).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Pre-flight probes | not_run | SKIP | Probe phase on a second kiro-cli; no unit tests apply |
+| 2: Crew-frame filter fix | pass | SKIP | Path unreachable live on kiro-cli 2.29.1; unit tests drive the real notification path |
+| 3: Agent questions through `userInput` | pass | pending | Live checks carried to Phase 7 |
+| 4: Step messages, waiting state, paused runs | pass | pending | Live checks carried to Phase 7 |
+| 5: Attention feed and title count | pass | pending | Live checks carried to Phase 7 |
+| 6: Remove the prompt silence watchdog | pass | pending | Live check carried to Phase 7 |
+| 7: Documentation, roadmap and live QA | pass | pending | Docs committed; live checks after the restart |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | [Reliability] A held, no-longer-fresh step dropped out of crew frames at the parent's next turn boundary (reproduced). | Fixed -- the wave is kept while a tracked step awaits a person; test over three kinds (9e5fef3, 23bf2fd). |
+| 2 | Medium | [Senior] `sessions_with_pending_permission` was dead code after Phase 5, and KNOWLEDGE still named it. | Fixed -- deleted; asserts and KNOWLEDGE point at `sessions_awaiting_person()` (9e5fef3, 59f38a8). |
+| 3 | Medium | [Cycle 2] A routed question answered after kiro-cli paused its step set the step running. | Fixed -- pause frames forget `question_wait`; frame-order test (23bf2fd). |
+| 4 | Low | [Reliability] A routed question's removal left its step waiting until its next tool call. | Fixed -- `question_wait` resume once nothing is open (9e5fef3). |
+| 5 | Low | [Senior] `_on_user_input_request` duplicated the set-waiting-and-reopen logic. | Fixed -- calls `_workflow_mark_step_waiting` (9e5fef3). |
+| 6 | Low | [Reliability] Three hold-tracking calls had no pinning test. | Fixed -- three tests; each deletion fails one (9e5fef3). |
+| 7 | Low | [Security] Replayed step-message label cleaning was untested. | Fixed -- replay test with U+202E, NUL and brackets (9e5fef3). |
+| 8 | Low | [Reliability] `_workflow_state_fault` logged one warning per failed request forever. | Fixed -- one line per minute per key after the first traceback (9e5fef3). |
+| 9 | Low | [Reliability] The attention poller kept stale rows and the count through failures and after a 403. | Fixed -- cleared after a 403 or three failures (9e5fef3). |
+| 10 | Low | [Security] The step label and agent text shared one span, so a text could pose as a step item. | Fixed -- separate step element, full-text tooltip (9e5fef3). |
+| 11 | Low | [Senior] The Needs attention markup comment omitted the new block. | Fixed -- comment updated (9e5fef3). |
+| 12 | Low | [Senior] README said the agent carries on after Stop with a question open; probe 5 shows the turn ends. | Fixed -- README reworded (59f38a8). |
+| 13 | Low | [Reliability] README said a step question leaves on Stop, which holds only during a turn. | Fixed -- README lists the step-question exits (59f38a8). |
+| 14 | Low | [Security] The test plan said attention text is clipped to 200; step questions clip at 512. | Fixed -- test plan corrected (59f38a8). |
+| 15 | Low | [Senior] The plan's deferred residuals had no ROADMAP entry. | Fixed -- one Low ROADMAP entry covers the three residuals (59f38a8). |
+| 16 | Low | [Reliability] Step questions raised no desktop toast. | Fixed -- user chose option A (2026-10-13): step questions toast (23bf2fd, 611a10d). |
+| 17 | Low | [Cycle 2] A capped step's own tool call refreshed its clock through the unhold path. | Fixed -- `step_frame` threaded through (23bf2fd). |
+| 18 | Low | [Cycle 2] `_workflow_state_fault_logged` grew without bound. | Fixed -- `_workflow_state_recovered` clears both dicts (23bf2fd). |
+| 19 | Low | [Cycle 2] A sub-agent in a later turn joins a kept wave's earlier panel. | Fixed -- documented in KNOWLEDGE as the user directed ("fill all six now", 2026-10-13) (611a10d). |
+| 20 | Low | [Cycle 2] The test plan's risks line omitted "during a turn" for Stop on step questions. | Fixed -- reworded (611a10d). |
+| 21 | Low | [Cycle 2] Missing tests: routed-question wave hold, question-pause-answer order, out-of-turn Stop or close resuming. | Fixed -- three tests (23bf2fd). |
+
+Cycle 1 ran the three personas in parallel, each mutating only a private `git archive` copy: Senior killed 7 of 7 mutations, Security 10 of 11, Reliability 12 of 15 (survivors became rows 6 and 7). Cycle 2 (`a387bfd..59f38a8`) killed 9 of 9 and found rows 3 and 17-21. The cycle cap was then reached; the user directed "fill all six now + option A" (2026-10-13) for the cycle-2 findings and the toast. Final suites at 611a10d: `tests/test_web.py` 3397 passed, 1 skipped; `tests/test_config.py` 113 passed; node 1112 passed. Raw per-persona summaries are in the session scratchpad (`review_s9`).
 
 ## Harness Improvement Opportunities
 
