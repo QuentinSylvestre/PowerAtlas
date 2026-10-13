@@ -682,7 +682,7 @@ Implementation health: Green.
 | 1 | Low | SC-7 asks for a test that drives a `tool_call_chunk`, but the wave test called `_note_subagent_action` directly. | Fixed -- the wave test drives the chunk through `_on_notification` (3ce782e); a mutation check fails it. |
 | 2 | Low | An untagged crew entry now gets the no-anchor `toolCallId` instead of the parent's v2 anchor; only old in-memory state has one. | Fixed -- a comment in `_note_subagent_action` states the fallback (3ce782e). |
 
-The reviewer ran both mutations (the old `crew_spawn_toolcallids` argument and the rejected `_active_fan_out_wave`); each failed the tests, and the file was restored byte for byte. qvalidate `--phase 2 --expect-ticked 2` passed. Cycle 2 skipped under the user's one-cycle-per-phase cadence; both findings were Low.
+The reviewer ran both mutations (the old `crew_spawn_toolcallids` argument and the rejected `_active_fan_out_wave`); each failed the tests, and the file was restored byte for byte. qvalidate `--phase 2 --expect-ticked 2` passed. Cycle 2 skipped under the user's one-cycle-per-phase cadence; both findings were Low. Cycle cap, recorded once for this plan: the default is 2 per phase (`/qdev` Step 6); 1 is applied per the user memory entry "/qdev review cadence: one review cycle per phase; only the Step 9 holistic review may run more".
 
 ## Harness Improvement Opportunities
 
