@@ -370,6 +370,7 @@
       <section class="dash-ov-section" id="dashOvAttention" aria-labelledby="dashOvAttentionTitle">
         <h3 class="dash-ov-title" id="dashOvAttentionTitle">Needs attention</h3>
         <div class="dash-ov-body" id="dashOvAttentionBody">
+          <div class="dash-ov-block" id="dashOvAskBlock" hidden></div>
           <div class="dash-ov-block" id="dashOvInterruptedBlock" hidden></div>
           <div class="dash-ov-block" id="dashOvReposBlock"><div class="dash-ov-loading">Loading…</div></div>
         </div>
@@ -1735,6 +1736,147 @@ function dashOvRenderInterrupted(rows){
   shown.forEach(function(r){ list.appendChild(dashOvInterruptedRow(r)); });
   block.appendChild(list);
 }
+// ---- Waiting for you: approvals, questions, step questions (SC-1, SC-2) ------
+// Its own 5 s poller of /api/dashboard/attention, started from the load path
+// (dashAttentionStart, never a top-level statement) and independent of the
+// Overview: it keeps polling while a transcript is open and while the tab is
+// hidden, because it also writes the page title's "(N) " count (D19, D20).
+// One request in flight; a 403 stops it quietly (a remote dashboard gets one
+// on every loopback-only route, and the signed-out note is the Overview's to
+// give). Every string is set with textContent; the kind label comes from a
+// fixed map, never from the response.
+// 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+var DASH_ATTENTION_URL = '/api/dashboard/attention';
+var DASH_ATTENTION_MS = 5000;
+var DASH_ATTENTION_TIMEOUT_MS = 15000;
+var DASH_ATTENTION_KIND_LABEL = {approval: 'Approval', question: 'Question', step_question: 'Step question'};
+var _dashAttentionTimer = null;
+var _dashAttentionBusy = false;
+var _dashOvAskKey = null;
+// The page title without the count, read once at load (dashAttentionStart).
+// A future writer of the dashboard title sets this and calls
+// dashSetAttentionTitle() rather than writing document.title itself (D20).
+var _dashBaseTitle = null;
+function dashSetAttentionTitle(n){
+  if (_dashBaseTitle === null) _dashBaseTitle = String(document.title || '');
+  var count = dashOvCount(n);
+  document.title = (count > 0 ? '(' + count + ') ' : '') + _dashBaseTitle;
+}
+// "3 min ago" from a `created` in epoch seconds; '' when it is not a number.
+function dashOvAskAge(created){
+  var t = Number(created);
+  if (typeof created !== 'number' || !isFinite(t)) return '';
+  return dashOvAgo(new Date(t * 1000).toISOString());
+}
+// Open the session an item belongs to (D21): through the rail when the rail
+// shows it, like an Overview tile; otherwise (a session created in "The
+// agent's own folder" has no rail row) on /acp in a new tab, which
+// subscribes and loads it. Never answers anything.
+function dashOvOpenAsk(item){
+  if (!item || typeof item.sessionId !== 'string' || !item.sessionId) return;
+  var sid = item.sessionId;
+  var cwd = String(item.cwd || '');
+  var provider = String(item.provider || 'kiro-cli-v3');
+  var row = document.querySelector('[data-sid="' + CSS.escape(sid) + '"]');
+  if (row) {
+    openSessionTranscript({sid: sid, provider: provider, cwd: cwd},
+      {id: sid, title: String(item.title || ''), provider: provider, cwd: cwd},
+      {cwd: cwd, name: String(item.workspace || '')});
+    return;
+  }
+  window.open('/acp?sid=' + encodeURIComponent(sid), '_blank', 'noopener');
+}
+function dashOvAskRow(item){
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'dash-ov-ask';
+  b.title = String(item.cwd == null ? '' : item.cwd);
+  var top = document.createElement('span');
+  top.className = 'dash-ov-ask-top';
+  top.appendChild(dashOvText('span', 'dash-ov-badge dash-ov-ask-kind',
+    DASH_ATTENTION_KIND_LABEL[item.kind] || 'Waiting'));
+  top.appendChild(dashOvText('span', 'dash-ov-ask-title', item.title));
+  top.appendChild(dashOvText('span', 'dash-ov-ws', item.workspace));
+  var age = dashOvText('span', 'dash-ov-ask-age', dashOvAskAge(item.created));
+  age._dashOvCreated = item.created;
+  top.appendChild(age);
+  b.appendChild(top);
+  var step = item.step ? String(item.step) : '';
+  b.appendChild(dashOvText('span', 'dash-ov-ask-text',
+    (step ? step + ' · ' : '') + String(item.text == null ? '' : item.text)));
+  b.addEventListener('click', function(){ dashOvOpenAsk(item); });
+  return b;
+}
+function dashOvRenderAsk(items){
+  var block = document.getElementById('dashOvAskBlock');
+  if (!block) return;
+  var shown = Array.isArray(items) ? items.filter(function(r){
+    return r && typeof r === 'object' && typeof r.sessionId === 'string' && r.sessionId;
+  }) : [];
+  if (!shown.length) {
+    block.hidden = true;
+    block.textContent = '';
+    _dashOvAskKey = null;
+    return;
+  }
+  // `age` changes every poll; the key leaves it out so an unchanged list is
+  // not rebuilt (a focused row keeps the focus), and only the ages move.
+  var key = null;
+  try {
+    key = JSON.stringify(shown.map(function(r){
+      return [r.kind, r.sessionId, r.text, r.created, r.step, r.title, r.workspace, r.cwd, r.provider];
+    }));
+  } catch (e) { key = null; }
+  if (key !== null && key === _dashOvAskKey && !block.hidden) {
+    block.querySelectorAll('.dash-ov-ask-age').forEach(function(n){
+      n.textContent = dashOvAskAge(n._dashOvCreated);
+    });
+    return;
+  }
+  _dashOvAskKey = key;
+  block.hidden = false;
+  block.textContent = '';
+  block.appendChild(dashOvText('div', 'dash-ov-sub', 'Waiting for you'));
+  var list = document.createElement('div');
+  list.className = 'dash-ov-asks';
+  shown.forEach(function(r){ list.appendChild(dashOvAskRow(r)); });
+  block.appendChild(list);
+}
+function dashAttentionStop(){
+  if (_dashAttentionTimer !== null) { clearInterval(_dashAttentionTimer); _dashAttentionTimer = null; }
+}
+function dashAttentionTick(){
+  if (_dashAttentionBusy || _dashAttentionTimer === null) return;
+  _dashAttentionBusy = true;
+  var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  var timer = ctl ? setTimeout(function(){ ctl.abort(); }, DASH_ATTENTION_TIMEOUT_MS) : null;
+  function settled(){
+    _dashAttentionBusy = false;
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+  }
+  fetch(DASH_ATTENTION_URL, ctl ? {signal: ctl.signal} : undefined).then(function(r){
+    if (r.status === 403) { dashAttentionStop(); throw new Error('forbidden'); }
+    if (!r.ok) throw new Error(String(r.status));
+    return r.json();
+  }).then(function(data){
+    settled();
+    var items = data && Array.isArray(data.items) ? data.items : [];
+    dashOvRenderAsk(items);
+    dashSetAttentionTitle(items.length);
+  }, function(){
+    // A failed poll keeps what was drawn; the next tick asks again. After a
+    // 403 the count is dropped, since nothing will refresh it.
+    settled();
+    if (_dashAttentionTimer === null) dashSetAttentionTitle(0);
+  });
+}
+// Idempotent: a second call keeps the one interval.
+function dashAttentionStart(){
+  if (_dashBaseTitle === null) _dashBaseTitle = String(document.title || '');
+  if (_dashAttentionTimer !== null) return;
+  _dashAttentionTimer = setInterval(dashAttentionTick, DASH_ATTENTION_MS);
+  dashAttentionTick();
+}
 // A failed refresh keeps what a section already drew; only a section still
 // showing its first "Loading…" (or the usage skeleton) says it could not load.
 function dashOvFirstLoadFailed(bodyId, text){
@@ -2567,6 +2709,8 @@ document.addEventListener('keydown', function(e){
   dashShowOverview();
 }, true);
 document.addEventListener('DOMContentLoaded', function(){
+  // In every mode, a transcript open or not (D19).
+  dashAttentionStart();
   // Nothing is attached at load, so the detach steps are skipped.
   if (!_viewingSid) {
     dashSetPanelMode('overview');

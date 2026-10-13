@@ -3355,11 +3355,11 @@ def _workflow_states(supervisor, held) -> dict[str, str]:
 
     The supervisor's state is loop-owned and unlocked, so a request takes this
     where it takes `held` and hands the dict to the `asyncio.to_thread` worker
-    as an argument; the worker never calls the supervisor. A session with a
-    permission request pending is left out: its verdict is `waiting` because a
-    person must act, and a running workflow must not turn that into `working`
-    (`_Supervisor.sessions_with_pending_permission`; a failure of that read
-    drops every overlay). A failure reading ONE session's workflow state drops
+    as an argument; the worker never calls the supervisor. A session a person
+    must answer (an approval, a question or a step question) is left out: its
+    status is `waiting` (`_awaiting_person_ids`), and a running workflow must
+    not turn that into `working` (`_Supervisor.sessions_awaiting_person`; a
+    failure of that read drops every overlay). A failure reading ONE session's workflow state drops
     only that session's overlay: it fails open to the parent's own status, and
     is logged once with a traceback, then as a short repeat line
     (`_workflow_state_fault`).
@@ -3368,7 +3368,7 @@ def _workflow_states(supervisor, held) -> dict[str, str]:
     if supervisor is None or not held:
         return {}
     try:
-        pending = supervisor.sessions_with_pending_permission()
+        pending = supervisor.sessions_awaiting_person()
     except Exception:
         # Without it a permission-pending session could not be told apart, so
         # no overlay at all is the safe side.
@@ -3409,6 +3409,42 @@ def _inflight_ids(supervisor, held) -> frozenset[str] | None:
         return None
 
 
+def _awaiting_person_ids(supervisor, held) -> frozenset[str] | None:
+    """The held sessions a person must answer (a pending approval, agent
+    question or workflow step question): ONE snapshot per request, **taken on
+    the event loop** beside `_workflow_states`, from
+    `_Supervisor.sessions_awaiting_person`.
+
+    `None` when there is no supervisor reading (no supervisor, or the read
+    failed): no session is overridden, so a failure fails open to each
+    session's own status (`_person_override_status`).
+    261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 5 step 5
+    """
+    if supervisor is None:
+        return None
+    try:
+        awaiting = supervisor.sessions_awaiting_person()
+        return frozenset(sid for sid in held if sid in awaiting)
+    except Exception:
+        log.warning("ACP listing: could not read the sessions awaiting a person",
+                    exc_info=True)
+        return None
+
+
+def _person_override_status(status: str, session_id: str,
+                            awaiting: frozenset[str] | None) -> str:
+    """A held session a person must answer reads `waiting`, ranked above
+    `working`: mid-turn, a pending approval or question is what the session is
+    doing, and a parent whose steps still run is waiting on the step that
+    asked. Applied after `_workflow_overlay_status`. `errored` is kept, as the
+    workflow overlay keeps it: it is the one signal only the classifier gives.
+    261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES SC-5
+    """
+    if awaiting and session_id in awaiting and status != "errored":
+        return "waiting"
+    return status
+
+
 # Consecutive failures of `_workflow_states`, per session id (or the pending-
 # permission read). Loop-only, like the function. The Overview tile poll runs
 # about every 2 s, so a persistent fault would write ~30 tracebacks a minute
@@ -3433,7 +3469,8 @@ def _workflow_state_fault(key: str) -> None:
 
 def _acp_status_for_held(sessions, snapshot=None,
                          workflow_states: dict[str, str] | None = None,
-                         inflight: frozenset[str] | None = None) -> dict[str, str]:
+                         inflight: frozenset[str] | None = None,
+                         awaiting: frozenset[str] | None = None) -> dict[str, str]:
     """The dashboard's verdict for the sessions this PowerAtlas is driving.
 
     Blocking — a transcript-tail classify per session — so this runs inside
@@ -3471,6 +3508,9 @@ def _acp_status_for_held(sessions, snapshot=None,
     classifier cannot read (a brand-new session with no transcript): `waiting`
     with no prompt in flight, `working` with one (`_resolved_session_status`).
     `None` keeps the legacy `working`.
+
+    `awaiting`, from `_awaiting_person_ids` on the event loop, is applied last:
+    a session a person must answer reads `waiting` (`_person_override_status`).
     """
     if not sessions:
         return {}
@@ -3482,11 +3522,13 @@ def _acp_status_for_held(sessions, snapshot=None,
         try:
             semantic = get_semantic_status(
                 session.session_id, _ACP_V3_LISTING_PROVIDER, session.cwd)
-            out[session.session_id] = _workflow_overlay_status(
-                _resolved_session_status(
-                    snapshot, _ACP_V3_LISTING_PROVIDER, session.session_id, semantic,
-                    inflight),
-                workflow_states.get(session.session_id))
+            out[session.session_id] = _person_override_status(
+                _workflow_overlay_status(
+                    _resolved_session_status(
+                        snapshot, _ACP_V3_LISTING_PROVIDER, session.session_id, semantic,
+                        inflight),
+                    workflow_states.get(session.session_id)),
+                session.session_id, awaiting)
         except Exception:
             log.exception("ACP listing: could not settle status for %s",
                           session.session_id)
@@ -3626,12 +3668,14 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                  tag: str = "", time_filter: str = "",
                  sort: str = "recent", q: str = "",
                  workflow_states: dict[str, str] | None = None,
-                 inflight: frozenset[str] | None = None) -> dict:
+                 inflight: frozenset[str] | None = None,
+                 awaiting: frozenset[str] | None = None) -> dict:
     """Build the listing payload. Blocking; runs off the loop.
 
     `workflow_states`: the loop-side `_workflow_states` snapshot, overlaid on
     the held rows' status by `_acp_status_for_held`. `inflight`: the loop-side
-    `_inflight_ids` snapshot, passed to the same call. This function never calls
+    `_inflight_ids` snapshot, passed to the same call, and so is `awaiting`
+    (`_awaiting_person_ids`). This function never calls
     the supervisor itself.
 
     Paginated **independently at both levels** (D19). A post-pagination
@@ -3992,7 +4036,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     statuses = _acp_status_for_held([
         s for s in all_page_sessions + [s for _c, _n, s, _p in pinned_sessions_found]
         if availability.get(s.session_id) == "held"], snapshot, workflow_states,
-        inflight)
+        inflight, awaiting)
 
     def _row_dict(s, prov_name: str, pinned: bool = False) -> dict:
         d = {
@@ -4051,10 +4095,11 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
                        include_provider: bool = False, tag: str = "",
                        time_filter: str = "",
                        workflow_states: dict[str, str] | None = None,
-                       inflight: frozenset[str] | None = None) -> dict:
+                       inflight: frozenset[str] | None = None,
+                       awaiting: frozenset[str] | None = None) -> dict:
     """Build the recency-ordered listing payload. Blocking; runs off the loop.
 
-    `workflow_states`, `inflight`: see `_acp_listing`.
+    `workflow_states`, `inflight`, `awaiting`: see `_acp_listing`.
 
     The listing's second shape: every session this ACP can resume, newest
     first, across all workspaces instead of grouped inside one. It exists so
@@ -4184,7 +4229,7 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
     statuses = _acp_status_for_held(
         [s for s in sessions + pinned_sessions_list
          if availability.get(s.session_id) == "held"], snapshot, workflow_states,
-        inflight)
+        inflight, awaiting)
 
     order = list(dict.fromkeys(s.cwd for s in sessions + pinned_sessions_list))
     flags = dict(zip(order, _acp_exists_flags(order)))
@@ -4296,16 +4341,18 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     # Taken here, on the loop, with `held`: the worker only receives the dict.
     workflow_states = _workflow_states(supervisor, held)
     inflight = _inflight_ids(supervisor, held)
+    awaiting = _awaiting_person_ids(supervisor, held)
     if mode == "recent":
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
             max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity,
-            workflow_states=workflow_states, inflight=inflight)
+            workflow_states=workflow_states, inflight=inflight, awaiting=awaiting)
     return await asyncio.to_thread(
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
-        held, capacity, workflow_states=workflow_states, inflight=inflight)
+        held, capacity, workflow_states=workflow_states, inflight=inflight,
+        awaiting=awaiting)
 
 
 _DASHBOARD_LISTING_PATH = "/api/dashboard/sessions"
@@ -4366,18 +4413,19 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
     # Taken here, on the loop, with `held`: the worker only receives the dict.
     workflow_states = _workflow_states(supervisor, held)
     inflight = _inflight_ids(supervisor, held)
+    awaiting = _awaiting_person_ids(supervisor, held)
     if mode == "recent":
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
             max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity,
             providers, True, tag, time_filter, workflow_states=workflow_states,
-            inflight=inflight)
+            inflight=inflight, awaiting=awaiting)
     return await asyncio.to_thread(
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
         held, capacity, providers, True, tag, time_filter, sort, q,
-        workflow_states=workflow_states, inflight=inflight)
+        workflow_states=workflow_states, inflight=inflight, awaiting=awaiting)
 
 
 # --- The dashboard Overview's summary ------------------------------------
@@ -4595,11 +4643,12 @@ def _overview_filters_cached():
 
 def _overview_live(held: dict[str, str], filter_: str,
                    workflow_states: dict[str, str] | None = None,
-                   inflight: frozenset[str] | None = None) -> dict:
+                   inflight: frozenset[str] | None = None,
+                   awaiting: frozenset[str] | None = None) -> dict:
     """The live tiles payload. Blocking; runs off the loop.
 
-    `workflow_states` and `inflight` are the loop-side `_workflow_states` and
-    `_inflight_ids` snapshots. They reach `overview.live_sessions` through the
+    `workflow_states`, `inflight` and `awaiting` are the loop-side
+    `_workflow_states`, `_inflight_ids` and `_awaiting_person_ids` snapshots. They reach `overview.live_sessions` through the
     `acp_status_for_held` closure below, so `overview.py` and the `LiveDeps`
     shape are unchanged.
 
@@ -4618,7 +4667,7 @@ def _overview_live(held: dict[str, str], filter_: str,
         session_is_live=_session_is_live,
         acp_availability=_acp_availability,
         acp_status_for_held=lambda sessions, snap: _acp_status_for_held(
-            sessions, snap, workflow_states, inflight),
+            sessions, snap, workflow_states, inflight, awaiting),
         row_title=_acp_row_title,
         hidden=hidden,
         provider_shown=lambda prov: prov in providers,
@@ -4647,8 +4696,93 @@ async def api_dashboard_overview_live(response: Response,
     # Taken here, on the loop, with `held`: the worker only receives the dict.
     workflow_states = _workflow_states(sup, held)
     inflight = _inflight_ids(sup, held)
+    awaiting = _awaiting_person_ids(sup, held)
     return await asyncio.to_thread(
-        _overview_live, held, filter_, workflow_states, inflight)
+        _overview_live, held, filter_, workflow_states, inflight, awaiting=awaiting)
+
+
+# --- The dashboard's attention feed ------------------------------------------
+#
+# 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES (SC-1, SC-2,
+# D17). Everything a person has to answer across the sessions this PowerAtlas
+# holds: pending approvals, agent questions and workflow step questions. The
+# dashboard polls it about every 5 s in every mode, for "Needs attention" and
+# the `(N)` title count. Loopback-only: absent from `_REMOTE_ALLOWED_PATHS`.
+
+_DASHBOARD_ATTENTION_PATH = "/api/dashboard/attention"
+_ATTENTION_UNTITLED = "Untitled session"
+
+
+def _attention_payload(items: list[dict]) -> dict:
+    """The attention feed's body from a loop-side `attention_snapshot()`.
+    Blocking; runs off the loop.
+
+    Each item gains `workspace` (the cwd's base name), `provider` and `age`
+    (whole seconds since `created`, never negative). A title the supervisor
+    did not store (no `focus_update` yet) is the rail's, `_acp_row_title` over
+    the cached `data.get_sessions`, cleaned like a stored one (D18), else
+    "Untitled session". One failed read costs only that item its title.
+    """
+    now = time.time()
+    clip = acp.MAX_TITLE_CHARS if acp is not None else _ACP_TITLE_MAX_CHARS
+    listed: dict[str, dict[str, str]] = {}
+
+    def _disk_title(cwd: str, sid: str) -> str:
+        if not cwd:
+            return ""
+        if cwd not in listed:
+            try:
+                listed[cwd] = {s.session_id: _acp_row_title(s)
+                               for s in data.get_sessions(cwd, _ACP_V3_LISTING_PROVIDER)}
+            except Exception:
+                log.debug("attention: could not list the sessions of %s", cwd,
+                          exc_info=True)
+                listed[cwd] = {}
+        raw = listed[cwd].get(sid, "")
+        return acp._clean_agent_text(raw, clip) if acp is not None else raw.strip()
+
+    out: list[dict] = []
+    for item in items:
+        cwd = str(item.get("cwd") or "")
+        sid = str(item.get("sessionId") or "")
+        title = str(item.get("title") or "") or _disk_title(cwd, sid) or _ATTENTION_UNTITLED
+        created = item.get("created")
+        age = int(max(0.0, now - created)) if isinstance(created, (int, float)) else 0
+        out.append({
+            "kind": item.get("kind"),
+            "sessionId": sid,
+            "text": str(item.get("text") or ""),
+            "created": created,
+            "age": age,
+            "step": str(item.get("step") or ""),
+            "cwd": cwd,
+            "title": title,
+            "workspace": (Path(cwd).name or cwd) if cwd else "",
+            "provider": _ACP_V3_LISTING_PROVIDER,
+        })
+    return {"items": out, "count": len(out)}
+
+
+@app.get(_DASHBOARD_ATTENTION_PATH)
+async def api_dashboard_attention(response: Response):
+    """Pending approvals, questions and step questions, oldest first.
+
+    The snapshot is taken here, on the loop, where supervisor state lives,
+    with the listing routes' `acp is None` guard; titles that need a disk read
+    are filled in a worker thread. A failed snapshot reads as nothing pending
+    and is logged.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    sup = getattr(acp, "_supervisor", None) if acp is not None else None
+    if sup is None:
+        return {"items": [], "count": 0}
+    try:
+        items = sup.attention_snapshot()
+    except Exception:
+        log.warning("attention: could not read the supervisor's pending items",
+                    exc_info=True)
+        return {"items": [], "count": 0}
+    return await asyncio.to_thread(_attention_payload, items)
 
 
 # --- The create flow's workspace list ------------------------------------
@@ -6889,6 +7023,7 @@ async def api_session_availability(response: Response, sid: str = "", cwd: str =
     held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
     workflow_states = _workflow_states(supervisor, held & {sid})
     inflight = _inflight_ids(supervisor, held & {sid})
+    awaiting = _awaiting_person_ids(supervisor, held & {sid})
 
     def _compute() -> tuple[str, str]:
         availability = _acp_availability([sid], held)
@@ -6898,10 +7033,12 @@ async def api_session_availability(response: Response, sid: str = "", cwd: str =
             try:
                 snapshot = presence.get_snapshot()
                 semantic = get_semantic_status(sid, _ACP_V3_LISTING_PROVIDER, cwd)
-                status = _workflow_overlay_status(
-                    _resolved_session_status(
-                        snapshot, _ACP_V3_LISTING_PROVIDER, sid, semantic, inflight),
-                    workflow_states.get(sid))
+                status = _person_override_status(
+                    _workflow_overlay_status(
+                        _resolved_session_status(
+                            snapshot, _ACP_V3_LISTING_PROVIDER, sid, semantic, inflight),
+                        workflow_states.get(sid)),
+                    sid, awaiting)
             except Exception:
                 log.exception("session-availability: could not settle status for %s", sid)
                 status = "working"

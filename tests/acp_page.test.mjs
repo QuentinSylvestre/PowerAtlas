@@ -14800,6 +14800,9 @@ const DASH_OVERVIEW_NAMES = [
   "function dashOvLiveTick", "function dashOvRenderLive", "function dashOvOpenTile",
   "function dashOvRenderUsage", "_dashCloseLeftSid", "function dashOvFirstLoadFailed",
   "function dashOvLiveStaleNote",
+  // 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 5
+  "function dashOvRenderAsk", "function dashOvOpenAsk", "function dashAttentionStart",
+  "function dashAttentionTick", "function dashSetAttentionTitle", "dashAttentionStart();",
 ];
 
 function dashPickerSource() {
@@ -15150,6 +15153,10 @@ function loadDashPicker(opts = {}) {
   }
   byId.set("dashOvInterruptedBlock", new El("div"));
   byId.get("dashOvInterruptedBlock").hidden = true;
+  // "Waiting for you" starts hidden and empty, as in the markup.
+  // 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 5
+  byId.set("dashOvAskBlock", new El("div"));
+  byId.get("dashOvAskBlock").hidden = true;
   // Needs attention holds one block per kind of item; the repositories block starts on the
   // markup's "Loading…" line.
   byId.set("dashOvReposBlock", new El("div"));
@@ -15202,6 +15209,9 @@ function loadDashPicker(opts = {}) {
 
   const fetches = [];
   const sentFrames = [];
+  // window.open calls and document.querySelector selectors (Phase 5 attention rows).
+  const dashOpened = [];
+  const dashQuerySelectors = [];
   const dashSendPromptCalls = [];
   const systemMessages = [];
   const addMessageCalls = [];
@@ -15336,6 +15346,16 @@ function loadDashPicker(opts = {}) {
       // previously-viewed row's highlight -- no rail rows are simulated in
       // this harness, so an empty, forEach-able result is the correct stand-in.
       querySelectorAll: () => [],
+      // The attention rows' rail lookup (D21): `null` (no rail row) unless a
+      // check sets `p.sandbox._railRowFor = (selector) => row`. Records each
+      // selector asked for. 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES
+      querySelector: (sel) => {
+        dashQuerySelectors.push(String(sel));
+        return typeof sandbox._railRowFor === "function" ? sandbox._railRowFor(String(sel)) : null;
+      },
+      // A plain, writable title, as the browser's; the attention poller
+      // prefixes it with "(N) ". Markup's base.html <title>.
+      title: "PowerAtlas",
       addEventListener: (type, fn) => {
         if (!dashDocListeners.has(type)) dashDocListeners.set(type, []);
         dashDocListeners.get(type).push(fn);
@@ -15347,6 +15367,11 @@ function loadDashPicker(opts = {}) {
       // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
       get activeElement() { return ACTIVE; },
     },
+    // CSS.escape for the attention rows' rail lookup: a backslash-escape of
+    // quotes and backslashes is enough to prove the id goes through it.
+    CSS: { escape: (v) => String(v).replace(/["\\]/g, (c) => "\\" + c) },
+    // window.open, recorded (the attention row for a session with no rail row).
+    open: (...args) => { dashOpened.push(args); return null; },
     // window.addEventListener('pagehide', dashCloseIfAbandoned) -- a bare,
     // top-level call now inside the extracted handleRegion (dashCloseIfAbandoned
     // was pulled in alongside dashHandle above). A no-op stub (unlike
@@ -15929,6 +15954,8 @@ function loadDashPicker(opts = {}) {
     byId,
     fetches,
     sentFrames,
+    opened: dashOpened,
+    querySelectors: dashQuerySelectors,
     dashSendPromptCalls,
     addMessageCalls,
     dashStored: dashStoredData,
@@ -23015,6 +23042,184 @@ check("dashboard overview interrupted: rows show title, workspace, window and th
   assertEqual(block.hidden, true);
   assertEqual(block.textContent, "", "nothing left drawn in it");
   assertEqual(block.querySelectorAll(".dash-ov-int").length, 0);
+});
+
+// ---- Waiting for you: the attention feed (261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 5) ----
+
+function ovAsk(over = {}) {
+  return Object.assign({ kind: "approval", sessionId: "sess_a", text: "Run npm test", created: Date.now() / 1000 - 600,
+                         age: 600, step: "", cwd: "C:\\dev\\alpha", title: "Alpha work", workspace: "alpha",
+                         provider: "kiro-cli-v3" }, over);
+}
+
+function ovAskFetch(p, answers) {
+  // `answers`: a list of {status, body} returned in turn for the attention URL.
+  const seen = [];
+  p.sandbox.fetch = (u) => {
+    if (String(u) === "/api/dashboard/attention") {
+      seen.push(String(u));
+      const a = answers.length > 1 ? answers.shift() : answers[0];
+      return Promise.resolve({ ok: a.status >= 200 && a.status < 300, status: a.status,
+                               json: () => Promise.resolve(a.body) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+  };
+  return seen;
+}
+
+check("dashboard attention: rows render in the order given, with kind, title, workspace, step and age as text", () => {
+  const p = loadDashPicker();
+  const block = p.el("dashOvAskBlock");
+  assertEqual(block.hidden, true, "hidden while there is nothing");
+  const evil = "<img src=x onerror=alert(1)>";
+  const now = Date.now() / 1000;
+  p.sandbox.dashOvRenderAsk([
+    ovAsk({ kind: "step_question", sessionId: "sess_p", text: "Which colour?", created: now - 3 * 3600,
+            step: "workflow step wf-coder", title: "Parent run", workspace: "beta" }),
+    ovAsk({ kind: "question", sessionId: "sess_q", text: evil, created: now - 5 * 60, title: evil, workspace: "gamma" }),
+    ovAsk({ created: now - 10 }),
+  ]);
+  assertEqual(block.hidden, false);
+  assertEqual(block.querySelector(".dash-ov-sub").textContent, "Waiting for you");
+  const rows = block.querySelectorAll(".dash-ov-ask");
+  assertEqual(rows.length, 3);
+  assertEqual(rows.map((r) => r.querySelector(".dash-ov-ask-kind").textContent).join("|"),
+              "Step question|Question|Approval");
+  assertEqual(rows[0].tagName, "BUTTON");
+  assertEqual(rows[0].type, "button");
+  assertEqual(rows[0].querySelector(".dash-ov-ask-title").textContent, "Parent run");
+  assertEqual(rows[0].querySelector(".dash-ov-ws").textContent, "beta");
+  assertEqual(rows[0].querySelector(".dash-ov-ask-text").textContent, "workflow step wf-coder \u00b7 Which colour?");
+  assertEqual(rows[0].querySelector(".dash-ov-ask-age").textContent, "3 h ago");
+  // Agent text and titles stay text: the El stand-in throws on innerHTML, so reaching here is the proof.
+  assertEqual(rows[1].querySelector(".dash-ov-ask-title").textContent, evil);
+  assertEqual(rows[1].querySelector(".dash-ov-ask-text").textContent, evil, "no step: no prefix");
+  assertEqual(rows[1].querySelector(".dash-ov-ask-age").textContent, "5 min ago");
+  assertEqual(rows[2].querySelector(".dash-ov-ask-age").textContent, "just now");
+  // An unknown kind never reaches the label from the response.
+  p.sandbox.dashOvRenderAsk([ovAsk({ kind: "<b>x</b>" })]);
+  assertEqual(block.querySelector(".dash-ov-ask-kind").textContent, "Waiting");
+  p.sandbox.dashOvRenderAsk([]);
+  assertEqual(block.hidden, true);
+  assertEqual(block.textContent, "");
+  assertEqual(block.querySelectorAll(".dash-ov-ask").length, 0);
+});
+
+check("dashboard attention: an unchanged list keeps its rows and only moves the ages", () => {
+  const p = loadDashPicker();
+  const block = p.el("dashOvAskBlock");
+  const item = ovAsk({ created: Date.now() / 1000 - 120, age: 120 });
+  p.sandbox.dashOvRenderAsk([item]);
+  const first = block.querySelector(".dash-ov-ask");
+  const age = first.querySelector(".dash-ov-ask-age");
+  assertEqual(age.textContent, "2 min ago");
+  age.textContent = "stale";
+  // Same item, a later poll: `age` differs, the key does not.
+  p.sandbox.dashOvRenderAsk([Object.assign({}, item, { age: 125 })]);
+  assert(block.querySelector(".dash-ov-ask") === first, "the row was rebuilt for an unchanged list");
+  assertEqual(age.textContent, "2 min ago", "the age was refreshed in place");
+  // A changed text rebuilds.
+  p.sandbox.dashOvRenderAsk([Object.assign({}, item, { text: "Run npm ci" })]);
+  assert(block.querySelector(".dash-ov-ask") !== first, "a changed item must be redrawn");
+  assertEqual(block.querySelector(".dash-ov-ask-text").textContent, "Run npm ci");
+});
+
+check("dashboard attention: a click opens the session through the rail when it has a row, else /acp in a new tab", () => {
+  const p = loadDashPicker();
+  const calls = [];
+  p.sandbox.openSessionTranscript = function () { calls.push([...arguments]); };
+  const railRow = new El("div");
+  // An id with a quote, so the selector only matches when it went through CSS.escape.
+  p.sandbox._railRowFor = (sel) => (sel === '[data-sid="sess_r\\"1"]' ? railRow : null);
+  p.sandbox.dashOvRenderAsk([
+    ovAsk({ sessionId: 'sess_r"1', cwd: "C:\\dev\\rail", workspace: "rail", title: "On the rail" }),
+    ovAsk({ sessionId: "sess_own folder&x", cwd: "C:\\agents\\home", workspace: "home", title: "Own folder" }),
+  ]);
+  const rows = p.el("dashOvAskBlock").querySelectorAll(".dash-ov-ask");
+  rows[0].click();
+  assertEqual(calls.length, 1, "opened through openSessionTranscript");
+  const [target, session, workspace] = calls[0];
+  assertEqual(JSON.stringify(target), JSON.stringify({ sid: 'sess_r"1', provider: "kiro-cli-v3", cwd: "C:\\dev\\rail" }));
+  assertEqual(session.title, "On the rail");
+  assertEqual(JSON.stringify(workspace), JSON.stringify({ cwd: "C:\\dev\\rail", name: "rail" }));
+  assertEqual(p.opened.length, 0, "no new tab for a session the rail shows");
+  rows[1].click();
+  assertEqual(calls.length, 1, "no rail row: the dashboard pane is not used");
+  assertEqual(JSON.stringify(p.opened), JSON.stringify([["/acp?sid=sess_own%20folder%26x", "_blank", "noopener"]]));
+});
+
+check("dashboard attention: the title gets '(N) ' and loses it at zero, never doubling the prefix", () => {
+  const p = loadDashPicker();
+  const s = p.sandbox;
+  assertEqual(s.document.title, "PowerAtlas");
+  s.dashSetAttentionTitle(3);
+  assertEqual(s.document.title, "(3) PowerAtlas");
+  s.dashSetAttentionTitle(12);
+  assertEqual(s.document.title, "(12) PowerAtlas");
+  s.dashSetAttentionTitle(0);
+  assertEqual(s.document.title, "PowerAtlas");
+  s.dashSetAttentionTitle(1);
+  assertEqual(s.document.title, "(1) PowerAtlas");
+});
+
+check("dashboard attention: the poller starts on load and keeps polling with a transcript open and the tab hidden", async () => {
+  const p = loadDashPicker();
+  const seen = ovAskFetch(p, [
+    { status: 200, body: { items: [ovAsk(), ovAsk({ sessionId: "sess_b", kind: "question" })], count: 2 } },
+    { status: 200, body: { items: [ovAsk({ sessionId: "sess_c" })], count: 1 } },
+    { status: 200, body: { items: [], count: 0 } },
+  ]);
+  p.fireDoc("DOMContentLoaded");
+  const iv = p.intervals.filter((t) => t.ms === 5000);
+  assertEqual(iv.length, 1, "one 5 s interval from the load path");
+  await p.settle(); await p.settle();
+  assertEqual(seen.length, 1, "a first poll at once");
+  assertEqual(p.sandbox.document.title, "(2) PowerAtlas");
+  assertEqual(p.el("dashOvAskBlock").querySelectorAll(".dash-ov-ask").length, 2);
+  // A transcript open (the Overview stopped) and the tab hidden.
+  p.sandbox.dashOverviewStop();
+  p.el("sessions-panel").className = "right-panel";
+  p.setVisibility("hidden");
+  assertEqual(p.sandbox.dashOvShowing(), false, "the Overview's own pollers would not fetch now");
+  iv[0].fn();
+  await p.settle(); await p.settle();
+  assertEqual(seen.length, 2, "the attention poll still fetched");
+  assertEqual(p.sandbox.document.title, "(1) PowerAtlas");
+  iv[0].fn();
+  await p.settle(); await p.settle();
+  assertEqual(seen.length, 3);
+  assertEqual(p.sandbox.document.title, "PowerAtlas", "the prefix goes at zero");
+  assertEqual(p.el("dashOvAskBlock").hidden, true, "an answered item disappears on the next poll");
+  // A second start keeps the one interval.
+  p.sandbox.dashAttentionStart();
+  assertEqual(p.intervals.filter((t) => t.ms === 5000).length, 1);
+});
+
+check("dashboard attention: a 403 stops the poller and drops the count", async () => {
+  const p = loadDashPicker();
+  const seen = ovAskFetch(p, [
+    { status: 200, body: { items: [ovAsk()], count: 1 } },
+    { status: 403, body: { error: "forbidden" } },
+  ]);
+  p.sandbox.dashAttentionStart();
+  await p.settle(); await p.settle();
+  assertEqual(p.sandbox.document.title, "(1) PowerAtlas");
+  p.intervals.filter((t) => t.ms === 5000)[0].fn();
+  await p.settle(); await p.settle();
+  assertEqual(seen.length, 2);
+  assertEqual(p.intervals.filter((t) => t.ms === 5000).length, 0, "the interval was cleared");
+  assertEqual(p.sandbox.document.title, "PowerAtlas");
+});
+
+check("dashboard attention: /acp's title code is untouched", () => {
+  const acpSrc = fs.readFileSync(DEFAULT_TEMPLATE, "utf8");
+  assert(!acpSrc.includes("/api/dashboard/attention"), "/acp polls no attention feed");
+  assert(!acpSrc.includes("dashSetAttentionTitle") && !acpSrc.includes("_dashBaseTitle"),
+         "/acp has none of the dashboard's title code");
+  const writes = acpSrc.match(/document\.title\s*=[^;\n]*/g) || [];
+  assertEqual(JSON.stringify(writes), JSON.stringify([
+    "document.title = 'PowerAtlas'", "document.title = 'PowerAtlas'",
+    "document.title = _newTitle + ' — PowerAtlas'"]));
 });
 
 // ---- resume controls on an interrupted row ----------------------------------------------------

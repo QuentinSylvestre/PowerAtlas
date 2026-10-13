@@ -38980,7 +38980,7 @@ class TestOverviewLive:
         from power_atlas import web as web_mod
         got = []
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_, workflow_states=None, inflight=None: got.append(filter_) or {"filter": filter_, "tiles": []})
+                            lambda held, filter_, workflow_states=None, inflight=None, awaiting=None: got.append(filter_) or {"filter": filter_, "tiles": []})
         client.get("/api/dashboard/overview/live?filter=poweratlas")
         client.get("/api/dashboard/overview/live?filter=bogus")
         client.get("/api/dashboard/overview/live")
@@ -38989,14 +38989,14 @@ class TestOverviewLive:
     def test_route_refused_without_the_cookie(self, anonymous_client, client, monkeypatch):
         from power_atlas import web as web_mod
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_, workflow_states=None, inflight=None: {"filter": filter_, "tiles": []})
+                            lambda held, filter_, workflow_states=None, inflight=None, awaiting=None: {"filter": filter_, "tiles": []})
         assert _is_json_403(anonymous_client.get("/api/dashboard/overview/live"))
         assert client.get("/api/dashboard/overview/live").status_code == 200
 
     def test_route_refused_to_a_remote_peer(self, remote_enabled, monkeypatch):
         from power_atlas import web as web_mod
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_, workflow_states=None, inflight=None: {"filter": filter_, "tiles": ["LEAK"]})
+                            lambda held, filter_, workflow_states=None, inflight=None, awaiting=None: {"filter": filter_, "tiles": ["LEAK"]})
         status, body, _ = _peer_http("/api/dashboard/overview/live", [_cookie_header()])
         assert status == 403
         assert b"LEAK" not in body
@@ -39020,6 +39020,341 @@ class TestOverviewLive:
         # asyncio.to_thread runs on the default executor, whose threads are
         # named "asyncio_N"; the loop's own thread is not.
         assert threads and threads[0].name.startswith("asyncio_")
+
+
+class TestDashboardAttention:
+    """`_Supervisor.attention_snapshot`, `GET /api/dashboard/attention` and the
+    waiting override on the status call sites.
+    261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 5 (SC-1,
+    SC-2, SC-5, D17, D18, D11).
+
+    Expected values come from the plan: items sorted by `created`, oldest first;
+    `kind` is "question" only for an entry whose kind is exactly that (D3, D4);
+    `step` is the step label for routed entries and step questions; a step
+    question is listed only while its parent is held and its child is still
+    tracked; a held session a person must answer reads `waiting`, above
+    `working`, and `errored` is kept.
+    """
+
+    _PATH = "/api/dashboard/attention"
+    _P = "sess_attn-parent-0000-0000-000000000001"
+    _Q = "sess_attn-other0-0000-0000-000000000002"
+    _CWD_P = "C:\\dev\\alpha-repo"
+    _CWD_Q = "D:\\work\\beta"
+
+    @staticmethod
+    def _sv(monkeypatch):
+        from power_atlas import acp as acp_mod
+        sv = acp_mod._Supervisor()
+        monkeypatch.setattr(acp_mod, "_supervisor", sv)
+        return sv
+
+    def _world(self, monkeypatch):
+        """Two held sessions: P (a stored title, a workflow step that asked and
+        a routed approval) and Q (no stored title, an agent question)."""
+        sv = self._sv(monkeypatch)
+        now = time.time()
+        sv.sessions[self._P] = {"cwd": self._CWD_P, "title": "Stored parent title"}
+        sv.sessions[self._Q] = {"cwd": self._CWD_Q}
+        sv.crews[self._P] = {"child-route": {"sessionName": "wf-coder", "done": False},
+                             "child-ask": {"sessionName": "asker", "done": False}}
+        sv._workflow_children[self._P] = {"child-route": ("running", time.monotonic()),
+                                          "child-ask": ("waiting", time.monotonic())}
+        sv._pending_permission.update({
+            "op-approval": {"session_id": self._P, "kind": "approval", "options": [],
+                            "kiro_id": 1, "text": "Run npm test", "created": now - 30},
+            "op-question": {"session_id": self._Q, "kind": "question", "options": [],
+                            "kiro_id": 2, "text": "Which database?", "created": now - 300,
+                            "answer_titles": ["Postgres"]},
+            "op-routed": {"session_id": self._P, "kind": "approval", "options": [],
+                          "kiro_id": 3, "text": "Write config.toml", "created": now - 100,
+                          "workflow_child": "child-route"},
+        })
+        sv._workflow_step_questions["child-ask"] = {
+            "parent": self._P, "text": "Blue or red?", "created": now - 200,
+            "label": "workflow step asker"}
+        return sv
+
+    # -- the loop-side snapshot -----------------------------------------------
+
+    def test_snapshot_lists_every_kind_oldest_first_with_its_step(self, monkeypatch):
+        sv = self._world(monkeypatch)
+        got = [(i["kind"], i["sessionId"], i["text"], i["step"], i["cwd"], i["title"])
+               for i in sv.attention_snapshot()]
+        assert got == [
+            ("question", self._Q, "Which database?", "", self._CWD_Q, ""),
+            ("step_question", self._P, "Blue or red?", "workflow step asker",
+             self._CWD_P, "Stored parent title"),
+            ("approval", self._P, "Write config.toml", "workflow step wf-coder",
+             self._CWD_P, "Stored parent title"),
+            ("approval", self._P, "Run npm test", "", self._CWD_P, "Stored parent title"),
+        ]
+
+    def test_snapshot_skips_malformed_entries_and_reads_a_missing_kind_as_approval(
+            self, monkeypatch):
+        sv = self._sv(monkeypatch)
+        now = time.time()
+        sv.sessions[self._P] = {"cwd": self._CWD_P}
+        good = {"session_id": self._P, "options": [], "kiro_id": 9, "text": "ok", "created": now - 5}
+        sv._pending_permission.update({
+            "a": "not a dict", "b": None,
+            "c": {"session_id": 5, "text": "x", "created": now},
+            "d": {"session_id": "sess_not-held", "text": "x", "created": now},
+            "e": dict(good, text=None),
+            "f": dict(good, created="soon"),
+            "g": dict(good, created=True),
+            "h": dict(good, created=float("nan")),
+            "i": dict(good),                                     # no kind
+            "j": dict(good, kind="Question", created=now - 1),   # not exactly "question"
+        })
+        sv._workflow_step_questions.update({
+            "k1": "bogus", "k2": {"parent": 7, "text": "x", "created": now},
+            "k3": {"parent": self._P, "text": "x", "created": "later"},
+        })
+        sv._workflow_children[self._P] = {"k2": ("waiting", time.monotonic()),
+                                          "k3": ("waiting", time.monotonic())}
+        got = [(i["kind"], i["text"], i["created"]) for i in sv.attention_snapshot()]
+        assert got == [("approval", "ok", now - 5), ("approval", "ok", now - 1)]
+
+    def test_a_step_question_whose_child_is_no_longer_tracked_is_not_listed(self, monkeypatch):
+        sv = self._world(monkeypatch)
+        del sv._workflow_children[self._P]["child-ask"]
+        kinds = [i["kind"] for i in sv.attention_snapshot()]
+        assert "step_question" not in kinds and len(kinds) == 3
+        # Nor one whose parent this supervisor no longer holds.
+        sv._workflow_children[self._P]["child-ask"] = ("waiting", time.monotonic())
+        sv._workflow_step_questions["child-x"] = {
+            "parent": "sess_gone", "text": "?", "created": time.time(), "label": "l"}
+        sv._workflow_children["sess_gone"] = {"child-x": ("waiting", time.monotonic())}
+        assert [i["sessionId"] for i in sv.attention_snapshot()
+                if i["kind"] == "step_question"] == [self._P]
+
+    def test_focus_update_stores_a_cleaned_title_on_a_held_session_only(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        sv = self._sv(monkeypatch)
+        sv.sessions[self._P] = {"cwd": self._CWD_P}
+        sv.history[self._P] = acp_mod._History()
+
+        def focus(sid, title):
+            sv._on_notification({"method": "session/update", "params": {
+                "sessionId": sid, "update": {"sessionUpdate": "session_info_update",
+                                             "_meta": {"kiro": {"kind": "focus_update",
+                                                                "title": title}}}}})
+
+        focus(self._P, "Fix\u202e the\n login\u200b bug")
+        assert sv.sessions[self._P]["title"] == "Fix the login bug"
+        # The emitted frame is unchanged (D18): the raw clipped title.
+        [frame] = [e for e in sv.history[self._P].events() if e.get("type") == "title"]
+        assert frame["payload"]["title"] == "Fix\u202e the\n login\u200b bug"
+        focus("sess_not-held", "Nope")
+        assert "sess_not-held" not in sv.sessions
+
+    # -- the route --------------------------------------------------------------
+
+    def test_route_returns_items_with_title_workspace_and_age(
+            self, client, monkeypatch, acp_listing_store):
+        sv = self._world(monkeypatch)
+        acp_listing_store["add"](self._CWD_Q, [_acp_row(self._Q, title="Disk\u202e title",
+                                                        cwd=self._CWD_Q)])
+        resp = client.get(self._PATH)
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+        body = resp.json()
+        assert body["count"] == 4 and len(body["items"]) == 4
+        q, step_q, routed, approval = body["items"]
+        assert (q["kind"], q["title"], q["workspace"], q["provider"]) == (
+            "question", "Disk title", "beta", "kiro-cli-v3")
+        assert (step_q["kind"], step_q["title"], step_q["workspace"], step_q["step"]) == (
+            "step_question", "Stored parent title", "alpha-repo", "workflow step asker")
+        assert routed["step"] == "workflow step wf-coder"
+        assert approval["text"] == "Run npm test"
+        # Ages from `created`, in whole seconds (300, 200, 100, 30 ago).
+        for item, ago in zip(body["items"], (300, 200, 100, 30)):
+            assert ago - 1 <= item["age"] <= ago + 5, (item["kind"], item["age"])
+            assert isinstance(item["created"], float)
+        assert sv.attention_snapshot()  # the route read, it did not consume
+
+    def test_route_title_falls_back_to_the_rail_title_then_untitled(
+            self, client, monkeypatch, acp_listing_store):
+        sv = self._sv(monkeypatch)
+        now = time.time()
+        sv.sessions.update({self._P: {"cwd": self._CWD_P}, self._Q: {"cwd": self._CWD_Q},
+                            "sess_nofolder": {"cwd": ""}})
+        for i, sid in enumerate((self._P, self._Q, "sess_nofolder")):
+            sv._pending_permission[f"op{i}"] = {"session_id": sid, "options": [], "kiro_id": i,
+                                                 "text": "t", "created": now - 10 + i}
+        # P: no store title, so the rail's fallback is the first prompt. Q: not on disk.
+        acp_listing_store["add"](self._CWD_P, [_acp_row(self._P, title="<untitled>",
+                                                        first="Add a login form",
+                                                        cwd=self._CWD_P)])
+        titles = [(i["sessionId"], i["title"], i["workspace"])
+                  for i in client.get(self._PATH).json()["items"]]
+        assert titles == [(self._P, "Add a login form", "alpha-repo"),
+                          (self._Q, "Untitled session", "beta"),
+                          ("sess_nofolder", "Untitled session", "")]
+
+    def test_an_answered_item_disappears_on_the_next_call(self, client, monkeypatch):
+        sv = self._world(monkeypatch)
+        assert client.get(self._PATH).json()["count"] == 4
+        # Answering pops the entry (`_handle_permission_response` step d); a
+        # step's resume drops its step question (D11's removal helper).
+        sv._pending_permission.pop("op-question")
+        sv._workflow_drop_step_question(self._P, "child-ask")
+        body = client.get(self._PATH).json()
+        assert [i["text"] for i in body["items"]] == ["Write config.toml", "Run npm test"]
+        assert body["count"] == 2
+
+    def test_route_with_acp_none_is_empty(self, client, monkeypatch):
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "acp", None)
+        resp = client.get(self._PATH)
+        assert resp.status_code == 200
+        assert resp.json() == {"items": [], "count": 0}
+
+    def test_route_refused_without_the_cookie(self, anonymous_client, client, monkeypatch):
+        self._world(monkeypatch)
+        resp = anonymous_client.get(self._PATH)
+        assert _is_json_403(resp)
+        assert b"Run npm test" not in resp.content
+        assert client.get(self._PATH).status_code == 200
+
+    def test_route_refused_to_a_remote_peer(self, remote_enabled, monkeypatch):
+        from power_atlas import web as web_mod
+        self._world(monkeypatch)
+        monkeypatch.setattr(web_mod, "_attention_payload",
+                            lambda items: {"items": ["LEAK"], "count": 1})
+        status, body, _ = _peer_http(self._PATH, [_cookie_header()])
+        assert status == 403
+        assert b"LEAK" not in body
+
+    def test_route_is_not_on_the_remote_surface(self):
+        from power_atlas import web as web_mod
+        assert web_mod._DASHBOARD_ATTENTION_PATH == self._PATH
+        assert web_mod._DASHBOARD_ATTENTION_PATH not in web_mod._REMOTE_ALLOWED_PATHS
+
+    def test_route_takes_the_snapshot_on_the_loop_and_titles_in_a_worker(
+            self, client, monkeypatch, acp_listing_store):
+        from power_atlas import acp as acp_mod
+        from power_atlas import data as data_mod
+        sv = self._world(monkeypatch)
+        threads = {"snap": [], "disk": []}
+        real_snap = sv.attention_snapshot
+        monkeypatch.setattr(sv, "attention_snapshot", lambda: threads["snap"].append(
+            threading.current_thread().name) or real_snap())
+        real_get = data_mod.get_sessions
+        monkeypatch.setattr(data_mod, "get_sessions", lambda cwd, provider="kiro-cli-v3": threads[
+            "disk"].append(threading.current_thread().name) or real_get(cwd, provider))
+        assert client.get(self._PATH).status_code == 200
+        assert threads["snap"] and not [t for t in threads["snap"] if t.startswith("asyncio_")]
+        assert threads["disk"] and all(t.startswith("asyncio_") for t in threads["disk"])
+        assert acp_mod._supervisor is sv
+
+    def test_isolated_config_seams_stay_in_force(self, client, monkeypatch, tmp_path):
+        from power_atlas import data_codex, gitstate, quota, resume
+        self._world(monkeypatch)
+        assert client.get(self._PATH).status_code == 200
+        assert [r.name for r in quota._roots()] == ["no-v3", "no-claude"]
+        assert quota._codex_candidates() == [] and quota._codex_all() == []
+        assert Path(data_codex.CODEX_SESSIONS_DIR).is_relative_to(tmp_path)
+        assert resume.start_scheduler() is None and gitstate.request([]) is False
+
+    # -- the waiting override (SC-5) ------------------------------------------
+
+    def _held_world(self, monkeypatch, acp_listing_store, verdicts):
+        from power_atlas import presence as presence_mod
+        from power_atlas import web as web_mod
+        sv = self._sv(monkeypatch)
+        cwd = "C:\\dev\\ws"
+        acp_listing_store["add"](cwd, [_acp_row(s, cwd=cwd) for s in verdicts])
+        for s in verdicts:
+            sv.sessions[s] = {"cwd": cwd}
+        monkeypatch.setattr(web_mod, "get_semantic_status",
+                            lambda sid, provider, c: verdicts[sid])
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                            lambda *a, **k: presence_mod.Snapshot(set(), set()))
+        return sv, cwd
+
+    def _rail(self, client, cwd):
+        return {r["id"]: r["status"] for r in client.get(
+            "/api/acp/sessions", params={"cwd": cwd, "session_size": 50}
+        ).json()["groups"][0]["sessions"]}
+
+    def test_override_ranks_waiting_above_working_and_keeps_errored(
+            self, client, monkeypatch, acp_listing_store):
+        from power_atlas.status_classifier import SemanticStatus as S
+        verdicts = {"asking_mid_turn": S.WORKING, "plain_mid_turn": S.WORKING,
+                    "asking_errored": S.ERRORED, "step_parent": S.WAITING}
+        sv, cwd = self._held_world(monkeypatch, acp_listing_store, verdicts)
+        now = time.time()
+        sv._pending_permission.update({
+            "q": {"session_id": "asking_mid_turn", "kind": "question", "options": [],
+                  "kiro_id": 1, "text": "?", "created": now},
+            "e": {"session_id": "asking_errored", "kind": "approval", "options": [],
+                  "kiro_id": 2, "text": "?", "created": now}})
+        # A parent whose one step asked while a sibling step still runs.
+        sv._workflow_children["step_parent"] = {"asker": ("waiting", time.monotonic()),
+                                                "runner": ("running", time.monotonic())}
+        sv._workflow_step_questions["asker"] = {"parent": "step_parent", "text": "Blue?",
+                                                "created": now, "label": "workflow step a"}
+        assert sv.workflow_state("step_parent") == "working"
+        assert self._rail(client, cwd) == {
+            "asking_mid_turn": "waiting", "plain_mid_turn": "working",
+            "asking_errored": "errored", "step_parent": "waiting"}
+
+    def test_override_reaches_the_overview_tiles_and_session_availability(
+            self, client, monkeypatch, acp_listing_store):
+        from power_atlas import overview
+        from power_atlas import web as web_mod
+        from power_atlas.status_classifier import SemanticStatus as S
+        asking, plain = "sess_" + _ov_uuid(41), "sess_" + _ov_uuid(42)
+        sv, cwd = self._held_world(monkeypatch, acp_listing_store,
+                                   {asking: S.WORKING, plain: S.WORKING})
+        sv._pending_permission["q"] = {"session_id": asking, "kind": "question",
+                                       "options": [], "kiro_id": 1, "text": "?",
+                                       "created": time.time()}
+        seen = {}
+        monkeypatch.setattr(overview, "live_sessions",
+                            lambda held, snap, f, deps, originals: seen.update(deps=deps) or [])
+        monkeypatch.setattr(web_mod.data, "discover_workspaces_with_counts", lambda *a, **k: [])
+        assert client.get("/api/dashboard/overview/live").status_code == 200
+        statuses = seen["deps"].acp_status_for_held(
+            [_acp_row(asking, cwd=cwd), _acp_row(plain, cwd=cwd)], None)
+        assert statuses == {asking: "waiting", plain: "working"}
+        for sid, want in ((asking, "waiting"), (plain, "working")):
+            body = client.get("/api/session-availability", params={"sid": sid, "cwd": cwd}).json()
+            assert (body["availability"], body["status"]) == ("held", want), sid
+        assert web_mod._person_override_status("working", "x", None) == "working"
+
+    def test_past_the_waiting_bound_list_override_and_rail_still_agree(
+            self, client, monkeypatch, acp_listing_store):
+        """Deferred from Phase 4: a step question outlives `workflow_state`
+        past the 6 h waiting bound. Nothing cancels it (D25) and the reap
+        keeps the child, so the list keeps it and the session keeps reading
+        Waiting, mid-turn included."""
+        from power_atlas import acp as acp_mod
+        from power_atlas.status_classifier import SemanticStatus as S
+        sv, cwd = self._held_world(monkeypatch, acp_listing_store, {"parent": S.WORKING})
+        sv.crews["parent"] = {"asker": {"sessionName": "asker", "done": False}}
+        past = acp_mod._WORKFLOW_WAITING_STALE_S + 1
+        sv._workflow_children["parent"] = {"asker": ("waiting", time.monotonic() - past)}
+        sv._workflow_step_questions["asker"] = {"parent": "parent", "text": "Blue or red?",
+                                                "created": time.time() - past,
+                                                "label": "workflow step asker"}
+        assert sv.workflow_state("parent") is None
+        # The reap leaves a step that waits on a person alone.
+        assert sv._workflow_reap_parent("parent", sv._workflow_children["parent"],
+                                        time.monotonic()) == []
+        assert "asker" in sv._workflow_children["parent"]
+        assert sv.sessions_awaiting_person() == frozenset({"parent"})
+        items = client.get(self._PATH).json()["items"]
+        assert [(i["kind"], i["sessionId"], i["text"]) for i in items] == [
+            ("step_question", "parent", "Blue or red?")]
+        assert self._rail(client, cwd) == {"parent": "waiting"}
+        # Inside the bound the same answer holds: the two never disagree.
+        sv._workflow_children["parent"] = {"asker": ("waiting", time.monotonic() - 60)}
+        assert sv.workflow_state("parent") == "waiting"
+        assert len(client.get(self._PATH).json()["items"]) == 1
+        assert self._rail(client, cwd) == {"parent": "waiting"}
 
 
 def datetime_now_iso(offset_s: float) -> str:
@@ -43140,7 +43475,7 @@ class TestWorkflowLivenessStatus:
         from power_atlas import web as web_mod
 
         class Broken:
-            def sessions_with_pending_permission(self):
+            def sessions_awaiting_person(self):
                 return frozenset()
 
             def workflow_state(self, sid):
@@ -43155,7 +43490,7 @@ class TestWorkflowLivenessStatus:
         from power_atlas import web as web_mod
 
         class Partly:
-            def sessions_with_pending_permission(self):
+            def sessions_awaiting_person(self):
                 return frozenset()
 
             def workflow_state(self, sid):
@@ -43172,7 +43507,7 @@ class TestWorkflowLivenessStatus:
         class Flaky:
             broken = True
 
-            def sessions_with_pending_permission(self):
+            def sessions_awaiting_person(self):
                 return frozenset()
 
             def workflow_state(self, sid):
@@ -43354,7 +43689,7 @@ class TestWorkflowLivenessStatus:
                             lambda sid, now=None: threads.append(threading.current_thread().name)
                             or real(sid, now))
         monkeypatch.setattr(web_mod, "_overview_live",
-                            lambda held, filter_, workflow_states=None, inflight=None: got.append(
+                            lambda held, filter_, workflow_states=None, inflight=None, awaiting=None: got.append(
                                 (dict(held), workflow_states)) or {"filter": filter_, "tiles": []})
         assert client.get("/api/dashboard/overview/live").status_code == 200
         assert got == [({"runner": self._CWD, "plain": self._CWD}, {"runner": "working"})]
@@ -43655,7 +43990,7 @@ class TestNewSessionStatusWithoutTranscript:
         got = []
         monkeypatch.setattr(
             web_mod, "_overview_live",
-            lambda held, filter_, workflow_states=None, inflight=None: got.append(inflight)
+            lambda held, filter_, workflow_states=None, inflight=None, awaiting=None: got.append(inflight)
             or {"filter": filter_, "tiles": []})
         assert client.get("/api/dashboard/overview/live").status_code == 200
         assert got == [frozenset({"a"})]

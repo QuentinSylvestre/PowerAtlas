@@ -88,6 +88,7 @@ import ipaddress
 import itertools
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -5309,6 +5310,89 @@ class _Supervisor:
                 owners.add(record["parent"])
         return frozenset(owners)
 
+    def attention_snapshot(self) -> list[dict]:
+        """Everything a person has to answer, for the dashboard's "Needs
+        attention" feed. A pure read. Loop-only: ``web.py`` takes it on the
+        event loop and hands the list to a worker thread.
+
+        One item per pending approval or question (``_pending_permission``)
+        and per open step question (``_workflow_step_questions``), each
+        ``{kind, sessionId, text, created, step, cwd, title}``, oldest first.
+        ``kind`` is ``"question"`` only for an entry whose ``kind`` is exactly
+        that, else ``"approval"`` (D3, D4). ``step`` is the step label for a
+        routed entry or a step question, else ``""``. ``cwd`` and ``title``
+        come from the owner's session record; ``title`` is ``""`` until a
+        ``focus_update`` stored one (D18).
+
+        A malformed entry is skipped, never raised on: not a dict, an owner
+        that is not a string or not a session this supervisor holds, a
+        ``text`` that is not a string, or a ``created`` that is not a finite
+        number (it would break the sort for every other item).
+
+        A step question is listed while its parent is held and its child is
+        still in ``_workflow_children[parent]``, by plain membership, not
+        freshness: the reap never drops a step waiting on a person (D25), so
+        past the 6 h waiting bound ``workflow_state`` reads None while the
+        question is still open, and ``sessions_awaiting_person`` (the status
+        override) still holds the parent. Membership keeps this list and that
+        override in agreement.
+        261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D11, D17
+        """
+        def _owner(session_id):
+            if not isinstance(session_id, str):
+                return None
+            meta = self.sessions.get(session_id)
+            return meta if isinstance(meta, dict) else None
+
+        def _when(value):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            return float(value) if math.isfinite(value) else None
+
+        items: list[dict] = []
+        for entry in tuple(self._pending_permission.values()):
+            if not isinstance(entry, dict):
+                continue
+            owner_id = entry.get("session_id")
+            meta = _owner(owner_id)
+            text = entry.get("text")
+            created = _when(entry.get("created"))
+            if meta is None or not isinstance(text, str) or created is None:
+                continue
+            child_id = entry.get("workflow_child")
+            items.append({
+                "kind": "question" if entry.get("kind") == "question" else "approval",
+                "sessionId": owner_id,
+                "text": text,
+                "created": created,
+                "step": (self._workflow_step_label(owner_id, child_id)
+                         if isinstance(child_id, str) else ""),
+                "cwd": _as_text(meta.get("cwd")),
+                "title": _as_text(meta.get("title")),
+            })
+        for child_id, record in tuple(self._workflow_step_questions.items()):
+            if not isinstance(record, dict):
+                continue
+            parent_id = record.get("parent")
+            meta = _owner(parent_id)
+            text = record.get("text")
+            created = _when(record.get("created"))
+            if meta is None or not isinstance(text, str) or created is None:
+                continue
+            if child_id not in (self._workflow_children.get(parent_id) or {}):
+                continue
+            items.append({
+                "kind": "step_question",
+                "sessionId": parent_id,
+                "text": text,
+                "created": created,
+                "step": _as_text(record.get("label")),
+                "cwd": _as_text(meta.get("cwd")),
+                "title": _as_text(meta.get("title")),
+            })
+        items.sort(key=lambda item: item["created"])
+        return items
+
     def _workflow_step_awaits_person(self, parent_id: str, child_id: str) -> bool:
         """True while a workflow step has an open approval, question or step
         question. A pure read. Loop-only.
@@ -6870,6 +6954,15 @@ class _Supervisor:
                 _title = _as_text(_kiro_meta.get("title"))[:MAX_TITLE_CHARS]
                 if _title and isinstance(session_id, str):
                     _emit(session_id, envelope("title", {"title": _title}, session_id))
+                    # Kept, cleaned, for the dashboard's attention feed, so a
+                    # 5 s poll never reads session files for a title. Only on
+                    # a session this supervisor holds: a step's own
+                    # `session_info_update` has no record here.
+                    # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES D18
+                    _meta_rec = self.sessions.get(session_id)
+                    _clean_title = _clean_agent_text(_title, MAX_TITLE_CHARS)
+                    if isinstance(_meta_rec, dict) and _clean_title:
+                        _meta_rec["title"] = _clean_title
                 return
             if _info_kind == "display_error":
                 if isinstance(session_id, str):

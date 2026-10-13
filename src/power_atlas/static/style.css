@@ -1552,6 +1552,17 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .dash-ov-setup-note { margin: 6px 0 4px; }
 .dash-ov-setup-code { margin: 0; padding: 6px 8px; overflow-x: auto; border-radius: var(--radius-sm); background: var(--card-bg); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 10.5px; color: var(--text); }
 @media (max-width: 700px) { .dash-ov-qcards { grid-template-columns: minmax(0, 1fr); } }
+/* Waiting for you: approvals, questions and step questions, one button each.
+   261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES */
+.dash-ov-asks { display: flex; flex-direction: column; gap: 2px; }
+.dash-ov-ask { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 5px 8px; border: 0; border-radius: var(--radius-sm); background: none; color: inherit; font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.dash-ov-ask:hover { background: var(--surface-hover); }
+.dash-ov-ask:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.dash-ov-ask-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dash-ov-ask-kind { background: rgba(251, 191, 36, 0.14); color: var(--amber); }
+.dash-ov-ask-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.dash-ov-ask-age { flex-shrink: 0; font-size: 11px; color: var(--text-dim); }
+.dash-ov-ask-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--text-muted); }
 /* Sessions a quota limit stopped. */
 .dash-ov-block:not([hidden]) + .dash-ov-block { margin-top: 10px; }
 .dash-ov-ints { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
