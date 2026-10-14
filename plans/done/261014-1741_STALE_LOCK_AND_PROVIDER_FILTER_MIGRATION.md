@@ -2,10 +2,21 @@
 
 > **Date**: 2026-10-14
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-10-14
 > **Scope**: Fix stale in_progress session lock; migrate provider filter chips into rail panel
-> **Memory relied on**: none
+> **Memory relied on**: v3 session liveness uses session.json status field — lock-file approach does not apply
 > **Estimated effort**: 0.5–1 day
+
+---
+
+## Completion Summary
+
+Both changes shipped same-day (2026-10-14) across 6 commits. 3451/3451 pytest, 1119/1119 node tests. Step 9b browser QA confirmed the provider filter migration end-to-end.
+
+### Acknowledged at archival
+
+- Accepted (harness opportunity): `run_workflow workflowPrompt` used for /qexplore trio dispatch added an extra failure point (workflow-creator never completed before session interruption); re-started with direct `subagent_wf-coder` calls on resume. Recurring pattern would warrant a governance note that direct sub-agent dispatch is preferred for exploration trios.
+- Follow-up plan intended: Remove grey-out (locked/available) for all non-ACP providers; keep liveness dot only. All rows always clickable; provider/PA refusal on actual conflict. See Follow-up Work item 1.
 
 ---
 
@@ -574,10 +585,18 @@ node tests/acp_page.test.mjs
 
 ## Follow-up Work (Deferred)
 
-1. **Reduce `_V3_SESSION_STALE_SECONDS`.**  When kiro IS running but a specific session
-   crashed (e.g., PA crash while a terminal kiro is open), the 30-min mtime window still
-   applies. A follow-up could reduce it to ~60 s (safe given the measured 25-40 s maximum
-   observed write gap). Deferred at user's explicit direction (Q3 in /qexplore interview).
+1. **Remove grey-out (locked/available) for all providers; keep liveness dot only.**
+   PA only controls ACP sessions directly; for every other provider (terminal kiro-cli,
+   Claude Code, Codex) the locked/available hint is best-effort and produces user confusion
+   when it misfires. The intended replacement: remove the grey-out state and the
+   `_lock_holder_v3` / `_V3_SESSION_STALE_SECONDS` UI gate entirely for non-ACP sessions.
+   Rows are always clickable; if the session is genuinely held, the provider's own CLI or
+   PA's own `session/load` refusal tells the user. The liveness dot (live/idle/waiting)
+   stays. This supersedes the narrower `_V3_SESSION_STALE_SECONDS` reduction (item 2).
+   Source: /qclose discussion 2026-10-14.
+
+2. **Reduce `_V3_SESSION_STALE_SECONDS`.**  Superseded by item 1 above if that ships; kept
+   for reference. Deferred at user's explicit direction (Q3 in /qexplore interview).
    Source: Design Decisions row 3.
 
 ## Review Log
