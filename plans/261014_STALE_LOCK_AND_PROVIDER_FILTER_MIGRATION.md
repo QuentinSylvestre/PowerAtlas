@@ -598,6 +598,8 @@ Full-effort review (4 personas: Architect, Senior engineer, Domain expert JS, Re
 
 4 personas: Architect+Reliability (combined), Senior engineer+Domain expert JS (combined). 3451/3451 pytest, 1119/1119 node tests. All SCs verified. Orphan grep clean.
 
+**Step 9b QA**: Provider filter verified in browser — `.search-area` absent, Provider section at top of filter menu, `_activeProvider` set on selection, `wsFilterDot` visible, Clear resets to `'all'`. Phase 1 live destructive test (kill kiro, check unlock) deferred — would terminate this running terminal session. Unit tests (8/8) fully cover the behavior.
+
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
 | 1 | Medium | Phase 2 review log said `_updateFilterUI` live-refresh branch test "Fixed" — not in commit c6cf341; mutation deletes guard silently. | Fixed — `_updateFilterUI live-refresh rebuilds menu when it is open` test added in fcae414. |
