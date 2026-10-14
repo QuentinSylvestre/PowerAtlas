@@ -92,7 +92,9 @@ def _load() -> None:
     if _state["loaded"]:
         return
     _state["loaded"] = True
-    schedules, dismissed = [], []
+    schedules = []
+    dismissed = []
+    skipped = []
     try:
         raw = json.loads(_state_path().read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
@@ -113,14 +115,14 @@ def _load() -> None:
             if isinstance(d, dict) and isinstance(d.get("session_id"), str) and _num(d.get("key_at")) is not None \
                     and _num(d.get("at")) is not None:
                 dismissed.append({"session_id": d["session_id"], "key_at": float(d["key_at"]), "at": float(d["at"])})
-    skipped = []
-    for s in (raw.get("skipped") if isinstance(raw.get("skipped"), list) else []):
-        if (isinstance(s, dict) and isinstance(s.get("session_id"), str)
-                and _UUID_RE.fullmatch(s["session_id"])
-                and _num(s.get("key_at")) is not None and _num(s.get("at")) is not None):
-            skipped.append({"session_id": s["session_id"], "key_at": float(s["key_at"]),
-                            "at": float(s["at"])})
-    _state["schedules"], _state["dismissed"], _state["skipped"] = schedules, dismissed, skipped
+        for s in (raw.get("skipped") if isinstance(raw.get("skipped"), list) else []):
+            if (isinstance(s, dict) and isinstance(s.get("session_id"), str)
+                    and _UUID_RE.fullmatch(s["session_id"])
+                    and _num(s.get("key_at")) is not None and _num(s.get("at")) is not None):
+                skipped.append({"session_id": s["session_id"], "key_at": float(s["key_at"]),
+                                "at": float(s["at"])})
+        _state["schedules"], _state["dismissed"], _state["skipped"] = schedules, dismissed, skipped
+
 
 def _save() -> bool:
     """Write the state file atomically (temporary file, then rename). Caller holds `_lock`. False when it
@@ -353,9 +355,10 @@ def cancel(session_id) -> dict:
 
 def cancel_with_skip(session_id: str, now: float | None = None) -> dict:
     """Cancel a scheduled resume and atomically record a per-stop skip.
-    The earlier two-step cancel()+add_skip() left a race window where the scheduler
-    could re-arm the session between calls. This function holds _lock throughout.
+    Holds `_lock` across both the schedule removal and the skip insertion, so no scheduler tick can re-arm the session between the two operations.
     """
+    if not _valid_session_id(session_id):
+        return {"ok": False, "error": "That is not a session id"}
     now = time.time() if now is None else now
     row = quota.find_hit(session_id, now)   # outside lock
     key_at = _key_at(row) if row is not None else None
@@ -574,11 +577,11 @@ def restore(now: float | None = None) -> int:
         dropped = len(_state["schedules"]) - len(keep)
         if dropped:
             _state["schedules"] = keep
-            _save()
-        cutoff = now - DISMISS_KEEP_SECONDS
-        stale_skips = [s for s in _state.get("skipped", []) if s.get("at", 0) <= cutoff]
-        if stale_skips:
-            _state["skipped"] = [s for s in _state["skipped"] if s.get("at", 0) > cutoff]
+        cutoff_sk = now - DISMISS_KEEP_SECONDS
+        stale_skips = [s for s in _state["skipped"] if s.get("at", 0) <= cutoff_sk]
+        if dropped or stale_skips:
+            if stale_skips:
+                _state["skipped"] = [s for s in _state["skipped"] if s.get("at", 0) > cutoff_sk]
             _save()
     return dropped
 
