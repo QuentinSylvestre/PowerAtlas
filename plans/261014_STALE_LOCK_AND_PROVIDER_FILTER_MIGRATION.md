@@ -1,7 +1,7 @@
 # Stale Lock Fix and Provider Filter Migration
 
 > **Date**: 2026-10-14
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Fix stale in_progress session lock; migrate provider filter chips into rail panel
 > **Memory relied on**: none
@@ -267,7 +267,7 @@ when no kiro-cli process is in the snapshot.
   `test_workspace_hash_is_threaded_to_lock_holder_v3`).
 - [x] 3 new tests in `TestAcpAvailabilityV3` pass (no-kiro, kiro-running, kiro+acp-None).
 - [x] Full test suite passes: `pytest tests/test_web.py`.
-- [ ] `memory/MEMORY.md` decision entry "v3 session liveness uses session.json status field"
+- [x] `memory/MEMORY.md` decision entry "v3 session liveness uses session.json status field"
   updated with an Update record noting Phase 1 resolves the crash-disambiguation residual.
 
 ---
@@ -535,7 +535,7 @@ node tests/acp_page.test.mjs
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Process-presence short-circuit | Complete | code: b2d8b52 |
-| 2 | Provider filter migration | Complete | code: c6cf341 |
+| 2 | Provider filter migration | Complete | code: c6cf341, fcae414 |
 
 ---
 
@@ -557,7 +557,7 @@ node tests/acp_page.test.mjs
   deletion of that div broke the test; the orchestrator updated the marker to
   `<main class="panels-container"` in the same commit.
 
-### Phase 2 (2026-10-14, code: c6cf341)
+### Phase 2 (2026-10-14, code: c6cf341; follow-up: fcae414)
 
 - **Stale comment update**: Two comment blocks around `initProviderFilter` (~lines 6824-6832)
   referenced "provider tabs hidden below 2 providers" and "Provider chips carry the same
@@ -568,6 +568,9 @@ node tests/acp_page.test.mjs
 - **Review-driven additions**: added dot-hidden complement test (`provider='all'` keeps dot
   hidden) and `dashRailReload` call assertion in Clear-filters test; added `setTagFilter`/
   `setTimeFilter` to `loadWsFilter` region guard to catch future extraction drift.
+- **Holistic review fix** (fcae414): added `_updateFilterUI` live-refresh test (menu open →
+  `_updateFilterUI` → menu rebuilt); the Phase 2 review log incorrectly marked this "Fixed"
+  but it was not included in c6cf341; caught by Step 9 holistic review.
 
 ## Follow-up Work (Deferred)
 
@@ -591,7 +594,15 @@ Full-effort review (4 personas: Architect, Senior engineer, Domain expert JS, Re
 | 4 | Medium | R1 risk table described psutil-unavailable behavior as "consistent with current behavior" — incorrect; it is a deliberate behavioral change. | Fixed — Risk table row reworded to state it is an intentional change and why it is acceptable. |
 | 5 | Medium | vm sandbox globals for new `acp_page.test.mjs` tests not enumerated (AGENTS.md memory p
 
-### 2026-10-14 — Phase 2 Implementation Review (Full effort, 4 personas)
+### 2026-10-14 — Step 9 Holistic Review (Full effort, 4 personas)
+
+4 personas: Architect+Reliability (combined), Senior engineer+Domain expert JS (combined). 3451/3451 pytest, 1119/1119 node tests. All SCs verified. Orphan grep clean.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Phase 2 review log said `_updateFilterUI` live-refresh branch test "Fixed" — not in commit c6cf341; mutation deletes guard silently. | Fixed — `_updateFilterUI live-refresh rebuilds menu when it is open` test added in fcae414. |
+| 2 | Low | `memory/MEMORY.md` decision entry still showed crash-disambiguation residual as unaddressed. | Fixed — Update record appended in fcae414. |
+| 3 | Low | `initProviderFilter` `.catch(function(){})` silently swallows errors; `_availableProviders` stays `[]` on fetch error. | Accepted — consistent with rest of codebase's silent catch pattern; no change needed. |
 
 4 personas: Architect+Senior engineer (combined), Domain expert JS+Reliability (combined). 1 review cycle, 1 auto-fix cycle. 1118/1118 node tests pass, 3451/3451 pytest pass.
 
