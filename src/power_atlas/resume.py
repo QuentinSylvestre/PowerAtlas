@@ -332,6 +332,18 @@ def schedule(session_id, prompt=None, fire_at=None, now: float | None = None,
         ):
             # Session already scheduled, or has a run record in any state (watching, gave_up, error, no_activity) — auto-schedule must not clobber any of these.
             return {"ok": True, "fire_at": None, "persisted": False, "open_terminal": False}
+        # Also check skip list: if this session was cancelled-with-skip,
+        # _auto_schedule_new() filters it via snapshot, but a race between
+        # snapshot and this schedule() call could bypass that. Check here too.
+        _key_at_val = _key_at(row)
+        _cutoff = now - DISMISS_KEEP_SECONDS
+        if _if_unscheduled and any(
+            s["session_id"] == session_id
+            and abs(s.get("key_at", 0) - _key_at_val) < 1.0
+            for s in _state["skipped"]
+            if s.get("at", 0) > _cutoff
+        ):
+            return {"ok": True, "fire_at": None, "persisted": False, "open_terminal": False}
         if not _if_unscheduled:
             # Manual schedule: clear any skip record so auto-schedule can re-arm on the next stop.
             _state["skipped"] = [s for s in _state["skipped"] if s["session_id"] != session_id]
@@ -343,6 +355,7 @@ def schedule(session_id, prompt=None, fire_at=None, now: float | None = None,
 
 
 def cancel(session_id) -> dict:
+    """Cancel a scheduled resume. Prefer cancel_with_skip() when auto-schedule may be active, to prevent immediate re-arming via SC-4 skip recording."""
     with _lock:
         _load()
         before = len(_state["schedules"])
@@ -363,7 +376,7 @@ def cancel_with_skip(session_id: str, now: float | None = None) -> dict:
     now = time.time() if now is None else now
     row = quota.find_hit(session_id, now)   # outside lock
     key_at = _key_at(row) if row is not None else None
-    auto_schedule_on = load_config().auto_schedule   # read outside lock to avoid stall
+    auto_schedule_on = load_config().auto_schedule   # read outside lock to avoid stall; window is microseconds. Toggle True→False: phantom skip (inert). Toggle False→True: skip not recorded, session re-arms next tick (one extra auto-schedule).
     with _lock:
         _load()
         before = len(_state["schedules"])

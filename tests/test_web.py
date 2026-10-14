@@ -46454,6 +46454,7 @@ class TestResume:
         assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
 
     def test_auto_schedule_kiro_row_not_scheduled(self):
+        # pre-plan; authoritative coverage in Phase 5 tests (test_kiro_row_not_auto_scheduled etc.)
         self.config.auto_schedule = True
         d = self.v3 / "h" / "sess_k1"
         d.mkdir(parents=True)
@@ -46465,6 +46466,7 @@ class TestResume:
         assert _resume_r._state["schedules"] == []
 
     def test_auto_schedule_ready_row_not_scheduled(self):
+        # pre-plan; authoritative coverage in Phase 5 tests (test_kiro_row_not_auto_scheduled etc.)
         self.config.auto_schedule = True
         # resets_at in the past → state="ready"; _auto_schedule_new must skip it
         sid, _ = self._stopped(resets_at=_Q_NOW - 100)
@@ -46472,6 +46474,7 @@ class TestResume:
         assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
 
     def test_auto_schedule_dismissed_session_not_rescheduled(self):
+        # pre-plan; authoritative coverage in Phase 5 tests (test_kiro_row_not_auto_scheduled etc.)
         self.config.auto_schedule = True
         sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
         _resume_r.dismiss(sid, now=_Q_NOW)
@@ -46695,6 +46698,54 @@ class TestResume:
         result = _resume_r.resume_now(sid, now=_Q_NOW + 3700)
         assert result["ok"] is True
         assert _resume_r._state["skipped"] == []
+
+    def test_schedule_if_unscheduled_respects_skip_record(self):
+        """SC-4: schedule(_if_unscheduled=True) must not override a skip record."""
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        # Inject a skip record: _key_at() returns resets_at for a row with a known reset time
+        key_at = _Q_NOW + 3600
+        with _resume_r._lock:
+            _resume_r._load()
+            _resume_r._state["skipped"] = [{"session_id": sid, "key_at": key_at, "at": _Q_NOW}]
+        result = _resume_r.schedule(sid, now=_Q_NOW, _if_unscheduled=True)
+        assert result.get("fire_at") is None
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_restore_prunes_stale_skip_records(self):
+        """restore() must drop skip records older than DISMISS_KEEP_SECONDS."""
+        now = _Q_NOW
+        old_at = now - _resume_r.DISMISS_KEEP_SECONDS - 1
+        state_file = self.tmp / _resume_r.STATE_NAME
+        sid_old = str(_uuid_q.uuid4())
+        sid_fresh = str(_uuid_q.uuid4())
+        fresh_at = now - 3600  # within TTL
+        state = {
+            "version": 1,
+            "schedules": [],
+            "dismissed": [],
+            "skipped": [
+                {"session_id": sid_old, "key_at": 1.0, "at": old_at},
+                {"session_id": sid_fresh, "key_at": 2.0, "at": fresh_at},
+            ]
+        }
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+        _resume_r.reset()
+        _resume_r.restore(now)
+        assert not any(s["session_id"] == sid_old for s in _resume_r._state["skipped"]), "stale skip must be pruned"
+        assert any(s["session_id"] == sid_fresh for s in _resume_r._state["skipped"]), "fresh skip must be kept"
+
+    def test_skip_round_trips_through_disk_and_blocks_auto_schedule(self):
+        """SC-4+SC-8: a skip persisted to disk must survive a reset/reload and block auto-schedule."""
+        now = _Q_NOW
+        sid, _ = self._stopped(resets_at=now + 3600)
+        _resume_r.add_skip(sid, now=now)
+        # Reset in-memory state and re-trigger load from disk
+        _resume_r.reset()
+        # Tick with auto_schedule=True — the session should NOT be scheduled
+        self.config.auto_schedule = True
+        _resume_r.tick(now)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"]), \
+            "skip record from disk must block auto-schedule"
 
 
 # ---- consoleinject: typing into another process's console -------------------------------------

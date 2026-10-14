@@ -6780,11 +6780,14 @@ function toggleNotifications(el){
 function toggleAutoSchedule(el){
   var turningOn=!el.classList.contains('active');
   el.classList.toggle('active');  // optimistic; reconciled from the response
+  var wasOn=el.getAttribute('aria-pressed')==='true';
+  el.setAttribute('aria-pressed',wasOn?'false':'true');  // optimistic
   fetch('/api/quota/auto-schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})
     .then(_okOrRefused)
     .then(function(d){if(d){el.classList.toggle('active',!!d.enabled);el.setAttribute('aria-pressed',d.enabled?'true':'false');}})
     .catch(function(err){
       el.classList.toggle('active',!turningOn);
+      el.setAttribute('aria-pressed',wasOn?'true':'false');  // rollback
       if(err&&err.refused)_refusedToast('Auto-schedule was not changed',err);
     });
 }
