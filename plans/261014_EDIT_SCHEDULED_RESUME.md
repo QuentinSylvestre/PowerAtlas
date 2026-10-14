@@ -1,7 +1,7 @@
 # Edit Scheduled Resume
 
 > **Date**: 2026-10-14
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Allow the user to edit the prompt and/or fire time of an already-scheduled resume from the Overview's "Stopped by a quota limit" section. Frontend-only change to `index.html`.
 > **Memory relied on**: none
@@ -166,11 +166,36 @@ Browser QA (requires running PowerAtlas + pa_local cookie):
 
 ## 9) Implementation Divergences from Plan
 
-*Reserved — filled during implementation.*
+`tests/acp_page.test.mjs` was committed alongside `index.html` in Phase 1 (per AGENTS.md "update existing tests when implementation changes").
 
 ## Review Log
 
-*Reserved — filled during implementation.*
+### 2026-10-14 — /qdev Phase 1 (full effort, Senior engineer)
+
+5 findings (0 High, 2 Medium, 3 Low). 5 auto-fixed (534a1a8), 1-cycle cap.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Draft re-seeded on every render for scheduled rows | Fixed — `_from` tracker (534a1a8) |
+| 2 | Medium | SC-4/SC-5 POST not tested | Fixed — added click+POST test (534a1a8) |
+| 3 | Low | Duplicate `var state` | Fixed (534a1a8) |
+| 4 | Low | `schedWhen.value` not asserted | Fixed (534a1a8) |
+| 5 | Low | `promptNow()` ignored draft edits | Fixed — unified to `draft.prompt` (534a1a8) |
+
+### 2026-10-14 — /qdev Step 9 final holistic (full effort, Senior engineer)
+
+5 findings (0 High, 2 Medium, 3 Low). 5 auto-fixed (5bcaaa1).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | ROADMAP.md not updated | Fixed — both locations (5bcaaa1) |
+| 2 | Medium | README.md not updated | Fixed — Update schedule sentence (5bcaaa1) |
+| 3 | Low | AGENTS.md controls list | Fixed (5bcaaa1) |
+| 4 | Low | Optional chaining style | Fixed — explicit null guard (5bcaaa1) |
+| 5 | Low | SC-5 fire_at value not asserted | Fixed — round-trip assertion (5bcaaa1) |
+
+Step 9b QA (2026-10-14): PASS via JS tests (1112 pass, Update-schedule click/POST/fire_at all covered); BLOCKED for live scheduled-row (requires real quota stop).
+
 
 ## Harness Improvement Opportunities
 
