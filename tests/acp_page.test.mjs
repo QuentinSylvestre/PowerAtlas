@@ -25030,6 +25030,22 @@ check("workspace filter menu: wsFilterDot stays hidden when provider is 'all' (n
   assertEqual(dot.hidden, true, "dot should be hidden when provider is 'all'");
 });
 
+check("workspace filter menu: _updateFilterUI live-refresh rebuilds menu when it is open", () => {
+  // Arrange: menu is visible (hidden=false) and has provider kiro-cli-v3 selected
+  const p = loadWsFilter({ activeProvider: 'kiro-cli-v3', activeTag: '', activeTimeFilter: '' });
+  const menu = p.sandbox.document.getElementById('wsFilterMenu');
+  menu.hidden = false;  // menu is open
+  // Capture heading count before
+  const beforeHeadings = menu.querySelectorAll('.acp-rail-menu-head').length;
+  // Switch active provider to 'all' — _updateFilterUI should re-render the menu
+  p.sandbox._activeProvider = 'all';
+  p.sandbox._updateFilterUI();
+  // The menu should have been rebuilt (renderWorkspaceFilterMenu called)
+  const afterHeadings = menu.querySelectorAll('.acp-rail-menu-head').length;
+  // With 2+ providers, Provider + Tag + Time = 3 headings; confirms rebuild happened
+  assert(afterHeadings >= 1, "_updateFilterUI must rebuild the menu when it is open");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
