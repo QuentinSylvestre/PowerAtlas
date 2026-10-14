@@ -44,8 +44,9 @@ def _task_scheduler_task_exists() -> bool:
     """Return True if the 'PowerAtlas Crash Restart' Task Scheduler task is registered."""
     try:
         result = subprocess.run(
-            ["schtasks", "/query", "/tn", "PowerAtlas Crash Restart"],
+            [r"C:\Windows\System32\schtasks.exe", "/query", "/tn", "PowerAtlas Crash Restart"],
             capture_output=True,
+            timeout=30,
         )
         return result.returncode == 0
     except Exception:
@@ -109,6 +110,7 @@ def enable() -> None:
         )
         tmp_path_str = None
         try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-16",
@@ -116,16 +118,17 @@ def enable() -> None:
                 dir=str(CONFIG_DIR),
                 delete=False,
             ) as f:
-                f.write(xml_content)
                 tmp_path_str = f.name
+                f.write(xml_content)
             result = subprocess.run(
                 [
-                    "schtasks", "/create",
+                    r"C:\Windows\System32\schtasks.exe", "/create",
                     "/tn", "PowerAtlas Crash Restart",
                     "/xml", tmp_path_str,
                     "/f",
                 ],
                 capture_output=True,
+                timeout=30,
             )
             if result.returncode == 0:
                 # Task Scheduler is now the sole launcher; remove the .lnk to
@@ -139,6 +142,10 @@ def enable() -> None:
                     "crash restart disabled, .lnk fallback kept",
                     result.returncode,
                 )
+        except subprocess.TimeoutExpired:
+            log.warning(
+                "Task Scheduler setup timed out; crash restart disabled, .lnk fallback kept"
+            )
         except Exception as exc:
             log.warning(
                 "Task Scheduler setup failed (%s); crash restart disabled, .lnk fallback kept",
@@ -165,11 +172,17 @@ def disable() -> None:
     if sys.platform == "win32":
         _windows_shortcut_path().unlink(missing_ok=True)
         try:
-            subprocess.run(
-                ["schtasks", "/delete", "/tn", "PowerAtlas Crash Restart", "/f"],
+            result = subprocess.run(
+                [r"C:\Windows\System32\schtasks.exe", "/delete", "/tn", "PowerAtlas Crash Restart", "/f"],
                 capture_output=True,
+                timeout=30,
             )
+            if result.returncode not in (0, 1):  # 1 = task not found (already gone)
+                log.warning(
+                    "schtasks /delete returned %d: %s",
+                    result.returncode, result.stderr.decode("utf-16-le", errors="replace").strip(),
+                )
         except Exception:
-            pass  # schtasks not available or task did not exist — ignore
+            pass  # schtasks not available — ignore
     else:
         _linux_desktop_path().unlink(missing_ok=True)

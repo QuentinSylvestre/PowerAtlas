@@ -29,6 +29,7 @@ def tmp_shortcut(tmp_path, monkeypatch):
     shortcut_file = tmp_path / "PowerAtlas.lnk"
     if sys.platform == "win32":
         monkeypatch.setattr(autostart, "_windows_shortcut_path", lambda: shortcut_file)
+        monkeypatch.setattr(autostart, "_task_scheduler_task_exists", lambda: False)
     else:
         desktop_file = tmp_path / "power-atlas.desktop"
         monkeypatch.setattr(autostart, "_linux_desktop_path", lambda: desktop_file)
@@ -40,13 +41,18 @@ def test_is_enabled_false_when_missing(tmp_shortcut):
     assert autostart.is_enabled() is False
 
 
-def test_disable_when_missing(tmp_shortcut):
+def test_disable_when_missing(tmp_shortcut, monkeypatch):
+    if sys.platform == "win32":
+        monkeypatch.setattr(autostart.subprocess, "run", MagicMock(return_value=MagicMock(returncode=0)))
     autostart.disable()  # should not raise
     assert autostart.is_enabled() is False
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only COM shortcut test")
-def test_enable_creates_shortcut_windows(tmp_shortcut):
+def test_enable_creates_shortcut_windows(tmp_shortcut, tmp_path, monkeypatch):
+    monkeypatch.setattr(autostart, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(autostart.subprocess, "run", MagicMock(return_value=MagicMock(returncode=0)))
+    tmp_shortcut.write_text("")  # pre-create so unlink verifies removal
     mock_shortcut = MagicMock()
     mock_shell = MagicMock()
     mock_shell.CreateShortCut.return_value = mock_shortcut
@@ -59,11 +65,14 @@ def test_enable_creates_shortcut_windows(tmp_shortcut):
     mock_shortcut.save.assert_called_once()
     expected_icon = str(Path(autostart.__file__).parent / "static" / "poweratlas.ico")
     assert mock_shortcut.IconLocation == f"{expected_icon},0"
+    assert not tmp_shortcut.exists()  # .lnk removed after successful task registration
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only COM shortcut test")
 def test_enable_targets_project_venv_not_running_interpreter(tmp_shortcut, tmp_path, monkeypatch):
     """The shortcut records the checkout's venv, whatever interpreter toggled it."""
+    monkeypatch.setattr(autostart, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(autostart.subprocess, "run", MagicMock(return_value=MagicMock(returncode=0)))
     venv_pythonw = tmp_path / "venv" / "Scripts" / "pythonw.exe"
     monkeypatch.setattr(
         autostart, "venv_python",

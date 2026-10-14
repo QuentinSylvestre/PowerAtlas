@@ -537,7 +537,10 @@ def _detect_and_log_crash(log) -> None:
         pid = int(pid_text)
     except (OSError, ValueError):
         return
-    if _pid_alive(pid):
+    try:
+        if _pid_alive(pid):
+            return
+    except OSError:
         return
     log.warning("Restarted after crash (previous PID %d not found)", pid)
     try:

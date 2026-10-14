@@ -46903,7 +46903,7 @@ class TestCrashRestart:
         create_calls = [c for c in calls if "/create" in c]
         assert create_calls, f"schtasks /create not called; calls={calls}"
         c = create_calls[0]
-        assert c[0] == "schtasks"
+        assert c[0] == r"C:\Windows\System32\schtasks.exe"
         assert "/tn" in c
         assert "PowerAtlas Crash Restart" in c
         assert "/f" in c
@@ -46985,7 +46985,7 @@ class TestCrashRestart:
         delete_calls = [c for c in calls if "/delete" in c]
         assert delete_calls, f"schtasks /delete not called; calls={calls}"
         c = delete_calls[0]
-        assert c[0] == "schtasks"
+        assert c[0] == r"C:\Windows\System32\schtasks.exe"
         assert "PowerAtlas Crash Restart" in c
         assert "/f" in c
 
