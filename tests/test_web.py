@@ -17479,6 +17479,95 @@ class TestAcpWorkflowNotifications:
         assert [f["payload"]["text"] for f in _queued(watcher)
                 if f["type"] == "chunk"] == ["{not json"]
 
+    # -- workflow-cancel on Stop ---------------------------------------------
+
+    def test_handle_cancel_sends_workflow_cancel_when_children_exist(self, wf):
+        """Stop with live workflow children calls ``_request`` with
+        ``_kiro.dev/commands/execute`` / ``workflow-cancel``. The call is
+        best-effort (timeout=5 s) and is placed after
+        ``_workflow_stop_children``, so the PA-side cleanup never waits on it.
+        SC-3 (261014_CRASH_RESTART_AUTO_RESUME_WORKFLOW_CANCEL Phase 3)."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        request_calls = []
+
+        async def fake_cancel(self_, session_id):
+            return True
+
+        async def fake_request(self_, method, params, timeout=None):
+            request_calls.append((method, params))
+            return {}
+
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, self.P)
+        acp_mod._supervisor.inflight.add(self.P)
+        _queued(conn)
+
+        with patch.object(acp_mod._Supervisor, "cancel", fake_cancel), \
+                patch.object(acp_mod._Supervisor, "_request", fake_request):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+
+        assert len(request_calls) == 1
+        method, params = request_calls[0]
+        assert method == "_kiro.dev/commands/execute"
+        assert params["sessionId"] == self.P
+        assert params["command"] == {"command": "workflow-cancel", "args": {}}
+        assert sv._workflow_children == {}  # children were still stopped
+
+    def test_handle_cancel_logs_warning_on_acp_error(self, wf, caplog):
+        """If ``_request`` raises ``AcpError`` (e.g. -32603 on kiro-cli
+        2.31.0), a WARNING is logged and the Stop broadcast still fires — the
+        caller never sees an exception. SC-3."""
+        acp_mod, sv = wf
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+
+        async def fake_cancel(self_, session_id):
+            return True
+
+        async def fake_request(self_, method, params, timeout=None):
+            raise acp_mod.AcpError("test error", "some_code")
+
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, self.P)
+        acp_mod._supervisor.inflight.add(self.P)
+        _queued(conn)
+
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"), \
+                patch.object(acp_mod._Supervisor, "cancel", fake_cancel), \
+                patch.object(acp_mod._Supervisor, "_request", fake_request):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+
+        # The Stop broadcast still fires: the subagents frame + agent_error notice
+        subs, notes = self._stop_outcome(conn)
+        assert len(subs) == 1 and len(notes) == 1
+        assert any("workflow-cancel not sent" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_handle_cancel_does_not_call_request_when_no_children(self, wf):
+        """Stop with no workflow children and no recorded run must NOT call
+        ``_request`` — the condition ``stopped or had_runs`` is False. SC-3."""
+        acp_mod, sv = wf
+        # No _start: no workflow children, no recorded run.
+        request_calls = []
+
+        async def fake_cancel(self_, session_id):
+            return True
+
+        async def fake_request(self_, method, params, timeout=None):
+            request_calls.append((method, params))
+            return {}
+
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, self.P)
+        acp_mod._supervisor.inflight.add(self.P)
+        _queued(conn)
+
+        with patch.object(acp_mod._Supervisor, "cancel", fake_cancel), \
+                patch.object(acp_mod._Supervisor, "_request", fake_request):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+
+        assert request_calls == []
+
 
 class TestAcpIdleSweeper:
     """Seven conditions (the seventh, a live workflow child, has its own

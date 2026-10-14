@@ -5748,8 +5748,10 @@ class _Supervisor:
         frame from the child finds no tracked child and changes nothing.
         ``subagent_sessions``, ``subagent_history`` and ``_workflow_child_meta``
         stay for click-to-view and the later orphan release. The step's own
-        process is not stopped (``workflow-cancel`` is not wired). Returns the
-        ids it dropped; the caller emits the frame. Loop-only (it writes).
+        process is asked to stop via ``workflow-cancel``; the call degrades
+        gracefully on kiro-cli 2.31.0 (returns -32603) and becomes effective
+        once kiro-cli classifies the method. Returns the ids it dropped; the
+        caller emits the frame. Loop-only (it writes).
 
         Also forgets the parent's recorded runs (``_workflow_runs``), whether
         or not a child is tracked: a Stop in the gap between two steps must
@@ -5832,6 +5834,12 @@ class _Supervisor:
                                 parent_id, failures)
         for parent_id in expired:
             if parent_id in framed:
+                continue
+            if self._workflow_holds_step(parent_id):
+                # A held step is waiting for a person; the run expired by
+                # staleness, but the workflow is not done from the user's
+                # point of view. Skip the closing frame so the header does
+                # not flip to "Done" while a question/approval is still open.
                 continue
             try:
                 _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
@@ -10139,12 +10147,25 @@ async def _handle_cancel(conn, session_id):
     # Stop ends the workflow in PowerAtlas's view (user decision 2026-10-09
     # after live QA: a workflow stalls after Stop, no later step starts and no
     # `run_complete` follows). Every tracked workflow child, fresh or stale,
-    # gets a "stopped" row and loses its tracking; PowerAtlas cannot stop the
-    # step's process (`workflow-cancel` is not wired).
+    # gets a "stopped" row and loses its tracking; PowerAtlas also asks
+    # kiro-cli to stop the step's process via `workflow-cancel`, which
+    # degrades gracefully on kiro-cli 2.31.0 (returns -32603).
     # A run recorded in the gap between two steps has no tracked child, so
     # `stopped` is empty: the header still needs the frame that says it is over.
     had_runs = _supervisor._workflow_has_runs(session_id)
     stopped = _supervisor._workflow_stop_children(session_id)
+    if stopped or had_runs:
+        try:
+            await _supervisor._request(
+                "_kiro.dev/commands/execute",
+                {"sessionId": session_id,
+                 "command": {"command": "workflow-cancel", "args": {}}},
+                timeout=5.0,   # best-effort; a hung kiro-cli must not delay the Stop broadcast
+            )
+        except AcpError as exc:
+            log.warning("workflow-cancel not sent: [%s] %s", exc.code, exc)
+        except Exception:
+            log.exception("workflow-cancel request failed unexpectedly")
     changed = bool(stopped) or had_runs
     crew = _supervisor.crews.get(session_id)
     if crew:
