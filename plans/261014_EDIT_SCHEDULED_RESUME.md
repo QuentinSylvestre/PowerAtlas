@@ -1,7 +1,7 @@
 # Edit Scheduled Resume
 
 > **Date**: 2026-10-14
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Allow the user to edit the prompt and/or fire time of an already-scheduled resume from the Overview's "Stopped by a quota limit" section. Frontend-only change to `index.html`.
 > **Memory relied on**: none
@@ -105,18 +105,29 @@ Once a session has a scheduled resume, the prompt and fire time are frozen. Ther
    Specifically, locate the `<button>` element that triggers the schedule POST and change its label. Use `createElement + textContent` per AGENTS.md (never `innerHTML`).
 
 **Exit criteria**:
-- [ ] When a session has a scheduled resume, the `<details>` section with prompt and datetime inputs is visible.
-- [ ] The prompt input is pre-filled with the existing `resume.prompt`.
-- [ ] The datetime-local input is pre-filled with the existing `resume.fire_at` value (converted via `dashOvLocalInput()`).
-- [ ] The button reads "Update schedule" (not "Schedule") when editing an existing schedule.
-- [ ] Clicking "Update schedule" posts `{session_id, prompt, fire_at}` to `/api/quota/schedule` and the row updates to reflect the new values after the Overview re-polls.
-- [ ] If `fire_at` is unchanged, the same time is sent back to the server.
-- [ ] "Cancel schedule", "Resume now", "Dismiss" still work.
-- [ ] `node tests/acp_page.test.mjs` passes.
+- [x] When a session has a scheduled resume, the `<details>` section with prompt and datetime inputs is visible.
+- [x] The prompt input is pre-filled with the existing `resume.prompt`.
+- [x] The datetime-local input is pre-filled with the existing `resume.fire_at` value (converted via `dashOvLocalInput()`).
+- [x] The button reads "Update schedule" (not "Schedule") when editing an existing schedule.
+- [x] Clicking "Update schedule" posts `{session_id, prompt, fire_at}` to `/api/quota/schedule` and the row updates to reflect the new values after the Overview re-polls.
+- [x] If `fire_at` is unchanged, the same time is sent back to the server.
+- [x] "Cancel schedule", "Resume now", "Dismiss" still work.
+- [x] `node tests/acp_page.test.mjs` passes.
 
----
+Implementation (2026-10-14, code: 54f2c97, fix: 534a1a8)
+`index.html` — `dashOvIntActions()` changes: (1) Draft pre-fill uses `_from` tracker to avoid overwriting in-progress edits on every 2s re-render — only re-seeds when server's `resume.prompt`/`resume.fire_at` changes; (2) `if (state !== 'scheduled')` guard on prompt+time `<details>` block removed so inputs show for scheduled rows; (3) Button label is "Update schedule" when `state === 'scheduled'`; (4) `promptNow()` unified to always use `draft.prompt` (pre-filled from `resume.prompt`, so behavior is unchanged until user edits the field); (5) duplicate `var state` removed. `tests/acp_page.test.mjs` updated: scheduled-row test now asserts inputs visible, prompt pre-filled, "Update schedule" button present, POST body correct on click, fire_at value asserted.
 
-## 6) Risk Assessment
+Review (2026-10-14, full effort, Senior engineer): 5 findings (0 High, 2 Medium, 3 Low). 5 auto-fixed (534a1a8) per 1-cycle cap.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Draft re-seeded on every render for scheduled rows — in-progress edits discarded | Fixed — `_from` tracker added (534a1a8) |
+| 2 | Medium | SC-4/SC-5 not tested | Fixed — added "Update schedule" click test (534a1a8) |
+| 3 | Low | Duplicate `var state` declaration | Fixed — removed (534a1a8) |
+| 4 | Low | `schedWhen.value` not asserted in test | Fixed — added value assertion (534a1a8) |
+| 5 | Low | `promptNow()` used `resume.prompt` instead of `draft.prompt` — discarded visible edits on Resume now | Fixed — unified to `draft.prompt` (534a1a8) |
+
+
 
 | Risk | Impact | Mitigation |
 |---|---|---|
@@ -151,7 +162,7 @@ Browser QA (requires running PowerAtlas + pa_local cookie):
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Edit-scheduled UI | Not started | |
+| 1 | Edit-scheduled UI | Complete | code: 54f2c97, fix: 534a1a8 |
 
 ## 9) Implementation Divergences from Plan
 
