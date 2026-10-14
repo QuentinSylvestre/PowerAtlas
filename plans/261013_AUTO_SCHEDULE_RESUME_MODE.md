@@ -531,12 +531,27 @@ Tests follow the existing `TestResume` fixture pattern (`test_web.py:45823`): `i
 | `test_resume_now_when_auto_schedule_off_unchanged` | `auto_schedule=False`, call `resume_now()`; assert normal return, no skip created | SC-9: resume_now path unaffected |
 
 **Exit criteria**:
-- [ ] All 22 new tests pass.
-- [ ] `_check_test_names.py` reports no duplicate test names.
-- [ ] Existing `TestResume` tests pass without modification.
-- [ ] `TestQuotaRoutes` passes without modification.
-- [ ] `plans/tests/260701_POWERATLAS.md` section `2.31 Auto-schedule resume mode` added with route descriptions and TestResume probe list; scope comment widened to include `2.31`.
-- [ ] (deferred from Phase 3) `/api/quota/auto-schedule` added to `TestQuotaRoutes._PATHS` or an explicit `assert "/api/quota/auto-schedule" not in web_mod._REMOTE_ALLOWED_PATHS` assertion added — ensures `_REMOTE_ALLOWED_PATHS` exclusion is covered by automated test.
+- [x] All 22 new tests pass.
+- [x] `_check_test_names.py` reports no duplicate test names.
+- [x] Existing `TestResume` tests pass without modification.
+- [x] `TestQuotaRoutes` passes without modification.
+- [x] `plans/tests/260701_POWERATLAS.md` section `2.31 Auto-schedule resume mode` added with route descriptions and TestResume probe list; scope comment widened to include `2.31`.
+- [x] (deferred from Phase 3) `/api/quota/auto-schedule` added to `TestQuotaRoutes._PATHS` or an explicit `assert "/api/quota/auto-schedule" not in web_mod._REMOTE_ALLOWED_PATHS` assertion added — ensures `_REMOTE_ALLOWED_PATHS` exclusion is covered by automated test.
+
+Implementation (2026-10-13, code: aba43b7, fix: 1ad61b1)
+Added 19 new test methods to `TestResume` (3 from Phase 2 already existed; 22 total plan-specified tests all pass). Tests follow the `isolated_config` autouse pattern; tick tests use the real `quota.interrupted` against the test fixture filesystem (stronger than mocking). `TestQuotaRoutes._PATHS` updated with `/api/quota/auto-schedule` (1ad61b1) providing same-origin enforcement coverage. Section 2.31 added to `plans/tests/260701_POWERATLAS.md`. Review fixes (1ad61b1): added schedule-removal assertions to `test_cancel_when_auto_schedule_on_adds_skip` and `test_cancel_route_adds_skip_when_auto_schedule_on`; added route to `_PATHS`.
+
+QA (2026-10-13): PASS — test suite is the surface; 3425 passed, 1 skipped.
+
+### 2026-10-13 — /qdev Phase 5 review (full effort, 1 persona: Senior)
+
+3 findings (0 High, 2 Medium, 1 Low). All resolved.
+
+| # | Severity | Finding | Persona | Resolution |
+|---|---|---|---|---|
+| 1 | Medium | `test_cancel_when_auto_schedule_on_adds_skip` only asserted skip present, not that schedule was removed — broken cancel could pass | Senior | Fixed — added schedule-removal assertion (1ad61b1) |
+| 2 | Medium | `test_cancel_route_adds_skip_when_auto_schedule_on` same gap at HTTP level | Senior | Fixed — added schedule-removal assertion (1ad61b1) |
+| 3 | Low | Same-origin enforcement for POST `/api/quota/auto-schedule` untested — route omitted from `_PATHS` | Senior | Fixed — added to `TestQuotaRoutes._PATHS` (1ad61b1) |
 
 ---
 
@@ -590,7 +605,7 @@ cd c:\Users\QSylvestre.POLESTAR\Documents\Perso\PowerAtlas
 | 2 | `_auto_schedule_new()` + tick() integration | Complete | code: a543925, fix: 44da1ea, 6e96684 |
 | 3 | Web routes + cancel modification + template context | Complete | code: 655382d, fix: 44da1ea, 6e96684 |
 | 4 | Gear-menu toggle | Complete | code: f45e117, fix: 5c349bc |
-| 5 | Tests | Not started | |
+| 5 | Tests | Complete | code: aba43b7, fix: 1ad61b1 |
 
 ## 9) Implementation Divergences from Plan
 
