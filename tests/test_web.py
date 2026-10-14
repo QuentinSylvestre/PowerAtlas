@@ -46510,6 +46510,7 @@ class TestResume:
         assert result == {"ok": True}
         assert len(_resume_r._state["skipped"]) == 1
         assert _resume_r._state["skipped"][0]["session_id"] == sid
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"]), "cancel_with_skip must remove the schedule"
 
     def test_cancel_when_auto_schedule_off_does_not_add_skip(self):
         """SC-9: cancel_with_skip with auto_schedule off removes the schedule but adds no skip."""
@@ -46653,6 +46654,7 @@ class TestResume:
         resp = client.post("/api/quota/cancel", json={"session_id": sid})
         assert resp.json() == {"ok": True}
         assert any(s["session_id"] == sid for s in _resume_r._state["skipped"])
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"]), "cancel route must remove the schedule"
 
     def test_auto_schedule_does_not_re_arm_error_run(self):
         """SC-3: a session in _runs with state='error' is not rescheduled by auto_schedule."""
@@ -46771,7 +46773,8 @@ class TestConsoleInject:
 # ---- the quota routes -------------------------------------------------------------------------
 
 class TestQuotaRoutes:
-    _PATHS = ("/api/quota/resume", "/api/quota/schedule", "/api/quota/cancel", "/api/quota/dismiss")
+    _PATHS = ("/api/quota/resume", "/api/quota/schedule", "/api/quota/cancel", "/api/quota/dismiss",
+              "/api/quota/auto-schedule")
 
     def test_each_route_hands_the_session_id_and_prompt_to_the_resume_module(self, client, monkeypatch):
         seen = []
@@ -46781,6 +46784,8 @@ class TestQuotaRoutes:
         monkeypatch.setattr(_resume_r, "dismiss", lambda sid: seen.append(("dismiss", sid)) or {"ok": True})
         body = {"session_id": "s1", "prompt": "go", "fire_at": 5, "cwd": "C:\\evil", "extra": 1}
         for path in self._PATHS:
+            if path == "/api/quota/auto-schedule":
+                continue  # toggle route: body is ignored and response format differs from session-id handlers
             assert client.post(path, json=body).json() == {"ok": True}
         assert seen == [("now", "s1", "go"), ("sched", "s1", "go", 5), ("cancel_with_skip", "s1"), ("dismiss", "s1")]
 
@@ -46793,6 +46798,8 @@ class TestQuotaRoutes:
                 if path == "/api/quota/cancel":
                     assert resp.status_code == 400, (path, raw)
                     assert resp.json() == {"ok": False, "error": "bad request"}, (path, raw)
+                elif path == "/api/quota/auto-schedule":
+                    pass  # toggle route ignores request body; body-validation rule does not apply
                 else:
                     assert resp.json() == {"ok": False, "error": "Invalid JSON body"}, (path, raw)
         assert called == []
