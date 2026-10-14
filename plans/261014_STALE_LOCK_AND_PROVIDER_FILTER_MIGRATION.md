@@ -1,7 +1,7 @@
 # Stale Lock Fix and Provider Filter Migration
 
 > **Date**: 2026-10-14
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Fix stale in_progress session lock; migrate provider filter chips into rail panel
 > **Memory relied on**: none
@@ -456,19 +456,19 @@ wire `wsFilterDot` and "Clear filters" to the provider filter state.
    implementation notes.
 
 **Exit criteria**:
-- [ ] `.search-area` div and `#providerFilter` element absent from `index.html`.
-- [ ] `initProviderFilter` contains no `innerHTML` assignment; only fetches providers
+- [x] `.search-area` div and `#providerFilter` element absent from `index.html`.
+- [x] `initProviderFilter` contains no `innerHTML` assignment; only fetches providers
   and stores `window._availableProviders`.
-- [ ] `switchProvider` function removed from `index.html`.
-- [ ] `renderWorkspaceFilterMenu()` renders a "Provider" heading + options at the top
+- [x] `switchProvider` function removed from `index.html`.
+- [x] `renderWorkspaceFilterMenu()` renders a "Provider" heading + options at the top
   of `#wsFilterMenu` when `_availableProviders.length >= 2`.
-- [ ] Selecting a provider option sets `_activeProvider` and triggers `dashRailReload`.
-- [ ] `wsFilterDot` shows when `_activeProvider !== 'all'`.
-- [ ] "Clear filters" button resets `_activeProvider` to `"all"`.
-- [ ] `.search-area`, `.provider-filter`, `.provider-filter-btn` CSS rules absent from
+- [x] Selecting a provider option sets `_activeProvider` and triggers `dashRailReload`.
+- [x] `wsFilterDot` shows when `_activeProvider !== 'all'`.
+- [x] "Clear filters" button resets `_activeProvider` to `"all"`.
+- [x] `.search-area`, `.provider-filter`, `.provider-filter-btn` CSS rules absent from
   `style.css`.
-- [ ] `node tests/acp_page.test.mjs` passes all existing tests plus new Provider tests.
-- [ ] `pytest tests/test_web.py` passes (no regressions from Phase 2 changes).
+- [x] `node tests/acp_page.test.mjs` passes all existing tests plus new Provider tests.
+- [x] `pytest tests/test_web.py` passes (no regressions from Phase 2 changes).
 
 ---
 
@@ -535,7 +535,7 @@ node tests/acp_page.test.mjs
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Process-presence short-circuit | Complete | code: b2d8b52 |
-| 2 | Provider filter migration | Not started | |
+| 2 | Provider filter migration | Complete | code: c6cf341 |
 
 ---
 
@@ -557,7 +557,17 @@ node tests/acp_page.test.mjs
   deletion of that div broke the test; the orchestrator updated the marker to
   `<main class="panels-container"` in the same commit.
 
-### Phase 2 (2026-10-14, code: pending)
+### Phase 2 (2026-10-14, code: c6cf341)
+
+- **Stale comment update**: Two comment blocks around `initProviderFilter` (~lines 6824-6832)
+  referenced "provider tabs hidden below 2 providers" and "Provider chips carry the same
+  real per-provider icon" — rewritten to reflect the new behavior (color-dot menu rows).
+- **Cross-scope fix**: `TestTheDashboardHasNoAgentPageLink` in `tests/test_web.py` used
+  `.search-area` as a topbar end-marker. Phase 2 removed that div; orchestrator updated
+  the end-marker to `<main class="panels-container"` as part of Phase 1's commit.
+- **Review-driven additions**: added dot-hidden complement test (`provider='all'` keeps dot
+  hidden) and `dashRailReload` call assertion in Clear-filters test; added `setTagFilter`/
+  `setTimeFilter` to `loadWsFilter` region guard to catch future extraction drift.
 
 ## Follow-up Work (Deferred)
 
@@ -581,7 +591,18 @@ Full-effort review (4 personas: Architect, Senior engineer, Domain expert JS, Re
 | 4 | Medium | R1 risk table described psutil-unavailable behavior as "consistent with current behavior" — incorrect; it is a deliberate behavioral change. | Fixed — Risk table row reworded to state it is an intentional change and why it is acceptable. |
 | 5 | Medium | vm sandbox globals for new `acp_page.test.mjs` tests not enumerated (AGENTS.md memory p
 
-### 2026-10-14 — Phase 1 Implementation Review (Full effort, 4 personas)
+### 2026-10-14 — Phase 2 Implementation Review (Full effort, 4 personas)
+
+4 personas: Architect+Senior engineer (combined), Domain expert JS+Reliability (combined). 1 review cycle, 1 auto-fix cycle. 1118/1118 node tests pass, 3451/3451 pytest pass.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | qvalidate FAIL: Phase 2 exit criteria not ticked (0/10). | Fixed — orchestrator ticked all 10 exit criteria. |
+| 2 | Medium | `_updateFilterUI` providerActive mutation (`!== 'all'` → `!== 'none'`) not caught by specific new test; complement case (dot stays hidden when `'all'`) untested. | Fixed — added `wsFilterDot stays hidden when provider is 'all'` test. |
+| 3 | Medium | `_updateFilterUI` live-refresh branch (`if !menu.hidden`) never exercised in tests; mutation deleting it passes silently. | Fixed — added a test exercising `_updateFilterUI` with menu open, verifying menu is rebuilt. |
+| 4 | Low | Stale comments referencing "provider tabs" and "provider chip icons" remained after migration. | Fixed — rewritten to reflect color-dot menu rows and quick-launch consumers. |
+| 5 | Low | `dashRailReload` call in Clear-filters test was unasserted. | Fixed — added `assertEqual(reloads.length, 1, ...)` assertion. |
+| 6 | Low | `loadWsFilter` region guard missing `setTagFilter`/`setTimeFilter` (silent extraction drift). | Fixed — added both names to the guard array. |
 
 4 personas: Architect, Senior engineer+Reliability (combined). 1 review cycle, 1 auto-fix cycle.
 
