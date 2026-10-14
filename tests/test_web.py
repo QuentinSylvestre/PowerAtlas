@@ -46475,6 +46475,22 @@ class TestResume:
         _resume_r.tick(_Q_NOW + 3711)
         assert any(s["session_id"] == sid for s in _resume_r._state["schedules"]), "session must be rescheduled"
 
+    def test_auto_schedule_on_removes_no_activity_run_and_enables_reschedule(self):
+        """auto_schedule=True removes a run that ended via the no_activity path and reschedules it."""
+        self.config.auto_schedule = True
+        # Use a far-future resets_at so the session stays "interrupted" during both ticks.
+        # No activity is appended after launch: _watch() sees kind=None (stale transcript) and
+        # waited > NO_ACTIVITY_SECONDS (180 s), so it returns "end" via the no_activity branch.
+        resets_at = _Q_NOW + 36000
+        sid, _ = self._stopped(resets_at=resets_at)
+        self._launch(sid)   # creates a watching run at _Q_NOW + 3700 with state="watching"
+        # Tick with now > launched_at + NO_ACTIVITY_SECONDS (3700 + 180 = 3880)
+        _resume_r.tick(_Q_NOW + 3881)
+        assert _resume_r._runs == [], "run must be removed when auto_schedule=True and verdict is 'end' (no_activity)"
+        # Next tick: _auto_schedule_new reschedules the session (no longer blocked by in_runs)
+        _resume_r.tick(_Q_NOW + 3882)
+        assert any(s["session_id"] == sid for s in _resume_r._state["schedules"]), "session must be rescheduled"
+
     def test_auto_schedule_kiro_row_not_scheduled(self):
         # pre-plan; authoritative coverage in Phase 5 tests (test_kiro_row_not_auto_scheduled etc.)
         self.config.auto_schedule = True
@@ -46714,9 +46730,9 @@ class TestResume:
         assert _resume_r._state["skipped"] == []
 
     def test_resume_now_when_auto_schedule_off_unchanged(self):
-        """SC-9: resume_now() with auto_schedule off completes normally and creates no skip."""
+        """SC-9: resume_now() with explicit auto_schedule=False completes normally and creates no skip."""
+        self.config.auto_schedule = False
         sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
-        # auto_schedule is False by default on Config()
         result = _resume_r.resume_now(sid, now=_Q_NOW + 3700)
         assert result["ok"] is True
         assert _resume_r._state["skipped"] == []

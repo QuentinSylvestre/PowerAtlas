@@ -630,8 +630,11 @@ def tick(now: float | None = None) -> None:
                             live["state"], live["detail"] = "error", "The resume could not be followed."
         _remove_run = verdict in ("done", "retry")
         if not _remove_run and verdict == "end":
-            from .config import load_config
-            _remove_run = load_config().auto_schedule
+            try:
+                from .config import load_config
+                _remove_run = load_config().auto_schedule
+            except Exception:
+                pass  # config unreadable — leave run in _runs (safe fallback)
         if _remove_run:
             with _lock:
                 _runs[:] = [r for r in _runs if r["id"] != run["id"]]

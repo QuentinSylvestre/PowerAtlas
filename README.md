@@ -287,7 +287,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   when it ends), and a burst of turn ends in one check is coalesced (at most 3 toasts per thread and 6 per check). Threads in a hidden workspace, on a network
   path, held by the desktop app or VS Code, or run as sub-agents send nothing. `codex_diagnostics.turn_watch`
   in the dashboard sessions response (`ok`, `stalled` or `off`) shows whether the check is running
-- **Auto-schedule resumes** (gear icon, off by default) automatically schedules a resume for every session stopped by a quota limit, at `resets_at + 60 s`. Clicking "Cancel schedule" records a per-stop skip so the session stays visible but is not re-armed for that stop. Toggle on, and every currently-stopped session with a known reset time is scheduled within 5 s.
+- **Auto-schedule resumes** (gear icon, on by default) automatically schedules a resume for every session stopped by a quota limit, at `resets_at + 60 s`. Clicking "Cancel schedule" records a per-stop skip so the session stays visible but is not re-armed for that stop. Toggle on, and every currently-stopped session with a known reset time is scheduled within 5 s.
 - **Agent permissions** (gear icon in topbar, then the Settings dialog) sets the permission mode for ACP sessions PowerAtlas
   creates: **Yolo** (the default; nothing asks, except a short Always blocked list that is refused in
   every mode) or **Manual** (common read-only actions run, everything else asks). **Auto** is shown but
