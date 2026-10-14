@@ -12,6 +12,8 @@ from .interpreter import venv_python
 
 log = logging.getLogger(__name__)
 
+_task_state: bool | None = None  # None = unknown (probe on first call)
+
 
 def _startup_interpreter(*, windowed: bool = False) -> Path:
     """The interpreter the login entry should invoke.
@@ -42,13 +44,17 @@ def _linux_desktop_path() -> Path:
 
 def _task_scheduler_task_exists() -> bool:
     """Return True if the 'PowerAtlas Crash Restart' Task Scheduler task is registered."""
+    global _task_state
+    if _task_state is not None:
+        return _task_state
     try:
         result = subprocess.run(
             [r"C:\Windows\System32\schtasks.exe", "/query", "/tn", "PowerAtlas Crash Restart"],
             capture_output=True,
             timeout=30,
         )
-        return result.returncode == 0
+        _task_state = result.returncode == 0
+        return _task_state
     except Exception:
         return False
 
@@ -136,12 +142,15 @@ def enable() -> None:
                 # guard, and the task's process exits 0 — RestartInterval never
                 # applies to the .lnk-launched process).
                 _windows_shortcut_path().unlink(missing_ok=True)
+                global _task_state
+                _task_state = True
             else:
                 log.warning(
                     "Task Scheduler registration failed (returncode %d); "
                     "crash restart disabled, .lnk fallback kept",
                     result.returncode,
                 )
+                _task_state = False
         except subprocess.TimeoutExpired:
             log.warning(
                 "Task Scheduler setup timed out; crash restart disabled, .lnk fallback kept"
@@ -182,7 +191,11 @@ def disable() -> None:
                     "schtasks /delete returned %d: %s",
                     result.returncode, result.stderr.decode("utf-16-le", errors="replace").strip(),
                 )
+        except subprocess.TimeoutExpired:
+            log.warning("schtasks /delete timed out — PowerAtlas Crash Restart task may still be registered")
         except Exception:
             pass  # schtasks not available — ignore
+        global _task_state
+        _task_state = False
     else:
         _linux_desktop_path().unlink(missing_ok=True)

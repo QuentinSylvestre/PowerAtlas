@@ -46929,6 +46929,23 @@ class TestResume:
         assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"]), \
             "skip record from disk must block auto-schedule"
 
+    def test_tick_load_config_exception_leaves_run_in_runs(self, monkeypatch):
+        # Guard for the except-pass around load_config() in tick().
+        # When load_config raises on the verdict=="end" path, _remove_run stays
+        # False and the run remains in _runs (safe fallback).
+        sid, path = self._stopped(resets_at=_Q_NOW + 3600)
+        self._launch(sid, attempt=2)
+        self._append(path, _q_user("go", at=_Q_NOW + 3702),
+                     _q_hit(resets_at=_Q_NOW + 30000, at=_Q_NOW + 3703))
+
+        def bad_load():
+            raise FileNotFoundError("no config")
+
+        monkeypatch.setattr("power_atlas.config.load_config", bad_load)
+        _resume_r.tick(_Q_NOW + 3710)
+        assert any(r["session_id"] == sid for r in _resume_r._runs), \
+            "run must stay in _runs when load_config raises"
+
 
 # ---- consoleinject: typing into another process's console -------------------------------------
 
