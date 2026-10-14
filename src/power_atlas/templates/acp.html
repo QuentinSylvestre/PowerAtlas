@@ -940,7 +940,6 @@
   var RAIL_AVAILABILITY = Object.create(null);
   RAIL_AVAILABILITY.available = 'available';
   RAIL_AVAILABILITY.held = 'held';
-  RAIL_AVAILABILITY.locked = 'locked';
   // What a held row's dot says, as a closed set on exactly the terms above and
   // for the same reason: `status` comes off the wire and ends up in a class
   // name. The three values are the dashboard's own semantic vocabulary, so the
@@ -994,17 +993,12 @@
   // Status bucket order: priority order, highest urgency first.
   // Array (not a map) — ordering defines bucket display priority.
   // 'working', 'waiting', 'errored' mirror the RAIL_STATUS keys; keep in sync.
-  var STATUS_BUCKET_ORDER = ['working', 'waiting', 'errored', 'available', 'locked'];
+  var STATUS_BUCKET_ORDER = ['working', 'waiting', 'errored', 'available'];
   var STATUS_BUCKET_LABEL = Object.create(null);
   STATUS_BUCKET_LABEL.working   = 'Working';
   STATUS_BUCKET_LABEL.waiting   = 'Waiting';
   STATUS_BUCKET_LABEL.errored   = 'Errored';
   STATUS_BUCKET_LABEL.available = 'Available';
-  STATUS_BUCKET_LABEL.locked    = 'Locked';
-  // Why a locked row cannot be picked. It lives on the row now rather than on
-  // an indicator, because the dot is drawn for held sessions only: a row that
-  // is greyed out and does not say why reads as broken rather than as taken.
-  var RAIL_LOCKED_REASON = 'in use by another process — cannot be opened here';
   // Every group fetched so far, in fetch order, each carrying the sessions
   // fetched for it so far. Accumulated rather than replaced: "show more" is
   // additive on both axes, and a page that dropped what it had would lose the
@@ -2606,7 +2600,7 @@
   // The rail draws one of three shapes. `project` is the original: workspace
   // groups, server-paged on both axes. `date` is one flat recency list from
   // `?mode=recent`, cut into local days here. `status` uses the same flat list,
-  // bucketed client-side into Working / Waiting / Errored / Available / Locked.
+  // bucketed client-side into Working / Waiting / Errored / Available.
   // They keep separate stores and switching empties the one being left, so
   // exactly one is ever populated — two live stores would need `railIndex`, the
   // delete path and the poll to agree on which copy of a session is
@@ -3055,7 +3049,6 @@
     // by server contract, so we must check availability first.
     var avail = railAvailability(session.availability);
     if (avail === 'held')   return railRowStatus(session.status); // 'working'|'waiting'|'errored'
-    if (avail === 'locked') return 'locked';
     return 'available';
   }
 
@@ -3293,7 +3286,6 @@
 
   function railRowNode(session, flat, workspace) {
     var state = railAvailability(session.availability);
-    var locked = state === 'locked';
     // The row and its menu are siblings inside a wrapper, and that shape is
     // forced rather than chosen: the row is a <button>, and a <button> inside a
     // <button> is invalid — the HTML parser closes the outer one at the inner
@@ -3308,11 +3300,6 @@
     row.type = 'button';
     row.dataset.sid = session.id;
     row.dataset.availability = state;
-    // Greyed is a colour; disabled is the only version of "not selectable" that
-    // a keyboard and a screen reader also get. D17: a session locked by a live
-    // foreign process cannot be loaded, and offering it costs a round trip and
-    // an error the user cannot act on.
-    row.disabled = locked;
 
     var titleText = railTitleText(session);
 
@@ -3352,15 +3339,6 @@
       pad.className = 'acp-rail-row-pad';
       pad.setAttribute('aria-hidden', 'true');
       row.appendChild(pad);
-      if (locked) {
-        // Disabled is what stops the press; this is what explains it. Both are
-        // needed: the greying is a colour, and a colour is not an answer to
-        // "why can I not open this one?". `aria-label` replaces the accessible
-        // name outright, so the title has to be carried into it or the row
-        // announces only its refusal and never which session is refusing.
-        row.title = RAIL_LOCKED_REASON;
-        row.setAttribute('aria-label', titleText + ' — ' + RAIL_LOCKED_REASON);
-      }
     }
 
     var title = document.createElement('span');
@@ -3396,17 +3374,12 @@
       row.appendChild(when);
     }
 
-    // Never over a locked row's own title. That one explains why the row cannot
-    // be pressed, which outranks both saying where it came from and saying when
-    // it last moved. Full precision one hover away is also what lets the
-    // visible timestamp above be shortened without losing anything.
-    if (!locked) row.title = note;
+    row.title = note;
 
     row.addEventListener('click', function () {
       // A browser fires no click on a disabled button; this guard covers
       // everything else that can reach the handler, including a later refactor
       // that stops drawing the row as one.
-      if (locked) return;
       railFocus = { sid: session.id };
       // Picking a row is navigation, and a menu left hanging over the list the
       // user has just navigated away from would outlive what it belonged to.
@@ -3540,9 +3513,6 @@
       del.disabled = true;
       del.title = 'PowerAtlas has this session open. Open it and press Close '
                 + 'first.';
-    } else if (state === 'locked') {
-      del.disabled = true;
-      del.title = 'Another process is using this session.';
     }
     del.addEventListener('click', function () {
       if (del.disabled) return;
@@ -3983,7 +3953,7 @@
     var msg = 'Deleted ' + nDeleted + ' session'
               + (nDeleted !== 1 ? 's' : '') + '.';
     if (nFailed > 0) {
-      msg += ' ' + nFailed + ' could not be deleted (held or locked).';
+      msg += ' ' + nFailed + ' could not be deleted (held by another process).';
     }
     if (data.folder_error && data.folder_error !== 'folder_already_gone') {
       msg += ' Folder: ' + data.folder_error;

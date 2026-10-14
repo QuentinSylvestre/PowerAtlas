@@ -236,8 +236,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   after the current turn, or steer the agent mid-turn. Paste a screenshot
   straight into the prompt with Ctrl+V, or drag one onto it. Creating asks which
   workspace first; each row's `⋯` menu can permanently delete a session from the kiro-cli store, from
-  this machine only. A workspace-grouped session browser lists what is resumable and greys out sessions
-  another process currently holds. See *Agent sessions* below
+  this machine only. A workspace-grouped session browser lists what is resumable. See *Agent sessions* below
 - Optional remote access over NetBird — off by default. When enabled, `/acp` and its listing endpoint
   are reachable from your own devices behind a device secret, while the dashboard, launchers and
   settings stay loopback-only. See *Remote access* below
@@ -407,8 +406,8 @@ Reached by opening `/acp` directly.
 
 `/acp` drives kiro-cli over ACP: one supervised `kiro-cli acp --agent-engine v3` process holds every
 session PowerAtlas opens. The left rail lists workspaces with their sessions — ten workspaces and three sessions each by
-default, each axis paging independently — and marks every visible row *available*, *held by PowerAtlas*,
-or *locked* by another process. Selecting a row resumes that session and replays its history; sessions
+default, each axis paging independently — and marks every visible row *available* or *held by PowerAtlas*.
+Selecting a row resumes that session and replays its history; sessions
 whose workspace directory no longer exists are marked so, since they cannot be resumed usefully.
 Session settings (thinking, knowledge, code intelligence, workflows) are read from your kiro `cli.json` on every `session/new` and `session/load`; with `chat.enableWorkflows` on, the agent uses `run_workflow` instead of `invoke_sub_agent`.
 If the connection drops, the page reconnects automatically with exponential backoff (1 s, 2 s, … up to 30 s); the Reconnect button remains available for immediate retry.
@@ -416,7 +415,7 @@ If the connection drops, the page reconnects automatically with exponential back
 **The rail groups by workspace, by day, or by status.** The sliders button beside *Refresh* switches between them and
 remembers the choice. Grouped by day the rail shows every session across every workspace, newest first,
 cut into *Today*, *Yesterday* and dated groups — by **your** clock, not the machine's, so the grouping is
-right on a phone in another timezone. Status groups every session into Working / Waiting / Errored / Available / Locked buckets, showing only occupied buckets — useful when you want to see all active sessions at a glance. In each mode each group shows three sessions and offers the rest, and
+right on a phone in another timezone. Status groups every session into Working / Waiting / Errored / Available buckets, showing only occupied buckets — useful when you want to see all active sessions at a glance. In each mode each group shows three sessions and offers the rest, and
 any group can be collapsed by its heading. Timestamps show only what distinguishes them — a clock for
 today, a day for this year. Hovering a row states all three of its facts at once, in any grouping
 mode: `[{workspace}]: {session title} - {date & time}`, so the project a row came from, a title too long

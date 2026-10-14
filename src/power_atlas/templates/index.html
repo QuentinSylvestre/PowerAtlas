@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 {% block content %}
 <div class="topbar">
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
@@ -2084,10 +2084,9 @@ function dashOvEventNode(ev){
   }
   return null;
 }
-// Open a tile's session, as clicking its rail row would (D14). Locked tiles
-// are inert like locked rail rows (D20).
+// Open a tile's session, as clicking its rail row would (D14).
 function dashOvOpenTile(tile){
-  if (!tile || !tile.id || tile.availability === 'locked') return;
+  if (!tile || !tile.id) return;
   openSessionTranscript({sid: String(tile.id), provider: String(tile.provider || ''), cwd: String(tile.cwd || '')},
     tile, {cwd: tile.cwd, name: tile.name});
 }
@@ -2103,15 +2102,11 @@ function dashOvTileNode(tile, now){
   el._dashOvTile = tile;
   var key = null;
   try { key = JSON.stringify(tile); } catch (e) { key = null; }
-  var locked = tile.availability === 'locked';
   var t = Date.parse(String(tile.last_activity || tile.updated_at || ''));
   var quiet = isFinite(t) ? Math.max(0, now - t) : 0;
   var idle = isFinite(t) && quiet > DASH_OV_IDLE_MS;
-  el.className = 'dash-ov-tile' + (idle ? ' idle' : '') + (locked ? ' is-locked' : '');
-  el.disabled = locked;
-  if (locked) el.setAttribute('aria-disabled', 'true');
-  else el.setAttribute('aria-disabled', 'false');
-  el.title = locked ? 'This session is open elsewhere right now.' : '';
+  el.className = 'dash-ov-tile' + (idle ? ' idle' : '');
+  el.title = '';
   var ageText = idle ? dashOvIdleText(quiet) : dashOvAgo(tile.last_activity || tile.updated_at);
   // The age depends on the clock, not the data: it is updated on every
   // render; the rest is rebuilt only when the tile's data changed.
@@ -3124,10 +3119,9 @@ function dashConnect(onReady){
     // (_dashSteerPending)` branch below), and even a later successful
     // reconnect can't fix it either, since dashReconnectOnReady() only
     // resubscribes `if (_dashAttachedSid)`, which is still null here. Two
-    // OTHER composer-disabled-with-a-note states legitimately must survive a
-    // drop untouched -- dashMaybeAttach()'s 'locked' ("open elsewhere") and
-    // agent_died's "process ended" -- both have _dashLoadingSid === null, so
-    // gating on it here leaves them alone.
+    // OTHER composer-disabled-with-a-note state that legitimately must survive a
+    // drop untouched -- agent_died's "process ended" has _dashLoadingSid === null, so
+    // gating on it here leaves it alone.
     _dashEagerLoadPending = false; // cleared before _dashWasLazyAttaching capture (plan Step 1 requirement)
     var _dashWasLazyAttaching = _dashLoadingSid !== null;
     _dashLoadingSid = null;
@@ -3908,13 +3902,6 @@ function dashMaybeAttach(target, sid){
     .then(function(data){
       if (_viewingSid !== sid) return; // superseded by a later click
       var state = data.availability;
-      if (state === 'locked') {
-        dashComposerEl.hidden = false;
-        dashPromptInput.disabled = true;
-        dashSendBtn.disabled = true;
-        dashSetComposerNote('This session is open elsewhere right now, so it can’t be prompted from here.');
-        return;
-      }
       dashComposerEl.hidden = false;
       dashPromptInput.disabled = false;
       dashSetComposerNote('');
@@ -6022,8 +6009,8 @@ function dashHandle(frame){
     sidRevealed = false;
     renderSidLabel();
     // Left visible-and-disabled, not hidden -- a prompt already typed here is
-    // worth keeping on screen with an explanation, mirroring the 'locked'
-    // state dashMaybeAttach() above already renders the same way.
+    // worth keeping on screen with an explanation, mirroring agent_died's
+    // "process ended" state that dashMaybeAttach() also renders the same way.
     dashPromptInput.disabled = true;
     dashSendBtn.disabled = true;
     dashSetComposerNote("This session's agent process ended.");
@@ -6951,7 +6938,6 @@ var dashRailSettingsMenu = document.getElementById('dashRailSettingsMenu');
 var DASH_RAIL_AVAILABILITY = Object.create(null);
 DASH_RAIL_AVAILABILITY.held = 'held';
 DASH_RAIL_AVAILABILITY.available = 'available';
-DASH_RAIL_AVAILABILITY.locked = 'locked';
 var DASH_RAIL_STATUS = Object.create(null);
 DASH_RAIL_STATUS.working = 'working';
 DASH_RAIL_STATUS.waiting = 'waiting';
@@ -6965,17 +6951,15 @@ DASH_STATUS_LABEL.idle = 'idle';
 DASH_STATUS_LABEL.unread = 'idle, unread';
 function dashRailAvailability(value){ return DASH_RAIL_AVAILABILITY[value] || 'available'; }
 function dashRailRowStatus(value){ return DASH_RAIL_STATUS[value] || 'working'; }
-var DASH_STATUS_BUCKET_ORDER = ['working', 'waiting', 'errored', 'available', 'locked'];
+var DASH_STATUS_BUCKET_ORDER = ['working', 'waiting', 'errored', 'available'];
 var DASH_STATUS_BUCKET_LABEL = Object.create(null);
 DASH_STATUS_BUCKET_LABEL.working = 'Working';
 DASH_STATUS_BUCKET_LABEL.waiting = 'Waiting';
 DASH_STATUS_BUCKET_LABEL.errored = 'Errored';
 DASH_STATUS_BUCKET_LABEL.available = 'Available';
-DASH_STATUS_BUCKET_LABEL.locked = 'Locked elsewhere';
 function dashStatusBucketKey(session){
   var avail = dashRailAvailability(session.availability);
   if (avail === 'held') return dashRailRowStatus(session.status);
-  if (avail === 'locked') return 'locked';
   return 'available';
 }
 
@@ -7593,14 +7577,9 @@ function dashRailRowNode(session, flat, workspace, labelled){
   // now carries a color instead (see dashRailGroupNode), from its tags --
   // a workspace-level fact with no per-session equivalent to collide with.
   if (_viewingSid === session.id) row.classList.add('viewing');
-  if (state === 'locked') {
-    row.disabled = true;
-    row.title = 'This session is open elsewhere right now.';
-  } else {
-    var note = dashRailRowHoverText(session, workspace);
-    if (flat && session.exists === false) note += ' — folder missing, so opening this will usually fail';
-    row.title = note;
-  }
+  var note = dashRailRowHoverText(session, workspace);
+  if (flat && session.exists === false) note += ' — folder missing, so opening this will usually fail';
+  row.title = note;
 
   var dotClass = dashRailDotClass(session);
   if (dotClass) {
@@ -7645,7 +7624,6 @@ function dashRailRowNode(session, flat, workspace, labelled){
   if (flat && session.exists === false) row.classList.add('acp-rail-row-gone');
 
   row.addEventListener('click', function(){
-    if (state === 'locked') return;
     // Clicking the open row again returns to the Overview once its
     // transcript has loaded; while it is loading or failed, the click
     // reloads it, as before (D20). 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
@@ -7660,11 +7638,8 @@ function dashRailRowNode(session, flat, workspace, labelled){
 
   var actions = document.createElement('div');
   actions.className = 'acp-rail-menu-wrap acp-rail-menu-wrap-ghost';
-  // resume_locked (Codex rows only): the thread's writer lock is held by a running Codex, which refuses
-  // `codex resume`. Only the Resume button goes; the row, its transcript and its bucket are unchanged.
-  // 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
-  if (state !== 'locked' && !session.resume_locked && (session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3' ||
-      session.provider === 'claude-code' || session.provider === 'kiro-ide' || session.provider === 'codex')) {
+  if (session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3' ||
+      session.provider === 'claude-code' || session.provider === 'kiro-ide' || session.provider === 'codex') {
     var resumeBtn = document.createElement('button');
     resumeBtn.type = 'button';
     resumeBtn.className = 'acp-rail-ghost-btn acp-rail-ghost-primary';
@@ -7727,14 +7702,11 @@ function dashRailRowNode(session, flat, workspace, labelled){
     delLabel.textContent = 'Delete session';
     delItem.appendChild(delLabel);
     // A hint, not the gate -- `state` is read at fetch time and can be
-    // stale by the time it's clicked; the server re-checks held/locked on
+    // stale by the time it's clicked; the server re-checks held on
     // its own authority and refuses on its own terms either way.
     if (state === 'held') {
       delItem.disabled = true;
       delItem.title = 'PowerAtlas has this session open. Close it in the transcript panel first.';
-    } else if (state === 'locked') {
-      delItem.disabled = true;
-      delItem.title = 'Another process is using this session.';
     }
     delItem.addEventListener('click', function(e){
       e.stopPropagation();
@@ -8444,7 +8416,7 @@ function dashDeleteWorkspace(group){
         deleted.forEach(dashRailForgetSession);
         if (deleted.length) dashRenderRail();
         var msg = 'Deleted ' + deleted.length + ' session' + (deleted.length !== 1 ? 's' : '') + '.';
-        if (failed.length) msg += ' ' + failed.length + ' could not be deleted (held or locked).';
+        if (failed.length) msg += ' ' + failed.length + ' could not be deleted (held by another process).';
         if (data.folder_deleted) msg += ' Folder removed from disk.';
         else if (data.folder_error && data.folder_error !== 'folder_already_gone') msg += ' Folder: ' + data.folder_error;
         var level = failed.length && !deleted.length ? 'error' : 'success';
@@ -8938,13 +8910,6 @@ function dashRailRefreshStates(incoming){
     }
     if (!!s.live !== !!fresh.live) {
       s.live = fresh.live;
-      changed = true;
-    }
-    // A Codex row whose thread's writer lock was taken or released since the last poll: the
-    // Resume button follows it, so it must count as a change or the button stays stale.
-    // 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
-    if (!!s.resume_locked !== !!fresh.resume_locked) {
-      s.resume_locked = fresh.resume_locked;
       changed = true;
     }
     if (dashRailTitleText(s) !== dashRailTitleText(fresh)) {

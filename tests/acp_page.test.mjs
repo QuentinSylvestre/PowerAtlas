@@ -1,4 +1,4 @@
-// Behavioural coverage for the browser-side code this repo has no other way to
+﻿// Behavioural coverage for the browser-side code this repo has no other way to
 // test: src/power_atlas/templates/acp.html, the remote-access panel in
 // templates/index.html, and the two rules in static/style.css that decide what
 // the /acp topbar shows whom.
@@ -2933,18 +2933,17 @@ check("a workspace's own show-more pages that workspace alone", async (tpl) => {
 });
 
 check("the live dot is drawn for a held session and for nothing else", async (tpl) => {
-  const store = fakeStore({ workspaces: 1, sessions: 3 });
+  const store = fakeStore({ workspaces: 1, sessions: 2 });
   store[0].sessions[0].availability = "available";
   store[0].sessions[1].availability = "held";
   store[0].sessions[1].status = "waiting";
-  store[0].sessions[2].availability = "locked";
   const page = await railed(tpl, { store });
   const rows = page.railRows();
 
   assertEqual(rows.map((r) => r.dataset.availability).join(","),
-              "available,held,locked",
-              "the three states did not survive the trip to the row");
-  for (const [i, want] of [[0, "available"], [1, "held"], [2, "locked"]]) {
+              "available,held",
+              "the two states did not survive the trip to the row");
+  for (const [i, want] of [[0, "available"], [1, "held"]]) {
     assert(String(rows[i].className).includes(`acp-rail-row-${want}`),
            `row ${i} carries no ${want} class: ${rows[i].className}`);
   }
@@ -2955,9 +2954,6 @@ check("the live dot is drawn for a held session and for nothing else", async (tp
   assert(!rows[0].querySelector(".session-status"),
          "an available session was given a live dot, which claims this ACP is " +
          "driving a session nothing here holds");
-  assert(!rows[2].querySelector(".session-status"),
-         "a locked session was given a live dot, which claims this ACP is " +
-         "driving a session another process has taken");
 
   const dot = rows[1].querySelector(".session-status");
   assert(dot, "the held session has no live dot, so nothing on the row says " +
@@ -3022,47 +3018,6 @@ check("a state or a status off the wire is narrowed before it reaches an attribu
                 `${JSON.stringify(sent)} left the dot without a real ` +
                 "accessible name, and it carries no text of its own");
   }
-});
-
-check("a locked row says why it cannot be opened, not only that it cannot", async (tpl) => {
-  const store = fakeStore({ workspaces: 1, sessions: 2 });
-  store[0].sessions[1].availability = "locked";
-  const page = await railed(tpl, { store });
-  const rows = page.railRows();
-
-  // The reason used to live on the availability dot, which a locked row no
-  // longer has. Greying is a colour, and a colour is not an answer to "why can
-  // I not open this one?" — without this the row reads as broken, not as taken.
-  assert(/another process/i.test(String(rows[1].title)),
-         `the locked row does not say what has it: ${JSON.stringify(rows[1].title)}`);
-  // `aria-label` replaces the accessible name outright, so the session's own
-  // title has to survive into it or the row announces its refusal and never
-  // which session is refusing.
-  const label = String(rows[1].getAttribute("aria-label"));
-  assert(/another process/i.test(label),
-         `a screen reader is told nothing about the refusal: ${label}`);
-  assert(label.includes(store[0].sessions[1].title),
-         `the refusal replaced the row's name instead of joining it: ${label}`);
-  assertEqual(rows[0].getAttribute("aria-label"), null,
-              "an available row was given a refusal label it has no reason for");
-});
-
-check("a locked row is greyed off and cannot be selected", async (tpl) => {
-  const store = fakeStore({ workspaces: 1, sessions: 3 });
-  store[0].sessions[1].availability = "locked";
-  const page = await railed(tpl, { store });
-  const rows = page.railRows();
-
-  assertEqual(rows[1].disabled, true,
-              "a session held by a live foreign process was offered as clickable; " +
-              "loading it is refused, so the row is a dead end with no explanation");
-  assertEqual(rows[0].disabled, false,
-              "positive control: an available session must stay selectable");
-  rows[1].dispatch("click");
-  assertEqual(page.sentOf("subscribe").length, 0,
-              "clicking a locked row still tried to open the session");
-  assertEqual(page.el("acpSid").textContent, "",
-              "the page adopted a session it cannot load");
 });
 
 check("selecting an available row opens that session", async (tpl) => {
@@ -4650,7 +4605,7 @@ check("a delete the server never answered says so and keeps the row", async (tpl
 });
 
 check("delete is off for a session the server would refuse", async (tpl) => {
-  for (const [availability, why] of [["held", /close/i], ["locked", /another process/i]]) {
+  for (const [availability, why] of [["held", /close/i]]) {
     const page = await railedOne(tpl, { availability });
     page.railMenuButtons()[0].dispatch("click");
     const item = page.one("acpRailGroups", ".acp-rail-menu-item");
@@ -7291,8 +7246,6 @@ function statusStore() {
         availability: "held",      status: "errored" },
       { id: "s-available", title: "available session", updated_at: "2026-08-01T07:00:00.000000000Z",
         availability: "available", status: "" },
-      { id: "s-locked",    title: "locked session",    updated_at: "2026-08-01T06:00:00.000000000Z",
-        availability: "locked",    status: "" },
     ],
   }];
 }
@@ -7335,7 +7288,7 @@ check("renderRailStatus groups sessions into correct buckets in priority order",
     const page = await railed(tpl, {
       store: statusStore(), stored: { pa_acp_group: "status" } });
     const headings = page.railHeadings();
-    // Working > Waiting > Errored > Available > Locked — order is what we are testing.
+    // Working > Waiting > Errored > Available — order is what we are testing.
     assert(headings.indexOf("Working")   < headings.indexOf("Waiting"),
            "Working bucket should appear before Waiting");
     assert(headings.indexOf("Waiting")   < headings.indexOf("Errored"),
@@ -7344,23 +7297,21 @@ check("renderRailStatus groups sessions into correct buckets in priority order",
            "Errored bucket should appear before Available");
     assert(headings.indexOf("Waiting")   < headings.indexOf("Available"),
            "Waiting bucket should appear before Available");
-    assert(headings.indexOf("Available") < headings.indexOf("Locked"),
-           "Available bucket should appear before Locked");
-    // All five occupied buckets rendered.
+    // All four occupied buckets rendered; Locked is absent.
     assert(headings.includes("Working"),   "Working bucket absent");
     assert(headings.includes("Waiting"),   "Waiting bucket absent");
     assert(headings.includes("Errored"),   "Errored bucket absent");
     assert(headings.includes("Available"), "Available bucket absent");
-    assert(headings.includes("Locked"),    "Locked bucket absent");
+    assert(!headings.includes("Locked"),   "Locked bucket should not exist");
     // Sessions under each group: each bucket has 1 session in the fixture.
-    assertEqual(page.railRows().length, 5,
+    assertEqual(page.railRows().length, 4,
                 "wrong total number of session rows under status mode");
   });
 
 check("statusBucketKey maps availability/status pairs to correct bucket keys", async (tpl) => {
   // Load the page so the script is evaluated and statusBucketKey is in scope.
   // We verify by switching to status mode and checking the DOM groupings.
-  // Held+working -> Working bucket; available -> Available; locked -> Locked.
+  // Held+working -> Working bucket; available -> Available.
   const store = [{
     cwd: "C:\\work\\test", name: "test", exists: true,
     sessions: [
@@ -7368,8 +7319,6 @@ check("statusBucketKey maps availability/status pairs to correct bucket keys", a
         availability: "held",      status: "working" },
       { id: "av",  title: "av",  updated_at: "2026-08-01T09:00:00.000000000Z",
         availability: "available", status: "" },
-      { id: "lk",  title: "lk",  updated_at: "2026-08-01T08:00:00.000000000Z",
-        availability: "locked",    status: "" },
     ],
   }];
   const page = await railed(tpl, { store });
@@ -7379,7 +7328,7 @@ check("statusBucketKey maps availability/status pairs to correct bucket keys", a
   const headings = page.railHeadings();
   assert(headings.includes("Working"),   "held+working should land in Working bucket");
   assert(headings.includes("Available"), "available should land in Available bucket");
-  assert(headings.includes("Locked"),    "locked should land in Locked bucket");
+  assert(!headings.includes("Locked"),   "Locked bucket should not exist");
   assert(!headings.includes("Errored"),  "Errored bucket should be absent (no errored sessions)");
   assert(!headings.includes("Waiting"),  "Waiting bucket should be absent (no waiting sessions)");
 });
@@ -7440,9 +7389,9 @@ check("railSummary() shows session count not workspace count under status mode",
     const page = await railed(tpl, {
       store: statusStore(), stored: { pa_acp_group: "status" } });
     const summaryText = page.el("acpRailStatus").textContent;
-    // statusStore() has 5 sessions total.
-    assert(summaryText.includes("5 session"),
-           `railSummary under status mode should say "5 sessions loaded", got: ${summaryText}`);
+    // statusStore() has 4 sessions total.
+    assert(summaryText.includes("4 session"),
+           `railSummary under status mode should say "4 sessions loaded", got: ${summaryText}`);
     assert(!summaryText.includes("workspaces"),
            `railSummary under status mode should not mention "workspaces", got: ${summaryText}`);
   });
@@ -19873,24 +19822,23 @@ check("dashboard overview live: markup in a title, event text or tool name stays
   assertEqual(tile.querySelectorAll(".dash-ov-ev").length, 3, "an unknown event kind is not drawn");
 });
 
-check("dashboard overview live: clicking a tile opens its session from a descriptor; a locked tile is inert (D14, D20)", () => {
+check("dashboard overview live: clicking a tile opens its session from a descriptor (D14, D20)", () => {
   const p = loadDashPicker();
   ovLoadRailHelpers(p);
   const opened = [];
   p.sandbox.openSessionTranscript = (target, session, workspace) => opened.push({ target, session, workspace });
   p.sandbox.dashOvRenderLive([ovTile(), ovTile({ id: "sess_22222222-2222-2222-2222-222222222222", availability: "locked" })]);
-  const [open, locked] = ovTiles(p);
+  const [open, wasLocked] = ovTiles(p);
   open.dispatch("click");
   assertEqual(opened.length, 1);
   assertEqual(JSON.stringify(opened[0].target),
     JSON.stringify({ sid: "sess_11111111-1111-1111-1111-111111111111", provider: "kiro-cli-v3", cwd: "C:\\ws\\proj" }));
   assertEqual(opened[0].session.title, "Fix the rail");
   assertEqual(JSON.stringify(opened[0].workspace), JSON.stringify({ cwd: "C:\\ws\\proj", name: "proj" }));
-  assertEqual(locked.disabled, true);
-  assertEqual(locked.getAttribute("aria-disabled"), "true");
-  assertEqual(locked.title, "This session is open elsewhere right now.");
-  locked.dispatch("click");
-  assertEqual(opened.length, 1, "a locked tile must not open");
+  // A tile with availability="locked" is now fully clickable — no special disabled state.
+  assertEqual(wasLocked.disabled, false);
+  wasLocked.dispatch("click");
+  assertEqual(opened.length, 2, "a previously-locked tile now opens its session");
 });
 
 check("dashboard overview live: the filter is stored, sent and restored", async () => {
@@ -21458,99 +21406,6 @@ check("dashboard rail: a Codex row has a Resume button, kiro-ide keeps its own t
   }
 });
 
-// 261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3: a Codex row
-// whose thread's writer lock is held (`resume_locked`) loses its Resume button and
-// nothing else.
-check("dashboard rail: a Codex row with resume_locked has no Resume button but stays an enabled, clickable row", () => {
-  const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
-  const resumeBtns = (row) => row.descendants()
-    .filter((n) => String(n.className).split(/\s+/).includes("acp-rail-ghost-primary"));
-  const id = "0199c8f2-7a3b-7c41-9e5d-3b8a1f6e2d40";
-  const opened = [];
-  const resumed = [];
-  const { box } = runDashSentinel(slice, true, {
-    openSessionTranscript: (row, session) => opened.push(session.id),
-    resumeSession: (b) => resumed.push(b),
-  });
-  const held = box.dashRailRowNode({ id, provider: "codex", availability: "available", resume_locked: true }, true, null);
-  const free = box.dashRailRowNode({ id, provider: "codex", availability: "available" }, true, null);
-  assertEqual(resumeBtns(held).length, 0, "a lock-held Codex row must not offer Resume");
-  assertEqual(resumeBtns(free).length, 1, "a Codex row without the field keeps its Resume button");
-  const rowOf = (wrap) => wrap.querySelector(".acp-rail-row");
-  assertEqual(rowOf(held).disabled, rowOf(free).disabled, "the held row's disabled state is the free row's");
-  assert(!rowOf(held).disabled, "the held row stays enabled");
-  assertEqual(rowOf(held).className, rowOf(free).className, "no state class change for a lock-held row");
-  assert(String(rowOf(held).className).includes("acp-rail-row-available"), "it is still an available row");
-  assertEqual(rowOf(held).title, rowOf(free).title, "the row's own hover text is unchanged");
-  rowOf(held).dispatch("click");
-  assertEqual(opened.length, 1, "clicking the held row still opens its transcript");
-  assertEqual(resumed.length, 0, "and never resumes");
-  // The pin button and the row menu are untouched.
-  assertEqual(held.descendants().filter((n) => String(n.className).includes("acp-rail-pin-btn")).length, 1);
-  assertEqual(hasText(held, "Copy session id"), true, "the row menu is intact");
-});
-
-check("dashboard rail: resume_locked changes no status bucket and no other provider's Resume button", () => {
-  const slice = dashSentinelSlice("function dashRailRowNode", "// ---- group/day/status headers");
-  const resumeCount = (row) => row.descendants()
-    .filter((n) => String(n.className).split(/\s+/).includes("acp-rail-ghost-primary")).length;
-  const { box } = runDashSentinel(slice, true);
-  // Another provider never receives the field from the server, but a stray one is read the same way.
-  for (const provider of ["claude-code", "kiro-cli-v3", "kiro-ide", "codex"]) {
-    const row = box.dashRailRowNode({ id: "s1", provider, availability: "available", resume_locked: true }, true, null);
-    assertEqual(resumeCount(row), 0, `${provider} with resume_locked loses only its Resume button`);
-  }
-  // `false` and `undefined` (the field is omitted when the lock is free) both keep the button.
-  for (const resume_locked of [false, undefined, 0, null]) {
-    const row = box.dashRailRowNode({ id: "s1", provider: "codex", availability: "available", resume_locked }, true, null);
-    assertEqual(resumeCount(row), 1, `resume_locked=${String(resume_locked)} keeps Resume`);
-  }
-  // The status bucket is a function of availability and status alone: build the real
-  // dashStatusBucketKey from index.html and compare rows with and without the field.
-  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
-  const from = src.indexOf("var DASH_RAIL_AVAILABILITY = Object.create(null);");
-  const to = src.indexOf("// ---- fetch + status line", from);
-  assert(from >= 0 && to > from, "the bucket helpers moved in index.html");
-  const bucket = vm.runInNewContext(src.slice(from, to) + "\ndashStatusBucketKey;", {});
-  for (const availability of ["available", "held", "locked", undefined]) {
-    for (const status of ["", "thinking", "waiting", "errored"]) {
-      const without = bucket({ provider: "codex", availability, status });
-      const withField = bucket({ provider: "codex", availability, status, resume_locked: true });
-      assertEqual(withField, without, `bucket for ${availability}/${status}`);
-    }
-  }
-  assertEqual(bucket({ provider: "codex", availability: "available", resume_locked: true }), "available");
-  // The server never sends availability "locked" for a held Codex thread (it sends the field
-  // instead); a source check that dashRailRowNode reads the field only in the Resume condition.
-  const rowFn = src.slice(src.indexOf("function dashRailRowNode"), src.indexOf("// ---- group/day/status headers"));
-  assertEqual((rowFn.match(/resume_locked/g) || []).length, 2, "resume_locked is read in one place (plus its comment)");
-  assert(/!session\.resume_locked\s*&&/.test(rowFn), "the Resume condition gates on !session.resume_locked");
-  assert(!/disabled\s*=\s*[^;]*resume_locked|resume_locked[^;\n]*disabled/.test(rowFn), "resume_locked must not disable the row");
-});
-
-check("dashboard rail: the 60 s refresh picks up a changed resume_locked, in both directions, and nothing else changes", () => {
-  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
-  const from = src.indexOf("function dashRailIndex(){");
-  const to = src.indexOf("function dashRailRefresh(){", from);
-  assert(from >= 0 && to > from, "the refresh helpers moved in index.html");
-  const stale = { id: "c1", provider: "codex", availability: "available", status: "", live: false, title: "t" };
-  const box = {
-    dashRailGroups: [{ sessions: [stale] }], dashRailFlat: [], dashRailPinned: [],
-    dashRailAvailability: (v) => v || "available",
-    dashRailRowStatus: (v) => v || "working",
-    dashRailTitleText: (s) => s.title,
-  };
-  vm.createContext(box);
-  vm.runInContext(src.slice(from, to), box);
-  const fresh = (extra) => ({ sessions: [{ id: "c1", provider: "codex", availability: "available", status: "", live: false, title: "t", ...extra }] });
-  assertEqual(box.dashRailRefreshStates(fresh({})), false, "an identical row is no change");
-  assertEqual(box.dashRailRefreshStates(fresh({ resume_locked: true })), true, "a lock taken is a change");
-  assertEqual(stale.resume_locked, true, "and the stored row follows it");
-  assertEqual(box.dashRailRefreshStates(fresh({ resume_locked: true })), false, "the same lock again is no change");
-  assertEqual(box.dashRailRefreshStates(fresh({})), true, "a lock released (the field omitted) is a change");
-  assertEqual(!!stale.resume_locked, false, "and the stored row follows it back");
-  assertEqual(box.dashRailRefreshStates(fresh({ resume_locked: false })), false, "false and omitted are the same state");
-});
 
 // A session or workspace that appears after the page loaded (a terminal `/clear` makes a new session
 // id) was invisible until a reload, because the 60 s refresh only updated rows the rail already held.
@@ -24368,12 +24223,11 @@ check("dashboard rail: Date buckets run newest day first whatever the input orde
 check("dashboard rail: Status buckets keep the fixed order, and Project buckets follow each folder's newest session", () => {
   const { box } = dashGroupingBox();
   const byStatus = renderLevels(box, [
-    bucketRow("l", { availability: "locked" }),
     bucketRow("a", { availability: "available" }),
     bucketRow("w", { availability: "held", status: "waiting" }),
     bucketRow("k", { availability: "held", status: "working" }),
   ], ["status"]);
-  assertEqual(dataHeads(byStatus).join(","), "/status:working,/status:waiting,/status:available,/status:locked");
+  assertEqual(dataHeads(byStatus).join(","), "/status:working,/status:waiting,/status:available");
   const byProject = renderLevels(box, [
     bucketRow("1", { cwd: "/w/b", name: "b" }), bucketRow("2", { cwd: "/w/a", name: "a" }), bucketRow("3", { cwd: "/w/b", name: "b" }),
   ], ["project"]);
