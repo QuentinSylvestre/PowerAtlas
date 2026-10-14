@@ -255,18 +255,18 @@ when no kiro-cli process is in the snapshot.
    `test_web.py`; it does not exist.
 
 **Exit criteria**:
-- [ ] `Snapshot.any_live_process(providers)` method present in `presence.py`; returns `True`
+- [x] `Snapshot.any_live_process(providers)` method present in `presence.py`; returns `True`
   when `_live_cwds` contains a kiro provider entry, `False` otherwise (including psutil
   unavailable).
-- [ ] `_acp_availability` calls `presence.get_snapshot()` once per invocation; when
+- [x] `_acp_availability` calls `presence.get_snapshot()` once per invocation; when
   `any_live_process` returns `False`, all non-held `sess_`-prefixed ids return `"available"`
   without calling `_lock_holder_v3`.
-- [ ] When `any_live_process` returns `True`, existing `_lock_holder_v3` path is unchanged.
-- [ ] 5 existing `TestAcpAvailabilityV3` tests still pass (with presence mock added to
+- [x] When `any_live_process` returns `True`, existing `_lock_holder_v3` path is unchanged.
+- [x] 5 existing `TestAcpAvailabilityV3` tests still pass (with presence mock added to
   the 2 currently-locked-path tests: `test_a_held_v3_session_is_reported_locked` and
   `test_workspace_hash_is_threaded_to_lock_holder_v3`).
-- [ ] 3 new tests in `TestAcpAvailabilityV3` pass (no-kiro, kiro-running, kiro+acp-None).
-- [ ] Full test suite passes: `pytest tests/test_web.py`.
+- [x] 3 new tests in `TestAcpAvailabilityV3` pass (no-kiro, kiro-running, kiro+acp-None).
+- [x] Full test suite passes: `pytest tests/test_web.py`.
 - [ ] `memory/MEMORY.md` decision entry "v3 session liveness uses session.json status field"
   updated with an Update record noting Phase 1 resolves the crash-disambiguation residual.
 
@@ -490,7 +490,7 @@ wire `wsFilterDot` and "Clear filters" to the provider filter state.
 ```powershell
 # From workspace root
 .venv-PowerAtlas\Scripts\python -m pytest tests/test_web.py -k "TestAcpAvailability" -v
-# Expected: all existing 4 tests + 2 new tests pass
+# Expected: 8 tests pass (5 existing + 3 new)
 ```
 
 **Change 2 (automated):**
@@ -534,13 +534,30 @@ node tests/acp_page.test.mjs
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Process-presence short-circuit | Not started | |
+| 1 | Process-presence short-circuit | Complete | code: b2d8b52 |
 | 2 | Provider filter migration | Not started | |
 
 ---
 
 ## 9) Implementation Divergences from Plan
-<Reserved — filled during implementation>
+
+### Phase 1 (2026-10-14, code: b2d8b52)
+
+- **H2 fix (additional tests)**: Review found 3 more tests outside `TestAcpAvailabilityV3`
+  that call `_acp_availability` with expected `"locked"` results without mocking
+  `presence.get_snapshot` (`test_locked_session_reports_locked_with_no_status`,
+  `test_availability_is_computed_only_for_returned_rows`,
+  `test_the_supervisor_snapshot_happens_on_the_loop`). All 3 patched in the same commit.
+- **H1 fix (raising-mock)**: `test_acp_availability_no_kiro_process_unlocks_in_progress`
+  initially used a raising mock that was swallowed by `except Exception` in
+  `_acp_availability`; replaced with a counter mock (`lock_calls = []` + `assert
+  lock_calls == []`).
+- **Cross-scope divergence (Phase 2 impact)**: `TestTheDashboardHasNoAgentPageLink` in
+  `tests/test_web.py` (Phase 1 scope) used `.search-area` as a topbar end-marker. Phase 2's
+  deletion of that div broke the test; the orchestrator updated the marker to
+  `<main class="panels-container"` in the same commit.
+
+### Phase 2 (2026-10-14, code: pending)
 
 ## Follow-up Work (Deferred)
 
@@ -562,7 +579,20 @@ Full-effort review (4 personas: Architect, Senior engineer, Domain expert JS, Re
 | 2 | Medium | `_updateProviderFilterDot` parallel helper leaves `wsFilterBtn.has-filter` stale for provider-only active state; `_updateFilterUI` call sites not all covered. | Fixed — Phase 2 now extends `_updateFilterUI` directly with provider check; all 4 call sites enumerated; no separate helper needed. |
 | 3 | Medium | 4 `_updateFilterUI` call sites not enumerated in Phase 2 details. | Fixed — all 4 call sites listed: `initWorkspaceFilters`, `setTagFilter`, `setTimeFilter`, `clearWorkspaceFilters`. |
 | 4 | Medium | R1 risk table described psutil-unavailable behavior as "consistent with current behavior" — incorrect; it is a deliberate behavioral change. | Fixed — Risk table row reworded to state it is an intentional change and why it is acceptable. |
-| 5 | Medium | vm sandbox globals for new `acp_page.test.mjs` tests not enumerated (AGENTS.md memory pattern). | Fixed — Phase 2 now lists required globals and elements for each test's vm sandbox. |
+| 5 | Medium | vm sandbox globals for new `acp_page.test.mjs` tests not enumerated (AGENTS.md memory p
+
+### 2026-10-14 — Phase 1 Implementation Review (Full effort, 4 personas)
+
+4 personas: Architect, Senior engineer+Reliability (combined). 1 review cycle, 1 auto-fix cycle.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Raising mock in `test_no_kiro_process` is swallowed by `except Exception`; mutation passes silently. | Fixed — replaced with counter mock (`lock_calls = []`; assert empty after call). |
+| 2 | High | 3 additional tests assert `"locked"` without presence mock: `test_locked_session_reports_locked_with_no_status`, `test_availability_is_computed_only_for_returned_rows`, `test_the_supervisor_snapshot_happens_on_the_loop`. | Fixed — presence mock added to all 3 tests in b2d8b52. |
+| 3 | High | qvalidate FAIL: Phase 1 exit criteria not ticked (0/6). | Fixed — orchestrator ticked 6/7 exit criteria; criterion 7 (`memory/MEMORY.md`) is doc-table-only pending. |
+| 4 | Medium | §7 Verification expected count said "4 tests + 2 new" — contradicts Phase 1 saying "5 + 3". | Fixed — §7 updated to "8 tests (5 existing + 3 new)". |
+| 5 | Low | `acp_store_dir_v3` fixture in 3 new tests unnecessary (mocks bypass real I/O). | Fixed — removed from all 3 new test signatures. |
+| 6 | Low | `any_live_process` docstring incomplete: only mentioned psutil-unavailable case. | Fixed — added "Also returns False when kiro-cli not in any process's cwd." |attern). | Fixed — Phase 2 now lists required globals and elements for each test's vm sandbox. |
 | 6 | Low | Inaccurate existing test count (4, not 5) and wrong class name reference (`TestLockHolderV3` in `test_web.py`). | Fixed — Current State corrected: 5 tests at line 21660; `_lock_holder_v3` tests are in `test_data_kiro_v3.py`. |
 | 7 | Low | `memory/MEMORY.md` update in Documentation Updates table has no corresponding exit criterion in Phase 1. | Fixed — Phase 1 exit criteria now include a checkbox for the memory entry update. |
 | 8 | Low | Provider icon visual regression (old chips had `<img>` icon; new menu uses color dot) not called out in Phase 2. | Fixed — Phase 2 test section notes the intentional visual change and acceptable `null` color behavior. |
