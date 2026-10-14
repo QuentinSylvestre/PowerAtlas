@@ -363,13 +363,14 @@ def cancel_with_skip(session_id: str, now: float | None = None) -> dict:
     now = time.time() if now is None else now
     row = quota.find_hit(session_id, now)   # outside lock
     key_at = _key_at(row) if row is not None else None
+    auto_schedule_on = load_config().auto_schedule   # read outside lock to avoid stall
     with _lock:
         _load()
         before = len(_state["schedules"])
         _state["schedules"] = [s for s in _state["schedules"] if s["session_id"] != session_id]
         if len(_state["schedules"]) == before:
             return {"ok": False, "error": "Nothing was scheduled for that session"}
-        if key_at is not None and load_config().auto_schedule:
+        if key_at is not None and auto_schedule_on:
             cutoff = now - DISMISS_KEEP_SECONDS
             _state["skipped"] = [
                 s for s in _state["skipped"]
