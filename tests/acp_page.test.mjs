@@ -24881,6 +24881,155 @@ check("dashboard: markPermissionResolved clears the id-less refusal fallback", (
   assertEqual(d.sandbox.reopenQuestionAfterRefusal({ code: "bad_payload" }), false);
 });
 
+// ---- workspace filter menu (provider section, Phase 2 of
+// 261014_STALE_LOCK_AND_PROVIDER_FILTER_MIGRATION) --------------------------
+//
+// Extract the filter-menu region from index.html and run it in a minimal vm
+// sandbox to drive renderWorkspaceFilterMenu() and _updateFilterUI() directly.
+// The El stand-in and HTML_SINK rules from the harness above still apply:
+// any innerHTML access in the extracted code throws immediately.
+
+function loadWsFilter(opts = {}) {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8").replace(/\r\n/g, "\n");
+  // The region starts at _wsFilterOptionRow (the first function used by
+  // renderWorkspaceFilterMenu) and ends at the comment that immediately
+  // follows _updateFilterUI's closing brace.
+  const from = src.indexOf("function _wsFilterOptionRow(");
+  if (from < 0) throw new Error("index.html no longer defines _wsFilterOptionRow");
+  const to = src.indexOf("// The session hover-tooltip", from);
+  if (to < 0) throw new Error("the anchor comment after _updateFilterUI moved in index.html");
+  const region = src.slice(from, to);
+  for (const name of [
+    "_wsFilterOptionRow", "renderWorkspaceFilterMenu",
+    "clearWorkspaceFilters", "_updateFilterUI", "closeWsFilterMenu",
+    "wsFilterMenu", "setTagFilter", "setTimeFilter",
+  ]) {
+    if (!region.includes(name)) {
+      throw new Error(`ws filter region no longer contains ${name}; it has moved`);
+    }
+  }
+
+  // DOM elements the extracted region looks up by id at parse time or runtime.
+  const byId = new Map();
+  const wsFilterMenuEl = new El("div");
+  wsFilterMenuEl.hidden = true;
+  const wsFilterBtnEl = new El("button");
+  const wsFilterDotEl = new El("span");
+  wsFilterDotEl.hidden = true;
+  byId.set("wsFilterMenu", wsFilterMenuEl);
+  byId.set("wsFilterBtn", wsFilterBtnEl);
+  byId.set("wsFilterDot", wsFilterDotEl);
+
+  // Spy counter for dashRailReload calls.
+  const reloads = [];
+
+  const sandbox = {
+    document: {
+      createElement: (tag) => new El(tag),
+      getElementById: (id) => byId.get(id) ?? null,
+      addEventListener: () => {},  // top-level wiring runs at parse time; swallow
+      querySelectorAll: () => [],
+    },
+    // index.html accesses filter state via window.* — mirrors the pattern
+    // in the dashRailRefresh tests (line ~21768).
+    window: {
+      _availableProviders: opts.providers !== undefined ? opts.providers : [
+        { name: "kiro-cli-v3", display: "kiro-cli v3", color: "#7138cc" },
+        { name: "claude-code", display: "Claude Code", color: "#c2590f" },
+      ],
+      _activeProvider:    opts.activeProvider    !== undefined ? opts.activeProvider    : "all",
+      _activeTag:         opts.activeTag         !== undefined ? opts.activeTag         : "",
+      _activeTimeFilter:  opts.activeTimeFilter  !== undefined ? opts.activeTimeFilter  : "",
+      _tagColorData:      opts.tags              !== undefined ? opts.tags              : [],
+    },
+    dashRailReload: () => { reloads.push(1); },
+    // Stubs for functions referenced inside the extracted region but not
+    // reachable from our tests (toggleTagColorsPopover, showToast, fetch).
+    showToast: () => {},
+    confirm: () => false,
+    fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve([]) }),
+    console: { log() {}, warn() {}, error() {} },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(region, sandbox, { filename: "index.html#ws-filter" });
+
+  return { sandbox, byId, reloads };
+}
+
+check("workspace filter menu: Provider section renders at the top when ≥2 providers", () => {
+  const { sandbox, byId } = loadWsFilter();
+  const menu = byId.get("wsFilterMenu");
+  menu.hidden = false;
+  sandbox.renderWorkspaceFilterMenu();
+  const headings = menu.querySelectorAll(".acp-rail-menu-head").map((h) => h.textContent);
+  assertEqual(headings[0], "Provider",
+    "first heading in the menu must be 'Provider' when 2+ providers are available");
+  const items = menu.querySelectorAll(".acp-rail-menu-item");
+  // items[0] is the 'All providers' row
+  const allLabel = items[0].querySelector(".ws-filter-item-label");
+  assertEqual(allLabel ? allLabel.textContent : "", "All providers",
+    "first item inside Provider section must be 'All providers'");
+});
+
+check("workspace filter menu: Provider section absent when fewer than 2 providers", () => {
+  const { sandbox, byId } = loadWsFilter({
+    providers: [{ name: "kiro-cli-v3", display: "kiro-cli v3", color: "#7138cc" }],
+  });
+  const menu = byId.get("wsFilterMenu");
+  menu.hidden = false;
+  sandbox.renderWorkspaceFilterMenu();
+  const headings = menu.querySelectorAll(".acp-rail-menu-head").map((h) => h.textContent);
+  assert(!headings.includes("Provider"),
+    "Provider section must not appear when fewer than 2 providers: " + JSON.stringify(headings));
+});
+
+check("workspace filter menu: clicking a provider option sets _activeProvider and calls dashRailReload", () => {
+  const { sandbox, byId, reloads } = loadWsFilter();
+  const menu = byId.get("wsFilterMenu");
+  menu.hidden = false;
+  sandbox.renderWorkspaceFilterMenu();
+  // item[0] = All providers, item[1] = kiro-cli v3, item[2] = Claude Code
+  const items = menu.querySelectorAll(".acp-rail-menu-item");
+  items[1].dispatch("click");
+  assertEqual(sandbox.window._activeProvider, "kiro-cli-v3",
+    "_activeProvider must be updated to the clicked provider name");
+  assertEqual(reloads.length, 1,
+    "dashRailReload must be called exactly once after a provider option click");
+});
+
+check("workspace filter menu: Clear filters resets _activeProvider to 'all'", () => {
+  const { sandbox, byId, reloads } = loadWsFilter({ activeProvider: "kiro-cli-v3" });
+  const menu = byId.get("wsFilterMenu");
+  menu.hidden = false;
+  sandbox.renderWorkspaceFilterMenu();
+  const clearBtn = menu.querySelectorAll(".ws-filter-clear")[0];
+  assert(clearBtn, "Clear filters button must appear when a provider filter is active");
+  clearBtn.dispatch("click");
+  assertEqual(sandbox.window._activeProvider, "all",
+    "_activeProvider must reset to 'all' after Clear filters is clicked");
+  assertEqual(reloads.length, 1, "dashRailReload should be called once after Clear");
+});
+
+check("workspace filter menu: wsFilterDot shows when only provider filter is active (tag and time unset)", () => {
+  const { sandbox, byId } = loadWsFilter({
+    activeProvider: "kiro-cli-v3",
+    activeTag: "",
+    activeTimeFilter: "",
+  });
+  const dot = byId.get("wsFilterDot");
+  dot.hidden = true;  // confirm it starts hidden
+  sandbox._updateFilterUI();
+  assertEqual(dot.hidden, false,
+    "wsFilterDot must become visible when _activeProvider != 'all'");
+});
+
+check("workspace filter menu: wsFilterDot stays hidden when provider is 'all' (no filters active)", () => {
+  const p = loadWsFilter({ activeProvider: 'all', activeTag: '', activeTimeFilter: '' });
+  p.sandbox._updateFilterUI();
+  const dot = p.sandbox.document.getElementById('wsFilterDot');
+  assertEqual(dot.hidden, true, "dot should be hidden when provider is 'all'");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

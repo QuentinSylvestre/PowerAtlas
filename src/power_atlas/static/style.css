@@ -313,12 +313,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .peek-input { background: none; border: none; color: var(--text); font-size: 12px; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; width: 14ch; outline: none; padding: 0; }
 .peek-input::placeholder { color: var(--text-dim); font-style: italic; }
 
-/* Provider filter row. Chips sit at equal visual weight to a real button
-   rather than a muted tab. The workspace search that used to share this row
-   lives in the Workspaces panel header now (`.ws-search` below). */
-.search-area { display: flex; gap: 8px; align-items: center; padding: 8px 16px; flex-shrink: 0; }
-.search-area[hidden] { display: none; }
-
 /* Cards grid */
 .panels-container { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 /* Widths are custom properties now, not literal min/max-width (panel resize,
@@ -936,24 +930,6 @@ script { display: none; }
 .restart-badge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.6px; color: #fbbf24; border: 1px solid currentColor; border-radius: 10px; padding: 1px 6px; cursor: help; flex-shrink: 0; }
 .btn-sm { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 3px 8px; font-size: 11px; cursor: pointer; }
 .btn-sm:hover { border-color: var(--accent); color: var(--text); }
-
-/* Provider filter (inline with search bar): real buttons carrying equal
-   visual weight to the search box beside them, not muted tabs -- 8px
-   radius rather than the old 12px, and there is
-   no longer a 999px full-pill shape anywhere in this row. */
-.provider-filter { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
-.provider-filter-btn {
-  display: flex; align-items: center; gap: 7px;
-  padding: 7px 14px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--card-bg); color: var(--text-muted); cursor: pointer;
-  font-family: inherit; font-size: 12.5px; font-weight: 600;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-  white-space: nowrap;
-}
-.provider-filter-btn:hover { background: var(--surface-hover); }
-.provider-filter-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-.provider-filter-icon { width: 14px; height: 14px; object-fit: contain; border-radius: 3px; flex-shrink: 0; display: block; }
-.provider-filter-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Provider icon badge on workspace cards */
 .provider-icon-wrapper { display: inline-flex; align-items: center; margin-left: 6px; }
