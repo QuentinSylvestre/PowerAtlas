@@ -1,7 +1,7 @@
 ﻿# Auto-Schedule Resume Mode
 
 > **Date**: 2026-10-13
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Single PA-wide boolean setting that automatically schedules a resume for every session stopped by a quota limit, without requiring the user to click "Schedule" manually. Gear-menu toggle. Integrates with existing "Stopped by a quota limit" section.
 > **Memory relied on**: none
@@ -675,6 +675,26 @@ Diff-only re-review of Phase 3 H1 fix (commit 44da1ea): 1 Low (load_config insid
 | 13 | Low | Implicit UUID validation gate via `cancel()` ok=True not documented | Fixed — docstring note added to `api_quota_cancel` in Phase 3 |
 
 Personas: Architect, Senior engineer, Reliability engineer (escalated H1 from Medium), Security auditor. Deduplication: H1 corroborated by all three code reviewers (kept High per cross-persona severity rule); findings 6 and 3 each corroborated by two personas.
+
+### 2026-10-13 — /qdev Step 9 final holistic review (full effort, 2 personas: Senior + Reliability)
+
+9 findings (0 High, 3 Medium, 6 Low). 8 auto-fixed (6572f77); 1 accepted (R-L2, design parity with dismissed).
+
+| # | Severity | Finding | Persona | Resolution |
+|---|---|---|---|---|
+| M1 | Medium | `schedule(_if_unscheduled=True)` missing skip-list check — race between snapshot and schedule() call could create phantom schedule that tick() fires | Reliability | Fixed — added skip-list check inside guard (6572f77) |
+| M2 | Medium | No test for `schedule(_if_unscheduled=True)` respecting skip record | Reliability | Fixed — added `test_schedule_if_unscheduled_respects_skip_record` (6572f77) |
+| M3 | Medium | `restore()` skip-prune path zero test coverage | Senior | Fixed — added `test_restore_prunes_stale_skip_records` (6572f77) |
+| L1 | Low | `auto_schedule_on` pre-lock comment didn't note both toggle-direction failure cases | Reliability | Fixed — comment updated (6572f77) |
+| L2 | Low | Stale skips not pruned in `_auto_schedule_new()` — bounded by TTL, consistent with dismissed pattern | Reliability | Accepted — design parity; no code change |
+| L3 | Low | Skip round-trip (disk→reload→tick) not end-to-end tested | Senior | Fixed — added `test_skip_round_trips_through_disk_and_blocks_auto_schedule` (6572f77) |
+| L4 | Low | `cancel()` missing docstring note to prefer `cancel_with_skip()` | Senior | Fixed — docstring added (6572f77) |
+| L5 | Low | Duplicate Phase 2/Phase 5 tests, no comment distinguishing them | Senior | Fixed — comments added to Phase 2 variants (6572f77) |
+| L6 | Low | `aria-pressed` not set optimistically in toggle JS — transient screen-reader gap | Senior | Fixed — optimistic set + rollback added (6572f77) |
+
+Diff-only cycle-2 re-review of M1 fix: clean — no new issues. Callers unaffected, `_key_at_val` match correct, guard scope correct.
+
+Step 9b QA (2026-10-13): **PASS** — 10/10 browser checks via standalone Playwright: dashboard signs in, toggle appears in gear menu after "Notify me" with correct label and role=switch, aria-pressed reflects server state on load and updates on click, API stays in sync.
 
 ## Harness Improvement Opportunities
 
