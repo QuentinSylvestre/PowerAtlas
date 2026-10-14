@@ -1,4 +1,4 @@
-# Auto-Schedule Resume Mode
+﻿# Auto-Schedule Resume Mode
 
 > **Date**: 2026-10-13
 > **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
@@ -93,7 +93,7 @@ None. One extra `load_config()` TOML parse per 5 s scheduler tick and one extra 
 
 ### Phase 1: Config field + `resume.py` foundation [QA]
 
-**Goal**: Add `auto_schedule: bool = False` to Config; add `skipped` state to `resume.py` with `_load()`/`_save()`/`reset()` support; add `add_skip()` public function; add `_if_unscheduled` guard to `schedule()` with skip-clear on manual invocation.
+**Goal**: Add `auto_schedule: bool = False` to Config; add `skipped` state to `resume.py` with `_load()`/`_save()`/`reset()` support; add `cancel_with_skip()` (atomic cancel+skip, used by cancel route) and `add_skip()` (test-level use); add `_if_unscheduled` guard to `schedule()` with skip-clear on manual invocation.
 
 **Covers**: SC-3, SC-4 (foundation), SC-5, SC-8, SC-9
 
@@ -137,7 +137,19 @@ body = json.dumps({"version": 1, "schedules": _state["schedules"],
                   indent=1, allow_nan=False)
 ```
 
-*4. In `reset()` — add `skipped=[]`:*
+*4a. In `restore()` — add prune for expired skip entries (called at startup):*
+
+Inside `restore()` after `_load()` is called, add:
+
+```python
+        cutoff = now - DISMISS_KEEP_SECONDS
+        stale_skips = [s for s in _state.get("skipped", []) if s.get("at", 0) <= cutoff]
+        if stale_skips:
+            _state["skipped"] = [s for s in _state["skipped"] if s.get("at", 0) > cutoff]
+            _save()
+```
+
+*4b. In `reset()` — add `skipped=[]`:*
 
 ```python
 def reset() -> None:
@@ -146,15 +158,40 @@ def reset() -> None:
         _runs.clear()
 ```
 
-*5. Add `add_skip()` public function (place near `cancel()` / `dismiss()`):*
+*5. Add `cancel_with_skip()` — the atomic cancel+skip used by the cancel route:*
 
 ```python
 def add_skip(session_id: str, now: float | None = None) -> None:
-    """Record a per-stop skip: _auto_schedule_new() will not re-arm this session for its
-    current stop. The skip persists until the session is stopped again with a different
-    resets_at, or the record expires (DISMISS_KEEP_SECONDS).
+    """Cancel a scheduled resume and atomically record a per-stop skip.
+    The earlier two-step cancel()+add_skip() left a race window where the scheduler
+    could re-arm the session between calls. This function holds _lock throughout.
+    """
+    now = time.time() if now is None else now
+    row = quota.find_hit(session_id, now)   # outside lock
+    key_at = _key_at(row) if row is not None else None
+    with _lock:
+        _load()
+        before = len(_state["schedules"])
+        _state["schedules"] = [s for s in _state["schedules"] if s["session_id"] != session_id]
+        if len(_state["schedules"]) == before:
+            return {"ok": False, "error": "Nothing was scheduled for that session"}
+        if key_at is not None:
+            cutoff = now - DISMISS_KEEP_SECONDS
+            _state["skipped"] = [
+                s for s in _state["skipped"]
+                if s.get("at", 0) > cutoff
+                and not (s["session_id"] == session_id and abs(s.get("key_at", 0) - key_at) < 1.0)
+            ] + [{"session_id": session_id, "key_at": key_at, "at": now}]
+        _save()
+    return {"ok": True}
+```
 
-    Called by api_quota_cancel when auto_schedule is on.
+*6. Keep `add_skip()` for test-level use (place after `cancel_with_skip()`):*
+
+```python
+def add_skip(session_id: str, now: float | None = None) -> None:
+    """Record a per-stop skip outside a cancel. Kept for test-level use only.
+    Production cancel calls cancel_with_skip() to close the race window.
     """
     now = time.time() if now is None else now
     row = quota.find_hit(session_id, now)
@@ -190,7 +227,7 @@ Inside the `with _lock:` block (`resume.py:186`), before the existing `_state["s
         ):
             # Session already scheduled or being watched — auto-schedule must not clobber it.
             # Return a non-error response so the caller does not log a spurious warning.
-            return {"ok": True, "fire_at": None, "persisted": True, "open_terminal": False}
+            return {"ok": True, "fire_at": None, "persisted": False, "open_terminal": False}
         if not _if_unscheduled:
             # Manual schedule: clear any skip record so auto-schedule can re-arm on the next stop.
             _state["skipped"] = [s for s in _state["skipped"] if s["session_id"] != session_id]
@@ -208,6 +245,8 @@ Note: the skip-clear only removes entries by `session_id` (not by `key_at`), so 
 - [ ] `schedule(session_id, _if_unscheduled=True)` when that session is in `_runs`: returns `{"ok": True, "fire_at": None, ...}` without clearing `_runs`.
 - [ ] `schedule(session_id)` (manual, no `_if_unscheduled`) when that session has a skip record: clears the skip record AND creates the new schedule atomically.
 - [ ] `reset()` clears `_state["skipped"]`.
+- [ ] `cancel_with_skip(session_id)` when session has a schedule: removes schedule, records skip, saves atomically — single `_lock` acquisition.
+- [ ] `cancel_with_skip(session_id)` when session has NO schedule: returns `{"ok": False, ...}` without touching `_state["skipped"]`.
 
 ---
 
@@ -241,13 +280,15 @@ def _auto_schedule_new(now: float) -> None:
             return
     except Exception:
         return
-    rows = quota.interrupted(now)       # O(1) from memo cache; no lock needed
+    rows = quota.interrupted(now)       # file-stat-memoized; re-reads only changed files; O(N stat calls) not O(1)
     with _lock:
         _load()
         already_scheduled = {s["session_id"] for s in _state["schedules"]}
         dismissed_keys = {(d["session_id"], d["key_at"]) for d in _state["dismissed"]}
         in_runs = {r["session_id"] for r in _runs}
-        skipped_keys = {(s["session_id"], s["key_at"]) for s in _state["skipped"]}
+        # Age-filter skip entries; comparison uses tolerance (1 s) to match add_skip()
+        _cutoff_s = now - DISMISS_KEEP_SECONDS
+        _skipped_live = [s for s in _state["skipped"] if s.get("at", 0) > _cutoff_s]
     for row in rows:
         if row.get("resets_at") is None:        # kiro-cli: never schedulable
             continue
@@ -261,10 +302,12 @@ def _auto_schedule_new(now: float) -> None:
             continue
         if (sid, key_at) in dismissed_keys:
             continue
-        if (sid, key_at) in skipped_keys:
+        if any(s["session_id"] == sid and abs(s["key_at"] - key_at) < 1.0 for s in _skipped_live):
             continue
         try:
-            schedule(sid, now=now, _if_unscheduled=True)
+            _result = schedule(sid, now=now, _if_unscheduled=True)
+            if not _result.get("ok"):
+                log.debug("auto-schedule skipped %s: %s", sid, _result.get("error"))
         except Exception:
             log.exception("auto-schedule failed for %s", sid)
 ```
@@ -317,6 +360,7 @@ async def toggle_quota_auto_schedule():
     enabled = not bool(config.auto_schedule)
     config.auto_schedule = enabled
     save_config(config)
+    log.info("auto_schedule set to %s", enabled)
     return {"enabled": enabled}
 ```
 
@@ -327,16 +371,19 @@ These routes are **loopback-only** (not added to `_REMOTE_ALLOWED_PATHS`), consi
 ```python
 @app.post("/api/quota/cancel")
 async def api_quota_cancel(request: Request):
-    """Cancel a session's scheduled resume: `{"session_id"}`.
-    When auto-schedule is on, also records a skip so the session is not re-armed.
+    """Cancel a session's scheduled resume and (atomically) record a skip: `{"session_id"}`.
+    Uses cancel_with_skip() to close the race window that existed when cancel() and add_skip()
+    were separate to_thread calls. Note: add_skip() implicit UUID validation via ok=True gate.
     """
     body = await _quota_body(request)
     if body is None:
         return JSONResponse({"ok": False, "error": "bad request"}, 400)
     session_id = body.get("session_id")
-    result = await asyncio.to_thread(resume.cancel, session_id)
-    if result.get("ok") and load_config().auto_schedule:
-        await asyncio.to_thread(resume.add_skip, session_id)
+    try:
+        result = await asyncio.to_thread(resume.cancel_with_skip, session_id)
+    except Exception:
+        log.exception("cancel_with_skip failed for %s", session_id)
+        result = {"ok": False, "error": "Internal error"}
     return result
 ```
 
@@ -351,8 +398,8 @@ async def api_quota_cancel(request: Request):
 - [ ] `POST /api/quota/auto-schedule` toggles and persists: after one POST, `GET` returns `{"enabled": true}`; after a second POST, returns `{"enabled": false}`.
 - [ ] Both routes require `pa_local` cookie + same-origin header (403 otherwise).
 - [ ] Neither route appears in `_REMOTE_ALLOWED_PATHS`.
-- [ ] `POST /api/quota/cancel` with auto-schedule on: calls `resume.add_skip(session_id)` (skip record created in `_state["skipped"]`).
-- [ ] `POST /api/quota/cancel` with auto-schedule off: does NOT call `resume.add_skip()`.
+- [ ] `POST /api/quota/cancel` with auto-schedule on or off: calls `resume.cancel_with_skip(session_id)` atomically (skip record in `_state["skipped"]` only when auto_schedule=True and session found).
+- [ ] `POST /api/quota/cancel` with auto-schedule off: `cancel_with_skip()` still runs (single function always), but skip record is only added when `auto_schedule=True`.
 - [ ] `index()` template context contains `"auto_schedule": bool`.
 
 ---
@@ -363,7 +410,7 @@ async def api_quota_cancel(request: Request):
 
 **Covers**: SC-1
 
-**File scope**: `src/power_atlas/templates/index.html`
+**File scope**: `src/power_atlas/templates/index.html`, `README.md`, `plans/ROADMAP.md`, `AGENTS.md`
 
 **`index.html` change**: In the gear quick-menu, immediately after the "Notify me" toggle row, add:
 
@@ -408,6 +455,10 @@ Note: the exact markup must match the existing "Notify me" row structure for con
 - [ ] Clicking the toggle calls `POST /api/quota/auto-schedule` and updates `aria-pressed` on the button.
 - [ ] Hard reload (`Ctrl+Shift+R`) after toggling retains the new state.
 - [ ] No new CSS rules inline in `acp.html` (this toggle is dashboard-only, not on `/acp`).
+- [ ] `node tests/acp_page.test.mjs` passes (AGENTS.md requires running it when changing a template inline script; run it as regression guard even though it covers `acp.html` not `index.html`).
+- [ ] `README.md` updated: auto-schedule description in quota-stop section; gear-menu list; new bullet near "Notify me".
+- [ ] `plans/ROADMAP.md` updated: all four locations (Timed-prompts summary, Edit-scheduled-message summary, quota-limit auto-schedule detail, Edit-scheduled-message sub-bullets).
+- [ ] `AGENTS.md` "Stopped by a quota limit" Terminology entry updated: Cancel schedule added to controls, gear-menu toggle noted, Settled annotation updated.
 
 ---
 
@@ -417,7 +468,7 @@ Note: the exact markup must match the existing "Notify me" row structure for con
 
 **Covers**: SC-1 through SC-9 (via test assertions)
 
-**File scope**: `tests/test_web.py`
+**File scope**: `tests/test_web.py`, `plans/tests/260701_POWERATLAS.md`
 
 Tests follow the existing `TestResume` fixture pattern (`test_web.py:45823`): `isolated_config` autouse fixture + `_REAL_START_SCHEDULER` pattern for manual tick calls. **Do not use `git add .` — stage only `tests/test_web.py`.**
 
@@ -443,12 +494,17 @@ Tests follow the existing `TestResume` fixture pattern (`test_web.py:45823`): `i
 | `test_toggle_auto_schedule_route` | `POST` twice; assert enabled → disabled | SC-8: toggle persists |
 | `test_auto_schedule_route_requires_auth` | no cookie → 403 | Route security |
 | `test_cancel_route_adds_skip_when_auto_schedule_on` | HTTP-level: cancel with `auto_schedule=True`; assert skip in `_state["skipped"]` | SC-4: route-level |
+| `test_auto_schedule_does_not_re_arm_error_run` | session in `_runs["error"]`, tick with `auto_schedule=True`; assert not rescheduled | SC-3: error state excluded |
+| `test_auto_schedule_does_not_re_arm_no_activity_run` | session in `_runs["no_activity"]`, tick; assert not rescheduled | SC-3: no_activity state excluded |
+| `test_add_skip_for_expired_session_is_noop` | `add_skip()` when `quota.find_hit()` returns None; assert `_state["skipped"]` stays empty | Phase 1 exit criterion 5 |
+| `test_resume_now_when_auto_schedule_off_unchanged` | `auto_schedule=False`, call `resume_now()`; assert normal return, no skip created | SC-9: resume_now path unaffected |
 
 **Exit criteria**:
-- [ ] All 18 new tests pass.
+- [ ] All 22 new tests pass.
 - [ ] `_check_test_names.py` reports no duplicate test names.
 - [ ] Existing `TestResume` tests pass without modification.
 - [ ] `TestQuotaRoutes` passes without modification.
+- [ ] `plans/tests/260701_POWERATLAS.md` section `2.31 Auto-schedule resume mode` added with route descriptions and TestResume probe list; scope comment widened to include `2.31`.
 
 ---
 
@@ -458,7 +514,7 @@ Tests follow the existing `TestResume` fixture pattern (`test_web.py:45823`): `i
 |---|---|---|
 | Auto-schedule clobbers manual schedule | High | `_if_unscheduled=True` guard in `schedule()` checks `_state["schedules"]` + `_runs` under `_lock` before writing (Phase 1) |
 | Auto-schedule clears a watching run | High | Same `_if_unscheduled=True` guard checks `_runs` (any state) (Phase 1) |
-| Cancel-then-re-arm loop | High | Per-stop `skipped` set; `add_skip()` called by cancel route when `auto_schedule=True` (Phases 1 + 3) |
+| Cancel-then-re-arm loop | High | Atomic `cancel_with_skip()` holds `_lock` through both cancel and skip-record steps; no race window (Phases 1 + 3) |
 | Dismiss-after-snapshot race (phantom schedule) | Low | Bounded to ≤10 s; `tick()`'s own dismissed check at `resume.py:~306` drops the phantom silently before firing; next `_auto_schedule_new()` snapshot sees dismissed correctly — no resume attempt ever fires (Phase 2 note in comment) |
 | `_SETTING_TYPES` boolean exclusion | Mitigated | Own route pair at `/api/quota/auto-schedule`, not `/api/save-setting` (Phase 3) |
 | Remote access exposure | Mitigated | New routes NOT added to `_REMOTE_ALLOWED_PATHS`; both quota routes are loopback-only (Phase 3) |
@@ -489,9 +545,10 @@ cd c:\Users\QSylvestre.POLESTAR\Documents\Perso\PowerAtlas
 
 | Document | Update needed | Phase |
 |---|---|---|
-| `README.md` | Add "Auto-schedule resumes" to the Settings/Features list (gear menu settings section) | 4 |
-
-*Pending doc-impact sub-agent findings — will be updated when that agent returns.*
+| `README.md` | (a) Add auto-schedule description to "Stopped by a quota limit" block (after the Schedule sentence; also mention Cancel schedule keeping the row). (b) Add "**Auto-schedule resumes**" to the gear-menu items list (~line 259). (c) Add "**Auto-schedule resumes** (gear icon, off by default)..." bullet near the "Notify me" bullet (~line 271). | 4 |
+| `plans/ROADMAP.md` | (a) Update "Timed prompts" summary (~line 33) to note auto-schedule mode shipped. (b) Update "Edit scheduled message" summary (~line 36): cancel ships, edit remains open. (c) Update "Quota-limit auto-schedule" detail (~line 185): mark shipped, revise "Still open". (d) Update "Edit scheduled message" detail sub-bullets (~lines 187–190): mark cancel shipped, narrow remaining to edit-only. | 4 |
+| `AGENTS.md` | Update "Stopped by a quota limit" Terminology entry (~line 172): add "Cancel schedule" to controls list; add gear-menu auto-schedule toggle note; update "Settled" annotation to also reference `261013_AUTO_SCHEDULE_RESUME_MODE`. | 4 |
+| `plans/tests/260701_POWERATLAS.md` | Add section `2.31 Auto-schedule resume mode` (route descriptions, TestResume probe list). Widen scope comment (~line 603) to include `2.31`. | 5 |
 
 ## Progress Tracker
 
@@ -513,8 +570,28 @@ cd c:\Users\QSylvestre.POLESTAR\Documents\Perso\PowerAtlas
 
 ## Review Log
 
-*Reserved — filled by review cycles.*
+### 2026-10-13 — /qplan Step 4 (full effort, 4 personas)
+
+13 findings (1 High, 3 Medium, 9 Low). 13 auto-resolved.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | Cancel+skip non-atomic: scheduler can re-arm between `cancel()` and `add_skip()` to_thread calls, violating SC-4 | Fixed — replaced two-step with atomic `cancel_with_skip()` (Phases 1 + 3) |
+| 2 | Medium | Phase 4 exit criteria omit `node tests/acp_page.test.mjs` required by AGENTS.md for template inline script changes | Fixed — added criterion to Phase 4 |
+| 3 | Medium | `quota.interrupted()` comment claims "O(1)" — actual cost is O(N stat calls) | Fixed — comment corrected to "file-stat-memoized" in Phase 2 |
+| 4 | Medium | `_runs` test coverage only exercises `"gave_up"`; `"error"` and `"no_activity"` states not tested | Fixed — added 2 parametrized tests to Phase 5 |
+| 5 | Low | Exception from `find_hit()` inside `cancel_with_skip` can turn a successful cancel into 500 | Fixed — try/except wraps `asyncio.to_thread(resume.cancel_with_skip, ...)` in Phase 3 |
+| 6 | Low | `_auto_schedule_new()` skip check used exact float; `add_skip()` uses 1-second tolerance | Fixed — skip check now uses `abs() < 1.0` tolerance in Phase 2 |
+| 7 | Low | Stale skip entries not age-filtered in `_auto_schedule_new()` snapshot | Fixed — age-filter applied when building `_skipped_live` in Phase 2 |
+| 8 | Low | `restore()` does not prune expired skip entries on restart | Fixed — added prune pass inside `restore()` in Phase 1 |
+| 9 | Low | No INFO log on `auto_schedule` toggle | Fixed — `log.info("auto_schedule set to %s", enabled)` added in Phase 3 |
+| 10 | Low | SC-9 test gap: no test for `resume_now()` with `auto_schedule=off` | Fixed — `test_resume_now_when_auto_schedule_off_unchanged` added to Phase 5 |
+| 11 | Low | `add_skip()` no-op path (find_hit=None) not tested | Fixed — `test_add_skip_for_expired_session_is_noop` added to Phase 5 |
+| 12 | Low | `"persisted": True` in `_if_unscheduled` early return is inaccurate (nothing written) | Fixed — changed to `"persisted": False` in Phase 1 |
+| 13 | Low | Implicit UUID validation gate via `cancel()` ok=True not documented | Fixed — docstring note added to `api_quota_cancel` in Phase 3 |
+
+Personas: Architect, Senior engineer, Reliability engineer (escalated H1 from Medium), Security auditor. Deduplication: H1 corroborated by all three code reviewers (kept High per cross-persona severity rule); findings 6 and 3 each corroborated by two personas.
 
 ## Harness Improvement Opportunities
 
-*Reserved — filled during exploration and implementation.*
+- `/qexplore` Step 3 filename creation used `Get-Date -Format "yyMMdd-HHmm"` producing date-time format `261013-1914_` which fails qvalidate's `filename-grammar` check (active plans need `YYMMDD_`, no time suffix) — cost: one rename commit and a qvalidate failure cycle — suggested change: use `Get-Date -Format "yyMMdd"` in the `/qexplore` Step 3 filename note.
