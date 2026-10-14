@@ -161,7 +161,7 @@ class Config:
     # Automatically schedule a resume for every session stopped by a quota limit.
     # Toggled via GET/POST /api/quota/auto-schedule. Takes effect at the next
     # scheduler tick (~5 s). 261013_AUTO_SCHEDULE_RESUME_MODE
-    auto_schedule: bool = False
+    auto_schedule: bool = True
 
     # ---- What `load_config` found, never stored ---------------------------
     # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (A9). Declared

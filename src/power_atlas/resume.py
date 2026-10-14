@@ -628,7 +628,11 @@ def tick(now: float | None = None) -> None:
                     for live in _runs:
                         if live["id"] == run["id"] and live["state"] == "watching":
                             live["state"], live["detail"] = "error", "The resume could not be followed."
-        if verdict in ("done", "retry"):
+        _remove_run = verdict in ("done", "retry")
+        if not _remove_run and verdict == "end":
+            from .config import load_config
+            _remove_run = load_config().auto_schedule
+        if _remove_run:
             with _lock:
                 _runs[:] = [r for r in _runs if r["id"] != run["id"]]
 

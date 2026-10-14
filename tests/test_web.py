@@ -46053,6 +46053,7 @@ class TestResume:
         assert _resume_r._runs[0]["state"] == "watching"
 
     def test_a_codex_resume_that_shows_no_activity_is_reported(self, monkeypatch):
+        self.config.auto_schedule = False
         sid, _ = self._cx_stopped(monkeypatch)
         self._launch(sid)
         _resume_r.tick(_Q_NOW + 3700 + _resume_r.NO_ACTIVITY_SECONDS + 1)
@@ -46158,6 +46159,7 @@ class TestResume:
         assert any("Resuming again" in t[1] for t in self.toasts)
 
     def test_the_second_attempt_failing_gives_up_with_a_toast_and_no_third(self):
+        self.config.auto_schedule = False
         sid, path = self._stopped(resets_at=_Q_NOW + 3600)
         self._launch(sid, attempt=2)
         self._append(path, _q_user("go", at=_Q_NOW + 3702), _q_hit(resets_at=_Q_NOW + 30000, at=_Q_NOW + 3703))
@@ -46169,6 +46171,7 @@ class TestResume:
         assert any("Giving up" in t[1] for t in self.toasts)
 
     def test_a_hit_that_does_not_move_the_reset_time_is_not_retried(self):
+        self.config.auto_schedule = False
         sid, path = self._stopped(resets_at=_Q_NOW + 3600)
         self._launch(sid)
         self._append(path, _q_user("go", at=_Q_NOW + 3702), _q_hit(resets_at=_Q_NOW + 3600, at=_Q_NOW + 3703))
@@ -46177,6 +46180,7 @@ class TestResume:
         assert row["resume"]["state"] == "gave_up"
 
     def test_no_activity_for_three_minutes_ends_the_watch_with_a_toast_and_is_not_retried(self):
+        self.config.auto_schedule = False
         sid, _ = self._stopped()
         self._launch(sid)
         _resume_r.tick(_Q_NOW + 3700 + _resume_r.NO_ACTIVITY_SECONDS - 5)
@@ -46189,6 +46193,7 @@ class TestResume:
         assert len(self.toasts) == 1 and len(self.launched) == 1
 
     def test_a_prompt_nobody_answered_reads_as_no_reply_not_as_success(self):
+        self.config.auto_schedule = False
         sid, path = self._stopped()
         self._launch(sid)
         self._append(path, _q_user("go", at=_Q_NOW + 3702))
@@ -46416,7 +46421,7 @@ class TestResume:
         assert sched[0]["fire_at"] == _Q_NOW + 3600 + _resume_r.FIRE_DELAY_SECONDS
 
     def test_auto_schedule_off_does_not_arm_any_session(self):
-        # auto_schedule defaults to False on Config()
+        self.config.auto_schedule = False
         sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
         _resume_r.tick(_Q_NOW)
         assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
@@ -46442,8 +46447,8 @@ class TestResume:
         _resume_r.tick(_Q_NOW)
         assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
 
-    def test_auto_schedule_does_not_re_arm_gave_up_run(self):
-        self.config.auto_schedule = True
+    def test_auto_schedule_off_does_not_remove_gave_up_run(self):
+        self.config.auto_schedule = False
         sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
         with _resume_r._lock:
             _resume_r._runs.append({"id": _uuid_q.uuid4().hex, "session_id": sid,
@@ -46451,7 +46456,24 @@ class TestResume:
                                     "launched_at": _Q_NOW, "resets_at": _Q_NOW + 3600,
                                     "attempt": 1, "mode": "", "state": "gave_up", "detail": ""})
         _resume_r.tick(_Q_NOW)
-        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+        assert any(r["session_id"] == sid for r in _resume_r._runs)
+
+    def test_auto_schedule_on_removes_gave_up_run_and_enables_reschedule(self):
+        self.config.auto_schedule = True
+        # Use a far-future resets_at so the session stays "interrupted" during both ticks.
+        # With attempt=1 and the second hit at the SAME resets_at (not later), _watch()
+        # takes the else path (gave_up/end) because hit["resets_at"] > run["resets_at"] + 1.0
+        # is False. The "watching" state filter in tick() means the run must start as watching.
+        resets_at = _Q_NOW + 36000
+        sid, path = self._stopped(resets_at=resets_at)
+        self._launch(sid)   # creates a watching run with state="watching"
+        # Second hit at the SAME resets_at → _watch() returns "end" (not retry)
+        self._append(path, _q_user("go", at=_Q_NOW + 3702), _q_hit(resets_at=resets_at, at=_Q_NOW + 3703))
+        _resume_r.tick(_Q_NOW + 3710)
+        assert _resume_r._runs == [], "run must be removed when auto_schedule=True and verdict is 'end'"
+        # Next tick: _auto_schedule_new reschedules the session (no longer blocked by in_runs)
+        _resume_r.tick(_Q_NOW + 3711)
+        assert any(s["session_id"] == sid for s in _resume_r._state["schedules"]), "session must be rescheduled"
 
     def test_auto_schedule_kiro_row_not_scheduled(self):
         # pre-plan; authoritative coverage in Phase 5 tests (test_kiro_row_not_auto_scheduled etc.)
@@ -46517,7 +46539,7 @@ class TestResume:
 
     def test_cancel_when_auto_schedule_off_does_not_add_skip(self):
         """SC-9: cancel_with_skip with auto_schedule off removes the schedule but adds no skip."""
-        # auto_schedule is False on the default Config()
+        self.config.auto_schedule = False
         sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
         _resume_r.schedule(sid, now=_Q_NOW)
         result = _resume_r.cancel_with_skip(sid, now=_Q_NOW)
@@ -46630,7 +46652,7 @@ class TestResume:
         """GET /api/quota/auto-schedule returns the current setting; route is loopback-only."""
         resp = client.get("/api/quota/auto-schedule")
         assert resp.status_code == 200
-        assert resp.json() == {"enabled": False}
+        assert resp.json() == {"enabled": True}
         import power_atlas.web as web_mod
         assert "/api/quota/auto-schedule" not in web_mod._REMOTE_ALLOWED_PATHS
 
@@ -46638,11 +46660,11 @@ class TestResume:
         """POST /api/quota/auto-schedule toggles the setting and reflects the new value."""
         resp1 = client.post("/api/quota/auto-schedule", json={})
         assert resp1.status_code == 200
-        assert resp1.json() == {"enabled": True}
+        assert resp1.json() == {"enabled": False}
         resp_get = client.get("/api/quota/auto-schedule")
-        assert resp_get.json() == {"enabled": True}
+        assert resp_get.json() == {"enabled": False}
         resp2 = client.post("/api/quota/auto-schedule", json={})
-        assert resp2.json() == {"enabled": False}
+        assert resp2.json() == {"enabled": True}
 
     def test_auto_schedule_route_requires_auth(self, anonymous_client):
         """Both /api/quota/auto-schedule routes return 403 without the pa_local cookie."""
