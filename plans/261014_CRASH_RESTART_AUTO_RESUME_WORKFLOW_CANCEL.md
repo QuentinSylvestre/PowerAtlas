@@ -293,16 +293,31 @@ All three occurrences of "off by default" in the auto-schedule / resume section:
 In the `## Terminology` section, entry for **"Stopped by a quota limit"**: update "toggle (off by default)" → "toggle (on by default)" and add a reference to `261014_CRASH_RESTART_AUTO_RESUME_WORKFLOW_CANCEL` alongside the existing plan reference.
 
 **Exit criteria**:
-- [ ] `tick()` removes a `gave_up` run from `_runs` when `auto_schedule=True`
-- [ ] `tick()` leaves a `gave_up` run in `_runs` when `auto_schedule=False` (verified with explicit `self.config.auto_schedule = False`)
-- [ ] `auto_schedule: bool = True` in `config.py`
-- [ ] `test_auto_schedule_does_not_re_arm_gave_up_run` renamed to `test_auto_schedule_off_does_not_remove_gave_up_run` with explicit `self.config.auto_schedule = False` and updated oracle
-- [ ] `test_auto_schedule_on_removes_gave_up_run_and_enables_reschedule` added and passes (uses `watching` state + transcript mock)
-- [ ] `test_auto_schedule_off_does_not_arm_any_session` updated: explicit `self.config.auto_schedule = False` added
-- [ ] `test_cancel_when_auto_schedule_off_does_not_add_skip` updated: explicit `self.config.auto_schedule = False` added
-- [ ] README.md "off by default" → "on by default" (2 occurrences matching `"Auto-schedule resumes"` lines at ~197 and ~261)
-- [ ] AGENTS.md Terminology updated for auto_schedule default
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/ -x --timeout=300` passes
+- [x] `tick()` removes a `gave_up` run from `_runs` when `auto_schedule=True`
+- [x] `tick()` leaves a `gave_up` run in `_runs` when `auto_schedule=False` (verified with explicit `self.config.auto_schedule = False`)
+- [x] `auto_schedule: bool = True` in `config.py`
+- [x] `test_auto_schedule_does_not_re_arm_gave_up_run` renamed to `test_auto_schedule_off_does_not_remove_gave_up_run` with explicit `self.config.auto_schedule = False` and updated oracle
+- [x] `test_auto_schedule_on_removes_gave_up_run_and_enables_reschedule` added and passes (uses `watching` state + transcript mock)
+- [x] `test_auto_schedule_off_does_not_arm_any_session` updated: explicit `self.config.auto_schedule = False` added
+- [x] `test_cancel_when_auto_schedule_off_does_not_add_skip` updated: explicit `self.config.auto_schedule = False` added
+- [x] README.md "off by default" → "on by default" (2 occurrences matching `"Auto-schedule resumes"` lines at ~197 and ~261)
+- [x] AGENTS.md Terminology updated for auto_schedule default
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/ -x --timeout=300` passes
+
+Implementation (2026-10-14, code: b864895)
+`resume.py`: extended `tick()` removal condition — when `verdict=="end"` and `load_config().auto_schedule` is True, the run is removed from `_runs` so `_auto_schedule_new` can reschedule the session on the next tick. `config.py`: changed `auto_schedule: bool = False` → `True`. `tests/test_web.py`: renamed `test_auto_schedule_does_not_re_arm_gave_up_run` to `test_auto_schedule_off_does_not_remove_gave_up_run` (explicit `auto_schedule=False`, oracle checks run remains); added `test_auto_schedule_on_removes_gave_up_run_and_enables_reschedule` (watching run → end → removed → rescheduled); added explicit `auto_schedule=False` to `test_auto_schedule_off_does_not_arm_any_session`, `test_cancel_when_auto_schedule_off_does_not_add_skip`, and 5 behavioral tests that relied on the old False default; updated route test oracles for new True default. `README.md`: 2 occurrences "off by default" → "on by default". `AGENTS.md` Terminology: toggle note updated to "on by default" with plan reference added. QA: PASS (2 pre-existing `TestAcpWorkflowNotifications` failures unrelated to Phase 2; in Phase 3 scope). Auto-fix code: 192f131 — 3rd README occurrence, load_config guard, test coverage for no_activity path.
+
+### 2026-10-14 — Implementation Review (after Phase 2, personas: Reliability engineer, Senior engineer, Domain expert, Security auditor)
+
+Implementation health: **Green**. 2 cycles. QA: PASS (85 TestResume).
+4 findings (0 High, 1 Medium, 3 Low). 4 auto-fixed.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | README.md line 290 still said "off by default" — third occurrence missed | Fixed — changed to "on by default" (`192f131`) |
+| 2 | Low | `load_config()` in `tick()` unguarded against config I/O failure | Fixed — wrapped in `try/except Exception: pass` (`192f131`) |
+| 3 | Low | `test_resume_now_when_auto_schedule_off_unchanged` relied on False default without explicit guard | Fixed — `self.config.auto_schedule = False` added (`192f131`) |
+| 4 | Low | `no_activity` + `auto_schedule=True` cycling path untested | Fixed — test added (`192f131`) |
 
 ---
 
@@ -442,7 +457,7 @@ node tests/acp_page.test.mjs
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Phase 1 — Supervisor / crash restart | Complete | code: 06bfbb8 |
-| 2 | Phase 2 — Auto-resume cycling | Pending | |
+| 2 | Phase 2 — Auto-resume cycling | Complete | code: 192f131 |
 | 3 | Phase 3 — Workflow-cancel wiring | Pending | |
 
 ## 9) Implementation Divergences from Plan
