@@ -2,12 +2,24 @@
 
 > **Date**: 2026-10-13
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-10-14T03:45
 > **Scope**: Single PA-wide boolean setting that automatically schedules a resume for every session stopped by a quota limit, without requiring the user to click "Schedule" manually. Gear-menu toggle. Integrates with existing "Stopped by a quota limit" section.
 > **Memory relied on**: none
 > **Estimated effort**: 1-2 days
 
 ---
+
+## Completion Summary
+
+All 9 success criteria implemented, tested (3428 tests), and verified end-to-end (Step 9b browser QA 10/10 PASS).
+
+**What shipped**: `auto_schedule: bool = False` in `Config`; `_state["skipped"]` + `cancel_with_skip()` + `add_skip()` in `resume.py`; `_auto_schedule_new()` called from `tick()`; `GET/POST /api/quota/auto-schedule` routes in `web.py`; `cancel` route replaced with atomic `cancel_with_skip()`; "Auto-schedule resumes" toggle in gear menu (`index.html`) with `role=switch`/`aria-pressed`; 22 tests in `TestResume`; section 2.31 in `plans/tests/260701_POWERATLAS.md`; README, ROADMAP, AGENTS.md docs updated.
+
+### Acknowledged at archival
+
+- **Skipped (harness opportunity)**: `/qexplore` Step 3 filename note in SKILL.md could specify `Get-Date -Format "yyMMdd"` to prevent time-suffix qvalidate failures on Windows — low-signal enough to skip promotion.
+- **Implementation Divergences section left as "Reserved"** — all divergences were addressed in per-phase implementation notes rather than the formal section (accept; same informational content, different location).
+- **Follow-up Work (deferred)**: Dismiss-after-snapshot phantom schedule race — a `dismiss()` call between `_auto_schedule_new()`'s snapshot and its `schedule()` call can create a phantom schedule for a dismissed session; `tick()`'s own dismissed-check drops it silently before any resume fires. ≤5 s window, no user impact. See Phase 2 code comment and Design Decisions (Race #3 row).
 
 ## Intent
 
