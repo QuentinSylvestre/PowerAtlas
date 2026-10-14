@@ -23392,10 +23392,12 @@ check("dashboard overview resume: a scheduled row shows when it fires and offers
   const p = loadDashPicker();
   const posts = ovPosts(p);
   const row = ovIntRow(p, { resume: { state: "scheduled", fire_at: ovNowS() + 3660 + 30, attempt: 2, prompt: "go" } });
-  assertEqual(JSON.stringify(ovButtons(row)), JSON.stringify(["Resume now", "Cancel schedule", "Dismiss"]));
+  assertEqual(JSON.stringify(ovButtons(row)), JSON.stringify(["Resume now", "Update schedule", "Cancel schedule", "Dismiss"]));
   assert(/^Resumes .+ · in 1h 1m/.test(row.querySelector(".dash-ov-int-state").textContent), row.querySelector(".dash-ov-int-state").textContent);
   assert(/second attempt/.test(row.querySelector(".dash-ov-int-state").textContent));
-  assertEqual(row.querySelectorAll("input").length, 0, "no editors while a schedule is armed");
+  const [schedPrompt, schedWhen] = row.querySelectorAll("input");
+  assertEqual(schedPrompt.value, "go", "prompt input is pre-filled with the scheduled prompt");
+  assert(schedWhen.type === "datetime-local", "when input is present for a scheduled row");
   ovButton(row, "Resume now").dispatch("click");
   assertEqual(posts[0].body.prompt, "go", "Resume now uses the scheduled prompt");
   await p.settle(); await p.settle();

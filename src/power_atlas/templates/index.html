@@ -1594,9 +1594,15 @@ function dashOvIntActions(row, li){
   msg.className = 'dash-ov-int-msg';
   msg.textContent = _dashOvIntMsg[row.id] || '';
   _dashOvIntLive[row.id] = {buttons: buttons, msg: msg};
+  var state = resume ? resume.state : '';
   var draft = _dashOvIntDraft[row.id];
-  if (!draft) {
-    draft = _dashOvIntDraft[row.id] = {prompt: '', when: row.resets_at != null ? dashOvLocalInput(Number(row.resets_at) + 60) : ''};
+  if (!draft || state === 'scheduled') {
+    draft = _dashOvIntDraft[row.id] = {
+      prompt: (state === 'scheduled' && resume && resume.prompt) ? resume.prompt : '',
+      when: (state === 'scheduled' && resume && resume.fire_at)
+        ? dashOvLocalInput(resume.fire_at)
+        : (row.resets_at != null ? dashOvLocalInput(Number(row.resets_at) + 60) : '')
+    };
   }
   function button(label, cls, run){
     var b = dashOvText('button', 'acp-btn dash-ov-act' + (cls ? ' ' + cls : ''), label);
@@ -1640,46 +1646,45 @@ function dashOvIntActions(row, li){
     box.appendChild(dashOvText('div', 'dash-ov-int-state is-bad', resume.detail || 'The resume did not go through.'));
   }
   if (row.can_resume === true && state !== 'watching') {
-    if (state !== 'scheduled') {
-      var opts = document.createElement('details');
-      opts.className = 'dash-ov-int-opts';
-      opts.appendChild(dashOvText('summary', '', 'Prompt and time'));
-      opts.appendChild(dashOvText('div', 'dash-ov-int-note', row.provider === 'codex'
-        ? 'Opens a new terminal and resumes the thread there with this prompt. A thread that is still ' +
-          'open in a terminal is not typed into: continue it there.'
-        : 'If the session’s terminal is still open, the prompt is typed into it and sent along with ' +
-          'anything already written in its prompt box.'));
-      var prompt = document.createElement('input');
-      prompt.type = 'text';
-      prompt.className = 'dash-ov-int-input';
-      prompt.placeholder = 'resume';
-      prompt.maxLength = 2000;
-      prompt.value = draft.prompt;
-      prompt.setAttribute('aria-label', 'What to send when resuming');
-      prompt.addEventListener('input', function(){ draft.prompt = prompt.value; });
-      opts.appendChild(prompt);
-      if (row.resets_at != null && row.state !== 'ready') {
-        var when = document.createElement('input');
-        when.type = 'datetime-local';
-        when.className = 'dash-ov-int-input';
-        when.value = draft.when;
-        when.setAttribute('aria-label', 'When to resume');
-        when.addEventListener('input', function(){ draft.when = when.value; });
-        opts.appendChild(when);
-      }
-      box.appendChild(opts);
+    var opts = document.createElement('details');
+    opts.className = 'dash-ov-int-opts';
+    opts.appendChild(dashOvText('summary', '', 'Prompt and time'));
+    opts.appendChild(dashOvText('div', 'dash-ov-int-note', row.provider === 'codex'
+      ? 'Opens a new terminal and resumes the thread there with this prompt. A thread that is still ' +
+        'open in a terminal is not typed into: continue it there.'
+      : 'If the session’s terminal is still open, the prompt is typed into it and sent along with ' +
+        'anything already written in its prompt box.'));
+    var prompt = document.createElement('input');
+    prompt.type = 'text';
+    prompt.className = 'dash-ov-int-input';
+    prompt.placeholder = 'resume';
+    prompt.maxLength = 2000;
+    prompt.value = draft.prompt;
+    prompt.setAttribute('aria-label', 'What to send when resuming');
+    prompt.addEventListener('input', function(){ draft.prompt = prompt.value; });
+    opts.appendChild(prompt);
+    if (row.resets_at != null && row.state !== 'ready') {
+      var when = document.createElement('input');
+      when.type = 'datetime-local';
+      when.className = 'dash-ov-int-input';
+      when.value = draft.when;
+      when.setAttribute('aria-label', 'When to resume');
+      when.addEventListener('input', function(){ draft.when = when.value; });
+      opts.appendChild(when);
     }
+    box.appendChild(opts);
     var promptNow = function(){ return state === 'scheduled' ? (resume.prompt || '') : draft.prompt; };
     box.appendChild(button(state === 'no_activity' || state === 'gave_up' || state === 'error' ? 'Resume again' : 'Resume now', 'dash-ov-act-main',
       function(){ return post('/api/quota/resume', {prompt: promptNow()})(); }));
-    if (state === 'scheduled') {
-      box.appendChild(button('Cancel schedule', '', post('/api/quota/cancel')));
-    } else if (row.resets_at != null && row.state !== 'ready') {
-      box.appendChild(button('Schedule', '', function(){
+    if (row.resets_at != null && row.state !== 'ready') {
+      box.appendChild(button(state === 'scheduled' ? 'Update schedule' : 'Schedule', '', function(){
         var at = Date.parse(draft.when);
         return dashOvQuotaPost('/api/quota/schedule', {session_id: row.id, prompt: draft.prompt,
           fire_at: isFinite(at) ? Math.floor(at / 1000) : undefined});
       }));
+    }
+    if (state === 'scheduled') {
+      box.appendChild(button('Cancel schedule', '', post('/api/quota/cancel')));
     }
   }
   // Dismiss is always there: it is also the way out of a resume that never reports back.
