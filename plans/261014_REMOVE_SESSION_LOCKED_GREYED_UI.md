@@ -501,8 +501,8 @@ Select-String -Path src/power_atlas/static/style.css -Pattern "is-locked"
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Remove locked state — Python backend | Not started | |
-| 2 | Remove locked state — Frontend | Not started | |
+| 1 | Remove locked state — Python backend | Done | commit 781758c; 8/8 exit criteria met; 3 lock_calls proxy assertions removed (behavioral assertions kept); 3439 passed |
+| 2 | Remove locked state — Frontend | Done | commit 5147abb; 11/11 exit criteria met; acp_page.test.mjs updated (3 deleted, 7 updated) — tests existed contra plan; 1114 passed |
 
 ---
 
