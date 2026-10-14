@@ -33,7 +33,6 @@
 - **Template prompts** — save reusable per-workspace prompts; build on the read-from-prompt convention rather than `$ARGUMENTS`
 - **Scheduled tasks** — cron-like recurring kiro-cli launches; mechanism is measured and process cost is known, but the auto-permissions gate must come first
 - **Timed prompts** — a one-shot prompt at a wall-clock time; the quota-reset resume for Claude Code and Codex shipped 2026-10-09, an auto-schedule gear-menu toggle shipped 2026-10-13 in `261013_AUTO_SCHEDULE_RESUME_MODE`, the general case and kiro-cli did not
-- **Edit scheduled message** — cancel shipped 2026-10-13 in `261013_AUTO_SCHEDULE_RESUME_MODE`, edit shipped 2026-10-14 in `261014_EDIT_SCHEDULED_RESUME`
 - **Auto-resume** — automatically resume quota-stopped sessions multiple times without user interaction; enabled by default
 - **Chained launches** — when a session finishes, automatically start the next one; works for sessions PowerAtlas drives, not for terminal sessions
 - **Skills support spike, Claude Code half** — how a Claude Code skill receives its arguments; the kiro-cli half is answered
@@ -183,11 +182,6 @@ cost first) · the Electron app.
 
 - **Timed prompts** — schedule a one-shot prompt for a specific wall-clock time; e.g. "at 11:50am, resume session X with prompt P"; cross-provider (kiro-cli ACP, Claude Code, kiro-cli terminal, Codex terminal); complements *Scheduled tasks* (recurring launches) but distinct: one-shot, prompt-delivery-focused, and works for sessions PowerAtlas does not own.
   - *Quota-limit auto-schedule* — **shipped 2026-10-13** in `261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS` (manual schedule) and `261013_AUTO_SCHEDULE_RESUME_MODE` (auto-schedule gear-menu toggle, skip-on-cancel). Still open: kiro-cli, which is detect-and-show only with no resume; defaulting the payload to the last user prompt instead of "resume"; and a general one-shot timed prompt at any wall-clock time.
-
-- **Edit scheduled message** — cancel shipped 2026-10-13 in `261013_AUTO_SCHEDULE_RESUME_MODE`, edit shipped 2026-10-14 in `261014_EDIT_SCHEDULED_RESUME`; applies to quota-reset auto-schedules in the Overview and any future general timed prompts.
-  - *What shipped* — the Overview's *Schedule* button creates a one-shot resume at reset time (`261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS`); *Cancel schedule* removes a schedule and keeps the row (`261013_AUTO_SCHEDULE_RESUME_MODE`); *Update schedule* lets the user edit the prompt and/or time of a pending schedule and replaces it (`261014_EDIT_SCHEDULED_RESUME`).
-  - *Shape* — an edit affordance on a pending scheduled row; lets the user change the prompt text and/or the scheduled time before it fires.
-  - *Done when* — a pending schedule can be edited (prompt and/or time) and the edited values are used when the schedule fires.
 
 - **Auto-resume** — automatically chain quota-limit resumes without user interaction between cycles; enabled by default; raises a warning when a session is inaccessible before the next resume fires.
   - *Motivation* — the current *Schedule* flow fires once and stops; a multi-step task running overnight must be rescheduled manually every time the limit resets. Auto-resume repeats until the session finishes or the user opts out.
