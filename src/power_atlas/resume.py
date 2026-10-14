@@ -330,7 +330,7 @@ def schedule(session_id, prompt=None, fire_at=None, now: float | None = None,
             any(s["session_id"] == session_id for s in _state["schedules"])
             or any(r["session_id"] == session_id for r in _runs)
         ):
-            # Session already scheduled or being watched — auto-schedule must not clobber it.
+            # Session already scheduled, or has a run record in any state (watching, gave_up, error, no_activity) — auto-schedule must not clobber any of these.
             return {"ok": True, "fire_at": None, "persisted": False, "open_terminal": False}
         if not _if_unscheduled:
             # Manual schedule: clear any skip record so auto-schedule can re-arm on the next stop.
@@ -357,6 +357,7 @@ def cancel_with_skip(session_id: str, now: float | None = None) -> dict:
     """Cancel a scheduled resume and atomically record a per-stop skip.
     Holds `_lock` across both the schedule removal and the skip insertion, so no scheduler tick can re-arm the session between the two operations.
     """
+    from .config import load_config
     if not _valid_session_id(session_id):
         return {"ok": False, "error": "That is not a session id"}
     now = time.time() if now is None else now
@@ -368,7 +369,7 @@ def cancel_with_skip(session_id: str, now: float | None = None) -> dict:
         _state["schedules"] = [s for s in _state["schedules"] if s["session_id"] != session_id]
         if len(_state["schedules"]) == before:
             return {"ok": False, "error": "Nothing was scheduled for that session"}
-        if key_at is not None:
+        if key_at is not None and load_config().auto_schedule:
             cutoff = now - DISMISS_KEEP_SECONDS
             _state["skipped"] = [
                 s for s in _state["skipped"]
@@ -532,7 +533,7 @@ def _auto_schedule_new(now: float) -> None:
     with _lock:
         _load()
         already_scheduled = {s["session_id"] for s in _state["schedules"]}
-        dismissed_keys = {(d["session_id"], d["key_at"]) for d in _state["dismissed"]}
+        dismissed_keys = {(d["session_id"], d["key_at"]) for d in _state["dismissed"]}  # exact equality safe: both sides from _key_at() on same resets_at float
         in_runs = {r["session_id"] for r in _runs}
         # Age-filter skip entries; comparison uses tolerance (1 s) to match add_skip()
         _cutoff_s = now - DISMISS_KEEP_SECONDS

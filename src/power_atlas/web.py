@@ -4629,11 +4629,11 @@ async def api_quota_schedule(request: Request):
 async def api_quota_cancel(request: Request):
     """Cancel a session's scheduled resume and (atomically) record a skip: `{"session_id"}`.
     Uses cancel_with_skip() to close the race window that existed when cancel() and add_skip()
-    were separate to_thread calls. Note: add_skip() implicit UUID validation via ok=True gate.
+    were separate to_thread calls. Note: `cancel_with_skip()` runs `_valid_session_id()` upfront; a non-UUID input is refused before any state is read.
     """
     body = await _quota_body(request)
     if body is None:
-        return {"ok": False, "error": "Invalid JSON body"}
+        return JSONResponse({"ok": False, "error": "bad request"}, status_code=400)
     session_id = body.get("session_id")
     try:
         result = await asyncio.to_thread(resume.cancel_with_skip, session_id)

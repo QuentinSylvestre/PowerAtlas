@@ -46405,6 +46405,86 @@ class TestResume:
         assert not [t for t in threading.enumerate() if t.name == "resume-scheduler"]
         assert _resume_r._scheduler == [None, None]
 
+    # -- auto-schedule: _auto_schedule_new via tick() -- 261013_AUTO_SCHEDULE_RESUME_MODE Phase 2
+
+    def test_auto_schedule_arms_unattended_session_on_tick(self):
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.tick(_Q_NOW)
+        sched = [s for s in _resume_r._state["schedules"] if s["session_id"] == sid]
+        assert len(sched) == 1
+        assert sched[0]["fire_at"] == _Q_NOW + 3600 + _resume_r.FIRE_DELAY_SECONDS
+
+    def test_auto_schedule_off_does_not_arm_any_session(self):
+        # auto_schedule defaults to False on Config()
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_auto_schedule_does_not_overwrite_manual_schedule(self):
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        custom_fire_at = _Q_NOW + 5000
+        _resume_r.schedule(sid, fire_at=custom_fire_at, now=_Q_NOW)
+        _resume_r.tick(_Q_NOW)
+        sched = [s for s in _resume_r._state["schedules"] if s["session_id"] == sid]
+        assert len(sched) == 1 and sched[0]["fire_at"] == custom_fire_at
+
+    def test_auto_schedule_does_not_re_arm_watching_run(self):
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        # Inject directly into _runs to keep the session in "limited" state (now < resets_at)
+        with _resume_r._lock:
+            _resume_r._runs.append({"id": _uuid_q.uuid4().hex, "session_id": sid,
+                                    "cwd": "C:\\dev\\proj", "title": "", "prompt": "resume",
+                                    "launched_at": _Q_NOW, "resets_at": _Q_NOW + 3600,
+                                    "attempt": 1, "mode": "", "state": "watching", "detail": ""})
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_auto_schedule_does_not_re_arm_gave_up_run(self):
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        with _resume_r._lock:
+            _resume_r._runs.append({"id": _uuid_q.uuid4().hex, "session_id": sid,
+                                    "cwd": "C:\\dev\\proj", "title": "", "prompt": "resume",
+                                    "launched_at": _Q_NOW, "resets_at": _Q_NOW + 3600,
+                                    "attempt": 1, "mode": "", "state": "gave_up", "detail": ""})
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_auto_schedule_kiro_row_not_scheduled(self):
+        self.config.auto_schedule = True
+        d = self.v3 / "h" / "sess_k1"
+        d.mkdir(parents=True)
+        (d / "messages.jsonl").write_text(json.dumps({"timestamp": _q_iso(_Q_NOW - 5), "payload": {
+            "type": "session_metadata", "key": "displayError",
+            "value": {"errorType": "UsageLimitReachedError"}}}) + "\n", encoding="utf-8")
+        os.utime(d / "messages.jsonl", (_Q_NOW, _Q_NOW))
+        _resume_r.tick(_Q_NOW)
+        assert _resume_r._state["schedules"] == []
+
+    def test_auto_schedule_ready_row_not_scheduled(self):
+        self.config.auto_schedule = True
+        # resets_at in the past → state="ready"; _auto_schedule_new must skip it
+        sid, _ = self._stopped(resets_at=_Q_NOW - 100)
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_auto_schedule_dismissed_session_not_rescheduled(self):
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.dismiss(sid, now=_Q_NOW)
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_auto_schedule_skipped_session_not_rescheduled(self):
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.add_skip(sid, now=_Q_NOW)
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
 
 # ---- consoleinject: typing into another process's console -------------------------------------
 
@@ -46488,20 +46568,24 @@ class TestQuotaRoutes:
         seen = []
         monkeypatch.setattr(_resume_r, "resume_now", lambda sid, prompt: seen.append(("now", sid, prompt)) or {"ok": True})
         monkeypatch.setattr(_resume_r, "schedule", lambda sid, prompt, at: seen.append(("sched", sid, prompt, at)) or {"ok": True})
-        monkeypatch.setattr(_resume_r, "cancel", lambda sid: seen.append(("cancel", sid)) or {"ok": True})
+        monkeypatch.setattr(_resume_r, "cancel_with_skip", lambda sid: seen.append(("cancel_with_skip", sid)) or {"ok": True})
         monkeypatch.setattr(_resume_r, "dismiss", lambda sid: seen.append(("dismiss", sid)) or {"ok": True})
         body = {"session_id": "s1", "prompt": "go", "fire_at": 5, "cwd": "C:\\evil", "extra": 1}
         for path in self._PATHS:
             assert client.post(path, json=body).json() == {"ok": True}
-        assert seen == [("now", "s1", "go"), ("sched", "s1", "go", 5), ("cancel", "s1"), ("dismiss", "s1")]
+        assert seen == [("now", "s1", "go"), ("sched", "s1", "go", 5), ("cancel_with_skip", "s1"), ("dismiss", "s1")]
 
     def test_a_body_that_is_not_a_json_object_is_refused_without_calling_anything(self, client, monkeypatch):
         called = []
         monkeypatch.setattr(_resume_r, "resume_now", lambda *a: called.append(a) or {"ok": True})
         for path in self._PATHS:
             for raw in ("not json", "[1, 2]", ""):
-                answer = client.post(path, content=raw, headers={"Content-Type": "application/json"}).json()
-                assert answer == {"ok": False, "error": "Invalid JSON body"}, (path, raw)
+                resp = client.post(path, content=raw, headers={"Content-Type": "application/json"})
+                if path == "/api/quota/cancel":
+                    assert resp.status_code == 400, (path, raw)
+                    assert resp.json() == {"ok": False, "error": "bad request"}, (path, raw)
+                else:
+                    assert resp.json() == {"ok": False, "error": "Invalid JSON body"}, (path, raw)
         assert called == []
 
     def test_the_routes_need_the_local_cookie_and_a_same_origin_request(self, client, anonymous_client):
