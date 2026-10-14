@@ -932,3 +932,34 @@ So the earlier finding that `modeId` is ignored on load holds only for a session
 **kiro-cli's built-in rules (`source: kiro-scope`), present even under `all: allow`** (P-0.10, F-5)
 - Ask on writes to `.git`, `.vscode`, `*.code-workspace`, `.kiro/agents` and `.kiro/hooks`, in the workspace and under `~`.
 - Deny on writes to `.kiroignore`, `.kiro/settings`, `~/.kiro/workspace-roots`, `~/.kiro/sandbox-state`, `~/.kiro/web-session`, `~/.kiro/powers/installed/*/mcp.json` and `~/.kiro/cloud-cache`. Nothing built in covers `.kiro/steering` or `.kiro/skills`.
+
+
+---
+
+## `_kiro.dev/commands/execute` — broken on kiro-cli 2.29.1+ (confirmed 2.31.0)
+
+**Measured 2026-10-15 on kiro-cli 2.31.0**, via standalone second-process probe (initialize → session/new → two commands/execute calls → session/delete).
+
+Both `/qexplore` and `/qplan` return `-32603` immediately:
+
+```
+[PersistenceClassification] Ext method "_kiro.dev/commands/execute" has no
+persistence classification. Add it to KnownExtMethod in persistence-classification.ts.
+```
+
+`session/delete` cleanup succeeded in the same probe, confirming the session and the channel work normally — only `commands/execute` is refused.
+
+**What is broken**: every palette skill and command entry. `commands_execute` in `acp.py` sends exactly `{sessionId, command: {command: "<name>", args: {}}}` for every palette item. With this error, no palette entry can be dispatched.
+
+**Probe params used (for reference)**:
+- `initialize`: `{protocolVersion: 1, clientCapabilities: {fs: {readTextFile: false, writeTextFile: false}, terminal: false, _meta: {kiro: {userInput: true}}}}`
+- `session/new`: `{_meta: {kiro: {modeId: "kiro_default"}}, cwd: "<workspace>", mcpServers: []}`
+- `commands/execute`: `{sessionId: "<id>", command: {command: "qexplore", args: {}}}`
+
+**First seen on 2.29.1** with `/compact` (2026-10-12 probe); first confirmed with real skills on 2.31.0. The `/compact` palette entry was already removed on 2026-10-08 for a different reason; this confirms the remainder are broken too.
+
+**Not affected**: `session/prompt` (normal turn delivery), `session/cancel`, `session/delete` — only the `_kiro.dev/commands/execute` ext method is unclassified.
+
+**Fix path**: kiro-cli must add `_kiro.dev/commands/execute` to `KnownExtMethod` in `persistence-classification.ts`. Re-probe on each minor kiro-cli release. If a different dispatch path is available (e.g. a new method), update `commands_execute` in `acp.py`.
+
+**`workflow-cancel` specifically confirmed 2026-10-15**: same -32603 PersistenceClassification error. When wired into `_handle_cancel` in PA: `_supervisor._request()` raises `AcpError`, caught as a warning, execution falls through to `_workflow_stop_children` unchanged. Behaviour is identical to today (no regression). The wiring is safe to add now and activates automatically when kiro-cli fixes the defect.
