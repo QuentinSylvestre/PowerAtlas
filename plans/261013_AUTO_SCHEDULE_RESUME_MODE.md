@@ -1,7 +1,7 @@
 ﻿# Auto-Schedule Resume Mode
 
 > **Date**: 2026-10-13
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Single PA-wide boolean setting that automatically schedules a resume for every session stopped by a quota limit, without requiring the user to click "Schedule" manually. Gear-menu toggle. Integrates with existing "Stopped by a quota limit" section.
 > **Memory relied on**: none
@@ -236,17 +236,22 @@ Inside the `with _lock:` block (`resume.py:186`), before the existing `_state["s
 Note: the skip-clear only removes entries by `session_id` (not by `key_at`), so all skips for this session are cleared on a manual schedule — the user explicitly chose to schedule, so auto-schedule should resume full management.
 
 **Exit criteria**:
-- [ ] `Config.auto_schedule` field exists with default `False`; `load_config()` returns it as a Python `bool`.
-- [ ] `config.toml` round-trip: setting `auto_schedule = true` in the file loads as `True`, setting to `false` loads as `False`.
-- [ ] `quota-state.json` includes `"skipped": [...]` on next save; existing files without `"skipped"` load cleanly (empty list).
-- [ ] `add_skip(session_id)` for a valid stopped session creates a `skipped` entry in `_state["skipped"]` and persists it to `quota-state.json`.
-- [ ] `add_skip(session_id)` for a session not in `quota.find_hit()` is a no-op (no write, no error).
-- [ ] `schedule(session_id, _if_unscheduled=True)` when that session already has a schedule: returns `{"ok": True, "fire_at": None, ...}` without modifying `_state["schedules"]`.
-- [ ] `schedule(session_id, _if_unscheduled=True)` when that session is in `_runs`: returns `{"ok": True, "fire_at": None, ...}` without clearing `_runs`.
-- [ ] `schedule(session_id)` (manual, no `_if_unscheduled`) when that session has a skip record: clears the skip record AND creates the new schedule atomically.
-- [ ] `reset()` clears `_state["skipped"]`.
-- [ ] `cancel_with_skip(session_id)` when session has a schedule: removes schedule, records skip, saves atomically — single `_lock` acquisition.
-- [ ] `cancel_with_skip(session_id)` when session has NO schedule: returns `{"ok": False, ...}` without touching `_state["skipped"]`.
+- [x] `Config.auto_schedule` field exists with default `False`; `load_config()` returns it as a Python `bool`.
+- [x] `config.toml` round-trip: setting `auto_schedule = true` in the file loads as `True`, setting to `false` loads as `False`.
+- [x] `quota-state.json` includes `"skipped": [...]` on next save; existing files without `"skipped"` load cleanly (empty list).
+- [x] `add_skip(session_id)` for a valid stopped session creates a `skipped` entry in `_state["skipped"]` and persists it to `quota-state.json`.
+- [x] `add_skip(session_id)` for a session not in `quota.find_hit()` is a no-op (no write, no error).
+- [x] `schedule(session_id, _if_unscheduled=True)` when that session already has a schedule: returns `{"ok": True, "fire_at": None, ...}` without modifying `_state["schedules"]`.
+- [x] `schedule(session_id, _if_unscheduled=True)` when that session is in `_runs`: returns `{"ok": True, "fire_at": None, ...}` without clearing `_runs`.
+- [x] `schedule(session_id)` (manual, no `_if_unscheduled`) when that session has a skip record: clears the skip record AND creates the new schedule atomically.
+- [x] `reset()` clears `_state["skipped"]`.
+- [x] `cancel_with_skip(session_id)` when session has a schedule: removes schedule, records skip, saves atomically — single `_lock` acquisition.
+- [x] `cancel_with_skip(session_id)` when session has NO schedule: returns `{"ok": False, ...}` without touching `_state["skipped"]`.
+
+Implementation (2026-10-13, code: 23b5d56, fix: 6755534)
+`config.py`: Added `auto_schedule: bool = False` field to the `Config` dataclass after `acp_permission_base_agent`, with a comment referencing the plan slug. `resume.py`: Extended `_state` with `skipped: []`; updated `_load()` to parse skipped entries (with field validation matching the dismissed pattern); updated `_save()` to serialize skipped; added prune pass in `restore()` for stale skip records; updated `reset()` to clear skipped; added `cancel_with_skip()` — atomic cancel + skip under a single `_lock` acquisition, with `_valid_session_id()` upfront guard; added `add_skip()` test helper; extended `schedule()` signature with `_if_unscheduled: bool = False` — early return when session is already scheduled or in `_runs`, skip-clear on manual invocation. Review fixes (6755534): moved skipped parsing inside `isinstance(raw, dict)` guard; fixed PEP 8 spacing; rephrased `cancel_with_skip()` docstring; merged double-save in `restore()` into single call; changed `_state.get("skipped", [])` to direct key access.
+
+QA (2026-10-13): PASS — library exports only; no HTTP/UI surface in Phase 1. Verified via full pytest (3397 passed, 1 skipped).
 
 ---
 
@@ -554,7 +559,7 @@ cd c:\Users\QSylvestre.POLESTAR\Documents\Perso\PowerAtlas
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Config field + resume.py foundation | Not started | |
+| 1 | Config field + resume.py foundation | Complete | code: 23b5d56, fix: 6755534 |
 | 2 | `_auto_schedule_new()` + tick() integration | Not started | [P:3] |
 | 3 | Web routes + cancel modification + template context | Not started | [P:2] |
 | 4 | Gear-menu toggle | Not started | |
@@ -569,6 +574,19 @@ cd c:\Users\QSylvestre.POLESTAR\Documents\Perso\PowerAtlas
 1. **Dismiss-after-snapshot phantom schedule.** A dismiss() call between `_auto_schedule_new()`'s snapshot and its `schedule()` call can create a schedule for a dismissed session, which `tick()`'s own dismissed check drops silently. The race window is ≤5 s, no resume fires. A full fix would check dismissed inside `schedule()`'s lock using pre-fetched `key_at` from `quota.find_hit()` — viable but adds complexity for an edge case with no user impact. Source: Design Decisions (Race #3 row), Phase 2 code comment.
 
 ## Review Log
+
+### 2026-10-13 — /qdev Phase 1 review (full effort, 2 personas: Reliability + Senior)
+
+6 findings (0 High, 1 Medium, 5 Low). 6 auto-fixed (1-cycle cap per AGENTS.md; all fixes mechanical). Cycle 2 skipped per user 1-cycle cap; Medium was a clear guard-placement fix with no design choice.
+
+| # | Severity | Finding | Persona | Resolution |
+|---|---|---|---|---|
+| 1 | Medium | `skipped` parsing outside `if isinstance(raw, dict)` guard in `_load()` — `raw.get()` throws `AttributeError` on non-dict JSON root; existing handler doesn't catch it | Senior | Fixed — moved inside guard; initialized `skipped = []` before guard so name always defined (6755534) |
+| 2 | Low | Missing blank line between `_load()` and `_save()` (PEP 8) | Senior | Fixed — added blank line (6755534) |
+| 3 | Low | Misleading `cancel_with_skip()` docstring referenced a "two-step" design that was never implemented | Senior | Fixed — rephrased to describe lock semantics (6755534) |
+| 4 | Low | `_state.get("skipped", [])` in `restore()` redundant after `_load()` guarantees the key | Senior, Reliability | Fixed — changed to `_state["skipped"]` (6755534) |
+| 5 | Low | Double-save in `restore()` — first `_save()` written before skip prune, leaving intermediate inconsistency | Reliability | Fixed — merged into single `_save()` at end of prune block (6755534) |
+| 6 | Low | `cancel_with_skip()` missing `_valid_session_id()` upfront check | Reliability | Fixed — added early validation mirroring `schedule()` (6755534) |
 
 ### 2026-10-13 — /qplan Step 4 (full effort, 4 personas)
 
