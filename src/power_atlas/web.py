@@ -2987,6 +2987,7 @@ async def index(request: Request):
         # `_notifications_enabled()`, which would be a second whole-file TOML
         # parse on a route that has one in hand.
         "notifications_enabled": bool(config.notifications.get("enabled", False)),
+        "auto_schedule": bool(config.auto_schedule),
         # Stripped: this one lands in the page source via `|tojson`.
         "launchers": _launchers_without_env(config.custom_launchers),
         "peek_hotkey": config.peek_hotkey,
@@ -4626,11 +4627,20 @@ async def api_quota_schedule(request: Request):
 
 @app.post("/api/quota/cancel")
 async def api_quota_cancel(request: Request):
-    """Cancel a session's scheduled resume: `{"session_id"}`."""
+    """Cancel a session's scheduled resume and (atomically) record a skip: `{"session_id"}`.
+    Uses cancel_with_skip() to close the race window that existed when cancel() and add_skip()
+    were separate to_thread calls. Note: add_skip() implicit UUID validation via ok=True gate.
+    """
     body = await _quota_body(request)
     if body is None:
         return {"ok": False, "error": "Invalid JSON body"}
-    return await asyncio.to_thread(resume.cancel, body.get("session_id"))
+    session_id = body.get("session_id")
+    try:
+        result = await asyncio.to_thread(resume.cancel_with_skip, session_id)
+    except Exception:
+        log.exception("cancel_with_skip failed for %s", session_id)
+        result = {"ok": False, "error": "Internal error"}
+    return result
 
 
 @app.post("/api/quota/dismiss")
@@ -4640,6 +4650,23 @@ async def api_quota_dismiss(request: Request):
     if body is None:
         return {"ok": False, "error": "Invalid JSON body"}
     return await asyncio.to_thread(resume.dismiss, body.get("session_id"))
+
+
+@app.get("/api/quota/auto-schedule")
+async def get_quota_auto_schedule():
+    """Whether auto-schedule mode is on: `{"enabled": bool}`."""
+    return {"enabled": bool(load_config().auto_schedule)}
+
+
+@app.post("/api/quota/auto-schedule")
+async def toggle_quota_auto_schedule():
+    """Toggle auto-schedule mode. Returns `{"enabled": bool}` (new value)."""
+    config = load_config()
+    enabled = not bool(config.auto_schedule)
+    config.auto_schedule = enabled
+    save_config(config)
+    log.info("auto_schedule set to %s", enabled)
+    return {"enabled": enabled}
 
 
 # --- The dashboard Overview's live tiles ----------------------------------
