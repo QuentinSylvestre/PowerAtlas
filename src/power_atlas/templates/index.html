@@ -1596,12 +1596,13 @@ function dashOvIntActions(row, li){
   _dashOvIntLive[row.id] = {buttons: buttons, msg: msg};
   var state = resume ? resume.state : '';
   var draft = _dashOvIntDraft[row.id];
-  if (!draft || state === 'scheduled') {
+  if (!draft || (state === 'scheduled' && (draft._from?.p !== resume.prompt || draft._from?.t !== resume.fire_at))) {
     draft = _dashOvIntDraft[row.id] = {
       prompt: (state === 'scheduled' && resume && resume.prompt) ? resume.prompt : '',
       when: (state === 'scheduled' && resume && resume.fire_at)
         ? dashOvLocalInput(resume.fire_at)
-        : (row.resets_at != null ? dashOvLocalInput(Number(row.resets_at) + 60) : '')
+        : dashOvLocalInput(Number(row.resets_at) + 60),
+      _from: state === 'scheduled' ? {p: resume.prompt, t: resume.fire_at} : null
     };
   }
   function button(label, cls, run){
@@ -1633,7 +1634,6 @@ function dashOvIntActions(row, li){
   var post = function(path, extra){
     return function(){ return dashOvQuotaPost(path, Object.assign({session_id: row.id}, extra || {})); };
   };
-  var state = resume ? resume.state : '';
   if (state === 'scheduled') {
     var line = document.createElement('div');
     line.className = 'dash-ov-int-state';
@@ -1673,7 +1673,7 @@ function dashOvIntActions(row, li){
       opts.appendChild(when);
     }
     box.appendChild(opts);
-    var promptNow = function(){ return state === 'scheduled' ? (resume.prompt || '') : draft.prompt; };
+    var promptNow = function(){ return draft.prompt; };
     box.appendChild(button(state === 'no_activity' || state === 'gave_up' || state === 'error' ? 'Resume again' : 'Resume now', 'dash-ov-act-main',
       function(){ return post('/api/quota/resume', {prompt: promptNow()})(); }));
     if (row.resets_at != null && row.state !== 'ready') {

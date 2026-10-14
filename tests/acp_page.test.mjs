@@ -23398,11 +23398,19 @@ check("dashboard overview resume: a scheduled row shows when it fires and offers
   const [schedPrompt, schedWhen] = row.querySelectorAll("input");
   assertEqual(schedPrompt.value, "go", "prompt input is pre-filled with the scheduled prompt");
   assert(schedWhen.type === "datetime-local", "when input is present for a scheduled row");
+  assertEqual(schedWhen.value, p.sandbox.dashOvLocalInput(ovNowS() + 3660 + 30), "when pre-filled from fire_at");
   ovButton(row, "Resume now").dispatch("click");
   assertEqual(posts[0].body.prompt, "go", "Resume now uses the scheduled prompt");
   await p.settle(); await p.settle();
   ovButton(row, "Cancel schedule").dispatch("click");
   assertEqual(posts[1].url, "/api/quota/cancel");
+  await p.settle(); await p.settle();
+  schedPrompt.value = "updated prompt text";
+  schedPrompt.dispatch("input");
+  ovButton(row, "Update schedule").dispatch("click");
+  assertEqual(posts[posts.length - 1].url, "/api/quota/schedule", "Update schedule POSTs to correct URL");
+  assertEqual(posts[posts.length - 1].body.prompt, "updated prompt text", "Updated prompt in POST body");
+  assert(typeof posts[posts.length - 1].body.fire_at === "number", "fire_at is a number in POST body");
   const watching = ovIntRow(p, { resume: { state: "watching", attempt: 1, detail: "", mode: "terminal" } });
   assertEqual(JSON.stringify(ovButtons(watching)), JSON.stringify(["Dismiss"]),
     "a watched resume offers only the way out of one that never reports back");
