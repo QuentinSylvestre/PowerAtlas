@@ -2,12 +2,16 @@
 
 > **Date**: 2026-10-14
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-10-14T11:37
 > **Scope**: Allow the user to edit the prompt and/or fire time of an already-scheduled resume from the Overview's "Stopped by a quota limit" section. Frontend-only change to `index.html`.
 > **Memory relied on**: none
 > **Estimated effort**: half a day
 
 ---
+
+## Completion Summary
+
+All 7 SCs implemented. `index.html` changes only — zero backend work (the API already upserted, `decorate()` already returned `prompt`). The prompt input and datetime-local input now show pre-filled when a session has a scheduled resume; clicking "Update schedule" re-posts to `/api/quota/schedule` with new values. 1112 JS tests + 3429 Python tests pass.
 
 ## Intent
 
