@@ -569,6 +569,17 @@ class Snapshot:
             return newest.session_id
         return None
 
+    def any_live_process(self, providers: frozenset[str]) -> bool:
+        """Return True if the scan saw at least one process for any of these providers.
+
+        Uses _live_cwds rather than _live_sids: an ACP session has no session id
+        on argv and therefore never appears in _live_sids, but its process still
+        occupies a cwd, so _live_cwds is the right signal. Returns False when
+        psutil was unavailable (_live_cwds is empty). Also returns False when
+        kiro-cli is not in any process's cwd, even if psutil is available.
+        """
+        return any(p in providers for p, _ in self._live_cwds)
+
 
 _EMPTY = Snapshot(set(), set(), {})
 

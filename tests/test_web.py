@@ -1264,6 +1264,9 @@ class TestSessionAvailabilityAPI:
 
     def test_locked_session_reports_locked_with_no_status(self, client, monkeypatch):
         from power_atlas import acp as acp_mod
+        from power_atlas import presence as presence_mod
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                             lambda: presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake")}))
         monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda *a, **k: 4242)
 
         resp = client.get(f"{self._PATH}?sid={self._SID}&cwd=C%3A%5Cdev%5Cws")
@@ -2315,7 +2318,7 @@ class TestTheDashboardHasNoAgentPageLink:
     def test_the_topbar_has_no_link_to_the_agent_page(self, client):
         page = client.get("/").text
         start = page.find('<div class="topbar">')
-        end = page.find('<div class="search-area">')
+        end = page.find('<main class="panels-container"')
         assert start >= 0 and end > start, (
             "the dashboard's topbar could not be located; this check is measuring nothing")
         assert 'href="/acp"' not in page[start:end], (
@@ -21289,7 +21292,8 @@ class TestAcpListingEndpoint:
                        "last_prompt", "last_reply_tail"):
             assert banned not in raw, f"{banned!r} reached the remote-facing payload"
 
-    def test_availability_is_computed_only_for_returned_rows(self, client, acp_listing_store):
+    def test_availability_is_computed_only_for_returned_rows(self, client, acp_listing_store,
+                                                              monkeypatch):
         """D17: ~30 rows, not 1,207. The discriminating property is *which* ids
         were checked, not the order they were checked in: an exact ordered list
         also fails on a per-group call, an sid dedup or any reordering that
@@ -21298,6 +21302,9 @@ class TestAcpListingEndpoint:
         it for a reason unrelated to what it measures. The expectation is
         derived from the response instead: every returned row that is not
         already `held` is checked exactly once, and nothing else is."""
+        from power_atlas import presence as presence_mod
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                             lambda: presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake")}))
         for i in range(6):
             acp_listing_store["add"](f"C:\\dev\\w{i}",
                              [_acp_row(f"sess_w{i}s{j}") for j in range(40)])
@@ -21321,6 +21328,9 @@ class TestAcpListingEndpoint:
         the right output does not discriminate: the output is identical whether
         the read was safe or not."""
         from power_atlas import acp as acp_mod
+        from power_atlas import presence as presence_mod
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                             lambda: presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake")}))
         live = _LoopBoundSessions({"sess_held-1": {"cwd": "C:\\dev\\ws"}})
         monkeypatch.setattr(acp_mod._supervisor, "sessions", live)
         acp_listing_store["locked"].add("sess_locked-1")
@@ -21727,8 +21737,11 @@ class TestAcpAvailabilityV3:
     def test_a_held_v3_session_is_reported_locked(self, monkeypatch):
         from power_atlas import acp as acp_mod
         from power_atlas import web as web_mod
+        from power_atlas import presence as presence_mod
 
         sid = "sess_11111111-1111-1111-1111-111111111111"
+        kiro_snap = presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake/cwd")})
+        monkeypatch.setattr(presence_mod, "get_snapshot", lambda: kiro_snap)
         monkeypatch.setattr(acp_mod, "_lock_holder_v3",
                              lambda s, workspace_hash=None: acp_mod._V3_HOLDER_PID_UNKNOWN)
 
@@ -21738,8 +21751,11 @@ class TestAcpAvailabilityV3:
     def test_an_idle_v3_session_is_reported_available(self, monkeypatch):
         from power_atlas import acp as acp_mod
         from power_atlas import web as web_mod
+        from power_atlas import presence as presence_mod
 
         sid = "sess_22222222-2222-2222-2222-222222222222"
+        kiro_snap = presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake/cwd")})
+        monkeypatch.setattr(presence_mod, "get_snapshot", lambda: kiro_snap)
         monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda s: None)
 
         result = web_mod._acp_availability([sid], held=set())
@@ -21751,8 +21767,11 @@ class TestAcpAvailabilityV3:
         `_lock_holder_v3` is ever consulted -- same rule the v2 path takes."""
         from power_atlas import acp as acp_mod
         from power_atlas import web as web_mod
+        from power_atlas import presence as presence_mod
 
         sid = "sess_33333333-3333-3333-3333-333333333333"
+        kiro_snap = presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake/cwd")})
+        monkeypatch.setattr(presence_mod, "get_snapshot", lambda: kiro_snap)
 
         def _must_not_be_called(s):
             raise AssertionError("_lock_holder_v3 called for an id already held")
@@ -21770,8 +21789,11 @@ class TestAcpAvailabilityV3:
         cycle-2 perf fix (SC-7), avoiding a full hash-dir scan per row."""
         from power_atlas import acp as acp_mod
         from power_atlas import web as web_mod
+        from power_atlas import presence as presence_mod
 
         sid = "sess_44444444-4444-4444-4444-444444444444"
+        kiro_snap = presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake/cwd")})
+        monkeypatch.setattr(presence_mod, "get_snapshot", lambda: kiro_snap)
         seen = {}
 
         def _fake_holder(s, workspace_hash=None):
@@ -21793,8 +21815,11 @@ class TestAcpAvailabilityV3:
         (this class's other tests) keep working unchanged."""
         from power_atlas import acp as acp_mod
         from power_atlas import web as web_mod
+        from power_atlas import presence as presence_mod
 
         sid = "sess_55555555-5555-5555-5555-555555555555"
+        kiro_snap = presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake/cwd")})
+        monkeypatch.setattr(presence_mod, "get_snapshot", lambda: kiro_snap)
         calls = []
 
         def _fake_holder(s):
@@ -21806,6 +21831,59 @@ class TestAcpAvailabilityV3:
         result = web_mod._acp_availability([sid], held=set(), workspace_hashes={})
         assert result[sid] == "available"
         assert calls == [sid]
+
+    def test_acp_availability_no_kiro_process_unlocks_in_progress(
+            self, monkeypatch):
+        """When no kiro process is running (empty snapshot), an in_progress
+        session returns 'available' immediately — `_lock_holder_v3` must NOT
+        be called."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+        from power_atlas import presence as presence_mod
+
+        empty_snapshot = presence_mod.Snapshot(set(), set())
+        monkeypatch.setattr(presence_mod, "get_snapshot", lambda: empty_snapshot)
+
+        lock_calls = []
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3",
+                             lambda *a, **k: lock_calls.append(a) or None)
+
+        session_id = "sess_deadbeef-0000-0000-0000-000000000001"
+        result = web_mod._acp_availability([session_id], frozenset())
+        assert result[session_id] == "available"
+        assert lock_calls == []
+
+    def test_acp_availability_kiro_running_falls_through_to_lock_holder(
+            self, monkeypatch):
+        """When a kiro process IS running, the presence short-circuit is
+        skipped and `_lock_holder_v3` is consulted normally."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+        from power_atlas import presence as presence_mod
+
+        kiro_snapshot = presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake/cwd")})
+        monkeypatch.setattr(presence_mod, "get_snapshot", lambda: kiro_snapshot)
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3",
+                             lambda *a, **k: acp_mod._V3_HOLDER_PID_UNKNOWN)
+
+        session_id = "sess_deadbeef-0000-0000-0000-000000000002"
+        result = web_mod._acp_availability([session_id], frozenset())
+        assert result[session_id] == "locked"
+
+    def test_acp_availability_kiro_running_acp_none_still_available(
+            self, monkeypatch):
+        """When kiro is running but `acp` is None (fail-open contract),
+        the result is 'available' rather than raising."""
+        from power_atlas import web as web_mod
+        from power_atlas import presence as presence_mod
+
+        kiro_snapshot = presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake/cwd")})
+        monkeypatch.setattr(presence_mod, "get_snapshot", lambda: kiro_snapshot)
+        monkeypatch.setattr(web_mod, "acp", None)
+
+        session_id = "sess_deadbeef-0000-0000-0000-000000000003"
+        result = web_mod._acp_availability([session_id], frozenset())
+        assert result[session_id] == "available"
 
 
 class TestAcpFlatListing:

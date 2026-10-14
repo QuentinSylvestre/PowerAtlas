@@ -3300,6 +3300,11 @@ def _acp_availability(session_ids, held,
     full-directory scan. Omitted or missing an id falls back to the full scan,
     unchanged in outcome, just slower.
     """
+    # Thread-safe: Snapshot is immutable after construction; CPython GIL makes
+    # the module-level _cached_snapshot reference assignment in get_snapshot()
+    # atomic. Worst case: two threads call get_snapshot() concurrently and both
+    # call _scan() — a redundant double-scan, not a data race.
+    kiro_alive = presence.get_snapshot().any_live_process(presence._KIRO_PROVIDERS)
     out: dict[str, str] = {}
     for sid in session_ids:
         if sid in held:
@@ -3309,6 +3314,9 @@ def _acp_availability(session_ids, held,
         # store, so treat them as always available without scanning.
         if not sid.startswith("sess_"):
             out[sid] = "available"
+            continue
+        if not kiro_alive:
+            out[sid] = "available"   # no kiro process running → cannot be held
             continue
         state = "available"
         try:
