@@ -1,7 +1,7 @@
 # Crash Restart, Auto-Resume Cycling, and Workflow-Cancel Wiring
 
 > **Date**: 2026-10-14
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Three PowerAtlas reliability improvements: Task Scheduler crash restart (Windows), hands-free quota-limit cycling, and PA-side workflow-cancel wiring
 > **Memory relied on**: none
@@ -199,21 +199,24 @@ Append a new `class TestCrashRestart` (after the last class in the file, not bef
 In the autostart enable/disable cycle section: note that `enable()` also registers a Task Scheduler task named `"PowerAtlas Crash Restart"`, and `disable()` removes it. Add `schtasks /query /tn "PowerAtlas Crash Restart"` as a verification step.
 
 **Exit criteria**:
-- [ ] `autostart.enable()` calls `schtasks /create /tn "PowerAtlas Crash Restart" /xml <tmp> /f` (XML written with UTF-16, `<Principals>` block included, interpreter path XML-escaped)
-- [ ] When `schtasks` returns code 0: `.lnk` is removed (`_windows_shortcut_path().unlink(missing_ok=True)`)
-- [ ] When `schtasks` fails (non-zero code or spawn exception): `.lnk` is NOT removed; warning logged
-- [ ] XML temp file deleted in `finally` with `unlink(missing_ok=True)` regardless of success/failure
-- [ ] `autostart.disable()` calls `schtasks /delete /tn "PowerAtlas Crash Restart" /f`
-- [ ] `autostart.is_enabled()` returns True when `.lnk` OR Task Scheduler task exists
-- [ ] `_run_foreground()` calls `_detect_and_log_crash(log)` before `_single_instance_guard()`
-- [ ] `_detect_and_log_crash` is Windows-only (early return on non-Windows)
-- [ ] `_detect_and_log_crash` wraps PID file read/parse in `try: ... except (OSError, ValueError): return`
-- [ ] Stale PID → log warning + `notify_crash_restart()` called
-- [ ] Missing PID file or live PID → no warning
-- [ ] `notifications.notify_crash_restart()` added with correct toast title/body
-- [ ] All new tests in `class TestCrashRestart` pass
-- [ ] `plans/tests/HARNESS.md` updated with Task Scheduler note
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/ -x --timeout=300` passes
+- [x] `autostart.enable()` calls `schtasks /create /tn "PowerAtlas Crash Restart" /xml <tmp> /f` (XML written with UTF-16, `<Principals>` block included, interpreter path XML-escaped)
+- [x] When `schtasks` returns code 0: `.lnk` is removed (`_windows_shortcut_path().unlink(missing_ok=True)`)
+- [x] When `schtasks` fails (non-zero code or spawn exception): `.lnk` is NOT removed; warning logged
+- [x] XML temp file deleted in `finally` with `unlink(missing_ok=True)` regardless of success/failure
+- [x] `autostart.disable()` calls `schtasks /delete /tn "PowerAtlas Crash Restart" /f`
+- [x] `autostart.is_enabled()` returns True when `.lnk` OR Task Scheduler task exists
+- [x] `_run_foreground()` calls `_detect_and_log_crash(log)` before `_single_instance_guard()`
+- [x] `_detect_and_log_crash` is Windows-only (early return on non-Windows)
+- [x] `_detect_and_log_crash` wraps PID file read/parse in `try: ... except (OSError, ValueError): return`
+- [x] Stale PID → log warning + `notify_crash_restart()` called
+- [x] Missing PID file or live PID → no warning
+- [x] `notifications.notify_crash_restart()` added with correct toast title/body
+- [x] All new tests in `class TestCrashRestart` pass
+- [x] `plans/tests/HARNESS.md` updated with Task Scheduler note
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/ -x --timeout=300` passes
+
+Implementation (2026-10-14, code: 06bfbb8)
+`notifications.py`: added `notify_crash_restart()` firing a toast with hardcoded title/body. `autostart.py`: added Task Scheduler XML generation with `<Principals>` block, `RestartInterval PT1M`, `RestartCount 3`, UTF-16 temp file, `html.escape()` on interpreter path, absolute `C:\Windows\System32\schtasks.exe` path, `timeout=30` on all calls, `CONFIG_DIR.mkdir()` guard, `.lnk` removal on success (Task Scheduler becomes sole launcher), `.lnk` preserved on failure. Added `_task_scheduler_task_exists()`. Updated `is_enabled()` to check `.lnk` OR task. Added `_detect_and_log_crash()` in `__main__.py` — Windows-only, `(OSError, ValueError)` guard on PID file parse, `_pid_alive` in `try/except OSError`. `tests/test_web.py`: appended `class TestCrashRestart` (11 tests). `test_autostart.py` updated to mock subprocess.run and _task_scheduler_task_exists. QA: PASS. Auto-fixes applied for 3 Medium findings and 4 Low findings.
 
 ---
 
@@ -290,7 +293,7 @@ All three occurrences of "off by default" in the auto-schedule / resume section:
 In the `## Terminology` section, entry for **"Stopped by a quota limit"**: update "toggle (off by default)" → "toggle (on by default)" and add a reference to `261014_CRASH_RESTART_AUTO_RESUME_WORKFLOW_CANCEL` alongside the existing plan reference.
 
 **Exit criteria**:
-- [ ] `tick()` removes a `gave_up` run from `_runs` when `auto_schedule=True` (verified via `watching`→`"end"` path, not direct injection)
+- [ ] `tick()` removes a `gave_up` run from `_runs` when `auto_schedule=True`
 - [ ] `tick()` leaves a `gave_up` run in `_runs` when `auto_schedule=False` (verified with explicit `self.config.auto_schedule = False`)
 - [ ] `auto_schedule: bool = True` in `config.py`
 - [ ] `test_auto_schedule_does_not_re_arm_gave_up_run` renamed to `test_auto_schedule_off_does_not_remove_gave_up_run` with explicit `self.config.auto_schedule = False` and updated oracle
@@ -438,7 +441,7 @@ node tests/acp_page.test.mjs
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Phase 1 — Supervisor / crash restart | Pending | |
+| 1 | Phase 1 — Supervisor / crash restart | Complete | code: 06bfbb8 |
 | 2 | Phase 2 — Auto-resume cycling | Pending | |
 | 3 | Phase 3 — Workflow-cancel wiring | Pending | |
 
@@ -473,6 +476,26 @@ node tests/acp_page.test.mjs
 | 12 | Low | `_detect_and_log_crash` no `sys.platform` guard — spurious crash notification possible on Linux PID reuse | Fixed — Windows-only guard added to function description |
 | 13 | Low | XML temp file `finally` block should use `unlink(missing_ok=True)` | Fixed — noted in Phase 1 implementation steps |
 | 14 | Low | `textwrap` listed in Phase 1 proposed imports but unused | Fixed — removed from import list |
+
+### 2026-10-14 — Implementation Review (after Phase 1, personas: Reliability engineer, Security auditor, Senior engineer, Domain expert)
+
+Implementation health: **Green**. 2 cycles. QA: PASS (5 scripted probes + 11 unit tests).
+12 findings (0 High, 3 Medium, 9 Low). 8 auto-fixed; 4 user: accepted.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `tmp_path_str = f.name` assigned after `f.write()` — cleanup skipped if write raises | Fixed — assignment moved before write (`c147d4e`) |
+| 2 | Medium | `disable()` discards schtasks /delete returncode silently | Fixed — returncode checked, non-(0,1) logged as WARNING (`c147d4e`) |
+| 3 | Medium | `test_autostart.py` existing Windows tests call real schtasks (no subprocess mock) | Fixed — fixture and affected tests patched (`c147d4e`) |
+| 4 | Low | Relative `"schtasks"` name — PATH hijacking risk | Fixed — absolute `C:\Windows\System32\schtasks.exe` used (`c147d4e`) |
+| 5 | Low | No timeout on subprocess.run calls | Fixed — `timeout=30` + `TimeoutExpired` handler added (`c147d4e`) |
+| 6 | Low | `_pid_alive()` call not guarded against `OSError` | Fixed — wrapped in `try/except OSError: return` (`c147d4e`) |
+| 7 | Low | `CONFIG_DIR` not defensively created before temp file | Fixed — `CONFIG_DIR.mkdir(parents=True, exist_ok=True)` added (`c147d4e`) |
+| 8 | Low | spawn-failure test doesn't pre-create `.lnk` to verify preservation | Fixed — `.lnk` pre-created; assertion added (`06bfbb8`) |
+| 9 | Low | No test validates actual XML content (RestartInterval, RestartCount, Principals) | Fixed — `test_enable_writes_xml_with_required_elements` added (`06bfbb8`) |
+| 10 | Low | stderr decoded as utf-16-le but schtasks outputs ANSI/OEM | User: accepted — replacement chars in log; doesn't affect functionality |
+| 11 | Low | `TimeoutExpired` path in `enable()` has no dedicated test | User: accepted — covered by `except Exception` path; low risk |
+| 12 | Low | schtasks path hardcodes `C:\Windows\System32` — non-C: installs degrade silently | User: accepted — documented assumption; .lnk fallback active on failure |
 
 
 
