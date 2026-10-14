@@ -55,3 +55,112 @@ Once a session has a scheduled resume, the prompt and fire time are frozen. Ther
 
 8. **`dashOvLocalInput` / `dashOvLocalOutput`**: The existing datetime-local `<input>` uses `dashOvLocalInput(fire_at)` to convert an epoch-seconds float to a `datetime-local` string value, and `dashOvLocalOutput(when)` to convert back before posting. These utilities are already defined and can be reused for pre-filling.
 
+
+---
+
+## Design Decisions
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Draft pre-fill on every render vs. lazy-init | Always overwrite draft when `state === 'scheduled'` | If draft was previously initialized empty (user opened Schedule before schedule armed), stale `prompt: ''` would show blank instead of the actual scheduled prompt. Overwriting every render call ensures the input always reflects the live `resume.prompt` / `resume.fire_at`. |
+| Button label | "Update schedule" | Distinguishes edit-of-existing from create-of-new in the same action area |
+| Show/hide time input | Show both prompt and time inputs in scheduled state (same `<details>` block) | User confirmed "might as well" — editing the time is natural alongside the prompt. Reuses existing datetime-local input and `dashOvLocalInput` / `dashOvLocalOutput` utilities. |
+| API | Re-post to existing `POST /api/quota/schedule` | The route already upserts; no new endpoint needed |
+| Scope | `index.html` only | `decorate()` already returns `prompt`, web route already upserts, `resume.schedule()` already replaces — zero backend work |
+
+## 5) Implementation Phases
+
+### Phase 1: Edit-scheduled UI [QA]
+
+**Goal**: In `dashOvIntActions()`, show the prompt + time `<details>` block when `state === 'scheduled'`, pre-filled from `resume.prompt` / `resume.fire_at`, with button label "Update schedule".
+
+**Covers**: SC-1, SC-2, SC-3, SC-4, SC-5, SC-6, SC-7
+
+**File scope**: `src/power_atlas/templates/index.html`
+
+**Changes** (all within `dashOvIntActions()` — read the function first to verify exact line numbers against what sub-agents found at index.html:1590–1692):
+
+1. **Draft pre-fill** (currently at lines 1597–1600): When `state === 'scheduled'`, always overwrite the draft's `prompt` and `when` from the live scheduled values:
+
+   ```javascript
+   if (!draft || state === 'scheduled') {
+       draft = _dashOvIntDraft[row.id] = {
+           prompt: (state === 'scheduled' && resume && resume.prompt) ? resume.prompt : '',
+           when: (state === 'scheduled' && resume && resume.fire_at)
+               ? dashOvLocalInput(resume.fire_at)
+               : dashOvLocalInput(Number(row.resets_at) + 60)
+       };
+   }
+   ```
+
+2. **Guard change** (currently at line 1642): Change `if (state !== 'scheduled')` to **no guard** (or `if (true)`) so the `<details>` block renders in all non-watching states. The block should now show for both unscheduled and scheduled rows.
+
+3. **Button label** (inside the `<details>` block, the "Schedule" button): Conditionally change to "Update schedule" when `state === 'scheduled'`:
+
+   ```javascript
+   // Button text:
+   state === 'scheduled' ? 'Update schedule' : 'Schedule'
+   ```
+
+   Specifically, locate the `<button>` element that triggers the schedule POST and change its label. Use `createElement + textContent` per AGENTS.md (never `innerHTML`).
+
+**Exit criteria**:
+- [ ] When a session has a scheduled resume, the `<details>` section with prompt and datetime inputs is visible.
+- [ ] The prompt input is pre-filled with the existing `resume.prompt`.
+- [ ] The datetime-local input is pre-filled with the existing `resume.fire_at` value (converted via `dashOvLocalInput()`).
+- [ ] The button reads "Update schedule" (not "Schedule") when editing an existing schedule.
+- [ ] Clicking "Update schedule" posts `{session_id, prompt, fire_at}` to `/api/quota/schedule` and the row updates to reflect the new values after the Overview re-polls.
+- [ ] If `fire_at` is unchanged, the same time is sent back to the server.
+- [ ] "Cancel schedule", "Resume now", "Dismiss" still work.
+- [ ] `node tests/acp_page.test.mjs` passes.
+
+---
+
+## 6) Risk Assessment
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Draft overwrite clobbers user's in-progress edit | Medium | Only overwrite when `state === 'scheduled'`; once the user starts typing in the inputs, the draft will reflect their edits. Re-render on poll updates the scheduled values but the JS template re-runs `dashOvIntActions()` — check whether draft is re-initialized on each render. If it is, the user's in-progress edits may be lost on a 2 s poll. **Resolution at implementation**: if `dashOvIntActions()` is called on every poll render, only pre-fill when there is no existing draft (standard lazy-init) rather than on every call; if called once per row, always pre-fill is safe. |
+| `<details>` open/closed state reset on re-render | Low | Each re-render of the row recreates the DOM node — the `<details>` `open` attribute is reset. Acceptable; the user must manually re-expand. |
+| `acp_page.test.mjs` asserts on pre-existing prompt visibility | Low | The test covers `acp.html`, not `index.html`. If any test checks that the prompt block is hidden in the scheduled state, it would fail. Inspect test for existing scheduled-state assertions and update as needed. |
+
+## 7) Verification
+
+```powershell
+cd c:\Users\QSylvestre.POLESTAR\Documents\Perso\PowerAtlas
+node tests/acp_page.test.mjs 2>&1 | Select-Object -Last 10
+.venv-PowerAtlas\Scripts\python -m pytest tests/test_web.py --timeout=300 -q 2>&1 | Select-Object -Last 5
+```
+
+Browser QA (requires running PowerAtlas + pa_local cookie):
+1. Open Overview — find a session with a scheduled resume ("Resumes in X min")
+2. Verify prompt input and datetime input are visible and pre-filled
+3. Edit the prompt → click "Update schedule" → row updates
+4. Edit the time → click "Update schedule" → row updates with new time
+5. "Cancel schedule" still works
+
+## 8) Documentation Updates
+
+| Document | Update needed |
+|---|---|
+| `README.md` | Update "Stopped by a quota limit" section to mention prompt/time editing |
+| `AGENTS.md` | Update "Edit scheduled message" Terminology entry with Settled ref |
+| `plans/ROADMAP.md` | Mark "Edit scheduled message" as shipped |
+
+## Progress Tracker
+
+| # | Phase | Status | Notes |
+|---|---|---|---|
+| 1 | Edit-scheduled UI | Not started | |
+
+## 9) Implementation Divergences from Plan
+
+*Reserved — filled during implementation.*
+
+## Review Log
+
+*Reserved — filled during implementation.*
+
+## Harness Improvement Opportunities
+
+*None recorded.*
