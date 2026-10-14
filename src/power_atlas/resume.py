@@ -64,7 +64,7 @@ _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 _GONE = "That session is no longer stopped by a quota limit"
 
 _lock = threading.RLock()
-_state: dict = {"loaded": False, "schedules": [], "dismissed": []}
+_state: dict = {"loaded": False, "schedules": [], "dismissed": [], "skipped": []}
 # Resumes being watched, and the ones that ended badly (kept so the row can say so). Memory only: a
 # restart forgets them, and the row then reads as it did before, interrupted.
 _runs: list[dict] = []
@@ -113,8 +113,14 @@ def _load() -> None:
             if isinstance(d, dict) and isinstance(d.get("session_id"), str) and _num(d.get("key_at")) is not None \
                     and _num(d.get("at")) is not None:
                 dismissed.append({"session_id": d["session_id"], "key_at": float(d["key_at"]), "at": float(d["at"])})
-    _state["schedules"], _state["dismissed"] = schedules, dismissed
-
+    skipped = []
+    for s in (raw.get("skipped") if isinstance(raw.get("skipped"), list) else []):
+        if (isinstance(s, dict) and isinstance(s.get("session_id"), str)
+                and _UUID_RE.fullmatch(s["session_id"])
+                and _num(s.get("key_at")) is not None and _num(s.get("at")) is not None):
+            skipped.append({"session_id": s["session_id"], "key_at": float(s["key_at"]),
+                            "at": float(s["at"])})
+    _state["schedules"], _state["dismissed"], _state["skipped"] = schedules, dismissed, skipped
 
 def _save() -> bool:
     """Write the state file atomically (temporary file, then rename). Caller holds `_lock`. False when it
@@ -122,7 +128,8 @@ def _save() -> bool:
     path = _state_path()
     tmp = path.with_name(path.name + ".tmp")
     try:
-        body = json.dumps({"version": 1, "schedules": _state["schedules"], "dismissed": _state["dismissed"]},
+        body = json.dumps({"version": 1, "schedules": _state["schedules"], "dismissed": _state["dismissed"],
+                          "skipped": _state["skipped"]},
                           indent=1, allow_nan=False)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(body, encoding="utf-8")
@@ -283,7 +290,8 @@ def resume_now(session_id, prompt=None, attempt: int = 1, now: float | None = No
     return {"ok": True, "mode": mode}
 
 
-def schedule(session_id, prompt=None, fire_at=None, now: float | None = None) -> dict:
+def schedule(session_id, prompt=None, fire_at=None, now: float | None = None,
+             _if_unscheduled: bool = False) -> dict:
     """Arm a resume for `fire_at` (default: a minute after the reset). One schedule per session.
     `{"ok": True, "fire_at": ..., "persisted": bool, "open_terminal": bool}`; `persisted` is False when it
     could not be saved, in which case it holds until PowerAtlas restarts and no longer. `open_terminal` is
@@ -316,6 +324,15 @@ def schedule(session_id, prompt=None, fire_at=None, now: float | None = None) ->
               "prompt": cleaned, "fire_at": when, "resets_at": row["resets_at"], "attempt": 1}
     with _lock:
         _load()
+        if _if_unscheduled and (
+            any(s["session_id"] == session_id for s in _state["schedules"])
+            or any(r["session_id"] == session_id for r in _runs)
+        ):
+            # Session already scheduled or being watched — auto-schedule must not clobber it.
+            return {"ok": True, "fire_at": None, "persisted": False, "open_terminal": False}
+        if not _if_unscheduled:
+            # Manual schedule: clear any skip record so auto-schedule can re-arm on the next stop.
+            _state["skipped"] = [s for s in _state["skipped"] if s["session_id"] != session_id]
         _state["schedules"] = [s for s in _state["schedules"] if s["session_id"] != session_id] + [record]
         _runs[:] = [r for r in _runs if r["session_id"] != session_id]
         persisted = _save()
@@ -332,6 +349,51 @@ def cancel(session_id) -> dict:
             _save()
             return {"ok": True}
     return {"ok": False, "error": "Nothing was scheduled for that session"}
+
+
+def cancel_with_skip(session_id: str, now: float | None = None) -> dict:
+    """Cancel a scheduled resume and atomically record a per-stop skip.
+    The earlier two-step cancel()+add_skip() left a race window where the scheduler
+    could re-arm the session between calls. This function holds _lock throughout.
+    """
+    now = time.time() if now is None else now
+    row = quota.find_hit(session_id, now)   # outside lock
+    key_at = _key_at(row) if row is not None else None
+    with _lock:
+        _load()
+        before = len(_state["schedules"])
+        _state["schedules"] = [s for s in _state["schedules"] if s["session_id"] != session_id]
+        if len(_state["schedules"]) == before:
+            return {"ok": False, "error": "Nothing was scheduled for that session"}
+        if key_at is not None:
+            cutoff = now - DISMISS_KEEP_SECONDS
+            _state["skipped"] = [
+                s for s in _state["skipped"]
+                if s.get("at", 0) > cutoff
+                and not (s["session_id"] == session_id and abs(s.get("key_at", 0) - key_at) < 1.0)
+            ] + [{"session_id": session_id, "key_at": key_at, "at": now}]
+        _save()
+    return {"ok": True}
+
+
+def add_skip(session_id: str, now: float | None = None) -> None:
+    """Record a per-stop skip outside a cancel. Kept for test-level use only.
+    Production cancel calls cancel_with_skip() to close the race window.
+    """
+    now = time.time() if now is None else now
+    row = quota.find_hit(session_id, now)
+    if row is None:
+        return
+    key_at = _key_at(row)
+    with _lock:
+        _load()
+        cutoff = now - DISMISS_KEEP_SECONDS
+        _state["skipped"] = [
+            s for s in _state["skipped"]
+            if s.get("at", 0) > cutoff
+            and not (s["session_id"] == session_id and abs(s.get("key_at", 0) - key_at) < 1.0)
+        ] + [{"session_id": session_id, "key_at": key_at, "at": now}]
+        _save()
 
 
 def dismiss(session_id, now: float | None = None) -> dict:
@@ -513,6 +575,11 @@ def restore(now: float | None = None) -> int:
         if dropped:
             _state["schedules"] = keep
             _save()
+        cutoff = now - DISMISS_KEEP_SECONDS
+        stale_skips = [s for s in _state.get("skipped", []) if s.get("at", 0) <= cutoff]
+        if stale_skips:
+            _state["skipped"] = [s for s in _state["skipped"] if s.get("at", 0) > cutoff]
+            _save()
     return dropped
 
 
@@ -554,5 +621,5 @@ def stop_scheduler() -> None:
 def reset() -> None:
     """Forget everything in memory (tests)."""
     with _lock:
-        _state.update(loaded=False, schedules=[], dismissed=[])
+        _state.update(loaded=False, schedules=[], dismissed=[], skipped=[])
         _runs.clear()

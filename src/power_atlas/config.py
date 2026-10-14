@@ -158,6 +158,10 @@ class Config:
     acp_permission_rules: dict = field(
         default_factory=lambda: _default_permission_rules())
     acp_permission_base_agent: str = "kiro_default"
+    # Automatically schedule a resume for every session stopped by a quota limit.
+    # Toggled via GET/POST /api/quota/auto-schedule. Takes effect at the next
+    # scheduler tick (~5 s). 261013_AUTO_SCHEDULE_RESUME_MODE
+    auto_schedule: bool = False
 
     # ---- What `load_config` found, never stored ---------------------------
     # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (A9). Declared
