@@ -109,6 +109,11 @@ def notify_quota(label: str, message: str) -> None:
     _fire_toast(f"PowerAtlas — {label}", message.strip() or "see the Overview")
 
 
+def notify_crash_restart() -> None:
+    """PowerAtlas restarted after a crash (stale PID file detected at startup)."""
+    _fire_toast("PowerAtlas", "Restarted after a crash — see orchestrator.log for details.")
+
+
 def _fire_toast(title: str, body: str) -> None:
     """Platform dispatch. The single seam tests patch -- keep it that way.
 

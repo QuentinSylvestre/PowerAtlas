@@ -46864,3 +46864,205 @@ class TestQuotaRoutes:
         import power_atlas.web as web_mod
         for path in self._PATHS:
             assert path not in web_mod._REMOTE_ALLOWED_PATHS
+
+class TestCrashRestart:
+    """Tests for the Task Scheduler crash-restart integration (autostart.py)
+    and crash detection on startup (__main__.py)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path, monkeypatch):
+        from power_atlas import autostart as _autostart
+        self.tmp = tmp_path
+        # Redirect CONFIG_DIR so NamedTemporaryFile writes to a safe tmp location
+        monkeypatch.setattr(_autostart, "CONFIG_DIR", tmp_path)
+        # Redirect the .lnk path so we never touch the real Startup folder
+        self.lnk = tmp_path / "PowerAtlas.lnk"
+        monkeypatch.setattr(_autostart, "_windows_shortcut_path", lambda: self.lnk)
+
+    # -- Task Scheduler registration tests (autostart.py) --
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path only")
+    def test_enable_registers_schtasks_task(self, monkeypatch):
+        """enable() calls schtasks /create /tn 'PowerAtlas Crash Restart' /f."""
+        import subprocess as _subprocess
+        from power_atlas import autostart as _autostart
+        calls = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return _subprocess.CompletedProcess(cmd, 0)
+
+        mock_shortcut = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
+        mock_shell = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
+        mock_shell.CreateShortCut.return_value = mock_shortcut
+
+        with patch("win32com.client.Dispatch", return_value=mock_shell):
+            monkeypatch.setattr(_autostart.subprocess, "run", _fake_run)
+            _autostart.enable()
+
+        create_calls = [c for c in calls if "/create" in c]
+        assert create_calls, f"schtasks /create not called; calls={calls}"
+        c = create_calls[0]
+        assert c[0] == "schtasks"
+        assert "/tn" in c
+        assert "PowerAtlas Crash Restart" in c
+        assert "/f" in c
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path only")
+    def test_enable_removes_lnk_when_schtasks_succeeds(self, monkeypatch):
+        """.lnk is removed when schtasks returns code 0."""
+        import subprocess as _subprocess
+        from power_atlas import autostart as _autostart
+        from unittest.mock import MagicMock
+
+        self.lnk.write_text("")
+        mock_shortcut = MagicMock()
+        mock_shell = MagicMock()
+        mock_shell.CreateShortCut.return_value = mock_shortcut
+
+        with patch("win32com.client.Dispatch", return_value=mock_shell):
+            monkeypatch.setattr(
+                _autostart.subprocess, "run",
+                lambda cmd, **kw: _subprocess.CompletedProcess(cmd, 0),
+            )
+            _autostart.enable()
+
+        assert not self.lnk.exists(), ".lnk should be removed after successful schtasks"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path only")
+    def test_enable_keeps_lnk_when_schtasks_fails(self, monkeypatch):
+        """.lnk is NOT removed when schtasks returns a non-zero code."""
+        import subprocess as _subprocess
+        from power_atlas import autostart as _autostart
+        from unittest.mock import MagicMock
+
+        self.lnk.write_text("")
+        mock_shortcut = MagicMock()
+        mock_shell = MagicMock()
+        mock_shell.CreateShortCut.return_value = mock_shortcut
+
+        with patch("win32com.client.Dispatch", return_value=mock_shell):
+            monkeypatch.setattr(
+                _autostart.subprocess, "run",
+                lambda cmd, **kw: _subprocess.CompletedProcess(cmd, 1),
+            )
+            _autostart.enable()
+
+        assert self.lnk.exists(), ".lnk should be kept when schtasks fails"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path only")
+    def test_enable_schtasks_spawn_failure_does_not_raise(self, monkeypatch):
+        """enable() does not propagate an exception when schtasks cannot be spawned."""
+        from power_atlas import autostart as _autostart
+        from unittest.mock import MagicMock
+
+        mock_shortcut = MagicMock()
+        mock_shell = MagicMock()
+        mock_shell.CreateShortCut.return_value = mock_shortcut
+
+        def _spawn_fail(cmd, **kw):
+            raise FileNotFoundError("schtasks not found")
+
+        with patch("win32com.client.Dispatch", return_value=mock_shell):
+            monkeypatch.setattr(_autostart.subprocess, "run", _spawn_fail)
+            _autostart.enable()  # must not raise
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path only")
+    def test_disable_deletes_schtasks_task(self, monkeypatch):
+        """disable() calls schtasks /delete /tn 'PowerAtlas Crash Restart' /f."""
+        import subprocess as _subprocess
+        from power_atlas import autostart as _autostart
+
+        calls = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return _subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(_autostart.subprocess, "run", _fake_run)
+        _autostart.disable()
+
+        delete_calls = [c for c in calls if "/delete" in c]
+        assert delete_calls, f"schtasks /delete not called; calls={calls}"
+        c = delete_calls[0]
+        assert c[0] == "schtasks"
+        assert "PowerAtlas Crash Restart" in c
+        assert "/f" in c
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path only")
+    def test_is_enabled_returns_true_when_task_exists(self, monkeypatch):
+        """is_enabled() returns True when the task exists even without a .lnk."""
+        from power_atlas import autostart as _autostart
+
+        assert not self.lnk.exists()
+        monkeypatch.setattr(_autostart, "_task_scheduler_task_exists", lambda: True)
+        assert _autostart.is_enabled() is True
+
+    # -- _detect_and_log_crash() tests --
+
+    def test_crash_detection_logs_and_notifies_on_stale_pid(self, monkeypatch):
+        """A stale PID (dead process) triggers a warning log and notify_crash_restart."""
+        import power_atlas.__main__ as _main
+        import power_atlas.notifications as _notif
+        from unittest.mock import MagicMock
+
+        pid_file = self.tmp / "power-atlas.pid"
+        pid_file.write_text("12345")
+        monkeypatch.setattr(_main, "_PID_FILE", pid_file)
+        monkeypatch.setattr(_main, "_pid_alive", lambda pid: False)
+        monkeypatch.setattr(_main.sys, "platform", "win32")
+
+        notified = []
+        monkeypatch.setattr(_notif, "notify_crash_restart", lambda: notified.append(True))
+
+        log_mock = MagicMock()
+        _main._detect_and_log_crash(log_mock)
+
+        log_mock.warning.assert_called_once()
+        assert notified, "notify_crash_restart should have been called"
+
+    def test_crash_detection_silent_on_no_pid_file(self, monkeypatch):
+        """No PID file present — no warning, no notification."""
+        import power_atlas.__main__ as _main
+        from unittest.mock import MagicMock
+
+        pid_file = self.tmp / "no-such-file.pid"
+        monkeypatch.setattr(_main, "_PID_FILE", pid_file)
+        monkeypatch.setattr(_main.sys, "platform", "win32")
+
+        log_mock = MagicMock()
+        _main._detect_and_log_crash(log_mock)
+
+        log_mock.warning.assert_not_called()
+
+    def test_crash_detection_silent_on_live_pid(self, monkeypatch):
+        """PID file present but the recorded process is alive — no warning."""
+        import power_atlas.__main__ as _main
+        from unittest.mock import MagicMock
+
+        pid_file = self.tmp / "power-atlas.pid"
+        pid_file.write_text("99999")
+        monkeypatch.setattr(_main, "_PID_FILE", pid_file)
+        monkeypatch.setattr(_main, "_pid_alive", lambda pid: True)
+        monkeypatch.setattr(_main.sys, "platform", "win32")
+
+        log_mock = MagicMock()
+        _main._detect_and_log_crash(log_mock)
+
+        log_mock.warning.assert_not_called()
+
+    def test_crash_detection_silent_on_non_windows(self, monkeypatch):
+        """Non-Windows platform: no warning even with a stale PID file."""
+        import power_atlas.__main__ as _main
+        from unittest.mock import MagicMock
+
+        pid_file = self.tmp / "power-atlas.pid"
+        pid_file.write_text("12345")
+        monkeypatch.setattr(_main, "_PID_FILE", pid_file)
+        monkeypatch.setattr(_main, "_pid_alive", lambda pid: False)
+        monkeypatch.setattr(_main.sys, "platform", "linux")
+
+        log_mock = MagicMock()
+        _main._detect_and_log_crash(log_mock)
+
+        log_mock.warning.assert_not_called()

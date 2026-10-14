@@ -19,7 +19,7 @@ last_run: 2026-07-01
 | claude-session-data | data | always (read-only) | `~/.claude/projects/` (UUID *.jsonl) + `~/.claude/history.jsonl` — do not modify/delete | 2026-07-01 |
 | config-toml | data | always | `%LOCALAPPDATA%\power-atlas\config.toml` — read/write; snapshot+restore | 2026-07-01 |
 | icons-dir | data | always | `%LOCALAPPDATA%\power-atlas\icons\<launcher_id>.png` — snapshot/clean after | 2026-07-01 |
-| autostart-folder | environment | always | Start Menu Startup `PowerAtlas.lnk` — enable/disable freely; no reboot (existence-only) | 2026-07-01 |
+| autostart-folder | environment | always | Start Menu Startup `PowerAtlas.lnk` — enable/disable freely; no reboot (existence-only). `enable()` also registers a Task Scheduler task named `"PowerAtlas Crash Restart"` (crash-restart with `RestartInterval PT1M`, `RestartCount 3`); when registration succeeds, the `.lnk` is removed (Task Scheduler becomes the sole launcher to avoid the login race). `disable()` removes both the task and the `.lnk`. Verify with `schtasks /query /tn "PowerAtlas Crash Restart"` after enable, and confirm the task is absent after disable. | 2026-07-01 |
 | venv-pythonw | tool | verify | `.venv-PowerAtlas\Scripts\pythonw.exe` — autostart shortcut target; confirm it exists | 2026-07-01 |
 | system-tray | environment | user-assisted | native Windows tray; scoped out (user clicks and reports) | 2026-07-01 |
 | peek-overlay | environment | user-assisted | native global hotkey + pywebview overlay; scoped out (X11-only on Linux) | 2026-07-01 |

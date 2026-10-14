@@ -523,6 +523,30 @@ def _remove_pid() -> None:
         pass
 
 
+def _detect_and_log_crash(log) -> None:
+    """Detect a stale PID file from a previous crash, log a warning, and notify.
+
+    Windows-only. Called once at startup, before ``_single_instance_guard``.
+    A stale PID file means the previous instance crashed rather than exiting
+    cleanly (``_remove_pid`` was never called).
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        pid_text = _PID_FILE.read_text().strip()
+        pid = int(pid_text)
+    except (OSError, ValueError):
+        return
+    if _pid_alive(pid):
+        return
+    log.warning("Restarted after crash (previous PID %d not found)", pid)
+    try:
+        from .notifications import notify_crash_restart
+        notify_crash_restart()
+    except Exception:
+        pass
+
+
 def _pid_alive(pid: int) -> bool:
     """Check if a process with the given PID is alive."""
     if sys.platform == "win32":
@@ -794,6 +818,7 @@ def _run_foreground() -> None:
     _enable_crash_handler()
     log.info("Starting power-atlas (foreground)")
 
+    _detect_and_log_crash(log)
     _single_instance_guard()
     _ensure_display()
     _write_pid()
