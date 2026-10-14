@@ -46963,9 +46963,49 @@ class TestCrashRestart:
         def _spawn_fail(cmd, **kw):
             raise FileNotFoundError("schtasks not found")
 
+        self.lnk.write_text("")  # pre-create .lnk to verify preservation on failure
+
         with patch("win32com.client.Dispatch", return_value=mock_shell):
             monkeypatch.setattr(_autostart.subprocess, "run", _spawn_fail)
             _autostart.enable()  # must not raise
+
+        assert self.lnk.exists(), ".lnk should be preserved when schtasks spawn raises"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path only")
+    def test_enable_writes_xml_with_required_elements(self, monkeypatch):
+        """enable() writes an XML task definition with all required elements."""
+        import html as _html
+        import subprocess as _subprocess
+        from pathlib import Path as _Path
+        from power_atlas import autostart as _autostart
+        from unittest.mock import MagicMock
+
+        captured_xml = []
+
+        def _fake_run(cmd, **kw):
+            cmd_list = list(cmd)
+            if "/xml" in cmd_list:
+                xml_idx = cmd_list.index("/xml")
+                xml_path = cmd_list[xml_idx + 1]
+                captured_xml.append(_Path(xml_path).read_text(encoding="utf-16"))
+            return _subprocess.CompletedProcess(cmd, 0)
+
+        mock_shortcut = MagicMock()
+        mock_shell = MagicMock()
+        mock_shell.CreateShortCut.return_value = mock_shortcut
+
+        with patch("win32com.client.Dispatch", return_value=mock_shell):
+            monkeypatch.setattr(_autostart.subprocess, "run", _fake_run)
+            _autostart.enable()
+
+        assert captured_xml, "subprocess.run was never called with an /xml argument"
+        xml = captured_xml[0]
+        assert "InteractiveToken" in xml, "Missing InteractiveToken in Principals block"
+        assert "LeastPrivilege" in xml, "Missing LeastPrivilege in Principals block"
+        assert "PT1M" in xml, "Missing PT1M RestartInterval"
+        assert "<RestartCount>3</RestartCount>" in xml, "Missing RestartCount=3"
+        interp = _html.escape(str(_autostart._startup_interpreter(windowed=True)))
+        assert interp in xml, f"Interpreter path {interp!r} not found in XML"
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows path only")
     def test_disable_deletes_schtasks_task(self, monkeypatch):
