@@ -511,9 +511,59 @@ def _watch(run: dict, now: float) -> str | None:
     return verdict
 
 
+def _auto_schedule_new(now: float) -> None:
+    """Schedule resumes for unattended interrupted sessions when auto_schedule is on.
+
+    Called from tick(). Uses _if_unscheduled=True so it never clobbers a manual
+    schedule or clears a watching run. Snapshot is taken under _lock once; individual
+    schedule() calls re-acquire _lock independently (serialized with manual calls).
+
+    Race note: a dismiss() between the snapshot and a schedule() call can produce one
+    phantom schedule that tick() discards (via its own dismissed check). The session
+    then appears dismissed in the snapshot of the next tick and is not rescheduled.
+    """
+    try:
+        from .config import load_config
+        if not load_config().auto_schedule:
+            return
+    except Exception:
+        return
+    rows = quota.interrupted(now)       # file-stat-memoized; re-reads only changed files; O(N stat calls) not O(1)
+    with _lock:
+        _load()
+        already_scheduled = {s["session_id"] for s in _state["schedules"]}
+        dismissed_keys = {(d["session_id"], d["key_at"]) for d in _state["dismissed"]}
+        in_runs = {r["session_id"] for r in _runs}
+        # Age-filter skip entries; comparison uses tolerance (1 s) to match add_skip()
+        _cutoff_s = now - DISMISS_KEEP_SECONDS
+        _skipped_live = [s for s in _state["skipped"] if s.get("at", 0) > _cutoff_s]
+    for row in rows:
+        if row.get("resets_at") is None:        # kiro-cli: never schedulable
+            continue
+        if row.get("state") == "ready":         # quota already reset; Resume now is the action
+            continue
+        sid = row["id"]
+        key_at = _key_at(row)
+        if sid in already_scheduled:
+            continue
+        if sid in in_runs:                      # any state: watching, error, gave_up, no_activity
+            continue
+        if (sid, key_at) in dismissed_keys:
+            continue
+        if any(s["session_id"] == sid and abs(s["key_at"] - key_at) < 1.0 for s in _skipped_live):
+            continue
+        try:
+            _result = schedule(sid, now=now, _if_unscheduled=True)
+            if not _result.get("ok"):
+                log.debug("auto-schedule skipped %s: %s", sid, _result.get("error"))
+        except Exception:
+            log.exception("auto-schedule failed for %s", sid)
+
+
 def tick(now: float | None = None) -> None:
     """One scheduler step: fire what is due, then watch what was launched."""
     now = time.time() if now is None else now
+    _auto_schedule_new(now)    # auto-schedule before firing due schedules
     while True:
         # One schedule at a time: it leaves the list just before it fires, so a cancel or a dismissal
         # reaches every schedule that has not started. An exception in one never costs the others theirs.
