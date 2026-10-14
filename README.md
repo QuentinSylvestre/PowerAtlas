@@ -192,7 +192,8 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     A schedule that comes due while PowerAtlas is not
     running is dropped at the next start. If the quota had not really reset, the resume is armed once
     more for the new reset time; if nothing happens within three minutes you get a toast (when
-    notifications are on). *Uncommitted or unpushed work* lists repositories with tracked changes,
+    notifications are on).
+    **Auto-schedule resumes** (gear icon, off by default) automatically schedules a resume for every stopped session at `resets_at + 60 s`; clicking **Cancel schedule** records a per-stop skip so the session stays visible but is not re-armed. *Uncommitted or unpushed work* lists repositories with tracked changes,
     commits ahead of their upstream, or a branch with local-only commits and no upstream; untracked
     files show as a quiet count. It is read in the background about once a minute and never fetches.
   - *Live now* shows up to 8 tiles, one per live session. Each tile shows the last few events of the
@@ -256,7 +257,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 - Custom launchers with inline args editing and one-click execution
 - Global launch profiles with configurable Windows Terminal profile and terminal command
 - Settings (gear icon in topbar): a short menu with the launch profile, remote access, **Autostart on
-  login**, **Notify me** and the current permission mode. **All settings…** opens the Settings dialog,
+  login**, **Notify me**, **Auto-schedule resumes** (off by default) and the current permission mode. **All settings…** opens the Settings dialog,
   whose sections are General (peek hotkey, peek mode Hold or Toggle, browser shortcut, port), Agent
   permissions and Browser sign-in. The peek hotkey, peek mode and browser shortcut take effect on the
   next launch. A shortcut is saved only when it is valid (see the config sample below) and the two
@@ -285,6 +286,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   when it ends), and a burst of turn ends in one check is coalesced (at most 3 toasts per thread and 6 per check). Threads in a hidden workspace, on a network
   path, held by the desktop app or VS Code, or run as sub-agents send nothing. `codex_diagnostics.turn_watch`
   in the dashboard sessions response (`ok`, `stalled` or `off`) shows whether the check is running
+- **Auto-schedule resumes** (gear icon, off by default) automatically schedules a resume for every session stopped by a quota limit, at `resets_at + 60 s`. Clicking "Cancel schedule" records a per-stop skip so the session stays visible but is not re-armed for that stop. Toggle on, and every currently-stopped session with a known reset time is scheduled within 5 s.
 - **Agent permissions** (gear icon in topbar, then the Settings dialog) sets the permission mode for ACP sessions PowerAtlas
   creates: **Yolo** (the default; nothing asks, except a short Always blocked list that is refused in
   every mode) or **Manual** (common read-only actions run, everything else asks). **Auto** is shown but

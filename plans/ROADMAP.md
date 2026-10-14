@@ -32,8 +32,8 @@
 - **Open session with a prompt or skill** — prompt delivery and skill loading are proven; `$ARGUMENTS` expansion re-checked on 2.22.0 and still negative, but a skill can read its arguments off the prompt instead
 - **Template prompts** — save reusable per-workspace prompts; build on the read-from-prompt convention rather than `$ARGUMENTS`
 - **Scheduled tasks** — cron-like recurring kiro-cli launches; mechanism is measured and process cost is known, but the auto-permissions gate must come first
-- **Timed prompts** — a one-shot prompt at a wall-clock time; the quota-reset resume for Claude Code and Codex shipped 2026-10-09, the general case and kiro-cli did not
-- **Edit scheduled message** — change or cancel a queued schedule after it has been enabled
+- **Timed prompts** — a one-shot prompt at a wall-clock time; the quota-reset resume for Claude Code and Codex shipped 2026-10-09, an auto-schedule gear-menu toggle shipped 2026-10-13 in `261013_AUTO_SCHEDULE_RESUME_MODE`, the general case and kiro-cli did not
+- **Edit scheduled message** — change or cancel a queued schedule after it has been enabled; cancel shipped 2026-10-13 in `261013_AUTO_SCHEDULE_RESUME_MODE`, edit open
 - **Auto-resume** — automatically resume quota-stopped sessions multiple times without user interaction; enabled by default
 - **Chained launches** — when a session finishes, automatically start the next one; works for sessions PowerAtlas drives, not for terminal sessions
 - **Skills support spike, Claude Code half** — how a Claude Code skill receives its arguments; the kiro-cli half is answered
@@ -47,6 +47,7 @@
 
 ### Platform
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext; serving them was fixed, storing them safely is not yet
+- **Supervisor / crash restart** — the Startup-folder `.lnk` has no restart-on-failure; a crashed PowerAtlas stays dead until the next login; model after Task Scheduler `RestartOnFailure` or SamWhispers' supervisor module
 - **Electron app** — replace the Python/pywebview stack; not near-term
 - **Separate the ACP half into its own module** — the atlas side imports `agent_profile` and `acp` directly today, so retiring or replacing the ACP half would be surgery rather than a delete
 - **One shared Codex rollout record reader** — the Working/Idle verdict reader is the fourth reader of the rollout record format, and parity tests are the chosen guard for now against the readers drifting apart
@@ -181,12 +182,12 @@ cost first) · the Electron app.
   - *Auto-permissions gate* — a scheduled task has no human watching, and as configured today nothing prompts, so it runs its tools unsupervised rather than stalling. *Decide permission requests by rule for unattended sessions* under `## Session Control & Integration` is the gate. Its mechanism is measured working (agent-profile `ask` rules, shipped for interactive sessions 2026-09-23 in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`), so this is waiting on that item shipping rather than on an unknown.
 
 - **Timed prompts** — schedule a one-shot prompt for a specific wall-clock time; e.g. "at 11:50am, resume session X with prompt P"; cross-provider (kiro-cli ACP, Claude Code, kiro-cli terminal, Codex terminal); complements *Scheduled tasks* (recurring launches) but distinct: one-shot, prompt-delivery-focused, and works for sessions PowerAtlas does not own.
-  - *Quota-limit auto-schedule* — **partly shipped 2026-10-09** in `plans/done/261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS.md`, not yet tested live: the Overview lists Claude Code and Codex sessions stopped by a quota limit, with the reset time and Quick resume and Schedule resume buttons (a schedule fires at reset plus 60 seconds; the default prompt is "resume", editable). Still open: kiro-cli, which is detect-and-show only with no resume; defaulting the payload to the last user prompt instead of "resume"; and a general one-shot timed prompt at any wall-clock time, which this does not provide.
+  - *Quota-limit auto-schedule* — **shipped 2026-10-13** in `261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS` (manual schedule) and `261013_AUTO_SCHEDULE_RESUME_MODE` (auto-schedule gear-menu toggle, skip-on-cancel). Still open: kiro-cli, which is detect-and-show only with no resume; defaulting the payload to the last user prompt instead of "resume"; and a general one-shot timed prompt at any wall-clock time.
 
-- **Edit scheduled message** — change or cancel a queued schedule after it has been enabled; applies to quota-reset auto-schedules in the Overview and any future general timed prompts.
-  - *What shipped* — the Overview's *Schedule* button creates a one-shot resume at reset time (`261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS`); no editing or cancellation exists beyond *Dismiss*, which discards the row and the schedule together.
-  - *Shape* — an edit affordance on a pending scheduled row; lets the user change the prompt text and/or the scheduled time before it fires; a separate cancel-schedule action keeps the row without firing.
-  - *Done when* — a pending schedule can be edited (prompt and/or time) and cancelled, and the edited values are used when the schedule fires.
+- **Edit scheduled message** — change or cancel a queued schedule after it has been enabled; cancel shipped 2026-10-13 in `261013_AUTO_SCHEDULE_RESUME_MODE`, edit open; applies to quota-reset auto-schedules in the Overview and any future general timed prompts.
+  - *What shipped* — the Overview's *Schedule* button creates a one-shot resume at reset time (`261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS`); *Cancel schedule* removes a schedule and keeps the row (`261013_AUTO_SCHEDULE_RESUME_MODE`). Editing the prompt or time is still open.
+  - *Shape* — an edit affordance on a pending scheduled row; lets the user change the prompt text and/or the scheduled time before it fires.
+  - *Done when* — a pending schedule can be edited (prompt and/or time) and the edited values are used when the schedule fires.
 
 - **Auto-resume** — automatically chain quota-limit resumes without user interaction between cycles; enabled by default; raises a warning when a session is inaccessible before the next resume fires.
   - *Motivation* — the current *Schedule* flow fires once and stops; a multi-step task running overnight must be rescheduled manually every time the limit resets. Auto-resume repeats until the session finishes or the user opts out.
@@ -228,6 +229,9 @@ cost first) · the Electron app.
 ## Platform
 
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext in `config.toml`; shape (a) is an OS keystore reference, shape (b) is an encrypted-at-rest blob. Both require a UI decision about how the user enters/updates credentials.
+
+- **Supervisor / crash restart** — the Startup-folder `.lnk` has no restart-on-failure. A crashed PowerAtlas stays dead until the next login, with no user-visible error. Model after Task Scheduler `RestartOnFailure` (as done for the Obsidian iCloud sync daemon, 2026-10-13: 99 restarts at 1-minute intervals) or a self-restart supervisor module like SamWhispers (`samwhispers.supervisor`, invoked as `pythonw.exe -c "...from samwhispers.supervisor import main; main()"`). Compare once the Electron app item is closer to actionable.
+  - *Done when* — a PowerAtlas crash is detected and the process is restarted without a login cycle; the restart is logged; and repeated crashes within a short window surface a tray notification rather than looping silently.
 
 - **Electron app** — package PowerAtlas as an Electron desktop app, replacing the current Python/pywebview stack. Removes the Python runtime dependency for end users, enables a distributable binary (no venv setup), and gives native access to the Chromium renderer without the pywebview abstraction layer. The web UI (`src/power_atlas/`) is already framework-free HTML/JS/CSS and would port directly; the Python backend logic (`data.py`, `web.py`, `acp.py`, etc.) would need a rewrite in Node.js or a bundled subprocess boundary to be decided at spike time. Not a near-term item — the current stack works and the rewrite cost is substantial.
 

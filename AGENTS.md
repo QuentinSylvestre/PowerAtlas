@@ -170,8 +170,8 @@ re-litigate a settled word. General programming vocabulary does not belong here.
   skipped) or last turn record (Codex) is a hit. A session that carried on after a hit is not interrupted. **Not "stopped" or "blocked"** in code;
   the UI heading says **Stopped by a quota limit**, which is the user-facing name for the same list.
 - **Stopped by a quota limit** — the Overview's list of interrupted sessions, with the reset time and
-  the Resume now, Schedule and Dismiss controls. UI text only; code and docs say "interrupted".
-  Settled 2026-10-09, `plans/261009_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS.md`.
+  the Resume now, Schedule, Cancel schedule and Dismiss controls. The gear-menu **Auto-schedule resumes** toggle (off by default, `261013_AUTO_SCHEDULE_RESUME_MODE`) schedules every unattended stopped session automatically at `resets_at + 60 s`. UI text only; code and docs say "interrupted".
+  Settled 2026-10-09, `plans/261009_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS.md`; gear-menu toggle 2026-10-13, `261013_AUTO_SCHEDULE_RESUME_MODE`.
 - **approval** — a pending permission request for a tool call (`session/request_permission`), shown as
   a card on the session and as a row in the Overview's "Needs attention". **Not "permission prompt"**
   in UI text.
