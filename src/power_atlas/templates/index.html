@@ -45,7 +45,7 @@
         <span class="topbar-menu-label">Notify me</span>
         <span class="topbar-switch"><span class="topbar-switch-knob"></span></span>
       </div>
-      <div id="autoScheduleToggle" class="topbar-menu-row topbar-toggle{% if auto_schedule %} active{% endif %}" onclick="toggleAutoSchedule(this)" tabindex="0" title="Automatically schedule a resume for every session stopped by a quota limit">
+      <div id="autoScheduleToggle" class="topbar-menu-row topbar-toggle{% if auto_schedule %} active{% endif %}" role="switch" aria-pressed="{{ 'true' if auto_schedule else 'false' }}" onclick="toggleAutoSchedule(this)" tabindex="0" title="Automatically schedule a resume for every session stopped by a quota limit">
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
         <span class="topbar-menu-label">Auto-schedule resumes</span>
         <span class="topbar-switch"><span class="topbar-switch-knob"></span></span>
@@ -6782,7 +6782,7 @@ function toggleAutoSchedule(el){
   el.classList.toggle('active');  // optimistic; reconciled from the response
   fetch('/api/quota/auto-schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})
     .then(_okOrRefused)
-    .then(function(d){if(d)el.classList.toggle('active',!!d.enabled)})
+    .then(function(d){if(d){el.classList.toggle('active',!!d.enabled);el.setAttribute('aria-pressed',d.enabled?'true':'false');}})
     .catch(function(err){
       el.classList.toggle('active',!turningOn);
       if(err&&err.refused)_refusedToast('Auto-schedule was not changed',err);
@@ -6799,7 +6799,7 @@ function refreshAutoScheduleToggle(){
   var el=document.getElementById('autoScheduleToggle');
   if(!el)return;
   fetch('/api/quota/auto-schedule').then(function(r){return r.ok?r.json():null})
-    .then(function(d){if(d)el.classList.toggle('active',!!d.enabled)})
+    .then(function(d){if(d){el.classList.toggle('active',!!d.enabled);el.setAttribute('aria-pressed',d.enabled?'true':'false');}})
     .catch(function(){});
 }
 function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput){peekInput.value=d.peek_hotkey||'ctrl+shift+z';peekInput.setAttribute('data-saved',peekInput.value)}var browserInput=document.getElementById('browserHotkey');if(browserInput){browserInput.value=d.browser_hotkey||'';browserInput.setAttribute('data-saved',browserInput.value)}['peekHotkeyError','browserHotkeyError'].forEach(function(id){var e=document.getElementById(id);if(e){e.textContent='';e.hidden=true}});if(typeof renderShortcutNotes==='function')renderShortcutNotes(d);var peekModeSel=document.getElementById('peekMode');if(peekModeSel)peekModeSel.value=d.peek_mode==='toggle'?'toggle':'hold';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();refreshAutoScheduleToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
