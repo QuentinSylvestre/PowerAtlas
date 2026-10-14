@@ -23411,6 +23411,7 @@ check("dashboard overview resume: a scheduled row shows when it fires and offers
   assertEqual(posts[posts.length - 1].url, "/api/quota/schedule", "Update schedule POSTs to correct URL");
   assertEqual(posts[posts.length - 1].body.prompt, "updated prompt text", "Updated prompt in POST body");
   assert(typeof posts[posts.length - 1].body.fire_at === "number", "fire_at is a number in POST body");
+  assert(Math.abs(posts[posts.length-1].body.fire_at - (ovNowS() + 3660 + 30)) < 60, 'fire_at round-trips original value');
   const watching = ovIntRow(p, { resume: { state: "watching", attempt: 1, detail: "", mode: "terminal" } });
   assertEqual(JSON.stringify(ovButtons(watching)), JSON.stringify(["Dismiss"]),
     "a watched resume offers only the way out of one that never reports back");

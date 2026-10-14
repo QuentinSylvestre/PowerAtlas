@@ -193,6 +193,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     running is dropped at the next start. If the quota had not really reset, the resume is armed once
     more for the new reset time; if nothing happens within three minutes you get a toast (when
     notifications are on).
+    When a schedule is already set, the **Prompt and time** panel pre-fills with the existing values; clicking **Update schedule** replaces the schedule.
     **Auto-schedule resumes** (gear icon, off by default) automatically schedules a resume for every stopped session at `resets_at + 60 s`; clicking **Cancel schedule** records a per-stop skip so the session stays visible but is not re-armed. *Uncommitted or unpushed work* lists repositories with tracked changes,
     commits ahead of their upstream, or a branch with local-only commits and no upstream; untracked
     files show as a quiet count. It is read in the background about once a minute and never fetches.

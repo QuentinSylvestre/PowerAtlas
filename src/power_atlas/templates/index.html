@@ -1596,7 +1596,7 @@ function dashOvIntActions(row, li){
   _dashOvIntLive[row.id] = {buttons: buttons, msg: msg};
   var state = resume ? resume.state : '';
   var draft = _dashOvIntDraft[row.id];
-  if (!draft || (state === 'scheduled' && (draft._from?.p !== resume.prompt || draft._from?.t !== resume.fire_at))) {
+  if (!draft || (state === 'scheduled' && (!draft._from || draft._from.p !== resume.prompt || draft._from.t !== resume.fire_at))) {
     draft = _dashOvIntDraft[row.id] = {
       prompt: (state === 'scheduled' && resume && resume.prompt) ? resume.prompt : '',
       when: (state === 'scheduled' && resume && resume.fire_at)
