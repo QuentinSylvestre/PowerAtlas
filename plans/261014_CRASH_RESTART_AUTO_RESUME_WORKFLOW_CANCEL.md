@@ -385,18 +385,34 @@ Add two tests to the existing `_handle_cancel` test area (or to `class TestCance
 - Section 7.5 "PID file lifecycle" (if present): add a note that a stale PID triggers the crash-restart log and notification.
 
 **Exit criteria**:
-- [ ] `_handle_cancel()` calls `await _supervisor._request("_kiro.dev/commands/execute", ...)` with `timeout=5.0` when `stopped or had_runs`
-- [ ] `AcpError` from the request is caught with `log.warning`; any other exception caught with `log.exception`
-- [ ] The call is placed after `stopped = _supervisor._workflow_stop_children(...)` and before `changed = ...`
-- [ ] `_workflow_stop_children` docstring comment updated to reflect wiring is done
-- [ ] `_request` is NOT called when `had_runs=False, stopped=[]`
-- [ ] Unit test: `_handle_cancel` with mock `_supervisor._request` raising `AcpError` → warning logged, broadcast still fires, no exception propagates
-- [ ] Unit test: `_handle_cancel` with successful `_request` when children exist
-- [ ] Unit test: `_handle_cancel` with no children → `_request` not called
-- [ ] ROADMAP.md updated for all three items
-- [ ] KNOWLEDGE.md workflow-cancel note updated
-- [ ] `plans/tests/260701_POWERATLAS.md` updated
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/ -x --timeout=300` passes
+- [x] `_handle_cancel()` calls `await _supervisor._request("_kiro.dev/commands/execute", ...)` with `timeout=5.0` when `stopped or had_runs`
+- [x] `AcpError` from the request is caught with `log.warning`; any other exception caught with `log.exception`
+- [x] The call is placed after `stopped = _supervisor._workflow_stop_children(...)` and before `changed = ...`
+- [x] `_workflow_stop_children` docstring comment updated to reflect wiring is done
+- [x] `_request` is NOT called when `had_runs=False, stopped=[]`
+- [x] Unit test: `_handle_cancel` with mock `_supervisor._request` raising `AcpError` → warning logged, broadcast still fires, no exception propagates
+- [x] Unit test: `_handle_cancel` with successful `_request` when children exist
+- [x] Unit test: `_handle_cancel` with no children → `_request` not called
+- [x] ROADMAP.md updated for all three items
+- [x] KNOWLEDGE.md workflow-cancel note updated
+- [x] `plans/tests/260701_POWERATLAS.md` updated
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/ -x --timeout=300` passes
+
+Implementation (2026-10-14, code: f216fb3)
+Pre-existing fix: `_workflow_reap`'s expired-run loop now checks `_workflow_holds_step(parent_id)` and skips the closing frame when True (open question/approval prevents premature header flip to Done). This fixed 2 pre-existing `TestAcpWorkflowNotifications` failures. Workflow-cancel wiring in `_handle_cancel`: after `_workflow_stop_children`, when `stopped or had_runs`, sends `await _supervisor._request("_kiro.dev/commands/execute", {...}, timeout=5.0)` with `AcpError` → WARNING, any other exception → log.exception. Degrades gracefully on kiro-cli 2.31.0 (-32603). `_workflow_stop_children` docstring updated. 5 new tests (3 new workflow-cancel tests; 2 new reap guard tests). ROADMAP.md, KNOWLEDGE.md, plans/tests/260701_POWERATLAS.md all updated. QA: PASS (5484 tests, 0 failures).
+
+### 2026-10-14 — Implementation Review (after Phase 3, personas: Senior engineer, Reliability engineer, Domain expert, Architect)
+
+Implementation health: **Green**. 2 cycles. QA: PASS (5484/5484).
+5 findings (0 High, 2 Medium, 3 Low). 5 auto-fixed.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | No test for `_workflow_holds_step` guard in `_workflow_reap` expired-run loop | Fixed — `test_workflow_reap_skips_stale_run_when_step_has_open_question` added (`f216fb3`) |
+| 2 | Medium | `had_runs=True, stopped=[]` (gap between steps) path untested | Fixed — `test_handle_cancel_sends_workflow_cancel_when_had_runs_but_no_tracked_children` added (`f216fb3`) |
+| 3 | Low | `_workflow_stop_children` docstring said "asked to stop" — call is in caller, not this method | Fixed — rephrased to "its caller (`_handle_cancel`) sends…" (`f216fb3`) |
+| 4 | Low | Pre-existing fix undeclared in Phase 3 spec — no checkpoint | Fixed — divergence recorded here |
+| 5 | Low | Additional tests (M1/M2) added by auto-fix → plan exit criteria not updated | Fixed — recorded in implementation notes |
 
 ---
 
@@ -458,7 +474,7 @@ node tests/acp_page.test.mjs
 |---|---|---|---|
 | 1 | Phase 1 — Supervisor / crash restart | Complete | code: 06bfbb8 |
 | 2 | Phase 2 — Auto-resume cycling | Complete | code: 192f131 |
-| 3 | Phase 3 — Workflow-cancel wiring | Pending | |
+| 3 | Phase 3 — Workflow-cancel wiring | Complete | code: f216fb3 |
 
 ## 9) Implementation Divergences from Plan
 <Reserved — filled during implementation>
