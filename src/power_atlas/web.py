@@ -820,21 +820,6 @@ def _session_is_live(snapshot, session, provider: str) -> bool:
         return False
 
 
-def _mark_resume_locked(row: dict, session, provider: str) -> None:
-    """Add ``resume_locked: true`` to a Codex row whose thread's writer lock is held.
-
-    The key is omitted otherwise, and never set for another provider. It is a field of
-    its own, never ``availability``: ``locked`` there disables the whole row, blocks its
-    transcript and moves it to the "Locked elsewhere" bucket, but a held Codex thread
-    can still be read. Only the Resume button reads it (Codex itself refuses to resume
-    a thread with an active writer). Both row builders run under ``asyncio.to_thread``,
-    so the probe never runs on the event loop.
-    261001_CODEX_BUILT_IN_PROVIDER_SESSIONS_LIVE_DOT_AND_OVERVIEW Phase 3
-    """
-    if provider == "codex" and data_codex.session_writer_locked(session.session_id):
-        row["resume_locked"] = True
-
-
 def _resolved_session_status(snapshot, provider: str, session_id: str,
                              semantic: SemanticStatus | None,
                              inflight: frozenset[str] | None = None) -> str:
@@ -3274,61 +3259,15 @@ def _acp_row_title(session) -> str:
 
 def _acp_availability(session_ids, held,
                        workspace_hashes: dict[str, str] | None = None) -> dict[str, str]:
-    """D17's three states for **these** ids and no others.
-
-    Blocking — one bounded file read plus a `psutil` query per id — so this runs
-    under `asyncio.to_thread`, never on the loop.
-
-    `held` is a snapshot taken on the loop and passed in; this function must not
-    reach for `_supervisor.sessions` itself. `_supervisor` state is loop-owned
-    and unlocked by design, and D9 forbids reading it from a worker thread:
-    iterating it here while the loop mutates gives a torn read or an outright
-    `RuntimeError: dictionary changed size during iteration`.
-
-    **Fails open to `available`.** A wrongly-greyed session is unreachable from
-    the UI with no way for the user to find out why; a wrongly-available one
-    costs one click and gets the agent's own typed in-use refusal at load. The
-    hint may only add a refusal, never grant one.
-
-    A `sess_`-prefixed id routes to `acp._lock_holder_v3` (session.json's
-    `status` field, zero round-trip). Non-`sess_`-prefixed ids (v2 bare UUIDs)
-    are treated as always available — v2 sessions are no longer in the store.
-
-    `workspace_hashes`, when the caller has it (e.g. `_acp_listing`, which
-    already knows each row's workspace), maps `session_id -> hash-dir name`
-    and is threaded through to `_lock_holder_v3` so a v3 id skips the
-    full-directory scan. Omitted or missing an id falls back to the full scan,
-    unchanged in outcome, just slower.
+    """Map session ids to their availability state — 'held' or 'available'.
+    'held': this PowerAtlas supervisor currently holds the session.
+    'available': all other sessions — always available; the provider's own
+    CLI or session/load call surfaces an in-use error if the session is
+    genuinely held elsewhere.
+    workspace_hashes parameter kept for API compatibility but no longer used.
+    Runs under asyncio.to_thread; held is a snapshot from the event loop.
     """
-    # Thread-safe: Snapshot is immutable after construction; CPython GIL makes
-    # the module-level _cached_snapshot reference assignment in get_snapshot()
-    # atomic. Worst case: two threads call get_snapshot() concurrently and both
-    # call _scan() — a redundant double-scan, not a data race.
-    kiro_alive = presence.get_snapshot().any_live_process(presence._KIRO_PROVIDERS)
-    out: dict[str, str] = {}
-    for sid in session_ids:
-        if sid in held:
-            out[sid] = "held"
-            continue
-        # Non-sess_-prefixed IDs are v2 bare UUIDs; they are no longer in the
-        # store, so treat them as always available without scanning.
-        if not sid.startswith("sess_"):
-            out[sid] = "available"
-            continue
-        if not kiro_alive:
-            out[sid] = "available"   # no kiro process running → cannot be held
-            continue
-        state = "available"
-        try:
-            if acp is not None:
-                wh = workspace_hashes.get(sid) if workspace_hashes else None
-                holder = acp._lock_holder_v3(sid, wh) if wh else acp._lock_holder_v3(sid)
-                if holder is not None:
-                    state = "locked"
-        except Exception:
-            state = "available"
-        out[sid] = state
-    return out
+    return {sid: ("held" if sid in held else "available") for sid in session_ids}
 
 
 # Verdicts a workflow overlay may upgrade. For a kiro-cli v3 session the
@@ -4103,7 +4042,6 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             # binary alive/dead signal, just not the richer classified
             # verdict `status` carries for held rows.
             d["live"] = _session_is_live(snapshot, s, prov_name)
-            _mark_resume_locked(d, s, prov_name)
             if prov_name == "codex":
                 d["status"] = _codex_turn_status(snapshot, s) or d["status"]
         return d
@@ -4295,7 +4233,6 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
             d["created_at"] = s.created_at  # see _acp_listing's _row_dict
             # See _acp_listing's identical field for what this is and why.
             d["live"] = _session_is_live(snapshot, s, prov_name)
-            _mark_resume_locked(d, s, prov_name)
             if prov_name == "codex":
                 d["status"] = _codex_turn_status(snapshot, s) or d["status"]
         return d
