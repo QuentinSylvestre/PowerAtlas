@@ -5748,10 +5748,11 @@ class _Supervisor:
         frame from the child finds no tracked child and changes nothing.
         ``subagent_sessions``, ``subagent_history`` and ``_workflow_child_meta``
         stay for click-to-view and the later orphan release. The step's own
-        process is asked to stop via ``workflow-cancel``; the call degrades
-        gracefully on kiro-cli 2.31.0 (returns -32603) and becomes effective
-        once kiro-cli classifies the method. Returns the ids it dropped; the
-        caller emits the frame. Loop-only (it writes).
+        process is not stopped by this method; its caller (``_handle_cancel``)
+        sends ``workflow-cancel`` to ask kiro-cli to stop it. The call
+        degrades gracefully on kiro-cli 2.31.0 (returns -32603) and becomes
+        effective once kiro-cli classifies the method. Returns the ids it
+        dropped; the caller emits the frame. Loop-only (it writes).
 
         Also forgets the parent's recorded runs (``_workflow_runs``), whether
         or not a child is tracked: a Stop in the gap between two steps must

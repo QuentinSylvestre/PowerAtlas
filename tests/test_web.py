@@ -16092,6 +16092,30 @@ class TestAcpWorkflowNotifications:
         row = sv.crews[self.P]["child-c7"]
         assert (row["done"], row["status"], row["action"]) == (False, "waiting", "waiting")
 
+    def test_workflow_reap_skips_stale_run_when_step_has_open_question(self, wf):
+        """Stale run + step with an open question: the run expires in
+        ``_workflow_expire_runs``, but ``_workflow_holds_step`` suppresses the
+        closing ``subagents`` frame so the header stays live while the user
+        answers. Distinct from the per-child guard tested above: here it is
+        the run-expiry path (the ``expired`` loop) that must be held, not the
+        per-child reap path. SC-3 / D25 (261014_CRASH_RESTART_AUTO_RESUME_WORKFLOW_CANCEL)."""
+        acp_mod, sv = wf
+        self._run_start(acp_mod)
+        self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
+        view = self._watch(acp_mod)
+        # A userInput question from the child sets up a pending entry, making
+        # _workflow_holds_step (via _workflow_step_awaits_person) return True.
+        sv._on_agent_request(_user_input_msg(71, "child-c7", "Which file?", []))
+        t0 = 1000.0
+        # Override both the run and the child timestamps to t0 so both expire
+        # together past the 6-hour waiting bound.
+        sv._workflow_runs[(self.P, "wf-k7x")] = t0
+        sv._workflow_children[self.P]["child-c7"] = ("waiting", t0)
+        _queued(view)   # drain setup frames (node_start, question_request, subagents)
+        now = t0 + 6 * 3600.0 + 1.0    # past the 21600 s waiting bound
+        assert sv._workflow_reap(now=now) == []
+        assert _queued(view) == []   # no closing subagents frame emitted
+
     # -- agent questions (`_kiro/userInput`) ----------------------------------
     # 261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 3.
     # Expected values come from the plan's D3-D9 and the measured request shape,
@@ -17567,6 +17591,37 @@ class TestAcpWorkflowNotifications:
             asyncio.run(acp_mod._handle_cancel(conn, self.P))
 
         assert request_calls == []
+
+    def test_handle_cancel_sends_workflow_cancel_when_had_runs_but_no_tracked_children(self, wf):
+        """Stop in the gap between two workflow steps (had_runs=True,
+        stopped=[]): the condition ``stopped or had_runs`` is True, so
+        ``_request`` IS called even though no child was tracked at the time
+        of Stop. A run in the gap must not leave the header stuck on
+        "Orchestrating". SC-3 (261014_CRASH_RESTART_AUTO_RESUME_WORKFLOW_CANCEL)."""
+        acp_mod, sv = wf
+        self._run_start(acp_mod)   # run recorded; no tracked children
+        request_calls = []
+
+        async def fake_cancel(self_, session_id):
+            return True
+
+        async def fake_request(self_, method, params, timeout=None):
+            request_calls.append((method, params))
+            return {}
+
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, self.P)
+        acp_mod._supervisor.inflight.add(self.P)
+        _queued(conn)
+
+        with patch.object(acp_mod._Supervisor, "cancel", fake_cancel), \
+                patch.object(acp_mod._Supervisor, "_request", fake_request):
+            asyncio.run(acp_mod._handle_cancel(conn, self.P))
+
+        assert len(request_calls) == 1
+        method, params = request_calls[0]
+        assert method == "_kiro.dev/commands/execute"
+        assert params["command"] == {"command": "workflow-cancel", "args": {}}
 
 
 class TestAcpIdleSweeper:
