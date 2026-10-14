@@ -46485,6 +46485,215 @@ class TestResume:
         _resume_r.tick(_Q_NOW)
         assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
 
+    # -- auto-schedule Phase 5 tests: skip state, cancel, persistence, routes
+    # 261013_AUTO_SCHEDULE_RESUME_MODE Phase 5
+
+    def test_auto_schedule_arms_unattended_rows_on_tick(self):
+        """SC-2: two unattended stopped sessions are both armed on a single tick."""
+        self.config.auto_schedule = True
+        resets_at = _Q_NOW + 3600
+        sid1, _ = self._stopped(resets_at=resets_at)
+        sid2, _ = self._stopped(resets_at=resets_at)
+        _resume_r.tick(_Q_NOW)
+        scheduled = {s["session_id"]: s for s in _resume_r._state["schedules"]}
+        assert sid1 in scheduled and sid2 in scheduled
+        expected_fire_at = resets_at + _resume_r.FIRE_DELAY_SECONDS
+        assert scheduled[sid1]["fire_at"] == expected_fire_at
+        assert scheduled[sid2]["fire_at"] == expected_fire_at
+
+    def test_cancel_when_auto_schedule_on_adds_skip(self):
+        """SC-4: cancel_with_skip with auto_schedule on adds a skip record atomically."""
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, now=_Q_NOW)
+        result = _resume_r.cancel_with_skip(sid, now=_Q_NOW)
+        assert result == {"ok": True}
+        assert len(_resume_r._state["skipped"]) == 1
+        assert _resume_r._state["skipped"][0]["session_id"] == sid
+
+    def test_cancel_when_auto_schedule_off_does_not_add_skip(self):
+        """SC-9: cancel_with_skip with auto_schedule off removes the schedule but adds no skip."""
+        # auto_schedule is False on the default Config()
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, now=_Q_NOW)
+        result = _resume_r.cancel_with_skip(sid, now=_Q_NOW)
+        assert result == {"ok": True}
+        assert _resume_r._state["schedules"] == []
+        assert _resume_r._state["skipped"] == []
+
+    def test_auto_schedule_respects_skip_after_cancel(self):
+        """SC-4: a session skipped via cancel_with_skip is not re-armed by auto_schedule on tick."""
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, now=_Q_NOW)
+        _resume_r.cancel_with_skip(sid, now=_Q_NOW)
+        assert _resume_r._state["skipped"], "pre-condition: skip record must be present"
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_manual_schedule_clears_skip(self):
+        """SC-5: a manual schedule() call clears the skip record and creates a new schedule."""
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, now=_Q_NOW)
+        _resume_r.cancel_with_skip(sid, now=_Q_NOW)
+        assert len(_resume_r._state["skipped"]) == 1, "pre-condition: skip must be set"
+        # Manual schedule: clears skip and creates new schedule
+        result = _resume_r.schedule(sid, now=_Q_NOW)
+        assert result["ok"] is True
+        assert _resume_r._state["skipped"] == []
+        assert any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_kiro_row_not_auto_scheduled(self):
+        """SC-6: a kiro-cli session (resets_at=None) is never auto-scheduled."""
+        self.config.auto_schedule = True
+        d = self.v3 / "h" / "sess_k1"
+        d.mkdir(parents=True)
+        (d / "messages.jsonl").write_text(json.dumps({"timestamp": _q_iso(_Q_NOW - 5), "payload": {
+            "type": "session_metadata", "key": "displayError",
+            "value": {"errorType": "UsageLimitReachedError"}}}) + "\n", encoding="utf-8")
+        os.utime(d / "messages.jsonl", (_Q_NOW, _Q_NOW))
+        _resume_r.tick(_Q_NOW)
+        assert _resume_r._state["schedules"] == []
+
+    def test_ready_row_not_auto_scheduled(self):
+        """SC-6: a session whose quota has already reset (state='ready') is not auto-scheduled."""
+        self.config.auto_schedule = True
+        # resets_at in the past → quota.interrupted returns state="ready"
+        sid, _ = self._stopped(resets_at=_Q_NOW - 100)
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_dismissed_row_not_auto_scheduled(self):
+        """SC-2 boundary: a dismissed session is not auto-scheduled by tick."""
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.dismiss(sid, now=_Q_NOW)
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_auto_schedule_off_leaves_existing_schedules(self):
+        """SC-7: toggling auto_schedule off does not remove or modify existing schedules."""
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.tick(_Q_NOW)
+        sched = [s for s in _resume_r._state["schedules"] if s["session_id"] == sid]
+        assert len(sched) == 1
+        original_fire_at = sched[0]["fire_at"]
+        # Toggle off
+        self.config.auto_schedule = False
+        # Tick before fire_at: schedule unchanged
+        _resume_r.tick(_Q_NOW + 1)
+        sched_after = [s for s in _resume_r._state["schedules"] if s["session_id"] == sid]
+        assert len(sched_after) == 1
+        assert sched_after[0]["fire_at"] == original_fire_at
+        # Schedule fires as normal at its time despite auto_schedule being off
+        _resume_r.tick(original_fire_at)
+        assert any(launch[0] == sid for launch in self.launched)
+
+    def test_skip_persisted_to_quota_state_json(self):
+        """SC-4/SC-8: add_skip() writes a skip record to quota-state.json on disk."""
+        resets_at = _Q_NOW + 3600
+        sid, _ = self._stopped(resets_at=resets_at)
+        _resume_r.add_skip(sid, now=_Q_NOW)
+        saved = self._file()
+        assert len(saved.get("skipped", [])) == 1
+        rec = saved["skipped"][0]
+        assert rec["session_id"] == sid
+        # key_at is resets_at for a session with a known reset time
+        assert abs(rec["key_at"] - resets_at) < 1.0
+
+    def test_skip_pruned_after_14_days(self):
+        """Skip records older than DISMISS_KEEP_SECONDS are pruned on the next add_skip() call."""
+        now = _Q_NOW
+        old_sid, _ = self._stopped(resets_at=now + 3600)
+        new_sid, _ = self._stopped(resets_at=now + 7200)
+        # Inject an expired skip record directly into in-memory state
+        with _resume_r._lock:
+            _resume_r._load()
+            _resume_r._state["skipped"].append({
+                "session_id": old_sid,
+                "key_at": float(now + 3600),
+                "at": float(now - _resume_r.DISMISS_KEEP_SECONDS - 1),
+            })
+        # add_skip for new_sid triggers the age-prune
+        _resume_r.add_skip(new_sid, now=now)
+        skipped = _resume_r._state["skipped"]
+        assert not any(s["session_id"] == old_sid for s in skipped), "expired skip must be pruned"
+        assert any(s["session_id"] == new_sid for s in skipped), "fresh skip must be kept"
+
+    def test_get_auto_schedule_route(self, client):
+        """GET /api/quota/auto-schedule returns the current setting; route is loopback-only."""
+        resp = client.get("/api/quota/auto-schedule")
+        assert resp.status_code == 200
+        assert resp.json() == {"enabled": False}
+        import power_atlas.web as web_mod
+        assert "/api/quota/auto-schedule" not in web_mod._REMOTE_ALLOWED_PATHS
+
+    def test_toggle_auto_schedule_route(self, client):
+        """POST /api/quota/auto-schedule toggles the setting and reflects the new value."""
+        resp1 = client.post("/api/quota/auto-schedule", json={})
+        assert resp1.status_code == 200
+        assert resp1.json() == {"enabled": True}
+        resp_get = client.get("/api/quota/auto-schedule")
+        assert resp_get.json() == {"enabled": True}
+        resp2 = client.post("/api/quota/auto-schedule", json={})
+        assert resp2.json() == {"enabled": False}
+
+    def test_auto_schedule_route_requires_auth(self, anonymous_client):
+        """Both /api/quota/auto-schedule routes return 403 without the pa_local cookie."""
+        assert anonymous_client.get("/api/quota/auto-schedule").status_code == 403
+        assert anonymous_client.post("/api/quota/auto-schedule", json={}).status_code == 403
+
+    def test_cancel_route_adds_skip_when_auto_schedule_on(self, client):
+        """SC-4 route-level: POST /api/quota/cancel adds a skip record when auto_schedule is on."""
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        _resume_r.schedule(sid, now=_Q_NOW)
+        resp = client.post("/api/quota/cancel", json={"session_id": sid})
+        assert resp.json() == {"ok": True}
+        assert any(s["session_id"] == sid for s in _resume_r._state["skipped"])
+
+    def test_auto_schedule_does_not_re_arm_error_run(self):
+        """SC-3: a session in _runs with state='error' is not rescheduled by auto_schedule."""
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        with _resume_r._lock:
+            _resume_r._runs.append({"id": _uuid_q.uuid4().hex, "session_id": sid,
+                                    "cwd": "C:\\dev\\proj", "title": "", "prompt": "resume",
+                                    "launched_at": _Q_NOW, "resets_at": _Q_NOW + 3600,
+                                    "attempt": 1, "mode": "", "state": "error",
+                                    "detail": "launch failed"})
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_auto_schedule_does_not_re_arm_no_activity_run(self):
+        """SC-3: a session in _runs with state='no_activity' is not rescheduled by auto_schedule."""
+        self.config.auto_schedule = True
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        with _resume_r._lock:
+            _resume_r._runs.append({"id": _uuid_q.uuid4().hex, "session_id": sid,
+                                    "cwd": "C:\\dev\\proj", "title": "", "prompt": "resume",
+                                    "launched_at": _Q_NOW, "resets_at": _Q_NOW + 3600,
+                                    "attempt": 1, "mode": "", "state": "no_activity",
+                                    "detail": "no activity since resume"})
+        _resume_r.tick(_Q_NOW)
+        assert not any(s["session_id"] == sid for s in _resume_r._state["schedules"])
+
+    def test_add_skip_for_expired_session_is_noop(self):
+        """Phase 1 EC-5: add_skip() for a session not returned by find_hit is a no-op."""
+        sid = str(_uuid_q.uuid4())  # no transcript file → find_hit returns None
+        _resume_r.add_skip(sid, now=_Q_NOW)
+        assert _resume_r._state["skipped"] == []
+
+    def test_resume_now_when_auto_schedule_off_unchanged(self):
+        """SC-9: resume_now() with auto_schedule off completes normally and creates no skip."""
+        sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
+        # auto_schedule is False by default on Config()
+        result = _resume_r.resume_now(sid, now=_Q_NOW + 3700)
+        assert result["ok"] is True
+        assert _resume_r._state["skipped"] == []
+
 
 # ---- consoleinject: typing into another process's console -------------------------------------
 

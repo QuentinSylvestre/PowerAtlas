@@ -144,7 +144,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ## 2. Web API + UI (`web.py` + `templates/`)
 
-> **2.1–2.25 and 2.28–2.30 are the dashboard surface, and it is no longer the whole web surface.** 2.26 and 2.27 are ACP-scoped: they describe the `/api/acp/sessions/delete` route and share the ACP surface's exclusion below. *(Widened 2026-09-28 for the Overview routes, `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE`, and 2026-10-13 for the attention feed, 2.30, whose populated cases need a held kiro-cli session and so share the ACP exclusion.)* The ACP surface —
+> **2.1–2.25 and 2.28–2.31 are the dashboard surface, and it is no longer the whole web surface.** 2.26 and 2.27 are ACP-scoped: they describe the `/api/acp/sessions/delete` route and share the ACP surface's exclusion below. *(Widened 2026-09-28 for the Overview routes, `260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE`, and 2026-10-13 for the attention feed, 2.30, whose populated cases need a held kiro-cli session and so share the ACP exclusion; and for auto-schedule, 2.31, whose tests are fully automated.)* The ACP surface —
 > `/acp`, the `/ws/acp` WebSocket, `GET /api/acp/sessions`, `/remote-auth` and the two loopback-only
 > `/api/remote-access*` routes — has no brief here. **The reason changed on 2026-08-01 and the scoping
 > did not.** It was originally scoped out as a throwaway prototype; `260731_ACP_REMOTE_CLIENT_PRODUCTIZATION`
@@ -387,6 +387,13 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: `count == len(items)`; items oldest first; the *Waiting for you* block is first in *Needs attention*, hidden when the list is empty; each row shows the kind label (Approval, Question, Step question), title, workspace, the step label in its own `.dash-ov-ask-step` element before the text when `step` is set (agent text is never prefixed), a tooltip with the full text, and an age equal to `age` plus the time since the poll arrived (not skewed by the browser clock); all text rendered with `textContent` only; every session listed reads Waiting in the rail and on its Overview tile (the same rule feeds both, `sessions_awaiting_person`).
 - **risks**: agent-authored text on a page with no CSP (cleaned server-side by `_clean_agent_text`: category C characters dropped, clipped to 200 for approvals and questions and to 512 for step questions); a background tab's timer is throttled by the browser to about once a minute, so the count can lag; the attention list and a pending card can disagree after a reconnect past the 2000-event or 2 MiB replay history (the list reads the store, so the item still shows); a step that died with a request open stays listed until answer, Stop, close or restart (a step question until the parent passes an answer on, Stop during a turn, close or restart).
 
+### 2.31 Auto-schedule resume mode (`GET/POST /api/quota/auto-schedule`, `cancel_with_skip`)
+- **what**: A single PA-wide boolean setting (`auto_schedule` in `config.toml`, default `False`) that automatically schedules a resume for every session stopped by a quota limit. Toggled via `GET/POST /api/quota/auto-schedule` (loopback-only, not in `_REMOTE_ALLOWED_PATHS`). When on, `resume.tick()` calls `_auto_schedule_new(now)` which arms every unattended resumable stopped session at `resets_at + FIRE_DELAY_SECONDS` (60 s). `cancel_with_skip()` atomically removes a schedule and records a per-stop skip in `quota-state.json`; future ticks respect the skip and do not re-arm. A manual `schedule()` call clears the skip. (`261013_AUTO_SCHEDULE_RESUME_MODE`)
+- **how-to-reach**: `GET /api/quota/auto-schedule` (returns `{"enabled": bool}`); `POST /api/quota/auto-schedule` (toggles, returns new `{"enabled": bool}`); `POST /api/quota/cancel` now calls `cancel_with_skip()`. *(pa_local)*
+- **probes**: `GET` returns `{"enabled": false}` on fresh config; `POST` toggles and persists; 403 without cookie on both GET and POST; `/api/quota/auto-schedule` not in `_REMOTE_ALLOWED_PATHS`; `cancel_with_skip` adds skip when `auto_schedule=True`, no skip when `False`; auto-scheduled sessions appear in `_state["schedules"]` at `resets_at + FIRE_DELAY_SECONDS`; kiro-cli sessions (`resets_at=None`) and ready sessions not auto-scheduled; dismissed and skipped sessions not re-armed; existing schedules unchanged after `auto_schedule` toggled off, and fire on schedule; skip persisted to `quota-state.json`; expired skips pruned after 14 days; `resume_now` path unaffected when off; `_runs` states error, no_activity, gave_up, watching all block re-arm.
+- **oracle**: `TestResume` — `test_auto_schedule_arms_unattended_rows_on_tick`, `test_cancel_when_auto_schedule_on_adds_skip`, `test_cancel_when_auto_schedule_off_does_not_add_skip`, `test_auto_schedule_respects_skip_after_cancel`, `test_manual_schedule_clears_skip`, `test_kiro_row_not_auto_scheduled`, `test_ready_row_not_auto_scheduled`, `test_dismissed_row_not_auto_scheduled`, `test_auto_schedule_off_leaves_existing_schedules`, `test_skip_persisted_to_quota_state_json`, `test_skip_pruned_after_14_days`, `test_get_auto_schedule_route`, `test_toggle_auto_schedule_route`, `test_auto_schedule_route_requires_auth`, `test_cancel_route_adds_skip_when_auto_schedule_on`, `test_auto_schedule_does_not_re_arm_error_run`, `test_auto_schedule_does_not_re_arm_no_activity_run`, `test_add_skip_for_expired_session_is_noop`, `test_resume_now_when_auto_schedule_off_unchanged`. Plus pre-existing Phase 2 tests: `test_auto_schedule_does_not_overwrite_manual_schedule`, `test_auto_schedule_does_not_re_arm_watching_run`, `test_auto_schedule_does_not_re_arm_gave_up_run`.
+- **risks**: Race: `dismiss()` between `_auto_schedule_new()` snapshot and `schedule()` produces one phantom schedule that `tick()`'s own dismissed check drops silently (≤5 s window, no resume fires). Skip records pruned after `DISMISS_KEEP_SECONDS` (14 days), parity with dismissed.
+
 ---
 
 ## 3. Launcher (`launcher.py`)
@@ -600,14 +607,13 @@ Per the automatable-only scope decision, these are documented but NOT part of th
 
 ## Coverage manifest (for run mode)
 
-In scope (full briefs): Data layer (1.1–1.12), Web API+UI (2.1–2.25, 2.28–2.30; 2.26–2.27 are ACP-scoped, and 2.30's populated cases need a held kiro-cli session), Launcher Windows subset (3.1–3.8),
+In scope (full briefs): Data layer (1.1–1.12), Web API+UI (2.1–2.25, 2.28–2.31; 2.26–2.27 are ACP-scoped, and 2.30's populated cases need a held kiro-cli session), Launcher Windows subset (3.1–3.8),
 Icons (4.1–4.4), Config (5.1–5.5), Autostart Windows (6.1), Lifecycle Windows subset (7.1–7.6).
 Scoped-out: native tray clicks, peek native behavior, all Linux paths (see above), and the ACP surface
 (`/acp`, `/ws/acp`, `GET /api/acp/sessions`, `/remote-auth`, `/api/remote-access*`) — see the note under
 §2, whose *reason* changed on 2026-08-01 while the scoping did not: that surface is product now, not a
 prototype, and it stays out because probing it spawns a real `-a` agent and writes to the user's session
-store, not because it is disposable. *(Corrected 2026-09-23: not `-a`; see the dated note under §2.)* **2.1–2.25 and 2.28–2.30 are the dashboard web surface, not the whole web
-surface**; a run that covers all of §2 must not report the web layer as fully covered. Two further
+store, not because it is disposable. *(Corrected 2026-09-23: not `-a`; see the dated note under §2.)* **2.1–2.25 and 2.28–2.31 are the dashboard web surface, not the whole web surface**; a run that covers all of §2 must not report the web layer as fully covered. Two further
 scoping notes for anyone widening this: the remote authorization controls are inert from loopback by
 design, so covering them means driving a non-loopback peer with the user's explicit authorization; and
 7.2's dual-bind probes are the one place in this plan that opens a network-reachable socket.
