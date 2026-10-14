@@ -1,7 +1,7 @@
 # Crash Restart, Auto-Resume Cycling, and Workflow-Cancel Wiring
 
 > **Date**: 2026-10-14
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Three PowerAtlas reliability improvements: Task Scheduler crash restart (Windows), hands-free quota-limit cycling, and PA-side workflow-cancel wiring
 > **Memory relied on**: none
@@ -527,6 +527,17 @@ Implementation health: **Green**. 2 cycles. QA: PASS (5 scripted probes + 11 uni
 | 10 | Low | stderr decoded as utf-16-le but schtasks outputs ANSI/OEM | User: accepted — replacement chars in log; doesn't affect functionality |
 | 11 | Low | `TimeoutExpired` path in `enable()` has no dedicated test | User: accepted — covered by `except Exception` path; low risk |
 | 12 | Low | schtasks path hardcodes `C:\Windows\System32` — non-C: installs degrade silently | User: accepted — documented assumption; .lnk fallback active on failure |
+
+### 2026-10-14 — Post-Implementation Review (Step 9, personas: Senior engineer, Reliability engineer)
+
+Implementation health: **Green**. 2 cycles. QA Step 9b: PASS.
+3 findings (0 High, 1 Medium, 2 Low). 3 auto-fixed.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `is_enabled()` now calls blocking subprocess.run inside async event loop handlers | Fixed — module-level `_task_state` cache; subprocess only on first call (`2324fc4`) |
+| 2 | Low | `disable()` `TimeoutExpired` swallowed silently — task stays registered | Fixed — `except subprocess.TimeoutExpired: log.warning(...)` added (`2324fc4`) |
+| 3 | Low | `load_config()` exception path in `tick()` untested | Fixed — `test_tick_load_config_exception_leaves_run_in_runs` added (`2324fc4`) |
 
 
 
