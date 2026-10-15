@@ -50,6 +50,17 @@ Recipe for live QA of /acp and the dashboard against the running instance. It wo
   `wait_for_function("() => !document.getElementById('acpMcpIndicator').hidden")`. Allow up
   to 90 s. The first `mcp_servers` frame arrives a few seconds after `session/new`. The new
   id is the last `ACP session created:` line in `%LOCALAPPDATA%\power-atlas\orchestrator.log`.
+- **Visualization iframe card.** The `poweratlas-acp` agent definition exposes the `emit_visualization`
+  MCP tool via the `/api/mcp/viz` SSE endpoint (injected by `agent_profile.inject_mcp_servers` at PA
+  startup into `~/.kiro/agents/poweratlas-acp.md`). To verify inline rendering: start a Default ACP
+  session, have the agent write a test HTML fragment (e.g. a `<div id="test">Hello</div>`), run
+  `python shared/skills/qvisualize/scripts/render.py test-fragment.html test-out.html` to wrap it,
+  then have the agent call `emit_visualization` with the absolute path, a title, and the session id
+  the PA runtime provided at session start. A `div.acp-viz-card > details > iframe` card should
+  appear in the `/acp` transcript. Expand the `<details>` element to confirm the HTML loads inside
+  the iframe. The iframe carries `sandbox="allow-scripts"` (no `allow-same-origin`) — widget-state
+  localStorage is in-memory only (ephemeral per iframe load, accepted v1 trade-off). Playwright:
+  `page.locator('.acp-viz-card iframe').first()` after `waitForSelector('.acp-viz-card')`.
 - **Dashboard attach.** The dashboard subscribes only to a session it sees as `held`. Keep
   the /acp page that created the session open, load `/` in a second page of the same context,
   and click the real `[data-sid="<id>"]` row. A session created in "The agent's own folder"
