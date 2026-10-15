@@ -7923,7 +7923,9 @@ async def viz_file(session_id: str, filename: str):
             return _not_found
         if not resolved_path.is_file():
             return _not_found
-        content = await asyncio.run_in_executor(None, resolved_path.read_bytes)
+        content = await asyncio.get_running_loop().run_in_executor(
+            None, resolved_path.read_bytes
+        )
     except Exception:  # noqa: BLE001
         return _not_found
 
