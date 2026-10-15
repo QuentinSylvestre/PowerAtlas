@@ -1,7 +1,7 @@
 # Remove Session Locked/Greyed UI for Non-ACP Providers
 
 > **Date**: 2026-10-14
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Memory relied on**: v3 session liveness
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Remove availability="locked" and resume_locked UI for all non-ACP session rows
@@ -593,6 +593,8 @@ qvalidate: 7/7 PASS. Tests: 3437/3437 pytest, 1114/1114 acp_page node.
 | 4 | Low | `test_acp_availability_kiro_running_acp_none_still_available` deleted (not simplified as plan said); not recorded in Implementation Divergences. | Fixed — divergence 3 added to plan. |
 | 5 | Low | `acp.html:3378-3380` orphaned click-guard comment after removing `if (locked) return`. | Fixed — 6c35b92. |
 | 6 | Low | `acp_page.test.mjs:3936` assertion message said "the locked row's `disabled` exists for." | Fixed — 6c35b92. |
+
+**Step 9b QA**: PASS (2026-10-14, commit 6c35b92). 153 session rows checked across 10 endpoint calls. SC-1 PASS (rows clickable, no disabled/is-locked attrs); SC-2 PASS (no `availability="locked"` in any response); SC-3 PASS (no `resume_locked` field); SC-4 PASS (no "Locked elsewhere"/"Locked" bucket in either template); SC-5 PASS (delete gate, liveness dots, held state unchanged — code inspection confirmed).
 
 ## Harness Improvement Opportunities
 
