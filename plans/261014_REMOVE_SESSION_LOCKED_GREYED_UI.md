@@ -517,7 +517,7 @@ Select-String -Path src/power_atlas/static/style.css -Pattern "is-locked"
 
 1. **Phase 1 — `TestAcpListingEndpoint` test rewrites**: The plan specified rewriting tests to remove `_lock_holder_v3` spies. Three tests had proxy assertions on `_lock_holder_v3` call count that were removed; the underlying behavioral assertions (availability values, threading behavior) were preserved. No behavioral regression.
 
-2. **Phase 2 — `tests/acp_page.test.mjs` had 10 locked-state tests**: The plan stated "no acp_page.test.mjs tests currently cover locked-state behavior." The actual file contained 10 such tests (3 deleted, 7 updated). All node tests pass.
+2. **Phase 2 — `tests/acp_page.test.mjs` had 10 locked-state tests**: The plan stated "no acp_page.test.mjs tests currently cover locked-state behavior." The actual file contained 12 such tests (5 deleted, 7 updated). All node tests pass.
 
 ## Follow-up Work (Deferred)
 <Reserved — appended during /qplan, /qdev, /qreview>
@@ -543,11 +543,41 @@ Full-effort review (4 personas: Architect, Senior engineer, Domain expert JS, Re
 | 11 | Low | `_check_test_names.py` pre-commit hook: class rename `TestCodexLiveDotAndResumeLock` → `TestCodexLiveDot` must not create a duplicate name. | Accepted — rename is a rename, not a new class alongside; no collision. |
 | 12 | Low | `workspace_hashes` parameter becomes unused; no test verifies callers can pass it harmlessly. | Accepted — no test needed; all callers pass it harmlessly (parameter accepted but ignored by the comprehension). |
 
+### 2026-10-14 — Implementation Review (after Phases 1+2, full effort, 4 personas each)
+
+Review cadence: 1 cycle per phase (user override, 2026-10-06; default 2). All findings auto-fixed in commit 88f6f15.
+
+Phase 1 health: **Green** (0 unresolved). Phase 2 health: **Green** (0 unresolved).
+
+| # | Ph | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|---|
+| 1 | 1 | Medium | `docs/KNOWLEDGE.md` ~253 planned update omitted; paragraph still said PA hides Resume button based on Codex writer lock. | Fixed — 88f6f15 appends Update annotation. |
+| 2 | 1 | Medium | Dead `hashes`/`by_cwd` block in `overview.py` executed on every Overview poll, building workspace hashes for ignored `workspace_hashes` param. | Fixed — 88f6f15 removes the dead block. |
+| 3 | 2 | Medium | README.md line 243 said "Resume button is hidden when writer lock is held" — false after Phase 2. Unplanned miss. | Fixed — 88f6f15 removes stale clause. |
+| 4 | 1 | Low | Dead lock-probe infrastructure in `acp_listing_store` fixture (`lock_calls`, `locked` set, two vacuous assertions, two dead `.add()` calls). | Fixed — 88f6f15. |
+| 5 | 1 | Low | Dead `session_writer_locked` probe in `TestCodexAdapterThroughTheDashboardListing.seam` fixture. | Fixed — 88f6f15. |
+| 6 | 1 | Low | Thread-test name/docstring still said "lock checks"/"bounded file read plus psutil query." | Fixed — 88f6f15 renames to `test_availability_runs_off_the_event_loop`, rewrites docstring. |
+| 7 | 1 | Low | Dead `hash_by_sid` dict in `_acp_listing` and stale `_lock_holder_v3` workspace-hash comment. | Fixed — 88f6f15. |
+| 8 | 1 | Low | Stale `_acp_delete_many` comment cross-referenced `_acp_availability → _lock_holder_v3`. | Fixed — 88f6f15. |
+| 9 | 1 | Low | Stale `api_session_availability` docstring mentioning "locked", "acp is None", "branches on id shape". | Fixed — 88f6f15 rewrites docstring. |
+| 10 | 1 | Low | Dead mock returning `4242` in `test_workflow_state_session_availability_does_not_overlay`. | Fixed — 88f6f15. |
+| 11 | 1 | Low | Dead `_lock_holder_v3 → None` mock in `test_available_session_reports_available`. | Fixed — 88f6f15. |
+| 12 | 1 | Low | Unused `monkeypatch` params in three `TestAcpAvailabilityV3` test signatures. | Fixed — 88f6f15. |
+| 13 | 1 | Low | Dead `_lock_holder_v3` mock in `grouped_multi_store` fixture. | Fixed — 88f6f15. |
+| 14 | 1 | Low | Duplicate `test_acp_availability_kiro_running_acp_none_still_available` (identical to idle test). | Fixed — 88f6f15 deletes duplicate. |
+| 15 | 1 | Low | Stale "foreign-locked session" language in `_held_rows` helper. | Fixed — 88f6f15. |
+| 16 | 2 | Low | `acp.html` line 928 API comment said "three states"; now two. | Fixed — 88f6f15. |
+| 17 | 2 | Low | `acp.html` poll comment included locked→available transition and "three states". | Fixed — 88f6f15. |
+| 18 | 2 | Low | `acp.html` delete block said "two states"/"both states"/"D17 gives a locked row". | Fixed — 88f6f15. |
+| 19 | 2 | Low | `acp.html` line 1028 referenced removed `locked` row `disabled`. | Fixed — 88f6f15. |
+| 20 | 2 | Low | UTF-8 BOM prepended to `index.html` and `tests/acp_page.test.mjs` in Phase 2 commit. | Fixed — 88f6f15 strips BOM. |
+| 21 | 2 | Low | `acp_page.test.mjs` narrowing test said "three literals"; regex still allowed `locked` class. | Fixed — 88f6f15 updates error msg and regex. |
+| 22 | 2 | Low | Plan section 9 annotation said "3 deleted, 7 updated" for `acp_page.test.mjs`; actual was 5 deleted, 7 updated. | Fixed — 88f6f15 (plan section 9 corrected). |
+| 23 | 2 | Low | `index.html` line 519 lifecycle comment listed `locked` as a state after `dashMaybeAttach` locked block was removed. | Fixed — 88f6f15. |
+
 ## Harness Improvement Opportunities
-<Reserved — appended during /qexplore, /qplan and /qdev when harness friction is felt.
-Format: - <observation> — cost: <what the friction actually cost> — suggested change: <one-line>
-Leave the heading even if empty: /qclose Pass 2 and /qdream GAT-PLANS both read it, and an
-absent heading is indistinguishable from a frictionless run.>
+
+- `run_workflow workflowPrompt` auto-fix brief dispatched a read-only agent (semantic_reviewer) instead of wf-coder; required immediate re-dispatch — cost: 1 wasted workflow creator turn + re-dispatch — suggested change: when the brief requires write/shell/git tools, explicitly say "use wf-coder" rather than relying on the creator to infer it.
 
 ---
 
