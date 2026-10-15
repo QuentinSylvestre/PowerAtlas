@@ -2986,6 +2986,8 @@ function clearTranscript() {
  * Phase 4: 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ
  */
 function addVisualizationCard(url, title) {
+  if (!url) { return; }  // guard against undefined/null url (e.g. missing payload.url)
+  var stick = stuckToBottom();  // capture before DOM mutation, per file convention
   var card = document.createElement('div');
   card.className = 'acp-msg acp-viz-card';
   var details = document.createElement('details');
@@ -3002,6 +3004,7 @@ function addVisualizationCard(url, title) {
   details.appendChild(frame);
   card.appendChild(details);
   transcriptEl.appendChild(card);
+  if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;  // restore scroll position
 }
 
 // ---- feeding frames from outside a live socket ---------------------------

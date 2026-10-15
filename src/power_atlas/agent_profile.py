@@ -1470,6 +1470,8 @@ def inject_mcp_servers(derived_text: str, port: int) -> str:
     """
     if port <= 0:
         return derived_text
+    if "  viz:" in derived_text:
+        return derived_text  # already injected, idempotent (mirrors inject_body_section guard)
     lines = derived_text.split("\n")
     close = _frontmatter_bounds(lines)
     if close < 0:

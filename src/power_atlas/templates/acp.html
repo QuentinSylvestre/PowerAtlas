@@ -4999,6 +4999,7 @@
     // addVisualizationCard is defined in transcript-renderer.js (Phase 4:
     // 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ).
     if (type === 'visualization') {
+      if (!payload.url) return;  // guard against missing url
       addVisualizationCard(payload.url, payload.title || 'Visualization');
       return;
     }
