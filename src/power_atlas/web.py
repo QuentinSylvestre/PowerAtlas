@@ -1557,6 +1557,18 @@ _REMOTE_AUTH_PATH = "/remote-auth"
 # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 4
 _LOCAL_AUTH_PATH = "/local-auth"
 
+# The SSE MCP endpoint that exposes `emit_visualization` to kiro-cli agents.
+# Named here so `_local_gate_exempt` can reference it without magic strings;
+# the route is defined further down near the /api/viz/ file-serving route.
+# 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 3
+_MCP_VIZ_SSE_PATH = "/api/mcp/viz"
+
+# The file-serving prefix for visualization HTML files.  The LCG exempts
+# paths under this prefix (GET only, with a ``..`` guard) so the browser can
+# load iframe src without a pa_local cookie.
+# 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 3
+_MCP_VIZ_FILE_PREFIX = "/api/viz/"
+
 # The session browser's listing route. Defined up here, far from its own route,
 # for one mechanical reason: `_REMOTE_ALLOWED_PATHS` below now names it, and a
 # module-level dict is built at import time, so the name has to exist before
@@ -2782,12 +2794,37 @@ def _local_gate_exempt(scope) -> bool:
     a backslash counts as a separator because the static directory is
     resolved with Windows path rules.
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL final QA
+
+    The MCP viz SSE path and its messages subpath are exempt for ALL methods
+    (GET for the SSE stream, POST for JSON-RPC messages) because kiro-cli
+    connects without a pa_local cookie.  A ``..`` guard prevents
+    ``/api/mcp/viz/../api/settings`` from slipping through.
+    The /api/viz/ serving prefix is exempt for GET/HEAD only (browsers load
+    iframe src there; may be unnecessary if they send pa_local, but added per
+    G-01 decision until confirmed).
+    261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 3
     """
-    if scope["type"] != "http" or scope.get("method") not in ("GET", "HEAD"):
+    if scope["type"] != "http":
         return False
+    method = scope.get("method")
     path = scope.get("path") or ""
+
+    # MCP viz endpoint: exempt for all HTTP methods so kiro-cli (no cookie)
+    # can open the SSE stream (GET) and POST JSON-RPC messages.
+    # The ``..`` guard prevents path-traversal bypass of the LCG cookie check.
+    if path == _MCP_VIZ_SSE_PATH or (
+            path.startswith(_MCP_VIZ_SSE_PATH + "/")
+            and ".." not in re.split(r"[/\\]", path)):
+        return True
+
+    if method not in ("GET", "HEAD"):
+        return False
     if path == _LOCAL_AUTH_PATH:
         return True
+    # /api/viz/ serving: GET/HEAD only, with the same ``..`` guard as /static.
+    # Prevents /api/viz/../../api/settings from bypassing the LCG cookie check.
+    if path.startswith(_MCP_VIZ_FILE_PREFIX):
+        return ".." not in re.split(r"[/\\]", path)
     if not (path == _REMOTE_STATIC_MOUNT
             or path.startswith(_REMOTE_STATIC_MOUNT + "/")):
         return False
@@ -7599,3 +7636,297 @@ async def get_workspace_settings_bulk_api(request: Request):
     all_tags.update(config.tag_settings.keys())
 
     return {"workspaces": workspaces, "all_tags": sorted(all_tags)}
+
+
+# ---------------------------------------------------------------------------
+# Visualization MCP SSE endpoint and file-serving route
+# 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 3
+# ---------------------------------------------------------------------------
+
+# conn_id → asyncio.Queue; holds queued JSON-RPC responses for active SSE
+# connections opened on _MCP_VIZ_SSE_PATH.
+_viz_mcp_sessions: dict[str, asyncio.Queue] = {}
+
+
+def _handle_emit_visualization(args: dict) -> dict:
+    """Handle a ``emit_visualization`` MCP tool call.
+
+    Returns either a JSON-RPC ``result`` dict (on success) or
+    ``{"error": {"code": ..., "message": ...}}`` (on failure).  The caller
+    inspects the ``"error"`` key to decide which envelope shape to use.
+    """
+    if not acp:
+        return {"error": {"code": -32603, "message": "ACP module not available"}}
+
+    session_id = args.get("session_id", "")
+    path_str = args.get("path", "")
+    title = (args.get("title") or "").strip() or "Visualization"
+
+    # Validate session_id exists in active sessions.
+    if not session_id or session_id not in acp._supervisor.sessions:
+        return {"error": {"code": -32600,
+                          "message": "session_id not found in active sessions"}}
+
+    # Extract cwd; guard against sessions with no working directory.
+    cwd = acp._supervisor.sessions[session_id].get("cwd", "")
+    if not cwd:
+        return {"error": {"code": -32603,
+                          "message": "session has no working directory"}}
+
+    # Validate path: must be absolute, end in .html, and lie within cwd.
+    if not path_str:
+        return {"error": {"code": -32602, "message": "path is required"}}
+    try:
+        p = Path(path_str)
+        if not p.is_absolute():
+            return {"error": {"code": -32602, "message": "path must be absolute"}}
+        if not path_str.endswith(".html"):
+            return {"error": {"code": -32602, "message": "path must end with .html"}}
+        cwd_resolved = Path(cwd).resolve()
+        resolved = p.resolve()
+        if not resolved.is_relative_to(cwd_resolved):
+            return {"error": {"code": -32602,
+                              "message": "path must be within the session working directory"}}
+        # Must be a direct child (no subdirectory component).
+        rel = resolved.relative_to(cwd_resolved)
+        if len(rel.parts) != 1:
+            return {"error": {"code": -32602,
+                              "message": ("path must be a direct child of the session "
+                                          "working directory, not a subdirectory")}}
+        if not resolved.is_file():
+            return {"error": {"code": -32602,
+                              "message": "visualization file not found at path"}}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": {"code": -32602, "message": f"invalid path: {exc}"}}
+
+    filename = p.name
+
+    # Broadcast-only: call _registry.broadcast directly, NOT _emit().
+    # _emit() would record the frame into _History (the replay buffer),
+    # but visualization frames are live-only — the file may change between
+    # agent turns.  This mirrors the tool_output broadcast-only pattern.
+    frame = acp.envelope("visualization", {
+        "url": f"/api/viz/{session_id}/{filename}",
+        "title": title,
+    }, session_id)
+    acp._registry.broadcast(session_id, frame)
+
+    return {"content": [{"type": "text", "text": f"Visualization emitted: {filename}"}]}
+
+
+@app.get(_MCP_VIZ_SSE_PATH)
+async def viz_mcp_sse(request: Request):
+    """SSE MCP endpoint exposing the ``emit_visualization`` tool.
+
+    kiro-cli opens a GET here to establish the SSE stream.  The server
+    immediately sends an ``endpoint`` event whose data is the POST URL the
+    client should use for JSON-RPC messages.  Responses arrive on this stream
+    as ``message`` events.
+
+    Exempt from ``LoopbackCredentialGate`` (kiro-cli has no pa_local cookie).
+    261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 3
+    """
+    from fastapi.responses import StreamingResponse as _SR
+
+    conn_id = str(uuid.uuid4())
+    queue: asyncio.Queue = asyncio.Queue()
+    _viz_mcp_sessions[conn_id] = queue
+
+    post_url = f"/api/mcp/viz/messages?conn={conn_id}"
+
+    async def event_stream():
+        # Tell the client where to POST JSON-RPC.
+        yield f"event: endpoint\ndata: {post_url}\n\n"
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if msg is None:
+                    break
+                yield f"event: message\ndata: {json.dumps(msg)}\n\n"
+        finally:
+            _viz_mcp_sessions.pop(conn_id, None)
+
+    return _SR(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/mcp/viz/messages")
+async def viz_mcp_messages(request: Request, conn: str):
+    """Receive a JSON-RPC request from kiro-cli and queue the response.
+
+    ``conn`` is the connection UUID issued by ``viz_mcp_sse`` in its
+    ``endpoint`` event.  Returns 202 Accepted; the actual JSON-RPC response
+    is streamed back on the SSE connection identified by ``conn``.
+    261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 3
+    """
+    queue = _viz_mcp_sessions.get(conn)
+    if queue is None:
+        return Response(status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return Response(status_code=400)
+
+    req_id = body.get("id")
+    method = body.get("method", "")
+    params = body.get("params") or {}
+
+    if method == "initialize":
+        response: dict = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "poweratlas-viz", "version": "1.0.0"},
+            },
+        }
+    elif method == "notifications/initialized":
+        # Notification: no response required.
+        return Response(status_code=202)
+    elif method == "tools/list":
+        response = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "tools": [
+                    {
+                        "name": "emit_visualization",
+                        "description": (
+                            "Emit a rendered visualization HTML file as an inline "
+                            "iframe card in the PowerAtlas ACP transcript."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": (
+                                        "Absolute path to the rendered HTML "
+                                        "visualization file.  Must be a direct child "
+                                        "of the session working directory."
+                                    ),
+                                },
+                                "title": {
+                                    "type": "string",
+                                    "description": (
+                                        "Display title for the visualization card "
+                                        "(default: 'Visualization')."
+                                    ),
+                                },
+                                "session_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "The ACP session ID to emit the visualization "
+                                        "into.  Use the session ID provided at session "
+                                        "start by the PA runtime."
+                                    ),
+                                },
+                            },
+                            "required": ["path", "session_id"],
+                        },
+                    }
+                ]
+            },
+        }
+    elif method == "tools/call":
+        tool_name = params.get("name", "")
+        tool_args = params.get("arguments") or {}
+        if tool_name == "emit_visualization":
+            outcome = _handle_emit_visualization(tool_args)
+            if "error" in outcome:
+                response = {"jsonrpc": "2.0", "id": req_id, "error": outcome["error"]}
+            else:
+                response = {"jsonrpc": "2.0", "id": req_id, "result": outcome}
+        else:
+            response = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
+            }
+    else:
+        if req_id is not None:
+            response = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": f"Method not found: {method}"},
+            }
+        else:
+            # Notification with no id: no response.
+            return Response(status_code=202)
+
+    await queue.put(response)
+    return Response(status_code=202)
+
+
+@app.get("/api/viz/{session_id}/{filename}")
+async def viz_file(session_id: str, filename: str):
+    """Serve a visualization HTML file from the session's working directory.
+
+    Both 404 cases (session not found/cwd empty and file not found) return
+    an identical plain-text body so no session-existence information is
+    leaked to the caller.
+
+    The resolved path (captured at guard time) is read rather than the
+    pre-resolve ``filepath``, closing the TOCTOU window between the
+    traversal check and the file read.  No caching headers: visualization
+    files may change between agent turns.
+    261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 3
+    """
+    _not_found = Response("404 Not Found", status_code=404, media_type="text/plain")
+
+    if not acp:
+        return _not_found
+
+    session = acp._supervisor.sessions.get(session_id)
+    cwd = (session.get("cwd", "") if session is not None else "")
+    if not cwd:
+        return _not_found
+
+    # Validate filename: no path separators, no ``..``, must end .html.
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return _not_found
+    if not filename.endswith(".html"):
+        return _not_found
+
+    filepath = Path(cwd) / filename
+    try:
+        resolved_path = filepath.resolve()
+        cwd_resolved = Path(cwd).resolve()
+        # Traversal guard: resolved path must still lie within cwd.
+        if not resolved_path.is_relative_to(cwd_resolved):
+            return _not_found
+        if not resolved_path.is_file():
+            return _not_found
+        content = resolved_path.read_bytes()
+    except Exception:  # noqa: BLE001
+        return _not_found
+
+    csp = (
+        "default-src 'self' 'unsafe-inline' blob: data: "
+        "https://unpkg.com https://cdn.jsdelivr.net https://esm.sh "
+        "https://cdnjs.cloudflare.com https://fonts.googleapis.com "
+        "https://fonts.gstatic.com https://fonts.bunny.net"
+    )
+    return Response(
+        content,
+        media_type="text/html",
+        headers={
+            "Content-Security-Policy": csp,
+            "Cache-Control": "no-store",
+        },
+    )

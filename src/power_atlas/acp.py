@@ -253,6 +253,10 @@ SERVER_TYPES = frozenset({
     # v3-only (SC-3, plan Phase 3 of 260923_ACP_V3_SESSION_DELETE_WATCHDOG_MCP_STATUS):
     # `_kiro/mcp/status` notification; see `_on_notification`.
     "mcp_servers",
+    # Broadcast-only: a viz HTML file the agent emitted via /api/mcp/viz;
+    # not recorded (no replay) — the file may change between agent turns.
+    # 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 3
+    "visualization",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
