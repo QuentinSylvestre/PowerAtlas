@@ -3,12 +3,23 @@
 > **Date**: 2026-10-14
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Memory relied on**: v3 session liveness
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-10-14 21:39
 > **Scope**: Remove availability="locked" and resume_locked UI for all non-ACP session rows
 > **Memory relied on**: none
 > **Estimated effort**: 1 day
 
 ---
+
+## Completion Summary
+
+Removed `availability="locked"` and `resume_locked` from all non-ACP session surfaces. Every non-held session row in the dashboard and `/acp` rails is now always clickable; the provider's own CLI surfaces an error if the session is genuinely held elsewhere. "Locked elsewhere"/"Locked" status buckets removed from both templates. The delete gate (`_acp_delete_many`), liveness dots, and `resume.py` backend gates are unchanged.
+
+**Key commits**: 781758c (Phase 1 Python), 5147abb (Phase 2 frontend), 88f6f15 (review auto-fixes), 6c35b92 (step 9 fixes)  
+**Tests**: 3437/3437 pytest · 1114/1114 acp_page node · Step 9b QA PASS (153 rows, all 5 SC verified)
+
+### Acknowledged at archival
+
+- `Accepted (harness opportunity)`: When dispatching a `workflowPrompt` auto-fix brief that requires write/shell/git tools, name `wf-coder` explicitly — the workflow creator inferred `semantic_reviewer` (read-only) and required a re-dispatch with `agent://wf-coder`. Cost: 1 wasted creator turn + re-dispatch. Suggested change: add a note to the workflow orchestration steering that implementation/fix briefs should name `wf-coder` directly.
 
 ## Intent
 
