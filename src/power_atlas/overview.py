@@ -455,8 +455,8 @@ class LiveDeps(NamedTuple):
     """The rail helpers `live_sessions` needs, passed in by `web.py` (D10).
 
     `session_is_live(snapshot, session, provider) -> bool` is the rail's live
-    check; `acp_availability(sids, held, workspace_hashes) -> {sid: state}` and
-    `acp_status_for_held(sessions, snapshot) -> {sid: status}` its held/locked
+    check; `acp_availability(sids, held) -> {sid: state}` and
+    `acp_status_for_held(sessions, snapshot) -> {sid: status}` its held/available
     and working/waiting verdicts; `row_title(session) -> str` its label.
     `hidden(cwd) -> bool` is the `hidden` workspace tag and
     `provider_shown(provider) -> bool` the available-and-enabled rule.

@@ -3375,9 +3375,6 @@
     row.title = note;
 
     row.addEventListener('click', function () {
-      // A browser fires no click on a disabled button; this guard covers
-      // everything else that can reach the handler, including a later refactor
-      // that stops drawing the row as one.
       railFocus = { sid: session.id };
       // Picking a row is navigation, and a menu left hanging over the list the
       // user has just navigated away from would outlive what it belonged to.

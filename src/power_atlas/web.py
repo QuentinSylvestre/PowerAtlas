@@ -3227,7 +3227,7 @@ _ACP_MAX_SESSIONS_PER_GROUP = 50
 #
 # The ceiling is where the cost stops being free rather than where it starts to
 # hurt. `_acp_availability` has no wall-clock budget of its own and is strictly
-# O(rows) — measured at 0.12-0.21 ms a row, so 100 rows is 17.9 ms — while the
+# O(rows) — a trivial dict comprehension set-lookup, while the
 # collect-and-sort behind it dominates at 140-340 ms warm. The bound exists
 # because this route is remotely reachable and a caller-supplied page size is
 # an amplification lever, not because 100 rows is expensive.

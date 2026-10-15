@@ -3932,8 +3932,7 @@ check("a re-render puts keyboard focus back where the user left it", async (tpl)
   await page.settle();
   let now = page.focused();
   assert(now, "the rebuild dropped focus to the document body, throwing a keyboard " +
-              "or screen-reader user out of the rail mid-task — the same population " +
-              "the locked row's `disabled` exists for");
+              "keyboard or screen-reader user out of the rail mid-task");
   assert(now.dataset && now.dataset.sid && now.dataset.sid.startsWith("sess-w0-"),
          "focus did not land on a ws-0 row");
 
