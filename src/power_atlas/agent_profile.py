@@ -1507,9 +1507,10 @@ _VIZ_GUIDANCE_BLOCK = (
     "When `/qvisualize` produces a visualization HTML file via render.py:\n"
     "- If the `emit_visualization` tool is available in your tool list, call"
     " it with the absolute file path, a concise title (\u2264 50 chars), and"
-    " your current ACP session ID as `session_id` (the session ID provided to"
-    " you at session start by the PA runtime). The visualization renders as an"
-    " inline iframe card in the transcript.\n"
+    " your current ACP session ID as `session_id`. Your PA session ID is"
+    " available in the `serverInfo.sessionId` field of the viz MCP endpoint's"
+    " `initialize` response; use that value as `session_id`. The visualization"
+    " renders as an inline iframe card in the transcript.\n"
     "- Otherwise, open the file in a browser: `Start-Process <path>` on Windows.\n"
 )
 

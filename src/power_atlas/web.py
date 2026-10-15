@@ -7792,13 +7792,26 @@ async def viz_mcp_messages(request: Request, conn: str):
     params = body.get("params") or {}
 
     if method == "initialize":
+        # Inject the most-recently-active PA session ID so the agent can pass
+        # it straight to emit_visualization without filesystem discovery.
+        # Uses last_used (monotonic) to pick among multiple active sessions.
+        _viz_session_id = None
+        if acp and acp._supervisor.sessions:
+            _viz_session_id = max(
+                acp._supervisor.sessions,
+                key=lambda sid: acp._supervisor.sessions[sid].get("last_used", 0),
+            )
         response: dict = {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "poweratlas-viz", "version": "1.0.0"},
+                "serverInfo": {
+                    "name": "poweratlas-viz",
+                    "version": "1.0.0",
+                    "sessionId": _viz_session_id,
+                },
             },
         }
     elif method == "notifications/initialized":
@@ -7838,8 +7851,9 @@ async def viz_mcp_messages(request: Request, conn: str):
                                     "type": "string",
                                     "description": (
                                         "The ACP session ID to emit the visualization "
-                                        "into.  Use the session ID provided at session "
-                                        "start by the PA runtime."
+                                        "into.  Use the value from "
+                                        "serverInfo.sessionId in this server's "
+                                        "initialize response."
                                     ),
                                 },
                             },
