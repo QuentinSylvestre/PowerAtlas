@@ -591,3 +591,4 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 - "_supervisor_v3 getattr silent null — rename singletons by string ref too" — declined 2026-09-17
 - "Large removal plans accumulate sub-agent pull-forwards — add import-check exit criterion per phase" — declined 2026-09-17
 - "4-persona high-effort holistic review catches cross-module silent regressions that per-phase review misses" — declined 2026-09-17
+- "When a function parameter is made unused, audit all callers for dead data-structure builds" — declined 2026-10-14
