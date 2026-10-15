@@ -2969,6 +2969,41 @@ function clearTranscript() {
   // just cleared by textContent = '' above, so stale refs are cleared here.
 }
 
+// ---- visualization card --------------------------------------------------
+
+/** Append an inline iframe card for a visualization to the transcript.
+ *
+ * Creates div.acp-msg.acp-viz-card containing a <details>/<summary>/<iframe>
+ * structure. All DOM construction uses createElement/setAttribute/textContent/
+ * appendChild — no innerHTML, matching the rest of this file's XSS control.
+ *
+ * The iframe uses sandbox="allow-scripts" without allow-same-origin so a
+ * same-origin document cannot reach back into PA's DOM. Widget state is
+ * in-memory only in this configuration; localStorage is accessible but
+ * ephemeral in the null-origin sandbox (data not persisted across iframe
+ * reloads — accepted v1 trade-off).
+ *
+ * Phase 4: 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ
+ */
+function addVisualizationCard(url, title) {
+  var card = document.createElement('div');
+  card.className = 'acp-msg acp-viz-card';
+  var details = document.createElement('details');
+  var summary = document.createElement('summary');
+  summary.textContent = title;
+  var frame = document.createElement('iframe');
+  frame.setAttribute('src', url);
+  // allow-same-origin deliberately omitted: same-origin + allow-scripts = full
+  // PA DOM access; omitting it gives the iframe a null origin that cannot reach
+  // back into the PA document. Widget state is in-memory only (v1 accepted).
+  frame.setAttribute('sandbox', 'allow-scripts');
+  frame.setAttribute('class', 'acp-viz-frame');
+  details.appendChild(summary);
+  details.appendChild(frame);
+  card.appendChild(details);
+  transcriptEl.appendChild(card);
+}
+
 // ---- feeding frames from outside a live socket ---------------------------
 //
 // renderTranscriptFrame(frame) covers exactly the frame shapes that have no
@@ -3095,6 +3130,15 @@ function renderTranscriptFrame(frame) {
     if (typeof resolvedId === 'string' || typeof resolvedId === 'number') {
       markPermissionResolved(resolvedId);
     }
+    return;
+  }
+  // Visualization frames are broadcast-only (never in the replay buffer),
+  // so this case fires only when a frame is explicitly dispatched here —
+  // e.g. from the test suite or from a dashboard that opts in. Live acp.html
+  // has its own case in handle() and reaches addVisualizationCard directly.
+  // Phase 4: 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ
+  if (type === 'visualization') {
+    addVisualizationCard(payload.url, payload.title || 'Visualization');
     return;
   }
 }

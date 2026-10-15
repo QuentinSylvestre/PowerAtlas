@@ -4995,6 +4995,13 @@
       addToolOutput(payload);
       return;
     }
+    // Broadcast-only, never in the replay buffer: reaches live viewers only.
+    // addVisualizationCard is defined in transcript-renderer.js (Phase 4:
+    // 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ).
+    if (type === 'visualization') {
+      addVisualizationCard(payload.url, payload.title || 'Visualization');
+      return;
+    }
     if (type === 'history_truncated') {
       addMessage('note', payload.message || 'earlier events were dropped');
       return;

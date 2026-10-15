@@ -3093,3 +3093,8 @@ mark.rail-hit { background: color-mix(in srgb, var(--accent) 32%, transparent); 
   white-space: nowrap;
   line-height: 1.7;
 }
+
+/* ---- visualization card (Phase 4: 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ) -- */
+.acp-viz-card { display: block; margin: 2px 0; }
+.acp-viz-card details summary { cursor: pointer; padding: 6px 10px; }
+.acp-viz-frame { width: 100%; min-height: 300px; border: none; display: block; border-radius: var(--radius-sm); }

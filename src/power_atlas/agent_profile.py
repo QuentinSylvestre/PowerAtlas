@@ -1445,6 +1445,113 @@ def inject_permissions(base_text: str, block: str) -> str:
     return "\n".join(out)
 
 
+# ---- Visualization MCP and body injections (Phase 4) ---------------------
+#
+# Both functions operate on the full derived-agent text (after
+# inject_permissions), perform purely textual modifications, and return the
+# result. They are parallel to inject_permissions() in signature and
+# character: no YAML parsing, no round-tripping — byte identity for
+# everything they do not touch. They are called in _generate after
+# inject_permissions and before _publish.
+#
+# 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 4
+
+
+def inject_mcp_servers(derived_text: str, port: int) -> str:
+    """Append a viz MCP server entry to the ``mcpServers:`` section.
+
+    Inserts two lines (``  viz:`` and ``    url: http://127.0.0.1:{port}/…``)
+    immediately before the first top-level YAML key that follows
+    ``mcpServers:``.  Purely textual, no YAML parsing; leaves the text
+    unchanged if ``mcpServers:`` is absent or the port is zero.
+
+    The frontmatter region is identified by ``_frontmatter_bounds``, so the
+    search is confined to the frontmatter — no false matches in body prose.
+    """
+    if port <= 0:
+        return derived_text
+    lines = derived_text.split("\n")
+    close = _frontmatter_bounds(lines)
+    if close < 0:
+        return derived_text
+    # Find the mcpServers: key at column 0 inside the frontmatter.
+    mcp_start = -1
+    for i in range(close):
+        if re.match(r'^mcpServers\s*:', lines[i]):
+            mcp_start = i
+            break
+    if mcp_start < 0:
+        return derived_text
+    # Find where the mcpServers block ends: first line at column 0 inside the
+    # frontmatter that is not empty and does not start with whitespace or '#'.
+    mcp_end = close  # default: insert just before the closing ---
+    for i in range(mcp_start + 1, close):
+        line = lines[i]
+        if line and line[0] not in " \t#":
+            mcp_end = i
+            break
+    viz_lines = [
+        "  viz:",
+        f"    url: http://127.0.0.1:{port}/api/mcp/viz",
+    ]
+    return "\n".join(lines[:mcp_end] + viz_lines + lines[mcp_end:])
+
+
+# The guidance block injected after '## Anti-skip enforcement'. Single
+# constant so tests and _generate always see the same text.
+_VIZ_GUIDANCE_BLOCK = (
+    "\n"
+    "## Visualization output\n"
+    "When `/qvisualize` produces a visualization HTML file via render.py:\n"
+    "- If the `emit_visualization` tool is available in your tool list, call"
+    " it with the absolute file path, a concise title (\u2264 50 chars), and"
+    " your current ACP session ID as `session_id` (the session ID provided to"
+    " you at session start by the PA runtime). The visualization renders as an"
+    " inline iframe card in the transcript.\n"
+    "- Otherwise, open the file in a browser: `Start-Process <path>` on Windows.\n"
+)
+
+
+def inject_body_section(derived_text: str) -> str:
+    """Append the '## Visualization output' guidance block after the
+    '## Anti-skip enforcement' section in the agent body.
+
+    Inserts _VIZ_GUIDANCE_BLOCK immediately before the next '## ' heading
+    after '## Anti-skip enforcement', or at the end of the body if none
+    follows.  Purely textual; leaves the text unchanged if the anchor heading
+    is absent (e.g. when using a minimal base with no such section) or if the
+    guidance is already present (idempotent).
+    """
+    if "## Visualization output" in derived_text:
+        return derived_text  # already injected, idempotent
+    # Find the body: after the second frontmatter fence.
+    lines = derived_text.split("\n")
+    close = _frontmatter_bounds(lines)
+    if close < 0:
+        return derived_text
+    # Locate '## Anti-skip enforcement' in the body.
+    anchor_idx = -1
+    for i in range(close + 1, len(lines)):
+        if lines[i].startswith("## Anti-skip enforcement"):
+            anchor_idx = i
+            break
+    if anchor_idx < 0:
+        return derived_text  # anchor absent — leave unchanged
+    # Find the next '## ' heading after the anchor (the insertion point).
+    insert_idx = len(lines)  # default: end of body
+    for i in range(anchor_idx + 1, len(lines)):
+        if lines[i].startswith("## "):
+            insert_idx = i
+            break
+    # Build the insertion: split the guidance block into individual lines and
+    # insert before the next heading.  The block starts with a blank line so
+    # the new section is separated from the preceding one.
+    guidance_lines = _VIZ_GUIDANCE_BLOCK.split("\n")
+    # Do NOT strip the trailing empty string: it produces the blank line that
+    # separates this section from the next '## ' heading that follows it.
+    return "\n".join(lines[:insert_idx] + guidance_lines + lines[insert_idx:])
+
+
 def _read_text(path: Path) -> str:
     """Read `path` as UTF-8 with `\\n` preserved exactly as stored.
 
@@ -1751,6 +1858,17 @@ def _generate(status: GenerationStatus, config) -> GenerationStatus:
         base_kept = excise_permissions(base_text)[0]
         block = compile_block(config, base_digest=_digest(base_kept))
         derived_text = inject_permissions(base_text, block)
+        # Phase 4 (261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ):
+        # inject viz MCP server entry and '## Visualization output' guidance.
+        # Uses config.port, which is the configured port; static ports produce
+        # a correct URL immediately; port=0 (random) leaves the URL unresolvable
+        # until the next PA restart with a configured static port.
+        derived_text = inject_mcp_servers(derived_text, getattr(config, "port", 0))
+        derived_text = inject_body_section(derived_text)
+        # Capture the expected outer text (everything outside the permissions
+        # block) *after* the additional injections, so verify() compares the
+        # staged file against the fully-modified text rather than only the base.
+        expected_outer = excise_permissions(derived_text)[0]
     except AgentProfileError as exc:
         # Unreadable, not UTF-8, or a frontmatter the splice refuses.
         exc.kind = exc.kind or "base"
@@ -1760,7 +1878,8 @@ def _generate(status: GenerationStatus, config) -> GenerationStatus:
         """A structural confirmation of this module's own splice.
 
         The frontmatter still has its fences, the block is the compiled one,
-        and every other byte still matches the base. It is deliberately **not**
+        and every other byte still matches the fully-modified derived text
+        (base + permissions + MCP/body injections). It is deliberately **not**
         a claim that kiro-cli bound the rules: only a live session can show
         that, and `kiro-cli agent validate --path` was measured in
         260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 0 to report
@@ -1768,7 +1887,7 @@ def _generate(status: GenerationStatus, config) -> GenerationStatus:
         working one (R-17).
         """
         kept, block_back = excise_permissions(written)
-        if _norm_block(block_back) != _norm_block(block) or kept != base_kept:
+        if _norm_block(block_back) != _norm_block(block) or kept != expected_outer:
             raise AgentProfileError(
                 f"the staged {target.name} does not match what was spliced; "
                 "the permission block may not be in effect", kind="write")

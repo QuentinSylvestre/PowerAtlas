@@ -24899,6 +24899,70 @@ check("workspace filter menu: _updateFilterUI live-refresh rebuilds menu when it
   assert(afterHeadings >= 1, "_updateFilterUI must rebuild the menu when it is open");
 });
 
+check("transcript-renderer.js: renderTranscriptFrame renders a visualization frame as an iframe card", (tpl) => {
+  // Dispatches via the shared module's renderTranscriptFrame (the same path
+  // the dashboard's reconnect replay uses), not via acp.html's live handle().
+  // Verifies addVisualizationCard creates the expected DOM structure without
+  // any innerHTML usage — the DOM sandbox throws on any innerHTML call, so
+  // any remaining innerHTML use would fail this check and every one after it.
+  const { page } = connected(tpl);
+  const vizUrl = "/api/viz/sess-live-0001/chart.html";
+  const vizTitle = "Q1–Q4 Revenue";
+  page.sandbox.renderTranscriptFrame({
+    type: "visualization",
+    payload: { url: vizUrl, title: vizTitle },
+  });
+  const cards = page.el("acpTranscript").querySelectorAll(".acp-viz-card");
+  assertEqual(cards.length, 1,
+    "renderTranscriptFrame must append exactly one .acp-viz-card for a visualization frame");
+  const iframe = cards[0].querySelector("iframe");
+  assert(iframe !== null, ".acp-viz-card must contain an iframe element");
+  assertEqual(iframe.getAttribute("src"), vizUrl,
+    "iframe src must match the visualization URL");
+  assertEqual(iframe.getAttribute("sandbox"), "allow-scripts",
+    "iframe must have sandbox=\"allow-scripts\" (allow-same-origin must NOT be present)");
+  // Verify the summary title
+  const summary = cards[0].querySelector("summary");
+  assert(summary !== null, ".acp-viz-card must contain a <summary> element");
+  assertEqual(summary.textContent, vizTitle,
+    "summary textContent must equal the visualization title");
+});
+
+check("transcript-renderer.js: visualization card uses default title when payload.title is absent", (tpl) => {
+  const { page } = connected(tpl);
+  page.sandbox.renderTranscriptFrame({
+    type: "visualization",
+    payload: { url: "/api/viz/sess-live-0001/test.html" },
+  });
+  const cards = page.el("acpTranscript").querySelectorAll(".acp-viz-card");
+  assertEqual(cards.length, 1, "one .acp-viz-card must be appended");
+  const summary = cards[0].querySelector("summary");
+  assert(summary !== null, "summary must be present");
+  assertEqual(summary.textContent, "Visualization",
+    "summary must default to 'Visualization' when payload.title is absent");
+});
+
+check("acp.html live handle() dispatches visualization frame to addVisualizationCard", (tpl) => {
+  // Delivers the frame through the live WebSocket path (acp.html's own handle())
+  // rather than renderTranscriptFrame, confirming acp.html's own case fires.
+  // Two .acp-viz-card elements would appear if both handle() and renderTranscriptFrame
+  // handled the frame — this check verifies exactly one is produced.
+  const { page, live } = connected(tpl);
+  const vizUrl = "/api/viz/sess-live-0001/live-chart.html";
+  page.deliver({
+    type: "visualization",
+    sessionId: live,
+    payload: { url: vizUrl, title: "Live Chart" },
+  });
+  const cards = page.el("acpTranscript").querySelectorAll(".acp-viz-card");
+  assertEqual(cards.length, 1,
+    "acp.html handle() must produce exactly one .acp-viz-card for a live visualization frame");
+  const iframe = cards[0].querySelector("iframe");
+  assert(iframe !== null, ".acp-viz-card must contain an iframe");
+  assertEqual(iframe.getAttribute("src"), vizUrl,
+    "iframe src must match the URL from the live frame");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
