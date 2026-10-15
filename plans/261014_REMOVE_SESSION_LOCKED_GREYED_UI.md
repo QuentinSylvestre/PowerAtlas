@@ -509,7 +509,7 @@ Select-String -Path src/power_atlas/static/style.css -Pattern "is-locked"
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Remove locked state — Python backend | Done | commit 781758c; 8/8 exit criteria met; 3 lock_calls proxy assertions removed (behavioral assertions kept); 3439 passed |
-| 2 | Remove locked state — Frontend | Done | commit 5147abb; 11/11 exit criteria met; acp_page.test.mjs updated (3 deleted, 7 updated) — tests existed contra plan; 1114 passed |
+| 2 | Remove locked state — Frontend | Done | commit 5147abb; 11/11 exit criteria met; acp_page.test.mjs updated (5 deleted, 7 updated, 12 total — tests existed contra plan); 1114 passed |
 
 ---
 
@@ -517,7 +517,9 @@ Select-String -Path src/power_atlas/static/style.css -Pattern "is-locked"
 
 1. **Phase 1 — `TestAcpListingEndpoint` test rewrites**: The plan specified rewriting tests to remove `_lock_holder_v3` spies. Three tests had proxy assertions on `_lock_holder_v3` call count that were removed; the underlying behavioral assertions (availability values, threading behavior) were preserved. No behavioral regression.
 
-2. **Phase 2 — `tests/acp_page.test.mjs` had 10 locked-state tests**: The plan stated "no acp_page.test.mjs tests currently cover locked-state behavior." The actual file contained 12 such tests (5 deleted, 7 updated). All node tests pass.
+2. **Phase 2 — `tests/acp_page.test.mjs` had 12 locked-state tests**: The plan stated "no acp_page.test.mjs tests currently cover locked-state behavior." The actual file contained 12 such tests (5 deleted, 7 updated). All node tests pass.
+
+3. **Auto-fix — `test_acp_availability_kiro_running_acp_none_still_available` deleted instead of simplified**: The Phase 1 plan said to simplify this test by removing the `acp=None` setup. The auto-fix cycle deleted it instead (it had become a duplicate of `test_an_idle_v3_session_is_reported_available`). The new `test_acp_availability_always_available_for_non_held_v3_sessions` covers the same behavior. No coverage gap.
 
 ## Follow-up Work (Deferred)
 <Reserved — appended during /qplan, /qdev, /qreview>
@@ -574,6 +576,23 @@ Phase 1 health: **Green** (0 unresolved). Phase 2 health: **Green** (0 unresolve
 | 21 | 2 | Low | `acp_page.test.mjs` narrowing test said "three literals"; regex still allowed `locked` class. | Fixed — 88f6f15 updates error msg and regex. |
 | 22 | 2 | Low | Plan section 9 annotation said "3 deleted, 7 updated" for `acp_page.test.mjs`; actual was 5 deleted, 7 updated. | Fixed — 88f6f15 (plan section 9 corrected). |
 | 23 | 2 | Low | `index.html` line 519 lifecycle comment listed `locked` as a state after `dashMaybeAttach` locked block was removed. | Fixed — 88f6f15. |
+
+### 2026-10-14 — Post-Implementation Review / Step 9 (full effort, 4 personas)
+
+Cycle 2 skipped — all 6 Step 9 findings were Low and auto-fixes purely mechanical (comment/docstring rewrites; Low-only short-circuit applies; Step 9 review is outside the 1-cycle-per-phase user cap).
+
+Implementation health: **Green** (0 High, 0 Medium, 6 Low — all Fixed in commit 6c35b92).
+
+qvalidate: 7/7 PASS. Tests: 3437/3437 pytest, 1114/1114 acp_page node.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | `LiveDeps` docstring in `overview.py` still referenced `workspace_hashes` arg and "held/locked" states. | Fixed — 6c35b92. |
+| 2 | Low | `web.py` page-size comment quoted stale `_acp_availability` cost figures (0.12-0.21 ms/row). | Fixed — 6c35b92 replaces with "trivial set-lookup comprehension." |
+| 3 | Low | Plan Progress Tracker Phase 2 annotation said "3 deleted, 7 updated"; actual was 5 deleted, 7 updated. | Fixed — plan corrected. |
+| 4 | Low | `test_acp_availability_kiro_running_acp_none_still_available` deleted (not simplified as plan said); not recorded in Implementation Divergences. | Fixed — divergence 3 added to plan. |
+| 5 | Low | `acp.html:3378-3380` orphaned click-guard comment after removing `if (locked) return`. | Fixed — 6c35b92. |
+| 6 | Low | `acp_page.test.mjs:3936` assertion message said "the locked row's `disabled` exists for." | Fixed — 6c35b92. |
 
 ## Harness Improvement Opportunities
 
