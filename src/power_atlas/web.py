@@ -7668,7 +7668,8 @@ def _handle_emit_visualization(args: dict) -> dict:
                           "message": "session_id not found in active sessions"}}
 
     # Extract cwd; guard against sessions with no working directory.
-    cwd = acp._supervisor.sessions[session_id].get("cwd", "")
+    session = acp._supervisor.sessions.get(session_id)
+    cwd = session.get("cwd", "") if session else ""
     if not cwd:
         return {"error": {"code": -32603,
                           "message": "session has no working directory"}}
@@ -7729,15 +7730,15 @@ async def viz_mcp_sse(request: Request):
     from fastapi.responses import StreamingResponse as _SR
 
     conn_id = str(uuid.uuid4())
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=32)
     _viz_mcp_sessions[conn_id] = queue
 
-    post_url = f"/api/mcp/viz/messages?conn={conn_id}"
+    post_url = f"{str(request.base_url).rstrip('/')}/api/mcp/viz/messages?conn={conn_id}"
 
     async def event_stream():
-        # Tell the client where to POST JSON-RPC.
-        yield f"event: endpoint\ndata: {post_url}\n\n"
         try:
+            # Tell the client where to POST JSON-RPC.
+            yield f"event: endpoint\ndata: {post_url}\n\n"
             while True:
                 if await request.is_disconnected():
                     break
@@ -7775,6 +7776,11 @@ async def viz_mcp_messages(request: Request, conn: str):
     queue = _viz_mcp_sessions.get(conn)
     if queue is None:
         return Response(status_code=404)
+    if queue.full():
+        return Response(status_code=429)
+
+    if int(request.headers.get("content-length", 0)) > 64 * 1024:
+        return Response(status_code=413)
 
     try:
         body = await request.json()
@@ -7847,7 +7853,12 @@ async def viz_mcp_messages(request: Request, conn: str):
         tool_name = params.get("name", "")
         tool_args = params.get("arguments") or {}
         if tool_name == "emit_visualization":
-            outcome = _handle_emit_visualization(tool_args)
+            try:
+                outcome = await asyncio.to_thread(_handle_emit_visualization, tool_args)
+            except Exception as exc:
+                response = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(exc)}}
+                await queue.put(response)
+                return Response(status_code=202)
             if "error" in outcome:
                 response = {"jsonrpc": "2.0", "id": req_id, "error": outcome["error"]}
             else:
@@ -7912,7 +7923,7 @@ async def viz_file(session_id: str, filename: str):
             return _not_found
         if not resolved_path.is_file():
             return _not_found
-        content = resolved_path.read_bytes()
+        content = await asyncio.run_in_executor(None, resolved_path.read_bytes)
     except Exception:  # noqa: BLE001
         return _not_found
 
