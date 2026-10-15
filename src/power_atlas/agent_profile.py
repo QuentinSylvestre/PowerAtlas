@@ -1555,6 +1555,51 @@ def inject_body_section(derived_text: str) -> str:
     return "\n".join(lines[:insert_idx] + guidance_lines + lines[insert_idx:])
 
 
+_KIRO_SETTINGS_DIR = Path.home() / ".kiro" / "settings"
+_VIZ_MCP_KEY = "viz"
+
+
+def update_mcp_json(port: int) -> None:
+    """Write the viz MCP server entry into ~/.kiro/settings/mcp.json.
+
+    Called at PA startup so kiro-cli picks up the viz MCP via includeMcpJson
+    without us having to inject it into the derived agent (which causes PA's
+    tamper-detection to fire because the body would no longer match the base
+    agent digest stored in the permissions block header).
+
+    Idempotent: if the entry already exists with the correct URL it is not
+    rewritten. If the file does not exist an empty object is created and the
+    entry is added. Atomic write (temp + replace) so a crash mid-write leaves
+    the previous state intact.
+    """
+    if port <= 0:
+        return
+    mcp_path = _KIRO_SETTINGS_DIR / "mcp.json"
+    try:
+        if mcp_path.exists():
+            existing = json.loads(mcp_path.read_bytes().decode("utf-8"))
+        else:
+            existing = {}
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    viz_url = f"http://127.0.0.1:{port}/api/mcp/viz"
+    current = existing.get(_VIZ_MCP_KEY, {})
+    if current.get("url") == viz_url:
+        return  # already correct, no write needed
+    existing[_VIZ_MCP_KEY] = {"url": viz_url}
+    new_bytes = json.dumps(existing, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
+    tmp = mcp_path.with_suffix(".tmp")
+    try:
+        _KIRO_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(new_bytes)
+        tmp.replace(mcp_path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _read_text(path: Path) -> str:
     """Read `path` as UTF-8 with `\\n` preserved exactly as stored.
 
@@ -1862,15 +1907,12 @@ def _generate(status: GenerationStatus, config) -> GenerationStatus:
         block = compile_block(config, base_digest=_digest(base_kept))
         derived_text = inject_permissions(base_text, block)
         # Phase 4 (261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ):
-        # inject viz MCP server entry and '## Visualization output' guidance.
-        # Uses config.port, which is the configured port; static ports produce
-        # a correct URL immediately; port=0 (random) leaves the URL unresolvable
-        # until the next PA restart with a configured static port.
-        derived_text = inject_mcp_servers(derived_text, getattr(config, "port", 0))
-        derived_text = inject_body_section(derived_text)
-        # Capture the expected outer text (everything outside the permissions
-        # block) *after* the additional injections, so verify() compares the
-        # staged file against the fully-modified text rather than only the base.
+        # viz MCP entry is now written to ~/.kiro/settings/mcp.json via
+        # _update_mcp_json() (called separately at startup), NOT injected into
+        # derived_text. Injecting into derived_text caused PA's tamper
+        # detection to fire because the body no longer matched the base agent
+        # digest stored in the permissions block header.
+        # '## Visualization output' guidance is now in kiro_default.md body.
         expected_outer = excise_permissions(derived_text)[0]
     except AgentProfileError as exc:
         # Unreadable, not UTF-8, or a frontmatter the splice refuses.
@@ -1924,6 +1966,10 @@ def _apply_locked(config) -> GenerationStatus:
     try:
         _clear_stage()
         status = _generate(status, config)
+        # Write viz MCP entry to mcp.json after generating the derived agent.
+        # Done here (not in _generate) so mcp.json is updated on every
+        # apply_settings call, keeping the port current even after PA restart.
+        update_mcp_json(getattr(config, "port", 0))
     except AgentProfileError as exc:
         _status = replace(status, ok=False, error=str(exc), error_kind=exc.kind)
         # A failure this module predicted and named (a file that is not
