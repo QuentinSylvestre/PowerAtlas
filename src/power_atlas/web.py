@@ -7854,7 +7854,13 @@ async def viz_mcp_messages(request: Request, conn: str):
         tool_args = params.get("arguments") or {}
         if tool_name == "emit_visualization":
             try:
-                outcome = await asyncio.to_thread(_handle_emit_visualization, tool_args)
+                # Call synchronously: _handle_emit_visualization performs only fast
+                # syscalls (path resolution, is_file) and synchronous queue-puts
+                # (acp._registry.broadcast → conn.send → asyncio.Queue.put_nowait).
+                # asyncio.Queue is not thread-safe; running the function in a thread
+                # pool would violate the asyncio contract.  Fast syscalls belong on
+                # the event loop, not in a thread pool.
+                outcome = _handle_emit_visualization(tool_args)
             except Exception as exc:
                 response = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(exc)}}
                 await queue.put(response)
