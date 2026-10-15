@@ -1,7 +1,8 @@
 # Remove Session Locked/Greyed UI for Non-ACP Providers
 
 > **Date**: 2026-10-14
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Memory relied on**: v3 session liveness
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Remove availability="locked" and resume_locked UI for all non-ACP session rows
 > **Memory relied on**: none
@@ -291,16 +292,19 @@ remove `_mark_resume_locked` and its two call sites; update all affected tests.
      any remaining references (excludes `_acp_delete_many`-context lines).
 
 **Exit criteria**:
-- [ ] `_acp_availability` returns only `"held"` or `"available"`; never `"locked"`.
+- [x] `_acp_availability` returns only `"held"` or `"available"`; never `"locked"`.
   `workspace_hashes` parameter retained for API compatibility but unused.
-- [ ] `_mark_resume_locked` function absent from `web.py`; no call sites remain.
-- [ ] `presence.get_snapshot()` no longer called inside `_acp_availability`.
-- [ ] `TestAcpAvailabilityV3`: 5 tests deleted, 3 updated, 1 new test added (4 total).
-- [ ] `TestCodexLiveDotAndResumeLock` class absent from `tests/test_web.py`.
-- [ ] No remaining `"locked"` availability assertions or `resume_locked` field references in
+- [x] `_mark_resume_locked` function absent from `web.py`; no call sites remain.
+- [x] `presence.get_snapshot()` no longer called inside `_acp_availability`.
+- [x] `TestAcpAvailabilityV3`: 5 tests deleted, 3 updated, 1 new test added (4 total).
+- [x] `TestCodexLiveDotAndResumeLock` class absent from `tests/test_web.py`.
+- [x] No remaining `"locked"` availability assertions or `resume_locked` field references in
   `tests/test_web.py` (verified by grep).
-- [ ] `pytest tests/test_web.py` passes (full suite).
-- [ ] `memory/MEMORY.md` "v3 session liveness" decision entry updated per Documentation Updates table.
+- [x] `pytest tests/test_web.py` passes (full suite).
+- [x] `memory/MEMORY.md` "v3 session liveness" decision entry updated per Documentation Updates table.
+
+Implementation (2026-10-14, code: 781758c)
+Simplified `_acp_availability` to a one-line dict comprehension returning only "held" or "available"; removed the `presence.get_snapshot().any_live_process()` short-circuit and the `_lock_holder_v3` call block. Deleted `_mark_resume_locked` and both call sites in `_acp_listing` and `_acp_flat_listing`. In `TestAcpAvailabilityV3`: deleted 5 locked-path tests, updated 3 (removing dead presence/acp mocks), added 1 new `test_acp_availability_always_available_for_non_held_v3_sessions`. Renamed `TestCodexLiveDotAndResumeLock` to `TestCodexLiveDot` and deleted the 6 resume_locked tests by name (10 live-dot tests preserved). Deleted `test_resume_locked_rides_a_held_codex_row_only_and_only_codex_is_probed` from `TestCodexAdapterThroughTheDashboardListing`. Cleaned remaining `"locked"` assertions and `resume_locked` field set references. 3 `_lock_holder_v3` proxy assertions removed from `TestAcpListingEndpoint` tests (behavioral assertions kept). Appended Update annotation to `memory/MEMORY.md` "v3 session liveness" decision entry. 3439/3439 pytest pass.
 
 ---
 
@@ -426,18 +430,21 @@ no acp_page.test.mjs tests currently cover locked-state behavior)
    ```
 
 **Exit criteria**:
-- [ ] `DASH_RAIL_AVAILABILITY.locked` absent from `index.html`.
-- [ ] "Locked elsewhere" absent from `index.html`; "Locked" absent from `acp.html`.
-- [ ] `row.disabled = true` no longer triggered by `state === 'locked'` in either template.
-- [ ] Click guards on `state === 'locked'` absent from both templates.
-- [ ] `resume_locked` references absent from `index.html` (`!session.resume_locked` removed
+- [x] `DASH_RAIL_AVAILABILITY.locked` absent from `index.html`.
+- [x] "Locked elsewhere" absent from `index.html`; "Locked" absent from `acp.html`.
+- [x] `row.disabled = true` no longer triggered by `state === 'locked'` in either template.
+- [x] Click guards on `state === 'locked'` absent from both templates.
+- [x] `resume_locked` references absent from `index.html` (`!session.resume_locked` removed
   from Resume button guard; diff check removed).
-- [ ] `.dash-ov-tile.is-locked` absent from `style.css`.
-- [ ] `RAIL_LOCKED_REASON` absent from `acp.html`.
-- [ ] README.md locked-state descriptions updated per Documentation Updates table.
-- [ ] `acp.html` and `index.html` batch-delete error strings updated to "held by another process".
-- [ ] `node tests/acp_page.test.mjs` passes (no regressions — hard reload, not restart).
-- [ ] `pytest tests/test_web.py` passes (no regressions from Phase 2 changes).
+- [x] `.dash-ov-tile.is-locked` absent from `style.css`.
+- [x] `RAIL_LOCKED_REASON` absent from `acp.html`.
+- [x] README.md locked-state descriptions updated per Documentation Updates table.
+- [x] `acp.html` and `index.html` batch-delete error strings updated to "held by another process".
+- [x] `node tests/acp_page.test.mjs` passes (no regressions — hard reload, not restart).
+- [x] `pytest tests/test_web.py` passes (no regressions from Phase 2 changes).
+
+Implementation (2026-10-14, code: 5147abb)
+Removed all locked-state handling from `index.html`: deleted `DASH_RAIL_AVAILABILITY.locked`, "Locked elsewhere" bucket constants and label, `dashStatusBucketKey` locked branch, `dashOvOpenTile` locked guard, `dashOvTileNode` is-locked class addition and `el.disabled = locked`, `dashRailRowNode` if/else locked block (unwrapped else body), row click guard, `!session.resume_locked &&` from Resume button condition, `dashMaybeAttach` locked state block, and the `resume_locked` diff-check 4-line block from `dashRailRefresh`. Updated batch-delete error string to "held by another process". Same removals applied to `acp.html`: deleted `RAIL_AVAILABILITY.locked`, `RAIL_LOCKED_REASON`, bucket constants, `railBucketKey` locked branch, all locked-dependent code in `railRowNode` (var, className, disabled, title blocks, click guard), and Delete-button locked disable block; updated batch-delete error string. Removed `.dash-ov-tile.is-locked` CSS rules from `style.css`. Updated README.md lines 239, 411, 419. `tests/acp_page.test.mjs` had 10 locked-state tests (contra plan assumption of 0): 3 deleted, 7 updated. 1114/1114 acp_page tests and 3439/3439 pytest pass.
 
 ---
 
@@ -507,7 +514,10 @@ Select-String -Path src/power_atlas/static/style.css -Pattern "is-locked"
 ---
 
 ## 9) Implementation Divergences from Plan
-<Reserved — filled during implementation>
+
+1. **Phase 1 — `TestAcpListingEndpoint` test rewrites**: The plan specified rewriting tests to remove `_lock_holder_v3` spies. Three tests had proxy assertions on `_lock_holder_v3` call count that were removed; the underlying behavioral assertions (availability values, threading behavior) were preserved. No behavioral regression.
+
+2. **Phase 2 — `tests/acp_page.test.mjs` had 10 locked-state tests**: The plan stated "no acp_page.test.mjs tests currently cover locked-state behavior." The actual file contained 10 such tests (3 deleted, 7 updated). All node tests pass.
 
 ## Follow-up Work (Deferred)
 <Reserved — appended during /qplan, /qdev, /qreview>
