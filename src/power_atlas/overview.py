@@ -939,7 +939,7 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
     `LIVE_MAX_TILES` tiles, most recent activity first; availability and
     status are worked out for those only.
     """
-    from . import data, data_codex, data_kiro_v3
+    from . import data, data_codex
 
     only_held = filter_ == "poweratlas"
     loaded: dict[tuple[str, str], list] = {}
@@ -1066,33 +1066,8 @@ def live_sessions(held: dict[str, str], snapshot, filter_: str, deps: LiveDeps,
     rows.sort(key=lambda r: r[9], reverse=True)
     rows = rows[:LIVE_MAX_TILES]
 
-    # Workspace-hash dirs for `acp_availability`, which reads one only for a
-    # `sess_` id that is not held. A v3 transcript is
-    # `<root>/<hash>/<sid>/messages.jsonl`, so the hash comes from the path
-    # already resolved; otherwise one lookup per distinct cwd per poll (each
-    # walks every v3 session dir). A wrong name is safe: `_lock_holder_v3`
-    # validates it and falls back to its full scan.
-    # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE
-    hashes: dict[str, str] = {}
-    by_cwd: dict[str, str | None] = {}
-    for _a, prov, sid, _s, cwd, is_held, path, _l, _st, _o in rows:
-        if is_held or not sid.startswith("sess_"):
-            continue
-        wh = None
-        if (prov == _HELD_PROVIDER and path is not None and path.name == "messages.jsonl"
-                and path.parent.name == sid):
-            wh = path.parent.parent.name or None
-        elif cwd:
-            if cwd not in by_cwd:
-                try:
-                    by_cwd[cwd] = data_kiro_v3.hash_dir_for_cwd(cwd)
-                except Exception:
-                    by_cwd[cwd] = None
-            wh = by_cwd[cwd]
-        if wh:
-            hashes[sid] = wh
     try:
-        availability = deps.acp_availability([r[2] for r in rows], frozenset(held), hashes)
+        availability = deps.acp_availability([r[2] for r in rows], frozenset(held))
     except Exception:
         log.exception("Overview: could not read session availability")
         availability = {}

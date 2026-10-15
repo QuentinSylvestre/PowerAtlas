@@ -916,16 +916,14 @@
   // subscribed to. The frames the page already receives therefore cannot carry
   // this, and widening the server's fan-out to every connection would be wrong
   // twice: the `session_closed` arm in `handle()` is unconditional, so a socket
-  // reading session B would be torn down when A was reclaimed, and `locked` ->
-  // `available` is a *foreign* process dropping its `.lock`, which produces no
-  // frame here at any fan-out. One poll fixes all three states; a protocol
-  // change would fix one of them and break a second.
+  // reading session B would be torn down when A was reclaimed. One poll fixes
+  // both states; a protocol change would fix one of them and break the second.
   //
   // 60 s because that is the sweeper's own cadence: the display converges
   // within one tick of the thing that moves it, and asking faster would only
   // spend requests between two states that cannot differ.
   var RAIL_REFRESH_MS = 60000;
-  // The three states GET /api/acp/sessions can report (D17), as a closed set.
+  // The two states GET /api/acp/sessions can report, as a closed set.
   // The value comes off the wire and ends up in a class name and a data
   // attribute, both of which are attribute sinks — so it is narrowed to one of
   // these literals first, the same discipline `addMessage` applies to `role`.
@@ -1025,7 +1023,7 @@
   // owns, which drops focus to <body> — harmless for the filter box, which
   // lives outside that container, and not harmless for a row or a show-more,
   // where it throws a keyboard or screen-reader user out of the rail mid-task.
-  // That is the same population the `locked` row's `disabled` exists for.
+  // That is the same population as the `held` row's `disabled` above.
   var railFocus = null;
 
   renderSidLabel();
@@ -3498,16 +3496,15 @@
     del.type = 'button';
     del.setAttribute('role', 'menuitem');
     del.textContent = 'Delete session';
-    // The two states the server refuses. Disabled rather than absent, and
+    // The state the server refuses. Disabled rather than absent, and
     // rather than offered-then-refused: `disabled` is the version of "not
-    // available" a keyboard and a screen reader also get — the same reading
-    // D17 gives a `locked` row — and a missing item would leave the user
-    // wondering whether deletion exists at all.
+    // available" a keyboard and a screen reader also get, and a missing item
+    // would leave the user wondering whether deletion exists at all.
     //
     // **A hint and not the gate.** `availability` is a reading taken at fetch
     // time and refreshed once a minute, so it is routinely a minute stale — a
     // session closed thirty seconds ago still reads `held` here. The server
-    // re-checks both states for itself and refuses on its own authority; this
+    // re-checks this state for itself and refuses on its own authority; this
     // only spares the round trip in the common case.
     if (state === 'held') {
       del.disabled = true;

@@ -1,4 +1,4 @@
-﻿// Behavioural coverage for the browser-side code this repo has no other way to
+// Behavioural coverage for the browser-side code this repo has no other way to
 // test: src/power_atlas/templates/acp.html, the remote-access panel in
 // templates/index.html, and the two rules in static/style.css that decide what
 // the /acp topbar shows whom.
@@ -2998,8 +2998,8 @@ check("a state or a status off the wire is narrowed before it reaches an attribu
                            [2, "__proto__"], [3, "toString"]]) {
     assertEqual(rows[i].dataset.availability, "available",
                 `the state ${JSON.stringify(sent)} was passed through rather ` +
-                "than narrowed to one of the three literals");
-    assert(/^acp-rail-row acp-rail-row-(available|held|locked)$/.test(
+                "than narrowed to one of the two literals");
+    assert(/^acp-rail-row acp-rail-row-(available|held)$/.test(
              String(rows[i].className)),
            `${JSON.stringify(sent)} reached a class name: ${rows[i].className}`);
     assert(!rows[i].querySelector(".session-status"),

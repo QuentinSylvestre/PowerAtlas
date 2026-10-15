@@ -1,4 +1,4 @@
-﻿{% extends "base.html" %}
+{% extends "base.html" %}
 {% block content %}
 <div class="topbar">
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
@@ -516,7 +516,7 @@
       </div>
       <div class="acp-steer-status" id="dashComposerNote" hidden aria-live="polite"></div>
       <!-- Steer status echo (SC5) -- separate from #dashComposerNote above,
-           which is a multi-purpose lifecycle note (loading/locked/agent-died
+           which is a multi-purpose lifecycle note (loading/agent-died
            messages) driven by dashSetComposerNote(). Keeping this one apart
            mirrors acp.html's own #acpSteerStatus, which has no other-purpose
            note element to share with at all, and avoids a real correctness

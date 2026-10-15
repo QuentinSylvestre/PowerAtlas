@@ -1270,9 +1270,6 @@ class TestSessionAvailabilityAPI:
         assert body["status"] == ""
 
     def test_available_session_reports_available(self, client, monkeypatch):
-        from power_atlas import acp as acp_mod
-        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda *a, **k: None)
-
         resp = client.get(f"{self._PATH}?sid={self._SID}")
         assert resp.status_code == 200
         assert resp.json()["availability"] == "available"
@@ -20985,10 +20982,7 @@ class _LoopBoundSessions(dict):
 def acp_listing_store(monkeypatch):
     """A synthetic kiro-cli store behind the listing endpoint.
 
-    Patches the two data-layer entry points the route uses and `_lock_holder_v3`,
-    recording every lock read so "availability is computed only for returned
-    rows" is a **count** rather than a shape assertion — a response-shape check
-    passes whether the endpoint walked 30 rows or all 1,207.
+    Patches the two data-layer entry points the route uses.
     """
     from power_atlas import acp as acp_mod
     from power_atlas import data as data_mod
@@ -20997,8 +20991,6 @@ def acp_listing_store(monkeypatch):
     state = {
         "workspaces": [],
         "sessions": {},
-        "lock_calls": [],
-        "locked": set(),
     }
 
     def _discover(provider=None):
@@ -21009,10 +21001,6 @@ def acp_listing_store(monkeypatch):
     def _get_sessions(cwd, provider=_ACP_V3_LISTING_PROVIDER):
         return list(state["sessions"].get(cwd, []))
 
-    def _holder_v3(sid, workspace_hash=None):
-        state["lock_calls"].append(sid)
-        return acp_mod._V3_HOLDER_PID_UNKNOWN if sid in state["locked"] else None
-
     def _add(cwd, sessions, updated="2026-07-31T00:00:00Z"):
         state["workspaces"].append((cwd, len(sessions), updated, _ACP_V3_LISTING_PROVIDER))
         state["sessions"][cwd] = sessions
@@ -21020,7 +21008,6 @@ def acp_listing_store(monkeypatch):
     state["add"] = _add
     monkeypatch.setattr(data_mod, "discover_workspaces_with_counts", _discover)
     monkeypatch.setattr(data_mod, "get_sessions", _get_sessions)
-    monkeypatch.setattr(acp_mod, "_lock_holder_v3", _holder_v3)
     monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
     return state
 
@@ -21028,7 +21015,7 @@ def acp_listing_store(monkeypatch):
 class TestAcpListingEndpoint:
     """Phase 4. A purpose-built read-only listing (D18) feeding the session
     browser, paginated independently at both levels (D19), with D17's
-    three-state availability computed only for the rows it returns."""
+    two-state availability computed only for the rows it returns."""
 
     _PATH = "/api/acp/sessions"
 
@@ -21063,7 +21050,7 @@ class TestAcpListingEndpoint:
                                              "availability", "status"}
 
     def _held_rows(self, client, acp_listing_store, monkeypatch, semantic):
-        """One workspace holding a free, a held and a foreign-locked session,
+        """One workspace holding a free, a held and an available session,
         with the classifier replaced by *semantic*. Returns `(rows_by_id,
         classified_ids)`."""
         from power_atlas import acp as acp_mod
@@ -21072,7 +21059,6 @@ class TestAcpListingEndpoint:
 
         acp_listing_store["add"]("C:\\dev\\ws", [
             _acp_row("free"), _acp_row("mine"), _acp_row("theirs")])
-        acp_listing_store["locked"].add("theirs")
         acp_mod._supervisor.sessions["mine"] = {"cwd": "C:\\dev\\ws"}
 
         asked = []
@@ -21108,8 +21094,8 @@ class TestAcpListingEndpoint:
             lambda _sid: SemanticStatus.WAITING)
 
         assert rows["mine"]["status"] == "waiting"
-        # `""` and not a verdict: a locked session is live in a process this
-        # cannot ask, and an available one has no live process at all.
+        # `""` and not a verdict: non-held sessions are always available and
+        # have no status to report.
         assert rows["free"]["status"] == ""
         assert rows["theirs"]["status"] == ""
         assert asked == ["mine"], (
@@ -21333,7 +21319,6 @@ class TestAcpListingEndpoint:
                              lambda: presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake")}))
         live = _LoopBoundSessions({"sess_held-1": {"cwd": "C:\\dev\\ws"}})
         monkeypatch.setattr(acp_mod._supervisor, "sessions", live)
-        acp_listing_store["locked"].add("sess_locked-1")
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("sess_held-1"), _acp_row("sess_locked-1"),
                                          _acp_row("sess_free-1")])
         body = client.get(self._PATH).json()
@@ -21345,11 +21330,11 @@ class TestAcpListingEndpoint:
             f"{live.off_loop_reads} of {live.reads} reads of loop-owned state "
             f"happened on a worker thread")
 
-    def test_the_lock_checks_run_off_the_event_loop(self, client, acp_listing_store,
-                                                    monkeypatch):
-        """D17 again: a bounded file read plus a `psutil` query per row, ~30
-        times. On the loop that is a stall on every other request the app is
-        serving, and no output assertion can see the difference."""
+    def test_availability_runs_off_the_event_loop(self, client, acp_listing_store,
+                                                   monkeypatch):
+        """`_acp_availability` runs under `asyncio.to_thread`; `held` is a
+        loop-owned frozenset snapshot. Asserting the thread is what pins this
+        — the output is identical whether the call was on-loop or off."""
         from power_atlas import web as web_mod
         real = web_mod._acp_availability
         where = []
@@ -21500,7 +21485,6 @@ class TestAcpListingEndpoint:
         body = client.get(self._PATH).json()
         assert body["groups"] == [] and body["group_total"] == 0
         assert body["has_more"] is False
-        assert acp_listing_store["lock_calls"] == []
 
     # Note: this class used to also carry
     # `test_sub_agent_sessions_are_absent`, pinning that a sub-agent's session
@@ -21656,7 +21640,6 @@ class TestAcpListingEndpoint:
         assert body == {"groups": [], "group_page": 1, "group_total": 0,
                         "has_more": False, "pinned": [],
                         "capacity": {"held": 0, "max": acp_mod.MAX_SESSIONS}}
-        assert acp_listing_store["lock_calls"] == []
 
 
 @pytest.fixture
@@ -21712,7 +21695,7 @@ class TestAcpAvailabilityV3:
     Non-held sessions are always available — the provider's own CLI surfaces
     an in-use error if the session is genuinely held elsewhere."""
 
-    def test_an_idle_v3_session_is_reported_available(self, monkeypatch):
+    def test_an_idle_v3_session_is_reported_available(self):
         from power_atlas import web as web_mod
 
         sid = "sess_22222222-2222-2222-2222-222222222222"
@@ -21720,22 +21703,13 @@ class TestAcpAvailabilityV3:
         assert result[sid] == "available"
 
     def test_a_held_v3_session_already_in_the_held_set_is_held_not_locked(
-            self, monkeypatch):
+            self):
         """`held` (this PowerAtlas's own v3 supervisor) returns 'held' directly."""
         from power_atlas import web as web_mod
 
         sid = "sess_33333333-3333-3333-3333-333333333333"
         result = web_mod._acp_availability([sid], held={sid})
         assert result[sid] == "held"
-
-    def test_acp_availability_kiro_running_acp_none_still_available(
-            self, monkeypatch):
-        """Non-held sessions are always available regardless of acp state."""
-        from power_atlas import web as web_mod
-
-        session_id = "sess_deadbeef-0000-0000-0000-000000000003"
-        result = web_mod._acp_availability([session_id], frozenset())
-        assert result[session_id] == "available"
 
     def test_acp_availability_always_available_for_non_held_v3_sessions(self):
         """All non-held sessions return 'available'; held ones return 'held'.
@@ -22034,7 +22008,6 @@ class TestDashboardListingEndpoint:
         monkeypatch.setattr(data_mod, "get_sessions", _get_sessions)
         monkeypatch.setattr(data_mod, "available_providers",
                             lambda: ["kiro-cli-v3", "claude-code"])
-        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda sid, wh=None: None)
         monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
         return state
 
@@ -38687,7 +38660,7 @@ class TestOverviewLive:
         return s
 
     @staticmethod
-    def _deps(recent=(), hidden=(), disabled=(), seen=None, hashes_seen=None):
+    def _deps(recent=(), hidden=(), disabled=(), seen=None):
         """Fake rail helpers. Live is the rail's rule over fixture data: the id
         on a cmdline, or a live cwd plus a sid in `recent` (the stand-in for
         "transcript written within 300 s")."""
@@ -38699,11 +38672,9 @@ class TestOverviewLive:
             return (data._normalize_path(session.cwd) in snapshot.live_cwds({provider})
                     and session.session_id in recent)
 
-        def availability(sids, held, workspace_hashes):
+        def availability(sids, held):
             if seen is not None:
                 seen.append(list(sids))
-            if hashes_seen is not None:
-                hashes_seen.append(dict(workspace_hashes))
             return {s: ("held" if s in held else "available") for s in sids}
 
         return overview.LiveDeps(
@@ -39466,31 +39437,6 @@ class TestOverviewLive:
         self._live({held_sid: ws}, snap, deps, self._originals(ws))
         assert len(reads) == 2, "the All tab's tails must still be memo hits"
         assert str(store.files[_ov_uuid(2)]) in overview._tail_memo
-
-    def test_workspace_hashes_come_from_the_path_and_skip_held_sessions(
-            self, store, tmp_path, monkeypatch):
-        """A held id is never looked up (`acp_availability` answers it without
-        the hash); a v3 transcript path gives its hash dir; otherwise one
-        lookup per distinct cwd. 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE"""
-        from power_atlas import data_kiro_v3
-        ws = str(tmp_path / "Ws")
-        held_sid, a, b, c = ("sess_" + _ov_uuid(i) for i in (1, 2, 3, 4))
-        for sid in (held_sid, a, b, c):
-            store.add(_OV_V3, ws, sid)
-        v3 = tmp_path / "v3" / "HASHA" / a / "messages.jsonl"
-        v3.parent.mkdir(parents=True)
-        v3.write_text(_ov_v3_line("assistant", content="hi") + "\n", encoding="utf-8")
-        store.files[a] = v3
-        lookups = []
-        monkeypatch.setattr(data_kiro_v3, "hash_dir_for_cwd",
-                            lambda cwd: lookups.append(cwd) or "HASHW")
-        hashes_seen = []
-        tiles = self._live({held_sid: ws}, self._snap(live_cwds=[(_OV_V3, ws)]),
-                           self._deps(recent={a, b, c}, hashes_seen=hashes_seen),
-                           self._originals(ws))
-        assert {t["id"] for t in tiles} == {held_sid, a, b, c}
-        assert hashes_seen == [{a: "HASHA", b: "HASHW", c: "HASHW"}]
-        assert lookups == [ws], "one lookup for the cwd, none for the held id or the path-derived one"
 
     def test_a_held_new_session_without_a_transcript_is_never_cut(self, store, tmp_path):
         """No transcript and no record time: it sorts first rather than last,
@@ -43901,11 +43847,11 @@ class TestCodexAdapterThroughTheDashboardListing:
     def seam(self, monkeypatch):
         from power_atlas import acp as acp_mod
         from power_atlas import data as data_mod
-        from power_atlas import data_codex, presence
+        from power_atlas import presence
         from power_atlas.data import _normalize_path
         real_discover, real_get = data_mod.discover_workspaces_with_counts, data_mod.get_sessions
         cc_row = _acp_row("cc1", cwd=self._CWD)
-        state = {"locked": set(), "asked": [], "snap": presence.Snapshot(
+        state = {"snap": presence.Snapshot(
             set(), {("codex", _normalize_path(self._CWD))})}
 
         def discover(provider=None):
@@ -43917,13 +43863,9 @@ class TestCodexAdapterThroughTheDashboardListing:
         def get_sessions(cwd, provider="kiro-cli"):
             return [cc_row] if provider == "claude-code" else real_get(cwd, provider)
 
-        def probe(sid):
-            state["asked"].append(sid)
-            return sid in state["locked"]
         monkeypatch.setattr(data_mod, "discover_workspaces_with_counts", discover)
         monkeypatch.setattr(data_mod, "get_sessions", get_sessions)
         monkeypatch.setattr(data_mod, "available_providers", lambda: ["codex", "claude-code"])
-        monkeypatch.setattr(data_codex, "session_writer_locked", probe)
         monkeypatch.setattr(presence, "get_snapshot", lambda: state["snap"])
         monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda sid, wh=None: None)
         monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
@@ -44390,7 +44332,6 @@ class TestWorkflowLivenessStatus:
             self, client, monkeypatch):
         from power_atlas import acp as acp_mod
         monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
-        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda *a, **k: 4242)
         self._children(monkeypatch, **{self._SID: ("running", 5.0)})
         body = client.get("/api/session-availability",
                           params={"sid": self._SID, "cwd": self._CWD}).json()

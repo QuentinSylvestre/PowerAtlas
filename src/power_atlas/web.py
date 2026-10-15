@@ -3883,10 +3883,6 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     rows: list[tuple[dict, list]] = []  # (meta, [(session, provider), ...])
     sids: list[str] = []
     pinned_sessions_found: list[tuple[str, str, object, str]] = []  # (cwd, name, session, provider)
-    # One hash lookup per workspace group, not per session — _lock_holder_v3's
-    # workspace_hash fast path (Phase 1 cycle-2) needs a session_id -> hash-dir
-    # mapping, and every session in a group shares the group's own hash dir.
-    hash_by_sid: dict[str, str] = {}
     exists_flags = _acp_exists_flags([w[0] for w in page_groups])
     if include_provider:
         # Dashboard only: the group header shows the branch, read from the git sweep's cache.
@@ -3943,13 +3939,10 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             # the most recent `session_size` would otherwise land on a later
             # page and never show pinned-at-top on the first one.
             tagged.sort(key=lambda x: x[0].session_id not in pinned_set)
-        ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
         if pinned_set:
             for s, prov_name in tagged:
                 if s.session_id in pinned_set:
                     pinned_sessions_found.append((ws_cwd, ws_name, s, prov_name))
-                    if ws_hash:
-                        hash_by_sid[s.session_id] = ws_hash
             # Pinned sessions remain in the workspace rows (so they appear both
             # in the "Pinned sessions" section and under their workspace) — the
             # client marks the pin button active via the `pinned` flag below.
@@ -3957,8 +3950,6 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         s_start = (session_page - 1) * session_size
         page_tagged = tagged[s_start:s_start + session_size]
         sids.extend(s.session_id for s, _p in page_tagged)
-        if ws_hash:
-            hash_by_sid.update({s.session_id: ws_hash for s, _p in page_tagged})
         meta = {
             "cwd": ws_cwd,
             "name": ws_name,
@@ -4005,17 +3996,14 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                             "(off-page pinned scan)",
                             prov_name, ws_cwd,
                         )
-                ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
                 for s, prov_name in off_tagged:
                     if time_filter and _time_bucket(s.updated_at) != time_filter:
                         continue
                     if s.session_id in pinned_set:
                         pinned_sessions_found.append((ws_cwd, ws_name, s, prov_name))
-                        if ws_hash:
-                            hash_by_sid[s.session_id] = ws_hash
 
     pinned_sids = [s.session_id for _cwd, _name, s, _p in pinned_sessions_found]
-    availability = _acp_availability(sids + pinned_sids, held, workspace_hashes=hash_by_sid)
+    availability = _acp_availability(sids + pinned_sids, held)
     all_page_sessions = [s for _meta, page_tagged in rows for s, _p in page_tagged]
     statuses = _acp_status_for_held([
         s for s in all_page_sessions + [s for _c, _n, s, _p in pinned_sessions_found]
@@ -4932,9 +4920,8 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
     for either id shape, since the caller is the one that chooses which
     supervisor to snapshot.
 
-    Every other per-id check below dispatches on id shape, exactly like
-    `_acp_availability` already does: all remaining session IDs are v3
-    (`sess_`-prefixed), routed to `acp._lock_holder_v3` /
+    Every other per-id check below dispatches on id shape: all remaining
+    session IDs are v3 (`sess_`-prefixed), routed to `acp._lock_holder_v3` /
     `acp._stored_session_cwd_v3` / `_acp_delete_session`. A non-`sess_`-prefixed
     id passed by a browser returns gracefully: `_lock_holder_v3` returns `None`,
     `_stored_session_cwd_v3` returns `""`, and `_acp_delete_session` returns
@@ -7003,22 +6990,23 @@ async def api_session_transcript(sid: str = "", provider: str = "kiro-cli-v3", c
 
 @app.get("/api/session-availability")
 async def api_session_availability(response: Response, sid: str = "", cwd: str = ""):
-    """Cheap held/locked/available peek for ONE session, for the dashboard's
+    """Cheap held/available peek for ONE session, for the dashboard's
     transcript panel to decide the composer's state without attaching.
 
-    Reuses `_acp_availability` exactly as `_acp_listing`/`api_acp_sessions`
-    do for the rail — zero ACP round-trip, same fail-open-to-`available`
-    contract, same `acp is None` degradation. Only ever meaningful for
-    kiro-cli-v3 (and, incidentally, retired-v2 kiro-cli — `_acp_availability`
-    branches on id shape) sessions; the panel should not call this for any
-    other provider, since they have no live-attach concept to be available
-    *for*.
+    Returns 'held' if this PowerAtlas supervisor currently holds the session,
+    'available' for all others. Reuses `_acp_availability` exactly as
+    `_acp_listing`/`api_acp_sessions` do for the rail — zero ACP round-trip,
+    same fail-open-to-`available` contract.
+
+    Only ever meaningful for kiro-cli-v3 sessions; the panel should not call
+    this for any other provider, since they have no live-attach concept to be
+    available *for*.
 
     `status` mirrors `_acp_status_for_held`'s own rule: `""` for a session
-    this PowerAtlas does not hold (a `locked`/`available` id has no local
-    transcript-tail reading worth doing), the resolved working/waiting/
-    errored verdict when it does. Requires `cwd` to compute a status for a
-    held session; without it the availability state alone is still returned.
+    this PowerAtlas does not hold (an available id has no local transcript-tail
+    reading worth doing), the resolved working/waiting/errored verdict when it
+    does. Requires `cwd` to compute a status for a held session; without it the
+    availability state alone is still returned.
 
     `no-store`, same reasoning as `api_acp_sessions`: availability is a
     liveness reading with a lifetime of seconds, not something to cache.
