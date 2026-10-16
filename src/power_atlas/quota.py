@@ -14,7 +14,12 @@ is read.
   `usage_limit_exceeded`. A thread is "interrupted" while that is its last turn record. The event names
   no reset time, so it is read from the last real `rate_limits` before it, or from the message's
   "try again at 9:38 PM".
-* kiro-cli records a `UsageLimitReachedError` display error. It carries no reset time.
+* kiro-cli records a `UsageLimitReachedError` display error ("return tomorrow"). It carries no reset time,
+  so a kiro row gets an *assumed* one: the next occurrence of the configured daily reset time
+  (`Config.kiro_daily_reset_minutes_utc`) after the stop, flagged `reset_assumed`. A session is stopped
+  while that error is the last thing in its log: a later `turn_start` means it went on. kiro also writes
+  `user` records of its own after a stop (an empty `steer` boundary, workflow notifications), so a `user`
+  record says nothing. A workflow child session is never listed: its parent's log carries the same stop.
 
 A reading is never shown as current when it is not: a window whose reset time has passed reads
 "reset", and a snapshot older than `STALE_AFTER_SECONDS` reads "stale".
@@ -30,7 +35,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config, data_claude, data_codex, overview
+from . import config, data_claude, data_codex, data_kiro_v3, overview
 
 log = logging.getLogger(__name__)
 
@@ -53,9 +58,11 @@ _CODEX_ROLLOUTS_TRIED = 4
 # the day they did not.
 _CONVERSATION_TYPE = re.compile(rb'"type"\s*:\s*"(?:user|assistant)"')
 _SESSION_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# A kiro-cli v3 session id is the name of its folder. Whole-string match: nothing else (a path segment, a
+# wildcard) reaches the glob in `kiro_session_path`.
+_KIRO_SESSION_ID = re.compile(r"sess_[0-9A-Za-z][0-9A-Za-z-]*")
 # A statusline payload is a few KB. Anything larger is not one, and is not read.
 MAX_SNAPSHOT_BYTES = 1024 * 1024
-_USER_TYPE = re.compile(rb'"type"\s*:\s*"user"')
 
 SNAPSHOT_NAME = "claude-statusline.json"
 # Shown to the owner to paste into their statusline command (and kept, word for word, in the agent
@@ -288,10 +295,13 @@ def interrupted(now: float | None = None) -> list[dict]:
 
 
 def find_hit(session_id: str, now: float | None = None) -> dict | None:
-    """The interrupted-session row for one Claude Code or Codex session id, or None when it is not listed.
-    Both id shapes are UUIDs that cannot meet in practice, so the id alone names the provider."""
+    """The interrupted-session row for one session id, or None when it is not listed. A kiro-cli id carries
+    a `sess_` prefix and the other two are bare UUIDs that cannot meet in practice, so the id alone names
+    the provider."""
     now = time.time() if now is None else now
-    for scan in (_scan_claude, _scan_codex):
+    scans = (_scan_kiro,) if isinstance(session_id, str) and session_id.startswith("sess_") \
+        else (_scan_claude, _scan_codex)
+    for scan in scans:
         for row in scan(now):
             if row["id"] == session_id:
                 return row
@@ -334,8 +344,20 @@ def transcript_progress(path: Path) -> dict | None:
 
 # ---- kiro-cli: usage-limit display errors -------------------------------------------------
 
+def _is_kiro_limit_error(payload: dict) -> bool:
+    value = payload.get("value")
+    return (payload.get("type") == "session_metadata" and payload.get("key") == "displayError"
+            and isinstance(value, dict) and value.get("errorType") == "UsageLimitReachedError")
+
+
 def _kiro_stop(path: Path, st) -> float | None:
-    """When the session's last turn ended in a usage-limit error, or None. Memoised on `(mtime_ns, size)`."""
+    """When the session's last turn ended in a usage-limit error, or None. Memoised on `(mtime_ns, size)`.
+
+    The session is stopped while that error is the last thing in its log. A `turn_start` after it means
+    the session went on. `user` records do not count either way: kiro writes its own after a stop (an empty
+    `steer` boundary a few ms after `turn_end`, workflow notifications), and reading one as "the session
+    moved on" lost the stop of a parent session that had a workflow running.
+    """
     key = str(path)
     with _lock:
         memo = _kiro_memo.get(key)
@@ -347,7 +369,7 @@ def _kiro_stop(path: Path, st) -> float | None:
         return None
     stop_at = None
     for line in reversed(raw.split(b"\n")):
-        if b'"displayError"' not in line and not _USER_TYPE.search(line):
+        if b'"displayError"' not in line and b'"turn_start"' not in line:
             continue
         try:
             entry = json.loads(line)
@@ -356,11 +378,9 @@ def _kiro_stop(path: Path, st) -> float | None:
         payload = entry.get("payload") if isinstance(entry, dict) else None
         if not isinstance(payload, dict):
             continue
-        if payload.get("type") == "user":
+        if payload.get("type") == "turn_start":
             break
-        value = payload.get("value")
-        if (payload.get("type") == "session_metadata" and payload.get("key") == "displayError"
-                and isinstance(value, dict) and value.get("errorType") == "UsageLimitReachedError"):
+        if _is_kiro_limit_error(payload):
             stop_at = _epoch(entry.get("timestamp"))
             break
     with _lock:
@@ -368,9 +388,36 @@ def _kiro_stop(path: Path, st) -> float | None:
     return stop_at
 
 
+def assumed_reset(hit_at: float, minutes_utc: int) -> float:
+    """The first moment after `hit_at` that is `minutes_utc` minutes past 00:00 UTC.
+
+    kiro-cli does not report when a daily limit lifts. From two stop days the reset lies between 20:54
+    and 02:39 UTC, so this is a guess that the owner can move (`Config.kiro_daily_reset_minutes_utc`).
+    """
+    day_start = math.floor(hit_at / 86400.0) * 86400.0
+    at = day_start + minutes_utc * 60.0
+    return at if at > hit_at else at + 86400.0
+
+
+def _reset_minutes() -> int:
+    """The configured daily reset time, minutes after 00:00 UTC. A value out of range reads as the default."""
+    try:
+        value = config.load_config().kiro_daily_reset_minutes_utc
+    except Exception:
+        log.exception("Quota: could not read the kiro reset time")
+        return 0
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1440 else 0
+
+
 def _scan_kiro(now: float) -> list[dict]:
-    """kiro-cli sessions whose last turn ended in a usage-limit error. No reset time is known."""
+    """kiro-cli sessions whose last turn ended in a usage-limit error, workflow children left out.
+
+    The reset time is assumed (`assumed_reset`) and the row says so with `reset_assumed`. `state` is
+    "ready" once that time has passed. A row's identity is its stop time (`hit_at`), not the reset time:
+    two stops on one day share a reset time.
+    """
     v3_root, _claude = _roots()
+    minutes = _reset_minutes()
     found: list[dict] = []
     seen: set[str] = set()
     for path in v3_root.glob("*/sess_*/messages.jsonl"):
@@ -389,19 +436,78 @@ def _scan_kiro(now: float) -> list[dict]:
             meta = json.loads((path.parent / "session.json").read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             pass
+        if isinstance(meta, dict) and data_kiro_v3._is_subagent_session(meta):
+            continue
         paths = meta.get("workspacePaths") if isinstance(meta, dict) else None
         cwd = paths[0] if isinstance(paths, list) and paths and isinstance(paths[0], str) else ""
         title = meta.get("title") if isinstance(meta, dict) and isinstance(meta.get("title"), str) else ""
+        reset = assumed_reset(stop_at, minutes)
         found.append({
             "id": path.parent.name, "provider": "kiro-cli-v3", "title": title or "untitled session",
-            "cwd": cwd, "name": Path(cwd).name or cwd, "window": "daily", "resets_at": None,
-            "hit_at": stop_at, "state": "limited",
+            "cwd": cwd, "name": Path(cwd).name or cwd, "window": "daily", "resets_at": reset,
+            "reset_assumed": True, "hit_at": stop_at, "state": "ready" if now >= reset else "limited",
         })
     with _lock:
         for stale in [k for k in _kiro_memo if k not in seen]:
             del _kiro_memo[stale]
     found.sort(key=lambda r: r["hit_at"], reverse=True)
     return found
+
+
+def kiro_session_path(session_id) -> Path | None:
+    """The message log of a kiro-cli v3 session, or None. The id must be a whole `sess_...` name."""
+    if not isinstance(session_id, str) or not _KIRO_SESSION_ID.fullmatch(session_id):
+        return None
+    v3_root, _claude = _roots()
+    for path in v3_root.glob("*/" + session_id + "/messages.jsonl"):
+        return path
+    return None
+
+
+# A cheap test before a kiro log line is parsed: the records that say where a turn stands.
+_KIRO_PROGRESS_WORDS = (b'"displayError"', b'"assistant"', b'"tool_call"', b'"tool_result"', b'"user"',
+                        b'"turn_start"')
+
+
+def kiro_progress(session_id: str) -> dict | None:
+    """Where a kiro-cli session's log stands, as `transcript_progress` does for a Claude transcript:
+    `{kind, at, hit}`, or None when the log cannot be found or read.
+
+    `kind` is "hit" (the last decisive record is a usage-limit error; `hit` is `{hit_at, window,
+    resets_at}`, `resets_at` None: kiro names none), "reply" (an assistant, tool call or tool result) or
+    "prompt" (a turn started or a user message arrived and nothing has answered it yet). The last decisive
+    record wins. A `turn_start` is not a reply: after a resume it comes a few ms after the prompt, and the
+    limit error follows seconds later. `user` records that kiro writes itself (`source` "steer", or empty)
+    are not decisive. Not memoised: the caller asks about one session, a few seconds after it changed.
+    """
+    path = kiro_session_path(session_id)
+    if path is None:
+        return None
+    try:
+        raw = _read_tail(path, path.stat().st_size, _TAIL_BYTES)
+    except OSError:
+        return None
+    for line in reversed(raw.split(b"\n")):
+        if not any(word in line for word in _KIRO_PROGRESS_WORDS):
+            continue
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        payload = entry.get("payload") if isinstance(entry, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        kind = payload.get("type")
+        at = _epoch(entry.get("timestamp")) or 0.0
+        if _is_kiro_limit_error(payload):
+            return {"kind": "hit", "at": at,
+                    "hit": {"hit_at": at, "window": "daily", "resets_at": None}}
+        if kind in ("assistant", "tool_call", "tool_result"):
+            return {"kind": "reply", "at": at, "hit": None}
+        if kind == "turn_start" or (kind == "user" and payload.get("source") != "steer"
+                                    and payload.get("content")):
+            return {"kind": "prompt", "at": at, "hit": None}
+    return None
 
 
 # ---- Codex: usage-limit turn ends ---------------------------------------------------------

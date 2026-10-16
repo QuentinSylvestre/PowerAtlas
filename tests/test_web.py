@@ -1986,7 +1986,7 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     # `browser_hotkey`: 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3
     # puts it in both payloads.
     expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "peek_mode", "browser_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
-                     "acp_max_sessions", "acp_idle_ttl_seconds",
+                     "acp_max_sessions", "acp_idle_ttl_seconds", "kiro_daily_reset_minutes_utc",
                      "remote_bind_address", "restart_to_apply", "in_force",
                      "restart_pending", "local_secret",
                      # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS
@@ -19679,6 +19679,31 @@ class TestSettingsSurface:
         assert body["ok"] is False
         assert "between" in body["error"]
 
+    def test_the_kiro_reset_time_is_writable_within_a_day_and_needs_no_restart(self, client):
+        """261016_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT: minutes after 00:00 UTC, read at every
+        scheduler tick."""
+        import power_atlas.config as config_mod
+        for minutes in (0, 1439, 600):
+            body = client.post("/api/save-setting",
+                               json={"key": "kiro_daily_reset_minutes_utc", "value": minutes}).json()
+            assert body == {"ok": True, "restart_required": False}, minutes
+        assert config_mod.load_config().kiro_daily_reset_minutes_utc == 600
+        assert client.get("/api/settings").json()["kiro_daily_reset_minutes_utc"] == 600
+
+    @pytest.mark.parametrize("value", [-1, 1440, True, "09:00", 9.5])
+    def test_a_kiro_reset_time_that_is_not_a_minute_of_the_day_is_refused(self, value, client):
+        import power_atlas.config as config_mod
+        client.post("/api/save-setting", json={"key": "kiro_daily_reset_minutes_utc", "value": 120})
+        body = client.post("/api/save-setting",
+                           json={"key": "kiro_daily_reset_minutes_utc", "value": value}).json()
+        assert body["ok"] is False
+        assert config_mod.load_config().kiro_daily_reset_minutes_utc == 120
+
+    def test_the_settings_page_shows_the_kiro_reset_time_and_its_local_equivalent_line(self, client):
+        client.post("/api/save-setting", json={"key": "kiro_daily_reset_minutes_utc", "value": 19 * 60 + 5})
+        page = client.get("/").text
+        assert 'id="kiroResetTime"' in page and 'value="19:05"' in page and 'id="kiroResetLocal"' in page
+
     def test_every_bounded_key_is_declared(self):
         """Adding a key to `_SETTING_TYPES` without a bound is what would turn
         the fail-closed `Unknown setting` refusal into an unbounded write.
@@ -19700,7 +19725,7 @@ class TestSettingsSurface:
             "int settings without a bound: "
             f"{sorted(unbounded - set(_SETTING_BOUNDS))}")
         assert set(_SETTING_BOUNDS) == {
-            "acp_max_sessions", "acp_idle_ttl_seconds"}
+            "acp_max_sessions", "acp_idle_ttl_seconds", "kiro_daily_reset_minutes_utc"}
         assert set(_SETTING_BOUNDS) <= set(_SETTING_TYPES)
 
     def test_the_startup_only_keys_say_restart_to_apply(self, client):
@@ -45637,11 +45662,11 @@ class TestQuota:
 
     # -- kiro-cli --
 
-    def _kiro(self, name, rows, age=0.0, cwd="C:\\dev\\kproj"):
+    def _kiro(self, name, rows, age=0.0, cwd="C:\\dev\\kproj", meta=None):
         d = self.v3 / "hash" / name
         d.mkdir(parents=True)
-        (d / "session.json").write_text(json.dumps({"title": "kiro work", "workspacePaths": [cwd]}),
-                                        encoding="utf-8")
+        (d / "session.json").write_text(json.dumps({"title": "kiro work", "workspacePaths": [cwd],
+                                                    **(meta or {})}), encoding="utf-8")
         path = d / "messages.jsonl"
         path.write_text("\n".join(rows) + "\n", encoding="utf-8")
         os.utime(path, (_Q_NOW - age, _Q_NOW - age))
@@ -45655,20 +45680,104 @@ class TestQuota:
                               value={"errorType": "UsageLimitReachedError",
                                      "message": "You've reached your daily usage limit."})
 
-    def test_a_kiro_session_whose_turn_ended_in_a_usage_limit_is_listed_without_a_reset_time(self):
+    def test_a_kiro_session_whose_turn_ended_in_a_usage_limit_is_listed_with_an_assumed_reset_time(self):
         self._kiro("sess_1", [self._kiro_row(_Q_NOW - 50, type="user", content="hi"), self._limit(_Q_NOW - 40),
                               self._kiro_row(_Q_NOW - 39, type="turn_end")])
         [row] = self._interrupted()
-        assert (row["id"], row["provider"], row["window"], row["resets_at"], row["state"]) == (
-            "sess_1", "kiro-cli-v3", "daily", None, "limited")
+        assert (row["id"], row["provider"], row["window"], row["state"]) == (
+            "sess_1", "kiro-cli-v3", "daily", "limited")
+        # _Q_NOW is 08:00 UTC and the default reset is 00:00 UTC: the next one is 16 hours off.
+        assert row["resets_at"] == _Q_NOW - 8 * 3600 + 86400 and row["reset_assumed"] is True
+        assert row["hit_at"] == _Q_NOW - 40
         assert row["title"] == "kiro work" and row["cwd"] == "C:\\dev\\kproj"
 
+    def test_a_kiro_row_is_ready_once_the_assumed_reset_has_passed(self):
+        self._kiro("sess_1", [self._limit(_Q_NOW - 40)])
+        [row] = self._interrupted(now=_Q_NOW - 8 * 3600 + 86400 + 1)
+        assert row["state"] == "ready"
+
+    def test_the_assumed_reset_is_the_next_occurrence_of_the_configured_time_after_the_stop(self):
+        day = 1_800_000_000.0 // 86400 * 86400
+        assumed = _quota_q.assumed_reset
+        assert assumed(day + 12 * 3600, 0) == day + 86400
+        assert assumed(day + 12 * 3600, 13 * 60) == day + 13 * 3600
+        assert assumed(day + 14 * 3600, 13 * 60) == day + 86400 + 13 * 3600
+        assert assumed(day + 13 * 3600, 13 * 60) == day + 86400 + 13 * 3600, "a stop at the reset is the next one's"
+
+    def test_the_reset_time_comes_from_the_setting_and_a_bad_value_reads_as_the_default(self, monkeypatch):
+        from power_atlas.config import Config
+        self._kiro("sess_1", [self._limit(_Q_NOW - 40)])
+        monkeypatch.setattr("power_atlas.config.load_config", lambda: Config(kiro_daily_reset_minutes_utc=9 * 60))
+        [row] = self._interrupted()
+        assert row["resets_at"] == _Q_NOW - 8 * 3600 + 9 * 3600
+        for bad in (-1, 1440, True, "x"):
+            monkeypatch.setattr("power_atlas.config.load_config",
+                                lambda bad=bad: Config(kiro_daily_reset_minutes_utc=bad))
+            [row] = self._interrupted()
+            assert row["resets_at"] == _Q_NOW - 8 * 3600 + 86400, bad
+
     def test_a_kiro_session_that_went_on_or_is_old_or_failed_otherwise_is_not_listed(self):
-        self._kiro("sess_2", [self._limit(_Q_NOW - 40), self._kiro_row(_Q_NOW - 5, type="user", content="again")])
+        self._kiro("sess_2", [self._limit(_Q_NOW - 40), self._kiro_row(_Q_NOW - 5, type="turn_start")])
         self._kiro("sess_3", [self._limit(_Q_NOW - 49 * 3600)], age=0)
         self._kiro("sess_4", [self._kiro_row(_Q_NOW - 40, type="session_metadata", key="displayError",
                                              value={"errorType": "AuthError", "message": "x"})])
         assert self._interrupted() == []
+
+    def test_records_kiro_writes_itself_after_a_stop_do_not_clear_it(self):
+        """A parent whose workflow was running got an empty `steer` user record right after the limit's
+        `turn_end`; reading it as "the session moved on" hid the stop."""
+        self._kiro("sess_6", [
+            self._kiro_row(_Q_NOW - 50, type="turn_start"), self._limit(_Q_NOW - 40),
+            self._kiro_row(_Q_NOW - 39, type="usage_summary"), self._kiro_row(_Q_NOW - 39, type="turn_end"),
+            self._kiro_row(_Q_NOW - 38, type="user", content="", source="steer"),
+            self._kiro_row(_Q_NOW - 37, type="user", content="{\"method\":\"_kiro/workflow/run_complete\"}",
+                           source="steer")])
+        assert [r["id"] for r in self._interrupted()] == ["sess_6"]
+
+    def test_a_workflow_child_is_not_listed_but_a_session_that_names_itself_as_root_is(self):
+        stop = [self._limit(_Q_NOW - 40)]
+        self._kiro("sess_child", stop, meta={"id": "sess_child", "rootConversationId": "sess_parent"})
+        self._kiro("sess_self", stop, meta={"id": "sess_self", "rootConversationId": "sess_self"})
+        self._kiro("sess_parent", stop, meta={"id": "sess_parent"})
+        assert sorted(r["id"] for r in self._interrupted()) == ["sess_parent", "sess_self"]
+
+    def test_find_hit_names_a_kiro_session_by_its_sess_prefix_and_leaves_the_other_providers_alone(self):
+        self._kiro("sess_7", [self._limit(_Q_NOW - 40)])
+        assert _quota_q.find_hit("sess_7", _Q_NOW)["provider"] == "kiro-cli-v3"
+        assert _quota_q.find_hit("sess_8", _Q_NOW) is None
+        assert _quota_q.find_hit(str(_uuid_q.uuid4()), _Q_NOW) is None
+
+    def test_kiro_progress_reads_where_a_resumed_session_stands(self):
+        stop = [self._kiro_row(_Q_NOW - 50, type="turn_start"), self._limit(_Q_NOW - 40),
+                self._kiro_row(_Q_NOW - 39, type="turn_end"),
+                self._kiro_row(_Q_NOW - 38, type="user", content="", source="steer")]
+        self._kiro("sess_p", list(stop))
+        path = _quota_q.kiro_session_path("sess_p")
+        assert _quota_q.kiro_progress("sess_p")["kind"] == "hit"
+        assert _quota_q.kiro_progress("sess_p")["hit"] == {"hit_at": _Q_NOW - 40, "window": "daily",
+                                                           "resets_at": None}
+
+        def append(*rows):
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write("\n".join(rows) + "\n")
+
+        # The prompt and the turn it starts are not an answer: the limit error can follow seconds later.
+        append(self._kiro_row(_Q_NOW + 1, type="user", content="resume"),
+               self._kiro_row(_Q_NOW + 1, type="turn_start"))
+        assert _quota_q.kiro_progress("sess_p")["kind"] == "prompt"
+        append(self._limit(_Q_NOW + 4), self._kiro_row(_Q_NOW + 4, type="turn_end"))
+        hit = _quota_q.kiro_progress("sess_p")
+        assert hit["kind"] == "hit" and hit["hit"]["hit_at"] == _Q_NOW + 4
+        append(self._kiro_row(_Q_NOW + 9000, type="user", content="again"),
+               self._kiro_row(_Q_NOW + 9000, type="turn_start"),
+               self._kiro_row(_Q_NOW + 9005, type="assistant", content="ok"))
+        assert _quota_q.kiro_progress("sess_p")["kind"] == "reply"
+
+    def test_kiro_progress_refuses_an_id_that_is_not_a_session_folder_name(self):
+        self._kiro("sess_q", [self._limit(_Q_NOW - 40)])
+        for bad in (None, "", "../sess_q", "sess_*", "sess_q/..", 5, "claude"):
+            assert _quota_q.kiro_session_path(bad) is None, bad
+            assert _quota_q.kiro_progress(bad) is None, bad
 
     # -- the payload as a whole --
 
@@ -45977,7 +46086,8 @@ class TestResume:
             (sid, _Q_NOW + 3660, "go", 1)]
         _resume_r.reset()   # a new process reads the file
         [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW)["interrupted"], _Q_NOW)
-        assert row["resume"] == {"state": "scheduled", "fire_at": _Q_NOW + 3660, "attempt": 1, "prompt": "go"}
+        assert row["resume"] == {"state": "scheduled", "fire_at": _Q_NOW + 3660, "attempt": 1, "max_attempts": 2,
+                                 "prompt": "go"}
 
     def test_scheduling_again_replaces_and_a_time_before_the_reset_is_moved_to_it(self):
         sid, _ = self._stopped(resets_at=_Q_NOW + 3600)
@@ -46120,16 +46230,191 @@ class TestResume:
         _resume_r.tick(_Q_NOW + 3700 + _resume_r.NO_ACTIVITY_SECONDS + 5)
         assert self.toasts == []
 
-    def test_kiro_rows_are_listed_but_have_no_resume_buttons(self):
-        d = self.v3 / "h" / "sess_k1"
+    # -- kiro-cli: an assumed reset time, a stop identified by its own time, a longer retry ladder --
+    # 261016_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT. _Q_NOW is 08:00 UTC, so the default 00:00 UTC
+    # reset assumed for a stop just before it is _KIRO_RESET, 16 hours later.
+
+    _KIRO_RESET = _Q_NOW + 16 * 3600
+
+    @staticmethod
+    def _k_row(at, **payload):
+        return json.dumps({"id": "x", "timestamp": _q_iso(at), "payload": payload}, separators=(",", ":"))
+
+    def _k_limit(self, at):
+        return self._k_row(at, type="session_metadata", key="displayError",
+                           value={"errorType": "UsageLimitReachedError", "message": "daily usage limit"})
+
+    def _kiro_stopped(self, hit_at=_Q_NOW - 40, meta=None):
+        sid = "sess_" + str(_uuid_q.uuid4())
+        d = self.v3 / "h" / sid
         d.mkdir(parents=True)
-        (d / "messages.jsonl").write_text(json.dumps({"timestamp": _q_iso(_Q_NOW - 5), "payload": {
-            "type": "session_metadata", "key": "displayError",
-            "value": {"errorType": "UsageLimitReachedError"}}}) + "\n", encoding="utf-8")
-        os.utime(d / "messages.jsonl", (_Q_NOW, _Q_NOW))
-        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW)["interrupted"], _Q_NOW)
-        assert row["provider"] == "kiro-cli-v3" and row["can_resume"] is False
-        assert _resume_r.resume_now("sess_k1", now=_Q_NOW)["ok"] is False
+        (d / "session.json").write_text(json.dumps({"title": "kiro work", "workspacePaths": ["C:\\dev\\kproj"],
+                                                    **(meta or {})}), encoding="utf-8")
+        path = d / "messages.jsonl"
+        path.write_text("\n".join([self._k_row(hit_at - 5, type="turn_start"), self._k_limit(hit_at),
+                                   self._k_row(hit_at + 1, type="turn_end")]) + "\n", encoding="utf-8")
+        os.utime(path, (_Q_NOW, _Q_NOW))
+        return sid, path
+
+    def _kiro_rows(self, *rows, path, at=_Q_NOW + 4000):
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(rows) + "\n")
+        os.utime(path, (at, at))
+
+    def test_session_ids_are_a_bare_uuid_or_a_sess_prefixed_one(self):
+        valid = _resume_r._valid_session_id
+        u = str(_uuid_q.uuid4())
+        assert valid(u) and valid("sess_" + u)
+        for bad in (None, 5, "", "sess_1", "sess_", "sess_" + u.upper(), "../" + u, "sess_" + u + "x", " " + u):
+            assert not valid(bad), bad
+
+    def test_a_stopped_kiro_session_can_be_resumed_at_once_even_before_the_assumed_reset(self):
+        sid, _ = self._kiro_stopped()
+        assert _resume_r.resume_now(sid, "carry on", now=_Q_NOW) == {"ok": True, "mode": "terminal"}
+        assert self.launched == [(sid, "C:\\dev\\kproj", "carry on")] and self.typed == []
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW + 1)["interrupted"], _Q_NOW + 1)
+        assert row["can_resume"] is True and row["resets_at"] == self._KIRO_RESET
+        assert row["resume"]["state"] == "watching" and row["resume"]["max_attempts"] == _resume_r.KIRO_MAX_ATTEMPTS
+
+    def test_a_kiro_session_the_acp_page_holds_is_refused_and_never_auto_scheduled(self, monkeypatch):
+        self.config.auto_schedule = True
+        sid, _ = self._kiro_stopped()
+        monkeypatch.setattr(_resume_r.presence, "acp_holds", lambda s: s == sid)
+        result = _resume_r.resume_now(sid, now=_Q_NOW)
+        assert result["ok"] is False and "/acp" in result["error"] and self.launched == []
+        _resume_r.tick(_Q_NOW)
+        assert _resume_r._state["schedules"] == []
+
+    def test_a_kiro_schedule_defaults_to_a_minute_after_the_assumed_reset_and_names_its_stop(self):
+        sid, _ = self._kiro_stopped()
+        result = _resume_r.schedule(sid, now=_Q_NOW)
+        assert result["ok"] is True and result["fire_at"] == self._KIRO_RESET + 60
+        [record] = _resume_r._state["schedules"]
+        assert record["hit_at"] == _Q_NOW - 40 and record["attempt"] == 1
+
+    def test_a_kiro_session_can_be_scheduled_after_its_assumed_reset_too(self):
+        sid, _ = self._kiro_stopped()
+        late = self._KIRO_RESET + 500
+        result = _resume_r.schedule(sid, now=late)
+        assert result["ok"] is True and result["fire_at"] == late + 5
+        assert _resume_r.schedule(sid, fire_at=late + 7200, now=late)["fire_at"] == late + 7200
+        assert _resume_r.schedule(sid, fire_at=late - 9999, now=late)["fire_at"] == late + 5, "never in the past"
+
+    def test_a_kiro_schedule_still_fires_after_the_reset_time_setting_is_edited(self):
+        sid, _ = self._kiro_stopped()
+        fire_at = _resume_r.schedule(sid, now=_Q_NOW)["fire_at"]
+        self.config.kiro_daily_reset_minutes_utc = 10 * 60      # the assumed reset moves to 10:00 UTC today
+        _resume_r.tick(fire_at + 1)
+        assert [l[0] for l in self.launched] == [sid]
+
+    def test_a_kiro_schedule_is_dropped_if_the_session_was_stopped_again_since(self):
+        sid, path = self._kiro_stopped()
+        fire_at = _resume_r.schedule(sid, now=_Q_NOW)["fire_at"]
+        self._kiro_rows(self._k_row(_Q_NOW + 100, type="turn_start"), self._k_limit(_Q_NOW + 110), path=path,
+                        at=_Q_NOW + 120)
+        _resume_r.tick(fire_at + 1)
+        assert self.launched == [], "the schedule was made for the earlier stop"
+
+    def test_auto_schedule_arms_a_limited_kiro_session_but_not_one_whose_assumed_reset_has_passed(self):
+        self.config.auto_schedule = True
+        sid, _ = self._kiro_stopped()
+        old, _ = self._kiro_stopped(hit_at=_Q_NOW - 30 * 3600)
+        _resume_r.tick(_Q_NOW)
+        assert [(s["session_id"], s["fire_at"], s["attempt"]) for s in _resume_r._state["schedules"]] == [
+            (sid, self._KIRO_RESET + 60, 1)]
+        assert self.launched == []
+        [old_row] = [r for r in _resume_r.decorate(_quota_q.payload(_Q_NOW)["interrupted"], _Q_NOW) if r["id"] == old]
+        assert old_row["state"] == "ready" and old_row["can_resume"] is True
+
+    def test_a_workflow_child_gets_no_resume_and_no_schedule(self):
+        self.config.auto_schedule = True
+        child, _ = self._kiro_stopped(meta={"rootConversationId": "sess_" + str(_uuid_q.uuid4())})
+        _resume_r.tick(_Q_NOW)
+        assert _resume_r._state["schedules"] == []
+        assert _resume_r.resume_now(child, now=_Q_NOW)["error"].startswith("That session is no longer stopped")
+
+    def test_the_watch_logs_how_long_after_the_stop_a_kiro_session_answered(self, caplog):
+        sid, path = self._kiro_stopped()
+        assert _resume_r.resume_now(sid, now=_Q_NOW)["ok"] is True
+        self._kiro_rows(self._k_row(_Q_NOW + 10, type="user", content="resume"),
+                        self._k_row(_Q_NOW + 10, type="turn_start"), path=path)
+        with caplog.at_level("INFO", logger="power_atlas.resume"):
+            _resume_r.tick(_Q_NOW + 20)
+            assert _resume_r._runs[0]["state"] == "watching", "a turn that has only started is not an answer"
+            self._kiro_rows(self._k_row(_Q_NOW + 25, type="assistant", content="ok"), path=path)
+            _resume_r.tick(_Q_NOW + 30)
+        assert _resume_r._runs == []
+        # The stop was at _Q_NOW - 40 and the answer at _Q_NOW + 25.
+        assert "answered 1 min after the stop (attempt 1)" in caplog.text and "assumed reset 00:00 UTC" in caplog.text
+
+    def test_a_kiro_session_still_limited_is_tried_again_an_hour_after_that_hit(self):
+        sid, path = self._kiro_stopped()
+        _resume_r.resume_now(sid, now=_Q_NOW)
+        self._kiro_rows(self._k_row(_Q_NOW + 10, type="user", content="resume"),
+                        self._k_row(_Q_NOW + 10, type="turn_start"), self._k_limit(_Q_NOW + 13),
+                        self._k_row(_Q_NOW + 13, type="turn_end"), path=path)
+        _resume_r.tick(_Q_NOW + 20)
+        assert _resume_r._runs == []
+        [retry] = _resume_r._state["schedules"]
+        assert (retry["attempt"], retry["fire_at"], retry["hit_at"]) == (2, _Q_NOW + 13 + 3600, _Q_NOW + 13)
+        assert any("Resuming again in an hour" in m for _l, m in self.toasts)
+        [row] = _resume_r.decorate(_quota_q.payload(_Q_NOW + 21)["interrupted"], _Q_NOW + 21)
+        assert row["resume"]["state"] == "scheduled" and row["resume"]["max_attempts"] == 8
+        _resume_r.tick(retry["fire_at"] + 1)
+        assert [l[0] for l in self.launched] == [sid, sid]
+        assert _resume_r._runs[0]["attempt"] == 2
+
+    @pytest.mark.parametrize("auto", [False, True])
+    def test_a_kiro_resume_gives_up_after_the_last_attempt_and_stays_given_up(self, auto):
+        """With Auto-schedule on the new stop's assumed reset is tomorrow's, so without the skip recorded
+        at give-up the next tick armed a fresh first attempt and "giving up" lasted until the next day."""
+        self.config.auto_schedule = auto
+        sid, path = self._kiro_stopped()
+        assert _resume_r.resume_now(sid, attempt=_resume_r.KIRO_MAX_ATTEMPTS, now=_Q_NOW)["ok"] is True
+        self._kiro_rows(self._k_row(_Q_NOW + 10, type="turn_start"), self._k_limit(_Q_NOW + 13), path=path)
+        _resume_r.tick(_Q_NOW + 20)
+        assert _resume_r._state["schedules"] == []
+        assert any("8 times" in m and "Giving up" in m for _l, m in self.toasts)
+        if not auto:
+            assert _resume_r._runs[0]["state"] == "gave_up"
+        for later in (30, 40, 3000):
+            _resume_r.tick(_Q_NOW + later)
+        assert _resume_r._state["schedules"] == [] and len(self.launched) == 1
+        # Resume now still works, and a manual schedule clears the skip.
+        assert _resume_r.schedule(sid, now=_Q_NOW + 3001)["ok"] is True
+
+    def test_an_explicit_kiro_schedule_time_is_bounded_from_now_not_from_an_old_assumed_reset(self):
+        sid, _ = self._kiro_stopped(hit_at=_Q_NOW - 40 * 3600)
+        assert _resume_r.schedule(sid, fire_at=_Q_NOW + 3 * 86400, now=_Q_NOW)["ok"] is True
+        refused = _resume_r.schedule(sid, fire_at=_Q_NOW + 8 * 86400, now=_Q_NOW)
+        assert refused["ok"] is False and "too far ahead" in refused["error"]
+
+    def test_the_state_file_keeps_a_late_kiro_attempt_and_drops_one_that_claude_can_never_have(self):
+        kiro, claude = "sess_" + str(_uuid_q.uuid4()), str(_uuid_q.uuid4())
+
+        def record(sid, attempt, **extra):
+            return {"id": _uuid_q.uuid4().hex, "session_id": sid, "cwd": "C:\\x", "prompt": "resume",
+                    "fire_at": _Q_NOW + 5, "resets_at": _Q_NOW + 5, "attempt": attempt, "title": "t", **extra}
+
+        (self.tmp / _resume_r.STATE_NAME).write_text(json.dumps({"version": 1, "schedules": [
+            record(kiro, 5, hit_at=_Q_NOW), record(kiro, 9), record(claude, 3), record(claude, 2)],
+            "dismissed": [], "skipped": []}), encoding="utf-8")
+        _resume_r.reset()
+        with _resume_r._lock:
+            _resume_r._load()
+        assert sorted((s["session_id"], s["attempt"]) for s in _resume_r._state["schedules"]) == sorted(
+            [(kiro, 5), (claude, 2)])
+        assert [s.get("hit_at") for s in _resume_r._state["schedules"] if s["session_id"] == kiro] == [_Q_NOW]
+
+    def test_a_second_stop_of_a_kiro_session_on_the_same_day_shows_again_after_a_dismissal(self):
+        """Both stops share one assumed reset time, so the reset time cannot be what a dismissal keys on."""
+        sid, path = self._kiro_stopped()
+        assert _resume_r.dismiss(sid, now=_Q_NOW)["ok"] is True
+        assert _resume_r.decorate(_quota_q.interrupted(_Q_NOW), _Q_NOW) == []
+        self._kiro_rows(self._k_row(_Q_NOW + 100, type="turn_start"), self._k_limit(_Q_NOW + 110), path=path,
+                        at=_Q_NOW + 120)
+        shown = _resume_r.decorate(_quota_q.interrupted(_Q_NOW + 200), _Q_NOW + 200)
+        assert [r["id"] for r in shown] == [sid]
 
 
     # -- review fixes: numbers, races, the open terminal, folders --
@@ -46398,18 +46683,6 @@ class TestResume:
         _resume_r.tick(_Q_NOW + 3882)
         assert any(s["session_id"] == sid for s in _resume_r._state["schedules"]), "session must be rescheduled"
 
-    def test_auto_schedule_kiro_row_not_scheduled(self):
-        # pre-plan; authoritative coverage in Phase 5 tests (test_kiro_row_not_auto_scheduled etc.)
-        self.config.auto_schedule = True
-        d = self.v3 / "h" / "sess_k1"
-        d.mkdir(parents=True)
-        (d / "messages.jsonl").write_text(json.dumps({"timestamp": _q_iso(_Q_NOW - 5), "payload": {
-            "type": "session_metadata", "key": "displayError",
-            "value": {"errorType": "UsageLimitReachedError"}}}) + "\n", encoding="utf-8")
-        os.utime(d / "messages.jsonl", (_Q_NOW, _Q_NOW))
-        _resume_r.tick(_Q_NOW)
-        assert _resume_r._state["schedules"] == []
-
     def test_auto_schedule_ready_row_not_scheduled(self):
         # pre-plan; authoritative coverage in Phase 5 tests (test_kiro_row_not_auto_scheduled etc.)
         self.config.auto_schedule = True
@@ -46492,18 +46765,6 @@ class TestResume:
         assert result["ok"] is True
         assert _resume_r._state["skipped"] == []
         assert any(s["session_id"] == sid for s in _resume_r._state["schedules"])
-
-    def test_kiro_row_not_auto_scheduled(self):
-        """SC-6: a kiro-cli session (resets_at=None) is never auto-scheduled."""
-        self.config.auto_schedule = True
-        d = self.v3 / "h" / "sess_k1"
-        d.mkdir(parents=True)
-        (d / "messages.jsonl").write_text(json.dumps({"timestamp": _q_iso(_Q_NOW - 5), "payload": {
-            "type": "session_metadata", "key": "displayError",
-            "value": {"errorType": "UsageLimitReachedError"}}}) + "\n", encoding="utf-8")
-        os.utime(d / "messages.jsonl", (_Q_NOW, _Q_NOW))
-        _resume_r.tick(_Q_NOW)
-        assert _resume_r._state["schedules"] == []
 
     def test_ready_row_not_auto_scheduled(self):
         """SC-6: a session whose quota has already reset (state='ready') is not auto-scheduled."""

@@ -22878,7 +22878,7 @@ check("dashboard overview interrupted: rows show title, workspace, window and th
   p.sandbox.dashOvRenderInterrupted([
     ovInterrupted(),
     ovInterrupted({ id: "u2", window: "seven_day", state: "ready", title: "Second" }),
-    ovInterrupted({ id: "sess_k", provider: "kiro-cli-v3", window: "daily", resets_at: null, title: "Kiro job" }),
+    ovInterrupted({ id: "sess_k", provider: "codex", window: "daily", resets_at: null, title: "Reset unknown job" }),
   ]);
   assertEqual(block.hidden, false);
   const rows = block.querySelectorAll(".dash-ov-int");
@@ -22890,7 +22890,7 @@ check("dashboard overview interrupted: rows show title, workspace, window and th
   assertEqual(rows[1].querySelector(".dash-ov-badge").textContent, "weekly limit");
   assertEqual(rows[1].querySelector(".dash-ov-int-ready").textContent, "Quota reset, ready to resume");
   assertEqual(rows[2].querySelector(".dash-ov-badge").textContent, "daily limit");
-  assertEqual(rows[2].querySelector(".dash-ov-reset").textContent, "resets tomorrow");
+  assertEqual(rows[2].querySelector(".dash-ov-reset").textContent, "reset time unknown");
   assertEqual(rows[0].querySelector(".dash-ov-tile-icon").src, "/api/launcher-icon/provider--claude-code");
   p.sandbox.dashOvRenderInterrupted([]);
   assertEqual(block.hidden, true);
@@ -23368,13 +23368,48 @@ check("dashboard overview resume: an ended resume says why and offers Resume aga
   }
 });
 
-check("dashboard overview resume: after the reset only Resume now is offered, and a kiro row can only be dismissed", () => {
+check("dashboard overview resume: after the reset only Resume now is offered, and a row with no known reset can only be dismissed", () => {
   const p = loadDashPicker();
   const ready = ovIntRow(p, { state: "ready" });
   assertEqual(JSON.stringify(ovButtons(ready)), JSON.stringify(["Resume now", "Dismiss"]));
   assertEqual(ready.querySelectorAll("input").length, 1, "a prompt, but no time to schedule");
-  const kiro = ovIntRow(p, { provider: "kiro-cli-v3", window: "daily", resets_at: null, can_resume: false });
-  assertEqual(JSON.stringify(ovButtons(kiro)), JSON.stringify(["Dismiss"]));
+  const unknown = ovIntRow(p, { provider: "codex", window: "other", resets_at: null, can_resume: false });
+  assertEqual(JSON.stringify(ovButtons(unknown)), JSON.stringify(["Dismiss"]));
+});
+
+// 261016_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT: kiro-cli names no reset time, so the row carries an
+// assumed one (`reset_assumed`). It is a guess, so a kiro row can be resumed or scheduled after it as well.
+function ovKiro(over = {}) {
+  return ovInterrupted(Object.assign({ id: "sess_k", provider: "kiro-cli-v3", window: "daily", can_resume: true,
+                                       reset_assumed: true, resets_at: ovNowS() + 3600 + 30 }, over));
+}
+
+check("dashboard overview resume: a kiro row says its reset is assumed and offers Resume now and Schedule", () => {
+  const p = loadDashPicker();
+  const row = ovIntRow(p, ovKiro());
+  assert(/^resets about .+ · in 1h 0m$/.test(row.querySelector(".dash-ov-reset").textContent), row.querySelector(".dash-ov-reset").textContent);
+  assertEqual(JSON.stringify(ovButtons(row)), JSON.stringify(["Resume now", "Schedule", "Dismiss"]));
+  assertEqual(row.querySelectorAll("input").length, 2, "a prompt and a time");
+  assert(/does not say when its limit lifts/.test(row.querySelector(".dash-ov-int-note").textContent));
+  assert(/every hour/.test(row.querySelector(".dash-ov-int-note").textContent));
+});
+
+check("dashboard overview resume: a kiro row past its assumed reset still offers a time to schedule", () => {
+  const p = loadDashPicker();
+  const row = ovIntRow(p, ovKiro({ state: "ready", resets_at: ovNowS() - 600 }));
+  assertEqual(row.querySelector(".dash-ov-int-ready").textContent, "Quota probably reset, ready to resume");
+  assertEqual(JSON.stringify(ovButtons(row)), JSON.stringify(["Resume now", "Schedule", "Dismiss"]));
+  const when = row.querySelectorAll("input")[1];
+  assertEqual(when.type, "datetime-local");
+  assert(Date.parse(when.value) > Date.now(), "the default time is ahead of now, not at the passed reset");
+});
+
+check("dashboard overview resume: a kiro row on a later attempt says which one of how many", () => {
+  const p = loadDashPicker();
+  const row = ovIntRow(p, ovKiro({ resume: { state: "scheduled", fire_at: ovNowS() + 3660 + 30, attempt: 3,
+                                              max_attempts: 8, prompt: "" } }));
+  assert(/ · attempt 3 of 8$/.test(row.querySelector(".dash-ov-int-state").textContent),
+         row.querySelector(".dash-ov-int-state").textContent);
 });
 
 check("dashboard overview resume: a failed request reads as a message, not as silence", async () => {

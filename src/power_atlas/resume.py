@@ -1,11 +1,11 @@
-"""Resume the Claude Code and Codex sessions a quota limit stopped: quick resume, scheduled resume, and
-what follows.
+"""Resume the Claude Code, Codex and kiro-cli sessions a quota limit stopped: quick resume, scheduled
+resume, and what follows.
 
 Two ways to resume, chosen by whether the session's terminal is still open:
 
 * **Closed**: PowerAtlas opens a Windows Terminal tab running `claude --resume <id> "<prompt>"` (or
-  `codex resume <id> "<prompt>"`) in the session's folder (`launcher.launch_session`). The session starts
-  by answering the prompt.
+  `codex resume <id> "<prompt>"`, or `kiro-cli chat --resume-id <id> "<prompt>"`) in the session's folder
+  (`launcher.launch_session`). The session starts by answering the prompt.
 * **Open** (Claude Code only): a hit leaves the TUI at its prompt, so the prompt is typed into that console
   by a helper process (`consoleinject`). Nothing is typed unless all of these hold: the process is the one
   PowerAtlas's presence scan validated for this exact session, it is an interactive terminal session
@@ -14,13 +14,20 @@ Two ways to resume, chosen by whether the session's terminal is still open:
   `/` there, because the TUI would run it as a shell or slash command. Whatever sits unsent in the TUI's
   prompt box is submitted with it: nothing can read that box from outside, so the Overview says so.
   A Codex thread open in a terminal is never typed into (its writer lock is held): the owner is told to
-  continue it there.
+  continue it there. Nor is a kiro-cli one (presence cannot tell a plain kiro terminal from a closed
+  session); a kiro session that PowerAtlas holds on the /acp page is refused instead of launched twice.
 
 A resume is reserved for its session before anything slow happens, so a click that races a due schedule
 (or two tabs) cannot start two. It is then watched in the transcript. A reply means it worked. A new hit
 with a *later* reset time means the quota had not really reset; the resume is armed once more for that
 time (two attempts in all). A hit that does not move the reset time, a second failure, or no reply
 within the wait ends the watch with a toast. A launch that fails to start is reported and never retried.
+
+kiro-cli names no reset time, so its rows carry an assumed one (`quota.assumed_reset`) and the rules differ:
+a kiro stop is identified by its stop time (`hit_at`), not the reset; Schedule and Resume now work at any
+time, because the reset is a guess; a hit after a resume is retried one hour after that hit, up to
+`KIRO_MAX_ATTEMPTS` attempts; and the first answer after a resume is logged with the minutes since the
+stop, which is the data that narrows the guess.
 
 Schedules are kept in `quota-state.json` beside `config.toml` (not in it: that file is rewritten whole on
 every setting change). A schedule fires only if PowerAtlas is running at its time. One that came due
@@ -56,11 +63,15 @@ LATE_SECONDS = 600               # a schedule overdue by more than this is dropp
 NO_ACTIVITY_SECONDS = 180        # nothing in the transcript since the resume started
 PROMPT_REPLY_SECONDS = 600       # the prompt landed but nothing has answered it
 MAX_ATTEMPTS = 2
+KIRO_MAX_ATTEMPTS = 8            # the reset is a guess, so a kiro resume is retried more often...
+KIRO_RETRY_SECONDS = 3600        # ...once per hour after the hit that ended the last attempt
+KIRO_PROVIDER = "kiro-cli-v3"
 TICK_SECONDS = 5.0
 DISMISS_KEEP_SECONDS = 14 * 86400
 _HELPER_TIMEOUT_SECONDS = 20
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f\x85  ]")
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# A Claude Code or Codex id is a bare UUID; a kiro-cli id is a UUID with a `sess_` prefix.
+_SESSION_ID_RE = re.compile(r"(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _GONE = "That session is no longer stopped by a quota limit"
 
 _lock = threading.RLock()
@@ -105,19 +116,23 @@ def _load() -> None:
     if isinstance(raw, dict):
         for s in raw.get("schedules") if isinstance(raw.get("schedules"), list) else []:
             if (isinstance(s, dict) and isinstance(s.get("id"), str) and isinstance(s.get("prompt"), str)
-                    and isinstance(s.get("session_id"), str) and _UUID_RE.fullmatch(s["session_id"])
+                    and _valid_session_id(s.get("session_id"))
                     and isinstance(s.get("cwd"), str) and _num(s.get("fire_at")) is not None
-                    and _num(s.get("resets_at")) is not None and s.get("attempt") in (1, 2)):
-                schedules.append({k: s[k] for k in ("id", "session_id", "cwd", "prompt", "fire_at",
-                                                    "resets_at", "attempt")}
-                                 | {"title": s["title"] if isinstance(s.get("title"), str) else ""})
+                    and _num(s.get("resets_at")) is not None
+                    and isinstance(s.get("attempt"), int) and not isinstance(s["attempt"], bool)
+                    and 1 <= s["attempt"] <= _max_attempts_for(s["session_id"])):
+                record = ({k: s[k] for k in ("id", "session_id", "cwd", "prompt", "fire_at",
+                                             "resets_at", "attempt")}
+                          | {"title": s["title"] if isinstance(s.get("title"), str) else ""})
+                if _num(s.get("hit_at")) is not None:
+                    record["hit_at"] = float(s["hit_at"])
+                schedules.append(record)
         for d in raw.get("dismissed") if isinstance(raw.get("dismissed"), list) else []:
             if isinstance(d, dict) and isinstance(d.get("session_id"), str) and _num(d.get("key_at")) is not None \
                     and _num(d.get("at")) is not None:
                 dismissed.append({"session_id": d["session_id"], "key_at": float(d["key_at"]), "at": float(d["at"])})
         for s in (raw.get("skipped") if isinstance(raw.get("skipped"), list) else []):
-            if (isinstance(s, dict) and isinstance(s.get("session_id"), str)
-                    and _UUID_RE.fullmatch(s["session_id"])
+            if (isinstance(s, dict) and _valid_session_id(s.get("session_id"))
                     and _num(s.get("key_at")) is not None and _num(s.get("at")) is not None):
                 skipped.append({"session_id": s["session_id"], "key_at": float(s["key_at"]),
                                 "at": float(s["at"])})
@@ -162,12 +177,20 @@ def clean_prompt(text) -> tuple[str, str]:
 
 
 def _valid_session_id(session_id) -> bool:
-    return isinstance(session_id, str) and bool(_UUID_RE.fullmatch(session_id))
+    return isinstance(session_id, str) and bool(_SESSION_ID_RE.fullmatch(session_id))
+
+
+def _max_attempts_for(session_id: str) -> int:
+    """How many attempts a resume of this session gets: a kiro-cli id (`sess_` prefix) has the long ladder."""
+    return KIRO_MAX_ATTEMPTS if session_id.startswith("sess_") else MAX_ATTEMPTS
 
 
 def _key_at(row: dict) -> float:
-    """What tells one stop of a session from the next: the reset time, or the stop time when there is none."""
-    return float(row["resets_at"] if row.get("resets_at") is not None else row["hit_at"])
+    """What tells one stop of a session from the next: the reset time, or the stop time when there is none
+    or when it is only assumed (two kiro stops on one day share an assumed reset time)."""
+    if row.get("reset_assumed") or row.get("resets_at") is None:
+        return float(row["hit_at"])
+    return float(row["resets_at"])
 
 
 # ---- the two ways to type or start -------------------------------------------------------------
@@ -218,12 +241,13 @@ def _refuse(error: str, gone: bool = False) -> dict:
 
 
 def resume_now(session_id, prompt=None, attempt: int = 1, now: float | None = None,
-               expect_resets_at: float | None = None) -> dict:
+               expect_resets_at: float | None = None, expect_hit_at: float | None = None) -> dict:
     """Resume one session now. `{"ok": True, "mode": "terminal" | "typed"}` or `{"ok": False, "error": ...}`
     (`"gone": True` when the session is no longer stopped, which is not a failure worth a toast).
 
     `expect_resets_at` is the reset time a schedule was made for: a session that has since been stopped
-    again by a different limit is not resumed on the old schedule's say-so."""
+    again by a different limit is not resumed on the old schedule's say-so. A kiro-cli schedule names the
+    stop instead (`expect_hit_at`), because its reset time is only assumed and may have been edited since."""
     now = time.time() if now is None else now
     if not _valid_session_id(session_id):
         return _refuse("That is not a session id")
@@ -231,8 +255,12 @@ def resume_now(session_id, prompt=None, attempt: int = 1, now: float | None = No
     if error:
         return _refuse(error)
     row = quota.find_hit(session_id, now)
-    if row is None or (expect_resets_at is not None
-                       and (row["resets_at"] is None or abs(row["resets_at"] - expect_resets_at) > 1.0)):
+    if row is None:
+        return _refuse(_GONE, gone=True)
+    if expect_resets_at is not None and (row["resets_at"] is None
+                                         or abs(row["resets_at"] - expect_resets_at) > 1.0):
+        return _refuse(_GONE, gone=True)
+    if expect_hit_at is not None and abs(row["hit_at"] - expect_hit_at) > 1.0:
         return _refuse(_GONE, gone=True)
     if row["resets_at"] is None:
         return _refuse("The reset time of this stop is not known")
@@ -246,6 +274,12 @@ def resume_now(session_id, prompt=None, attempt: int = 1, now: float | None = No
         # nothing here types into a Codex terminal.
         if data_codex.session_writer_locked(session_id):
             return _refuse("This thread is open in a terminal PowerAtlas cannot type into. Continue it there.")
+    elif provider == KIRO_PROVIDER:
+        # The /acp page holds this session: a second kiro-cli on it would fight the first. A kiro terminal
+        # cannot be told from a closed session, so anything else is launched; if kiro refuses it, the
+        # watch ends with "no activity".
+        if presence.acp_holds(session_id):
+            return _refuse("PowerAtlas has this session open. Continue it from the /acp page.")
     else:
         snapshot = presence.get_snapshot(force=True)
         pid = snapshot.pid_for("claude-code", session_id)
@@ -268,7 +302,7 @@ def resume_now(session_id, prompt=None, attempt: int = 1, now: float | None = No
             return _refuse("The session has moved on since it was stopped")
     run = {"id": uuid.uuid4().hex, "session_id": session_id, "provider": provider, "cwd": row["cwd"],
            "title": row["title"], "prompt": cleaned, "launched_at": now, "resets_at": row["resets_at"],
-           "attempt": attempt, "mode": mode, "state": "watching", "detail": ""}
+           "hit_at": row["hit_at"], "attempt": attempt, "mode": mode, "state": "watching", "detail": ""}
     # Reserve the session before the slow part (the helper takes up to 20 s): a second resume of it,
     # from a due schedule or a second tab, is refused here and not launched alongside this one.
     with _lock:
@@ -310,7 +344,8 @@ def schedule(session_id, prompt=None, fire_at=None, now: float | None = None,
         return _refuse(_GONE, gone=True)
     if row["resets_at"] is None:
         return _refuse("The reset time of this stop is not known, so it cannot be scheduled")
-    if now >= row["resets_at"]:
+    assumed = bool(row.get("reset_assumed"))
+    if now >= row["resets_at"] and not assumed:
         return _refuse("The quota has already reset. Use Resume now.")
     if fire_at is None:
         when = row["resets_at"] + FIRE_DELAY_SECONDS
@@ -318,12 +353,16 @@ def schedule(session_id, prompt=None, fire_at=None, now: float | None = None,
         when = _num(fire_at)
         if when is None:
             return _refuse("The time must be a number")
-        if when > row["resets_at"] + MAX_FIRE_AHEAD_SECONDS:
-            return _refuse("That time is too far after the reset")
-    # Never before the reset: a resume earlier than that only meets the limit again.
-    when = max(when, row["resets_at"], now + 5.0)
+        # An assumed reset may be long past, so it cannot be what the limit counts from.
+        if when > (now if assumed else row["resets_at"]) + MAX_FIRE_AHEAD_SECONDS:
+            return _refuse("That time is too far ahead" if assumed else "That time is too far after the reset")
+    # Never before the reset: a resume earlier than that only meets the limit again. An assumed reset is a
+    # guess, so it bounds nothing: the owner may schedule any time from now on.
+    when = max(when, now + 5.0) if assumed else max(when, row["resets_at"], now + 5.0)
     record = {"id": uuid.uuid4().hex, "session_id": session_id, "cwd": row["cwd"], "title": row["title"],
               "prompt": cleaned, "fire_at": when, "resets_at": row["resets_at"], "attempt": 1}
+    if assumed:
+        record["hit_at"] = row["hit_at"]
     with _lock:
         _load()
         if _if_unscheduled and (
@@ -450,15 +489,16 @@ def decorate(rows: list[dict], now: float | None = None) -> list[dict]:
         if (row["id"], _key_at(row)) in hidden:
             continue
         row = dict(row)
-        row["can_resume"] = row["provider"] in ("claude-code", "codex") and row["resets_at"] is not None
+        row["can_resume"] = (row["provider"] in ("claude-code", "codex", KIRO_PROVIDER)
+                             and row["resets_at"] is not None)
         if row["id"] in scheduled:
             s = scheduled[row["id"]]
             row["resume"] = {"state": "scheduled", "fire_at": s["fire_at"], "attempt": s["attempt"],
-                             "prompt": s["prompt"]}
+                             "max_attempts": _max_attempts_for(row["id"]), "prompt": s["prompt"]}
         elif row["id"] in runs:
             r = runs[row["id"]]
             row["resume"] = {"state": r["state"], "attempt": r["attempt"], "detail": r["detail"],
-                             "mode": r["mode"]}
+                             "max_attempts": _max_attempts_for(row["id"]), "mode": r["mode"]}
         out.append(row)
     return out
 
@@ -484,9 +524,15 @@ def _watch(run: dict, now: float) -> str | None:
     The transcript (a Codex rollout, for a Codex thread) is read outside the lock; what is decided from it
     is decided inside, after checking the run is still the one being watched (a dismissal or a new
     schedule may have replaced it). For a Codex thread a turn that started counts as the reply: its
-    first answer can be a long way off, and the `reply` kind means only that the prompt got through."""
-    if run.get("provider") == "codex":
+    first answer can be a long way off, and the `reply` kind means only that the prompt got through.
+
+    A kiro-cli session has no reset time to move, so a hit is retried one hour after it (up to
+    `KIRO_MAX_ATTEMPTS` attempts), and its first reply is logged with the time since the stop."""
+    provider = run.get("provider")
+    if provider == "codex":
         progress = quota.codex_progress(run["session_id"])
+    elif provider == KIRO_PROVIDER:
+        progress = quota.kiro_progress(run["session_id"])
     else:
         path = quota.claude_session_path(run["session_id"])
         progress = quota.transcript_progress(path) if path else None
@@ -500,17 +546,45 @@ def _watch(run: dict, now: float) -> str | None:
         if live is None:
             return "done"   # dismissed or replaced while we were reading the transcript: do nothing
         if kind == "reply":
+            if provider == KIRO_PROVIDER and run.get("hit_at") is not None:
+                log.info("kiro-cli resume answered %.0f min after the stop (attempt %d); assumed reset %s UTC",
+                         (progress["at"] - run["hit_at"]) / 60.0, run["attempt"],
+                         time.strftime("%H:%M", time.gmtime(run["resets_at"])))
             return "done"
         if kind == "hit":
             hit = progress["hit"]
-            if run["attempt"] < MAX_ATTEMPTS and hit["resets_at"] is not None and hit["resets_at"] > run["resets_at"] + 1.0:
+            retry = None    # `(fire_at, resets_at, hit_at)` of the next attempt, when there is one
+            if provider == KIRO_PROVIDER:
+                if run["attempt"] < KIRO_MAX_ATTEMPTS:
+                    at = max(hit["hit_at"] + KIRO_RETRY_SECONDS, now + 5.0)
+                    retry = (at, at, hit["hit_at"])
+            elif run["attempt"] < MAX_ATTEMPTS and hit["resets_at"] is not None and hit["resets_at"] > run["resets_at"] + 1.0:
+                retry = (hit["resets_at"] + FIRE_DELAY_SECONDS, hit["resets_at"], None)
+            if retry is not None:
                 _load()
-                _state["schedules"] = [s for s in _state["schedules"] if s["session_id"] != run["session_id"]] + [{
-                    "id": uuid.uuid4().hex, "session_id": run["session_id"], "cwd": run["cwd"],
-                    "title": run["title"], "prompt": run["prompt"], "fire_at": hit["resets_at"] + FIRE_DELAY_SECONDS,
-                    "resets_at": hit["resets_at"], "attempt": run["attempt"] + 1}]
+                record = {"id": uuid.uuid4().hex, "session_id": run["session_id"], "cwd": run["cwd"],
+                          "title": run["title"], "prompt": run["prompt"], "fire_at": retry[0],
+                          "resets_at": retry[1], "attempt": run["attempt"] + 1}
+                if retry[2] is not None:
+                    record["hit_at"] = retry[2]
+                _state["schedules"] = [s for s in _state["schedules"] if s["session_id"] != run["session_id"]] + [record]
                 _save()
-                notify, verdict = "Still limited. Resuming again after the new reset time.", "retry"
+                notify, verdict = (("Still limited. Resuming again in an hour.", "retry")
+                                   if provider == KIRO_PROVIDER else
+                                   ("Still limited. Resuming again after the new reset time.", "retry"))
+            elif provider == KIRO_PROVIDER:
+                live["state"] = "gave_up"
+                live["detail"] = f"The usage limit stopped the resume {run['attempt']} times."
+                notify, verdict = live["detail"] + " Giving up.", "end"
+                # Giving up has to hold: the new stop's assumed reset is tomorrow's, so Auto-schedule would
+                # arm it again at once. A skip for this stop keeps it quiet; Resume now still works.
+                _load()
+                cutoff = now - DISMISS_KEEP_SECONDS
+                _state["skipped"] = [s for s in _state["skipped"] if s.get("at", 0) > cutoff
+                                     and not (s["session_id"] == run["session_id"]
+                                              and abs(s.get("key_at", 0) - hit["hit_at"]) < 1.0)
+                                     ] + [{"session_id": run["session_id"], "key_at": hit["hit_at"], "at": now}]
+                _save()
             else:
                 live["state"], live["detail"] = "gave_up", "The quota limit stopped the resume again."
                 notify, verdict = "The quota limit stopped the resume again. Giving up.", "end"
@@ -553,11 +627,13 @@ def _auto_schedule_new(now: float) -> None:
         _cutoff_s = now - DISMISS_KEEP_SECONDS
         _skipped_live = [s for s in _state["skipped"] if s.get("at", 0) > _cutoff_s]
     for row in rows:
-        if row.get("resets_at") is None:        # kiro-cli: never schedulable
+        if row.get("resets_at") is None:        # no reset time known (a Codex stop): not schedulable
             continue
         if row.get("state") == "ready":         # quota already reset; Resume now is the action
             continue
         sid = row["id"]
+        if row["provider"] == KIRO_PROVIDER and presence.acp_holds(sid):
+            continue                            # open on the /acp page: resume_now would refuse it
         key_at = _key_at(row)
         if sid in already_scheduled:
             continue
@@ -593,14 +669,17 @@ def tick(now: float | None = None) -> None:
             log.info("A scheduled resume was %d s overdue and was dropped, not fired late", now - due["fire_at"])
             continue
         # A dismissal that landed after the schedule was taken off the list could not remove it.
+        # A kiro schedule names its stop (`hit_at`); the others name the reset time.
+        stop_key = due.get("hit_at", due["resets_at"])
         with _lock:
-            dismissed = any(d["session_id"] == due["session_id"] and abs(d["key_at"] - due["resets_at"]) < 1.0
+            dismissed = any(d["session_id"] == due["session_id"] and abs(d["key_at"] - stop_key) < 1.0
                             for d in _state["dismissed"])
         if dismissed:
             continue
         try:
             result = resume_now(due["session_id"], due["prompt"], attempt=due["attempt"], now=now,
-                                expect_resets_at=due["resets_at"])
+                                expect_resets_at=None if "hit_at" in due else due["resets_at"],
+                                expect_hit_at=due.get("hit_at"))
         except Exception:
             log.exception("a scheduled resume raised")
             result = _refuse("The scheduled resume failed unexpectedly")

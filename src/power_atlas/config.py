@@ -162,6 +162,11 @@ class Config:
     # Toggled via GET/POST /api/quota/auto-schedule. Takes effect at the next
     # scheduler tick (~5 s). 261013_AUTO_SCHEDULE_RESUME_MODE
     auto_schedule: bool = True
+    # When kiro-cli's daily usage limit is assumed to lift, in minutes after 00:00 UTC. kiro does not
+    # report it; from two stop days it lies between 20:54 and 02:39 UTC. Set through
+    # POST /api/save-setting (bounds in `web._SETTING_BOUNDS`) and read at every scheduler tick, so no
+    # restart is needed. 261016_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT
+    kiro_daily_reset_minutes_utc: int = 0
 
     # ---- What `load_config` found, never stored ---------------------------
     # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (A9). Declared

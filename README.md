@@ -130,7 +130,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 
 - Auto-discovers workspaces from kiro-cli, Claude Code, Codex, and Kiro IDE session data
   - Kiro IDE sessions: `%APPDATA%\Kiro\User\globalStorage\...` (Windows) / `~/.config/Kiro/User/globalStorage/...` (Linux)
-  - kiro-cli v3 sessions: `~/.kiro/sessions/<workspace-hash>/sess_*/`. Sub-agent and workflow-node sessions (a `rootConversationId` that is not their own id) are not listed
+  - kiro-cli v3 sessions: `~/.kiro/sessions/<workspace-hash>/sess_*/`. Sub-agent and workflow-node sessions (a `rootConversationId` that is not their own id) are not listed, and neither are they in *Stopped by a quota limit* (a workflow step's limit stop is also written to its parent session, which is listed)
   - Codex sessions: `~/.codex/sessions/` (`$CODEX_HOME/sessions` when `CODEX_HOME` is set). Sessions started from the Codex CLI, the VS Code extension and the desktop app are listed; sub-agent threads and archived sessions are not
 - Unified provider-launcher system with extracted icons and configurable colors. A provider whose binary has no embedded icon (Codex, kiro-cli) gets a terminal glyph drawn in its color; Codex's default color is white
 - Inline provider filter next to the workspaces rail
@@ -177,15 +177,25 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     item open reads Waiting in the rail and on its Overview tile, even mid-turn.
     *Stopped by a quota limit* lists the Claude Code
     sessions whose last message is a quota hit and the Codex threads whose last turn a usage limit
-    refused (and kiro-cli sessions that stopped on a usage limit, which have no reset time), with the
-    window, the reset time, and a session leaves the list when its conversation goes on, when you
-    dismiss it, or two days after the reset (two days after the stop, when no reset time is known). For a Claude Code session, **Resume now** opens a
+    refused, and the kiro-cli sessions that stopped on the daily usage limit (kiro-cli names no reset time, so the row
+    shows an assumed one, flagged "about"), with the
+    window and the reset time. A session leaves the list when its conversation goes on, when you
+    dismiss it, or two days after the reset (two days after the stop for a kiro-cli session and for a Codex stop with no reset time). For a Claude Code session, **Resume now** opens a
     terminal running `claude --resume <id> "<prompt>"`, or, when the session's terminal is still open
     and the quota has reset, types the prompt into it. For a Codex thread it opens a terminal running
     `codex resume <id> "<prompt>"`; a thread that is still open in a terminal is never typed into, and
     the row says to continue it there. A Codex stop takes its reset time from the last full window
     in the rollout, else from the message's "try again at" clock time; with neither, the row says the
     reset time is unknown and offers only Dismiss.
+    For a kiro-cli session, **Resume now** opens a terminal running
+    `kiro-cli chat --agent-engine v3 --trust-tools * --resume-id <id> "<prompt>"`, the same command as the rail's Resume, so a
+    scheduled resume runs unattended with every tool trusted. PowerAtlas never types into an open kiro-cli terminal, and it cannot tell a
+    plain kiro-cli terminal from a closed session, so it opens a new one anyway; a session that PowerAtlas itself holds (the /acp page)
+    is refused with a pointer to /acp. Because the reset time is a guess, **Resume now** and **Schedule** work at any time, also
+    after the assumed reset. The guess is *Settings, General, kiro-cli daily limit reset* (a time in UTC, 00:00 by default, shown
+    with the same time on this computer's clock); measured stops put the real reset between 20:54 and 02:39 UTC. A resume that
+    hits the limit again is tried again an hour after that hit, up to 8 attempts in all, and then given up on until you resume it yourself or set a new schedule. A schedule that is already set keeps its time when the setting changes. After a kiro-cli session answers,
+    `orchestrator.log` records how many minutes after the stop that was, which is the data for moving the guess.
     **Schedule** does the same a minute after the reset (or at a time you choose) while PowerAtlas is
     running. The prompt defaults to `resume`. A Codex thread that is open in a terminal can be
     scheduled, and the row says to close that terminal before the time or the resume is refused.
@@ -194,7 +204,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
     more for the new reset time; if nothing happens within three minutes you get a toast (when
     notifications are on).
     When a schedule is already set, the **Prompt and time** panel pre-fills with the existing values; clicking **Update schedule** replaces the schedule.
-    **Auto-schedule resumes** (gear icon, on by default) automatically schedules a resume for every stopped session at `resets_at + 60 s`; clicking **Cancel schedule** records a per-stop skip so the session stays visible but is not re-armed. *Uncommitted or unpushed work* lists repositories with tracked changes,
+    **Auto-schedule resumes** (gear icon, on by default) automatically schedules a resume for every stopped session at `resets_at + 60 s` (for kiro-cli, the assumed reset; a kiro-cli session already past it shows Resume now and is not scheduled automatically); clicking **Cancel schedule** records a per-stop skip so the session stays visible but is not re-armed. *Uncommitted or unpushed work* lists repositories with tracked changes,
     commits ahead of their upstream, or a branch with local-only commits and no upstream; untracked
     files show as a quiet count. It is read in the background about once a minute and never fetches.
   - *Live now* shows up to 8 tiles, one per live session. Each tile shows the last few events of the
@@ -258,7 +268,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
 - Global launch profiles with configurable Windows Terminal profile and terminal command
 - Settings (gear icon in topbar): a short menu with the launch profile, remote access, **Autostart on
   login**, **Notify me**, **Auto-schedule resumes** (on by default) and the current permission mode. **All settings…** opens the Settings dialog,
-  whose sections are General (peek hotkey, peek mode Hold or Toggle, browser shortcut, port), Agent
+  whose sections are General (peek hotkey, peek mode Hold or Toggle, browser shortcut, port, kiro-cli daily limit reset), Agent
   permissions and Browser sign-in. The peek hotkey, peek mode and browser shortcut take effect on the
   next launch. A shortcut is saved only when it is valid (see the config sample below) and the two
   shortcuts do not overlap: neither may equal the other or contain all of its keys, as
@@ -286,7 +296,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   when it ends), and a burst of turn ends in one check is coalesced (at most 3 toasts per thread and 6 per check). Threads in a hidden workspace, on a network
   path, held by the desktop app or VS Code, or run as sub-agents send nothing. `codex_diagnostics.turn_watch`
   in the dashboard sessions response (`ok`, `stalled` or `off`) shows whether the check is running
-- **Auto-schedule resumes** (gear icon, on by default) automatically schedules a resume for every session stopped by a quota limit, at `resets_at + 60 s`. Clicking "Cancel schedule" records a per-stop skip so the session stays visible but is not re-armed for that stop. Toggle on, and every currently-stopped session with a known reset time is scheduled within 5 s.
+- **Auto-schedule resumes** (gear icon, on by default) automatically schedules a resume for every session stopped by a quota limit, at `resets_at + 60 s`. Clicking "Cancel schedule" records a per-stop skip so the session stays visible but is not re-armed for that stop. Toggle on, and every currently-stopped session with a known or assumed reset time that is still ahead is scheduled within 5 s.
 - **Agent permissions** (gear icon in topbar, then the Settings dialog) sets the permission mode for ACP sessions PowerAtlas
   creates: **Yolo** (the default; nothing asks, except a short Always blocked list that is refused in
   every mode) or **Manual** (common read-only actions run, everything else asks). **Auto** is shown but

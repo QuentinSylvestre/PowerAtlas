@@ -3010,6 +3010,12 @@ async def index(request: Request):
         # parse on a route that has one in hand.
         "notifications_enabled": bool(config.notifications.get("enabled", False)),
         "auto_schedule": bool(config.auto_schedule),
+        # "HH:MM" UTC for the time field; a stored value out of range reads as the default, as in `quota`.
+        "kiro_reset_hhmm": "%02d:%02d" % divmod(
+            config.kiro_daily_reset_minutes_utc
+            if isinstance(config.kiro_daily_reset_minutes_utc, int)
+            and not isinstance(config.kiro_daily_reset_minutes_utc, bool)
+            and 0 <= config.kiro_daily_reset_minutes_utc < 1440 else 0, 60),
         # Stripped: this one lands in the page source via `|tojson`.
         "launchers": _launchers_without_env(config.custom_launchers),
         "peek_hotkey": config.peek_hotkey,
@@ -6140,6 +6146,7 @@ async def api_settings():
         "autostart": autostart_enabled,
         "acp_max_sessions": config.acp_max_sessions,
         "acp_idle_ttl_seconds": config.acp_idle_ttl_seconds,
+        "kiro_daily_reset_minutes_utc": config.kiro_daily_reset_minutes_utc,
         # The address only; the secret is served by `/api/remote-access` alone.
         "remote_bind_address": config.remote_bind_address,
         # Which keys are restart-only. A property of the setting, unchanging.
@@ -6445,6 +6452,10 @@ _SETTING_TYPES: dict[str, type] = {
     # is built, so `../x` never reaches `Path`.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
     "acp_permission_base_agent": str,
+    # When kiro-cli's daily usage limit is assumed to lift, minutes after 00:00 UTC. Read at every
+    # scheduler tick, so it is not in `_RESTART_TO_APPLY`.
+    # 261016_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT
+    "kiro_daily_reset_minutes_utc": int,
 }
 
 # Inclusive integer bounds, enforced on the write path only. `load_config` is
@@ -6456,6 +6467,7 @@ _SETTING_TYPES: dict[str, type] = {
 _SETTING_BOUNDS: dict[str, tuple[int, int]] = {
     "acp_max_sessions": (1, 16),
     "acp_idle_ttl_seconds": (300, 86400),
+    "kiro_daily_reset_minutes_utc": (0, 1439),
 }
 
 # Keys whose value is read exactly once at startup. Returned to the settings UI

@@ -1592,9 +1592,12 @@ function dashOvIntActions(row, li){
   if (!draft || (state === 'scheduled' && (!draft._from || draft._from.p !== resume.prompt || draft._from.t !== resume.fire_at))) {
     draft = _dashOvIntDraft[row.id] = {
       prompt: (state === 'scheduled' && resume && resume.prompt) ? resume.prompt : '',
+      // An assumed reset (kiro-cli) may already be behind us: the default is then a minute from now.
       when: (state === 'scheduled' && resume && resume.fire_at)
         ? dashOvLocalInput(resume.fire_at)
-        : dashOvLocalInput(Number(row.resets_at) + 60),
+        : dashOvLocalInput(row.reset_assumed === true
+          ? Math.max(Number(row.resets_at) + 60, Date.now() / 1000 + 60)
+          : Number(row.resets_at) + 60),
       _from: state === 'scheduled' ? {p: resume.prompt, t: resume.fire_at} : null
     };
   }
@@ -1631,7 +1634,8 @@ function dashOvIntActions(row, li){
     var line = document.createElement('div');
     line.className = 'dash-ov-int-state';
     line.appendChild(dashOvResetNode(resume.fire_at, 'Resumes'));
-    if (resume.attempt === 2) line.appendChild(dashOvText('span', '', ' · second attempt'));
+    if (resume.attempt === 2 && !(resume.max_attempts > 2)) line.appendChild(dashOvText('span', '', ' · second attempt'));
+    else if (resume.attempt > 1) line.appendChild(dashOvText('span', '', ' · attempt ' + resume.attempt + ' of ' + resume.max_attempts));
     box.appendChild(line);
   } else if (state === 'watching') {
     box.appendChild(dashOvText('div', 'dash-ov-int-state', 'Resuming…'));
@@ -1645,6 +1649,10 @@ function dashOvIntActions(row, li){
     opts.appendChild(dashOvText('div', 'dash-ov-int-note', row.provider === 'codex'
       ? 'Opens a new terminal and resumes the thread there with this prompt. A thread that is still ' +
         'open in a terminal is not typed into: continue it there.'
+      : row.provider === 'kiro-cli-v3'
+      ? 'Opens a new terminal and resumes the session there with this prompt. kiro-cli does not say ' +
+        'when its limit lifts, so the reset time is assumed (set it in Settings) and a resume that is ' +
+        'still limited is tried again every hour. A session open on the /acp page is not resumed from here.'
       : 'If the session’s terminal is still open, the prompt is typed into it and sent along with ' +
         'anything already written in its prompt box.'));
     var prompt = document.createElement('input');
@@ -1656,7 +1664,9 @@ function dashOvIntActions(row, li){
     prompt.setAttribute('aria-label', 'What to send when resuming');
     prompt.addEventListener('input', function(){ draft.prompt = prompt.value; });
     opts.appendChild(prompt);
-    if (row.resets_at != null && row.state !== 'ready') {
+    // An assumed reset is a guess, so a kiro-cli session can be scheduled even after it.
+    var schedulable = row.resets_at != null && (row.state !== 'ready' || row.reset_assumed === true);
+    if (schedulable) {
       var when = document.createElement('input');
       when.type = 'datetime-local';
       when.className = 'dash-ov-int-input';
@@ -1669,7 +1679,7 @@ function dashOvIntActions(row, li){
     var promptNow = function(){ return draft.prompt; };
     box.appendChild(button(state === 'no_activity' || state === 'gave_up' || state === 'error' ? 'Resume again' : 'Resume now', 'dash-ov-act-main',
       function(){ return post('/api/quota/resume', {prompt: promptNow()})(); }));
-    if (row.resets_at != null && row.state !== 'ready') {
+    if (schedulable) {
       box.appendChild(button(state === 'scheduled' ? 'Update schedule' : 'Schedule', '', function(){
         var at = Date.parse(draft.when);
         return dashOvQuotaPost('/api/quota/schedule', {session_id: row.id, prompt: draft.prompt,
@@ -1706,11 +1716,12 @@ function dashOvInterruptedRow(row){
   var when = document.createElement('div');
   when.className = 'dash-ov-int-when';
   if (row.resets_at == null) {
-    when.appendChild(dashOvText('span', 'dash-ov-reset', row.provider === 'codex' ? 'reset time unknown' : 'resets tomorrow'));
+    when.appendChild(dashOvText('span', 'dash-ov-reset', 'reset time unknown'));
   } else if (row.state === 'ready') {
-    when.appendChild(dashOvText('span', 'dash-ov-int-ready', 'Quota reset, ready to resume'));
+    when.appendChild(dashOvText('span', 'dash-ov-int-ready', row.reset_assumed === true
+      ? 'Quota probably reset, ready to resume' : 'Quota reset, ready to resume'));
   } else {
-    when.appendChild(dashOvResetNode(row.resets_at));
+    when.appendChild(dashOvResetNode(row.resets_at, row.reset_assumed === true ? 'resets about' : undefined));
   }
   li.appendChild(when);
   dashOvIntActions(row, li);
@@ -6790,7 +6801,7 @@ function refreshAutoScheduleToggle(){
     .then(function(d){if(d){el.classList.toggle('active',!!d.enabled);el.setAttribute('aria-pressed',d.enabled?'true':'false');}})
     .catch(function(){});
 }
-function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput){peekInput.value=d.peek_hotkey||'ctrl+shift+z';peekInput.setAttribute('data-saved',peekInput.value)}var browserInput=document.getElementById('browserHotkey');if(browserInput){browserInput.value=d.browser_hotkey||'';browserInput.setAttribute('data-saved',browserInput.value)}['peekHotkeyError','browserHotkeyError'].forEach(function(id){var e=document.getElementById(id);if(e){e.textContent='';e.hidden=true}});if(typeof renderShortcutNotes==='function')renderShortcutNotes(d);var peekModeSel=document.getElementById('peekMode');if(peekModeSel)peekModeSel.value=d.peek_mode==='toggle'?'toggle':'hold';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();refreshAutoScheduleToggle();if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
+function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput){peekInput.value=d.peek_hotkey||'ctrl+shift+z';peekInput.setAttribute('data-saved',peekInput.value)}var browserInput=document.getElementById('browserHotkey');if(browserInput){browserInput.value=d.browser_hotkey||'';browserInput.setAttribute('data-saved',browserInput.value)}['peekHotkeyError','browserHotkeyError'].forEach(function(id){var e=document.getElementById(id);if(e){e.textContent='';e.hidden=true}});if(typeof renderShortcutNotes==='function')renderShortcutNotes(d);var peekModeSel=document.getElementById('peekMode');if(peekModeSel)peekModeSel.value=d.peek_mode==='toggle'?'toggle':'hold';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();refreshAutoScheduleToggle();if(typeof syncKiroReset==='function')syncKiroReset(d);if(typeof loadAcpPermissions==='function')loadAcpPermissions();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){
   initProviderFilter();initWorkspaceFilters();
   dashRailInit();
@@ -10648,6 +10659,66 @@ function saveShortcut(input, key) {
   }).then(loadRestartKeys);
 }
 
+// The kiro-cli reset time field (partials/settings_modal.html) holds "HH:MM" in UTC; the server stores
+// minutes after 00:00 UTC. The line under it shows the same moment on this computer's clock, for today's
+// date so a daylight-saving change is counted. 261016_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT
+function kiroResetLocalText(hhmm) {
+  var m = /^(\d{2}):(\d{2})$/.exec(hhmm || '');
+  if (!m) return '';
+  var now = new Date();
+  var d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), +m[1], +m[2]));
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return 'On this computer: ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+function showKiroResetLocal() {
+  var input = document.getElementById('kiroResetTime');
+  var line = document.getElementById('kiroResetLocal');
+  if (input && line) line.textContent = kiroResetLocalText(input.value);
+}
+// Put the field back in step with `/api/settings` (a value edited in config.toml, or by another tab).
+function syncKiroReset(settings) {
+  var input = document.getElementById('kiroResetTime');
+  var minutes = settings && settings.kiro_daily_reset_minutes_utc;
+  if (!input || typeof minutes !== 'number' || minutes < 0 || minutes > 1439) return;
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  var value = pad(Math.floor(minutes / 60)) + ':' + pad(minutes % 60);
+  input.value = value;
+  input.setAttribute('data-saved', value);
+  showKiroResetLocal();
+}
+function saveKiroReset(input) {
+  var m = /^(\d{2}):(\d{2})$/.exec(input.value || '');
+  var err = document.getElementById('kiroResetTimeError');
+  var show = function (text) {
+    if (!err) return;
+    err.textContent = text;
+    err.hidden = !text;
+  };
+  var revert = function () {
+    input.value = input.getAttribute('data-saved') || '00:00';
+    showKiroResetLocal();
+  };
+  if (!m || +m[1] > 23 || +m[2] > 59) { revert(); show('Enter a time'); return Promise.resolve(); }
+  var value = input.value;
+  return fetch('/api/save-setting', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({key: 'kiro_daily_reset_minutes_utc', value: +m[1] * 60 + +m[2]})
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    if (d && d.ok) {
+      input.setAttribute('data-saved', value);
+      show('');
+      showKiroResetLocal();
+    } else {
+      revert();
+      show((d && d.error) || 'Not saved');
+    }
+  }).catch(function () {
+    revert();
+    show('Not saved: PowerAtlas did not answer');
+  });
+}
+
 function loadRestartKeys() {
   // The same payload carries `local_secret`, drawn first and on its own so a
   // failure in either renderer cannot hide the other's warning.
@@ -10738,11 +10809,12 @@ function openSettingsDialog(pane) {
   // 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 3 review fix 8
   // The after-save browser shortcut line (follow-up 16) is stale too.
   if (!modal.open) {
-    ['peekHotkeyError', 'browserHotkeyError', 'browserHotkeyNext'].forEach(function (id) {
+    ['peekHotkeyError', 'browserHotkeyError', 'browserHotkeyNext', 'kiroResetTimeError'].forEach(function (id) {
       var e = document.getElementById(id);
       if (e) { e.textContent = ''; e.hidden = true; }
     });
   }
+  showKiroResetLocal();
   showSettingsPane(pane || _settingsPane, false);
   loadRestartKeys();
   loadAcpPermissions();

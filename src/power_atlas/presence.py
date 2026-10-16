@@ -228,6 +228,12 @@ def publish_acp_sessions(session_ids, agent_pid) -> None:
     _acp_live = (ids, agent_pid if isinstance(agent_pid, int) else None)
 
 
+def acp_holds(session_id) -> bool:
+    """Whether PowerAtlas's own ACP supervisor holds `session_id`, as last published. False when nothing
+    has been published, so a resume is then launched rather than refused."""
+    return isinstance(session_id, str) and session_id in _acp_live[0]
+
+
 _CLAUDE_SESSION_DIR = Path.home() / ".claude" / "sessions"
 
 # path -> (mtime, size, parsed|None). Most sidecars do not change between

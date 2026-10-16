@@ -132,6 +132,24 @@
                       style="display:{% if port %}inline-block{% else %}none{% endif %}">Apply</button>
             </div>
           </div>
+          <!-- 261016_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT. kiro-cli does not
+               report when its daily usage limit lifts, so a stopped kiro-cli session is
+               resumed after this assumed time. Stored as minutes after 00:00 UTC, read
+               by the scheduler at every tick: nothing to restart. The line under the
+               field shows the same time on this computer's clock. -->
+          <div class="settings-row kiro-reset-group">
+            <div class="settings-row-text">
+              <div class="settings-row-head"><label class="settings-row-title" for="kiroResetTime">kiro-cli daily limit reset</label></div>
+              <div class="settings-row-desc">When kiro-cli's daily usage limit is assumed to lift, in UTC. kiro-cli does not report it. Stopped kiro-cli sessions are resumed one minute after this time when Auto-schedule resumes is on, and retried every hour if still limited.</div>
+              <div class="pa-modal-hint" id="kiroResetLocal"></div>
+              <div class="pa-modal-field-error" id="kiroResetTimeError" role="alert" hidden></div>
+            </div>
+            <div class="settings-row-control">
+              <input type="time" id="kiroResetTime" class="port-input" style="min-width: 9.5em" aria-label="kiro-cli daily limit reset, UTC"
+                     value="{{ kiro_reset_hhmm|default('00:00') }}" data-saved="{{ kiro_reset_hhmm|default('00:00') }}"
+                     onchange="saveKiroReset(this)">
+            </div>
+          </div>
         </div>
       </section>
 
