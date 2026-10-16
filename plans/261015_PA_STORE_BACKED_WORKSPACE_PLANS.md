@@ -1,7 +1,7 @@
 # PA — Store-Backed Workspace Plans Support
 
 > **Date**: 2026-10-15
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Add PowerAtlas Active Plans support for workspaces that keep plans in the agent-playbook store
 > **Memory relied on**: none
@@ -486,6 +486,27 @@ Implementation note: `playbook_root: str = ""` added to `Config`; `config.playbo
 | 13 | Low | `_get_store_dir` has check-outside-lock read (via `_store_map_cache` unpack) not protected; concurrent `apply_config` call can see partially-cleared cache. (Reviewed and accepted at implementation) | Accept — GIL-atomic list element access; list is immutable-size 3; no torn read possible on CPython. |
 
 Phase 2 health: **Green** (0 unresolved High, 0 auto-fixable Medium remaining).
+
+### 2026-10-15 — Step 9 Final Holistic Review (full effort, 4 personas)
+
+12 findings (0 High, 1 Medium, 11 Low). 1 Medium auto-resolved.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `plans/tests/260701_POWERATLAS.md` §2.29 not updated; plan's doc table required noting store-backed behavior and SC-1..5 test additions. (Single-source: Senior) | Fixed — orchestrator updated §2.29 inline with store-backed redirection note and `playbook_root` field reference. |
+| 2 | Low | `(store_dir / "plans").is_dir()` call runs outside the inner `try/except(OSError)`; relies on `is_dir()` swallowing OSError internally. (Single-source: Senior) | Accept-and-note — `is_dir()` returns False on OSError per Python docs; no behavioral risk. |
+| 3 | Low | `playbook_root` not in README Configuration sample block (all sibling keys are documented). (Single-source: Senior) | Accept-and-note — plan's doc table did not include README; key is optional/auto-detect; add in a doc-cleanup pass. |
+| 4 | Low | Store path from `__store__.md` has no local-boundary containment check; `..` components are resolved by `.resolve()` allowing a `../../other-repo/plans/` redirect. (Single-source: Security Auditor) | Accept-and-note — same-user-authored file; loopback-only endpoint; no privilege boundary crossed. Defense-in-depth boundary check deferred to Follow-up. |
+| 5 | Low | Override path asymmetry: workspace absent from WORKSPACE map undiscoverable in override mode but found in non-override mode. (Single-source: Architect) | Accept — deliberate per §3; WORKSPACE is authoritative when override is set. User-facing asymmetry noted. |
+| 6 | Low | `_build_store_map` iterates all `workspaces/` subdirs with one `realpath` each under no deadline; dead-share playbook_root subdir stalls once per 30s cache window. (Single-source: Reliability) | Accept-and-note — matches D21 residual; playbook_root is user-configured local path. |
+| 7 | Low | Multiple `realpath` calls added per cwd when non-override path used (one in `_get_store_dir`/`_parse_store_dir_from_cwd` + one on `plans_dir`). (Single-source: Reliability) | Accept — each bounded to one stall per cwd per scan by the `_skip_cwd` string pre-check; matched D21 accepted posture. |
+| 8 | Low | `_playbook_root_override` read outside `_store_map_lock`; concurrent write from a hypothetical runtime `apply_config` call would be unsafe. (Single-source: Reliability) | Accept — startup-only; self-healing via `cached_root != _playbook_root_override` TTL invalidation. |
+| 9 | Low | `_build_store_map` return annotation `dict` vs `dict[str, Path]`. (Corroborated: Phase 2 + Architect) | Accept-and-note — matches existing bare-`dict` convention in module; tighten in a cleanup pass. |
+| 10 | Low | README `## Configuration` sample missing `playbook_root` entry. (Same as #3, cross-persona echo) | Accept-and-note — same as #3. |
+| 11 | Low | Step 9b: [QA] annotation; Python API surface (scan_plans + config field) verified by 57 passing pytest tests. Browser/dashboard surface requires PA restart (explicit user grant per AGENTS.md; no grant for this task). | SKIP browser surface — deferred to user-initiated restart. Python API: PASS. |
+| 12 | Low | gitstate "Uncommitted work" still uses workspace cwd (not store repo). (Single-source: Architect) | Accept — correct boundary (D1); gitstate should show the user's working tree, not the store's. |
+
+Final health: **Green** (0 unresolved High, 0 auto-fixable Medium).
 
 15 findings (2 High, 8 Medium, 5 Low). All auto-resolved.
 
