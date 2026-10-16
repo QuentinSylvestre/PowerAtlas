@@ -1,8 +1,10 @@
 # ACP session-switch state bugs and queue-status restore on reconnect
 
 > **Date**: 2026-10-16
-> **Status**: Exploring  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Fix three session-switch state bugs in acp.html; restore queue-waiting message on reconnect; add visualization handler to the dashboard
+> **Memory relied on**: none
+> **Estimated effort**: ~4–6 hours
 
 ---
 
@@ -12,13 +14,13 @@
 
 Five concrete bugs, all found by code analysis (no reproduction steps needed):
 
-1. **Steer-pending lock** (`acp.html:5961`): when a Steer send is in-flight and the user clicks a different session in the rail, `_steerPending` is not cleared and `promptInput.disabled`, `sendModeBtn.disabled`, `modeToggle.disabled` are not restored. The new session opens with the composer locked indefinitely — the only recovery is a page reload.
+1. **Steer-pending lock** (`acp.html`): when a Steer send is in-flight and the user clicks a different session in the rail, `_steerPending` is not cleared and `promptInput.disabled`, `sendModeBtn.disabled`, `modeToggle.disabled` are not restored. The new session opens with the composer locked indefinitely — the only recovery is a page reload.
 
-2. **Queued prompt silently discarded** (`acp.html:4903`): `queuedPrompt` and `queuedPromptSession` are not cleared in the rail-click path (`selectSession()`). If the user queued a prompt on session A then switches to session B, the queued text survives the switch. When the user eventually returns to session A and the `meta turn:end` fires during transcript replay, the queued text is discarded silently (the `!replaying` guard at line 4944 suppresses the "session changed" note during replay).
+2. **Queued prompt silently discarded** (`acp.html`): `queuedPrompt` and `queuedPromptSession` are not cleared in the rail-click path (`selectSession()`). If the user queued a prompt on session A then switches to session B, the queued text survives the switch. When the user eventually returns to session A and the `meta turn:end` fires during transcript replay, the queued text is discarded silently (the `!replaying` guard at `meta turn:end` suppresses the "session changed" note during replay).
 
-3. **Stale `_transcriptLive`** (`transcript-renderer.js:92`): `setTranscriptLive()` is not called during `selectSession()` or `clearTranscript()`. If the user switches from a live session (mid-turn) to a new empty session (no history), `_transcriptLive` remains `true`. Any tool calls arriving before the new session's first `meta turn:start` are rendered with the live incremental grouping path instead of the replay path.
+3. **Stale `_transcriptLive`** (`transcript-renderer.js`): `setTranscriptLive()` is not called during `selectSession()` or `clearTranscript()`. If the user switches from a live session (mid-turn) to a new empty session (no history), `_transcriptLive` remains `true`. Any tool calls arriving before the new session's first `meta turn:start` are rendered with the live incremental grouping path instead of the replay path.
 
-4. **Queue-waiting state not restored on reconnect** (`acp.py:9118`): `meta["queued_behind"]` persists server-side but `_handle_subscribe` does not re-send `queue_status`. A client that reconnects while a session is queued behind another session gets `turnActive: true` with no indication of the waiting state. The steer-status line stays blank.
+4. **Queue-waiting state not restored on reconnect** (`acp.py`): `meta["queued_behind"]` persists server-side but `_handle_subscribe` does not re-send `queue_status`. A client that reconnects while a session is queued behind another session gets `turnActive: true` with no indication of the waiting state. The steer-status line stays blank.
 
 5. **Dashboard never renders visualization cards** (`index.html`): `dashHandle()` has no `visualization` case. Visualization frames reach the dashboard WebSocket (broadcast fans to all subscribers) but are silently discarded. Live dashboard sessions never show viz cards.
 
@@ -32,6 +34,14 @@ Desired outcome: switching sessions in /acp is fully clean; the queue-waiting me
 - SC4: After a page reload or WebSocket reconnect, if the session is queued behind another session, the "Waiting for another session's turn to finish…" message is shown on the steer-status line. Implemented by adding `queued: bool(meta.get("queued_behind"))` to the session frame payload in `_handle_subscribe`, and restoring the message in the session frame handler on both pages.
 - SC5: The dashboard `dashHandle()` renders visualization iframe cards (`addVisualizationCard()`) when a `visualization` frame arrives for a live subscribed session.
 
+### Invariants
+
+- `releaseSession()` already clears `_steerPending`, `queuedPrompt`, and `queuedPromptSession` — its behavior must remain unchanged; the Phase 1 fixes add those clears only to `selectSession()`.
+- Queued prompts continue to auto-send at `meta turn:end` when the session has not changed — the `selectSession()` clear only discards state for the cross-session case.
+- `_transcriptLive` continues to be correctly set by `meta turn:start` (true) and `meta turn:end` / `history` handlers (false) in the normal no-switch path — the `clearTranscript()` addition is a reset guard, not a replacement.
+- The live `queue_status` broadcast path (`_set_queued_behind` broadcasting to all subscribers) remains unchanged; Phase 2 adds a one-time restore at subscribe only.
+- `addVisualizationCard()` in `acp.html`'s existing visualization handler remains unchanged; Phase 3 adds a new call site in `index.html`'s `dashHandle()` only.
+
 ### Scope boundaries & non-goals
 
 **In scope**: the five bugs above.
@@ -44,114 +54,308 @@ Desired outcome: switching sessions in /acp is fully clean; the queue-waiting me
 
 ---
 
-## Exploration Discovery
+## 1) Current State
 
-<!-- Transient: /qplan folds these into the planning sections and removes this section. -->
+### Bug 1 — steer-pending lock (`acp.html`, function `selectSession`)
 
-### 4. Existing patterns & constraints
+`_steerPending` is declared near the top of the IIFE. It is set in the Steer send handler, cleared in `releaseSession()` and in the `steer_ack` / `steer_sent` handlers. The three disabled flags (`promptInput.disabled`, `sendModeBtn.disabled`, `modeToggle.disabled`) are set alongside it and restored in `releaseSession()` and the steer-ack paths.
 
-**Bug 1 — steer-pending lock** (`acp.html`):
-- `_steerPending` set at line 5961 (steer send), cleared in `releaseSession()` at line 1271 and steer-ack/steer-sent handlers at lines 5126–5139.
-- `promptInput.disabled = true` at line 5961; restored only in `releaseSession()` (line 1266) and steer-ack paths (lines 5126, 5136).
-- Rail-click path: `selectSession()` at line ~4374. Calls `clearTranscript()`, `setTurn(false)`, `setContext(null)` — does NOT touch `_steerPending` or the three `disabled` fields.
-- `session` frame handler at line 5051 (`clearTranscript()` called there): also does not restore `_steerPending` or `disabled`.
-- Fix: in `selectSession()` (or at the top of the `session` frame handler, before `clearTranscript()`), add: `_steerPending = null; promptInput.disabled = false; sendModeBtn.disabled = false; modeToggle.disabled = false;` — and clear `setSteerStatus('')` (which the session frame handler already does at line 5077).
+`selectSession()` calls `clearTranscript()`, `setTurn(false)`, `setContext(null)`, and a few others — but does NOT touch `_steerPending` or the three disabled fields. The `session` frame handler also calls `clearTranscript()` and does not restore them.
 
-**Bug 2 — queued prompt not cleared** (`acp.html`):
-- `queuedPrompt` and `queuedPromptSession` declared at lines 808–809.
-- Set at lines 5928–5929 (Queue button). Cleared in `releaseSession()` at lines 1257–1258 and in `meta turn:end` handler at lines 4903–4904.
-- `selectSession()` does NOT clear them.
-- The `meta turn:end` handler at line 4903 clears them unconditionally (no `!replaying` guard on the clear itself). So if the user returns to session A and its turn-end was recorded, the queued text is cleared during replay — silently, since the "session changed" note at line 4944 IS guarded by `!replaying`. Text is lost with no visible trace.
-- Fix: add `queuedPrompt = null; queuedPromptSession = null;` to `selectSession()`.
-- Dashboard parity: `dashCloseIfAbandoned()` at `index.html:5138` already clears `_dashQueuedPrompt` and `_dashQueuedPromptSession`; no fix needed there.
+`releaseSession()` (function `releaseSession` in `acp.html`) correctly clears `queuedPrompt`, `queuedPromptSession`, `_steerPending`, and restores all three disabled flags. The bug is confined to the rail-click path through `selectSession()`.
 
-**Bug 3 — stale `_transcriptLive`** (`transcript-renderer.js:92`):
-- `setTranscriptLive(v)` at line 98. Called from: `meta turn:start` handler (sets true), `meta turn:end` handler (sets false), `history` frame handler (sets false), `agent_died` handler (sets false).
-- NOT called from `clearTranscript()` or `selectSession()`.
-- `clearTranscript()` at line ~2931 resets `agentBody`, `toolRows`, `_toolTimers`, `toolGroup`, `openGroup`, `_autoExpandEdits` — but not `_transcriptLive`.
-- Fix: add `setTranscriptLive(false)` to `clearTranscript()`. This is safe: `clearTranscript()` is called at session switch, at `releaseSession()`, and in the `session` frame handler — all are contexts where a live state from the previous session must not carry over.
+### Bug 2 — queued prompt not cleared (`acp.html`, function `selectSession`)
 
-**Bug 4 — queue_status not restored on reconnect** (`acp.py`):
-- `_set_queued_behind()` at `acp.py:4624`: stores `meta["queued_behind"]` and broadcasts `queue_status{"waiting": bool}`.
-- `_handle_subscribe` at `acp.py:9118–9230`: sends the session frame at line 9171 with `turnActive`, `contextPercent`, `cwd`, `created` — but not `queued_behind`.
-- No `queue_status` re-send anywhere in the subscribe path.
-- Client handler: `acp.html:5170` (`if (type === 'queue_status') { if (!replaying) setSteerStatus(...); }`) — already guarded against replay. Needs to also handle it in the session frame path.
-- Fix: add `"queued": bool(meta.get("queued_behind"))` to the session frame envelope at `acp.py:9171`. In the session frame handler on both pages: after `setSteerStatus('')`, check `if (payload.queued) setSteerStatus('Waiting for another session\u2019s turn to finish\u2026')` (and the dashboard equivalent).
-- Note: this fix overlaps with File 1 (`261016_SESSION_FIDELITY...`) SC2 — coordinate with that plan to avoid a double-merge conflict. Recommend landing this fix in whichever plan ships first.
+`queuedPrompt` and `queuedPromptSession` are declared at the top of the IIFE. They are set by the Queue button handler and cleared in `releaseSession()` and in the `meta turn:end` handler.
 
-**Bug 5 — dashboard viz handler missing** (`index.html`):
-- `dashHandle()` dispatches on `type`. Zero occurrences of "visualization" or "addVisualizationCard" in `index.html` (confirmed by probe).
-- `addVisualizationCard(url, title)` at `transcript-renderer.js:2988` is already loaded by both pages.
-- Fix: add a `visualization` case to `dashHandle()`:
-  ```javascript
-  if (type === 'visualization') {
-    if (!payload.url) return;
-    addVisualizationCard(payload.url, payload.title || 'Visualization');
-    return;
-  }
-  ```
-- Note: this fix also overlaps with File 1 Phase 2. Coordinate.
+`selectSession()` does NOT clear them. The `meta turn:end` handler clears them unconditionally (no `!replaying` guard on the clear itself). So if the user switches back to session A and its turn-end was already recorded, the queued text is cleared during replay — silently, because the "session changed" note in that same handler IS guarded by `!replaying`.
 
-**`releaseSession()` already correct** (`acp.html:1224`):
-`releaseSession()` clears `queuedPrompt`, `queuedPromptSession`, `_steerPending`, restores `promptInput.disabled`, `sendModeBtn.disabled`, `modeToggle.disabled`. The bugs are only in the rail-click path (`selectSession()`) which does NOT go through `releaseSession()`.
+Dashboard parity is already correct: `dashCloseIfAbandoned()` in `index.html` already clears `_dashQueuedPrompt` and `_dashQueuedPromptSession`.
 
-**Dashboard parity already correct** (`index.html`):
-`dashCloseIfAbandoned()` at `index.html:5108` clears `_dashQueuedPrompt`, `_dashQueuedPromptSession`, `_dashSteerPending`, re-enables `dashPromptInput`, `dashSendModeBtn`, `dashModeToggle`. Bugs 1–3 exist only in acp.html's `selectSession()`.
+### Bug 3 — stale `_transcriptLive` (`transcript-renderer.js`, function `clearTranscript`)
+
+`setTranscriptLive(v)` is defined in `transcript-renderer.js`. It is called from the `meta turn:start` handler (sets true), `meta turn:end` handler (sets false), `history` frame handler (sets false), and `agent_died` handler (sets false). It is NOT called from `clearTranscript()` or `selectSession()`.
+
+`clearTranscript()` resets `agentBody`, `toolRows`, `_toolTimers`, `toolGroup`, `openGroup`, `_autoExpandEdits`, `thinkingRow`, and crew panels — but not `_transcriptLive`. Since `clearTranscript()` is called at session switch (via the `session` frame handler in `acp.html`), at `releaseSession()`, and at history replay time, adding the call there covers all paths.
+
+Adding `setTranscriptLive(false)` to `clearTranscript()` is safe during the normal reconnect-replay sequence: the `session` frame handler calls `clearTranscript()` first, then the `history` frame handler calls `setTranscriptLive(false)` independently — the extra call in `clearTranscript()` is idempotent in that sequence. The call is necessary for the session-switch path where no `history` frame follows (e.g., switching to a session that has already sent all its history).
+
+### Bug 4 — queue_status not restored on reconnect (`acp.py`, function `_handle_subscribe`)
+
+`_set_queued_behind()` stores `meta["queued_behind"]` and broadcasts `queue_status{"waiting": bool}`. `_handle_subscribe` sends a `session` envelope with `turnActive`, `contextPercent`, `cwd`, `created` — but not `queued_behind`. The client's `queue_status` handler on both pages is already guarded against replay (`if (!replaying)`), so it cannot be reached through the normal history replay; the fix requires adding `queued` to the session frame.
+
+### Bug 5 — dashboard viz handler missing (`index.html`, function `dashHandle`)
+
+`dashHandle()` dispatches on `type`. There is no `visualization` case. `addVisualizationCard(url, title)` is defined in `transcript-renderer.js` and loaded by both pages. The function is already called in `acp.html`'s own frame handler; the dashboard needs only the same one-line call.
+
+## 2) Goal
+
+Fix five state-management bugs across three components: three session-switch cleanup gaps in `acp.html` / `transcript-renderer.js` (Phase 1), a reconnect-state omission in `acp.py` (Phase 2), and a missing frame handler in `index.html` (Phase 3).
+
+## 3) Design Decisions
+
+| Decision | Choice | Alternatives considered | Rationale |
+|---|---|---|---|
+| Bug decomposition scope | Cover SC1–SC5 in this plan; larger session-fidelity features in sibling plan `261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION.md` | Single merged plan | Keeps this plan as a focused bug-fix drop with a shorter review cycle |
+| SC4 queue-UI scope | Restore steer-status line text only; no rail indicator or Needs Attention entry | Add rail indicator | Rail indicator is scoped to the sibling plan; steer-status is the live indicator the user sees while queued |
+| `_steerPending` clear on session switch | Discard stale steer text silently (no user note) | Restore text to new session's textarea | The steer was authored for the old session; restoring to a different session would be more confusing than discarding. The silent behavior differs from `releaseSession()` intentionally: `releaseSession()` is triggered by an explicit close where the user may not expect failure; `selectSession()` is a deliberate switch. |
+| `setTranscriptLive(false)` placement | Add to `clearTranscript()` in `transcript-renderer.js` | Add to `selectSession()` in `acp.html` | `clearTranscript()` is the single canonical reset called by `selectSession()`, `releaseSession()`, and the `session` frame handler — one edit covers all paths, including the dashboard's history-replay path |
+| `"queued"` key in `_handle_subscribe` only (not `_handle_new`) | Omit from `_handle_new` | Add to `_handle_new` as well | Newly created sessions cannot be `queued_behind` at creation time; the key would always be `false` and is unnecessary. `_handle_new` should add a comment stating this invariant so a future reader does not add it unnecessarily. |
+
+## 4) External Dependencies & Costs
+
+None. Code-only change; no infrastructure, CI/CD, IAM, data migration, DNS, or third-party service changes.
+
+### Cost impact
+
+None.
+
+## 5) Implementation Phases
+
+### Phase 1: Three session-switch state fixes [QA]
+
+**Goal**: Clear `_steerPending`, `queuedPrompt`/`queuedPromptSession`, and `_transcriptLive` on session switch.
+
+**Covers**: SC1, SC2, SC3
+
+**File scope**:
+- `src/power_atlas/templates/acp.html`
+- `src/power_atlas/static/transcript-renderer.js`
+- `tests/acp_page.test.mjs`
+
+**Changes**:
+
+In `selectSession()` (function `selectSession` in `acp.html`), before the `clearTranscript()` call, add the following state resets:
+
+```javascript
+// SC1: release the in-flight steer lock so the new session's composer is
+// interactive. The in-flight steer to the previous session is irrecoverable —
+// text is discarded, not restored (the steer was for a different session).
+// Note: unlike releaseSession(), selectSession() discards silently (no user
+// note) — the steer was abandoned, not failed; releaseSession()'s note is
+// for an explicit close where the user may not have expected the steer to fail.
+if (_steerPending) {
+  promptInput.disabled = false;
+  sendModeBtn.disabled = false;
+  modeToggle.disabled = false;
+}
+_steerPending = null;
+// SC2: discard any queued prompt from the previous session. Carrying it
+// silently to a new session would risk an unintended auto-send.
+queuedPrompt = null;
+queuedPromptSession = null;
+```
+
+> **Sketch** — place these lines after the session-capacity early-return guards and before `clearTranscript()`, mirroring the equivalent clears in `releaseSession()`.
+
+In the `steer_ack` handler (the `if (type === 'steer_ack')` block in `acp.html`'s main frame dispatch), add a guard at the very top of the block, mirroring the dashboard's existing guard (`if (!_dashSteerPending) return;`):
+
+```javascript
+// SC1: a late steer_ack for the previous session arrives after
+// _steerPending was cleared by selectSession(). Guard so neither path
+// (rejection: promptInput.value = _steerPending, or success: disable-clear)
+// runs against the new session's composer. Mirrors dashHandle()'s own guard.
+if (!_steerPending) return;
+```
+
+> **Sketch** — add as the first statement inside the `if (type === 'steer_ack')` block, before the `if (payload && payload.queued === false)` branch.
+
+In `clearTranscript()` (function `clearTranscript` in `transcript-renderer.js`), add at the end of the function body, after `thinkingRow = null` and the crew-panel cleanup calls:
+
+```javascript
+// SC3: entering a cleared transcript is never a live state — reset
+// so a live session's flag never carries into the next session's first frames.
+// Dashboard note: this file is loaded by index.html too; setTranscriptLive(false)
+// during dashboard session-switch history replay is correct — same reasoning applies.
+setTranscriptLive(false);
+```
+
+> **Sketch** — `setTranscriptLive` is defined in the same file; no cross-file import issue. The call is idempotent when `_transcriptLive` is already false. Dashboard path: `clearTranscript()` is called from `renderTranscriptHistory()` before any `meta turn:start` can arrive for the new session, so `setTranscriptLive(false)` is always correct at that call site.
+
+**Tests** in `tests/acp_page.test.mjs`:
+
+- **T1 (SC1)**: Simulate a Steer send in-flight on session A (compositor locked: `promptInput.disabled = true`, Steer mode active). Trigger a rail-click to session B (call through the session-selection path). Assert: (a) `promptInput.disabled === false` on session B's load; (b) subsequently receiving a `steer_ack{queued: false}` frame appends no error message and does not alter `promptInput.value`. Use the existing send-call recorder to verify no unexpected side-effects.
+- **T2 (SC2)**: Queue mode: register a queued prompt on session A (simulate Queue button press). Switch to session B. Return to session A WITHOUT any intervening turn:end (so queuedPrompt would still survive if the fix were absent). Deliver a live `meta turn:end` for session A. Assert that `send()` is NOT called with `'prompt'`. Without the fix, queuedPrompt is still session A's text at this point, the session-identity guard does not fire (queuedPromptSession === sessionId === A), and the prompt IS auto-sent; with the fix, the text was cleared at switch time and nothing fires.
+- **T3 (SC3)**: Call `setTranscriptLive(true)` on the page. Call `clearTranscript()`. Assert that the most recent entry in the existing `setLiveCalls` recorder (populated by the test harness's `setTranscriptLive` instrumentation, e.g., at `acp_page.test.mjs` around the `setLiveCalls` recorder setup) records `false`.
+
+> **Harness note for T1/T2**: Both tests use behavioral outcomes observable through the page's public DOM state and the test harness's `send()` spy, not direct access to IIFE-scoped variables (`_steerPending`, `queuedPrompt`). T3 uses the existing `setLiveCalls` recorder already present in the harness.
+
+**Exit criteria**:
+- [ ] `selectSession()` resets `_steerPending`, `promptInput.disabled`, `sendModeBtn.disabled`, `modeToggle.disabled` before calling `clearTranscript()` — verify by reading the function body (SC1)
+- [ ] `selectSession()` clears `queuedPrompt` and `queuedPromptSession` before calling `clearTranscript()` — verify by reading the function body (SC2)
+- [ ] `steer_ack` handler has `if (!_steerPending) return;` guard as its first statement — verify by reading the handler (SC1)
+- [ ] `clearTranscript()` calls `setTranscriptLive(false)` as its last step — verify by reading the function body (SC3)
+- [ ] Tests T1–T3 exist in `acp_page.test.mjs` and pass: `node tests/acp_page.test.mjs` exits 0
+- [ ] `releaseSession()` is unmodified — its existing `_steerPending`, `queuedPrompt`, and `queuedPromptSession` resets are still present
+- [ ] Dashboard path verified: `clearTranscript()` is also called by the dashboard's history replay; `setTranscriptLive(false)` in `clearTranscript()` is correct for that path (no dedicated dashboard test needed — identical reasoning applies)
+
+### Phase 2: Queue-status restore on reconnect [QA]
+
+**Goal**: Re-emit `queued_behind` state in the session frame so a reconnecting client sees the "Waiting…" steer-status message without waiting for a new live `queue_status` broadcast.
+
+**Covers**: SC4
+
+**File scope**:
+- `src/power_atlas/acp.py`
+- `src/power_atlas/templates/acp.html`
+- `src/power_atlas/templates/index.html`
+- `tests/test_web.py`
+- `tests/acp_page.test.mjs`
+
+**Changes**:
+
+In `_handle_subscribe` (function `_handle_subscribe` in `acp.py`), add `"queued"` to the session-frame dict. The current envelope call sends `sessionId`, `cwd`, `created`, `turnActive`, `contextPercent`; add:
+
+```python
+"queued": bool(meta.get("queued_behind")),
+```
+
+> **Sketch** — add this key to the existing dict literal in the `conn.send(envelope("session", {...}, session_id))` call inside `_handle_subscribe`, before the closing brace.
+
+In `acp.html`, in the `session` frame handler (the `if (type === 'session')` block in the main frame dispatch function), after the `setSteerStatus('')` call, add:
+
+```javascript
+// SC4: restore the waiting indicator if this session was queued when we
+// subscribed. Live queue_status frames keep it current afterward.
+if (payload.queued) {
+  setSteerStatus('Waiting for another session\u2019s turn to finish\u2026');
+}
+```
+
+> **Sketch** — place immediately after `setSteerStatus('')`, before the tab-title reset that follows in the same `session` block.
+
+In `index.html`, in `dashHandle()`, in the `session` frame arm (the code that runs when `type === 'session'` and `sid === _viewingSid`), after the `setDashSteerStatus('')` call, add:
+
+```javascript
+// SC4: restore the waiting indicator on reconnect.
+if (payload.queued) {
+  setDashSteerStatus('Waiting for another session\u2019s turn to finish\u2026');
+}
+```
+
+> **Sketch** — place immediately after `setDashSteerStatus('')`, before the `dashSetComposerNote('')` call that follows in the same arm.
 
 **Tests**:
-- `tests/acp_page.test.mjs`: no tests for session-switch state (`selectSession()`, `_steerPending`, `queuedPrompt` cross-session). `queue_status` cross-session has no test coverage.
-- `tests/test_web.py`: `TestAcpReplayOnSubscribe` covers subscribe re-send logic; no test for `queued_behind` in session frame.
 
-### 5. Risks & mitigations
+- `tests/test_web.py`: add a test (in `TestAcpReplayOnSubscribe` or a new `TestHandleSubscribeQueuedState` class) that sets `meta["queued_behind"]` on a supervised session, calls `_handle_subscribe`, and asserts the emitted `session` frame payload has `queued == True`. Add a second test with no `queued_behind` set to assert `queued == False`.
+- `tests/acp_page.test.mjs`: add tests that fire a `session` frame payload `{turnActive: false, queued: true}` through `acp.html`'s frame handler and assert the steer-status element shows the "Waiting…" string. Add a parallel test through `index.html`'s `dashHandle()`.
 
-**R1 — SC4 overlaps with File 1 SC2.**
-Both plans add `"queued"` to the session frame and restore the steer-status message on session frame receipt. If both are planned simultaneously, the Python change is identical and only needs to land once. Recommend implementing SC4 in this plan (which ships first as a bug-fix plan) and noting it as already done in File 1.
+**Exit criteria**:
+- [ ] `_handle_subscribe` in `acp.py` emits `"queued": True` in the `session` frame when `meta["queued_behind"]` is set (SC4)
+- [ ] `_handle_subscribe` emits `"queued": False` when `meta["queued_behind"]` is absent or `None` (SC4)
+- [ ] `_handle_new` in `acp.py` has a comment noting that it omits `"queued"` because new sessions cannot be `queued_behind` (documentation only; no code change in `_handle_new`) (SC4)
+- [ ] `acp.html` session frame handler shows "Waiting…" steer-status text when `payload.queued` is `true` (SC4)
+- [ ] `index.html` `dashHandle()` session frame arm shows "Waiting…" `setDashSteerStatus` text when `payload.queued` is `true` (SC4)
+- [ ] New tests in `test_web.py` pass: `pytest tests/test_web.py --timeout=300` exits 0
+- [ ] New tests in `acp_page.test.mjs` pass: `node tests/acp_page.test.mjs` exits 0
+- [ ] `_set_queued_behind` and the live `queue_status` broadcast path are unmodified
 
-**R2 — Clearing `_steerPending` in `selectSession()` discards in-flight steer silently.**
-The steer request is already in-flight to the server. A `steer_ack` or `steer_sent` will arrive on the socket for the old session. After `_steerPending = null`, the ack handlers at lines 5120–5139 use `_steerPending` — if it's null, the handlers become no-ops. The in-flight steer to session A is then orphaned: it may or may not apply to session A (server-side it probably does). No new harm is introduced; the text is silently dropped, same as the existing behavior for other session switches. Acceptable.
+### Phase 3: Dashboard visualization frame handler [QA]
 
-**R3 — `setTranscriptLive(false)` in `clearTranscript()` is called during replay.**
-`clearTranscript()` is called at the start of `history` frame replay (inside the session frame handler). At that point `_transcriptLive` is already false (set to false at the start of the `history` frame handler at `acp.html:5023`). So adding it to `clearTranscript()` is a no-op in the replay path — safe.
+**Goal**: Add the missing `visualization` case to `dashHandle()` so the dashboard renders viz iframe cards for live subscribed sessions.
 
-### 6. Resolved decisions
+**Covers**: SC5
 
-- Q1 (decomposition): Option B — this plan covers session-switch bugs and queue restore; `261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION.md` covers the larger features
-- Q (queue UI scope): steer-status line restoration only; no rail indicator or Needs Attention entry
+**File scope**:
+- `src/power_atlas/templates/index.html`
+- `tests/acp_page.test.mjs`
 
-### 7. Open items
+**Changes**:
 
-None. All five bugs have deterministic root causes and clear fixes.
+In `dashHandle()` (function `dashHandle` in `index.html`), add a `visualization` case. `addVisualizationCard(url, title)` is already defined in `transcript-renderer.js` and loaded by both pages. Place the new case after the `mcp_servers` handler and before `commands_execute_result` (or at any convenient location in the if-chain, matching the adjacent handlers' style):
 
-Coordinate SC4 / Bug 4 with `261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION.md` to avoid merging the same `acp.py` change twice.
+```javascript
+if (type === 'visualization') {
+  if (!payload.url) return;
+  addVisualizationCard(payload.url, payload.title || 'Visualization');
+  return;
+}
+```
 
-### 8. Recommended approach
+> **Sketch** — the guard `if (!payload.url) return` mirrors `addVisualizationCard`'s own internal guard and is an explicit gate for malformed frames. Note: `visualization` frames are broadcast-only (not recorded in the replay buffer), so viz cards appear only while live-subscribed, never on page reload or reconnect. This is consistent with acp.html's existing behavior.
 
-All five fixes are independent of each other. Suggested order by risk:
+**Test** in `tests/acp_page.test.mjs`: add a test that fires a `visualization` frame payload `{url: 'https://localhost/test.html', title: 'Test Viz'}` through the dashboard page's `dashHandle()` and asserts that `addVisualizationCard` was called with those arguments (spy or verify a `.acp-viz-card` element was inserted into the transcript container).
 
-**Phase 1 — Three acp.html session-switch state fixes** (SC1, SC2, SC3)
-- `acp.html` `selectSession()`: add `_steerPending = null; promptInput.disabled = false; sendModeBtn.disabled = false; modeToggle.disabled = false;` (SC1).
-- `acp.html` `selectSession()`: add `queuedPrompt = null; queuedPromptSession = null;` (SC2).
-- `transcript-renderer.js` `clearTranscript()`: add `setTranscriptLive(false);` (SC3).
-- `acp_page.test.mjs`: add tests for all three — specifically: (a) after `setCrew` then `clearTranscript()`, `_transcriptLive` is false; (b) after a simulated session switch with steer pending, `promptInput.disabled` is false; (c) after a session switch with a queued prompt, `queuedPrompt` is null.
+**Exit criteria**:
+- [ ] `dashHandle()` handles `type === 'visualization'` by calling `addVisualizationCard(payload.url, payload.title || 'Visualization')` (SC5)
+- [ ] `visualization` frames with a missing or falsy `payload.url` return without calling `addVisualizationCard` (SC5)
+- [ ] New test in `acp_page.test.mjs` passes: `node tests/acp_page.test.mjs` exits 0
+- [ ] `acp.html`'s existing visualization handler is unmodified
 
-**Phase 2 — Queue-status restore on reconnect** (SC4)
-- `acp.py` `_handle_subscribe`: add `"queued": bool(meta.get("queued_behind"))` to the session frame payload.
-- `acp.html` session frame handler: after `setSteerStatus('')`, add `if (payload.queued) setSteerStatus('Waiting for another session\u2019s turn to finish\u2026');`
-- `index.html` session frame handler: add `if (payload.queued) setDashSteerStatus('Waiting for another session\u2019s turn to finish\u2026');`
-- `test_web.py`: add test — `_handle_subscribe` on a session with `queued_behind` set emits `session` frame with `queued: true`.
-- `acp_page.test.mjs`: add test — session frame with `{queued: true}` sets steer-status text on both pages.
+## 6) Risk Assessment
 
-**Phase 3 — Dashboard visualization handler** (SC5)
-- `index.html` `dashHandle()`: add `visualization` case calling `addVisualizationCard(payload.url, payload.title || 'Visualization')`.
-- `acp_page.test.mjs`: add test — `visualization` frame in dashboard context calls `addVisualizationCard`.
+| Risk | Impact | Mitigation |
+|---|---|---|
+| R1: SC4 change in `acp.py` overlaps with sibling plan `261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION.md` — both plans would add `"queued"` to the session frame | Medium: a second apply causes a duplicate key in the dict or a merge conflict | Land this plan first; the sibling plan notes SC4 as already done and does not re-apply the key. Coordinate before merging the sibling plan. |
+| R2: Discarding `_steerPending` text on session switch leaves the user unable to recover the steer text | Low: acceptable trade-off | The steer was authored for the old session; restoring it to a new session would be more confusing than discarding it. Behavior is silent, same as existing behavior for other state cleared on switch. |
+| R3: `setTranscriptLive(false)` added to `clearTranscript()` fires during the reconnect-replay sequence | Low: no-op in practice | In the reconnect flow, the `session` frame handler calls `clearTranscript()` (setting `_transcriptLive = false`); the `history` frame handler then calls `setTranscriptLive(false)` independently — idempotent. The fix is necessary for the session-switch path where the `session` frame triggers `clearTranscript()` but no `history` frame follows. |
 
-### 9. QA environment
+## 7) Verification
 
-- PowerAtlas running at `http://127.0.0.1:<port>`. Sign in via `pa_local` cookie.
-- Browser: Playwright from `.venv-PowerAtlas` or Chrome via Claude-in-Chrome MCP.
-- SC1: trigger a Steer send on session A, switch to session B while the steer is in-flight (before `steer_ack` arrives), confirm the composer on session B is interactive.
-- SC2: queue a prompt on session A, switch to session B, switch back, confirm no queued prompt fires unexpectedly.
-- SC3: start a turn on session A, switch to session B (new, no history), confirm tool calls arriving for session B render in the replay path.
-- SC4: with two sessions open and one mid-turn, reload the page for the waiting session, confirm the steer-status message appears.
-- SC5: on a dashboard session that receives a viz emit, confirm the viz card appears.
-- Python tests: `pytest tests/test_web.py --timeout=300`; node tests: `node tests/acp_page.test.mjs`.
+**Python tests**: `.venv-PowerAtlas\Scripts\pytest tests\test_web.py --timeout=300`
+
+**Node tests**: `node tests\acp_page.test.mjs`
+
+**Manual live QA** (PowerAtlas running at `http://127.0.0.1:<port>`; sign in via `pa_local` cookie — see `AGENTS.md § Verification Setup`):
+
+- **SC1**: Open two sessions. Start a Steer send on session A (Steer mode active, text in composer). Switch to session B via the rail before `steer_ack` arrives. Verify the composer on session B is fully interactive (not locked).
+- **SC2**: Queue a prompt on session A (Queue button). Switch to session B. Switch back to session A. Verify the queued prompt text is gone and no prompt fires unexpectedly at turn-end.
+- **SC3**: Start a turn on session A (mid-turn, `_transcriptLive = true`). Switch to session B (new empty session). Trigger a tool call for session B. Verify it renders via the replay / group path, not as a live incremental stream with no preceding `turn:start`.
+- **SC4**: With two sessions open and session A queued behind session B's turn, reload the /acp page. Verify the "Waiting for another session's turn to finish…" message appears on session A's steer-status line immediately on load.
+- **SC5**: Open the dashboard (`/`) and subscribe to a live session. Have the agent emit a visualization (`emit_visualization` tool). Verify a viz iframe card appears in the dashboard transcript.
+
+## 8) Documentation Updates
+
+| Document | Update needed | Phase |
+|---|---|---|
+
+No documentation updates needed. All five changes are internal implementation corrections to existing, already-documented features. No user-visible API, CLI surface, configuration, or observable feature behavior changes are introduced.
+
+## Progress Tracker
+
+| # | Phase | Status | Notes |
+|---|---|---|---|
+| 1 | Three session-switch state fixes | Not started | |
+| 2 | Queue-status restore on reconnect | Not started | |
+| 3 | Dashboard visualization frame handler | Not started | |
+
+## 9) Implementation Divergences from Plan
+
+_Reserved — filled during implementation._
+
+## Follow-up Work (Deferred)
+
+1. **`_steerPending` restore in `ws.onclose` (stale-restore on reconnect).** When the WebSocket drops while a steer is in-flight, `ws.onclose` restores the text to the textarea but cannot know whether the steer already landed server-side. This is a separate stale-restore race window, deferred per scope boundary in `§ Scope boundaries & non-goals`. Source: scope boundary.
+
+2. **Late `steer_sent` from old session after rail-click switch.** A `steer_sent` frame (broadcast via `_emit`) for the old session can arrive at the client after `selectSession()` clears `_steerPending`, during the narrow window before the server processes the new `subscribe` and detaches the socket from the old session's subscriber set. The steer_sent handler's `addMessage('steer', steerText)` call is unconditional, so the old steer's band would appear in the new session's just-cleared transcript. The probability is low (requires the steer's `await` to complete before the subscribe reaches the server), and the consequence is cosmetic (a dimmed band). This plan fixes steer_ack but not steer_sent; SC1 is scoped to steer_ack. A follow-up should add a `if (!_steerPending && promptInput.value.trim() !== steerText) return;` guard or adopt acp.html's full top-level `sessionId` frame filter. Source: Cycle 2 review, Reliability engineer + End-user advocate.
+
+## Review Log
+
+### 2026-10-16 — /qplan Cycle 1 (Full effort, 4 personas: Architect, Senior engineer, Reliability engineer, End-user advocate)
+
+8 findings (1 High, 3 Medium, 4 Low). 8 auto-resolved.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | SC1 claims steer_ack is "ignored or handled gracefully" but Phase 1 adds no guard; late rejection ack corrupts new session's composer. | Fixed — added `if (!_steerPending) return;` to steer_ack handler in Phase 1 Changes + exit criterion. |
+| 2 | Medium | Tests T1/T2 access IIFE-scoped variables not reachable from test harness. | Fixed — rewrote T1/T2/T3 to use behavioral assertions (DOM state, send() spy, setLiveCalls recorder). |
+| 3 | Medium | `_handle_new` also emits session frame; `"queued"` omission there is undocumented. | Fixed — added Design Decisions row explaining the omission + exit criterion noting the comment. |
+| 4 | Medium | Phase 1 edits shared `clearTranscript()`; dashboard impact unverified. | Fixed — added exit criterion note + comment in clearTranscript sketch verifying dashboard path is correct. |
+| 5 | Low | R3 mechanism prose: "history frame handler calls clearTranscript()" is wrong (session frame handler does). | Fixed — corrected R3 prose. |
+| 6 | Low | SC5 broadcast-only nature not documented; viz cards won't appear on reload. | Fixed — added broadcast-only note to Phase 3 sketch. |
+| 7 | Low | Deliberate difference (selectSession silently discards vs. releaseSession note) undocumented. | Fixed — added rationale to Design Decisions `_steerPending` row. |
+| 8 | Low | T3 should use existing `setLiveCalls` recorder. | Fixed — T3 rewritten to reference the recorder explicitly. |
+
+### 2026-10-16 — /qplan Cycle 2 (Full effort, 4 personas: Architect, Senior engineer, Reliability engineer, End-user advocate)
+
+3 findings (0 High, 1 Medium, 2 Low). 3 auto-resolved (1 fix, 2 deferred to Follow-up Work).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | T2 exercises the live turn:end path which the existing session-identity guard handles with or without the fix; real SC2 distinction requires the round-trip scenario. | Fixed — rewrote T2 to: queue A → switch B → return A (no turn:end in history) → deliver live turn:end → assert no auto-send. |
+| 2 | Low | Late `steer_sent` for old session can render a stale band on new session's transcript (narrow race; pre-existing, not introduced by this plan). | Deferred — added to Follow-up Work item 2. |
+| 3 | Low | steer_ack guard has a narrow residual race where the user starts a fresh steer on B before a late A ack arrives (same residual as the dashboard's own proven guard). | Accepted as per-design (mirrors existing dashboard pattern; no behavioral consequence). |
+
+## Harness Improvement Opportunities
+
+_Reserved — appended during /qexplore, /qplan and /qdev when harness friction is felt._
