@@ -25071,7 +25071,7 @@ check("selectSession clears steer lock and re-enables composer when switching se
     "fixture: promptInput should be disabled after steer send");
   assert(page.el("acpSendMode").disabled === true,
     "fixture: sendModeBtn should be disabled after steer send");
-  // Switch to a different session via rail row click (sess-w1-s0 = railRows()[3]).
+  // Switch to a different session via rail row click (railRows()[3]).
   // selectSession() must re-enable the composer and clear _steerPending (SC1).
   page.railRows()[3].dispatch("click");
   assertEqual(page.el("acpPrompt").disabled, false,
@@ -25110,7 +25110,7 @@ check("selectSession clears queuedPrompt so it does not auto-send on returning t
   page.click("acpSendMode");
   // Baseline: count prompt frames before any switches.
   const promptsBefore = page.socket().sent.filter((f) => f.type === "prompt").length;
-  // Switch A -> B (sess-w1-s0 = railRows()[3]).
+  // Switch A -> B (railRows()[3]).
   // With the fix, selectSession() clears queuedPrompt and queuedPromptSession here.
   page.railRows()[3].dispatch("click");
   // Switch B -> A (sess-w0-s0 = railRows()[0]), without any turn:end in A's history.
