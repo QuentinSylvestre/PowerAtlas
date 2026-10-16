@@ -352,18 +352,18 @@ repo — tests needing git activity (SC-4) use the existing `_plan_repo`/`_git`/
   `_plan_memo.clear()` to prevent state leakage between tests.
 
 **Exit criteria:**
-- [ ] SC-1 test passes: store-backed plan appears with correct workspace name and `cwd`
-- [ ] SC-2 test passes: fallback to workspace `plans/` when store has no `plans/`
-- [ ] SC-3 test passes: no-store workspace unaffected (no `__store__.md` → no lookup)
-- [ ] SC-4 test passes: `plan["activity"]` uses store repo commit date
-- [ ] SC-4 fallback test passes: no-git-repo store → `plan["activity"]` = file mtime
-- [ ] SC-5 test passes: `playbook_root` override builds WORKSPACE map and looks up correctly
-- [ ] `apply_config` cache-clearing test passes: new root triggers map rebuild
-- [ ] UNC guard verified: `_parse_store_dir_from_cwd` rejects a UNC-resolved store path (test or code-read)
-- [ ] Deadline gate: `store_dir = None` initialized before deadline check; store lookup skipped past deadline for index > 0
-- [ ] `apply_config` called in `__main__.py` and accepted by linter (`python -m py_compile`)
-- [ ] All existing `TestOverviewPlans` tests pass (SC-6): `pytest tests/test_web.py -k "TestOverviewPlans" -x`
-- [ ] Pre-commit hooks pass: `_check_public_ids.py` and `_check_test_names.py`
+- [x] SC-1 test passes: store-backed plan appears with correct workspace name and `cwd`
+- [x] SC-2 test passes: fallback to workspace `plans/` when store has no `plans/`
+- [x] SC-3 test passes: no-store workspace unaffected (no `__store__.md` → no lookup)
+- [x] SC-4 test passes: `plan["activity"]` uses store repo commit date
+- [x] SC-4 fallback test passes: no-git-repo store → `plan["activity"]` = file mtime
+- [x] SC-5 test passes: `playbook_root` override builds WORKSPACE map and looks up correctly
+- [x] `apply_config` cache-clearing test passes: new root triggers map rebuild
+- [x] UNC guard verified: `_parse_store_dir_from_cwd` rejects a UNC-resolved store path (test or code-read)
+- [x] Deadline gate: `store_dir = None` initialized before deadline check; store lookup skipped past deadline for index > 0
+- [x] `apply_config` called in `__main__.py` and accepted by linter (`python -m py_compile`)
+- [x] All existing `TestOverviewPlans` tests pass (SC-6): `pytest tests/test_web.py -k "TestOverviewPlans" -x`
+- [x] Pre-commit hooks pass: `_check_public_ids.py` and `_check_test_names.py`
 
 ---
 
@@ -412,7 +412,7 @@ Live QA (after PA restart with diskpeek open):
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Config field | Complete | code: 1ff8b71 |
-| 2 | Overview store infrastructure + tests | Pending | |
+| 2 | Overview store infrastructure + tests | Complete | code: bb11f06 / a1759ef |
 
 ---
 
@@ -425,6 +425,12 @@ Live QA (after PA restart with diskpeek open):
 2. **Test fixture bug in plan snippet**: plan snippet used `p.write_bytes(tomli_w.dumps({...}))`, but `tomli_w.dumps` returns `str`; `write_bytes` would raise `TypeError`. Fixed to `p.write_text(tomli_w.dumps({...}))`.
 
 3. **Test placement**: there is no dedicated config-loading test class in `tests/test_web.py`. The two new tests were added to `TestRemoteBindAddressValidation`, which uses the `isolated_config` autouse fixture and contains the existing `test_load_config_*` sanitization tests (the same CONFIG_PATH-assignment pattern). The class name is unrelated to playbook_root (noted by reviewers as a Low/Medium discoverability issue); a future refactor can move them to a `TestConfigFields` class. The tests are functionally correct, mutation-discriminating, and passing.
+
+**Phase 2 — Overview store infrastructure:**
+
+4. **Lock discipline (build-outside-lock)**: Plan spec and Phase 1 review finding #4 both said "TTL check, build, and write all run inside `_store_map_lock`". The implementation uses "check under lock / build outside lock / write under lock", matching `_plan_memo_lock`'s documented convention ("two threads parsing the same file at once is tolerated"). Superior choice (readers never blocked during a `workspaces/*/` scan); documented in `_get_store_dir` docstring. The fix commit `a1759ef` added a UNC guard to `_build_store_map` and a UNC rejection test.
+
+5. **`test_store_stale_badge_from_store_activity` omitted**: Plan's test-additions listed this as a SC-4 supplement. Absent from delivered tests — SC-4 is adequately covered by `test_store_git_activity_uses_store_repo` and `test_store_git_fallback_to_mtime_when_no_repo`; stale logic is store-agnostic.
 
 ## Follow-up Work (Deferred)
 
@@ -458,6 +464,28 @@ Live QA (after PA restart with diskpeek open):
 
 Phase 1 health: **Green** (0 unresolved High, 0 auto-fixable Medium remaining).
 Implementation note: `playbook_root: str = ""` added to `Config`; `config.playbook_root = config.playbook_root.strip()` added in `_load_config_once`. Two tests pass: `test_playbook_root_defaults_to_empty`, `test_playbook_root_is_stripped_on_load`. SC-6: 50 `TestOverviewPlans` tests pass.
+
+### 2026-10-15 — Phase 2 Review (full effort, 4 personas; 1 auto-fix cycle)
+
+13 findings (0 High, 3 Medium, 10 Low). All Mediums auto-resolved.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `_build_store_map` adds WORKSPACE-derived store dirs to the map without UNC guard; an override WORKSPACE pointing at `\\server\share` reaches `realpath` in `scan_plans` with no string pre-check. (Corroborated: Architect + Senior) | Fixed — added `_skip_cwd`+`_resolves_to_unc` check per store dir in `_build_store_map` in auto-fix commit `a1759ef`. |
+| 2 | Medium | No test verifies `_parse_store_dir_from_cwd` returns None for a UNC store path; exit criterion satisfied by code-read only. (Corroborated: Architect + Maintainability) | Fixed — added `test_store_parse_rejects_unc_store_dir` in `a1759ef`; 57 TestOverviewPlans pass. |
+| 3 | Medium | Lock discipline (build outside lock) reverses plan spec + Phase 1 review finding #4 with no §9 entry. Code is correct/superior, but undocumented divergence. (Corroborated: Architect + Senior) | Fixed — §9 Phase 2 divergence note written. |
+| 4 | Low | `_build_store_map` doesn't guard `playbook_root` itself being UNC; `(root/"workspaces").iterdir()` could stall before the OSError catch. (Single-source: Architect) | Accept-and-note. User-controlled config; apply `_resolves_to_unc` on root in future if needed. |
+| 5 | Low | `apply_config` writes `_playbook_root_override` outside `_store_map_lock`; relies on GIL atomicity and startup-only timing. (Single-source: Architect) | Accept — startup-only, GIL-atomic single assignment; self-healing via `cached_root` TTL check. |
+| 6 | Low | WORKSPACE path not `.resolve()`d in `_build_store_map`; a subst/symlinked cwd could key-miss. (Single-source: Architect) | Accept-and-note — common cases covered; symlink edge rare. |
+| 7 | Low | `test_store_stale_badge_from_store_activity` promised in plan but absent. SC-4 is well covered otherwise. (Corroborated: Senior + Maintainability) | Accept-and-note — §9 records omission with rationale. |
+| 8 | Low | Stale-root stamping race: map built from root before lock, but stamped with `_playbook_root_override` after lock; can write map with wrong root string. (Single-source: Reliability) | Accept — startup-only; unreachable in production; docstring discloses outside-lock build. |
+| 9 | Low | Non-override path has no memoization for `__store__.md` reads; re-reads on every scan. (Single-source: Reliability) | Accept-and-note — bounded by web layer 30s cache; add per-cwd memo only if store workspace count grows large. |
+| 10 | Low | Store-backed workspace past deadline (index>0) silently falls back to local `plans/`. (Single-source: Reliability) | Accept — intended D21 degradation per "first workspace always processed" invariant. |
+| 11 | Low | `_build_store_map` return annotation is bare `dict` rather than `dict[str, Path]`. (Single-source: Maintainability) | Accept-and-note — mirrors existing `_plan_memo` convention; tighten annotation in a cleanup pass. |
+| 12 | Low | QA step 5b: [QA]-annotated phase. Python API exercised by 57 passing pytest tests. PA restart required for live browser surface (no grant for this task). | SKIP — PA restart deferred to Step 9b or user-initiated restart. |
+| 13 | Low | `_get_store_dir` has check-outside-lock read (via `_store_map_cache` unpack) not protected; concurrent `apply_config` call can see partially-cleared cache. (Reviewed and accepted at implementation) | Accept — GIL-atomic list element access; list is immutable-size 3; no torn read possible on CPython. |
+
+Phase 2 health: **Green** (0 unresolved High, 0 auto-fixable Medium remaining).
 
 15 findings (2 High, 8 Medium, 5 Low). All auto-resolved.
 
