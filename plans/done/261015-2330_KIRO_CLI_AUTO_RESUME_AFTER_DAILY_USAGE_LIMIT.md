@@ -1,8 +1,39 @@
 # kiro-cli — Auto-Resume After a Daily Usage Limit
 
 > **Date**: 2026-10-16
-> **Status**: Exploring  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-10-15 23:29
 > **Scope**: Give kiro-cli v3 sessions that a daily usage limit stopped the same Resume now, Schedule, auto-schedule, watch and retry support that Claude Code and Codex sessions have
+> **Memory relied on**: none
+
+---
+
+## Completion Summary
+
+Implemented directly after exploration, without `/qplan` (the user's choice). Code and tests are in `05cca44`; this file's exploration record is `199bb31`.
+
+**What shipped.** All ten success criteria below are met. kiro-cli v3 sessions stopped by the daily usage limit get Resume now, Schedule, auto-schedule, a watch and an hourly retry ladder (8 attempts, then given up on until the owner acts). The reset time is assumed (`Config.kiro_daily_reset_minutes_utc`, default 00:00 UTC, in Settings > General). Stop detection no longer loses a stop to kiro's own `steer` user records. Workflow children are never listed or resumed, and a session held on the /acp page is refused.
+
+**Verification.**
+- Full pytest suite (5502 passed, 2 skipped), `node tests/acp_page.test.mjs` (1120 passed) and `_check_test_names.py`. The two regression tests for the changes found in review and in exploration were run against the unfixed code and fail there.
+- Live, on a restarted PowerAtlas: a throwaway session given a fake stop was auto-scheduled, rescheduled to 15 s out, fired by the scheduler, answered, and logged "answered 1 min after the stop (attempt 1)". The throwaway session and its processes were then removed.
+- Live, success criterion 10: the real stopped session (`sess_21f8fb19`) was resumed through **Resume now** and answered 555 minutes after its stop (attempt 1); its row left the list.
+- Real browser (Playwright): the Overview row, the Settings field (a clipped "12:00 AM" was found and fixed) and saving the setting round-trip.
+- Measured facts are recorded in `docs/KNOWLEDGE.md` ("kiro-cli daily usage limit"), including the 22-of-22 single-error finding and the reset window (20:54Z, 02:39Z].
+
+**Independent review (a separate agent, scored against the success criteria; these are the author's dispositions, not user approvals).**
+- Fixed: with Auto-schedule on, "giving up" re-armed the next day's first attempt. Giving up now records a skip for that stop (test: `test_a_kiro_resume_gives_up_after_the_last_attempt_and_stays_given_up`, both Auto-schedule settings).
+- Fixed: an explicit Schedule time on an old assumed-reset row was bounded from the reset; it is now bounded from now.
+- Not changed, measured: a second limit error on one stop would drop a schedule keyed to the stop time. In the real store 0 of 22 stops have one. Recorded in `docs/KNOWLEDGE.md` under "Invalidated by".
+- Not changed, documented: an already-armed schedule keeps its time when the reset setting changes (README states it); an odd `sess_` folder name could show buttons that fail (every real session folder is a lowercase `sess_<uuid>`; the 272 other folders are `.history` entries); unattended resumes run with all tools trusted, as the rail's Resume does (decided in Q2).
+
+**Roadmap.** `plans/ROADMAP.md` is trimmed to unshipped items on the three entries this change touched (Timed prompts, Auto-resume, Quota-limit auto-schedule), at the user's direction. The long Auto-resume entry further down still carries an unrelated shipped note from 2026-10-14; it was left alone.
+
+**Left open.**
+- Whether `kiro-cli chat --resume-id` refuses a session another process holds (needs two live processes).
+- Overview Usage totals still count child sessions' tokens (`docs/KNOWLEDGE.md`, "Not checked").
+- Resuming a held session through the ACP supervisor (option C) was deferred; the general one-shot timed prompt remains a roadmap item.
+- This file kept its transient `## Exploration Discovery` section, because it is the only record of the decisions made; `/qplan` never ran to fold it.
 
 ---
 

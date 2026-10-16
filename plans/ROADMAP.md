@@ -32,8 +32,8 @@
 - **Open session with a prompt or skill** — prompt delivery and skill loading are proven; `$ARGUMENTS` expansion re-checked on 2.22.0 and still negative, but a skill can read its arguments off the prompt instead
 - **Template prompts** — save reusable per-workspace prompts; build on the read-from-prompt convention rather than `$ARGUMENTS`
 - **Scheduled tasks** — cron-like recurring kiro-cli launches; mechanism is measured and process cost is known, but the auto-permissions gate must come first
-- **Timed prompts** — a one-shot prompt at a wall-clock time; the quota-reset resume for Claude Code and Codex shipped 2026-10-09, an auto-schedule gear-menu toggle shipped 2026-10-13 in `261013_AUTO_SCHEDULE_RESUME_MODE`, the general case and kiro-cli did not
-- **Auto-resume** — **shipped 2026-10-14** in `261014_CRASH_RESTART_AUTO_RESUME_WORKFLOW_CANCEL`: multi-cycle quota-limit resume (a `gave_up` run is removed from `_runs` when `auto_schedule=True`, so `_auto_schedule_new` can rearm it); `auto_schedule` defaults to `True`. Open: kiro-cli sessions (no `resets_at`); terminal-access confirmation for terminal sessions.
+- **Timed prompts** — a one-shot prompt at a wall-clock time, not tied to a quota stop
+- **Auto-resume** — terminal-access confirmation for terminal sessions
 - **Chained launches** — when a session finishes, automatically start the next one; works for sessions PowerAtlas drives, not for terminal sessions
 - **Skills support spike, Claude Code half** — how a Claude Code skill receives its arguments; the kiro-cli half is answered
 - **Plan-file shortcuts** — detect `plans/*.md` files and offer one-click `/qdev` buttons; same read-from-prompt convention
@@ -181,7 +181,7 @@ cost first) · the Electron app.
   - *Auto-permissions gate* — a scheduled task has no human watching, and as configured today nothing prompts, so it runs its tools unsupervised rather than stalling. *Decide permission requests by rule for unattended sessions* under `## Session Control & Integration` is the gate. Its mechanism is measured working (agent-profile `ask` rules, shipped for interactive sessions 2026-09-23 in `260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL`), so this is waiting on that item shipping rather than on an unknown.
 
 - **Timed prompts** — schedule a one-shot prompt for a specific wall-clock time; e.g. "at 11:50am, resume session X with prompt P"; cross-provider (kiro-cli ACP, Claude Code, kiro-cli terminal, Codex terminal); complements *Scheduled tasks* (recurring launches) but distinct: one-shot, prompt-delivery-focused, and works for sessions PowerAtlas does not own.
-  - *Quota-limit auto-schedule* — **shipped 2026-10-13** in `261009-2109_DASHBOARD_OVERVIEW_REHAUL_QUOTA_RESUME_AND_GIT_STATUS` (manual schedule) and `261013_AUTO_SCHEDULE_RESUME_MODE` (auto-schedule gear-menu toggle, skip-on-cancel). Still open: kiro-cli, which is detect-and-show only with no resume; defaulting the payload to the last user prompt instead of "resume"; and a general one-shot timed prompt at any wall-clock time.
+  - *Quota-limit auto-schedule* — open: defaulting the payload to the last user prompt instead of "resume"; and a general one-shot timed prompt at any wall-clock time.
 
 - **Auto-resume** — **shipped 2026-10-14** in `261014_CRASH_RESTART_AUTO_RESUME_WORKFLOW_CANCEL`: multi-cycle cycling fixed (`gave_up` run removed from `_runs` when `auto_schedule=True`) and `auto_schedule` defaulted to `True`. The rest of the design below remains open.
   - *Motivation* — the current *Schedule* flow fires once and stops; a multi-step task running overnight must be rescheduled manually every time the limit resets. Auto-resume repeats until the session finishes or the user opts out.
