@@ -1,8 +1,10 @@
 # Session fidelity, workflow panel tree, Workflows history, and WF agent interaction
 
 > **Date**: 2026-10-16
-> **Status**: Exploring  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Viz/queue reload fidelity; crew panel tree; per-session Workflows history panel; direct prompt to workflow step agents
+> **Memory relied on**: none
+> **Estimated effort**: 1.5–2 weeks
 
 ---
 
@@ -26,7 +28,7 @@ Desired outcome: sessions feel complete after reload; the workflow panel gives a
 
 **Reload fidelity**
 
-- SC1: After a page reload or WebSocket reconnect, visualization iframe cards reappear in the transcript at their original positions. Implemented by recording broadcast viz URLs in `meta["visualizations"]` and resending them via `_handle_subscribe`.
+- SC1: After a page reload or WebSocket reconnect, visualization iframe cards reappear in the transcript appended after the replayed history. Implemented by recording broadcast viz URLs in `meta["visualizations"]` and resending them via `_handle_subscribe`. (Note: position within the original transcript is not preserved — viz frames are broadcast-only and carry no buffer position.)
 - SC2: After a page reload or reconnect, if the session is queued behind another session, the "Waiting for another session's turn to finish…" message is restored. Implemented by adding `queued_behind` to the session frame payload in `_handle_subscribe`.
 
 **Workflow panel tree**
@@ -50,147 +52,540 @@ Desired outcome: sessions feel complete after reload; the workflow panel gives a
 
 **Out of scope / deferred**:
 - Model and effort labels per step row (fields not in current wire frame; no server changes for step metadata)
-- Interaction from the Workflows history panel (past-run steps are read-only; composer only for live in-transcript crew panel)
+- Interaction from the Workflows history panel (past-run steps are view-only; composer only for live in-transcript crew panel)
 - Dependency on `261016_VIZ_STORE...` — viz replay is implemented independently of store file location
 - Rail or Needs Attention indicator for queued-behind sessions (steer-status line restoration only)
 - Completed workflow panels replayed in the transcript itself (covered by the Workflows panel instead)
 
 ---
 
-## Exploration Discovery
+## 1) Current State
 
-<!-- Transient: /qplan folds these into the planning sections and removes this section. -->
+**Broadcast-only frames**: The `SERVER_TYPES` comment block in `acp.py` marks `tool_output`, `subagents`, `queue_status`, `steer_status`, and `visualization` as broadcast-only (sent via `_registry.broadcast()` directly, never via `_emit()` which records into the replay buffer).
 
-### 4. Existing patterns & constraints
+**Visualization frame path**: `_handle_emit_visualization()` in `web.py` builds a `visualization` envelope and calls `acp._registry.broadcast(session_id, frame)` directly, with an inline comment explaining why `_emit()` is intentionally bypassed ("visualization frames are live-only — the file may change between agent turns"). `meta["visualizations"]` does not exist; must be added. `acp.html` handles the `visualization` frame in its main dispatcher, calling `addVisualizationCard(payload.url, payload.title)` from `transcript-renderer.js`. `index.html` has zero occurrences of `"visualization"` — the dashboard never renders viz cards.
 
-**Broadcast-only frames (never in replay buffer)**:
-`acp.py:205–259` `SERVER_TYPES` comment block. Broadcast-only: `tool_output`, `subagents`, `queue_status`, `steer_status`, `visualization`. Recording goes via `_emit()` (acp.py:8380); broadcast-only frames call `_registry.broadcast()` directly.
+**`_handle_subscribe()` current sends**: session frame (with `sessionId`, `cwd`, `created: false`, `turnActive`, `contextPercent` — no `queued` field), optional history_truncated notice, history frame (all recorded events), crew snapshot (if in-flight or any step not done), commands, skills, mcp_servers. Does not send visualizations or the queue-waiting state.
 
-**Visualization frame path**:
-- Emitted at `web.py:7763` with `_registry.broadcast()` directly (not `_emit()`).
-- Handled in `acp.html:5003` — calls `addVisualizationCard(payload.url, payload.title)` from `transcript-renderer.js:2988`.
-- `index.html` has **zero** occurrences of "visualization" — no `dashHandle()` case; dashboard never renders viz cards even for live sessions. SC1 fix and the dashboard viz handler are separate.
-- `meta["visualizations"]` does not exist; must be added.
+**`_set_queued_behind()`**: stores `meta["queued_behind"]` and broadcasts `queue_status{"waiting": bool}`, but `_handle_subscribe` does not include it in the session frame.
 
-**Queue-status frame path**:
-- `_set_queued_behind(session_id, behind)` at `acp.py:4624`: stores `meta["queued_behind"]` and broadcasts `queue_status{"waiting": bool}`.
-- `_handle_subscribe` (`acp.py:9118–9230`) sends a `session` frame (acp.py:9171) but does **not** include `queued_behind` or re-send `queue_status`. Fix: add `"queued": bool(meta.get("queued_behind"))` to the session frame payload.
-- Client handlers at `acp.html:5170` and `index.html:5704` — both guarded by `!replaying` / `!_dashReplaying`. The session frame handler (which fires before history replay) is the right place to restore the message.
+**Crew panel rendering**: `renderCrewPanel(slot)` in `acp.html` renders a flat sorted list. The `role` field from `_subagents_payload()` is a path like `"run-both/step-a"`. No group/container nodes reach the client — they are dropped in `acp.py` before payload construction. Group labels must be inferred client-side by splitting `role` on `/`. Dashboard equivalent `dashSetCrew()` in `index.html` is marked "keep in sync" with `acp.html:setCrew`.
 
-**Crew panel rendering**:
-- `renderCrewPanel(slot)` at `acp.html:1879` — flat list, no hierarchy. `role` field from `acp.py:5903` is a path like `"run-both/step-a"`.
-- `setCrew(entries, toolCallId, workflowLive)` at `acp.html:2007`.
-- `_subagents_payload()` at `acp.py:8425` — strips internal fields, sends `sessionId`, `role`, `task`, `sessionName`, `status`, `action`, `done`, `error`, `startedAt`, `stoppedAt`.
-- No group/container nodes in the wire frame (container nodes silently dropped at `acp.py:6063`). Group labels must be inferred client-side by splitting `role` on `/` and grouping entries with the same first segment.
-- Dashboard equivalent: `dashSetCrew()` in `index.html` — marked "keep in sync" with `acp.html:setCrew`.
+**`_handle_prompt()` guard**: `if session_id in _supervisor.subagent_sessions:` refuses with `_READ_ONLY_SUBAGENT_MESSAGE` (`"read_only_session"`). Workflow step sessions are in both `subagent_sessions` and `_workflow_child_meta`. The fix requires more than a single-guard change: see Phase 6 for the complete modification spec.
 
-**Subscribe re-send conditions for subagents**:
-`_handle_subscribe` at `acp.py:9192`: re-sends `subagents` only if `session_id in _supervisor.inflight OR any(not e["done"] for e in crew.values())`. Completed panels not re-sent. The Workflows panel (SC4) covers this gap instead of extending the subscribe condition.
+**`step_message` frame**: Recorded (not broadcast-only, per `SERVER_TYPES` block comment). Emitted via `_emit(envelope("step_message", {"step": step, "severity": severity, "message": message}, parent_id))`. Payload includes a `step` dict with `sessionId`. Arrives on the parent session's WebSocket. Not currently rendered in the sub-agent panel.
 
-**`_handle_prompt` guard**:
-`acp.py:9547–9548`: refuses `session/prompt` for ANY session in `subagent_sessions` with `_READ_ONLY_SUBAGENT_MESSAGE`. Workflow step sessions are in both `subagent_sessions` and `_workflow_child_meta`. The fix: relax the guard to `if session_id in _supervisor.subagent_sessions and session_id not in _supervisor._workflow_child_meta: refuse`.
+**`_get_tool_diffs_v3(session_id)`**: Pattern for reading a session's `messages.jsonl`. The function is inlined in `acp.py` (per the module's isolation boundary — no import from `data_kiro_v3.py`). It constructs the sessions root inline as `Path.home() / ".kiro" / "sessions"`, excludes `hash_dir.name == "cli"`, validates with `_SESSION_ID_RE.fullmatch(session_id)`, and wraps blocking I/O in a `_scan()` inner function. New `_get_workflow_runs_v3()` must follow this same pattern exactly (no `V3_SESSIONS_ROOT` / `_V3_EXCLUDED_NAMES` import).
 
-**`composer-chrome.js`** (788 lines): pattern for shared session chrome. Each new control follows `initXxxDom({refs})` wired by each page's inline script. Collision check required for any new global names introduced.
+**`composer-chrome.js`** (788 lines): Shared init pattern `initXxxDom({refs})`. Global-scope collision list at the top of the file. New workflow and sub-agent composer inits must clear this list.
 
-**`transcript-renderer.js`** (3066 lines): `clearTranscript()` at line ~2931. `addVisualizationCard()` at line 2988. `initTranscriptDom(refs)` at line ~60. No `innerHTML` anywhere — all `createElement`/`textContent`.
+**Test infrastructure**: `TestAcpReplayOnSubscribe` in `tests/test_web.py` covers subscribe re-send. No tests exist for viz resend or `queued` field. `tests/acp_page.test.mjs` covers crew panel (lines 6241+); no coverage for visualization frame or tree grouping.
 
-**Test infrastructure**:
-- `tests/acp_page.test.mjs`: crew panel has coverage (lines 6241+). `queue_status` cross-session behavior has **no** coverage. Visualization frame has **no** coverage.
-- `tests/test_web.py`: `TestAcpReplayOnSubscribe` (line ~3301) covers subscribe re-send. No tests for `queue_status` resend or `meta["visualizations"]`.
+---
 
-### 5. Risks & mitigations
+## 2) Goal
 
-**R1 — Direct prompt to step session may not resolve step questions correctly.**
-Step question answers normally travel via the parent session relay (`_handle_prompt` on the parent → the parent sends the answer to kiro-cli's workflow engine). If the sub-agent composer sends `session/prompt` directly to the step session, kiro-cli's workflow engine may not clear the step question pending state, causing the step to remain paused indefinitely.
-Mitigation: step question reply cards in the sub-agent panel continue to route via the parent session (same existing path). The sub-agent composer is for free-form prompts only. If kiro-cli is tested and found to handle direct prompts for step questions correctly, the mitigation can be relaxed. Flag as an O1 (execution-contingent Open Item).
+Add six vertical-slice capabilities: (1) viz and queue-status replay on reconnect, (2) dashboard viz display, (3) tree-structured crew panel, (4) Workflows panel shell with live run, (5) past-run history from disk, and (6) direct-prompt composer for live workflow step sessions.
 
-**R2 — `_workflow_child_meta` may be cleared before interaction is attempted.**
-`_workflow_drop_child()` removes a child from `_workflow_child_meta` when `node_complete` arrives. If the user opens the sub-agent panel slightly after a step completes, the guard relaxation `session_id not in _workflow_child_meta` may already be false again, re-blocking the prompt. Mitigation: use `session_id in _supervisor.subagent_sessions and session_id not in _supervisor._workflow_child_meta` as the guard — already correct for the normal case. Add a note that completed steps don't accept prompts.
+---
 
-**R3 — Workflow history extraction from `messages.jsonl`.**
-It is not fully confirmed which record types in the kiro-cli session `messages.jsonl` contain workflow step data (`sub_agent_start`/`sub_agent_complete` vs. raw `_kiro/workflow/*` notification records vs. something else). The implementation phase must probe `messages.jsonl` format for a session with workflow steps before writing the parser.
+## 3) Design Decisions
 
-**R4 — viz `_vizHeightsListening` listener persists across `clearTranscript()`.**
-`transcript-renderer.js:3032–3048` adds a `window.addEventListener('message', ...)` for viz iframes that is never removed. After `clearTranscript()`, the iframes are gone but the listener stays. Because the listener matches on `frames[i].contentWindow === event.source`, orphaned iframes from a cleared session should fail to match — likely harmless, but verify.
+| Decision | Choice | Alternatives considered | Rationale |
+|---|---|---|---|
+| Viz replay tracking | `meta["visualizations"]` list of `{url, title}` dicts appended on each broadcast; full list resent after mcp_servers in `_handle_subscribe` | Record viz events in the replay buffer | Preserves the broadcast-only contract; no buffer-semantics change |
+| Viz replay position | Resent at end of subscribe (appears appended after replayed transcript) | Reconstruct in-order position | In-order requires buffer position tracking; "append after history" is achievable and avoids complication |
+| Queue-waiting restore | `"queued": bool(meta.get("queued_behind"))` added to session frame payload in `_handle_subscribe` | Resend a separate `queue_status` frame on subscribe | Session frame already fires once before history replay; a single added field suffices |
+| Crew tree grouping | Client-side only, infer from `role` path split on `/`; no server-side change | Add explicit container nodes to `_subagents_payload` | Container nodes are already dropped in `acp.py`; client-side inference requires no protocol change |
+| Group expand/collapse default | Groups with any running/waiting step start expanded; all-done groups start collapsed | Always expanded; always collapsed | Running groups need immediate visibility; done groups reduce visual clutter |
+| Workflows panel location | Right-side panel via `composer-chrome.js initWorkflowsDom()`, accessible from session toolbar | Inline below crew panel; separate modal | Consistent with existing panel pattern; non-intrusive |
+| Workflow history data source | Parse kiro-cli `messages.jsonl` via new `GET /api/workflow-history?sid=` endpoint | Hold in-memory in PowerAtlas | Survives PowerAtlas restart; no dependency on session being active |
+| Messages.jsonl parser placement | New function `_get_workflow_runs_v3()` in `acp.py` alongside `_get_tool_diffs_v3()` | New `data_kiro_wf.py` module | Minimal new-file overhead; identical pattern and import scope already in `acp.py` |
+| WF prompt guard relaxation | Add dedicated early branch in `_handle_prompt` for `_workflow_child_meta` sessions, bypassing the `sessions` check and the inflight/eviction body; the existing `subagent_sessions` guard still applies to non-workflow sub-agents | Simple single-guard relaxation (insufficient — sessions check blocks step sessions) | Step sessions live only in `subagent_sessions`, not `sessions`; a one-line change cannot route correctly |
+| Composer activation gate | Track SIDs from `workflowLive: true` subagents frames in a module-level `Set`; enable composer for SIDs in the set | Per-entry `isWorkflowStep` field from server | No server change needed; `workflowLive` is already a reliable frame-level indicator |
+| Step question cards in sub-agent panel | Filter incoming `step_message` frames on the main WebSocket by matching `payload.step.sessionId === subViewSid` | New server-side relay frame; polling | No new frame type; `step_message` already carries `step.sessionId` |
+| `_vizHeightsListening` listener orphan (O3 resolved) | Confirmed harmless — removed iframes leave `window.frames` (live HTMLCollection); orphaned contentWindow never matches any live `frames[i].contentWindow` | Remove listener after clearTranscript | `window.frames` is live; no code change needed |
 
-**R5 — `composer-chrome.js` global name collision.**
-Any new global names for the Workflows panel must be checked against the collision list in `composer-chrome.js:30–33`.
+---
 
-### Visual design (confirmed via /qvisualize prototype, 2026-10-16)
+## 4) External Dependencies & Costs
 
-- **Crew panel tree**: Tree A — dedicated group-label rows with chevron, clickable to expand/collapse child step rows. Collapsed group shows a status summary ("4 done", "running") on the group row. Group names inferred from `role` path segments; `parallel` tag shown when applicable.
-- **Workflows panel**: "with step rows" style — each run shows step-level timing when expanded (step name + elapsed time per row).
-- **Sub-agent panel composer**: always-present text box at the bottom for live steps, sends directly to step session. When a step question is pending, an amber question-card appears above the composer with quick-pick option buttons — the composer remains and works the same way. No design variants — one design, two states.
+Code-only change. No cloud resources, CI/CD, IAM, DNS, or third-party service changes required. No recurring cost impact. No operator-run migration or rollout.
 
-### 6. Resolved decisions
+| Category | Change needed | Owner | Status |
+|---|---|---|---|
+| CI/CD | None | — | N/A |
+| IAM / Permissions | None | — | N/A |
+| Cloud resources | None | — | N/A |
+| Data migration / backfill | None | — | N/A |
+| Rollout / cutover | None | — | N/A |
+| Secrets / Env vars | None | — | N/A |
 
-- Q1: How to decompose? — A: ok (Option B) — Decision: Two files — this file (fidelity + workflow UI) and `261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE.md` (session-switch bugs)
-- Q2: Workflow UI scope? — A: A+C — Decision: Tree structure in inline crew panel + Workflows history panel
-- Q3: Workflows panel placement? — A: right-side panel, both pages — Decision: Right-side panel accessible from session toolbar in both /acp and dashboard; implemented via `composer-chrome.js`
-- Q4: Workflow history data source? — A: ok (Option B) — Decision: Parse kiro-cli session `messages.jsonl` on subscribe; new endpoint `/api/workflow-history?sid=…`; not dependent on PowerAtlas holding the session
-- Q5: Per-step metadata? — A: current fields only — Decision: Agent name (`sessionName`/`task`), role-derived group, status icon, action text, elapsed; no model/effort (no server changes for step data)
-- Q6: History panel click behavior? — A + interact with wf agents — Decision: Click a live step → opens sub-agent panel with composer; past runs view-only
-- Q7: WF agent interaction mechanism? — A: C — Decision: Both step question replies (via parent, unchanged) and direct free-form prompt (directly to step `sessionId` via `session/prompt`)
-- Q8: Interaction from history panel? — A: ok — Decision: Interaction only from live in-transcript crew panel; Workflows history panel is view-only for past runs
-- Q9: Workflows panel live content? — A: ok — Decision: Panel shows currently-running workflow with live step updates + completed past runs below
-- Q10: Sub-agent composer scope? — A: ok — Decision: Both /acp (`#acpSubPanel`) and dashboard (`#dashSubPanel`) via `composer-chrome.js`
+---
 
-### 7. Open items
+## 5) Implementation Phases
 
-- O1 (execution-contingent): Verify whether kiro-cli's workflow engine correctly processes step question answers that arrive via direct `session/prompt` to the step session (vs. via the parent relay). If it does, the mitigation for R1 (separate routing for step question replies) can be simplified.
-- O2 (execution-contingent): Probe `messages.jsonl` for a session with workflow steps to identify which record types carry workflow step data (e.g., `sub_agent_start`/`sub_agent_complete` payload shapes, or raw notification records). Required before writing the workflow history parser.
-- O3 (deterministic): Confirm `_vizHeightsListening` listener orphan is harmless (R4) — a read of `transcript-renderer.js:3032–3048` and a test that clears the transcript with a viz card present.
+### Phase 1: Reload fidelity [QA]
 
-### 8. Recommended approach
+**Goal**: After a WebSocket reconnect or page reload, visualization iframe cards reappear in the transcript and the queue-waiting steer-status is restored.
 
-**Phase 1 — Reload fidelity** (Python + minimal JS)
-- `acp.py`: when a `visualization` frame is broadcast, also append the URL to `meta.setdefault("visualizations", [])`.
-- `acp.py` `_handle_subscribe`: iterate `meta.get("visualizations", [])` and re-send each as a `visualization` envelope before the history frame.
-- `acp.py` `_handle_subscribe`: add `"queued": bool(meta.get("queued_behind"))` to the session frame payload.
-- `acp.html` session frame handler: if `payload.queued`, call `setSteerStatus('Waiting for another session\u2019s turn to finish\u2026')`.
-- `index.html` session frame handler: same via `setDashSteerStatus`.
-- `test_web.py`: add tests for both new subscribe behaviors.
+**File scope**: `src/power_atlas/web.py`, `src/power_atlas/acp.py`, `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`, `tests/test_web.py`, `docs/KNOWLEDGE.md`
 
-**Phase 2 — Dashboard viz handler** (JS only)
-- `index.html` `dashHandle()`: add a `visualization` case that calls `addVisualizationCard(payload.url, payload.title)` from `transcript-renderer.js`.
-- `acp_page.test.mjs`: add coverage for the visualization frame case in the dashboard.
+**Covers**: SC1, SC2
 
-**Phase 3 — Crew panel tree structure** (JS + CSS)
-- `acp.html` `renderCrewPanel()`: parse `role` on `/`; build group-label rows (`div.acp-crew-group`) above their child step rows. Aggregate group status from children.
-- `index.html` `dashSetCrew()` / `dashRenderCrewPanel()`: mirror changes.
-- `style.css`: add `.acp-crew-group` styles (indent children, group header styling).
-- `acp_page.test.mjs`: add crew panel tree rendering tests.
+> **Coordination with sibling plan `261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE.md`**: Steps 3–5 below (the `"queued"` session frame field and the steer-status restore) duplicate SESSION_SWITCH SC4/Phase 2. Phase 2 of this plan (dashboard viz handler) duplicates SESSION_SWITCH SC5/Phase 3. **If SESSION_SWITCH has already landed, skip Steps 3–5 here and skip Phase 2 of this plan entirely.** If running both plans in parallel, coordinate around merge conflicts in `_handle_subscribe` and the JS session frame handlers.
 
-**Phase 4 — Workflows panel shell** (JS + CSS, both pages)
-- Add `#acpWorkflowsPanel` markup to `acp.html` and `#dashWorkflowsPanel` to `index.html`.
-- Add toggle button to session toolbar.
-- Wire via `composer-chrome.js` `initWorkflowsDom({refs})`.
-- Panel shows live current run from `subagents` frames (already flowing); populates as they arrive.
-- `style.css`: panel layout, toggle button, run-row/step-row styles.
+**Changes**:
 
-**Phase 5 — Workflow history from disk** (Python + JS)
-- `data_kiro_v3.py` (or new `data_kiro_workflow.py`): function `parse_workflow_runs(session_id)` — reads the kiro-cli session's `messages.jsonl`, extracts workflow step records (probe O2 first), returns a list of `{runId, runLabel, startedAt, completedAt, steps: [{name, role, status, startedAt, stoppedAt}]}`.
-- `web.py`: new endpoint `GET /api/workflow-history?sid=…` returns the parsed runs. Authenticated (loopback and remote).
-- `acp.html` / `index.html`: on Workflows panel open, fetch `/api/workflow-history?sid=…` and render past runs below the live run.
-- `test_web.py`: add endpoint tests with fixture `messages.jsonl` files.
+1. **`web.py` `_handle_emit_visualization()`**: After `acp._registry.broadcast(session_id, frame)`, record the visualization in session meta:
+   - Get `meta = acp._supervisor.sessions.get(session_id)`.
+   - If `meta is not None`, append `{"url": url_path, "title": title}` to `meta.setdefault("visualizations", [])`.
+   - `url_path` is the `/api/viz/...` value already built for the frame; `title` is the title argument passed to the function.
+   - **Size cap**: limit the list to 20 entries: after append, `meta["visualizations"] = meta["visualizations"][-20:]`.
+   - The guard on `meta is not None` handles sessions that close between the broadcast and the append.
 
-**Phase 6 — Sub-agent composer and direct step prompt** (Python + JS, both pages)
-- `acp.py` `_handle_prompt`: relax guard — `if session_id in _supervisor.subagent_sessions and session_id not in _supervisor._workflow_child_meta: refuse(...)`.
-- `acp.html` `#acpSubPanel`: add a composer (prompt input + send button). On send: call `send('prompt', {sessionId: subViewSid, message: text})` directly to the step session.
-- `index.html` `#dashSubPanel`: mirror.
-- `composer-chrome.js`: add `initSubAgentComposerDom({refs})` and `setSubAgentComposerEnabled(bool)`.
-- `acp.html` `openSubagent()`: enable the composer only when `subViewSid` is in `_supervisor._workflow_child_meta` (live step), disable for done/closed steps and non-workflow sub-agents.
-- `acp_page.test.mjs`: add coverage for the new composer behavior.
-- `test_web.py`: add `_handle_prompt` guard relaxation tests.
+2. **`acp.py` `_handle_subscribe()`**: Add a viz resend block at the very end of the function (after the `mcp_servers` resend block), so viz frames arrive after history replay on the client:
+   - If `meta.get("visualizations")`, first send a single `steer_status` (or `notification`) envelope with text "— Restored visualizations —" to signal these are restores. Verify the correct "restored marker" frame type by checking whether any existing `_handle_subscribe` path sends a "Restored" annotation; use the same type/format.
+   - Iterate `meta.get("visualizations", [])` and for each entry send `conn.send(envelope("visualization", {"url": entry["url"], "title": entry["title"]}, session_id))`.
 
-### 9. QA environment
+3. **`acp.py` `_handle_subscribe()`**: Add `"queued": bool(meta.get("queued_behind"))` to the existing session frame envelope payload (alongside `sessionId`, `cwd`, `created`, `turnActive`, `contextPercent`).
+
+4. **`acp.html` session frame handler**: In the case that handles a non-`created` `session` payload, add: `if (payload.queued) setSteerStatus('Waiting for another session\u2019s turn to finish\u2026');`
+
+5. **`index.html` session frame handler**: In the equivalent `case 'session'` branch of `dashHandle()`, add the same `payload.queued` check calling the dashboard's steer-status setter.
+
+6. **`tests/test_web.py`** (`TestAcpReplayOnSubscribe` or a new group alongside it):
+   - Test A: broadcast a `visualization` frame to a session (using existing mock infrastructure); subscribe with a fresh connection; assert the subscriber receives a `visualization` envelope with the correct `url` and `title`.
+   - Test B: set `meta["queued_behind"]` to a truthy value on a session; subscribe; assert the session frame payload has `"queued": True`.
+   - Test C: broadcast 25 viz frames to a session; subscribe; assert the subscriber receives no more than 20 `visualization` envelopes (size cap).
+   - All tests use synthetic session IDs only — no real paths or IDs from disk.
+
+**O3 verification** (no code change): Read `addVisualizationCard()` in `transcript-renderer.js` and confirm the `window.addEventListener('message', ...)` listener it adds matches events against active iframes only (whether by iterating `window.frames`, `querySelectorAll`, or a stored reference — the key property is that removed iframes cannot produce matching events). Tick this criterion after reading; no code change required.
+
+**Exit criteria**:
+- [ ] `meta["visualizations"]` list in `web.py` populated as `[{"url": ..., "title": ...}, ...]` after each `emit_visualization` broadcast; guarded for missing session; capped at 20 entries
+- [ ] `_handle_subscribe` sends a "Restored visualizations" marker before the first resent viz (when any entries exist)
+- [ ] `_handle_subscribe` resends all stored viz as `visualization` envelopes after the `mcp_servers` block (end of function)
+- [ ] Session frame payload in `_handle_subscribe` includes `"queued": bool(meta.get("queued_behind"))`
+- [ ] `acp.html` session frame handler: restores steer-status text when `payload.queued` is true
+- [ ] `index.html` session frame handler: mirrors queued restoration
+- [ ] O3: `addVisualizationCard`'s message listener confirmed harmless for cleared iframes (read implementation in `transcript-renderer.js`; verify removed iframes cannot produce matching events; no code change required — tick after reading)
+- [ ] `tests/test_web.py` Tests A, B, C written (A: viz resend; B: queued field; C: size cap); all use synthetic session IDs
+- [ ] `pytest tests/test_web.py --timeout=300` passes
+- [ ] `docs/KNOWLEDGE.md` `_handle_subscribe` section updated: note `visualization` frame resend on subscribe and `"queued"` field in session frame
+
+---
+
+### Phase 2: Dashboard viz handler [QA]
+
+**Goal**: The dashboard transcript panel renders visualization iframe cards when a live session emits one.
+
+**File scope**: `src/power_atlas/templates/index.html`, `tests/acp_page.test.mjs`
+
+**Covers**: SC1 (dashboard side — enables dashboard to receive and replay viz frames)
+
+> **Coordination**: This phase is also covered by SESSION_SWITCH plan SC5/Phase 3. Skip if SESSION_SWITCH has already landed.
+
+**Changes**:
+
+1. **`index.html` `dashHandle()`**: Add a `'visualization'` case to the frame dispatch. Guard with `!_dashReplaying` (same pattern as `queue_status` and `steer_status` in `dashHandle`):
+   ```javascript
+   // Sketch — match the existing case style in dashHandle()
+   case 'visualization':
+       if (!_dashReplaying) addVisualizationCard(payload.url, payload.title);
+       break;
+   ```
+   Before shipping: verify `addVisualizationCard` is accessible in `index.html`'s script scope (grep for the function in the page's loaded scripts or inline script blocks).
+
+2. **`tests/acp_page.test.mjs`**: Add a test case for the dashboard `visualization` frame — dispatch a `visualization` frame to the dashboard handler and assert a viz card element is inserted into the transcript DOM.
+
+**Exit criteria**:
+- [ ] `dashHandle()` has a `'visualization'` case calling `addVisualizationCard(payload.url, payload.title)`
+- [ ] `addVisualizationCard` confirmed accessible in `index.html`'s script scope (grep or read the template imports)
+- [ ] No `innerHTML` used for viz card content (verify `addVisualizationCard` in `transcript-renderer.js` uses `createElement`/`textContent`)
+- [ ] `tests/acp_page.test.mjs`: new viz-frame test for the dashboard passes
+- [ ] `node tests/acp_page.test.mjs` passes
+
+---
+
+### Phase 3: Crew panel tree structure [QA]
+
+**Goal**: The inline crew panel groups step rows under collapsible group-label rows inferred client-side from the `role` path, in both /acp and dashboard.
+
+**File scope**: `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`, `src/power_atlas/static/style.css`, `tests/acp_page.test.mjs`, `docs/KNOWLEDGE.md`
+
+**Covers**: SC3
+
+**Changes**:
+
+1. **`acp.html` `renderCrewPanel(slot)`**: Replace the flat list render with a tree:
+   - Group entries by first `role` path segment: `const [group] = (entry.role || '').split('/')`. Entries whose role has no `/` (or is empty) use `null` as the group key (rendered at root level without a group header).
+   - Build a `Map<string|null, entry[]>` of groups.
+   - For the `null` group: render entries directly as step rows at the root level.
+   - For each named group: render a group-label row (`div.acp-crew-group`) above the group's step rows, wrapped in a `div.acp-crew-group-children`.
+   - **Group-label row content** (no `innerHTML`): chevron span (text `▶` collapsed, `▼` expanded), group name text node, aggregate status badge span.
+   - **Aggregate status badge**: any step with `entry.status === 'failed'` → text "has failures" (start expanded); else any step with `entry.status === 'working'` → text "running" (start expanded); else any `entry.status === 'waiting'` → text "waiting" (start expanded); else all done → text "N done" (start collapsed).
+   - **Initial expand state**: start EXPANDED if any step in the group has `status === 'working'`, `'waiting'`, or `'failed'`; otherwise start COLLAPSED.
+   - **Accessibility**: group-label rows must be keyboard-activatable — add `role="button"`, `tabindex="0"`, and a `keydown` handler for Enter/Space (same toggle logic as the click handler).
+   - **Toggle behavior**: clicking a group-label row toggles the `hidden` attribute on its sibling `div.acp-crew-group-children`. Update the chevron text accordingly. Update `aria-expanded` on the group-label row.
+   - No `innerHTML` anywhere in this rendering (per `acp_page.test.mjs` prohibition).
+
+2. **`index.html` `dashSetCrew()` / `dashRenderCrewPanel()`**: Apply the same tree-building algorithm, mirroring `acp.html:setCrew` as the existing "keep in sync" comment instructs. Duplicate the logic (same pattern as other crew rendering that already exists in both files).
+
+3. **`style.css`**: Add:
+   - `.acp-crew-group { cursor: pointer; user-select: none; }` — group-label row (clickable)
+   - `.acp-crew-group-children { }` — wrapper for child step rows
+   - `.acp-crew-group-children[hidden] { display: none; }` — ensures `hidden` attribute is respected even when CSS display rules exist
+   - `.acp-crew-badge { }` — aggregate status badge styling
+   - Chevron and indentation styles for child rows
+
+**Exit criteria**:
+- [ ] A `subagents` payload with `role: "run-both/step-a"` renders a group-label row labeled "run-both" in `acp.html`'s crew panel
+- [ ] Group-label row click collapses and re-expands child step rows
+- [ ] Group badge shows correct aggregate status ("has failures" / running / waiting / N done) — failed groups start expanded
+- [ ] Group-label rows have `role="button"`, `tabindex="0"`, `aria-expanded`, and Enter/Space keydown handlers
+- [ ] Entries with no `/` in `role` render at root level (no group header)
+- [ ] Groups with any running/waiting step start expanded; all-done groups start collapsed
+- [ ] `index.html` crew panel produces identical tree structure
+- [ ] No `innerHTML` used in any tree rendering path
+- [ ] `style.css` includes `.acp-crew-group-children[hidden] { display: none; }`
+- [ ] `tests/acp_page.test.mjs`: new tests for grouped crew rendering and click-toggle
+- [ ] `node tests/acp_page.test.mjs` passes
+- [ ] `docs/KNOWLEDGE.md` crew panel section updated: flat-list description replaced with tree-structure description (group-label rows, role-path grouping)
+
+---
+
+### Phase 4: Workflows panel shell [QA]
+
+**Goal**: A Workflows right-side panel is accessible from the session toolbar in both /acp and dashboard, populated with the live run's step rows and updated by incoming `subagents` frames.
+
+**File scope**: `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`, `src/power_atlas/static/composer-chrome.js`, `src/power_atlas/static/style.css`, `tests/acp_page.test.mjs`
+
+**Covers**: SC4 (live-run section), SC6 (click live step → opens sub-agent panel)
+
+**Pre-check**: Before adding globals to `composer-chrome.js`, read the collision-list comment near the top of that file and verify no name conflicts exist for any new exported name.
+
+**Changes**:
+
+1. **`acp.html`**:
+   - Add `<div id="acpWorkflowsPanel" hidden>` with two child containers: `<div id="acpWorkflowsLiveRun">` (live current run) and `<div id="acpWorkflowsPastRuns">` (Phase 5 populates this).
+   - Add a toggle button in the session toolbar (`<button id="acpWorkflowsToggle" aria-expanded="false" aria-controls="acpWorkflowsPanel">Workflows</button>` or equivalent icon button matching the toolbar's style).
+   - Wire: clicking `#acpWorkflowsToggle` toggles the `hidden` attribute on `#acpWorkflowsPanel` and updates `aria-expanded` on the button.
+   - Call `initWorkflowsDom({...})` at page init with the new element refs.
+
+2. **`index.html`**: Mirror with `#dashWorkflowsPanel`, `#dashWorkflowsLiveRun`, `#dashWorkflowsPastRuns`, `#dashWorkflowsToggle` (with `aria-expanded="false"` and `aria-controls="dashWorkflowsPanel"`).
+
+3. **`composer-chrome.js` `initWorkflowsDom({refs})`** (new function):
+   - Accepts: `{liveRunContainer, pastRunsContainer, toggleBtn, panelEl, openSubagentFn}` (refs differ per page; each page passes its own).
+   - Exports `setWorkflowsLiveRun(entries)`:
+     - Clears `liveRunContainer`.
+     - For each entry in `entries`: create a `div.wf-step-row` containing the step name (from `entry.sessionName || entry.role`), a status icon, and elapsed time (computed from `entry.startedAt` / `entry.stoppedAt`; show a running indicator if `entry.stoppedAt` is null).
+     - Clicking a `.wf-step-row` calls `openSubagentFn(entry.sessionId)`.
+     - No `innerHTML`.
+   - Exports `clearWorkflowsLiveRun()`: clears `liveRunContainer`.
+
+4. **`acp.html` / `index.html` `subagents` frame handler**: In addition to updating the crew panel, also:
+   - Call `setWorkflowsLiveRun(payload.subagents)` when `payload.workflowLive === true`.
+   - Call `clearWorkflowsLiveRun()` when `payload.subagents.length === 0`.
+
+5. **`style.css`**: Panel layout, toggle button, `.wf-step-row` styles, panel header. CSS for the `[hidden]` attribute override if any element toggles via CSS class alongside `hidden`.
+
+**Exit criteria**:
+- [ ] `#acpWorkflowsPanel` in `acp.html`; toolbar toggle shows/hides it correctly; toggle button has `aria-expanded` and `aria-controls`
+- [ ] `#dashWorkflowsPanel` in `index.html`; toolbar toggle shows/hides it correctly; same ARIA attributes
+- [ ] No name collision with existing `composer-chrome.js` globals (verified against collision list)
+- [ ] `initWorkflowsDom`, `setWorkflowsLiveRun`, `clearWorkflowsLiveRun` exported from `composer-chrome.js`
+- [ ] Sending a `subagents` frame with `workflowLive: true` entries populates `#acpWorkflowsLiveRun` and `#dashWorkflowsLiveRun`
+- [ ] Clicking a live step row in the Workflows panel calls `openSubagentFn(entry.sessionId)` to open the sub-agent panel
+- [ ] No `innerHTML` in any step row rendering
+- [ ] Hard reload (no PowerAtlas restart) picks up JS/CSS changes
+- [ ] `tests/acp_page.test.mjs`: panel toggle and live-run population tests pass
+- [ ] `node tests/acp_page.test.mjs` passes
+
+---
+
+### Phase 5: Workflow history from disk [QA]
+
+**Goal**: The Workflows panel populates with completed past runs loaded from kiro-cli's `messages.jsonl`; runs are collapsible and view-only.
+
+**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/web.py`, `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`, `tests/test_web.py`, `docs/KNOWLEDGE.md`
+
+**Covers**: SC4 (full panel including history), SC5 (collapsible, view-only past runs)
+
+**Pre-probe (O2 — required before writing the parser)**: Locate a kiro-cli session directory containing workflow steps under `~/.kiro/sessions/`. Read its `messages.jsonl` and identify: (a) the exact payload fields on `sub_agent_start` records for workflow steps (check for `workflowId`, `nodeId`, `role`, `task`, `subSessionId`); (b) the payload fields on `sub_agent_complete` records; (c) whether workflow run boundaries are marked by separate notification-type records or inferred from `sub_agent_start` grouping by `workflowId`.
+
+Expected shapes (from kiro-cli protocol documentation and existing PowerAtlas code):
+- `sub_agent_start`: `{"type": "sub_agent_start", "subSessionId": "sess_…", "role": "…/…", "workflowId": "wf_…", "task": "…", …}`
+- `sub_agent_complete`: `{"type": "sub_agent_complete", "subSessionId": "sess_…", "status": "success|failed", …timestamps}`
+
+If the probe reveals different field names, adapt the parser and add a comment noting the deviation.
+
+**Changes**:
+
+1. **`acp.py` `_get_workflow_runs_v3(session_id: str) -> list[dict]`** (new function, alongside `_get_tool_diffs_v3`):
+   - Follow the `_get_tool_diffs_v3` pattern exactly: inline the sessions root as `sessions_root = Path.home() / ".kiro" / "sessions"` (do NOT import `V3_SESSIONS_ROOT` from `data_kiro_v3` — that import violates `acp.py`'s isolation boundary per the module docstring). Exclude `hash_dir.name == "cli"` (the exclusion is inlined, not from `_V3_EXCLUDED_NAMES`).
+   - Validate with `if not _SESSION_ID_RE.fullmatch(session_id): return []`.
+   - Wrap blocking I/O in a `_scan()` inner function (same pattern as `_get_tool_diffs_v3`): `def _scan(): ...` followed by `return _scan()`. Callers invoke via `asyncio.to_thread`.
+   - Return runs ordered oldest-first.
+
+2. **`web.py` `GET /api/workflow-history`** (new route):
+   - Route: `GET /api/workflow-history` with query parameter `sid`.
+   - Authentication: this route is protected by the `LoopbackCredentialGate` ASGI middleware — do NOT add a `@_local_gate` decorator (that is not a decorator in this codebase). Ensure the route is NOT listed as exempt in `_local_gate_exempt()`.
+   - Validate `sid` with `_valid_session_id(sid)` before use; return HTTP 400 if invalid.
+   - Call `_get_workflow_runs_v3` via `asyncio.to_thread`: `runs = await asyncio.to_thread(_get_workflow_runs_v3, sid)` (the function does blocking I/O — same wrapping pattern as `_get_tool_diffs_v3`).
+   - Import `_get_workflow_runs_v3` from `acp`: `from . import acp as _acp; runs = await asyncio.to_thread(_acp._get_workflow_runs_v3, sid)`.
+   - Return `JSONResponse({"runs": runs})`.
+
+3. **`acp.html` / `index.html` Workflows panel**:
+   - On toggle button click (panel open): if `#acpWorkflowsPastRuns` (or dashboard equivalent) is empty, show a "Loading…" text node in the container, then `fetch('/api/workflow-history?sid=' + encodeURIComponent(currentSessionId))`.
+   - On fetch success (HTTP 200): remove the loading indicator, parse JSON, call `renderWorkflowsPastRuns(runs)`.
+   - On fetch error (non-2xx or network error): remove loading indicator, show a brief "Could not load workflow history." text node (no `innerHTML`).
+   - `renderWorkflowsPastRuns(runs)`: if `runs.length === 0`, show "No workflow runs in this session." text node. Otherwise render runs **newest-first** (reverse the array): for each run, create a `<details>/<summary>` collapsible element. The most recent run (first after reversal) starts `open` by default; all others start closed. Summary shows run label + status. Body shows step rows (same `.wf-step-row` style from Phase 4).
+   - Past run step rows are view-only: no click handler, `cursor: default` (not pointer).
+   - No `innerHTML`.
+
+4. **`tests/test_web.py`** (`TestWorkflowHistory` class or equivalent):
+   - Create a fixture `messages.jsonl` with synthetic `sub_agent_start`/`sub_agent_complete` records using placeholder session IDs (e.g., `"sess_placeholder_wf_step_1"`) and placeholder workflow IDs (e.g., `"wf_placeholder_run_1"`). No real paths or home-directory strings.
+   - Test A: `GET /api/workflow-history?sid=<valid>` returns 200 with `{"runs": [...]}` matching the fixture.
+   - Test B: `GET /api/workflow-history?sid=<valid>` returns 200 with `{"runs": []}` for a session with no workflow records.
+   - Test C: `GET /api/workflow-history?sid=<bad_format>` returns 400.
+   - Test D: `GET /api/workflow-history?sid=<valid>` without `pa_local` cookie returns 403.
+
+**Exit criteria**:
+- [ ] Pre-probe completed; parser comment notes actual field shapes if they differ from expected
+- [ ] `_get_workflow_runs_v3(session_id)` returns a correctly shaped list for a fixture with synthetic workflow records
+- [ ] `GET /api/workflow-history?sid=<valid>` returns 200 `{"runs": [...]}` when authenticated
+- [ ] `GET /api/workflow-history?sid=<bad_format>` returns 400
+- [ ] `GET /api/workflow-history` without auth returns 403
+- [ ] Workflows panel shows a loading indicator while fetching; on error shows "Could not load workflow history." message; on empty list shows "No workflow runs." message
+- [ ] Past runs rendered newest-first; most recent run starts `open`; others start closed
+- [ ] Past run step rows are view-only (no click handler, cursor: default)
+- [ ] All test fixtures use placeholder/synthetic session IDs and paths — no real home-directory paths or IDs
+- [ ] `pytest tests/test_web.py --timeout=300` passes
+- [ ] Python restart required after `acp.py` and `web.py` changes (note: restart PowerAtlas after deploying this phase)
+- [ ] `docs/KNOWLEDGE.md` `_get_tool_diffs_v3` section updated: note `_get_workflow_runs_v3` added as sibling function for workflow run extraction
+
+---
+
+### Phase 6: Sub-agent composer and direct step prompt [QA]
+
+**Goal**: The sub-agent transcript panel for a live workflow step has a text composer for direct prompts; step question cards from `step_message` frames also appear in the sub-agent panel.
+
+**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`, `src/power_atlas/static/composer-chrome.js`, `tests/acp_page.test.mjs`, `tests/test_web.py`, `docs/KNOWLEDGE.md`
+
+**Covers**: SC7, SC8
+
+**Changes**:
+
+1. **`acp.py` `_handle_prompt()`**: The guard chain requires a comprehensive modification for workflow step sessions — a single-guard relaxation is insufficient because step sessions live only in `subagent_sessions`, not in `sessions`, and the subsequent guards assume top-level sessions. Add a **dedicated early branch** for `_workflow_child_meta` sessions, placed immediately after the `bad_payload` validation checks, before the subagent guard:
+
+   ```python
+   # Sketch — adapt to exact code structure; place BEFORE the subagent_sessions guard
+   if session_id in _supervisor._workflow_child_meta:
+       child_meta = _supervisor._workflow_child_meta[session_id]
+       parent_id = child_meta.get("parent")
+       # Allow a connection subscribed to the parent OR to the step itself.
+       if conn is not None and conn.session_id not in (session_id, parent_id):
+           refuse("not_subscribed",
+                  "Subscribe to this step session or its parent session before prompting it.")
+           return
+       # Bypass sessions check (step sessions are in subagent_sessions, not sessions).
+       # Do NOT run inflight tracking, crew eviction, or _workflow_free_orphans —
+       # those are parent-session operations.
+       log.info("ACP step-direct prompt: step=%s parent=%s (%d chars)",
+                session_id, parent_id, len(text))
+       # Route the prompt to the step session via the supervisor.
+       # IMPORTANT: Before implementing, read `_supervisor.prompt()` to verify whether
+       # it accesses `_supervisor.sessions[session_id]` or resolves the connection
+       # independently. If it accesses sessions[], a secondary lookup via
+       # subagent_sessions is required. Adjust accordingly and record any deviation
+       # in the Phase 9 implementation divergences section.
+       try:
+           result = await _supervisor.prompt(session_id, spoken, images)
+       except Exception:
+           log.exception("ACP step-direct prompt failed: step=%s", session_id)
+           _emit(session_id, error_frame("internal_error",
+                 "The step prompt failed; see orchestrator.log.", session_id))
+       return
+   ```
+
+   The existing `if session_id in _supervisor.subagent_sessions:` guard (below the early branch) remains unchanged for non-`_workflow_child_meta` sub-agent sessions (they remain read-only).
+
+2. **`composer-chrome.js` `initSubAgentComposerDom({refs})`** (new function):
+   - Accepts: `{subComposerInput, subComposerSend, subComposerContainer, sendFn}`.
+   - `sendFn` is the page's WebSocket send function reference.
+   - Exports `setSubAgentComposerEnabled(enabled, targetSid)`: when `enabled`, show `subComposerContainer` and store `targetSid`; when disabled, hide the container, clear `targetSid`, and show a brief "Step completed." text in the container if `targetSid` was previously set (to give visual feedback when the composer disappears mid-session).
+   - On send button click and on Enter key in `subComposerInput`: if `targetSid` is set and `subComposerInput.value.trim()` is non-empty:
+     - Capture the text value before clearing.
+     - Check WebSocket ready-state: if OPEN, call `sendFn('prompt', {prompt: capturedText})` (note: the payload key is **`prompt`**, not `message` — `_handle_prompt` reads `payload.get("prompt")`; the `sessionId` is in the outer envelope via `conn.session_id` when subscribed to the step session, OR use `sendFn('prompt', {prompt: capturedText}, targetSid)` if the page's `send()` accepts a third envelope-sessionId argument).
+     - On success: clear the input.
+     - On send error (WebSocket not OPEN or exception): do NOT clear the input; show a brief "Send failed — check connection." note in the composer area (no `innerHTML`).
+   - Verify the correct `send()` call signature in the page (whether sessionId goes as a third arg or must be in the payload) before finalizing this call.
+   - Verify no collision with existing composer-chrome globals.
+
+3. **`acp.html` `#acpSubPanel`**: Add a composer at the panel bottom (no `innerHTML` anywhere):
+   - `<div id="acpSubComposerContainer" hidden>` containing an `<input type="text" id="acpSubComposerInput">`, a `<button id="acpSubComposerSend">Send</button>`, and a `<span id="acpSubComposerStatus" hidden>` (for error/status messages).
+   - Call `initSubAgentComposerDom({subComposerInput: acpSubComposerInput, subComposerSend: acpSubComposerSend, subComposerContainer: acpSubComposerContainer, sendFn: send})` at page init.
+   - Add `role="button"` and `tabindex="0"` to the `#acpSubComposerSend` button if it is a `<button>` element (it already has implicit keyboard support as a button; this is a reminder not to use a `div` as the send button).
+
+4. **`acp.html` `openSubagent(sessionId)`**: Track live workflow child SIDs:
+   - Maintain a module-level `Set` named `_liveWorkflowChildSids`.
+   - When a `subagents` frame arrives with `payload.workflowLive === true`: add all `payload.subagents[i].sessionId` values to `_liveWorkflowChildSids`.
+   - When a crew-eviction broadcast arrives (empty `subagents` frame, `payload.workflowLive === false` with an empty array, or a `session` frame for a new session — i.e., on session switch): clear `_liveWorkflowChildSids`.
+   - Also clear `_liveWorkflowChildSids` at workflow run completion: when a `subagents` frame arrives with `payload.workflowLive === false` (regardless of whether the array is empty), clear the set — the run is over.
+   - In `openSubagent(sessionId)`: call `setSubAgentComposerEnabled(_liveWorkflowChildSids.has(sessionId), sessionId)`.
+
+5. **`acp.html` `step_message` card in sub-agent panel**:
+   - The main WebSocket already delivers `step_message` frames (they are recorded and arrive in `subagents` frames or as stand-alone frames to the parent session's subscribers).
+   - When a `step_message` frame arrives and the sub-agent panel is open (`subViewSid` is set) and `payload.step.sessionId === subViewSid`: render an amber question card (`div.acp-step-question-card`) in `#acpSubPanel` above the composer.
+   - Card content (no `innerHTML`): message text, and if `payload.step.options` is present, one button per option.
+   - Clicking an option routes the reply through the EXISTING parent-session mechanism (unchanged — do not route option replies to the step session directly).
+   - Clear the card when `subViewSid` changes, when a new `step_message` replaces the previous one for the same step, OR immediately when an option button is clicked (visually disable/hide the card before the reply completes, so the user sees the click registered).
+
+6. **`index.html` `#dashSubPanel`**: Mirror changes from steps 3–5 using the dashboard's equivalents (`dashSubComposerContainer`, etc.).
+
+**Exit criteria**:
+- [ ] `_handle_prompt` early branch: a session in `_workflow_child_meta` routes to the dedicated step-prompt path; the existing subagent guard still refuses sessions in `subagent_sessions` only (not in `_workflow_child_meta`)
+- [ ] `_supervisor.prompt()` resolution verified for step sessions (read the function; record any deviation in divergences)
+- [ ] `initSubAgentComposerDom` and `setSubAgentComposerEnabled` exported from `composer-chrome.js`; no global name collision
+- [ ] Sub-agent panel shows composer when opened for a live workflow step (`_liveWorkflowChildSids` contains the sessionId)
+- [ ] Sub-agent panel hides composer (with "Step completed." notice) for completed workflow steps; hidden for non-workflow sub-agents
+- [ ] `_liveWorkflowChildSids` cleared on session switch and on `workflowLive === false` frames
+- [ ] Sending from the composer uses `{prompt: text}` payload key (not `message`); verifies send() signature for sessionId routing
+- [ ] Send failure (WS not OPEN) leaves input populated and shows error note; success clears input
+- [ ] `step_message` frames matching `subViewSid` render an amber card in `#acpSubPanel` (and `#dashSubPanel`)
+- [ ] Clicking an option on the step question card immediately hides/disables the card; reply routes via existing parent-session mechanism
+- [ ] No `innerHTML` used anywhere in the new sub-panel additions
+- [ ] `tests/test_web.py`: step-prompt tests — (a) session in `_workflow_child_meta` routes to dedicated step-prompt path (not refused); (b) session in `subagent_sessions` only still gets `read_only_session` refusal
+- [ ] `tests/acp_page.test.mjs`: composer enable/disable tests; `step_message` card rendering test
+- [ ] Python restart required for `acp.py` change
+- [ ] `pytest tests/test_web.py --timeout=300` passes
+- [ ] `node tests/acp_page.test.mjs` passes
+- [ ] `docs/KNOWLEDGE.md` `_handle_prompt` section updated: note guard relaxation for `_workflow_child_meta` sessions; note `step_message` frames now surface in the sub-agent panel
+
+---
+
+## 6) Risk Assessment
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| R1 — Direct prompt to step session may not clear the step question pending state | Step paused indefinitely if answer via direct prompt doesn't reach workflow engine | Step question replies continue to route via the parent session (unchanged). Direct composer is for free-form prompts only. Verify at execution (O1). |
+| R2 — `_workflow_child_meta` cleared before user attempts interaction | Composer disabled for a step that completes while the panel is open | Guard `session_id not in _workflow_child_meta` is correct for the normal case; completed steps don't accept prompts, which is the expected behavior. Document in Phase 6 UI that composer disappears when step completes. |
+| R3 — `messages.jsonl` workflow record shapes unconfirmed | Parser fails silently or returns empty runs | Phase 5 pre-probe verifies shapes before implementation; parser notes deviations in code comments. |
+| R4 — `_vizHeightsListening` listener orphan (resolved) | None — confirmed harmless | Removed iframes cannot produce matching events in the listener (verified by reading `addVisualizationCard` implementation; no code change needed). |
+| R5 — `composer-chrome.js` global name collision | Runtime errors if new names shadow existing ones | Pre-check the collision list at the top of `composer-chrome.js` before introducing any new exported names (enforced in Phase 4 and Phase 6 exit criteria). |
+
+A risk whose Mitigation is anything other than "addressed within this plan" for R1: see Follow-up Work item 1.
+
+---
+
+## 7) Verification
 
 - PowerAtlas running at `http://127.0.0.1:<port>` (read port from `%LOCALAPPDATA%\power-atlas\config.toml` or `orchestrator.log`).
-- Sign in via `pa_local` cookie (see `AGENTS.md § Verification Setup`).
-- Browser: Playwright from `.venv-PowerAtlas` or Chrome via Claude-in-Chrome MCP.
-- For SC1 (viz reload): trigger a viz emit via `/acp`, then reload the page and confirm the card reappears.
-- For SC2 (queue-waiting restore): reproduce the queued-behind state (two sessions, one mid-turn), reload the page for the waiting session.
-- For SC3 (crew panel tree): start a workflow with parallel steps; confirm group label rows appear.
-- For SC4-SC5 (Workflows panel): run multiple workflow steps across several turns; confirm all runs appear in the panel.
-- For SC7-SC8 (wf interaction): start a workflow, open the sub-agent panel for a running step, send a free-form prompt.
-- Python tests: `pytest tests/test_web.py --timeout=300`; node tests: `node tests/acp_page.test.mjs`.
+- Sign in via `pa_local` cookie (see `AGENTS.md § Verification Setup`). Mint via `w.login_path(w.mint_login_code())` or directly from a Playwright script using `ctx.add_cookies([...])`.
+- Browser: Playwright from `.venv-PowerAtlas` or Chrome via Claude-in-Chrome MCP. Hard reload (`Ctrl+Shift+R`) picks up JS/CSS changes without restart.
+- **Python changes require restart** (`acp.py`, `web.py`): phases 1, 5, and 6 include Python changes. Restart PowerAtlas after each such phase before running live QA (per `AGENTS.md`: never restart without explicit user permission in the current task).
+- **SC1 (viz reload)**: trigger `emit_visualization` from a Default ACP session; reload the /acp page and confirm the viz card reappears.
+- **SC1 (dashboard)**: subscribe the dashboard to the session; trigger `emit_visualization`; confirm viz card appears in the dashboard transcript.
+- **SC2 (queue-waiting restore)**: start two sessions; trigger one mid-turn while the other is queued behind it; reload the /acp page for the waiting session; confirm the steer-status bar shows the waiting message.
+- **SC3 (crew panel tree)**: start a workflow with parallel steps; confirm group-label rows appear in the crew panel; click a group row to expand/collapse.
+- **SC4–SC5 (Workflows panel)**: run multiple workflow steps across several turns; open the Workflows panel; confirm all past runs appear and are collapsible.
+- **SC6 (click-to-sub-panel)**: click a live step row in the Workflows panel; confirm the sub-agent panel opens for that step.
+- **SC7–SC8 (wf interaction)**: start a workflow; open the sub-agent panel for a running step; confirm the composer is visible; send a free-form prompt; confirm it routes to the step session.
+- Python tests: `pytest tests/test_web.py --timeout=300`
+- Node tests: `node tests/acp_page.test.mjs`
+
+---
+
+## 8) Documentation Updates
+
+| Document | Update needed | Phase |
+|---|---|---|
+| `docs/KNOWLEDGE.md` (crew panel / `renderCrewPanel` section) | Update description of crew panel rendering from flat list to tree structure; note group-label rows inferred from `role` path | 3 |
+| `docs/KNOWLEDGE.md` (`_handle_subscribe` section, broadcast-only resend invariant) | Note that `visualization` frames are now also resent on subscribe (exception to the broadcast-only rule); add `"queued"` field to the session frame description | 1 |
+| `docs/KNOWLEDGE.md` (`_handle_prompt` section, around "read-only sub-agent" guard) | Note that workflow step sessions (in `_workflow_child_meta`) are no longer blocked by the read-only guard | 6 |
+| `docs/KNOWLEDGE.md` (`_workflow_child_meta` section, prompt routing lines) | Note the guard relaxation: `_handle_prompt` now allows prompts for sessions in `_workflow_child_meta` | 6 |
+| `docs/KNOWLEDGE.md` (`step_message` / `_on_session_notify` section) | Note that `step_message` frames are also surfaced in the sub-agent panel for the matching step session | 6 |
+| `docs/KNOWLEDGE.md` (`_get_tool_diffs_v3` section) | Note that `_get_workflow_runs_v3` was added as a sibling function for workflow run history extraction | 5 |
+| `README.md` | No update — no installation, basic-usage, or user-visible CLI surface changes | — |
+| `memory/MEMORY.md` (broadcast-only resend invariant, setCrew, _handle_subscribe entries) | Update entries that assert visualization frames are never replayed on subscribe; reflect guard relaxation; reflect tree rendering — managed by /qdream, not during implementation | doc-table-only |
+
+---
+
+## Progress Tracker
+
+| # | Phase | Status | Notes |
+|---|---|---|---|
+| 1 | Reload fidelity | Not started | Python restart needed after |
+| 2 | Dashboard viz handler | Not started | JS/CSS only; hard reload |
+| 3 | Crew panel tree structure | Not started | JS/CSS only; hard reload |
+| 4 | Workflows panel shell | Not started | JS/CSS only; hard reload |
+| 5 | Workflow history from disk | Not started | Python restart needed after |
+| 6 | Sub-agent composer and direct step prompt | Not started | Python restart needed after |
+
+Mark tasks that can run in parallel with `[P]`:
+- Tasks sharing the same `[P]` marker within a phase may be executed concurrently
+- Unlabeled tasks are sequential by default
+
+---
+
+## 9) Implementation Divergences from Plan
+
+<!-- Reserved — filled during implementation -->
+
+---
+
+## Follow-up Work (Deferred)
+
+1. **Verify step question answer routing via direct step prompt (O1).** If direct `session/prompt` to a step session correctly clears its step question pending state in kiro-cli's workflow engine, the Phase 6 mitigation (step question option replies still route via the parent) can be simplified to allow direct routing. Source: R1, O1. Re-verify at execution time.
+
+2. **Assess mixed-crew frames (workflow + standalone sub-agents).** If a session can have both workflow children and standalone sub-agents active simultaneously, the frame-level `workflowLive` flag used to gate the sub-agent composer may yield false positives (enabling the composer for a non-workflow sub-agent within a workflow run's crew frame). If this case is confirmed at runtime, add a per-entry `isWorkflowStep` boolean to `_subagents_payload()` in `acp.py`. Source: Phase 6 design decision.
+
+3. **Verify `send()` signature for direct step prompts.** The Phase 6 composer calls `sendFn('prompt', {prompt: text})` but the correct routing to the step session (whether via `conn.session_id` after subagent_subscribe, or via a third envelope-sessionId arg) must be confirmed by reading `acp.html`'s `send()` function and `_handle_prompt`'s `session_id` resolution. Source: Phase 6 change note.
+
+---
+
+## Review Log
+
+### 2026-10-16 — Plan creation (via /qplan)
+
+26 findings (1 High, 14 Medium, 11 Low). All auto-resolved.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | Phase 6 `_handle_prompt` single-guard relaxation insufficient — step sessions not in `sessions`, blocked by second guard; downstream body incompatible. | Fixed — dedicated early branch added for `_workflow_child_meta` sessions; bypasses `sessions` check and inflight/eviction body. |
+| 2 | Medium | Phases 1 (steps 3-5) and 2 duplicate SESSION_SWITCH plan SC4/SC5; parallel execution risks merge conflicts. | Fixed — coordination notes added to Phase 1 and Phase 2 with skip-if-landed instructions. |
+| 3 | Medium | `@_local_gate` decorator does not exist in `web.py`; auth is ASGI middleware (`LoopbackCredentialGate`). | Fixed — Phase 5 auth description corrected to ASGI middleware; note not to add to `_local_gate_exempt`. |
+| 4 | Medium | `V3_SESSIONS_ROOT`/`_V3_EXCLUDED_NAMES` are in `data_kiro_v3.py`; `acp.py` has an isolation boundary and cannot import them. | Fixed — Phase 5 parser spec updated to use inline path construction (follow `_get_tool_diffs_v3` pattern exactly). |
+| 5 | Medium | `_get_workflow_runs_v3` called synchronously in an async handler; same blocking I/O as `_get_tool_diffs_v3` which uses `asyncio.to_thread`. | Fixed — `asyncio.to_thread` wrapping added to Phase 5 endpoint spec. |
+| 6 | Medium | SC1 says "original positions" but design decision says "appended after history replay" — contradiction. | Fixed — SC1 wording updated to describe append-after-history behavior. |
+| 7 | Medium | `meta["visualizations"]` grows without bound for long-running sessions. | Fixed — size cap of 20 entries added to Phase 1; Test C added. |
+| 8 | Medium | Phase 5 client fetch has no error handler; unhandled rejection leaves panel blank with no feedback. | Fixed — loading, error, and empty states added to Phase 5 client spec. |
+| 9 | Medium | Aggregate badge missing "failed" state; failed steps silently hidden by collapsed-group default. | Fixed — "has failures" arm added to Phase 3 badge logic; failed groups start expanded. |
+| 10 | Medium | Workflows panel has no loading, error, or empty state. | Fixed — loading/error/empty states added to Phase 5 client rendering. |
+| 11 | Medium | Past runs rendered oldest-first; most recent run buried below older runs. | Fixed — Phase 5 specifies newest-first ordering; most recent `<details>` starts `open`. |
+| 12 | Medium | Step question card not cleared on option click; persists visually after user answers. | Fixed — Phase 6 adds immediate hide/disable on option button click. |
+| 13 | Medium | Viz cards resent without visual context marker; appear indistinguishable from new output. | Fixed — Phase 1 adds a "Restored visualizations" separator before resent viz cards. |
+| 14 | Medium | Group-label rows and step rows use `div` with click handlers but have no ARIA or keyboard access. | Fixed — Phase 3 adds `role="button"`, `tabindex="0"`, `aria-expanded`, and Enter/Space keydown handlers to group-label rows; Phase 4 toggle buttons get `aria-expanded`/`aria-controls`. |
+| 15 | Medium | Sub-agent composer clears input unconditionally; send failure loses the user's typed text. | Fixed — Phase 6 spec: capture text before clear, check WS ready-state, restore on failure, show error note. |
+| 16 | Medium | Phase 6 composer sends `{message: text}` but `_handle_prompt` reads `payload.get("prompt")`; every send refused as "bad_payload" (empty text). | Fixed — Phase 6 composer spec updated to use `{prompt: text}` key; `send()` signature verification added as exit criterion. |
+| 17 | Low | O3 verification claimed "window.frames" mechanism; actual implementation may differ. | Fixed — O3 exit criterion generalized to verify "removed iframes cannot produce matching events" without assuming window.frames specifically. |
+| 18 | Low | `_liveWorkflowChildSids` not cleared on session switch. | Fixed — Phase 6 step 4 adds session-switch clear. |
+| 19 | Low | `_liveWorkflowChildSids` not cleared at workflow run completion (turn-end eviction uses `broadcast_empty=False`). | Fixed — Phase 6 step 4 adds `workflowLive === false` frame as clearing trigger. |
+| 20 | Low | `<details>/<summary>` default state (all open vs. all closed) not specified. | Fixed — Phase 5 specifies newest-first with most recent `open`, all others closed. |
+| 21 | Low | When composer is hidden mid-session (step completes), no visual feedback for user. | Fixed — `setSubAgentComposerEnabled(false)` now shows "Step completed." notice in composer area. |
+| 22 | Low | Workflows panel toggle buttons missing `aria-expanded`/`aria-controls`. | Fixed — Phase 4 toggle button markup includes `aria-expanded="false"` and `aria-controls`. |
+| 23 | Low | R2 Risk Assessment description incorrectly claims `_workflow_child_meta` is cleared at `node_complete`. | Fixed — Risk Assessment R4 description corrected. |
+| 24 | Low | R4 O3 description referred to `window.frames` (Live HTMLCollection) as the mechanism. | Fixed — R4 description generalized. |
+| 25 | Low | Phase 4 file scope missing `tests/acp_page.test.mjs`. | Fixed — Phase 4 file scope retained `acp_page.test.mjs` in exit criteria; verify against file scope line. |
+| 26 | Low | Phase 5 returns oldest-first; combined with loading/empty state additions and newest-first ordering this is a coherent fix. | Fixed — see findings 10, 11, 20. |
+
+Personas: Architect, Senior engineer, Security auditor, Reliability engineer, End-user advocate. Effort: Full.
+
+---
+
+## Harness Improvement Opportunities
+
+<!-- Reserved — filled by /qexplore, /qplan, /qdev when harness friction is felt.
+Format: - <observation> — cost: <what the friction actually cost> — suggested change: <one-line>
+Leave the heading even if empty. -->
