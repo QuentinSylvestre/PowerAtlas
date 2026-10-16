@@ -1,7 +1,7 @@
 # ACP session-switch state bugs and queue-status restore on reconnect
 
 > **Date**: 2026-10-16
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress
 > **Scope**: Fix three session-switch state bugs in acp.html; restore queue-waiting message on reconnect; add visualization handler to the dashboard
 > **Memory relied on**: none
 > **Estimated effort**: ~4–6 hours
@@ -181,13 +181,20 @@ setTranscriptLive(false);
 > **Harness note for T1/T2**: Both tests use behavioral outcomes observable through the page's public DOM state and the test harness's `send()` spy, not direct access to IIFE-scoped variables (`_steerPending`, `queuedPrompt`). T3 uses the existing `setLiveCalls` recorder already present in the harness.
 
 **Exit criteria**:
-- [ ] `selectSession()` resets `_steerPending`, `promptInput.disabled`, `sendModeBtn.disabled`, `modeToggle.disabled` before calling `clearTranscript()` — verify by reading the function body (SC1)
-- [ ] `selectSession()` clears `queuedPrompt` and `queuedPromptSession` before calling `clearTranscript()` — verify by reading the function body (SC2)
-- [ ] `steer_ack` handler has `if (!_steerPending) return;` guard as its first statement — verify by reading the handler (SC1)
-- [ ] `clearTranscript()` calls `setTranscriptLive(false)` as its last step — verify by reading the function body (SC3)
-- [ ] Tests T1–T3 exist in `acp_page.test.mjs` and pass: `node tests/acp_page.test.mjs` exits 0
-- [ ] `releaseSession()` is unmodified — its existing `_steerPending`, `queuedPrompt`, and `queuedPromptSession` resets are still present
-- [ ] Dashboard path verified: `clearTranscript()` is also called by the dashboard's history replay; `setTranscriptLive(false)` in `clearTranscript()` is correct for that path (no dedicated dashboard test needed — identical reasoning applies)
+- [x] `selectSession()` resets `_steerPending`, `promptInput.disabled`, `sendModeBtn.disabled`, `modeToggle.disabled` before calling `clearTranscript()` — verify by reading the function body (SC1)
+- [x] `selectSession()` clears `queuedPrompt` and `queuedPromptSession` before calling `clearTranscript()` — verify by reading the function body (SC2)
+- [x] `steer_ack` handler has `if (!_steerPending) return;` guard as its first statement — verify by reading the handler (SC1)
+- [x] `clearTranscript()` calls `setTranscriptLive(false)` as its last step — verify by reading the function body (SC3)
+- [x] Tests T1–T3 exist in `acp_page.test.mjs` and pass: `node tests/acp_page.test.mjs` exits 0
+- [x] `releaseSession()` is unmodified — its existing `_steerPending`, `queuedPrompt`, and `queuedPromptSession` resets are still present
+- [x] Dashboard path verified: `clearTranscript()` is also called by the dashboard's history replay; `setTranscriptLive(false)` in `clearTranscript()` is correct for that path (no dedicated dashboard test needed — identical reasoning applies)
+
+#### Implementation (2026-10-16, code: 69e916d)
+Added SC1/SC2 state resets to `selectSession()` in `acp.html`: clears `_steerPending` and re-enables `promptInput`/`sendModeBtn`/`modeToggle`, clears `queuedPrompt`/`queuedPromptSession`. Added `if (!_steerPending) return;` guard as the first statement of the `steer_ack` handler (SC1). Added `setTranscriptLive(false)` as the last step of `clearTranscript()` in `transcript-renderer.js` (SC3). Added tests T1–T3 covering all three SCs with behavioral assertions; mutation tests confirmed each test catches exactly its target mutation with no collateral failures.
+
+QA (Step 5b): PASS — /acp page loads, no JS console errors, composer buttons enabled. Mutation tests by reviewer verified per-test coverage.
+
+Auto-fixes (cycle 1, Low): dropped inaccurate `sess-w1-s0` session-index label from T1/T2 test comments; removed misplaced "Reset prompt navigation state" comment from bottom of `clearTranscript()`. Applied in-session (purely mechanical comment fixes). Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical. Fix commit: 3ebf572.
 
 ### Phase 2: Queue-status restore on reconnect [QA]
 
@@ -315,7 +322,7 @@ No documentation updates needed. All five changes are internal implementation co
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Three session-switch state fixes | Not started | |
+| 1 | Three session-switch state fixes | Complete | code: 69e916d |
 | 2 | Queue-status restore on reconnect | Not started | |
 | 3 | Dashboard visualization frame handler | Not started | |
 
@@ -330,6 +337,19 @@ _Reserved — filled during implementation._
 2. **Late `steer_sent` from old session after rail-click switch.** A `steer_sent` frame (broadcast via `_emit`) for the old session can arrive at the client after `selectSession()` clears `_steerPending`, during the narrow window before the server processes the new `subscribe` and detaches the socket from the old session's subscriber set. The steer_sent handler's `addMessage('steer', steerText)` call is unconditional, so the old steer's band would appear in the new session's just-cleared transcript. The probability is low (requires the steer's `await` to complete before the subscribe reaches the server), and the consequence is cosmetic (a dimmed band). This plan fixes steer_ack but not steer_sent; SC1 is scoped to steer_ack. A follow-up should add a `if (!_steerPending && promptInput.value.trim() !== steerText) return;` guard or adopt acp.html's full top-level `sessionId` frame filter. Source: Cycle 2 review, Reliability engineer + End-user advocate.
 
 ## Review Log
+
+### 2026-10-16 — Implementation Review (after Phase 1, persona: Senior engineer, Reliability engineer, End-user advocate, Maintainability reviewer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low).
+QA: PASS (1 surface — JS page behavior; mutation tests confirmed test coverage).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | T1/T2 test comments label `railRows()[3]` as `sess-w1-s0`; actual session id depends on session_size. | Fixed — dropped label from test comments (commit 3ebf572). |
+| 2 | Low | Pre-existing "Reset prompt navigation state" comment at bottom of `clearTranscript()` now misleadingly precedes SC3 code. | Fixed — removed misplaced comment (commit 3ebf572). |
+
+Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical (comment-only, no behavior changes).
 
 ### 2026-10-16 — /qplan Cycle 1 (Full effort, 4 personas: Architect, Senior engineer, Reliability engineer, End-user advocate)
 
