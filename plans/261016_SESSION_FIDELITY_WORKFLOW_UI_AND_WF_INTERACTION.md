@@ -116,6 +116,12 @@ It is not fully confirmed which record types in the kiro-cli session `messages.j
 **R5 — `composer-chrome.js` global name collision.**
 Any new global names for the Workflows panel must be checked against the collision list in `composer-chrome.js:30–33`.
 
+### Visual design (confirmed via /qvisualize prototype, 2026-10-16)
+
+- **Crew panel tree**: Tree A — dedicated group-label rows with chevron, clickable to expand/collapse child step rows. Collapsed group shows a status summary ("4 done", "running") on the group row. Group names inferred from `role` path segments; `parallel` tag shown when applicable.
+- **Workflows panel**: "with step rows" style — each run shows step-level timing when expanded (step name + elapsed time per row).
+- **Sub-agent panel composer**: always-present text box at the bottom for live steps, sends directly to step session. When a step question is pending, an amber question-card appears above the composer with quick-pick option buttons — the composer remains and works the same way. No design variants — one design, two states.
+
 ### 6. Resolved decisions
 
 - Q1: How to decompose? — A: ok (Option B) — Decision: Two files — this file (fidelity + workflow UI) and `261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE.md` (session-switch bugs)
