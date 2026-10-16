@@ -1,7 +1,7 @@
 # PA — Store-Backed Workspace Plans Support
 
 > **Date**: 2026-10-15
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Add PowerAtlas Active Plans support for workspaces that keep plans in the agent-playbook store
 > **Memory relied on**: none
@@ -187,11 +187,11 @@ config.playbook_root = config.playbook_root.strip()
 <!-- sketch -->
 
 **Exit criteria:**
-- [ ] `Config()` has `playbook_root: str = ""` and `Config(playbook_root="  /x  ").playbook_root == "  /x  "` (raw field; strip happens in `_load_config_once`)
-- [ ] `load_config()` on a TOML with `playbook_root = "  /x  "` returns a config where `.playbook_root == "/x"` (strip applied)
-- [ ] `load_config()` on a TOML without `playbook_root` returns `.playbook_root == ""`
-- [ ] `_STORED_FIELDS` includes `"playbook_root"` (verified by `"playbook_root" in config._STORED_FIELDS`)
-- [ ] All existing `TestOverviewPlans` tests pass (SC-6)
+- [x] `Config()` has `playbook_root: str = ""` and `Config(playbook_root="  /x  ").playbook_root == "  /x  "` (raw field; strip happens in `_load_config_once`)
+- [x] `load_config()` on a TOML with `playbook_root = "  /x  "` returns a config where `.playbook_root == "/x"` (strip applied)
+- [x] `load_config()` on a TOML without `playbook_root` returns `.playbook_root == ""`
+- [x] `_STORED_FIELDS` includes `"playbook_root"` (verified by `"playbook_root" in config._STORED_FIELDS`)
+- [x] All existing `TestOverviewPlans` tests pass (SC-6)
 
 **Test additions in `tests/test_web.py`** (inside the existing `isolated_config` fixture scope):
 - `test_playbook_root_defaults_to_empty`: `load_config()` with no `playbook_root` key → `""`.
@@ -411,14 +411,20 @@ Live QA (after PA restart with diskpeek open):
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Config field | Pending | |
+| 1 | Config field | Complete | code: 1ff8b71 |
 | 2 | Overview store infrastructure + tests | Pending | |
 
 ---
 
 ## 9) Implementation Divergences from Plan
 
-<Reserved — filled during implementation>
+**Phase 1 — Config field:**
+
+1. **Field placement**: plan sketch said "after `auto_schedule: bool = True`"; a newer stored field `kiro_daily_reset_minutes_utc: int = 0` was added since the plan was written. `playbook_root` was placed after that field — i.e. at the very end of the stored-field block, immediately before the `# ---- What load_config found, never stored` comment. `_STORED_FIELDS` is name-keyed; round-trip is unaffected by order.
+
+2. **Test fixture bug in plan snippet**: plan snippet used `p.write_bytes(tomli_w.dumps({...}))`, but `tomli_w.dumps` returns `str`; `write_bytes` would raise `TypeError`. Fixed to `p.write_text(tomli_w.dumps({...}))`.
+
+3. **Test placement**: there is no dedicated config-loading test class in `tests/test_web.py`. The two new tests were added to `TestRemoteBindAddressValidation`, which uses the `isolated_config` autouse fixture and contains the existing `test_load_config_*` sanitization tests (the same CONFIG_PATH-assignment pattern). The class name is unrelated to playbook_root (noted by reviewers as a Low/Medium discoverability issue); a future refactor can move them to a `TestConfigFields` class. The tests are functionally correct, mutation-discriminating, and passing.
 
 ## Follow-up Work (Deferred)
 
@@ -433,7 +439,25 @@ Live QA (after PA restart with diskpeek open):
 
 ## Review Log
 
-### 2026-10-15 — Plan Creation (via /qplan)
+### 2026-10-15 — Phase 1 Review (full effort, 4 personas)
+
+10 findings (0 High, 1 Medium, 9 Low). 1 Medium auto-resolved.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Tests in `TestRemoteBindAddressValidation` class with no §9 divergence note; placement unjustified and undiscoverable. (Corroborated: Senior + Maintainability) | Fixed — §9 divergence note written explaining the class choice. |
+| 2 | Low | `config_mod.CONFIG_PATH = ` raw assignment instead of `monkeypatch.setattr` in new tests, diverging from sibling convention. (Corroborated: Senior + Maintainability) | Accept-and-note. Tests are correct and protected by the autouse fixture; consistency improvement deferred. |
+| 3 | Low | No `isinstance(..., str)` re-check before `config.playbook_root.strip()`, unlike adjacent sanitizers in `_load_config_once`. (Single-source: Architect) | Accept — type gate in load loop guarantees `str` before strip. Style-only divergence. |
+| 4 | Low | No `_strip_control_chars` / length cap on `playbook_root` unlike `default_directory`. (Single-source: Reliability) | Accept-and-note — mitigated by Phase 2's `Path(...).resolve()`. |
+| 5 | Low | `test_playbook_root_defaults_to_empty` exercises no-file path, not present-file-missing-key. (Single-source: Senior) | Accept — no-file branch is the simpler and more common case; both code paths produce the same result. |
+| 6 | Low | Field placement after `kiro_daily_reset_minutes_utc` rather than `auto_schedule` — noted in divergences. (Single-source: Architect) | Accept — documented in §9. |
+| 7 | Low | No `save_config` + `load_config` round-trip test. (Corroborated: Reliability + Maintainability) | Accept-and-note — structural correctness verified via `_STORED_FIELDS` membership; round-trip test would be belt-and-suspenders. |
+| 8 | Low | `test_playbook_root_defaults_to_empty` sets `CONFIG_PATH` redundantly (fixture already handles it). (Single-source: Maintainability) | Accept — harmless. |
+| 9 | Low | Plan §9 placeholder "Reserved" note was not written during implementation — sub-agent didn't record placement rationale. (Single-source: Maintainability) | Fixed — orchestrator wrote §9 immediately on receiving review. |
+| 10 | Low | QA step 5b: [QA]-annotated phase; behavior verified by new passing pytest tests. SKIP — no runtime surface beyond pytest. | SKIP — recorded. |
+
+Phase 1 health: **Green** (0 unresolved High, 0 auto-fixable Medium remaining).
+Implementation note: `playbook_root: str = ""` added to `Config`; `config.playbook_root = config.playbook_root.strip()` added in `_load_config_once`. Two tests pass: `test_playbook_root_defaults_to_empty`, `test_playbook_root_is_stripped_on_load`. SC-6: 50 `TestOverviewPlans` tests pass.
 
 15 findings (2 High, 8 Medium, 5 Low). All auto-resolved.
 
