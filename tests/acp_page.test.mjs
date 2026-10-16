@@ -25048,6 +25048,113 @@ check("acp.html live handle() dispatches visualization frame to addVisualization
     "iframe src must match the URL from the live frame");
 });
 
+// ---- Phase 1 (261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE) -----------
+// T1: SC1 — selectSession() clears steer lock
+
+check("selectSession clears steer lock and re-enables composer when switching sessions", async (tpl) => {
+  // Use railed() so the page has rail rows available for clicking.
+  const page = await railed(tpl);
+  // Deliver a session frame to establish an active session with a live turn.
+  // Use sess-w0-s0 (the first session in the default fakeStore).
+  const sessionA = "sess-w0-s0";
+  page.deliver({
+    type: "session", sessionId: sessionA,
+    payload: { sessionId: sessionA, cwd: "C:\\work\\a", created: false,
+               turnActive: true, contextPercent: null },
+  });
+  // Simulate a steer send: type text, trigger input, click the send button in steer mode.
+  page.type("steer text");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpSendMode");
+  // Fixture: the composer should now be locked while awaiting steer_ack.
+  assert(page.el("acpPrompt").disabled === true,
+    "fixture: promptInput should be disabled after steer send");
+  assert(page.el("acpSendMode").disabled === true,
+    "fixture: sendModeBtn should be disabled after steer send");
+  // Switch to a different session via rail row click (sess-w1-s0 = railRows()[3]).
+  // selectSession() must re-enable the composer and clear _steerPending (SC1).
+  page.railRows()[3].dispatch("click");
+  assertEqual(page.el("acpPrompt").disabled, false,
+    "promptInput should be re-enabled after switching sessions with a steer in-flight (SC1)");
+  assertEqual(page.el("acpSendMode").disabled, false,
+    "sendModeBtn should be re-enabled after switching sessions with a steer in-flight (SC1)");
+  assertEqual(page.el("acpModeToggle").disabled, false,
+    "modeToggle should be re-enabled after switching sessions with a steer in-flight (SC1)");
+  // Deliver a late steer_ack (rejection) for the original session.
+  // With the !_steerPending guard in place, this must be a no-op:
+  // no error message added, promptInput.value not set to the steer text.
+  const transcriptBefore = page.el("acpTranscript").textContent;
+  page.deliver({ type: "steer_ack", sessionId: sessionA, payload: { queued: false } });
+  assert(!page.el("acpTranscript").textContent.includes("not accepted"),
+    "a late steer_ack rejection must not add an error message to the new session's transcript (SC1 guard)");
+  assert(page.el("acpPrompt").value !== "steer text",
+    "a late steer_ack rejection must not restore the steer text to the new session's composer (SC1 guard)");
+});
+
+// T2: SC2 — selectSession() clears queuedPrompt so round-trip does not auto-send
+
+check("selectSession clears queuedPrompt so it does not auto-send on returning to the session", async (tpl) => {
+  // Use railed() so the page has rail rows available for clicking.
+  const page = await railed(tpl);
+  // Establish session A (sess-w0-s0) as the active session with a live turn.
+  const sessionA = "sess-w0-s0";
+  page.deliver({
+    type: "session", sessionId: sessionA,
+    payload: { sessionId: sessionA, cwd: "C:\\work\\a", created: false,
+               turnActive: true, contextPercent: null },
+  });
+  // Queue a prompt on session A.
+  page.type("queued text");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpModeOptQueue");
+  page.click("acpSendMode");
+  // Baseline: count prompt frames before any switches.
+  const promptsBefore = page.socket().sent.filter((f) => f.type === "prompt").length;
+  // Switch A -> B (sess-w1-s0 = railRows()[3]).
+  // With the fix, selectSession() clears queuedPrompt and queuedPromptSession here.
+  page.railRows()[3].dispatch("click");
+  // Switch B -> A (sess-w0-s0 = railRows()[0]), without any turn:end in A's history.
+  // Without the fix, queuedPrompt is still set to "queued text" and
+  // queuedPromptSession is still "sess-w0-s0", so the round-trip would make the
+  // session-identity guard (_queueSession !== sessionId) pass — triggering auto-send.
+  page.railRows()[0].dispatch("click");
+  // Deliver a live meta turn:end for session A.
+  // replaying is false here (direct delivery, not through a history frame).
+  page.deliver({ type: "meta", sessionId: sessionA,
+    payload: { turn: "end", stopReason: "end_turn" } });
+  const promptsAfter = page.socket().sent.filter((f) => f.type === "prompt").length;
+  assertEqual(promptsAfter, promptsBefore,
+    "no auto-send should fire after the A->B->A round-trip — " +
+    "queuedPrompt must have been cleared by selectSession() during the A->B switch (SC2)");
+});
+
+// T3: SC3 — clearTranscript() resets _transcriptLive to false
+
+check("clearTranscript sets transcriptLive to false", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Spy on setTranscriptLive by wrapping the real function in the sandbox.
+  // Because transcript-renderer.js runs inside a vm context backed by the
+  // sandbox object, reassigning sandbox.setTranscriptLive is visible to
+  // clearTranscript()'s own lookup of the same global name.
+  const setLiveCalls = [];
+  const origSetTranscriptLive = page.sandbox.setTranscriptLive;
+  page.sandbox.setTranscriptLive = function(v) {
+    setLiveCalls.push(Boolean(v));
+    origSetTranscriptLive(v);
+  };
+  // Enter live mode by delivering a meta turn:start.
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  // Clear the spy to get a clean baseline (so only clearTranscript's call is seen).
+  setLiveCalls.length = 0;
+  // Call clearTranscript() directly — it is the real function from transcript-renderer.js.
+  page.sandbox.clearTranscript();
+  // The last (and required) call to setTranscriptLive from clearTranscript must be false.
+  assert(setLiveCalls.length >= 1,
+    "clearTranscript should have called setTranscriptLive at least once (SC3)");
+  assertEqual(setLiveCalls[setLiveCalls.length - 1], false,
+    "clearTranscript must call setTranscriptLive(false) as its last step (SC3)");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

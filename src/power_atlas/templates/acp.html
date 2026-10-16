@@ -4388,6 +4388,22 @@
     delete loadTried['s:' + sid];
     loadFailed = false;
     setLoading(null);
+    // SC1: release the in-flight steer lock so the new session's composer is
+    // interactive. The in-flight steer to the previous session is irrecoverable —
+    // text is discarded, not restored (the steer was for a different session).
+    // Note: unlike releaseSession(), selectSession() discards silently (no user
+    // note) — the steer was abandoned, not failed; releaseSession()'s note is
+    // for an explicit close where the user may not have expected the steer to fail.
+    if (_steerPending) {
+      promptInput.disabled = false;
+      sendModeBtn.disabled = false;
+      modeToggle.disabled = false;
+    }
+    _steerPending = null;
+    // SC2: discard any queued prompt from the previous session. Carrying it
+    // silently to a new session would risk an unintended auto-send.
+    queuedPrompt = null;
+    queuedPromptSession = null;
     clearTranscript();
     // Staged against the session being navigated away from, exactly as in
     // `releaseSession`. A reconnect deliberately does *not* do this: a dropped
@@ -5118,6 +5134,11 @@
       return;
     }
     if (type === 'steer_ack') {
+      // SC1: a late steer_ack for the previous session arrives after
+      // _steerPending was cleared by selectSession(). Guard so neither path
+      // (rejection: promptInput.value = _steerPending, or success: disable-clear)
+      // runs against the new session's composer. Mirrors dashHandle()'s own guard.
+      if (!_steerPending) return;
       // Fix 3: check queued===false BEFORE nulling _steerPending so text can
       // be restored on rejection. On success, clear and re-enable as before.
       if (payload && payload.queued === false) {

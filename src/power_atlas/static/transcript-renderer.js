@@ -2967,6 +2967,11 @@ function clearTranscript() {
   if (typeof closeSubagentView === 'function') closeSubagentView();
   // Reset prompt navigation state: the nav arrows track DOM rows that were
   // just cleared by textContent = '' above, so stale refs are cleared here.
+  // SC3: entering a cleared transcript is never a live state — reset
+  // so a live session's flag never carries into the next session's first frames.
+  // Dashboard note: this file is loaded by index.html too; setTranscriptLive(false)
+  // during dashboard session-switch history replay is correct — same reasoning applies.
+  setTranscriptLive(false);
 }
 
 // ---- visualization card --------------------------------------------------
