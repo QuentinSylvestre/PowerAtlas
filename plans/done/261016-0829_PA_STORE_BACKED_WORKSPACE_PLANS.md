@@ -2,10 +2,26 @@
 
 > **Date**: 2026-10-15
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-10-16
 > **Scope**: Add PowerAtlas Active Plans support for workspaces that keep plans in the agent-playbook store
-> **Memory relied on**: none
+> **Memory relied on**: PowerAtlas source files use CRLF line endings — edit with the Edit tool | A bare `bash` on PATH can be WSL's launcher — use Git's bash for statusline tests
 > **Estimated effort**: 1-2 days
+
+## Completion Summary
+
+All 6 success criteria met, 57 `TestOverviewPlans` tests pass, live QA verified on PA restart (2026-10-16):
+- **SC-1**: `diskpeek` plans (from agent-playbook store) appear under the diskpeek workspace; `plan["cwd"]` = workspace path.
+- **SC-2–SC-6**: verified by unit tests.
+- **SC-4**: `plan["activity"]` confirmed from store repo slug-scoped commit (commit `45ef5694`, `2026-10-16T05:34:57Z`).
+
+The `plans/tests/260701_POWERATLAS.md` §2.29 doc-table entry was updated inline at Step 9 (adding store-backed redirection note and `playbook_root` reference). README `## Configuration` sample missing `playbook_root` entry — accepted; key is optional and auto-detecting. Defense-in-depth boundary check for `__store__.md` path traversal deferred to Follow-up Work item 3.
+
+### Acknowledged at archival
+
+- `Accepted` (Step 9 finding #2): `(store_dir / "plans").is_dir()` relies on `is_dir()` swallowing OSError; no behavioral risk.
+- `Accepted` (Step 9 finding #3/#10): `playbook_root` absent from README `## Configuration` sample; doc cleanup deferred.
+- `Accepted` (Step 9 finding #4): no local-boundary containment check on resolved store path; same-user file on loopback-only endpoint, defense-in-depth deferred.
+- `Accepted` (Step 9 finding #9/Phase 2 #11): `_build_store_map` return annotation is bare `dict`; matches `_plan_memo` convention; cleanup deferred.
 
 ---
 
