@@ -2988,8 +2988,23 @@ function clearTranscript() {
 function addVisualizationCard(url, title) {
   if (!url) { return; }  // guard against undefined/null url (e.g. missing payload.url)
   var stick = stuckToBottom();  // capture before DOM mutation, per file convention
+  // The same file emitted again is an update, not a second card: the agent
+  // builds a visualization in steps and shows each one. The frame is reloaded
+  // (the query defeats the cache) and the card keeps its place and open state.
+  var existing = transcriptEl.querySelectorAll('.acp-viz-card');
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getAttribute('data-viz-url') === url) {
+      var again = existing[i].querySelector('.acp-viz-frame');
+      var label = existing[i].querySelector('summary');
+      _vizReloads += 1;
+      if (label) { label.textContent = title; }
+      if (again) { again.setAttribute('src', url + '?r=' + _vizReloads); }
+      return;
+    }
+  }
   var card = document.createElement('div');
   card.className = 'acp-msg acp-viz-card';
+  card.setAttribute('data-viz-url', url);
   var details = document.createElement('details');
   var summary = document.createElement('summary');
   summary.textContent = title;
@@ -3004,7 +3019,39 @@ function addVisualizationCard(url, title) {
   details.appendChild(frame);
   card.appendChild(details);
   transcriptEl.appendChild(card);
+  listenForVizHeights();
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;  // restore scroll position
+}
+
+var _vizHeightsListening = false;
+var _vizReloads = 0;
+
+/** Size each visualization card to the content its page reports.
+ *
+ * The rendered page posts `{type: 'height', height}` to its parent once its
+ * own content is laid out. Without this the frame stays at its CSS
+ * min-height and a taller visualization scrolls inside a 300 px window with
+ * its bottom cut off. A message is applied only when it comes from a card's
+ * own frame (`event.source`), is a finite number, and is within bounds: the
+ * frame is sandboxed with a null origin, so the origin cannot be checked and
+ * the source window is the identity.
+ */
+function listenForVizHeights() {
+  if (_vizHeightsListening || typeof window.addEventListener !== 'function') { return; }
+  _vizHeightsListening = true;
+  window.addEventListener('message', function (event) {
+    var data = event.data;
+    if (!data || data.type !== 'height') { return; }
+    var h = data.height;
+    if (typeof h !== 'number' || !isFinite(h) || h < 0 || h > 10000) { return; }
+    var frames = transcriptEl.querySelectorAll('.acp-viz-frame');
+    for (var i = 0; i < frames.length; i++) {
+      if (frames[i].contentWindow === event.source) {
+        frames[i].style.height = Math.ceil(h) + 'px';
+        return;
+      }
+    }
+  });
 }
 
 // ---- feeding frames from outside a live socket ---------------------------

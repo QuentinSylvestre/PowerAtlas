@@ -9476,14 +9476,59 @@ async def _handle_new(conn, payload):
             conn.send(envelope("mcp_servers", {"servers": mcp_servers}, session_id))
 
 
-async def _handle_prompt(conn, session_id, payload):
-    """Run one turn on ``_supervisor``."""
+# A turn that ends at the model's output limit is invisible on the wire: kiro-cli
+# answers `end_turn`. At Max effort the model's reasoning shares that limit, so
+# an open-ended or large task can use all of it before the first tool call and
+# the turn ends with nothing done. One short follow-up restarts it: measured,
+# the same task that died after 276 s finished in 51 s once told to begin with a
+# tool call. Once per user prompt (`auto`), so a task that cannot fit never loops.
+AUTO_CONTINUE_TRUNCATED = True
+_AUTO_CONTINUE_PROMPT = (
+    "[PowerAtlas] Your previous turn stopped at the output limit before you "
+    "finished, so nothing after your reasoning was kept. Continue the task now. "
+    "Your first action must be a tool call doing the smallest useful next step. "
+    "Then work in small steps: write files in pieces of at most about 6 KB, one "
+    "tool call per piece, and keep reasoning between calls short.")
+_TRUNCATION_RETRIES = 4
+_TRUNCATION_RETRY_SECONDS = 0.25
+
+
+async def _truncated_turn(session_id: str, started: float) -> bool:
+    """Whether the turn that began at wall-clock `started` ended at the model's
+    output limit, read from the session store (see `data_kiro_v3.last_turn_end`).
+
+    A record older than the turn is not this turn's: kiro-cli may not have
+    written it yet when `session/prompt` returns, so it is looked for a few
+    times. Never raises; an unreadable store reads as "not truncated".
+    """
+    from . import data_kiro_v3
+    for attempt in range(_TRUNCATION_RETRIES):
+        try:
+            found = await asyncio.to_thread(data_kiro_v3.last_turn_end, session_id)
+        except Exception:  # noqa: BLE001 - detection must never fail a turn
+            log.exception("ACP: could not read the stop reason of %s", session_id)
+            return False
+        if found is not None and found[1] >= started - 2.0:
+            return found[0] == "max_tokens"
+        if attempt + 1 < _TRUNCATION_RETRIES:
+            await asyncio.sleep(_TRUNCATION_RETRY_SECONDS)
+    return False
+
+
+async def _handle_prompt(conn, session_id, payload, auto=False):
+    """Run one turn on ``_supervisor``.
+
+    ``auto`` marks PowerAtlas's own follow-up after a truncated turn: it has no
+    connection of its own (``conn`` is ``None``) and never triggers another.
+    """
     def refuse(code, message):
-        conn.send(error_frame(code, message, session_id))
+        if conn is not None:
+            conn.send(error_frame(code, message, session_id))
         log.warning("ACP prompt refused: [%s] session=%s", code, session_id)
 
     if not session_id:
-        conn.send(error_frame("bad_envelope", "'prompt' needs a sessionId."))
+        if conn is not None:
+            conn.send(error_frame("bad_envelope", "'prompt' needs a sessionId."))
         log.warning("ACP prompt refused: [bad_envelope] no sessionId")
         return
     text = payload.get("prompt")
@@ -9507,7 +9552,7 @@ async def _handle_prompt(conn, session_id, payload):
                "This server has no such live v3 session. It may belong to an "
                "earlier PowerAtlas process -- create a new one.")
         return
-    if conn.session_id != session_id:
+    if not auto and conn.session_id != session_id:
         refuse("not_subscribed", "Subscribe to this session before prompting it.")
         return
     if session_id in _supervisor.closing:
@@ -9552,9 +9597,12 @@ async def _handle_prompt(conn, session_id, payload):
     _emit(session_id, envelope("chunk", {"role": "user", "text": spoken}, session_id))
     _emit(session_id, envelope("meta", {"turn": "start"}, session_id))
     stop_reason = "interrupted"
+    started = time.time()
     try:
         result = await _supervisor.prompt(session_id, spoken, images)
         stop_reason = result.get("stopReason") or "end_turn"
+        if stop_reason == "end_turn" and await _truncated_turn(session_id, started):
+            stop_reason = "max_tokens"
     except AcpError as exc:
         log.warning("ACP session/prompt refused: [%s] %s", exc.code, exc)
         _emit(session_id, error_frame(exc.code, str(exc), session_id))
@@ -9660,7 +9708,11 @@ async def _handle_prompt(conn, session_id, payload):
             # user cancel -- so
             # this one call site covers them all; the consumer filters on
             # `stop_reason` rather than this module guessing which endings matter.
-            _notify("turn_end", session_id, stop_reason)
+            # Not announced when the follow-up below carries the turn on: the
+            # person has nothing to come back to yet.
+            if not (stop_reason == "max_tokens" and not auto
+                    and AUTO_CONTINUE_TRUNCATED):
+                _notify("turn_end", session_id, stop_reason)
         finally:
             # Last, so a slow or failing write delays nothing above. An entry
             # still here means the turn ended without its request being answered
@@ -9673,6 +9725,13 @@ async def _handle_prompt(conn, session_id, payload):
             for _swept in _swept_permissions:
                 await _supervisor._answer_pending_cancelled(
                     _swept, "turn ended with the request unanswered")
+    if (stop_reason == "max_tokens" and not auto and AUTO_CONTINUE_TRUNCATED
+            and session_id in _supervisor.sessions
+            and session_id not in _supervisor.closing):
+        log.info("ACP: turn of %s ended at the output limit; sending one "
+                 "follow-up", session_id)
+        await _handle_prompt(None, session_id,
+                             {"prompt": _AUTO_CONTINUE_PROMPT}, auto=True)
 
 
 def _pop_pending_permissions(session_id: str, *,
@@ -10727,7 +10786,9 @@ def apply_config(config) -> None:
     hand-edited number would trade a wrong session cap for no application at
     all. The write path is where a bad value is refused by name.
     """
-    global MAX_SESSIONS, ACP_IDLE_TTL_SECONDS
+    global MAX_SESSIONS, ACP_IDLE_TTL_SECONDS, AUTO_CONTINUE_TRUNCATED
+    flag = getattr(config, "acp_auto_continue_truncated", True)
+    AUTO_CONTINUE_TRUNCATED = flag if isinstance(flag, bool) else True
     MAX_SESSIONS = _clamped(config, "acp_max_sessions", MAX_SESSIONS, 1, 16)
     ACP_IDLE_TTL_SECONDS = float(_clamped(
         config, "acp_idle_ttl_seconds", ACP_IDLE_TTL_SECONDS, 300, 86400))

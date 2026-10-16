@@ -4911,7 +4911,9 @@
         // after a reload as a prompt with no answer and no explanation —
         // exactly the hung-turn appearance turn boundaries exist to prevent.
         // Skipped when the queue-discard note below will fire instead.
-        addMessage('note', 'turn ended: ' + payload.stopReason);
+        addMessage('note', payload.stopReason === 'max_tokens'
+          ? 'turn ended at the output limit: the model used it up before finishing'
+          : 'turn ended: ' + payload.stopReason);
       }
       logLine('info', '← turn end (' + payload.stopReason + ')');
       // `!replaying` is load-bearing and is NOT inherited from the guards

@@ -130,6 +130,9 @@ class Config:
     # never raising, and ~16 routes call it on the loop.
     acp_max_sessions: int = 8
     acp_idle_ttl_seconds: int = 1800
+    # When a turn ends at the model's output limit, send one short follow-up
+    # that restarts it. See `acp._truncated_turn`.
+    acp_auto_continue_truncated: bool = True
     # The single non-loopback address PowerAtlas additionally listens on, and
     # the single non-loopback name `web._ALLOWED_HOSTS` admits. Empty means
     # loopback-only, which is the default and the state a version bump must

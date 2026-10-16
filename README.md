@@ -348,6 +348,11 @@ acp_max_sessions = 8  # 1-16. Concurrent kiro-cli ACP sessions. Each costs ~3 pr
 acp_idle_ttl_seconds = 1800  # 300-86400. A session with no attached tab, no running turn and no
                              # in-flight load is terminated after this long idle, on a 60 s sweep.
                              # Its transcript stays on disk, so it can be resumed later.
+acp_auto_continue_truncated = true  # Read once at startup. kiro-cli reports a turn that stopped at the
+                                    # model's output limit as a normal end; at Max effort the model's
+                                    # reasoning can use that limit up before it does anything. PowerAtlas
+                                    # reads the real stop reason from the session store, says so in the
+                                    # transcript, and sends one short follow-up per prompt. false = say so only.
 
 # ACP permission mode. Set from the Settings dialog's "Agent permissions" section, without a restart.
 # A hand edit of the mode (or the rules) takes effect when the next new Default session is started, and

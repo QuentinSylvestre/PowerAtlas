@@ -68,6 +68,20 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", tmp_path / "remote-secret")
     monkeypatch.setattr(agent_profile_mod, "KIRO_AGENTS_DIR", tmp_path / "kiro-agents")
+    # The user's own ~/.kiro/settings, which generation reads to retire an old
+    # viz entry; and the listen port, which only `__main__` sets.
+    monkeypatch.setattr(agent_profile_mod, "_KIRO_SETTINGS_DIR", tmp_path / "kiro-settings")
+    monkeypatch.setattr(agent_profile_mod, "_listen_port", 0)
+    # `acp._truncated_turn` reads the kiro session store after every turn: off
+    # for every test, so none reads this machine's sessions or waits on the
+    # retries. `TestTruncatedTurnRecovery` puts the real one back over a
+    # fixture store.
+    from power_atlas import acp as _acp_truncated
+
+    async def _never_truncated(session_id, started):
+        return False
+
+    monkeypatch.setattr(_acp_truncated, "_truncated_turn", _never_truncated)
     # kiro-cli's cli.json, redirected to a file that does not exist: `session/new`
     # and `session/load` build `_meta.kiro.settings` from it on every call
     # (261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 1), so a test
@@ -7504,7 +7518,11 @@ class TestAcpCancel:
         from power_atlas.web import templates
         src = templates.env.loader.get_source(templates.env, "acp.html")[0]
         branch = src.split("payload.turn === 'end'", 1)[1].split("return;", 1)[0]
-        assert "addMessage('note', 'turn ended: ' + payload.stopReason)" in branch
+        assert "addMessage('note'" in branch
+        assert "'turn ended: ' + payload.stopReason" in branch
+        # A truncated turn gets its own wording, in the transcript too.
+        assert "payload.stopReason === 'max_tokens'" in branch
+        assert "turn ended at the output limit" in branch
         assert "setTurn(false)" in branch
         stop = src.split("stopBtn.addEventListener", 1)[1].split("});", 1)[0]
         assert "send('cancel'" in stop
@@ -31142,6 +31160,460 @@ class TestDerivedAgentInjectionIsTextual:
         derived = _derive(text)
         assert ap.excise_permissions(derived)[0] == text
         assert ap.excise_permissions(derived)[1] == _block()
+
+
+_BASE_WITH_MCP = """\
+---
+description: A base agent
+mcpServers:
+  atlassian:
+    url: https://mcp.example.test/v1/mcp
+
+resources:
+  - file://AGENTS.md
+---
+
+# Body
+"""
+
+
+from power_atlas import acp as _acp_for_truncation
+_REAL_TRUNCATED_TURN = _acp_for_truncation._truncated_turn
+
+
+class TestTruncatedTurnRecovery:
+    """kiro-cli answers `end_turn` for a turn that really stopped at the
+    model's output limit; the real reason is only in the session store. At Max
+    effort that is common, and the turn ends with nothing done. PowerAtlas
+    reads the store, says so, and sends one follow-up."""
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        """A session folder in the redirected kiro store, and a writer of
+        `turn_end` records into it."""
+        from power_atlas import acp as acp_real
+        from power_atlas import data_kiro_v3 as v3
+        monkeypatch.setattr(acp_real, "_truncated_turn", _REAL_TRUNCATED_TURN)
+        monkeypatch.setattr(v3, "V3_SESSIONS_ROOT", tmp_path / "kiro-sessions")
+        monkeypatch.setattr(v3, "_session_path_cache", {})
+        folder = tmp_path / "kiro-sessions" / "hash0001" / v3._ensure_sess_prefix("sess-phase4")
+        folder.mkdir(parents=True)
+        path = folder / "messages.jsonl"
+        path.write_text("", encoding="utf-8")
+
+        def write(reason, when=None, pad=0):
+            from datetime import datetime, timezone
+            stamp = (when or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
+            lines = [json.dumps({"id": "x-turn-end", "timestamp": stamp,
+                                 "payload": {"type": "turn_end", "stopReason": reason}})]
+            if pad:  # the large session_start record kiro writes after each turn
+                lines.append(json.dumps({"id": "s", "timestamp": stamp,
+                                         "payload": {"type": "session_start",
+                                                     "content": "x" * pad}}))
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+
+        return write
+
+    def test_the_stop_reason_is_read_past_a_large_trailing_record(self, acp_session, store):
+        from power_atlas import data_kiro_v3 as v3
+        store("end_turn")
+        store("max_tokens", pad=900_000)
+        reason, stamp = v3.last_turn_end("sess-phase4")
+        assert reason == "max_tokens" and stamp > 1e9
+
+    def test_no_store_or_no_record_reads_as_none(self, acp_session, store):
+        from power_atlas import data_kiro_v3 as v3
+        assert v3.last_turn_end("sess-phase4") is None
+        assert v3.last_turn_end("sess-not-there") is None
+
+    def _run(self, acp_mod, sid, store, reasons, monkeypatch):
+        """One user prompt against a stub agent that answers `end_turn` every
+        time and records `reasons[n]` in the store for the n-th request."""
+        monkeypatch.setattr(acp_mod, "_TRUNCATION_RETRY_SECONDS", 0)
+        prompts = []
+
+        async def fake_request(self, method, params,
+                               timeout=acp_mod.REQUEST_TIMEOUT_SECONDS):
+            prompts.append(params["prompt"][0]["text"])
+            store(reasons[len(prompts) - 1])
+            return {"stopReason": "end_turn"}
+
+        conn = TestAcpPromptDispatch._conn(None, acp_mod, sid)
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "draw it"}))
+        ends = [f["payload"]["stopReason"] for f in _queued(conn)
+                if f["type"] == "meta" and f["payload"].get("turn") == "end"]
+        return prompts, ends
+
+    def test_a_truncated_turn_is_named_and_followed_up_once(self, acp_session, store, monkeypatch):
+        acp_mod, sid = acp_session
+        prompts, ends = self._run(acp_mod, sid, store,
+                                  ["max_tokens", "end_turn"], monkeypatch)
+        assert len(prompts) == 2 and prompts[0] == "draw it"
+        assert prompts[1].startswith("[PowerAtlas]") and "tool call" in prompts[1]
+        assert ends == ["max_tokens", "end_turn"]
+
+    def test_a_follow_up_that_is_truncated_too_does_not_loop(self, acp_session, store, monkeypatch):
+        acp_mod, sid = acp_session
+        prompts, ends = self._run(acp_mod, sid, store,
+                                  ["max_tokens", "max_tokens", "max_tokens"], monkeypatch)
+        assert len(prompts) == 2
+        assert ends == ["max_tokens", "max_tokens"]
+
+    def test_the_follow_up_can_be_turned_off(self, acp_session, store, monkeypatch):
+        acp_mod, sid = acp_session
+        monkeypatch.setattr(acp_mod, "AUTO_CONTINUE_TRUNCATED", False)
+        prompts, ends = self._run(acp_mod, sid, store, ["max_tokens"], monkeypatch)
+        assert prompts == ["draw it"] and ends == ["max_tokens"]
+
+    def test_a_normal_turn_is_untouched(self, acp_session, store, monkeypatch):
+        acp_mod, sid = acp_session
+        prompts, ends = self._run(acp_mod, sid, store, ["end_turn"], monkeypatch)
+        assert prompts == ["draw it"] and ends == ["end_turn"]
+
+    def test_a_record_from_an_earlier_turn_is_not_this_turns(self, acp_session, store, monkeypatch):
+        """The previous turn's `max_tokens` is still the last record when kiro
+        has not yet written this turn's; it must not be read as this turn's."""
+        from datetime import datetime, timedelta, timezone
+        acp_mod, sid = acp_session
+        store("max_tokens", when=datetime.now(timezone.utc) - timedelta(minutes=5))
+        monkeypatch.setattr(acp_mod, "_TRUNCATION_RETRY_SECONDS", 0)
+        started = __import__("time").time()
+        assert asyncio.run(acp_mod._truncated_turn(sid, started)) is False
+
+    def test_the_config_flag_reaches_the_module(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas.config import Config
+        monkeypatch.setattr(acp_mod, "AUTO_CONTINUE_TRUNCATED", True)
+        config = Config()
+        assert config.acp_auto_continue_truncated is True
+        config.acp_auto_continue_truncated = False
+        acp_mod.apply_config(config)
+        assert acp_mod.AUTO_CONTINUE_TRUNCATED is False
+        config.acp_auto_continue_truncated = "no"  # not a bool: the default stands
+        acp_mod.apply_config(config)
+        assert acp_mod.AUTO_CONTINUE_TRUNCATED is True
+
+
+class TestVizMcpEntry:
+    """The `emit_visualization` server lives in the derived agent's own
+    `mcpServers`, never in the user's `~/.kiro/settings/mcp.json`.
+
+    The first release wrote it into that file, at the top level where kiro-cli
+    never looks, so no session ever had the tool.
+    """
+
+    def test_entry_is_a_child_of_the_bases_mcpservers(self):
+        ap = _agent_profile()
+        text = ap.inject_mcp_servers(_BASE_WITH_MCP, 4915)
+        assert ("  atlassian:\n    url: https://mcp.example.test/v1/mcp\n"
+                "  viz:  # PowerAtlas-injected\n"
+                "    url: http://127.0.0.1:4915/api/mcp/viz  # PowerAtlas-injected\n"
+                ) in text
+        assert text.index("  viz:") < text.index("resources:")
+
+    def test_key_is_added_when_the_base_has_none(self):
+        ap = _agent_profile()
+        text = ap.inject_mcp_servers(_BASE_NO_PERMISSIONS, 4915)
+        assert "mcpServers:  # PowerAtlas-injected\n  viz:" in text
+        assert text.index("mcpServers:") < text.index("\n---\n", 4)
+
+    def test_every_other_byte_survives(self):
+        ap = _agent_profile()
+        for base in (_BASE_WITH_MCP, _BASE_NO_PERMISSIONS):
+            injected = ap.inject_mcp_servers(base, 4915)
+            assert injected != base
+            assert ap.excise_permissions(injected)[0] == base
+
+    def test_crlf_base_gets_crlf_lines(self):
+        ap = _agent_profile()
+        text = ap.inject_mcp_servers(_BASE_WITH_MCP.replace("\n", "\r\n"), 4915)
+        assert "\n" not in text.replace("\r\n", "")
+        assert ap.excise_permissions(text)[0] == _BASE_WITH_MCP.replace("\n", "\r\n")
+
+    def test_idempotent(self):
+        ap = _agent_profile()
+        once = ap.inject_mcp_servers(_BASE_WITH_MCP, 4915)
+        assert ap.inject_mcp_servers(once, 4915) == once
+
+    @pytest.mark.parametrize("port", [0, -1])
+    def test_no_port_no_entry(self, port):
+        ap = _agent_profile()
+        assert ap.inject_mcp_servers(_BASE_WITH_MCP, port) == _BASE_WITH_MCP
+
+    def test_a_flow_mapping_or_a_base_viz_is_left_alone(self):
+        ap = _agent_profile()
+        flow = _BASE_WITH_MCP.replace("mcpServers:\n  atlassian:\n    url: "
+                                      "https://mcp.example.test/v1/mcp\n",
+                                      "mcpServers: {}\n")
+        assert flow != _BASE_WITH_MCP
+        assert ap.inject_mcp_servers(flow, 4915) == flow
+        own = _BASE_WITH_MCP.replace("  atlassian:", "  viz:\n    url: http://x\n  atlassian:")
+        assert ap.inject_mcp_servers(own, 4915) == own
+
+    def test_a_line_that_only_ends_with_the_marker_is_not_set_aside(self, isolated_config):
+        """The marker is a YAML comment: a hand-added key carrying it is live
+        configuration for kiro-cli and must still read as a changed file."""
+        ap = _agent_profile()
+        _write_base(isolated_config, _BASE_WITH_MCP)
+        ap.set_listen_port(4915)
+        try:
+            _regenerate(ap, _cfg("manual"))
+            path = ap.derived_agent_path()
+            good = path.read_text(encoding="utf-8")
+            assert ap.derived_block_state(_cfg("manual")) == "on"
+            for forged in ("tools: ['*']  # PowerAtlas-injected\n",
+                           "mcpServers:  # PowerAtlas-injected\n",
+                           "  viz:  # PowerAtlas-injected\n    command: evil  # PowerAtlas-injected\n"):
+                path.write_bytes(good.replace("resources:", forged + "resources:").encode("utf-8"))
+                assert ap.derived_block_state(_cfg("manual")) == "stale", forged
+        finally:
+            ap.set_listen_port(0)
+
+    def test_a_comment_before_the_first_child_does_not_set_the_indent(self):
+        ap = _agent_profile()
+        base = ("---\ndescription: x\nmcpServers:\n    # my servers\n"
+                "  foo:\n    command: x\nresources:\n  - a\n---\nB\n")
+        text = ap.inject_mcp_servers(base, 4915)
+        assert "  viz:  # PowerAtlas-injected\n    url: http://127.0.0.1:4915/api/mcp/viz" in text
+        assert text.index("  foo:") < text.index("  viz:") < text.index("resources:")
+        assert ap.excise_permissions(text)[0] == base
+
+    def test_a_quoted_mcpservers_key_is_not_duplicated(self):
+        ap = _agent_profile()
+        base = '---\ndescription: x\n"mcpServers":\n  foo:\n    command: x\n---\nB\n'
+        text = ap.inject_mcp_servers(base, 4915)
+        assert text.count("mcpServers") == 1 and "  viz:  # PowerAtlas-injected" in text
+
+    def test_a_viz_deeper_in_a_server_does_not_block_the_entry(self):
+        ap = _agent_profile()
+        base = ("---\ndescription: x\nmcpServers:\n  foo:\n    env:\n"
+                '      viz: "1"\nresources:\n  - a\n---\nB\n')
+        assert "  viz:  # PowerAtlas-injected" in ap.inject_mcp_servers(base, 4915)
+
+    def test_a_second_marked_mcpservers_key_does_not_pass_as_ours(self):
+        ap = _agent_profile()
+        text = ap.inject_mcp_servers(_BASE_WITH_MCP, 4915)
+        forged = text.replace("resources:", "mcpServers:  # PowerAtlas-injected\n"
+                              "  viz:  # PowerAtlas-injected\n"
+                              "    url: http://127.0.0.1:1/api/mcp/viz  # PowerAtlas-injected\n"
+                              "resources:")
+        assert ap.excise_permissions(forged)[0] != _BASE_WITH_MCP
+
+    def test_generation_writes_the_entry_and_the_file_stays_on(self, isolated_config):
+        ap = _agent_profile()
+        _write_base(isolated_config, _BASE_WITH_MCP)
+        ap.set_listen_port(4915)
+        try:
+            _regenerate(ap, _cfg("manual"))
+            written = ap.derived_agent_path().read_text(encoding="utf-8")
+            assert "url: http://127.0.0.1:4915/api/mcp/viz" in written
+            assert ap.derived_block_state(_cfg("manual")) == "on"
+            # Another port on the next start is not a hand edit.
+            ap.set_listen_port(5001)
+            assert ap.derived_block_state(_cfg("manual")) == "on"
+            _regenerate(ap, _cfg("manual"))
+            written = ap.derived_agent_path().read_text(encoding="utf-8")
+            assert "5001/api/mcp/viz" in written and "4915" not in written
+        finally:
+            ap.set_listen_port(0)
+
+    def test_hand_editing_beside_the_entry_is_still_detected(self, isolated_config):
+        ap = _agent_profile()
+        _write_base(isolated_config, _BASE_WITH_MCP)
+        ap.set_listen_port(4915)
+        try:
+            _regenerate(ap, _cfg("manual"))
+            path = ap.derived_agent_path()
+            path.write_text(path.read_text(encoding="utf-8").replace(
+                "description: A base agent", "description: edited by hand"),
+                encoding="utf-8")
+            assert ap.derived_block_state(_cfg("manual")) == "stale"
+        finally:
+            ap.set_listen_port(0)
+
+    def test_generation_never_writes_the_users_mcp_json(self, isolated_config):
+        ap = _agent_profile()
+        ap.set_listen_port(4915)
+        try:
+            _regenerate(ap, _cfg("manual"))
+        finally:
+            ap.set_listen_port(0)
+        assert not (ap._KIRO_SETTINGS_DIR / "mcp.json").exists()
+
+    def test_the_old_global_entry_is_retired_and_the_users_own_is_not(self, isolated_config):
+        ap = _agent_profile()
+        settings = ap._KIRO_SETTINGS_DIR
+        settings.mkdir(parents=True, exist_ok=True)
+        path = settings / "mcp.json"
+        path.write_text(json.dumps({
+            "mcpServers": {"zoho": {"command": "node"},
+                           "viz": {"url": "http://127.0.0.1:4915/api/mcp/viz"}},
+            "viz": {"url": "http://127.0.0.1:4915/api/mcp/viz"},
+        }), encoding="utf-8")
+        ap.retire_global_mcp_viz()
+        assert json.loads(path.read_text(encoding="utf-8")) == {
+            "mcpServers": {"zoho": {"command": "node"}}}
+        # A viz the user wrote themselves, pointing elsewhere, stays.
+        mine = {"mcpServers": {"viz": {"url": "https://example.test/mcp"}}}
+        path.write_text(json.dumps(mine), encoding="utf-8")
+        ap.retire_global_mcp_viz()
+        assert json.loads(path.read_text(encoding="utf-8")) == mine
+
+    def test_retiring_with_no_file_or_a_broken_one_is_silent(self, isolated_config):
+        ap = _agent_profile()
+        ap.retire_global_mcp_viz()
+        settings = ap._KIRO_SETTINGS_DIR
+        settings.mkdir(parents=True, exist_ok=True)
+        (settings / "mcp.json").write_text("{not json", encoding="utf-8")
+        ap.retire_global_mcp_viz()
+        assert (settings / "mcp.json").read_text(encoding="utf-8") == "{not json"
+
+
+class TestVizMcpServer:
+    """The server behind the injected entry: both MCP transports, and the
+    session an emitted visualization lands in."""
+
+    def _rpc(self, client, method, params=None, id_=1):
+        body = {"jsonrpc": "2.0", "method": method}
+        if id_ is not None:
+            body["id"] = id_
+        if params is not None:
+            body["params"] = params
+        return client.post("/api/mcp/viz", json=body)
+
+    @pytest.fixture
+    def sessions(self, monkeypatch, tmp_path):
+        """Two sessions sharing `tmp_path`, one alone in its own folder; every
+        broadcast recorded."""
+        from power_atlas import acp as acp_mod
+        own = tmp_path / "own"
+        own.mkdir()
+        table = {"sess_a": {"cwd": str(tmp_path)}, "sess_b": {"cwd": str(tmp_path)},
+                 "sess_c": {"cwd": str(own)}}
+        monkeypatch.setattr(acp_mod._supervisor, "sessions", table)
+        sent = []
+        monkeypatch.setattr(acp_mod._registry, "broadcast",
+                            lambda sid, frame: sent.append((sid, frame)))
+        (tmp_path / "shared.html").write_text("<div></div>", encoding="utf-8")
+        (own / "mine.html").write_text("<div></div>", encoding="utf-8")
+        return tmp_path, own, sent
+
+    def test_streamable_http_handshake_and_tool_list(self, anonymous_client):
+        init = self._rpc(anonymous_client, "initialize",
+                         {"protocolVersion": "2025-03-26"}).json()
+        assert init["result"]["protocolVersion"] == "2025-03-26"
+        assert init["result"]["serverInfo"]["name"] == "poweratlas-viz"
+        assert "sessionId" not in init["result"]["serverInfo"]
+        tools = self._rpc(anonymous_client, "tools/list").json()["result"]["tools"]
+        assert [t["name"] for t in tools] == ["emit_visualization"]
+        assert tools[0]["inputSchema"]["required"] == ["path"]
+        assert "KIRO_SESSION_ID" in tools[0]["inputSchema"]["properties"]["session_id"]["description"]
+
+    def test_a_browser_cross_origin_post_is_still_refused(self, anonymous_client):
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        for headers in ({"Origin": "https://evil.test"},
+                        {"Origin": "null"},
+                        {"Sec-Fetch-Site": "cross-site"},
+                        {"Referer": "https://evil.test/page"}):
+            for path in ("/api/mcp/viz", "/api/mcp/viz/messages?conn=x"):
+                resp = anonymous_client.post(path, json=body, headers=headers)
+                assert resp.status_code == 403, (path, headers)
+
+    def test_only_the_two_viz_paths_accept_a_post_with_no_origin(self, anonymous_client):
+        resp = anonymous_client.post("/api/mcp/viz/other", json={})
+        assert resp.status_code == 403
+
+    def test_a_notification_gets_202_and_no_body(self, anonymous_client):
+        resp = self._rpc(anonymous_client, "notifications/initialized", id_=None)
+        assert resp.status_code == 202 and resp.content == b""
+
+    def test_an_unknown_method_is_an_error(self, anonymous_client):
+        assert self._rpc(anonymous_client, "nope").json()["error"]["code"] == -32601
+
+    def test_a_file_alone_in_one_sessions_folder_needs_no_session_id(self, anonymous_client, sessions):
+        _tmp, own, sent = sessions
+        out = self._rpc(anonymous_client, "tools/call", {
+            "name": "emit_visualization",
+            "arguments": {"path": str(own / "mine.html"), "title": "Mine"}}).json()
+        assert "error" not in out
+        assert [sid for sid, _ in sent] == ["sess_c"]
+
+    def test_a_shared_folder_needs_the_session_id(self, anonymous_client, sessions):
+        tmp, _own, sent = sessions
+        path = str(tmp / "shared.html")
+        out = self._rpc(anonymous_client, "tools/call", {
+            "name": "emit_visualization", "arguments": {"path": path}}).json()
+        assert "KIRO_SESSION_ID" in out["error"]["message"] and not sent
+        out = self._rpc(anonymous_client, "tools/call", {
+            "name": "emit_visualization",
+            "arguments": {"path": path, "session_id": "sess_b"}}).json()
+        assert "error" not in out
+        assert [sid for sid, _ in sent] == ["sess_b"]
+
+    def test_an_unknown_session_id_falls_back_to_the_folder(self, anonymous_client, sessions):
+        _tmp, own, sent = sessions
+        out = self._rpc(anonymous_client, "tools/call", {
+            "name": "emit_visualization",
+            "arguments": {"path": str(own / "mine.html"), "session_id": "sess_gone"}}).json()
+        assert "error" not in out and [sid for sid, _ in sent] == ["sess_c"]
+
+    def test_a_file_in_no_sessions_folder_is_refused(self, anonymous_client, sessions, tmp_path_factory):
+        stray = tmp_path_factory.mktemp("stray") / "x.html"
+        stray.write_text("<div></div>", encoding="utf-8")
+        _tmp, _own, sent = sessions
+        out = self._rpc(anonymous_client, "tools/call", {
+            "name": "emit_visualization", "arguments": {"path": str(stray)}}).json()
+        assert "error" in out and not sent
+
+    def test_params_that_are_not_an_object_get_an_error_not_a_500(self, anonymous_client):
+        for method in ("tools/call", "tools/list", "initialize"):
+            resp = anonymous_client.post("/api/mcp/viz", json={
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": [1]})
+            assert resp.status_code == 200, method
+        out = anonymous_client.post("/api/mcp/viz", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": [1]}).json()
+        assert out["error"]["code"] == -32601
+
+    def test_the_body_cap_holds_without_a_content_length(self, anonymous_client):
+        def chunks():
+            yield b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{"pad":"'
+            for _ in range(3):
+                yield b"x" * (30 * 1024)
+            yield b'"}}'
+        resp = anonymous_client.post("/api/mcp/viz", content=chunks(),
+                                     headers={"Content-Type": "application/json"})
+        assert resp.status_code == 413
+        small = anonymous_client.post("/api/mcp/viz", content=iter([b'{"jsonrpc":"2.0",', b'"id":1,"method":"ping"}']),
+                                      headers={"Content-Type": "application/json"})
+        assert small.status_code == 200 and small.json()["result"] == {}
+
+    def test_not_json_is_a_400(self, anonymous_client):
+        assert anonymous_client.post("/api/mcp/viz", content=b"{nope",
+                                     headers={"Content-Type": "application/json"}).status_code == 400
+
+    def test_a_valid_session_id_cannot_emit_a_file_outside_its_folder(self, anonymous_client, sessions):
+        tmp, _own, sent = sessions
+        out = self._rpc(anonymous_client, "tools/call", {
+            "name": "emit_visualization",
+            "arguments": {"path": str(tmp / "shared.html"), "session_id": "sess_c"}}).json()
+        assert "error" in out and not sent
+
+    def test_the_sse_transport_still_answers_through_the_stream(self, anonymous_client):
+        from power_atlas import web as web_mod
+        queue = asyncio.Queue(maxsize=32)
+        web_mod._viz_mcp_sessions["c1"] = queue
+        try:
+            resp = anonymous_client.post("/api/mcp/viz/messages?conn=c1", json={
+                "jsonrpc": "2.0", "id": 7, "method": "tools/list"})
+            assert resp.status_code == 202
+            assert queue.get_nowait()["result"]["tools"][0]["name"] == "emit_visualization"
+        finally:
+            web_mod._viz_mcp_sessions.pop("c1", None)
+        assert anonymous_client.post("/api/mcp/viz/messages?conn=gone",
+                                     json={}).status_code == 404
 
 
 class TestBaseAgentNameValidation:

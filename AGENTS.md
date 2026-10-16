@@ -51,12 +51,17 @@ Recipe for live QA of /acp and the dashboard against the running instance. It wo
   to 90 s. The first `mcp_servers` frame arrives a few seconds after `session/new`. The new
   id is the last `ACP session created:` line in `%LOCALAPPDATA%\power-atlas\orchestrator.log`.
 - **Visualization iframe card.** The `poweratlas-acp` agent definition exposes the `emit_visualization`
-  MCP tool via the `/api/mcp/viz` SSE endpoint (injected by `agent_profile.inject_mcp_servers` at PA
-  startup into `~/.kiro/agents/poweratlas-acp.md`). To verify inline rendering: start a Default ACP
+  MCP tool via the `/api/mcp/viz` endpoint (Streamable HTTP and SSE), which `agent_profile.inject_mcp_servers`
+  adds to that agent's own `mcpServers` at every generation, as two lines ending `# PowerAtlas-injected`
+  that `_excise_full` drops before any comparison, so the tamper check never sees them. Nothing is written
+  to `~/.kiro/settings/mcp.json`. If a session has no `emit_visualization`, check that the derived agent
+  carries `viz:  # PowerAtlas-injected` with the right port, and that the session's MCP indicator counts
+  it. kiro-cli sends no `Origin`, so `same_origin_guard` lets exactly the two viz POST paths through
+  without one. To verify inline rendering: start a Default ACP
   session, have the agent write a test HTML fragment (e.g. a `<div id="test">Hello</div>`), run
   `python shared/skills/qvisualize/scripts/render.py test-fragment.html test-out.html` to wrap it,
-  then have the agent call `emit_visualization` with the absolute path, a title, and the session id
-  the PA runtime provided at session start. A `div.acp-viz-card > details > iframe` card should
+  then have the agent call `emit_visualization` with the absolute path, a title, and its
+  `$env:KIRO_SESSION_ID` (optional when no other session shares the folder). A `div.acp-viz-card > details > iframe` card should
   appear in the `/acp` transcript. Expand the `<details>` element to confirm the HTML loads inside
   the iframe. The iframe carries `sandbox="allow-scripts"` (no `allow-same-origin`) — widget-state
   localStorage is in-memory only (ephemeral per iframe load, accepted v1 trade-off). Playwright:

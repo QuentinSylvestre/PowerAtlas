@@ -1562,6 +1562,7 @@ _LOCAL_AUTH_PATH = "/local-auth"
 # the route is defined further down near the /api/viz/ file-serving route.
 # 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 3
 _MCP_VIZ_SSE_PATH = "/api/mcp/viz"
+_MCP_VIZ_POST_PATHS = (_MCP_VIZ_SSE_PATH, _MCP_VIZ_SSE_PATH + "/messages")
 
 # The file-serving prefix for visualization HTML files.  The LCG exempts
 # paths under this prefix (GET only, with a ``..`` guard) so the browser can
@@ -1777,7 +1778,16 @@ async def same_origin_guard(request: Request, call_next):
     if not _request_host_allowed(request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
     if request.method == "POST":
-        if not _origin_or_referer_ok(request, allow_missing=False):
+        # The viz MCP server's two POST paths are called by kiro-cli, an HTTP
+        # client that sends neither Origin nor Referer. A browser always sends
+        # an Origin on a cross-origin POST, so letting "neither" through there
+        # keeps the CSRF defence: a header that is present must still be this
+        # app's own, and so must Sec-Fetch-Site where a browser sets it.
+        mcp_client = request.url.path in _MCP_VIZ_POST_PATHS
+        if mcp_client and request.headers.get("sec-fetch-site") not in (
+                None, "same-origin", "none"):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        if not _origin_or_referer_ok(request, allow_missing=mcp_client):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
     elif request.url.path == _ACP_PATH and not _acp_navigation_ok(request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
@@ -7660,6 +7670,45 @@ async def get_workspace_settings_bulk_api(request: Request):
 _viz_mcp_sessions: dict[str, asyncio.Queue] = {}
 
 
+def _viz_session_for(session_id: str, p: Path) -> tuple[str, str] | dict:
+    """`(session_id, cwd)` the visualization at `p` belongs to, or an error dict.
+
+    The agent cannot read the MCP handshake, so it has no reliable way to know
+    PowerAtlas's name for its own session. A `session_id` that names an active
+    session is honoured. Otherwise the folder decides: the one active session
+    whose working directory holds the file as a direct child. Several sessions
+    can share a folder (every "agent's own folder" session does), and then the
+    caller has to say which; the message tells it how.
+    """
+    sessions = acp._supervisor.sessions
+    if session_id and session_id in sessions:
+        cwd = sessions[session_id].get("cwd", "")
+        if not cwd:
+            return {"error": {"code": -32603,
+                              "message": "session has no working directory"}}
+        return session_id, cwd
+
+    def holds(cwd: str) -> bool:
+        try:
+            return p.resolve().parent == Path(cwd).resolve()
+        except OSError:
+            return False
+
+    matches = [sid for sid, s in sessions.items()
+               if s.get("cwd") and holds(s["cwd"])]
+    if len(matches) == 1:
+        return matches[0], sessions[matches[0]]["cwd"]
+    how = ("Pass session_id: the value of $env:KIRO_SESSION_ID in your shell "
+           "(it starts with sess_).")
+    if matches:
+        return {"error": {"code": -32600, "message": (
+            f"{len(matches)} active sessions use this folder, so the "
+            f"visualization cannot be matched to one. {how}")}}
+    return {"error": {"code": -32600, "message": (
+        "session_id not found in active sessions, and no active session has "
+        f"this file's folder as its working directory. {how}")}}
+
+
 def _handle_emit_visualization(args: dict) -> dict:
     """Handle a ``emit_visualization`` MCP tool call.
 
@@ -7670,21 +7719,9 @@ def _handle_emit_visualization(args: dict) -> dict:
     if not acp:
         return {"error": {"code": -32603, "message": "ACP module not available"}}
 
-    session_id = args.get("session_id", "")
+    session_id = args.get("session_id") or ""
     path_str = args.get("path", "")
     title = (args.get("title") or "").strip() or "Visualization"
-
-    # Validate session_id exists in active sessions.
-    if not session_id or session_id not in acp._supervisor.sessions:
-        return {"error": {"code": -32600,
-                          "message": "session_id not found in active sessions"}}
-
-    # Extract cwd; guard against sessions with no working directory.
-    session = acp._supervisor.sessions.get(session_id)
-    cwd = session.get("cwd", "") if session else ""
-    if not cwd:
-        return {"error": {"code": -32603,
-                          "message": "session has no working directory"}}
 
     # Validate path: must be absolute, end in .html, and lie within cwd.
     if not path_str:
@@ -7695,6 +7732,10 @@ def _handle_emit_visualization(args: dict) -> dict:
             return {"error": {"code": -32602, "message": "path must be absolute"}}
         if not path_str.endswith(".html"):
             return {"error": {"code": -32602, "message": "path must end with .html"}}
+        found = _viz_session_for(session_id, p)
+        if isinstance(found, dict):
+            return found
+        session_id, cwd = found
         cwd_resolved = Path(cwd).resolve()
         resolved = p.resolve()
         if not resolved.is_relative_to(cwd_resolved):
@@ -7725,6 +7766,139 @@ def _handle_emit_visualization(args: dict) -> dict:
     acp._registry.broadcast(session_id, frame)
 
     return {"content": [{"type": "text", "text": f"Visualization emitted: {filename}"}]}
+
+
+_VIZ_MCP_MAX_BODY = 64 * 1024
+
+
+async def _viz_mcp_body(request: Request) -> object:
+    """The request's JSON body, read with the size cap enforced on the bytes
+    actually received: a chunked request has no Content-Length to check.
+
+    Returns the parsed body, or a `Response` (413 for too large, 400 for not
+    JSON) for the caller to return as it is.
+    """
+    try:
+        declared = int(request.headers.get("content-length", 0))
+    except ValueError:
+        return Response(status_code=400)
+    if declared > _VIZ_MCP_MAX_BODY:
+        return Response(status_code=413)
+    received = bytearray()
+    async for chunk in request.stream():
+        received.extend(chunk)
+        if len(received) > _VIZ_MCP_MAX_BODY:
+            return Response(status_code=413)
+    try:
+        return json.loads(bytes(received))
+    except ValueError:
+        return Response(status_code=400)
+
+
+_VIZ_TOOLS = [{
+    "name": "emit_visualization",
+    "description": (
+        "Show a rendered visualization HTML file as an inline card in the "
+        "PowerAtlas transcript of this session. Call it after render.py has "
+        "produced the file. The file must sit directly in your working "
+        "directory."),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": ("Absolute path to the rendered .html file. Must be "
+                                "a direct child of the session working directory."),
+            },
+            "title": {
+                "type": "string",
+                "description": "Card title, 50 characters or fewer (default: 'Visualization').",
+            },
+            "session_id": {
+                "type": "string",
+                "description": (
+                    "Your ACP session id: the value of $env:KIRO_SESSION_ID in "
+                    "your shell, starting with sess_. Optional when no other "
+                    "session shares your working directory."),
+            },
+        },
+        "required": ["path"],
+    },
+}]
+
+
+def _viz_mcp_dispatch(body: object) -> dict | None:
+    """The JSON-RPC response to one request of the viz MCP server, or `None`
+    for a notification (which has no response). Shared by both transports."""
+    if not isinstance(body, dict):
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32600, "message": "Invalid Request"}}
+    req_id = body.get("id")
+    method = body.get("method", "")
+    params = body.get("params")
+    if not isinstance(params, dict):
+        params = {}
+
+    def ok(result: dict) -> dict:
+        return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+    def fail(code: int, message: str) -> dict:
+        return {"jsonrpc": "2.0", "id": req_id,
+                "error": {"code": code, "message": message}}
+
+    if method == "initialize":
+        client_version = params.get("protocolVersion")
+        return ok({
+            "protocolVersion": (client_version if isinstance(client_version, str)
+                                and client_version else "2024-11-05"),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "poweratlas-viz", "version": "1.1.0"},
+        })
+    if method == "ping":
+        return ok({})
+    if method == "tools/list":
+        return ok({"tools": _VIZ_TOOLS})
+    if method == "tools/call":
+        tool_args = params.get("arguments") or {}
+        if params.get("name") != "emit_visualization" or not isinstance(tool_args, dict):
+            return fail(-32601, f"Unknown tool: {params.get('name', '')}")
+        try:
+            # Synchronous on purpose: _handle_emit_visualization performs only
+            # fast syscalls (path resolution, is_file) and synchronous queue-puts
+            # (acp._registry.broadcast → conn.send → asyncio.Queue.put_nowait).
+            # asyncio.Queue is not thread-safe; running the function in a thread
+            # pool would violate the asyncio contract.
+            outcome = _handle_emit_visualization(tool_args)
+        except Exception as exc:  # noqa: BLE001
+            return fail(-32603, str(exc))
+        if "error" in outcome:
+            return {"jsonrpc": "2.0", "id": req_id, "error": outcome["error"]}
+        return ok(outcome)
+    if req_id is None:
+        return None  # notification (notifications/initialized and the like)
+    return fail(-32601, f"Method not found: {method}")
+
+
+@app.post(_MCP_VIZ_SSE_PATH)
+async def viz_mcp_http(request: Request):
+    """Streamable-HTTP transport of the viz MCP server: one JSON-RPC message
+    (or a batch) in the POST body, the response as JSON in the reply.
+
+    kiro-cli picks the transport for a bare ``url:`` entry itself; serving
+    both this and the SSE stream below means the entry works whichever it
+    tries first. Exempt from ``LoopbackCredentialGate`` with the rest of the
+    path.
+    """
+    from fastapi.responses import JSONResponse as _JR
+
+    body = await _viz_mcp_body(request)
+    if isinstance(body, Response):
+        return body
+    if isinstance(body, list):
+        replies = [r for r in (_viz_mcp_dispatch(m) for m in body) if r is not None]
+        return _JR(replies) if replies else Response(status_code=202)
+    reply = _viz_mcp_dispatch(body)
+    return _JR(reply) if reply is not None else Response(status_code=202)
 
 
 @app.get(_MCP_VIZ_SSE_PATH)
@@ -7791,128 +7965,13 @@ async def viz_mcp_messages(request: Request, conn: str):
     if queue.full():
         return Response(status_code=429)
 
-    if int(request.headers.get("content-length", 0)) > 64 * 1024:
-        return Response(status_code=413)
+    body = await _viz_mcp_body(request)
+    if isinstance(body, Response):
+        return body
 
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        return Response(status_code=400)
-
-    req_id = body.get("id")
-    method = body.get("method", "")
-    params = body.get("params") or {}
-
-    if method == "initialize":
-        # Inject the most-recently-active PA session ID so the agent can pass
-        # it straight to emit_visualization without filesystem discovery.
-        # Uses last_used (monotonic) to pick among multiple active sessions.
-        _viz_session_id = None
-        if acp and acp._supervisor.sessions:
-            _viz_session_id = max(
-                acp._supervisor.sessions,
-                key=lambda sid: acp._supervisor.sessions[sid].get("last_used", 0),
-            )
-        response: dict = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {
-                    "name": "poweratlas-viz",
-                    "version": "1.0.0",
-                    "sessionId": _viz_session_id,
-                },
-            },
-        }
-    elif method == "notifications/initialized":
-        # Notification: no response required.
-        return Response(status_code=202)
-    elif method == "tools/list":
-        response = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "emit_visualization",
-                        "description": (
-                            "Emit a rendered visualization HTML file as an inline "
-                            "iframe card in the PowerAtlas ACP transcript."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "path": {
-                                    "type": "string",
-                                    "description": (
-                                        "Absolute path to the rendered HTML "
-                                        "visualization file.  Must be a direct child "
-                                        "of the session working directory."
-                                    ),
-                                },
-                                "title": {
-                                    "type": "string",
-                                    "description": (
-                                        "Display title for the visualization card "
-                                        "(default: 'Visualization')."
-                                    ),
-                                },
-                                "session_id": {
-                                    "type": "string",
-                                    "description": (
-                                        "The ACP session ID to emit the visualization "
-                                        "into.  Use the value from "
-                                        "serverInfo.sessionId in this server's "
-                                        "initialize response."
-                                    ),
-                                },
-                            },
-                            "required": ["path", "session_id"],
-                        },
-                    }
-                ]
-            },
-        }
-    elif method == "tools/call":
-        tool_name = params.get("name", "")
-        tool_args = params.get("arguments") or {}
-        if tool_name == "emit_visualization":
-            try:
-                # Call synchronously: _handle_emit_visualization performs only fast
-                # syscalls (path resolution, is_file) and synchronous queue-puts
-                # (acp._registry.broadcast → conn.send → asyncio.Queue.put_nowait).
-                # asyncio.Queue is not thread-safe; running the function in a thread
-                # pool would violate the asyncio contract.  Fast syscalls belong on
-                # the event loop, not in a thread pool.
-                outcome = _handle_emit_visualization(tool_args)
-            except Exception as exc:
-                response = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(exc)}}
-                await queue.put(response)
-                return Response(status_code=202)
-            if "error" in outcome:
-                response = {"jsonrpc": "2.0", "id": req_id, "error": outcome["error"]}
-            else:
-                response = {"jsonrpc": "2.0", "id": req_id, "result": outcome}
-        else:
-            response = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
-            }
-    else:
-        if req_id is not None:
-            response = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32601, "message": f"Method not found: {method}"},
-            }
-        else:
-            # Notification with no id: no response.
-            return Response(status_code=202)
-
-    await queue.put(response)
+    response = _viz_mcp_dispatch(body)
+    if response is not None:
+        await queue.put(response)
     return Response(status_code=202)
 
 

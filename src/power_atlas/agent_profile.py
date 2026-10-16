@@ -1405,9 +1405,10 @@ def _excise_full(text: str) -> tuple[str, str, int]:
     a second one beside PowerAtlas's is read by kiro-cli too."""
     lines = text.split("\n")
     close = _frontmatter_bounds(lines)
+    lines, close = _drop_injected(lines, close)
     regions = _permissions_regions(lines, close)
     if not regions:
-        return text, "", 0
+        return "\n".join(lines), "", 0
     kept: list[str] = []
     cursor = 0
     for start, end in regions:
@@ -1445,154 +1446,191 @@ def inject_permissions(base_text: str, block: str) -> str:
     return "\n".join(out)
 
 
-# ---- Visualization MCP and body injections (Phase 4) ---------------------
+# ---- Visualization MCP entry ---------------------------------------------
 #
-# Both functions operate on the full derived-agent text (after
-# inject_permissions), perform purely textual modifications, and return the
-# result. They are parallel to inject_permissions() in signature and
-# character: no YAML parsing, no round-tripping — byte identity for
-# everything they do not touch. They are called in _generate after
-# inject_permissions and before _publish.
+# `inject_mcp_servers` adds the `emit_visualization` server to the derived
+# agent's own `mcpServers:` map, and nowhere else. PowerAtlas writes only its
+# own agent definition; the first version of this feature wrote the entry into
+# `~/.kiro/settings/mcp.json`, which is the user's file, and wrote it at the
+# top level where kiro-cli never looks, so no session ever saw the tool.
 #
-# 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 4
+# Every line the injection adds ends with `_INJECTED_MARK`. `_excise_full` drops
+# those lines before any comparison, so the byte-identity check ("the derived
+# file is the base plus one permissions block") and the base digest see the
+# file as if the entry were absent, and the tamper detection is untouched. The
+# port is not part of what gets compared, so a restart on another port does
+# not read as a hand edit.
+#
+# 261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ Phase 4, reworked
+# after the entry was found missing from every session's tool list.
+
+_INJECTED_MARK = "# PowerAtlas-injected"
+_MCP_KEY_LINE_RE = re.compile(r"""^["']?mcpServers["']?\s*:\s*(#.*)?$""")
+_MCP_KEY_START_RE = re.compile(r"""^["']?mcpServers["']?\s*:""")
+# The exact lines `inject_mcp_servers` writes. Matching the shape rather than
+# the marker alone matters: the marker is a YAML comment, so a line that only
+# ends with it would be invisible to the tamper check while kiro-cli still
+# loads it as configuration.
+_INJ_KEY_RE = re.compile(r"^mcpServers:  " + re.escape(_INJECTED_MARK) + r"$")
+_INJ_VIZ_RE = re.compile(r"^( +)viz:  " + re.escape(_INJECTED_MARK) + r"$")
+_INJ_URL_RE = re.compile(
+    r"^( +)url: http://127\.0\.0\.1:\d{1,5}/api/mcp/viz  "
+    + re.escape(_INJECTED_MARK) + r"$")
+
+
+def _injected_spans(lines: list[str], close: int) -> list[tuple[int, int]]:
+    """Half-open line spans inside the frontmatter that are exactly what
+    `inject_mcp_servers` wrote: a `viz:` line followed at once by its `url:`
+    line, optionally preceded by the `mcpServers:` key it created. The key is
+    only ours when no other `mcpServers:` key exists, since a second one would
+    shadow the base's servers."""
+    spans: list[tuple[int, int]] = []
+    others = sum(1 for i in range(1, close)
+                 if _MCP_KEY_START_RE.match(lines[i].rstrip("\r"))
+                 and not _INJ_KEY_RE.match(lines[i].rstrip("\r")))
+    i = 1
+    while i < close - 1:
+        viz = _INJ_VIZ_RE.match(lines[i].rstrip("\r"))
+        url = _INJ_URL_RE.match(lines[i + 1].rstrip("\r"))
+        if viz and url and len(url.group(1)) > len(viz.group(1)):
+            start = i
+            if (i > 1 and not others
+                    and _INJ_KEY_RE.match(lines[i - 1].rstrip("\r"))):
+                start = i - 1
+            spans.append((start, i + 2))
+            i += 2
+            continue
+        i += 1
+    return spans
+
+
+def _drop_injected(lines: list[str], close: int) -> tuple[list[str], int]:
+    """`lines` without the injected viz entry inside the frontmatter, and the
+    closing fence's index in the result."""
+    spans = _injected_spans(lines, close)
+    if not spans:
+        return lines, close
+    dropped = {i for start, end in spans for i in range(start, end)}
+    kept = [line for i, line in enumerate(lines) if i not in dropped]
+    return kept, close - len(dropped)
+
+
+def has_injected_mcp(text: str) -> bool:
+    """Whether `text`'s frontmatter carries the injected viz entry."""
+    lines = text.split("\n")
+    try:
+        close = _frontmatter_bounds(lines)
+    except AgentProfileError:
+        return False
+    return bool(_injected_spans(lines, close))
 
 
 def inject_mcp_servers(derived_text: str, port: int) -> str:
-    """Append a viz MCP server entry to the ``mcpServers:`` section.
+    """`derived_text` with the viz MCP server in its `mcpServers:` map.
 
-    Inserts two lines (``  viz:`` and ``    url: http://127.0.0.1:{port}/…``)
-    immediately before the first top-level YAML key that follows
-    ``mcpServers:``.  Purely textual, no YAML parsing; leaves the text
-    unchanged if ``mcpServers:`` is absent or the port is zero.
-
-    The frontmatter region is identified by ``_frontmatter_bounds``, so the
-    search is confined to the frontmatter — no false matches in body prose.
+    Purely textual, like `inject_permissions`. Adds the `mcpServers:` key when
+    the base has none. Returns the text unchanged when `port` is not a real
+    port, when the frontmatter cannot be split, when `mcpServers:` is not a
+    block mapping (a flow `{}` cannot take an indented child), or when the
+    base already declares its own `viz` server (a second one would be a
+    duplicate key). Idempotent.
     """
-    if port <= 0:
+    if port <= 0 or has_injected_mcp(derived_text):
         return derived_text
-    if "  viz:" in derived_text:
-        return derived_text  # already injected, idempotent (mirrors inject_body_section guard)
     lines = derived_text.split("\n")
-    close = _frontmatter_bounds(lines)
-    if close < 0:
+    try:
+        close = _frontmatter_bounds(lines)
+    except AgentProfileError:
         return derived_text
-    # Find the mcpServers: key at column 0 inside the frontmatter.
-    mcp_start = -1
-    for i in range(close):
-        if re.match(r'^mcpServers\s*:', lines[i]):
-            mcp_start = i
-            break
-    if mcp_start < 0:
+    eol = "\r" if _dominant_line_ending(lines) == "\r\n" else ""
+    url = f"http://127.0.0.1:{port}/api/mcp/viz"
+
+    def entry(indent: str) -> list[str]:
+        return [f"{indent}viz:  {_INJECTED_MARK}{eol}",
+                f"{indent}{indent}url: {url}  {_INJECTED_MARK}{eol}"]
+
+    start = next((i for i in range(1, close)
+                  if _MCP_KEY_START_RE.match(lines[i].rstrip("\r"))), -1)
+    if start < 0:
+        key = f"mcpServers:  {_INJECTED_MARK}{eol}"
+        return "\n".join(lines[:close] + [key] + entry("  ") + lines[close:])
+    if not _MCP_KEY_LINE_RE.match(lines[start].rstrip("\r")):
+        log.warning("viz MCP not added to the derived agent: the base agent's "
+                    "mcpServers is not a block mapping")
         return derived_text
-    # Find where the mcpServers block ends: first line at column 0 inside the
-    # frontmatter that is not empty and does not start with whitespace or '#'.
-    mcp_end = close  # default: insert just before the closing ---
-    for i in range(mcp_start + 1, close):
-        line = lines[i]
+    indent = ""
+    last = start
+    for i in range(start + 1, close):
+        line = lines[i].rstrip("\r")
         if line and line[0] not in " \t#":
-            mcp_end = i
-            break
-    viz_lines = [
-        "  viz:",
-        f"    url: http://127.0.0.1:{port}/api/mcp/viz",
-    ]
-    return "\n".join(lines[:mcp_end] + viz_lines + lines[mcp_end:])
-
-
-# The guidance block injected after '## Anti-skip enforcement'. Single
-# constant so tests and _generate always see the same text.
-_VIZ_GUIDANCE_BLOCK = (
-    "\n"
-    "## Visualization output\n"
-    "When `/qvisualize` produces a visualization HTML file via render.py:\n"
-    "- If the `emit_visualization` tool is available in your tool list, call"
-    " it with the absolute file path, a concise title (\u2264 50 chars), and"
-    " your current ACP session ID as `session_id`. Your PA session ID is"
-    " available in the `serverInfo.sessionId` field of the viz MCP endpoint's"
-    " `initialize` response; use that value as `session_id`. The visualization"
-    " renders as an inline iframe card in the transcript.\n"
-    "- Otherwise, open the file in a browser: `Start-Process <path>` on Windows.\n"
-)
-
-
-def inject_body_section(derived_text: str) -> str:
-    """Append the '## Visualization output' guidance block after the
-    '## Anti-skip enforcement' section in the agent body.
-
-    Inserts _VIZ_GUIDANCE_BLOCK immediately before the next '## ' heading
-    after '## Anti-skip enforcement', or at the end of the body if none
-    follows.  Purely textual; leaves the text unchanged if the anchor heading
-    is absent (e.g. when using a minimal base with no such section) or if the
-    guidance is already present (idempotent).
-    """
-    if "## Visualization output" in derived_text:
-        return derived_text  # already injected, idempotent
-    # Find the body: after the second frontmatter fence.
-    lines = derived_text.split("\n")
-    close = _frontmatter_bounds(lines)
-    if close < 0:
+            break  # the next top-level key
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue  # blank, or a comment: it says nothing about the indent
+        if not indent:
+            indent = line[:len(line) - len(line.lstrip())]
+        last = i
+    # A `viz` key of the base's own, at the children's indent. A deeper `viz`
+    # (a server's env var, say) is a different key and does not count.
+    own = re.compile(r"^" + re.escape(indent or "  ") + r"""["']?viz["']?\s*:""")
+    if any(own.match(lines[i].rstrip("\r")) for i in range(start + 1, last + 1)):
+        log.warning("viz MCP not added to the derived agent: the base "
+                    "agent already declares a viz server")
         return derived_text
-    # Locate '## Anti-skip enforcement' in the body.
-    anchor_idx = -1
-    for i in range(close + 1, len(lines)):
-        if lines[i].startswith("## Anti-skip enforcement"):
-            anchor_idx = i
-            break
-    if anchor_idx < 0:
-        return derived_text  # anchor absent — leave unchanged
-    # Find the next '## ' heading after the anchor (the insertion point).
-    insert_idx = len(lines)  # default: end of body
-    for i in range(anchor_idx + 1, len(lines)):
-        if lines[i].startswith("## "):
-            insert_idx = i
-            break
-    # Build the insertion: split the guidance block into individual lines and
-    # insert before the next heading.  The block starts with a blank line so
-    # the new section is separated from the preceding one.
-    guidance_lines = _VIZ_GUIDANCE_BLOCK.split("\n")
-    # Do NOT strip the trailing empty string: it produces the blank line that
-    # separates this section from the next '## ' heading that follows it.
-    return "\n".join(lines[:insert_idx] + guidance_lines + lines[insert_idx:])
+    return "\n".join(lines[:last + 1] + entry(indent or "  ") + lines[last + 1:])
+
+
+# The port this process actually listens on. `config.port` is not it: 0 means
+# "pick one" and a busy static port falls back to a random one, so the entry
+# written from config would point at nothing. `__main__` records the bound
+# port before the server starts; 0 (a test, or before the bind) injects nothing.
+_listen_port = 0
+
+
+def set_listen_port(port: int) -> None:
+    global _listen_port
+    _listen_port = port if isinstance(port, int) and port > 0 else 0
 
 
 _KIRO_SETTINGS_DIR = Path.home() / ".kiro" / "settings"
-_VIZ_MCP_KEY = "viz"
 
 
-def update_mcp_json(port: int) -> None:
-    """Write the viz MCP server entry into ~/.kiro/settings/mcp.json.
+def retire_global_mcp_viz() -> None:
+    """Remove the `viz` entry an earlier release wrote into the user's own
+    `~/.kiro/settings/mcp.json`, at the top level of the file and so never
+    read. Touches nothing else, and only an entry whose URL ends in
+    `/api/mcp/viz`: a `viz` the user wrote themselves is left alone.
 
-    Called at PA startup so kiro-cli picks up the viz MCP via includeMcpJson
-    without us having to inject it into the derived agent (which causes PA's
-    tamper-detection to fire because the body would no longer match the base
-    agent digest stored in the permissions block header).
-
-    Idempotent: if the entry already exists with the correct URL it is not
-    rewritten. If the file does not exist an empty object is created and the
-    entry is added. Atomic write (temp + replace) so a crash mid-write leaves
-    the previous state intact.
+    Idempotent, and it never raises: a file that is absent, unreadable or not
+    JSON is somebody else's business.
     """
-    if port <= 0:
-        return
     mcp_path = _KIRO_SETTINGS_DIR / "mcp.json"
     try:
-        if mcp_path.exists():
-            existing = json.loads(mcp_path.read_bytes().decode("utf-8"))
-        else:
-            existing = {}
-    except (OSError, json.JSONDecodeError):
-        existing = {}
-    viz_url = f"http://127.0.0.1:{port}/api/mcp/viz"
-    current = existing.get(_VIZ_MCP_KEY, {})
-    if current.get("url") == viz_url:
-        return  # already correct, no write needed
-    existing[_VIZ_MCP_KEY] = {"url": viz_url}
-    new_bytes = json.dumps(existing, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
+        existing = json.loads(mcp_path.read_bytes().decode("utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(existing, dict):
+        return
+
+    def ours(entry: object) -> bool:
+        url = entry.get("url") if isinstance(entry, dict) else None
+        return isinstance(url, str) and url.rstrip("/").endswith("/api/mcp/viz")
+
+    changed = False
+    if ours(existing.get("viz")):
+        del existing["viz"]
+        changed = True
+    servers = existing.get("mcpServers")
+    if isinstance(servers, dict) and ours(servers.get("viz")):
+        del servers["viz"]
+        changed = True
+    if not changed:
+        return
     tmp = mcp_path.with_suffix(".tmp")
     try:
-        _KIRO_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-        tmp.write_bytes(new_bytes)
+        tmp.write_bytes(json.dumps(existing, indent=2, ensure_ascii=False)
+                        .encode("utf-8") + b"\n")
         tmp.replace(mcp_path)
+        log.info("removed the viz entry an earlier release wrote to %s", mcp_path)
     except OSError:
         try:
             tmp.unlink(missing_ok=True)
@@ -1906,13 +1944,13 @@ def _generate(status: GenerationStatus, config) -> GenerationStatus:
         base_kept = excise_permissions(base_text)[0]
         block = compile_block(config, base_digest=_digest(base_kept))
         derived_text = inject_permissions(base_text, block)
-        # Phase 4 (261014_QVISUALIZE_QDOCUMENT_CODEX_ENRICHMENT_AND_PA_VIZ):
-        # viz MCP entry is now written to ~/.kiro/settings/mcp.json via
-        # _update_mcp_json() (called separately at startup), NOT injected into
-        # derived_text. Injecting into derived_text caused PA's tamper
-        # detection to fire because the body no longer matched the base agent
-        # digest stored in the permissions block header.
-        # '## Visualization output' guidance is now in kiro_default.md body.
+        # The viz MCP entry goes into the derived agent's own mcpServers, with
+        # every added line marked so `_excise_full` drops it again before any
+        # comparison; see "Visualization MCP entry" above. The agent's own
+        # guidance on using it is in the base agent's body (agent-playbook's
+        # kiro_default.md), which this module never edits.
+        derived_text = inject_mcp_servers(derived_text, _listen_port)
+        viz_injected = has_injected_mcp(derived_text)
         expected_outer = excise_permissions(derived_text)[0]
     except AgentProfileError as exc:
         # Unreadable, not UTF-8, or a frontmatter the splice refuses.
@@ -1923,8 +1961,8 @@ def _generate(status: GenerationStatus, config) -> GenerationStatus:
         """A structural confirmation of this module's own splice.
 
         The frontmatter still has its fences, the block is the compiled one,
-        and every other byte still matches the fully-modified derived text
-        (base + permissions + MCP/body injections). It is deliberately **not**
+        and every other byte still matches the derived text with the
+        injected viz entry set aside (base + permissions). It is deliberately **not**
         a claim that kiro-cli bound the rules: only a live session can show
         that, and `kiro-cli agent validate --path` was measured in
         260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 0 to report
@@ -1936,6 +1974,10 @@ def _generate(status: GenerationStatus, config) -> GenerationStatus:
             raise AgentProfileError(
                 f"the staged {target.name} does not match what was spliced; "
                 "the permission block may not be in effect", kind="write")
+        if has_injected_mcp(written) != viz_injected:
+            raise AgentProfileError(
+                f"the staged {target.name} does not carry the visualization "
+                "entry that was spliced", kind="write")
 
     try:
         _publish(target, derived_text, verify)
@@ -1966,10 +2008,7 @@ def _apply_locked(config) -> GenerationStatus:
     try:
         _clear_stage()
         status = _generate(status, config)
-        # Write viz MCP entry to mcp.json after generating the derived agent.
-        # Done here (not in _generate) so mcp.json is updated on every
-        # apply_settings call, keeping the port current even after PA restart.
-        update_mcp_json(getattr(config, "port", 0))
+        retire_global_mcp_viz()
     except AgentProfileError as exc:
         _status = replace(status, ok=False, error=str(exc), error_kind=exc.kind)
         # A failure this module predicted and named (a file that is not

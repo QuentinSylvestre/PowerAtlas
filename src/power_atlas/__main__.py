@@ -880,6 +880,11 @@ def _run_foreground() -> None:
         _remove_pid()
         sys.exit(1)
 
+    # The derived kiro-cli agent points its visualization MCP entry at this
+    # port, which config.port is not when it is 0 or the bind fell back.
+    from . import agent_profile as _agent_profile
+    _agent_profile.set_listen_port(port)
+
     uv_config = uvicorn.Config(app, host=_loopback_host(), port=port,
                                log_level="warning",
                                ws_max_size=WS_MAX_SIZE_BYTES,

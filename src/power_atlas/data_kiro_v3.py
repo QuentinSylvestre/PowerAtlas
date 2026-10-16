@@ -18,6 +18,7 @@ import secrets
 import shutil
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from .data import BoundedCache, Session, _FileInfo, _normalize_path, _cap_text
@@ -471,6 +472,49 @@ def _find_v3_session_path(session_id: str) -> Path | None:
     if found_path is not None:
         _session_path_cache[session_id] = found_path
     return found_path
+
+
+_TURN_END_TAIL_BYTES = 1_500_000
+
+
+def last_turn_end(session_id: str) -> tuple[str, float] | None:
+    """`(stopReason, epoch seconds)` of the session's most recent `turn_end`
+    record in `messages.jsonl`, or `None` when there is none or it cannot be read.
+
+    kiro-cli answers `session/prompt` with `end_turn` and `status: success`
+    even when the model stopped at its output limit (`max_tokens`); the real
+    reason is recorded only here. At Max effort the model's reasoning shares
+    that limit, so a turn can end with no file written and no tool call, and
+    nothing on the wire says so. Reads the tail only: the `session_start`
+    record written after each turn is large, and the file grows without bound.
+    """
+    path = _find_v3_session_path(session_id)
+    if path is None:
+        return None
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - _TURN_END_TAIL_BYTES))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.split("\n")):
+        if '"turn_end"' not in line:
+            continue
+        try:
+            record = json.loads(line)
+            payload = record["payload"]
+            if payload.get("type") != "turn_end":
+                continue
+            reason = payload.get("stopReason")
+            stamp = datetime.fromisoformat(
+                record["timestamp"].replace("Z", "+00:00")).timestamp()
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if isinstance(reason, str):
+            return reason, stamp
+    return None
 
 
 # ---------------------------------------------------------------------------

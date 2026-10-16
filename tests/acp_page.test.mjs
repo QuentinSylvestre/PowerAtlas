@@ -24963,6 +24963,56 @@ check("transcript-renderer.js: renderTranscriptFrame renders a visualization fra
     "summary textContent must equal the visualization title");
 });
 
+check("transcript-renderer.js: a visualization card is sized only by its own page's height report", (tpl) => {
+  // The rendered page posts {type:'height'} to its parent. The frame is
+  // sandboxed with a null origin, so the source window is the only identity:
+  // a report from anywhere else, or a value out of range, must change nothing.
+  const { page } = connected(tpl);
+  const listeners = [];
+  page.sandbox.addEventListener = (type, fn) => listeners.push([type, fn]);
+  for (const name of ["a", "b"]) {
+    page.sandbox.renderTranscriptFrame({
+      type: "visualization",
+      payload: { url: "/api/viz/sess-live-0001/" + name + ".html", title: name },
+    });
+  }
+  const messages = listeners.filter(([type]) => type === "message");
+  assertEqual(messages.length, 1, "one message listener however many cards there are");
+  const frames = page.el("acpTranscript").querySelectorAll(".acp-viz-frame");
+  assertEqual(frames.length, 2, "two cards, two frames");
+  const own = { id: "own" };
+  frames[0].contentWindow = own;
+  frames[1].contentWindow = { id: "other" };
+  const send = (source, data) => messages[0][1]({ source, data });
+  send(own, { type: "height", height: 412.2 });
+  assertEqual(frames[0].style.height, "413px", "the reporting frame takes the rounded-up height");
+  assert(!frames[1].style.height, "the other card's frame is untouched");
+  send({ id: "stranger" }, { type: "height", height: 50 });
+  send(own, { type: "other", height: 60 });
+  for (const bad of [-1, 10001, NaN, Infinity, "90", null]) {
+    send(own, { type: "height", height: bad });
+  }
+  send(own, null);
+  assertEqual(frames[0].style.height, "413px", "foreign sources and bad values change nothing");
+});
+
+check("transcript-renderer.js: emitting the same visualization again updates its card in place", (tpl) => {
+  const { page } = connected(tpl);
+  const url = "/api/viz/sess-live-0001/chart.html";
+  page.sandbox.renderTranscriptFrame({ type: "visualization", payload: { url, title: "Draft" } });
+  page.sandbox.renderTranscriptFrame({ type: "visualization", payload: { url, title: "Final" } });
+  page.sandbox.renderTranscriptFrame({ type: "visualization",
+    payload: { url: "/api/viz/sess-live-0001/other.html", title: "Other" } });
+  const cards = page.el("acpTranscript").querySelectorAll(".acp-viz-card");
+  assertEqual(cards.length, 2, "one card per file, however often it is emitted");
+  assertEqual(cards[0].querySelector("summary").textContent, "Final",
+    "the title follows the latest emit");
+  const src = cards[0].querySelector("iframe").getAttribute("src");
+  assert(src.startsWith(url + "?r="), "the frame reloads with a cache-busting query, got " + src);
+  assertEqual(cards[1].querySelector("iframe").getAttribute("src"),
+    "/api/viz/sess-live-0001/other.html", "another file's card is untouched");
+});
+
 check("transcript-renderer.js: visualization card uses default title when payload.title is absent", (tpl) => {
   const { page } = connected(tpl);
   page.sandbox.renderTranscriptFrame({
