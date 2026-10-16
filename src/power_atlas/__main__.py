@@ -850,6 +850,11 @@ def _run_foreground() -> None:
     from .web import set_startup_config
     set_startup_config(config)
 
+    # Store-backed plan discovery: inject the configured playbook root once.
+    # 261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 2
+    from .overview import apply_config as _overview_apply_config
+    _overview_apply_config(config.playbook_root)
+
     # Determine port: 0 = random, >0 = attempt static with random fallback
     desired_port = config.port
 

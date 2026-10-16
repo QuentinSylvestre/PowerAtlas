@@ -37912,9 +37912,13 @@ class TestOverviewPlans:
     def _fresh(self):
         from power_atlas import overview, web as web_mod
         overview._plan_memo.clear()
+        overview._playbook_root_override = ""
+        overview._store_map_cache[:] = [0.0, None, ""]
         web_mod._overview_plans_cache[:] = [0.0, None, None]
         yield
         overview._plan_memo.clear()
+        overview._playbook_root_override = ""
+        overview._store_map_cache[:] = [0.0, None, ""]
         web_mod._overview_plans_cache[:] = [0.0, None, None]
 
     @staticmethod
@@ -37934,6 +37938,140 @@ class TestOverviewPlans:
     def _scan(*workspaces, **kw):
         from power_atlas import overview
         return overview.scan_plans([(str(w), w.name) for w in workspaces], **kw)
+
+    @staticmethod
+    def _store_ws(root, store_root, ws_name, plan_files):
+        """Create a store-backed workspace.
+
+        workspace: root/ws_name - no local plans/ dir
+        store dir: store_root/ws_name - has plans/ with plan_files
+        __store__.md: workspace/.kiro/steering/__store__.md pointing at the store dir
+        WORKSPACE: store_root/ws_name/WORKSPACE containing workspace path
+        Returns (ws_path, store_dir)
+        """
+        ws = root / ws_name
+        ws.mkdir(parents=True)
+        store_dir = store_root / ws_name
+        (store_dir / "plans").mkdir(parents=True)
+        for fname, body in plan_files.items():
+            p = store_dir / "plans" / fname
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(body, bytes):
+                p.write_bytes(body)
+            else:
+                p.write_text(body, encoding="utf-8")
+        (store_dir / "WORKSPACE").write_text(str(ws), encoding="utf-8")
+        steering = ws / ".kiro" / "steering"
+        steering.mkdir(parents=True)
+        (steering / "__store__.md").write_text(
+            f"---\ninclusion: always\n---\n\n"
+            f"The store directory is:\n\n`{store_dir}`\n",
+            encoding="utf-8",
+        )
+        return ws, store_dir
+
+    # --- Store-backed workspace tests (261015_PA_STORE_BACKED_WORKSPACE_PLANS) ---
+
+    def test_store_backed_plan_appears(self, tmp_path):
+        """SC-1: store-backed workspace shows its plan under the workspace name."""
+        store_root = tmp_path / "store"
+        ws, store_dir = self._store_ws(tmp_path, store_root, "myws",
+                                       {"260101_ALPHA.md": _OV_TRACKER_PLAN})
+        [plan] = self._scan(ws)
+        assert plan["workspace"] == "myws"
+        assert plan["cwd"] == str(ws)   # workspace cwd, not store dir
+        assert plan["title"] == "ALPHA"
+        assert plan["state"] == "In Progress"
+
+    def test_store_no_plans_dir_falls_back_to_workspace(self, tmp_path):
+        """SC-2: store present but no plans/ -> fall back to workspace plans/."""
+        store_root = tmp_path / "store"
+        ws, store_dir = self._store_ws(tmp_path, store_root, "myws", {})
+        import shutil
+        shutil.rmtree(store_dir / "plans")
+        (ws / "plans").mkdir()
+        (ws / "plans" / "260101_LOCAL.md").write_text(_OV_TRACKER_PLAN, encoding="utf-8")
+        [plan] = self._scan(ws)
+        assert plan["file"] == "260101_LOCAL.md"
+        assert plan["cwd"] == str(ws)
+
+    def test_no_store_md_unaffected(self, tmp_path):
+        """SC-3: workspace with no __store__.md behaves identically to pre-feature."""
+        ws = self._ws(tmp_path, "plain", {"260101_ALPHA.md": _OV_TRACKER_PLAN})
+        [plan] = self._scan(ws)
+        assert plan["title"] == "ALPHA"
+        assert plan["cwd"] == str(ws)
+
+    def test_store_git_activity_uses_store_repo(self, tmp_path, _need_git):
+        """SC-4: slug-scoped commit in the store repo drives plan activity."""
+        store_root = tmp_path / "store"
+        slug = "260916_ALPHA"
+        ws, store_dir = self._store_ws(tmp_path, store_root, "myws",
+                                       {slug + ".md": _OV_PHASES_PLAN})
+        plan_path = store_dir / "plans" / (slug + ".md")
+        old = dt.datetime(2026, 9, 16, 12, tzinfo=dt.timezone.utc)
+        self._git(store_dir, old, "init", "-q")
+        self._git(store_dir, old, "add", "plans")
+        self._git(store_dir, old, "commit", "-q", "-m", f"docs({slug}): plan")
+        # File mtime differs from the commit date: proves the commit date is used.
+        remap = dt.datetime(2026, 9, 25, 12, tzinfo=dt.timezone.utc).timestamp()
+        os.utime(plan_path, (remap, remap))
+        now = dt.datetime(2026, 9, 20, tzinfo=dt.timezone.utc).timestamp()
+        [plan] = self._scan(ws, now=now)
+        assert plan["activity"] == old.isoformat()
+        assert plan["stale"] is False   # 4 days < 7
+        assert plan["cwd"] == str(ws)
+
+    def test_store_git_fallback_to_mtime_when_no_repo(self, tmp_path):
+        """SC-4 fallback: store dir not a git repo -> activity = file mtime."""
+        store_root = tmp_path / "store"
+        ws, store_dir = self._store_ws(tmp_path, store_root, "myws",
+                                       {"260101_ALPHA.md": _OV_TRACKER_PLAN})
+        t = 1_700_000_000
+        path = store_dir / "plans" / "260101_ALPHA.md"
+        os.utime(path, (t, t))
+        [plan] = self._scan(ws, now=t)
+        expected = dt.datetime.fromtimestamp(t, tz=dt.timezone.utc).isoformat()
+        assert plan["activity"] == expected
+
+    def test_playbook_root_override_builds_workspace_map(self, tmp_path):
+        """SC-5: playbook_root override uses WORKSPACE map to find the store."""
+        from power_atlas import overview
+        ws_path = tmp_path / "myws"
+        ws_path.mkdir()
+        # agent-playbook root: <root>/workspaces/myws is the store dir.
+        playbook_root = tmp_path / "playbook"
+        store_dir = playbook_root / "workspaces" / "myws"
+        (store_dir / "plans").mkdir(parents=True)
+        (store_dir / "plans" / "260101_ALPHA.md").write_text(
+            _OV_TRACKER_PLAN, encoding="utf-8")
+        (store_dir / "WORKSPACE").write_text(str(ws_path), encoding="utf-8")
+        # No __store__.md in the workspace: the override path must resolve it.
+        overview._playbook_root_override = str(playbook_root)
+        overview._store_map_cache[:] = [0.0, None, ""]
+        [plan] = self._scan(ws_path)
+        assert plan["workspace"] == "myws"
+        assert plan["cwd"] == str(ws_path)
+        assert plan["title"] == "ALPHA"
+
+    def test_apply_config_clears_cache(self, tmp_path):
+        """apply_config with a new root clears _store_map_cache."""
+        from power_atlas import overview
+        overview._playbook_root_override = "/root_a"
+        overview._store_map_cache[:] = [999999.0, {}, "/root_a"]
+        overview.apply_config("/root_b")
+        assert overview._playbook_root_override == "/root_b"
+        assert overview._store_map_cache[0] == 0.0   # TTL reset
+        assert overview._store_map_cache[1] is None  # map cleared
+        assert overview._store_map_cache[2] == ""    # root cleared
+
+    def test_existing_scan_unaffected_when_no_store(self, tmp_path):
+        """SC-6: pre-feature scan behavior preserved when no store configured."""
+        ws = self._ws(tmp_path, "proj", {"260920_ALPHA_PLAN.md": _OV_TRACKER_PLAN})
+        [plan] = self._scan(ws)
+        assert plan["title"] == "ALPHA PLAN"
+        assert plan["cwd"] == str(ws)
+        assert plan["state"] == "In Progress"
 
     def test_tracker_rows_skip_the_non_numeric_row(self, tmp_path):
         ws = self._ws(tmp_path, "proj", {"260920_ALPHA_PLAN.md": _OV_TRACKER_PLAN})

@@ -73,6 +73,16 @@ _DATE_PREFIX_RE = re.compile(r"^\d{6}_")
 _plan_memo: dict[str, tuple[int, int, dict | None]] = {}
 _plan_memo_lock = threading.Lock()
 
+# Store-backed plan support (261015_PA_STORE_BACKED_WORKSPACE_PLANS).
+# When set, _get_store_dir uses the WORKSPACE map built from this root instead
+# of parsing __store__.md per workspace.
+_playbook_root_override: str = ""
+# Cache: [monotonic_at, {normalized_cwd: store_dir_path} | None, root_str]
+# Third element allows invalidation when the root changes (see apply_config).
+_store_map_cache: list = [0.0, None, ""]
+_store_map_lock = threading.Lock()
+_STORE_MAP_TTL = 30.0
+
 
 def _read_plan_file(path: Path, st=None) -> str | None:
     """The file's text, or None when it is larger than `PLAN_MAX_BYTES`, or
@@ -288,6 +298,114 @@ def _plan_activity(cwd: str, path: Path, mtime: float) -> float:
     return float(committed)
 
 
+def apply_config(playbook_root: str) -> None:
+    """Inject the configured playbook root at startup.
+
+    Must not raise. Called once from __main__ alongside acp.apply_config.
+    261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 2
+    """
+    global _playbook_root_override
+    _playbook_root_override = (playbook_root or "").strip()
+    with _store_map_lock:
+        _store_map_cache[:] = [0.0, None, ""]
+
+
+def _parse_store_dir_from_cwd(cwd: str) -> Path | None:
+    """Parse cwd's __store__.md to find its agent-playbook store directory.
+
+    Returns None on any I/O failure, regex miss, or when the resolved path
+    is on a UNC/network share (D21 stall guard).
+    261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 2
+    """
+    store_md = Path(cwd) / ".kiro" / "steering" / "__store__.md"
+    try:
+        text = store_md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # Regex tied to the /qwire-governance-generated __store__.md format:
+    #   The store directory is:\n\n`<absolute-path>`
+    m = re.search(r"The store directory is:\s*\n\s*\n`([^`\n]+)`", text)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    try:
+        resolved = Path(raw).expanduser().resolve()
+    except (ValueError, OSError):
+        return None
+    # Guard against a store on a UNC/network share (D21; same as plans_dir guard).
+    resolved_str = str(resolved)
+    if _skip_cwd(resolved_str) or _resolves_to_unc(os.path.realpath(resolved_str)):
+        return None
+    return resolved
+
+
+def _build_store_map(playbook_root: Path) -> dict:
+    """Build {normalized_workspace_path: store_dir_path} from WORKSPACE files.
+
+    Swallows all I/O failures; returns {} on a whole-iteration failure.
+    261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 2
+    """
+    from . import data
+    result: dict = {}
+    try:
+        for ws_dir in (playbook_root / "workspaces").iterdir():
+            if not ws_dir.is_dir():
+                continue
+            try:
+                raw = (ws_dir / "WORKSPACE").read_text("utf-8", errors="replace").strip()
+            except OSError as exc:
+                log.debug("Overview store map: skipping %s (%s)", ws_dir, exc)
+                continue
+            if not raw:
+                continue
+            try:
+                norm = data._normalize_path(str(Path(raw).expanduser()))
+            except (ValueError, OSError) as exc:
+                log.debug("Overview store map: bad WORKSPACE path in %s: %s", ws_dir, exc)
+                continue
+            result[norm] = ws_dir
+    except (OSError, ValueError) as exc:
+        log.debug("Overview store map: failed to scan workspaces in %s: %s",
+                  playbook_root, exc)
+    return result
+
+
+def _get_store_dir(cwd: str) -> Path | None:
+    """Return the store directory for a workspace cwd, or None if not store-backed.
+
+    Two paths:
+    - Override (_playbook_root_override set): use cached WORKSPACE map built
+      from that root. TTL check and cache write run under _store_map_lock;
+      the build itself runs outside the lock (two concurrent builds from the
+      same directory are value-equivalent, as with _plan_memo_lock).
+    - No override: parse cwd's own __store__.md directly (no map/cache needed).
+    261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 2
+    """
+    try:
+        if _playbook_root_override:
+            from . import data
+            norm_cwd = data._normalize_path(str(Path(cwd).expanduser()))
+            with _store_map_lock:
+                at, store_map, cached_root = _store_map_cache
+                need = (store_map is None
+                        or cached_root != _playbook_root_override
+                        or time.monotonic() - at >= _STORE_MAP_TTL)
+                if not need:
+                    return store_map.get(norm_cwd)
+            # Build outside the lock (file I/O must not block all readers).
+            try:
+                root = Path(_playbook_root_override).expanduser().resolve()
+            except (ValueError, OSError):
+                return None
+            new_map = _build_store_map(root)
+            with _store_map_lock:
+                _store_map_cache[:] = [time.monotonic(), new_map, _playbook_root_override]
+            return new_map.get(norm_cwd)
+        return _parse_store_dir_from_cwd(cwd)
+    except Exception:
+        return None
+
+
 def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) -> list[dict]:
     """Active plans across `workspaces`, a list of `(cwd, name)` pairs.
 
@@ -335,7 +453,18 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
             break
         if _skip_cwd(cwd):
             continue
-        plans_dir = Path(cwd) / "plans"
+        # Store-backed workspace: redirect plans_dir and git_cwd to the store
+        # repo when it has a plans/ directory.
+        # (261015_PA_STORE_BACKED_WORKSPACE_PLANS)
+        store_dir = None
+        if index == 0 or time.monotonic() < deadline:
+            store_dir = _get_store_dir(cwd)
+        if store_dir is not None and (store_dir / "plans").is_dir():
+            plans_dir = store_dir / "plans"
+            git_cwd = str(store_dir)   # plan commits live in the store repo
+        else:
+            plans_dir = Path(cwd) / "plans"
+            git_cwd = cwd
         try:
             if _resolves_to_unc(os.path.realpath(str(plans_dir))):
                 continue
@@ -379,7 +508,7 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
             # Not memoised with the parse: a code commit scoped to the plan
             # is activity and does not touch the file. Past the deadline the
             # mtime stands, so git never extends the scan.
-            activity = (_plan_activity(cwd, path, mtime)
+            activity = (_plan_activity(git_cwd, path, mtime)
                         if time.monotonic() < deadline else mtime)
             out.append({
                 "cwd": cwd,
