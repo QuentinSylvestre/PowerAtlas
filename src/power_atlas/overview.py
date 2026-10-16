@@ -351,6 +351,10 @@ def _build_store_map(playbook_root: Path) -> dict:
         for ws_dir in (playbook_root / "workspaces").iterdir():
             if not ws_dir.is_dir():
                 continue
+            # Skip store dirs on UNC/network shares (D21 stall guard).
+            if _skip_cwd(str(ws_dir)) or _resolves_to_unc(os.path.realpath(str(ws_dir))):
+                log.debug("Overview store map: skipping UNC store dir %s", ws_dir)
+                continue
             try:
                 raw = (ws_dir / "WORKSPACE").read_text("utf-8", errors="replace").strip()
             except OSError as exc:

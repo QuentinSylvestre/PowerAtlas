@@ -38640,6 +38640,22 @@ class TestOverviewPlans:
             body = client.get("/api/dashboard/overview/summary").json()
         assert body["plans"] == []
 
+    def test_store_parse_rejects_unc_store_dir(self, tmp_path):
+        """_parse_store_dir_from_cwd returns None for a UNC store path."""
+        from power_atlas import overview
+        ws = tmp_path / "myws"
+        ws.mkdir()
+        steering = ws / ".kiro" / "steering"
+        steering.mkdir(parents=True)
+        # Write __store__.md pointing at a UNC path
+        (steering / "__store__.md").write_text(
+            "The store directory is:\n\n`\\\\server\\share\\store`\n",
+            encoding="utf-8"
+        )
+        # Should return None (UNC path rejected)
+        result = overview._parse_store_dir_from_cwd(str(ws))
+        assert result is None
+
 
 # --- Overview: Live now tiles (260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE) ---
 
