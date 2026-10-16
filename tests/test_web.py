@@ -19581,6 +19581,27 @@ class TestRemoteBindAddressValidation:
         monkeypatch.setattr(config_mod, "CONFIG_PATH", path)
         assert config_mod.load_config().remote_bind_address == "100.78.142.124"
 
+    def test_playbook_root_defaults_to_empty(self, isolated_config):
+        """261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 1. A config with no
+        `playbook_root` key loads the empty-string default."""
+        from power_atlas.config import load_config
+        from power_atlas import config as config_mod
+        config_mod.CONFIG_PATH = isolated_config / "config.toml"
+        cfg = load_config()
+        assert cfg.playbook_root == ""
+
+    def test_playbook_root_is_stripped_on_load(self, isolated_config):
+        """261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 1. Surrounding
+        whitespace is stripped on load."""
+        import tomli_w
+        from power_atlas.config import load_config
+        from power_atlas import config as config_mod
+        p = isolated_config / "config.toml"
+        p.write_text(tomli_w.dumps({"playbook_root": "  /x/y  "}))
+        config_mod.CONFIG_PATH = p
+        cfg = load_config()
+        assert cfg.playbook_root == "/x/y"
+
 
 class TestEnablingRemoteAccessIsOneStep:
     """`/api/save-setting` is the whole of enabling remote access.

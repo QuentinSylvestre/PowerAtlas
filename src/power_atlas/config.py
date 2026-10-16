@@ -167,6 +167,11 @@ class Config:
     # POST /api/save-setting (bounds in `web._SETTING_BOUNDS`) and read at every scheduler tick, so no
     # restart is needed. 261016_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT
     kiro_daily_reset_minutes_utc: int = 0
+    # Absolute path to the agent-playbook config repo. When set, overview.py uses
+    # this root to build the WORKSPACE map directly instead of parsing __store__.md
+    # per workspace. Empty string (the default) means auto-detect from __store__.md.
+    # 261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 1
+    playbook_root: str = ""
 
     # ---- What `load_config` found, never stored ---------------------------
     # 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL final review (A9). Declared
@@ -894,6 +899,7 @@ def _load_config_once(final: bool) -> Config | None:
         # Hold for anything that is not hold or toggle. Never raises.
         # 261006_MERGED_PEEK_AND_APP_WINDOW_WITH_CONFIGURABLE_SHORTCUTS Phase 2 review
         config.peek_mode = _normalize_peek_mode(config.peek_mode)
+        config.playbook_root = config.playbook_root.strip()
         # Store as instance attr (not a dataclass field) — object identity constraint:
         # the same Config instance returned by load must be passed to save for extras to persist.
         config._extra = extra
