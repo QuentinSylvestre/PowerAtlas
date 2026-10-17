@@ -3687,7 +3687,7 @@ function dashRenderWorkflowsPastRuns(runs, container) {
     var details = document.createElement('details');
     if (i === 0) details.open = true;
     var summary = document.createElement('summary');
-    var labelText = run.workflowId || ('Run ' + (runs.length - i));
+    var labelText = run.name || run.workflowId || ('Run ' + (runs.length - i));
     var summaryText = document.createElement('span');
     summaryText.textContent =
       labelText + ' \u2014 ' + steps.length + ' step' + (steps.length === 1 ? '' : 's');
@@ -3700,7 +3700,7 @@ function dashRenderWorkflowsPastRuns(runs, container) {
       row.style.cursor = 'default';
       var roleSpan = document.createElement('span');
       roleSpan.className = 'wf-step-role';
-      roleSpan.textContent = step.role || step.subSessionId || '';
+      roleSpan.textContent = step.agentName || step.nodeId || '';
       var statusSpan = document.createElement('span');
       statusSpan.className = 'wf-step-status';
       statusSpan.textContent = step.status || '';
@@ -6064,6 +6064,7 @@ function dashHandle(frame){
         var _dOld = dashSubPanelEl.querySelector('.acp-step-question-card');
         if (_dOld) _dOld.parentNode.removeChild(_dOld);
         var _dCard = document.createElement('div');
+        _dCard.setAttribute('role', 'alert');
         _dCard.className = 'acp-step-question-card acp-step-question-card-' +
           (payload.severity || 'warning');
         var _dCardText = document.createElement('span');
