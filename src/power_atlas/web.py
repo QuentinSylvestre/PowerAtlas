@@ -7754,13 +7754,14 @@ def _handle_emit_visualization(args: dict) -> dict:
         return {"error": {"code": -32602, "message": f"invalid path: {exc}"}}
 
     filename = p.name
+    url_path = f"/api/viz/{session_id}/{filename}"
 
     # Broadcast-only: call _registry.broadcast directly, NOT _emit().
     # _emit() would record the frame into _History (the replay buffer),
     # but visualization frames are live-only — the file may change between
     # agent turns.  This mirrors the tool_output broadcast-only pattern.
     frame = acp.envelope("visualization", {
-        "url": f"/api/viz/{session_id}/{filename}",
+        "url": url_path,
         "title": title,
     }, session_id)
     acp._registry.broadcast(session_id, frame)
@@ -7769,7 +7770,7 @@ def _handle_emit_visualization(args: dict) -> dict:
     meta = acp._supervisor.sessions.get(session_id)
     if meta is not None:
         meta.setdefault("visualizations", []).append({
-            "url": f"/api/viz/{session_id}/{filename}",
+            "url": url_path,
             "title": title,
         })
         # Cap at 20 entries to avoid unbounded growth in long sessions.

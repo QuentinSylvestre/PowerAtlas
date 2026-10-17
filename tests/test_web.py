@@ -3502,6 +3502,8 @@ class TestHandleSubscribeVizReplay:
         acp_mod, sid = acp_session
         meta = acp_mod._supervisor.sessions[sid]
         # Simulate 25 recordings using the same cap logic as web.py.
+        # NOTE: the [-20:] slice below is a copy of web.py's cap logic and must
+        # be kept in sync with _handle_emit_visualization if the cap changes.
         for i in range(25):
             meta.setdefault("visualizations", []).append(
                 {"url": f"/api/viz/sess-placeholder-cap/v{i}.html", "title": f"V{i}"}
@@ -3514,6 +3516,54 @@ class TestHandleSubscribeVizReplay:
         frames = _queued(conn)
         viz_frames = [f for f in frames if f["type"] == "visualization"]
         assert len(viz_frames) == 20
+
+
+class TestVizRecording:
+    """_handle_emit_visualization records frames into meta['visualizations'].
+
+    Exercises the recording path in web.py directly — the path that
+    TestHandleSubscribeVizReplay tests by injecting pre-built dicts.  Removing
+    the recording block from web.py must leave this class failing, not green.
+    """
+
+    def test_recording_populates_visualizations(self, acp_session, tmp_path):
+        """A single call writes one entry into meta['visualizations']."""
+        from power_atlas.web import _handle_emit_visualization
+        acp_mod, sid = acp_session
+        html_file = tmp_path / "chart.html"
+        html_file.write_text("<html></html>")
+        acp_mod._supervisor.sessions[sid]["cwd"] = str(tmp_path)
+
+        result = _handle_emit_visualization({
+            "path": str(html_file),
+            "title": "My Chart",
+            "session_id": sid,
+        })
+
+        assert "error" not in result
+        meta = acp_mod._supervisor.sessions[sid]
+        assert "visualizations" in meta
+        assert len(meta["visualizations"]) == 1
+        assert meta["visualizations"][0]["url"] == f"/api/viz/{sid}/chart.html"
+        assert meta["visualizations"][0]["title"] == "My Chart"
+
+    def test_cap_enforced_after_21_calls(self, acp_session, tmp_path):
+        """After 21 calls, meta['visualizations'] has at most 20 entries."""
+        from power_atlas.web import _handle_emit_visualization
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.sessions[sid]["cwd"] = str(tmp_path)
+
+        for i in range(21):
+            html_file = tmp_path / f"v{i}.html"
+            html_file.write_text("<html></html>")
+            _handle_emit_visualization({
+                "path": str(html_file),
+                "title": f"V{i}",
+                "session_id": sid,
+            })
+
+        meta = acp_mod._supervisor.sessions[sid]
+        assert len(meta["visualizations"]) <= 20
 
 
 class TestAcpUnsubscribe:
