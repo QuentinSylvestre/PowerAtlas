@@ -25200,6 +25200,35 @@ check("dashHandle session frame with queued:true shows waiting steer status", ()
     `SC4: dash steer status must mention "turn to finish", got: ${p.sandbox.dashSteerStatusEl.textContent}`);
 });
 
+check("session frame with queued:false leaves steer status hidden", (tpl) => {
+  const { page, live } = connected(tpl);
+  const status = page.el("acpSteerStatus");
+  // Baseline: status is hidden after the initial session frame.
+  assertEqual(status.hidden, true, "steer status should start hidden");
+  // Deliver a session frame with queued:false — should NOT show the waiting indicator.
+  page.deliver({
+    type: "session", sessionId: live,
+    payload: {
+      sessionId: live, cwd: "/work", created: false,
+      turnActive: false, contextPercent: null, queued: false,
+    },
+  });
+  assertEqual(status.hidden, true,
+    "SC4: steer status must stay hidden when session frame carries queued:false");
+});
+
+check("dashHandle session frame with queued:false leaves dash steer status hidden", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, true,
+    "SC4: dash steer status should start hidden");
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "/work", turnActive: false, queued: false },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, true,
+    "SC4: dash steer status must stay hidden when session frame carries queued:false");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
