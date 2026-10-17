@@ -344,6 +344,30 @@ _Reserved — filled during implementation._
 
 ## Review Log
 
+## Review Log
+
+### 2026-10-16 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer, End-user advocate, Maintainability reviewer.
+4 findings (0 High, 0 Medium, 4 Low).
+QA verification: PASS (5 surfaces: SC1/SC2/SC3 session-switch JS, SC4 Python+JS, SC5 dashboard JS; 1132 JS + 3518 pytest; no JS errors on live PowerAtlas after restart).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Three session-switch state fixes | pass | PASS | 1132 JS (T1–T3 + 1129 baseline) |
+| 2: Queue-status restore on reconnect | pass | PASS | 3518 pytest + 1132 JS (4 SC4 tests) |
+| 3: Dashboard visualization frame handler | pass | PASS | 1132 JS (3 SC5 tests) |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | `steer_sent` unconditional band render — pre-existing race window not introduced by this plan. | User: accepted — documented in Follow-up Work item 2, pre-existing, deferred per plan scope. |
+| 2 | Low | "Waiting…" string in 3 locations across 2 files; text change would require 3 edits. | Fixed — extracted to `QUEUE_WAITING_MSG` constant (acp.html IIFE + dashHandle-local; commit 48f59b1). |
+
+Step 9 cycle-1: Green (2 Low). Finding 1 user-accepted, Finding 2 fixed. Cycle-2 review: Green (no new findings). Step 9b QA: PASS.
+
 ### 2026-10-16 — Implementation Review (after Phase 3, persona: Senior engineer, Reliability engineer, End-user advocate, Maintainability reviewer)
 
 Implementation health: Green.
