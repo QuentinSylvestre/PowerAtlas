@@ -3299,19 +3299,36 @@ def _get_tool_diffs_v3(session_id: str) -> "dict[str, dict]":
 def _get_workflow_runs_v3(session_id: str) -> "list[dict]":
     """Extract workflow run history from a v3 session's messages.jsonl.
 
-    Parses _kiro/workflow/node_start, node_complete, and run_complete
-    notification records (user-type messages with JSON content).
+    Parses sub_agent_start / sub_agent_complete records, grouped by
+    parentExecutionId.  Each group represents one dispatch wave (a single
+    invoke_sub_agent or run_workflow call).
 
-    Pre-probe O2 (2026-10-16): field shapes confirmed from real local data:
-    - node_start carries workflowId, nodeId, type, agentName
-    - node_complete carries workflowId, nodeId, status, capturedOutput
-    - run_complete carries workflowId, status, finalState.workflowName
+    Probe O2 (2026-10-16, live data): _kiro/workflow/* notification methods
+    are NOT stored in messages.jsonl — they are ACP wire frames only.  What IS
+    stored: sub_agent_start / sub_agent_complete with parentExecutionId,
+    subSessionId, subAgentName, and explanation.
 
     Returns list of runs ordered oldest-first, each:
-    {workflowId, name, status, startedAt, endedAt, steps: [{nodeId, agentName, status, capturedOutput}]}
+    {workflowId, name, status, startedAt, endedAt,
+     steps: [{nodeId, agentName, label, status, capturedOutput}]}
     """
     if not _SESSION_ID_RE.fullmatch(session_id):
         return []
+
+    import re as _re
+
+    def _derive_run_name(explanation: str, fallback: str) -> str:
+        if not explanation:
+            return fallback[:24]
+        # "Executing stage 'X' in pipeline: …" → "stage X"
+        m = _re.search(r"stage\s+'([^']+)'", explanation, _re.I)
+        if m:
+            return m.group(1)[:40]
+        # "Dispatching Phase N …" → "Phase N …"
+        m = _re.search(r"(Phase\s+\d+[^.,;:]*)", explanation, _re.I)
+        if m:
+            return m.group(1).strip()[:40]
+        return explanation.split(".")[0].strip()[:40] or fallback[:24]
 
     def _scan() -> "list[dict]":
         sessions_root = Path.home() / ".kiro" / "sessions"
@@ -3329,8 +3346,8 @@ def _get_workflow_runs_v3(session_id: str) -> "list[dict]":
         if jsonl_path is None:
             return []
 
-        runs: "dict[str, dict]" = {}  # workflowId -> run dict
-        run_order: "list[str]" = []   # insertion order for oldest-first
+        runs: "dict[str, dict]" = {}   # parentExecutionId → run
+        run_order: "list[str]" = []
 
         try:
             for raw_line in jsonl_path.read_text(
@@ -3344,68 +3361,62 @@ def _get_workflow_runs_v3(session_id: str) -> "list[dict]":
                 except ValueError:
                     continue
                 payload = msg.get("payload") or {}
-                if payload.get("type") != "user":
-                    continue
-                content_str = payload.get("content") or ""
-                if "_kiro/workflow/" not in content_str:
-                    continue
-                try:
-                    inner = json.loads(content_str)
-                except (ValueError, TypeError):
-                    continue
-                if not isinstance(inner, dict):
-                    continue  # guard: non-dict JSON (array, string, etc.) → skip
-                method = inner.get("method") or ""
-                wf_id = inner.get("workflowId") or ""
-                if not wf_id or not method.startswith("_kiro/workflow/"):
-                    continue
+                ptype = payload.get("type")
+                ts = msg.get("timestamp")  # ISO-8601 string or None
 
-                if wf_id not in runs:
-                    runs[wf_id] = {
-                        "workflowId": wf_id,
-                        "name": "",
-                        "status": "unknown",
-                        "startedAt": None,
-                        "endedAt": None,
-                        "steps": [],
-                    }
-                    run_order.append(wf_id)
-                run = runs[wf_id]
-
-                if method == "_kiro/workflow/node_start":
-                    node_type = inner.get("type") or ""
-                    if node_type == "step":
-                        run["steps"].append({
-                            "nodeId": inner.get("nodeId") or "",
-                            "agentName": inner.get("agentName") or "",
+                if ptype == "sub_agent_start":
+                    exec_id = payload.get("parentExecutionId") or ""
+                    sub_id = payload.get("subSessionId") or ""
+                    agent_name = payload.get("subAgentName") or ""
+                    explanation = payload.get("explanation") or ""
+                    if not exec_id:
+                        continue
+                    if exec_id not in runs:
+                        runs[exec_id] = {
+                            "workflowId": exec_id,
+                            "name": _derive_run_name(explanation, exec_id[:12]),
                             "status": "running",
-                            "capturedOutput": None,
-                        })
-                elif method == "_kiro/workflow/node_complete":
-                    node_id = inner.get("nodeId") or ""
-                    status = inner.get("status") or "unknown"
-                    output = inner.get("capturedOutput")
+                            "startedAt": ts,
+                            "endedAt": None,
+                            "steps": [],
+                        }
+                        run_order.append(exec_id)
+                    runs[exec_id]["steps"].append({
+                        "nodeId": sub_id,
+                        "agentName": agent_name,
+                        "label": explanation[:80] if explanation else agent_name,
+                        "status": "running",
+                        "capturedOutput": None,
+                    })
+
+                elif ptype == "sub_agent_complete":
+                    exec_id = payload.get("parentExecutionId") or ""
+                    sub_id = payload.get("subSessionId") or ""
+                    status = payload.get("status") or "unknown"
+                    if exec_id not in runs:
+                        continue
+                    run = runs[exec_id]
+                    # Match by subSessionId first; fall back to first still-running step
+                    matched = False
                     for step in run["steps"]:
-                        if step["nodeId"] == node_id:
+                        if step["nodeId"] == sub_id:
                             step["status"] = status
-                            step["capturedOutput"] = output
+                            matched = True
                             break
-                elif method == "_kiro/workflow/run_complete":
-                    run["status"] = inner.get("status") or "unknown"
-                    final = inner.get("finalState") or {}
-                    run["name"] = (
-                        final.get("workflowName")
-                        or final.get("runLabel")
-                        or wf_id
-                    )
-                    root = final.get("root") or {}
-                    run["startedAt"] = root.get("startedAt")
-                    run["endedAt"] = root.get("endedAt")
+                    if not matched:
+                        for step in run["steps"]:
+                            if step["status"] == "running":
+                                step["status"] = status
+                                break
+                    # Mark run complete when all steps have settled
+                    if all(s["status"] != "running" for s in run["steps"]):
+                        run["status"] = "complete"
+                        run["endedAt"] = ts
 
         except Exception:
             return []
 
-        return [runs[wf_id] for wf_id in run_order]
+        return [runs[eid] for eid in run_order]
 
     try:
         return _scan()
