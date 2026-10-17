@@ -49,6 +49,14 @@
 // _dashWfPanelEl, _dashWfOpenSubagentFn, initWorkflowsDom,
 // setWorkflowsLiveRun, clearWorkflowsLiveRun — grepped against both
 // acp.html and index.html; no collision. `_wf`-prefixed to minimise risk.
+//
+// Phase 6 additions (sub-agent composer): _subComposerInput, _subComposerSend,
+// _subComposerContainer, _subComposerStatus, _subComposerSendFn,
+// _subComposerTargetSid, _dashSubComposerInput, _dashSubComposerSend,
+// _dashSubComposerContainer, _dashSubComposerStatus, _dashSubComposerSendFn,
+// _dashSubComposerTargetSid, initSubAgentComposerDom,
+// setSubAgentComposerEnabled — grepped against both acp.html and index.html;
+// no collision.
 
 // ---- context-window usage indicator ----------------------------------------
 
@@ -1007,5 +1015,136 @@ function handleCommandsExecuteResult(payload) {
     addSystemMessage(res.message);
   } else if (res && !res.success) {
     addSystemMessage('Command failed.');
+  }
+}
+
+// ---- sub-agent panel composer (Phase 6) ------------------------------------
+//
+// A minimal free-form composer rendered at the bottom of the sub-agent panel
+// when a workflow step session is live. Sending routes the prompt directly to
+// the step's sessionId via `session/prompt`.
+//
+// Two independent sets of refs — one per page — mirroring every other
+// dual-page pattern in this file. `isDashboard` selects which set to read.
+
+var _subComposerInput     = null;
+var _subComposerSend      = null;
+var _subComposerContainer = null;
+var _subComposerStatus    = null;
+var _subComposerSendFn    = null;
+var _subComposerTargetSid = null;
+
+var _dashSubComposerInput     = null;
+var _dashSubComposerSend      = null;
+var _dashSubComposerContainer = null;
+var _dashSubComposerStatus    = null;
+var _dashSubComposerSendFn    = null;
+var _dashSubComposerTargetSid = null;
+
+/** Wire DOM refs and event listeners for the sub-agent composer on one page.
+ *
+ *  `refs.sendFn` is the page's WebSocket send function: `send(type, payload,
+ *  sid)`. On /acp the ref is the plain `send` function; on index.html it is
+ *  `dashSend`.
+ *
+ *  The panel uses the main WS (subscribed to the parent session), passing the
+ *  step sessionId explicitly as the third argument, so the server's
+ *  `_handle_prompt` receives it as `session_id` and routes via the new
+ *  `_workflow_child_meta` early branch.
+ *
+ *  No innerHTML anywhere (acp_page.test.mjs prohibition). */
+function initSubAgentComposerDom(refs) {
+  var isDash = !!refs.isDashboard;
+  var input     = refs.input;
+  var sendBtn   = refs.sendBtn;
+  var container = refs.container;
+  var statusEl  = refs.statusEl;
+  var sendFn    = refs.sendFn;
+
+  if (isDash) {
+    _dashSubComposerInput     = input;
+    _dashSubComposerSend      = sendBtn;
+    _dashSubComposerContainer = container;
+    _dashSubComposerStatus    = statusEl;
+    _dashSubComposerSendFn    = sendFn;
+  } else {
+    _subComposerInput     = input;
+    _subComposerSend      = sendBtn;
+    _subComposerContainer = container;
+    _subComposerStatus    = statusEl;
+    _subComposerSendFn    = sendFn;
+  }
+
+  if (!input || !sendBtn) return;
+
+  function _doSend() {
+    var targetSid = isDash ? _dashSubComposerTargetSid : _subComposerTargetSid;
+    var fn        = isDash ? _dashSubComposerSendFn    : _subComposerSendFn;
+    var sEl       = isDash ? _dashSubComposerStatus    : _subComposerStatus;
+    if (!targetSid || !input.value.trim()) return;
+    var text = input.value;
+    // sendFn(type, payload, sid) puts sid into the envelope's sessionId, so
+    // _handle_prompt receives the step session id correctly.
+    var sent = typeof fn === 'function' && fn('prompt', { prompt: text }, targetSid);
+    if (sent !== false) {
+      input.value = '';
+      if (sEl) { sEl.textContent = ''; sEl.hidden = true; }
+    } else {
+      // WebSocket not OPEN or send returned false: leave input populated.
+      if (sEl) {
+        sEl.textContent = 'Send failed \u2014 check connection.';
+        sEl.hidden = false;
+      }
+    }
+  }
+
+  sendBtn.addEventListener('click', _doSend);
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); _doSend(); }
+  });
+}
+
+/** Show or hide the sub-agent composer.
+ *
+ *  `enabled=true`: reveal the container and set the target step sessionId.
+ *  `enabled=false`: if a target was previously set, show a "Step completed."
+ *  notice (input and send button hidden, container stays visible so the user
+ *  sees the feedback); otherwise just hide the container entirely.
+ *
+ *  Called by the host page's `openSubagent()` whenever a sub-agent panel is
+ *  opened, and by the `subagents` frame handler when workflowLive changes.
+ */
+function setSubAgentComposerEnabled(enabled, targetSid, isDashboard) {
+  var container = isDashboard ? _dashSubComposerContainer : _subComposerContainer;
+  var input     = isDashboard ? _dashSubComposerInput     : _subComposerInput;
+  var sendBtn   = isDashboard ? _dashSubComposerSend      : _subComposerSend;
+  var statusEl  = isDashboard ? _dashSubComposerStatus    : _subComposerStatus;
+  var prevTarget = isDashboard ? _dashSubComposerTargetSid : _subComposerTargetSid;
+
+  if (!container) return;
+
+  if (enabled) {
+    if (isDashboard) { _dashSubComposerTargetSid = targetSid; }
+    else             { _subComposerTargetSid     = targetSid; }
+    if (input)   { input.hidden = false; input.disabled = false; }
+    if (sendBtn) { sendBtn.hidden = false; sendBtn.disabled = false; }
+    if (statusEl) { statusEl.hidden = true; statusEl.textContent = ''; }
+    container.hidden = false;
+  } else {
+    var hadTarget = !!prevTarget;
+    if (isDashboard) { _dashSubComposerTargetSid = null; }
+    else             { _subComposerTargetSid     = null; }
+    if (hadTarget) {
+      // Show "Step completed." so the user sees why the composer is gone.
+      if (input)   { input.hidden = true; }
+      if (sendBtn) { sendBtn.hidden = true; }
+      if (statusEl) {
+        statusEl.textContent = 'Step completed.';
+        statusEl.hidden = false;
+      }
+      container.hidden = false;
+    } else {
+      container.hidden = true;
+    }
   }
 }

@@ -6714,11 +6714,19 @@ class _Supervisor:
         return result or {}
 
     def _emit_step_message(self, parent_id: str, step: str, severity: str,
-                           message: str) -> None:
-        """Record a ``step_message`` system row on the parent's transcript."""
+                           message: str, step_id: str = "") -> None:
+        """Record a ``step_message`` system row on the parent's transcript.
+
+        ``step_id`` is the step's own session id, included in the frame as
+        ``stepSessionId`` so the sub-agent panel can match the card to the
+        open panel (Phase 6, 261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION SC7).
+        Omitted (empty) for replayed messages where the session id is no longer available.
+        """
         _flush_bubble(parent_id, emit_fn=_emit)
-        _emit(parent_id, envelope("step_message", {
-            "step": step, "severity": severity, "message": message}, parent_id))
+        payload: dict = {"step": step, "severity": severity, "message": message}
+        if step_id:
+            payload["stepSessionId"] = step_id
+        _emit(parent_id, envelope("step_message", payload, parent_id))
 
     def _on_session_notify(self, params) -> None:
         """Handle ``_kiro/session/notify``: a workflow step's ``send_message``
@@ -6777,7 +6785,8 @@ class _Supervisor:
             if changed:
                 _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
             if severity in ("warning", "error"):
-                self._emit_step_message(parent_id, label, severity, message)
+                self._emit_step_message(parent_id, label, severity, message,
+                                        step_id=step_id)
             return
         if sender == "parent":
             step_id = params.get("sessionId")
@@ -9673,6 +9682,43 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
         return
     if not text.strip() and not images:
         refuse("bad_payload", "A prompt needs text, an image, or both.")
+        return
+    # Workflow step sessions live in subagent_sessions (and _workflow_child_meta)
+    # but NOT in sessions, so the existing guards below would both block them.
+    # This dedicated early branch routes the prompt directly to the step session
+    # via the supervisor transport, bypassing the sessions membership check and
+    # the parent-session turn-management code (inflight tracking, crew eviction,
+    # _workflow_free_orphans) -- those are parent-only operations.
+    # The existing subagent_sessions guard below still covers non-workflow
+    # sub-agents, which remain read-only.
+    # Phase 6, SC7/SC8: 261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION.
+    if session_id in _supervisor._workflow_child_meta:
+        child_meta = _supervisor._workflow_child_meta[session_id]
+        parent_id = child_meta.get("parent") or ""
+        # Allow a connection subscribed to the step session itself, or to its
+        # parent. The auto path (conn is None) is also permitted, though
+        # PowerAtlas does not currently use it for step sessions.
+        if conn is not None and conn.session_id not in (session_id, parent_id):
+            refuse("not_subscribed",
+                   "Subscribe to this step session or its parent session "
+                   "before prompting it.")
+            return
+        log.info("ACP step-direct prompt: step=%s parent=%s (%d chars)",
+                 session_id, parent_id, len(text))
+        blocks: list[dict] = [{"type": "text", "text": text}]
+        blocks.extend(images or ())
+        try:
+            await _supervisor._request(
+                "session/prompt",
+                {"sessionId": session_id, "prompt": blocks},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            log.exception("ACP step-direct prompt failed: step=%s", session_id)
+            if conn is not None:
+                conn.send(error_frame(
+                    "internal_error",
+                    "The step prompt failed; see orchestrator.log.", session_id))
         return
     if session_id in _supervisor.subagent_sessions:
         refuse("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE)

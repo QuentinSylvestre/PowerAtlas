@@ -5771,6 +5771,9 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor._workflow_ended.clear()
         acp_mod._supervisor._crew_order_next.clear()
         acp_mod._supervisor._compacting.clear()
+        # Phase 6: workflow child meta (step sessions); not cleared elsewhere
+        # in teardown and tests reuse session ids.
+        acp_mod._supervisor._workflow_child_meta.clear()
         acp_mod._bubbles.clear()
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
@@ -12252,6 +12255,71 @@ class TestAcpSubagentReadOnlyAccess:
             assert len(acp_mod._supervisor.sessions) == 1
 
 
+class TestAcpWorkflowStepDirectPrompt:
+    """Phase 6 (SC7): a session in ``_workflow_child_meta`` routes to the
+    dedicated step-prompt path rather than being refused ``read_only_session``;
+    a session in ``subagent_sessions`` only still gets the refusal.
+
+    261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION Phase 6.
+    """
+
+    def _make_conn(self, acp_mod, sid=None):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        if sid:
+            acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def test_step_session_in_workflow_child_meta_bypasses_read_only_guard(
+            self, acp_store):
+        """A session in ``_workflow_child_meta`` must not be refused with
+        ``read_only_session``; it must reach the step-prompt path."""
+        acp_mod, _ = acp_store
+        parent_sid = _live_session(acp_mod, sid="wf-parent-01")
+        step_sid = "sess-wf-step-01"
+        # Register the step as a sub-agent session AND a workflow child.
+        acp_mod._supervisor.subagent_sessions[step_sid] = {"parent": parent_sid}
+        acp_mod._supervisor._workflow_child_meta[step_sid] = {
+            "parent": parent_sid, "workflowId": "wf_placeholder_run_1",
+        }
+        # Subscribe the connection to the PARENT session.
+        conn = self._make_conn(acp_mod, parent_sid)
+        requests = []
+
+        async def fake_request(self, method, params, timeout=acp_mod.REQUEST_TIMEOUT_SECONDS):
+            requests.append((method, params))
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request):
+            asyncio.run(acp_mod._handle_prompt(conn, step_sid, {"prompt": "hello step"}))
+
+        # Must NOT produce a read_only_session error frame.
+        frames = _queued(conn)
+        error_codes = [f["payload"].get("code") for f in frames if f["type"] == "error"]
+        assert "read_only_session" not in error_codes, \
+            "step session in _workflow_child_meta must not be refused read_only_session"
+        # Must have attempted session/prompt for the step session.
+        assert any(m == "session/prompt" and p.get("sessionId") == step_sid
+                   for m, p in requests), \
+            "step-direct prompt must call session/prompt with the step's sessionId"
+
+    def test_subagent_session_not_in_workflow_child_meta_is_still_refused(
+            self, acp_store):
+        """A session in ``subagent_sessions`` only (not in
+        ``_workflow_child_meta``) must still receive the ``read_only_session``
+        refusal — the new branch must not relax that guard."""
+        acp_mod, _ = acp_store
+        parent_sid = _live_session(acp_mod, sid="wf-parent-02")
+        non_wf_sub = "sess-non-wf-sub-01"
+        # Register as a sub-agent session only, NOT as a workflow child.
+        acp_mod._supervisor.subagent_sessions[non_wf_sub] = {"parent": parent_sid}
+        conn = self._make_conn(acp_mod, parent_sid)
+        asyncio.run(acp_mod._handle_prompt(conn, non_wf_sub, {"prompt": "try me"}))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "read_only_session", \
+            "non-workflow sub-agent session must still be refused read_only_session"
+
+
 class TestAcpSubagentCleanup:
 
     def test_closing_the_parent_tears_down_its_crew(self, acp_session):
@@ -16989,7 +17057,7 @@ class TestAcpWorkflowNotifications:
         assert before <= record["created"] <= time.time()
         assert self._step_messages(out) == [{
             "step": "workflow step wf-coder", "severity": "warning",
-            "message": "Which colour? Red or blue?"}]
+            "message": "Which colour? Red or blue?", "stepSessionId": "child-c7"}]
         subs = [f for f in out if f["type"] == "subagents"]
         assert subs[-1]["payload"]["subagents"][0]["action"] == "Which colour? Red or blue?"
         # Recorded, so a reconnect replays it.
@@ -17053,7 +17121,7 @@ class TestAcpWorkflowNotifications:
         assert sv._workflow_step_questions == {}
         assert self._step_messages(out) == [{
             "step": "workflow step wf-coder", "severity": "error",
-            "message": "build failed"}]
+            "message": "build failed", "stepSessionId": "child-c7"}]
 
     def test_step_message_is_cleaned_and_clipped_to_the_message_limit(self, wf):
         acp_mod, sv = wf
@@ -17584,7 +17652,7 @@ class TestAcpWorkflowNotifications:
         self._step_says(acp_mod, severity, raw)
         assert self._step_messages(_queued(view)) == [{
             "step": "workflow step wf-coder", "severity": severity,
-            "message": expected}]
+            "message": expected, "stepSessionId": "child-c7"}]
         assert sv.crews[self.P]["child-c7"]["action"] == expected
         if severity == "warning":
             assert sv._workflow_step_questions["child-c7"]["text"] == expected

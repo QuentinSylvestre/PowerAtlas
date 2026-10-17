@@ -7176,6 +7176,120 @@ check("Enter and Space keys on a live step row open the sub-agent panel", (tpl) 
               "Enter key on step row must open sub-agent panel");
 });
 
+// ---- Phase 6: sub-agent composer (SC7/SC8) ----------------------------------
+
+check("sub-agent composer is visible when openSubagent is called with a live workflow step SID", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // Deliver a workflowLive:true subagents frame to populate _liveWorkflowChildSids.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "wf-step-1", role: "step-a", task: "", sessionName: "s1",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  // Open the sub-agent panel for the live step.
+  page.el("acpTranscript").querySelector(".acp-crew-row").dispatch("click");
+  const container = page.el("acpSubComposerContainer");
+  assert(!container.hidden,
+    "sub-agent composer container must be visible for a live workflow step");
+  const input = page.el("acpSubComposerInput");
+  assert(!input.hidden, "composer input must not be hidden");
+  const sendBtn = page.el("acpSubComposerSend");
+  assert(!sendBtn.hidden, "send button must not be hidden");
+});
+
+check("sub-agent composer is hidden when openSubagent is called for a non-live sub-agent", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // Deliver a subagents frame WITHOUT workflowLive:true.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "plain-sub-1", role: "explorer", task: "", sessionName: "s1",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ]));  // workflowLive absent → non-live
+  // Open the sub-agent panel via crew row click.
+  page.el("acpTranscript").querySelector(".acp-crew-row").dispatch("click");
+  const container = page.el("acpSubComposerContainer");
+  assert(container.hidden,
+    "sub-agent composer container must be hidden for a non-workflow sub-agent");
+});
+
+check("sub-agent composer is disabled when workflowLive becomes false while the panel is open", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // Start a live workflow.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "wf-step-2", role: "step-b", task: "", sessionName: "s2",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  page.el("acpTranscript").querySelector(".acp-crew-row").dispatch("click");
+  const container = page.el("acpSubComposerContainer");
+  assert(!container.hidden, "composer must be visible for live step");
+  // Now deliver a workflowLive:false frame to the MAIN socket (index 0).
+  // After openSubagent opens the sub-panel socket, page.deliver() would
+  // target the sub-socket — use deliverTo(0) to reach the main handler.
+  page.deliverTo(0, subagentsFrame(live, [], "", false));
+  // Container must remain visible (showing "Step completed." notice) since it had a target.
+  // The input and send button must be hidden; status must be visible.
+  const input   = page.el("acpSubComposerInput");
+  const sendBtn = page.el("acpSubComposerSend");
+  const status  = page.el("acpSubComposerStatus");
+  assert(input.hidden,   "input must be hidden after step completes");
+  assert(sendBtn.hidden, "send button must be hidden after step completes");
+  assert(!status.hidden, "status must be visible showing 'Step completed.'");
+  assertEqual(status.textContent, "Step completed.",
+    "status must say 'Step completed.' when the step ends while panel is open");
+});
+
+check("step_message frame matching subViewSid renders amber card in #acpSubPanel", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // Open the sub-agent panel for a live step.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "wf-step-3", role: "step-c", task: "", sessionName: "s3",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  page.el("acpTranscript").querySelector(".acp-crew-row").dispatch("click");
+  const subPanel = page.el("acpSubPanel");
+  // No card before the frame arrives.
+  assertEqual(subPanel.querySelectorAll(".acp-step-question-card").length, 0,
+    "no step question card before step_message arrives");
+  // Deliver a step_message to the MAIN socket (index 0), not the sub-agent socket.
+  page.deliverTo(0, {
+    type: "step_message",
+    sessionId: live,
+    payload: { step: "workflow step step-c", severity: "warning",
+               message: "Waiting for your input", stepSessionId: "wf-step-3" },
+  });
+  const cards = subPanel.querySelectorAll(".acp-step-question-card");
+  assertEqual(cards.length, 1, "one step question card must appear in #acpSubPanel");
+  const cardText = cards[0].querySelector(".acp-step-question-text");
+  assert(cardText !== null, "card must have a text element");
+  assertEqual(cardText.textContent, "Waiting for your input",
+    "card text must match the step_message message");
+  // Also verify the amber class is applied for warning severity.
+  assert(cards[0].className.includes("acp-step-question-card-warning"),
+    "warning severity must get the -warning class");
+});
+
+check("step_message with non-matching stepSessionId does not render sub-panel card", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "wf-step-4", role: "step-d", task: "", sessionName: "s4",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  page.el("acpTranscript").querySelector(".acp-crew-row").dispatch("click");
+  // step_message for a DIFFERENT step session, delivered to main socket.
+  page.deliverTo(0, {
+    type: "step_message",
+    sessionId: live,
+    payload: { step: "workflow step other", severity: "warning",
+               message: "Different step message", stepSessionId: "wf-other-step" },
+  });
+  const subPanel = page.el("acpSubPanel");
+  assertEqual(subPanel.querySelectorAll(".acp-step-question-card").length, 0,
+    "no card must appear when stepSessionId does not match subViewSid");
+});
+
 
 
 check("setCrew with toolCallId anchors panel after tool call row", (tpl) => {

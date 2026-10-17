@@ -449,6 +449,15 @@
       </div>
       <div class="acp-transcript acp-subpanel-transcript" id="dashSubTranscript"
            role="log" aria-live="polite" aria-label="Sub-agent conversation"></div>
+      <!-- Phase 6 sub-agent composer (mirrors acp.html #acpSubComposerContainer).
+           Shown only for live workflow step sessions. Wired via
+           composer-chrome.js initSubAgentComposerDom(). No innerHTML. -->
+      <div id="dashSubComposerContainer" class="acp-subcomposer" hidden>
+        <input type="text" id="dashSubComposerInput"
+               placeholder="Message this step\u2026" aria-label="Message this step">
+        <button type="button" id="dashSubComposerSend">Send</button>
+        <span id="dashSubComposerStatus" hidden></span>
+      </div>
     </div>
     <div class="acp-composer" id="dashComposer" hidden>
       <!-- Images staged for the next prompt (SC6, dashboard/ACP
@@ -3613,6 +3622,16 @@ initWorkflowsDom({
   openSubagentFn: function (sid) { dashOpenSubagent(sid); },
   isDashboard: true,
 });
+// Phase 6: wire the dashboard sub-agent panel composer (mirrors acp.html).
+// `dashSend` resolves at call time via the hoisted function declaration.
+initSubAgentComposerDom({
+  input:     document.getElementById('dashSubComposerInput'),
+  sendBtn:   document.getElementById('dashSubComposerSend'),
+  container: document.getElementById('dashSubComposerContainer'),
+  statusEl:  document.getElementById('dashSubComposerStatus'),
+  sendFn:    function (type, payload, sid) { return send(type, payload, sid); },
+  isDashboard: true,
+});
 // Phase 5: fetch workflow history from disk when the dashboard panel is first
 // opened.  Mirrors acp.html's equivalent block; `_dashAttachedSid` is the
 // dashboard equivalent of acp.html's `sessionId`.
@@ -4838,6 +4857,8 @@ function dashRemoveAllCrewPanels() {
   dashCrews = Object.create(null); // Fix 4, Phase 5 review -- see the declaration above
   _dashNoAnchorSeq = 0;
   _dashNoAnchorKey = null; // reset for the next session
+  // Phase 6: clear live step tracking when the session ends.
+  _dashLiveWorkflowChildSids = new Set();
 }
 
 function dashSetCrew(entries, toolCallId, workflowLive) {
@@ -4934,6 +4955,11 @@ function dashCrewEntry(sid) {
 // is open -- only what is drawn changes -- mirrors acp.html's own subViewSid
 // (acp.html:802-807).
 var dashSubViewSid = null;
+// Phase 6: the set of step session ids from the most recent dashboard
+// `subagents` frame with `workflowLive === true` (mirrors acp.html's
+// `_liveWorkflowChildSids`). Cleared when `workflowLive` becomes false or
+// when the session changes.
+var _dashLiveWorkflowChildSids = new Set();
 // A second, independent WebSocket, opened the first time a crew row is
 // clicked and left connected afterwards (switching rows re-subscribes it
 // rather than reopening it). Kept apart from _dashWs on purpose: acp.py's
@@ -4999,8 +5025,13 @@ function dashOpenSubagent(sid) {
   dashSubTranscriptEl.textContent = '';
   dashSubAgentBody = null;
   dashSubToolRows = Object.create(null);
+  // Phase 6: clear any prior step question card.
+  var _prevCard = dashSubPanelEl.querySelector('.acp-step-question-card');
+  if (_prevCard) _prevCard.parentNode.removeChild(_prevCard);
   dashRenderSubHead();
   dashConnectSubWs(sid);
+  // Phase 6: enable the composer only for live workflow step sessions.
+  setSubAgentComposerEnabled(_dashLiveWorkflowChildSids.has(sid), sid, true);
 }
 
 function dashCloseSubagentView() {
@@ -5810,10 +5841,23 @@ function dashHandle(frame){
     // acp.html's own `subagents` handling (acp.html:5038-5045).
     dashSetCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive);
     // Phase 4: update the Workflows live-run panel from the same frame.
+    // Phase 6: update _dashLiveWorkflowChildSids and the sub-panel composer.
     if (payload.workflowLive === true) {
       setWorkflowsLiveRun(payload.subagents || [], true);
+      var _dashNewLive = new Set();
+      (payload.subagents || []).forEach(function (e) {
+        if (e.sessionId) _dashNewLive.add(e.sessionId);
+      });
+      if (dashSubViewSid && _dashLiveWorkflowChildSids.has(dashSubViewSid) && !_dashNewLive.has(dashSubViewSid)) {
+        setSubAgentComposerEnabled(false, null, true);
+      }
+      _dashLiveWorkflowChildSids = _dashNewLive;
     } else {
       clearWorkflowsLiveRun(true);
+      if (dashSubViewSid && _dashLiveWorkflowChildSids.has(dashSubViewSid)) {
+        setSubAgentComposerEnabled(false, null, true);
+      }
+      _dashLiveWorkflowChildSids = new Set();
     }
     return;
   }
@@ -6013,6 +6057,27 @@ function dashHandle(frame){
     // mirrors acp.html's step_message branch (shared renderer row).
     addStepMessage(payload && payload.step, payload && payload.severity,
                    payload && payload.message);
+    // Phase 6 (SC8): mirror acp.html's sub-panel card for the dashboard.
+    var _dStepSid = payload && payload.stepSessionId;
+    if (_dStepSid && dashSubViewSid && _dStepSid === dashSubViewSid && !_dashReplaying) {
+      if (dashSubPanelEl) {
+        var _dOld = dashSubPanelEl.querySelector('.acp-step-question-card');
+        if (_dOld) _dOld.parentNode.removeChild(_dOld);
+        var _dCard = document.createElement('div');
+        _dCard.className = 'acp-step-question-card acp-step-question-card-' +
+          (payload.severity || 'warning');
+        var _dCardText = document.createElement('span');
+        _dCardText.className = 'acp-step-question-text';
+        _dCardText.textContent = typeof payload.message === 'string' ? payload.message : '';
+        _dCard.appendChild(_dCardText);
+        var _dComposerEl = document.getElementById('dashSubComposerContainer');
+        if (_dComposerEl) {
+          dashSubPanelEl.insertBefore(_dCard, _dComposerEl);
+        } else {
+          dashSubPanelEl.appendChild(_dCard);
+        }
+      }
+    }
     return;
   }
   if (type === 'permission_request') {

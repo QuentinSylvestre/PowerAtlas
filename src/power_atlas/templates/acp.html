@@ -258,6 +258,14 @@
     </div>
     <div class="acp-transcript acp-subpanel-transcript" id="acpSubTranscript"
          role="log" aria-live="polite" aria-label="Sub-agent conversation"></div>
+    <!-- Phase 6 sub-agent composer: shown only for live workflow step sessions.
+         Wired via composer-chrome.js initSubAgentComposerDom(). No innerHTML. -->
+    <div id="acpSubComposerContainer" class="acp-subcomposer" hidden>
+      <input type="text" id="acpSubComposerInput"
+             placeholder="Message this step\u2026" aria-label="Message this step">
+      <button type="button" id="acpSubComposerSend">Send</button>
+      <span id="acpSubComposerStatus" hidden></span>
+    </div>
   </div>
   <div class="acp-composer" id="acpComposer">
     <!-- Images staged for the next prompt, and the only place they are ever
@@ -729,6 +737,16 @@
     openSubagentFn: function (sid) { openSubagent(sid); },
     isDashboard: false,
   });
+  // Phase 6: wire the sub-agent panel composer. `send` is declared further
+  // down and resolved at call time via the closure.
+  initSubAgentComposerDom({
+    input:     document.getElementById('acpSubComposerInput'),
+    sendBtn:   document.getElementById('acpSubComposerSend'),
+    container: document.getElementById('acpSubComposerContainer'),
+    statusEl:  document.getElementById('acpSubComposerStatus'),
+    sendFn:    function (type, payload, sid) { return send(type, payload, sid); },
+    isDashboard: false,
+  });
   // Phase 5: fetch workflow history from disk when the panel is first opened.
   // `sessionId` is declared further down (genuinely page-specific) and is
   // accessible here via the scope chain at call time.
@@ -950,6 +968,11 @@
   // changes — which is what lets a fan-out keep streaming into the main
   // transcript behind the panel exactly as Claude Code's own agent bar does.
   var subViewSid = null;
+  // Phase 6: the set of step session ids from the most recent `subagents`
+  // frame with `workflowLive === true`. Cleared when `workflowLive` becomes
+  // false (run ended) or when the session changes. Used by `openSubagent` to
+  // decide whether to enable the sub-panel composer.
+  var _liveWorkflowChildSids = new Set();
   // sessionCommands/sessionSkills/cmdDropdownEl/_cmdSelectedIndex, and the
   // slash-command palette they drive, moved to composer-chrome.js's
   // initCommandPaletteDom() (dashboard/ACP feature-parity plan, Phase 2) —
@@ -2217,6 +2240,8 @@
     crews = {};
     _noAnchorSeq = 0;
     _noAnchorKey = null; // reset for the next session
+    // Phase 6: clear live step tracking when the session ends.
+    _liveWorkflowChildSids = new Set();
   }
 
   // mirrors index.html's dashSetCrew() — keep in sync
@@ -2335,8 +2360,13 @@
     subTranscriptEl.textContent = '';
     subAgentBody = null;
     subToolRows = Object.create(null);
+    // Phase 6: clear any prior step question card.
+    var _prevCard = subPanelEl.querySelector('.acp-step-question-card');
+    if (_prevCard) _prevCard.parentNode.removeChild(_prevCard);
     renderSubHead();
     connectSubWs(sid);
+    // Phase 6: enable the composer only for live workflow step sessions.
+    setSubAgentComposerEnabled(_liveWorkflowChildSids.has(sid), sid, false);
   }
 
   // mirrors index.html's dashCloseSubagentView() — keep in sync
@@ -5480,6 +5510,34 @@
       // shared renderer (textContent only).
       addStepMessage(payload && payload.step, payload && payload.severity,
                      payload && payload.message);
+      // Phase 6 (SC7): if the sub-agent panel is open for this step, also
+      // show an amber card there so the user sees the message in context.
+      // `stepSessionId` is set by acp.py's `_emit_step_message` when a step
+      // session id is known (live notify); replayed messages may omit it.
+      var _stepSid = payload && payload.stepSessionId;
+      if (_stepSid && subViewSid && _stepSid === subViewSid && !replaying) {
+        // Build the card in #acpSubPanel, above the composer.
+        var _subPanel = document.getElementById('acpSubPanel');
+        if (_subPanel) {
+          // Remove any prior card for the same step (only one at a time).
+          var _old = _subPanel.querySelector('.acp-step-question-card');
+          if (_old) _old.parentNode.removeChild(_old);
+          var _card = document.createElement('div');
+          _card.className = 'acp-step-question-card acp-step-question-card-' +
+            (payload.severity || 'warning');
+          var _cardText = document.createElement('span');
+          _cardText.className = 'acp-step-question-text';
+          _cardText.textContent = typeof payload.message === 'string' ? payload.message : '';
+          _card.appendChild(_cardText);
+          // Insert above the composer container (last child), or append.
+          var _composerEl = document.getElementById('acpSubComposerContainer');
+          if (_composerEl) {
+            _subPanel.insertBefore(_card, _composerEl);
+          } else {
+            _subPanel.appendChild(_card);
+          }
+        }
+      }
       return;
     }
     if (type === 'permission_request') {
@@ -5593,10 +5651,26 @@
       // report, which is this page's only source for it after a reload.
       setCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive);
       // Phase 4: update the Workflows live-run panel from the same frame.
+      // Phase 6: update _liveWorkflowChildSids and the sub-panel composer.
       if (payload.workflowLive === true) {
         setWorkflowsLiveRun(payload.subagents || [], false);
+        // Track which step sessions are live.
+        var _newLive = new Set();
+        (payload.subagents || []).forEach(function (e) {
+          if (e.sessionId) _newLive.add(e.sessionId);
+        });
+        // If the viewed step just left the live set, disable the composer.
+        if (subViewSid && _liveWorkflowChildSids.has(subViewSid) && !_newLive.has(subViewSid)) {
+          setSubAgentComposerEnabled(false, null, false);
+        }
+        _liveWorkflowChildSids = _newLive;
       } else {
         clearWorkflowsLiveRun(false);
+        // Run ended: clear the live set and disable the composer if open.
+        if (subViewSid && _liveWorkflowChildSids.has(subViewSid)) {
+          setSubAgentComposerEnabled(false, null, false);
+        }
+        _liveWorkflowChildSids = new Set();
       }
       return;
     }
