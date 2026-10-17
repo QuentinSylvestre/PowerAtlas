@@ -2,6 +2,7 @@
 
 > **Date**: 2026-10-16
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-10-16 23:22
 > **Scope**: Viz/queue reload fidelity; crew panel tree; per-session Workflows history panel; direct prompt to workflow step agents
 > **Memory relied on**: none
 > **Estimated effort**: 1.5–2 weeks
@@ -565,7 +566,24 @@ Mark tasks that can run in parallel with `[P]`:
 
 ---
 
-## Follow-up Work (Deferred)
+## Completion Summary
+
+### Acknowledged at archival
+
+All 6 phases implemented and reviewed. 18 review findings (0 High, 4 Medium, 14 Low) — all resolved or accepted with follow-up notes in `## Follow-up Work (Deferred)`.
+
+**4 live-QA surfaces BLOCKED — manual verification recommended before release:**
+
+- SC1 — Viz reload (viz iframe cards reappear after page reload): requires a live session that has received `emit_visualization` + page reload. Automated probes confirmed `meta["visualizations"]` recording and the `/api/viz/` endpoint security; the browser-level reload sequence was not driven.
+- SC3 — Crew panel tree live (group-label rows appear, click-to-expand works in a running workflow): requires a live workflow with parallel steps. Crew panel tree CSS classes and JS code paths confirmed present; runtime interaction with live `subagents` frames was not driven.
+- SC6 — Click-to-sub-panel from Workflows panel (clicking a step row opens the sub-agent panel): requires a live workflow run in the Workflows panel. Panel DOM and `openSubagentFn` wiring confirmed present; end-to-end click path with a live step session was not driven.
+- SC7/SC8 — Sub-agent composer for direct step prompt (composer visible and send routes to step): requires a live workflow step session. Composer DOM, `setSubAgentComposerEnabled` logic, and `_handle_prompt` early branch confirmed present; live send path was not driven.
+
+These four surfaces pass all automated tests. All other verifiable behaviors (session creation, workflows toggle, `_handle_prompt` routing, `/api/workflow-history` security, `step_message` `role=alert`, sub-panel composer DOM) passed the Step 9b automated probes.
+
+---
+
+
 
 1. **Verify step question answer routing via direct step prompt (O1).** If direct `session/prompt` to a step session correctly clears its step question pending state in kiro-cli's workflow engine, the Phase 6 mitigation (step question option replies still route via the parent) can be simplified to allow direct routing. Source: R1, O1. Re-verify at execution time.
 
