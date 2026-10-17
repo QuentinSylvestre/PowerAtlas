@@ -372,18 +372,23 @@ If the probe reveals different field names, adapt the parser and add a comment n
    - Test D: `GET /api/workflow-history?sid=<valid>` without `pa_local` cookie returns 403.
 
 **Exit criteria**:
-- [ ] Pre-probe completed; parser comment notes actual field shapes if they differ from expected
-- [ ] `_get_workflow_runs_v3(session_id)` returns a correctly shaped list for a fixture with synthetic workflow records
-- [ ] `GET /api/workflow-history?sid=<valid>` returns 200 `{"runs": [...]}` when authenticated
-- [ ] `GET /api/workflow-history?sid=<bad_format>` returns 400
-- [ ] `GET /api/workflow-history` without auth returns 403
-- [ ] Workflows panel shows a loading indicator while fetching; on error shows "Could not load workflow history." message; on empty list shows "No workflow runs." message
-- [ ] Past runs rendered newest-first; most recent run starts `open`; others start closed
-- [ ] Past run step rows are view-only (no click handler, cursor: default)
-- [ ] All test fixtures use placeholder/synthetic session IDs and paths — no real home-directory paths or IDs
-- [ ] `pytest tests/test_web.py --timeout=300` passes
-- [ ] Python restart required after `acp.py` and `web.py` changes (note: restart PowerAtlas after deploying this phase)
-- [ ] `docs/KNOWLEDGE.md` `_get_tool_diffs_v3` section updated: note `_get_workflow_runs_v3` added as sibling function for workflow run extraction
+- [x] Pre-probe completed; parser comment notes actual field shapes if they differ from expected
+- [x] `_get_workflow_runs_v3(session_id)` returns a correctly shaped list for a fixture with synthetic workflow records
+- [x] `GET /api/workflow-history?sid=<valid>` returns 200 `{"runs": [...]}` when authenticated
+- [x] `GET /api/workflow-history?sid=<bad_format>` returns 400
+- [x] `GET /api/workflow-history` without auth returns 403
+- [x] Workflows panel shows a loading indicator while fetching; on error shows "Could not load workflow history." message; on empty list shows "No workflow runs." message
+- [x] Past runs rendered newest-first; most recent run starts `open`; others start closed
+- [x] Past run step rows are view-only (no click handler, cursor: default)
+- [x] All test fixtures use placeholder/synthetic session IDs and paths — no real home-directory paths or IDs
+- [x] `pytest tests/test_web.py --timeout=300` passes
+- [x] Python restart required after `acp.py` and `web.py` changes (note: restart PowerAtlas after deploying this phase)
+- [x] `docs/KNOWLEDGE.md` `_get_tool_diffs_v3` section updated: note `_get_workflow_runs_v3` added as sibling function for workflow run extraction
+
+Implementation (2026-10-16, code: eaf9034)
+`_get_workflow_runs_v3(session_id)` in `acp.py` parses `_kiro/workflow/node_start`, `_kiro/workflow/node_complete`, and `_kiro/workflow/run_complete` user-type notification records (user payload.type == "user", payload.content is JSON with method starting `_kiro/workflow/`). Returns list of runs ordered oldest-first. Pre-probe O2 confirmed from real local data: `sub_agent_start` records do NOT carry `workflowId`; workflow tracking uses user notification records. `GET /api/workflow-history?sid=...` endpoint in `web.py` (protected by `LoopbackCredentialGate`, `asyncio.to_thread` for blocking I/O). JS fetch + render in both templates with loading/error/empty states; newest-first `<details>/<summary>` past runs. Dashboard `#dashWorkflowsPastRuns` cleared in `dashCloseIfAbandoned()` to cover both direct-switch and overview paths. Non-dict inner JSON guard added to parser. Tests: `TestWorkflowHistory` (4 tests, synthetic IDs). `docs/KNOWLEDGE.md` updated.
+
+Per-phase QA: BLOCKED (Python + JS changes; restart permission granted; deferred to Step 9b per user decision).
 
 ---
 
@@ -540,7 +545,7 @@ A risk whose Mitigation is anything other than "addressed within this plan" for 
 | 2 | Dashboard viz handler | Complete | Handled by sibling plan (fb6ebf8) |
 | 3 | Crew panel tree structure | Complete | JS/CSS only; code: a85816c |
 | 4 | Workflows panel shell | Complete | JS/CSS only; code: 973e182 |
-| 5 | Workflow history from disk | Not started | Python restart needed after |
+| 5 | Workflow history from disk | Complete | Python restart needed after; code: eaf9034 |
 | 6 | Sub-agent composer and direct step prompt | Not started | Python restart needed after |
 
 Mark tasks that can run in parallel with `[P]`:
@@ -577,9 +582,26 @@ Mark tasks that can run in parallel with `[P]`:
 
 10. **Phase 4 review: dashboard path (`isDashboard: true`) has no independent test.** Add a test passing `isDashboard: true` in Phase 5/6. Source: Phase 4 review, F4.
 
+11. **Phase 5 review: Test A user-type filter blind spot.** Removing `payload.type != "user"` filter doesn't fail Test A. Add a variant with a non-user record carrying workflow JSON. Source: Phase 5 review cycle 2, N2.
+
+12. **Phase 5 review: Test A step-type filter blind spot.** Add a fixture with a `node_start` with `type: "root"` to make the `node_type == "step"` guard testable. Source: Phase 5 review cycle 2, N3.
+
 ---
 
 ## Review Log
+
+### 2026-10-16 — Implementation Review (after Phase 5, personas: Senior engineer, Security auditor, Reliability engineer, End-user advocate)
+
+Implementation health: Green.
+4 personas, full effort. 2 cycles. 5 findings (0 High, 2 Medium, 3 Low). All resolved or accepted.
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | Medium | `_get_workflow_runs_v3` parsed wrong record type — looked for `sub_agent_start` with `workflowId`, which doesn't exist; returned `[]` for all real sessions. | Fixed — rewritten to parse `_kiro/workflow/node_start|node_complete|run_complete` user notifications (commit b8b609d, confirmed from real local data). |
+| 2 | Medium | Dashboard `#dashWorkflowsPastRuns` clear placed in `dashShowOverview()` only; direct session-switch path (`dashCloseIfAbandoned`) wasn't cleared. | Fixed — moved clear to `dashCloseIfAbandoned()` which fires on both paths (commit eaf9034). |
+| 3 | Low | Non-dict inner JSON (array, string) would raise AttributeError and abort entire scan via outer except. | Fixed — added `if not isinstance(inner, dict): continue` guard (commit eaf9034). |
+| 4 | Low | Test A `user`-type filter blind spot — removing filter wouldn't fail test. | Orchestrator: proposed-accept — follow-up test improvement (see Follow-up Work #11). |
+| 5 | Low | Test A step-type filter blind spot — one `node_start` with `type: "step"` insufficient to gate the filter. | Orchestrator: proposed-accept — follow-up test improvement (see Follow-up Work #12). |
 
 ### 2026-10-16 — Implementation Review (after Phase 4, personas: Senior engineer, End-user advocate, Reliability engineer, Maintainability reviewer)
 
