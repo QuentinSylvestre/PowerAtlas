@@ -38624,16 +38624,20 @@ class TestOverviewPlans:
     """`overview.scan_plans` and `GET /api/dashboard/overview/summary`."""
 
     @pytest.fixture(autouse=True)
-    def _fresh(self):
+    def _fresh(self, tmp_path, monkeypatch):
         from power_atlas import overview, web as web_mod
+        # No test in this class scans the real store repo (~/.agent-playbook/stores).
+        monkeypatch.setenv("AGENT_PLAYBOOK_STORES", str(tmp_path / "no-store-repo"))
         overview._plan_memo.clear()
         overview._playbook_root_override = ""
-        overview._store_map_cache[:] = [0.0, None, ""]
+        overview._store_map_cache[:] = ["", {}]
+        overview._resolver_cache[:] = ["", 0.0, None, None]
         web_mod._overview_plans_cache[:] = [0.0, None, None]
         yield
         overview._plan_memo.clear()
         overview._playbook_root_override = ""
-        overview._store_map_cache[:] = [0.0, None, ""]
+        overview._store_map_cache[:] = ["", {}]
+        overview._resolver_cache[:] = ["", 0.0, None, None]
         web_mod._overview_plans_cache[:] = [0.0, None, None]
 
     @staticmethod
@@ -38749,36 +38753,664 @@ class TestOverviewPlans:
         expected = dt.datetime.fromtimestamp(t, tz=dt.timezone.utc).isoformat()
         assert plan["activity"] == expected
 
-    def test_playbook_root_override_builds_workspace_map(self, tmp_path):
-        """SC-5: playbook_root override uses WORKSPACE map to find the store."""
-        from power_atlas import overview
-        ws_path = tmp_path / "myws"
-        ws_path.mkdir()
-        # agent-playbook root: <root>/workspaces/myws is the store dir.
-        playbook_root = tmp_path / "playbook"
-        store_dir = playbook_root / "workspaces" / "myws"
-        (store_dir / "plans").mkdir(parents=True)
-        (store_dir / "plans" / "260101_ALPHA.md").write_text(
-            _OV_TRACKER_PLAN, encoding="utf-8")
-        (store_dir / "WORKSPACE").write_text(str(ws_path), encoding="utf-8")
-        # No __store__.md in the workspace: the override path must resolve it.
-        overview._playbook_root_override = str(playbook_root)
-        overview._store_map_cache[:] = [0.0, None, ""]
-        [plan] = self._scan(ws_path)
-        assert plan["workspace"] == "myws"
-        assert plan["cwd"] == str(ws_path)
-        assert plan["title"] == "ALPHA"
-
     def test_apply_config_clears_cache(self, tmp_path):
         """apply_config with a new root clears _store_map_cache."""
         from power_atlas import overview
         overview._playbook_root_override = "/root_a"
-        overview._store_map_cache[:] = [999999.0, {}, "/root_a"]
+        overview._store_map_cache[:] = ["/root_a", {"/x": (999999.0, None)}]
+        overview._resolver_cache[:] = ["/root_a", 999999.0, object(), (1, 1)]
         overview.apply_config("/root_b")
         assert overview._playbook_root_override == "/root_b"
-        assert overview._store_map_cache[0] == 0.0   # TTL reset
-        assert overview._store_map_cache[1] is None  # map cleared
-        assert overview._store_map_cache[2] == ""    # root cleared
+        assert overview._store_map_cache == ["", {}]   # root and answers dropped
+        assert overview._resolver_cache == ["", 0.0, None, None]   # loaded resolver dropped
+
+    # --- Store resolver tests (261016_WORKSPACE_STORE_REPO_REMOTE_IDENTITY_AND_PYTHON_GUARDS Phase 7) ---
+
+    _RESOLVER_REL = ("shared", "skills", "qdream", "scripts", "store-resolver.py")
+
+    @classmethod
+    def _config_repo(cls):
+        """The agent-playbook config repo, for the tests that need the real
+        resolver and the cross-check fixture. This repository is public, so a
+        machine without the config repo skips them: `AGENT_PLAYBOOK_REPO`, else
+        the `agent-playbook` folder next to this checkout."""
+        candidates = []
+        if os.environ.get("AGENT_PLAYBOOK_REPO"):
+            candidates.append(Path(os.environ["AGENT_PLAYBOOK_REPO"]))
+        candidates.append(Path(__file__).resolve().parents[2] / "agent-playbook")
+        for cand in candidates:
+            if cand.joinpath(*cls._RESOLVER_REL).is_file():
+                return cand
+        pytest.skip("the agent-playbook config repo is not next to this checkout "
+                    "(set AGENT_PLAYBOOK_REPO)")
+
+    @pytest.fixture
+    def playbook(self, tmp_path, monkeypatch):
+        """(playbook_root, stores_root, resolver module): a scratch playbook root
+        holding a copy of the real resolver, an empty scratch store repo
+        (`AGENT_PLAYBOOK_STORES`), and no legacy stores yet."""
+        import shutil
+        from power_atlas import overview
+        src = self._config_repo().joinpath(*self._RESOLVER_REL)
+        root = tmp_path / "playbook"
+        dst = root.joinpath(*self._RESOLVER_REL)
+        dst.parent.mkdir(parents=True)
+        shutil.copy2(src, dst)
+        stores = tmp_path / "stores"
+        stores.mkdir()
+        (stores / ".git").mkdir()
+        monkeypatch.setenv("AGENT_PLAYBOOK_STORES", str(stores))
+        module = overview._load_resolver(str(root))
+        assert module is not None
+        return root, stores, module
+
+    @staticmethod
+    def _plans_in(dir_, name):
+        (dir_ / "plans").mkdir(parents=True, exist_ok=True)
+        (dir_ / "plans" / name).write_text(_OV_TRACKER_PLAN, encoding="utf-8")
+
+    @staticmethod
+    def _git_repo(path, url=None):
+        """A minimal git repository the resolver accepts (HEAD, objects/, refs/,
+        config), built here: the resolver's own fixture builders are not API."""
+        git = Path(path) / ".git"
+        (git / "objects").mkdir(parents=True, exist_ok=True)
+        (git / "refs").mkdir(exist_ok=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (git / "config").write_text(
+            '[remote "origin"]\n\turl = %s\n' % url if url else "", encoding="utf-8")
+        return Path(path)
+
+    def _store(self, playbook, dirname, text, plan=None):
+        """A store directory (one STORE file) in the scratch store repo; `plan`
+        puts a plan in it."""
+        _root, stores, _module = playbook
+        d = stores / dirname
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "STORE").write_bytes(text.encode("utf-8"))
+        if plan:
+            self._plans_in(d, plan)
+        return d
+
+    @staticmethod
+    def _use_root(root):
+        from power_atlas import overview
+        overview.apply_config(str(root))
+
+    @staticmethod
+    def _same_dir(a, b):
+        return a is not None and b is not None and os.path.samefile(str(a), str(b))
+
+    def test_subfolder_of_a_store_backed_repo_reads_the_repo_store(self, tmp_path, playbook):
+        """A session in a subfolder reaches the store of the repo around it."""
+        from power_atlas import overview
+        root, _stores, _module = playbook
+        repo = self._git_repo(tmp_path / "app", "https://github.com/Acme/App.git")
+        sub = repo / "src" / "deep"
+        sub.mkdir(parents=True)
+        store = self._store(playbook, "acme-app-a1b2c3", "remote github.com/acme/app\n",
+                            plan="260101_STOREPLAN.md")
+        self._plans_in(repo, "260102_REPOPLAN.md")   # the repo's own plans/ is not read
+        self._use_root(root)
+        assert self._same_dir(overview._get_store_dir(str(sub)), store)
+        [plan] = self._scan(sub)
+        assert plan["title"] == "STOREPLAN"
+        assert plan["cwd"] == str(sub)        # the session folder, not the store
+        assert plan["workspace"] == "deep"
+
+    def test_nearest_store_wins_in_a_monorepo(self, tmp_path, playbook):
+        """A subpath store beats the repo's own; a sibling folder gets the repo's."""
+        from power_atlas import overview
+        root, _stores, _module = playbook
+        repo = self._git_repo(tmp_path / "mono", "git@github.com:acme/mono.git")
+        (repo / "services" / "api" / "handlers").mkdir(parents=True)
+        (repo / "services" / "web").mkdir(parents=True)
+        whole = self._store(playbook, "acme-mono-111111", "remote github.com/acme/mono\n",
+                            plan="260101_WHOLE.md")
+        api = self._store(playbook, "acme-mono-222222",
+                          "remote github.com/acme/mono\npath services/api\n",
+                          plan="260102_APIONLY.md")
+        self._use_root(root)
+        assert self._same_dir(overview._get_store_dir(str(repo / "services" / "api" / "handlers")), api)
+        assert self._same_dir(overview._get_store_dir(str(repo / "services" / "web")), whole)
+        assert self._same_dir(overview._get_store_dir(str(repo)), whole)
+
+    def test_two_checkouts_of_one_remote_share_one_store(self, tmp_path, playbook):
+        """Two clones (different paths, different URL spellings) read one store;
+        a clone of another remote does not. The store's plans are listed once,
+        under the first clone in the rail's order (Phase 7 review fix: both
+        clones used to list the same plans)."""
+        from power_atlas import overview
+        root, _stores, _module = playbook
+        one = self._git_repo(tmp_path / "work" / "app", "https://github.com/Acme/App.git")
+        two = self._git_repo(tmp_path / "elsewhere" / "app-clone", "git@github.com:acme/app")
+        other = self._git_repo(tmp_path / "work" / "tool", "https://github.com/acme/tool.git")
+        self._plans_in(other, "260103_LOCALTOOL.md")
+        store = self._store(playbook, "acme-app-a1b2c3", "remote github.com/acme/app\n",
+                            plan="260101_SHARED.md")
+        self._use_root(root)
+        assert self._same_dir(overview._get_store_dir(str(one)), store)
+        assert self._same_dir(overview._get_store_dir(str(two)), store)
+        assert overview._get_store_dir(str(other)) is None
+        titles = {p["cwd"]: p["title"] for p in self._scan(one, two, other)}
+        assert titles == {str(one): "SHARED", str(other): "LOCALTOOL"}
+        # First wins by the order given, not by name or path.
+        titles = {p["cwd"]: p["title"] for p in self._scan(other, two, one)}
+        assert titles == {str(two): "SHARED", str(other): "LOCALTOOL"}
+
+    def test_a_subfolder_and_its_repo_list_the_shared_store_once(self, tmp_path, playbook):
+        from power_atlas import overview
+        root, _stores, _module = playbook
+        repo = self._git_repo(tmp_path / "app", "https://github.com/acme/app.git")
+        sub = repo / "pkg"
+        sub.mkdir()
+        store = self._store(playbook, "acme-app-a1b2c3", "remote github.com/acme/app\n",
+                            plan="260101_SHARED.md")
+        self._use_root(root)
+        assert [(p["cwd"], p["title"]) for p in self._scan(sub, repo)] == [(str(sub), "SHARED")]
+        assert [(p["cwd"], p["title"]) for p in self._scan(repo, sub)] == [(str(repo), "SHARED")]
+        # The skipped duplicate adds no memo entry and the read plan stays memoised.
+        assert set(overview._plan_memo) == {str(store / "plans" / "260101_SHARED.md")}
+
+    def test_missing_resolver_module_reads_the_workspace_plans(self, tmp_path):
+        """No store-resolver.py under playbook_root: no store, no error."""
+        from power_atlas import overview
+        root = tmp_path / "empty-playbook"
+        root.mkdir()
+        ws = self._ws(tmp_path, "proj", {"260101_LOCAL.md": _OV_TRACKER_PLAN})
+        self._use_root(root)
+        assert overview._get_store_dir(str(ws)) is None
+        [plan] = self._scan(ws)
+        assert plan["title"] == "LOCAL"
+        assert overview._resolver_cache[2] is None
+
+    def test_resolver_module_that_fails_to_import_reads_the_workspace_plans(self, tmp_path):
+        from power_atlas import overview
+        root = tmp_path / "broken-playbook"
+        mod = root.joinpath(*self._RESOLVER_REL)
+        mod.parent.mkdir(parents=True)
+        mod.write_text("def resolve_artifact(:\n", encoding="utf-8")
+        ws = self._ws(tmp_path, "proj", {"260101_LOCAL.md": _OV_TRACKER_PLAN})
+        self._use_root(root)
+        assert overview._get_store_dir(str(ws)) is None
+        [plan] = self._scan(ws)
+        assert plan["title"] == "LOCAL"
+
+    def test_resolver_module_without_resolve_artifact_is_refused(self, tmp_path):
+        from power_atlas import overview
+        root = tmp_path / "odd-playbook"
+        mod = root.joinpath(*self._RESOLVER_REL)
+        mod.parent.mkdir(parents=True)
+        mod.write_text("x = 1\n", encoding="utf-8")
+        self._use_root(root)
+        assert overview._load_resolver(str(root)) is None
+
+    def test_resolver_is_loaded_once_and_reloaded_after_apply_config(self, playbook):
+        from power_atlas import overview
+        root, _stores, _module = playbook
+        self._use_root(root)
+        first = overview._load_resolver(str(root))
+        assert first is not None
+        assert overview._load_resolver(str(root)) is first
+        overview.apply_config(str(root))
+        assert overview._resolver_cache[2] is None
+        assert overview._load_resolver(str(root)) is not first
+
+    def test_legacy_store_is_served_by_the_transitional_reader(self, tmp_path, playbook):
+        """Until the data moves, a workspace's plans sit in a legacy
+        <playbook_root>/workspaces store; `find` alone would not see it."""
+        from power_atlas import overview
+        root, _stores, module = playbook
+        ws = tmp_path / "legacyws"
+        ws.mkdir()
+        legacy = root / "workspaces" / "legacyws-store"
+        legacy.mkdir(parents=True)
+        (legacy / "WORKSPACE").write_text(str(ws), encoding="utf-8")
+        self._plans_in(legacy, "260101_LEGACYPLAN.md")
+        assert tuple(module.find(str(ws), "plans"))[0] == "none"   # the store repo has nothing
+        self._use_root(root)
+        assert self._same_dir(overview._get_store_dir(str(ws)), legacy)
+        [plan] = self._scan(ws)
+        assert plan["title"] == "LEGACYPLAN"
+
+    def test_store_repo_without_plan_content_falls_back_to_the_workspace(self, tmp_path, playbook):
+        """The resolver counts a store only when its plans/ holds a .md file: a
+        store with an empty plans/ no longer hides the workspace's own plans."""
+        from power_atlas import overview
+        root, _stores, _module = playbook
+        repo = self._git_repo(tmp_path / "app", "https://github.com/acme/app.git")
+        self._plans_in(repo, "260101_INREPO.md")
+        store = self._store(playbook, "acme-app-a1b2c3", "remote github.com/acme/app\n")
+        (store / "plans").mkdir()
+        self._use_root(root)
+        assert overview._get_store_dir(str(repo)) is None
+        [plan] = self._scan(repo)
+        assert plan["title"] == "INREPO"
+
+    def test_a_resolver_answer_on_a_unc_share_is_refused(self, tmp_path):
+        from power_atlas import overview
+        root = tmp_path / "fake-playbook"
+        mod = root.joinpath(*self._RESOLVER_REL)
+        mod.parent.mkdir(parents=True)
+        mod.write_text(
+            "import types\n"
+            "from pathlib import Path\n"
+            "def resolve_artifact(folder, kind='memory', config_repo=None):\n"
+            "    return types.SimpleNamespace(source='store-repo',\n"
+            "                                 store=Path('\\\\\\\\server\\\\share\\\\store'))\n",
+            encoding="utf-8")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._use_root(root)
+        # The fake really answers a UNC store, so the guard is what returns None.
+        assert str(overview._load_resolver(str(root)).resolve_artifact(str(ws)).store).startswith("\\\\")
+        assert overview._get_store_dir(str(ws)) is None
+
+    def test_answers_are_cached_per_normalized_cwd_and_expire_one_by_one(self, tmp_path, playbook, monkeypatch):
+        """Each answer carries its own stamp: one just inside its window is kept,
+        one just past it is re-resolved, and a neighbour is untouched either way.
+        A store answer and a 'not store-backed' one are both cached."""
+        from power_atlas import data, overview
+        root, _stores, module = playbook
+        repo = self._git_repo(tmp_path / "app", "https://github.com/acme/app.git")
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        self._store(playbook, "acme-app-a1b2c3", "remote github.com/acme/app\n", plan="260101_P.md")
+        self._use_root(root)
+        module = overview._load_resolver(str(root))   # the module _get_store_dir calls
+        calls = []
+        real = module.resolve_artifact
+
+        def counting(folder, kind="memory", config_repo=None):
+            calls.append(folder)
+            return real(folder, kind, config_repo)
+
+        monkeypatch.setattr(module, "resolve_artifact", counting)
+        first = overview._get_store_dir(str(repo))
+        assert first is not None
+        assert overview._get_store_dir(str(repo) + os.sep) == first   # same normalized cwd
+        assert overview._get_store_dir(str(plain)) is None
+        assert overview._get_store_dir(str(plain)) is None            # a None answer is cached too
+        assert len(calls) == 2
+        answers = overview._store_map_cache[1]
+        key = data._normalize_path(str(repo))
+        stamp, answer = answers[key]
+        answers[key] = (stamp - overview._STORE_MAP_TTL + 5, answer)   # 5 s left in its window
+        assert overview._get_store_dir(str(repo)) == first
+        assert len(calls) == 2
+        answers[key] = (stamp - overview._STORE_MAP_TTL - 1, answer)   # 1 s past its window
+        assert overview._get_store_dir(str(repo)) == first
+        assert len(calls) == 3
+        assert overview._get_store_dir(str(plain)) is None   # its own stamp is fresh
+        assert len(calls) == 3
+
+    def test_store_answers_are_reused_at_the_web_cadence(self, tmp_path, playbook, monkeypatch):
+        """The web layer reuses a scan for 30 s, so the next scan starts at least
+        30 s after the previous one ended. The store answers must outlive that gap,
+        or every scan resolves every folder cold (Phase 7 review fix). Driven with
+        a clock that jumps 30.5 s between scans."""
+        from power_atlas import overview
+        root, _stores, _module = playbook
+        repos = []
+        for n in range(3):
+            repo = self._git_repo(tmp_path / ("app%d" % n), "https://github.com/acme/app%d.git" % n)
+            self._store(playbook, "acme-app%d-a1b2c3" % n, "remote github.com/acme/app%d\n" % n,
+                        plan="260101_P%d.md" % n)
+            repos.append(repo)
+        self._use_root(root)
+        module = overview._load_resolver(str(root))
+        calls = []
+        real = module.resolve_artifact
+
+        def counting(folder, kind="memory", config_repo=None):
+            calls.append(folder)
+            return real(folder, kind, config_repo)
+
+        monkeypatch.setattr(module, "resolve_artifact", counting)
+
+        class Clock:
+            offset = 0.0
+
+            def monotonic(self):
+                return time.monotonic() + self.offset
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        clock = Clock()
+        monkeypatch.setattr(overview, "time", clock)
+        titles = lambda: sorted(p["title"] for p in self._scan(*repos))   # noqa: E731
+        assert titles() == ["P0", "P1", "P2"]
+        assert len(calls) == 3                       # the first scan resolves each folder once
+        clock.offset += 30.5
+        assert titles() == ["P0", "P1", "P2"]
+        assert len(calls) == 3, "the second scan, 30.5 s later, resolved folders again"
+        clock.offset += 30.5                         # 61 s after the first answers
+        assert titles() == ["P0", "P1", "P2"]
+        assert len(calls) == 3
+        clock.offset += 30.5                         # 91.5 s: past every answer's window
+        assert titles() == ["P0", "P1", "P2"]
+        assert len(calls) == 6
+
+    def test_a_scan_cut_at_its_deadline_says_so_at_info(self, tmp_path, caplog):
+        a = self._ws(tmp_path, "a", {"p.md": _OV_PHASES_PLAN})
+        b = self._ws(tmp_path, "b", {"p.md": _OV_PHASES_PLAN})
+        with caplog.at_level(logging.INFO, logger="power_atlas.overview"):
+            self._scan(a, b)
+            assert not [r for r in caplog.records if "deadline" in r.getMessage()]
+            self._scan(a, b, deadline_s=0.0)
+        [rec] = [r for r in caplog.records if "deadline" in r.getMessage()]
+        assert rec.levelno == logging.INFO
+        assert "workspace 2 of 2" in rec.getMessage()
+        assert str(tmp_path) not in rec.getMessage()   # no path or content in the line
+
+    # --- Phase 7 cleanup: what is cached, module reload, deadline after a resolver call ---
+
+    def _fake_resolver(self, root, body):
+        mod = root.joinpath(*self._RESOLVER_REL)
+        mod.parent.mkdir(parents=True, exist_ok=True)
+        mod.write_text(body, encoding="utf-8")
+        return mod
+
+    def test_only_a_stable_resolver_answer_is_cached_a_failed_one_is_asked_again(self, tmp_path):
+        """`none`, `store-repo` and `legacy` are kept; `failed` (a transient fault
+        such as an unreadable store repo) and `in-workspace` are asked again on
+        the next scan. A fake resolver names its answer by the folder's name and
+        counts its calls."""
+        from power_atlas import overview
+        root = tmp_path / "fake-playbook"
+        store = tmp_path / "the-store"
+        store.mkdir()
+        self._fake_resolver(root, (
+            "import types\n"
+            "from pathlib import Path\n"
+            "calls = []\n"
+            "def resolve_artifact(folder, kind='memory', config_repo=None):\n"
+            "    calls.append(Path(folder).name)\n"
+            "    src = Path(folder).name.rsplit('-', 1)[0]\n"
+            "    st = Path(%r) if src in ('store-repo', 'legacy') else None\n"
+            "    return types.SimpleNamespace(source=src, store=st, reason='injected')\n" % str(store)))
+        self._use_root(root)
+        calls = overview._load_resolver(str(root)).calls
+        names = ("failed-1", "none-1", "store-repo-1", "legacy-1", "in-workspace-1")
+        for name in names:
+            (tmp_path / name).mkdir()
+        first = [overview._get_store_dir(str(tmp_path / n)) for n in names]
+        second = [overview._get_store_dir(str(tmp_path / n)) for n in names]
+        assert first == second
+        assert [self._same_dir(a, store) if a else None for a in first] == [None, None, True, True, None]
+        # one call each for the three kept answers, two for the two that are asked again
+        assert sorted(calls) == sorted(["failed-1"] * 2 + ["none-1"] + ["store-repo-1"]
+                                       + ["legacy-1"] + ["in-workspace-1"] * 2)
+
+    def test_a_failed_answer_that_later_succeeds_is_used_at_once(self, tmp_path):
+        """The retry matters: a store repo that was unreadable for one scan and
+        readable for the next gives the workspace its store on that next scan,
+        not after the 90 s window."""
+        from power_atlas import overview
+        root = tmp_path / "fake-playbook"
+        store = tmp_path / "the-store"
+        store.mkdir()
+        self._fake_resolver(root, (
+            "import types\n"
+            "from pathlib import Path\n"
+            "state = {'source': 'failed'}\n"
+            "def resolve_artifact(folder, kind='memory', config_repo=None):\n"
+            "    ok = state['source'] == 'store-repo'\n"
+            "    return types.SimpleNamespace(source=state['source'],\n"
+            "                                 store=Path(%r) if ok else None, reason='')\n" % str(store)))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._use_root(root)
+        module = overview._load_resolver(str(root))
+        assert overview._get_store_dir(str(ws)) is None
+        module.state["source"] = "store-repo"
+        assert self._same_dir(overview._get_store_dir(str(ws)), store)
+
+    def test_a_find_only_resolver_failed_answer_is_not_cached_either(self, tmp_path):
+        from power_atlas import overview
+        root = tmp_path / "fake-playbook"
+        store = tmp_path / "the-store"
+        store.mkdir()
+        self._fake_resolver(root, (
+            "from pathlib import Path\n"
+            "calls = []\n"
+            "def find(folder, kind='memory'):\n"
+            "    calls.append(Path(folder).name)\n"
+            "    name = Path(folder).name\n"
+            "    return ('found', Path(%r)) if name == 'hit' else (name, None)\n" % str(store)))
+        for name in ("hit", "none", "failed"):
+            (tmp_path / name).mkdir()
+        self._use_root(root)
+        calls = overview._load_resolver(str(root)).calls
+        for _ in range(2):
+            assert self._same_dir(overview._get_store_dir(str(tmp_path / "hit")), store)
+            assert overview._get_store_dir(str(tmp_path / "none")) is None
+            assert overview._get_store_dir(str(tmp_path / "failed")) is None
+        assert sorted(calls) == ["failed", "failed", "hit", "none"]
+
+    def test_resolver_file_change_is_picked_up_after_the_check_window(self, tmp_path):
+        """A resolver rewritten while PowerAtlas runs (the playbook moving its
+        data) is loaded again once the check window has passed: not before it,
+        and not when the file is unchanged. Both versions have the same size, so
+        the modification time is what tells them apart. Answers cached under the
+        old module are dropped with it."""
+        from power_atlas import overview
+        root = tmp_path / "fake-playbook"
+        store_a = tmp_path / "storeA"
+        store_b = tmp_path / "storeB"
+        store_a.mkdir()
+        store_b.mkdir()
+        body = ("import types\n"
+                "from pathlib import Path\n"
+                "def resolve_artifact(folder, kind='memory', config_repo=None):\n"
+                "    return types.SimpleNamespace(source='store-repo', store=Path(%r), reason='')\n")
+        mod = self._fake_resolver(root, body % str(store_a))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._use_root(root)
+
+        def past_window():
+            overview._resolver_cache[1] -= overview._RESOLVER_RETRY_SECONDS + 1
+
+        first = overview._load_resolver(str(root))
+        assert self._same_dir(overview._get_store_dir(str(ws)), store_a)
+        st = os.stat(mod)
+        mod.write_text(body % str(store_b), encoding="utf-8")
+        assert os.stat(mod).st_size == st.st_size
+        os.utime(mod, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        # inside the window: the old module and its cached answer
+        assert overview._load_resolver(str(root)) is first
+        assert self._same_dir(overview._get_store_dir(str(ws)), store_a)
+        past_window()
+        second = overview._load_resolver(str(root))
+        assert second is not first
+        assert self._same_dir(overview._get_store_dir(str(ws)), store_b)   # the old answer was dropped
+        # unchanged file: past the window again, the same module object
+        past_window()
+        assert overview._load_resolver(str(root)) is second
+
+    def test_a_resolver_file_that_breaks_keeps_the_last_good_module(self, tmp_path, caplog):
+        from power_atlas import overview
+        root = tmp_path / "fake-playbook"
+        store = tmp_path / "the-store"
+        store.mkdir()
+        good = ("import types\n"
+                "from pathlib import Path\n"
+                "def resolve_artifact(folder, kind='memory', config_repo=None):\n"
+                "    return types.SimpleNamespace(source='store-repo', store=Path(%r), reason='')\n"
+                % str(store))
+        mod = self._fake_resolver(root, good)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        self._use_root(root)
+        first = overview._load_resolver(str(root))
+        mod.write_text("def resolve_artifact(:\n", encoding="utf-8")   # half-written
+        overview._resolver_cache[1] -= overview._RESOLVER_RETRY_SECONDS + 1
+        with caplog.at_level(logging.DEBUG, logger="power_atlas.overview"):
+            assert overview._load_resolver(str(root)) is first
+        assert any("keeping the previously loaded module" in r.getMessage() for r in caplog.records)
+        assert self._same_dir(overview._get_store_dir(str(ws)), store)
+        # the file is mended: the next change is loaded
+        mod.write_text(good + "# mended\n", encoding="utf-8")
+        overview._resolver_cache[1] -= overview._RESOLVER_RETRY_SECONDS + 1
+        mended = overview._load_resolver(str(root))
+        assert mended is not None and mended is not first
+
+    def test_scan_stops_reading_a_workspace_whose_resolver_call_crossed_the_deadline(
+            self, tmp_path, monkeypatch, caplog):
+        """The deadline is checked again right after each resolver call. Three
+        workspaces with plans, a resolver that takes 0.25 s per call (a fake
+        clock, so the test is exact) and a 0.3 s deadline: the first is read, the
+        second is resolved (the deadline falls inside that call) but nothing of it
+        is read, the third is not resolved."""
+        from power_atlas import overview
+        wss = [self._ws(tmp_path, "w%d" % i, {"260101_P%d.md" % i: _OV_TRACKER_PLAN}) for i in range(3)]
+        resolved, globbed = [], []
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        clock = Clock()
+
+        def slow_get_store_dir(cwd):
+            resolved.append(Path(cwd).name)
+            clock.now += 0.25
+            return None
+
+        real_glob = Path.glob
+
+        def spy_glob(self_, pattern):
+            globbed.append(self_.parent.name)
+            return real_glob(self_, pattern)
+
+        monkeypatch.setattr(overview, "time", clock)
+        monkeypatch.setattr(overview, "_get_store_dir", slow_get_store_dir)
+        monkeypatch.setattr(Path, "glob", spy_glob)
+        with caplog.at_level(logging.INFO, logger="power_atlas.overview"):
+            plans = overview.scan_plans([(str(w), w.name) for w in wss], deadline_s=0.3)
+        assert resolved == ["w0", "w1"]
+        assert globbed == ["w0"]
+        assert [p["title"] for p in plans] == ["P0"]
+        assert any("workspace 2 of 3" in r.getMessage() for r in caplog.records)
+
+    def test_a_resolver_with_only_find_is_asked_find(self, tmp_path):
+        """A resolver that no longer offers resolve_artifact (its legacy branch
+        removed) answers through find(cwd, "plans")."""
+        from power_atlas import overview
+        root = tmp_path / "find-only-playbook"
+        mod = root.joinpath(*self._RESOLVER_REL)
+        mod.parent.mkdir(parents=True)
+        store = tmp_path / "the-store"
+        self._plans_in(store, "260101_FINDONLY.md")
+        mod.write_text(
+            "from pathlib import Path\n"
+            "calls = []\n"
+            "def find(folder, kind='memory'):\n"
+            "    calls.append((folder, kind))\n"
+            "    if folder.endswith('hit'):\n"
+            "        return ('found', Path(%r))\n"
+            "    return ('none', None)\n" % str(store),
+            encoding="utf-8")
+        hit = tmp_path / "hit"
+        miss = tmp_path / "miss"
+        hit.mkdir()
+        miss.mkdir()
+        self._use_root(root)
+        assert self._same_dir(overview._get_store_dir(str(hit)), store)
+        assert overview._get_store_dir(str(miss)) is None
+        assert overview._load_resolver(str(root)).calls == [(str(hit), "plans"), (str(miss), "plans")]
+        assert [p["title"] for p in self._scan(hit)] == ["FINDONLY"]
+
+    def test_a_non_store_answer_logs_the_resolver_reason_at_debug(self, tmp_path, playbook, monkeypatch, caplog):
+        from power_atlas import overview
+        root, _stores, _module = playbook
+        ws = tmp_path / "plain"
+        ws.mkdir()
+        self._use_root(root)
+        with caplog.at_level(logging.DEBUG, logger="power_atlas.overview"):
+            assert overview._get_store_dir(str(ws)) is None          # a store repo, no store for this folder
+            monkeypatch.setenv("AGENT_PLAYBOOK_STORES", str(tmp_path / "gone"))
+            assert overview._get_store_dir(str(ws) + "x") is None    # no store repo on this machine
+        msgs = [r.getMessage() for r in caplog.records if "is not store-backed" in r.getMessage()]
+        assert len(msgs) == 2
+        assert "source=none" in msgs[0] and "store repo=ok" in msgs[0] and "no reason given" in msgs[0]
+        assert "store repo=missing" in msgs[1] and "store repo skipped" in msgs[1]
+
+    def test_a_store_holding_only_done_plans_still_wins_over_the_workspace_plans(self, tmp_path, playbook):
+        """The documented rule (README, playbook_root): the resolver counts a
+        store's plans/ as populated when any .md sits under it, plans/done/
+        included, so such a store is read and the workspace's own plans/ is not."""
+        from power_atlas import overview
+        root, _stores, _module = playbook
+        repo = self._git_repo(tmp_path / "app", "https://github.com/acme/app.git")
+        self._plans_in(repo, "260101_INREPO.md")
+        store = self._store(playbook, "acme-app-a1b2c3", "remote github.com/acme/app\n")
+        (store / "plans" / "done").mkdir(parents=True)
+        (store / "plans" / "done" / "250101_OLD.md").write_text(_OV_TRACKER_PLAN, encoding="utf-8")
+        self._use_root(root)
+        assert self._same_dir(overview._get_store_dir(str(repo)), store)
+        assert self._scan(repo) == []
+
+    def test_poweratlas_and_the_resolver_agree_on_the_crosscheck_folders(
+            self, tmp_path, playbook):
+        """SC-5 cross-check. The manifest in the config repo describes five
+        folders; the resolver and `_get_store_dir` must each return the answer
+        the manifest names (not merely each other's)."""
+        import json
+        from power_atlas import overview
+        root, stores, module = playbook
+        manifest = json.loads(self._config_repo().joinpath(
+            "shared", "skills", "qdream", "scripts", "fixtures", "store-resolver",
+            "poweratlas-crosscheck", "manifest.json").read_text(encoding="utf-8"))
+        ws_root = tmp_path / "ws"
+
+        def real(path_text):
+            return Path(path_text.replace("{ws}", str(ws_root)))
+
+        expected_dir = {}
+        for item in manifest["stores"]:
+            d = self._store(playbook, item["dir"], item["store"], plan=item["plan"])
+            expected_dir["store:" + item["dir"]] = d
+        for item in manifest["legacy"]:
+            d = root / "workspaces" / item["dir"]
+            d.mkdir(parents=True)
+            workspace = real(item["workspace"])
+            workspace.mkdir(parents=True)
+            (d / "WORKSPACE").write_text(str(workspace), encoding="utf-8")
+            self._plans_in(d, item["plan"])
+            expected_dir["legacy:" + item["dir"]] = d
+        folders = []
+        for item in manifest["folders"]:
+            path = real(item["path"])
+            path.mkdir(parents=True, exist_ok=True)
+            if item["git"]:
+                self._git_repo(path, item["remote"])
+            folders.append((item, path))
+        assert len(folders) == 5
+        self._use_root(root)
+        for item, path in folders:
+            want = expected_dir.get(item["expect"])
+            resolver_store = module.resolve_artifact(str(path), "plans", str(root)).store
+            pa_store = overview._get_store_dir(str(path))
+            if want is None:
+                assert item["expect"] == "none"
+                assert resolver_store is None and pa_store is None, item["id"]
+            else:
+                assert self._same_dir(resolver_store, want), item["id"]
+                assert self._same_dir(pa_store, want), item["id"]
+            if item["expect"].startswith("store:"):
+                # `find` (the store repo only) agrees with the transitional reader here.
+                status, found = module.find(str(path), "plans")
+                assert status == "found" and self._same_dir(found, want), item["id"]
+            else:
+                assert module.find(str(path), "plans")[0] == "none", item["id"]
 
     def test_existing_scan_unaffected_when_no_store(self, tmp_path):
         """SC-6: pre-feature scan behavior preserved when no store configured."""

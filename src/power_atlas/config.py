@@ -171,7 +171,7 @@ class Config:
     # restart is needed. 261016_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT
     kiro_daily_reset_minutes_utc: int = 0
     # Absolute path to the agent-playbook config repo. When set, overview.py uses
-    # this root to build the WORKSPACE map directly instead of parsing __store__.md
+    # this root to load the playbook's store resolver instead of parsing __store__.md
     # per workspace. Empty string (the default) means auto-detect from __store__.md.
     # 261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 1
     playbook_root: str = ""

@@ -16,6 +16,7 @@ workspaces whose Status is `In Progress`, or `Complete` but not yet moved to
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -73,15 +74,34 @@ _DATE_PREFIX_RE = re.compile(r"^\d{6}_")
 _plan_memo: dict[str, tuple[int, int, dict | None]] = {}
 _plan_memo_lock = threading.Lock()
 
-# Store-backed plan support (261015_PA_STORE_BACKED_WORKSPACE_PLANS).
-# When set, _get_store_dir uses the WORKSPACE map built from this root instead
-# of parsing __store__.md per workspace.
+# Store-backed plan support (261015_PA_STORE_BACKED_WORKSPACE_PLANS,
+# 261016_WORKSPACE_STORE_REPO_REMOTE_IDENTITY_AND_PYTHON_GUARDS Phase 7).
+# When set (the agent-playbook config repo), _get_store_dir asks the playbook's
+# store resolver, loaded by path from this root, instead of parsing
+# __store__.md per workspace.
 _playbook_root_override: str = ""
-# Cache: [monotonic_at, {normalized_cwd: store_dir_path} | None, root_str]
-# Third element allows invalidation when the root changes (see apply_config).
-_store_map_cache: list = [0.0, None, ""]
+# Cache: [root_str, {normalized_cwd: (monotonic_at, store_dir_path | None)}].
+# The dict fills lazily, one answer per cwd (a "not store-backed" answer is
+# cached too), and each answer expires on its own `monotonic_at`, stamped when
+# it was written. The root element allows invalidation when the root changes
+# (see apply_config). The time-to-live is longer than the web layer's 30 s
+# reuse of a scan: a scan starts at least 30 s after the previous one ended, so
+# a shorter window would never hit and every scan would resolve every cwd cold.
+_store_map_cache: list = ["", {}]
+# The loaded resolver module: [root_str, monotonic_at, module | None, stamp].
+# `monotonic_at` is when the file was last checked and `stamp` is its
+# (mtime_ns, size) then. For _RESOLVER_RETRY_SECONDS after a check the module is
+# reused as is: a failed load is cached as None, so a missing module costs one
+# debug line per window, not one per workspace per scan. After the window the
+# file is stat-ed once, and a changed stamp loads the module again, so a resolver
+# update is picked up without a restart (a change within one window waits for it).
+_resolver_cache: list = ["", 0.0, None, None]
 _store_map_lock = threading.Lock()
-_STORE_MAP_TTL = 30.0
+_STORE_MAP_TTL = 90.0
+_STORE_MAP_MAX = 1024
+_RESOLVER_RETRY_SECONDS = 30.0
+_RESOLVER_MODULE_NAME = "_power_atlas_store_resolver"
+_RESOLVER_RELPATH = ("shared", "skills", "qdream", "scripts", "store-resolver.py")
 
 
 def _read_plan_file(path: Path, st=None) -> str | None:
@@ -307,7 +327,8 @@ def apply_config(playbook_root: str) -> None:
     global _playbook_root_override
     _playbook_root_override = (playbook_root or "").strip()
     with _store_map_lock:
-        _store_map_cache[:] = [0.0, None, ""]
+        _store_map_cache[:] = ["", {}]
+        _resolver_cache[:] = ["", 0.0, None, None]
 
 
 def _parse_store_dir_from_cwd(cwd: str) -> Path | None:
@@ -339,73 +360,174 @@ def _parse_store_dir_from_cwd(cwd: str) -> Path | None:
     return resolved
 
 
-def _build_store_map(playbook_root: Path) -> dict:
-    """Build {normalized_workspace_path: store_dir_path} from WORKSPACE files.
-
-    Swallows all I/O failures; returns {} on a whole-iteration failure.
-    261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 2
-    """
-    from . import data
-    result: dict = {}
+def _resolver_stamp(path: str):
+    """`(mtime_ns, size)` of the resolver file, or None when it cannot be stat-ed."""
     try:
-        for ws_dir in (playbook_root / "workspaces").iterdir():
-            if not ws_dir.is_dir():
-                continue
-            # Skip store dirs on UNC/network shares (D21 stall guard).
-            if _skip_cwd(str(ws_dir)) or _resolves_to_unc(os.path.realpath(str(ws_dir))):
-                log.debug("Overview store map: skipping UNC store dir %s", ws_dir)
-                continue
-            try:
-                raw = (ws_dir / "WORKSPACE").read_text("utf-8", errors="replace").strip()
-            except OSError as exc:
-                log.debug("Overview store map: skipping %s (%s)", ws_dir, exc)
-                continue
-            if not raw:
-                continue
-            try:
-                norm = data._normalize_path(str(Path(raw).expanduser()))
-            except (ValueError, OSError) as exc:
-                log.debug("Overview store map: bad WORKSPACE path in %s: %s", ws_dir, exc)
-                continue
-            result[norm] = ws_dir
-    except (OSError, ValueError) as exc:
-        log.debug("Overview store map: failed to scan workspaces in %s: %s",
-                  playbook_root, exc)
-    return result
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _import_resolver(path: str):
+    """Load the resolver at `path` under a private name; None (with a debug line) when unusable.
+
+    `sys.path` is not changed. A module that offers neither `resolve_artifact`
+    nor `find` is refused. An import error propagates to the caller.
+    """
+    spec = importlib.util.spec_from_file_location(_RESOLVER_MODULE_NAME, path)
+    if spec is None or spec.loader is None:
+        log.debug("Overview store resolver: cannot load %s", path)
+        return None
+    candidate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(candidate)
+    if (callable(getattr(candidate, "resolve_artifact", None))
+            or callable(getattr(candidate, "find", None))):
+        return candidate
+    log.debug("Overview store resolver: %s has neither resolve_artifact nor find", path)
+    return None
+
+
+def _load_resolver(root: str):
+    """The playbook's store-resolver module, loaded by path from `root`, or None.
+
+    `<root>/shared/skills/qdream/scripts/store-resolver.py` is loaded with
+    importlib under a private name. It is checked at most once per
+    _RESOLVER_RETRY_SECONDS: a failed load is tried again after that, and a
+    loaded module is loaded again when the file's `(mtime_ns, size)` has
+    changed, so a resolver update (the playbook moving its data) needs no
+    restart. A reload that fails keeps the previous module and logs at debug;
+    the answers cached under the old module are dropped when a new one takes
+    over. A root that is relative or on a UNC/network share is not touched
+    (D21). Logs at debug and returns None on a missing file or a failed import.
+    """
+    now = time.monotonic()
+    with _store_map_lock:
+        cached_root, at, previous, previous_stamp = _resolver_cache
+        if cached_root == root and now - at < _RESOLVER_RETRY_SECONDS:
+            return previous
+    if cached_root != root:
+        previous = previous_stamp = None
+    module, stamp = None, None
+    try:
+        base = os.path.expanduser(root)
+        if _skip_cwd(base):
+            log.debug("Overview store resolver: playbook_root %r is not a local "
+                      "absolute path", root)
+        else:
+            path = os.path.join(base, *_RESOLVER_RELPATH)
+            stamp = _resolver_stamp(path)
+            if stamp is None or not os.path.isfile(path):
+                log.debug("Overview store resolver: %s not found", path)
+            elif previous is not None and stamp == previous_stamp:
+                module = previous
+            else:
+                module = _import_resolver(path)
+    except Exception as exc:
+        log.debug("Overview store resolver: failed to load from %s: %s: %s",
+                  root, type(exc).__name__, exc)
+        module = None
+    if module is None and previous is not None:
+        log.debug("Overview store resolver: keeping the previously loaded module "
+                  "for %s", root)
+        module = previous
+    with _store_map_lock:
+        _resolver_cache[:] = [root, now, module, stamp]
+        if previous is not None and module is not previous:
+            _store_map_cache[:] = [root, {}]
+    return module
+
+
+def _resolve_store_dir(cwd: str, root: str) -> tuple[Path | None, bool]:
+    """Ask the resolver where `cwd`'s plans live: `(store directory | None, cacheable)`.
+
+    Calls the resolver's transitional-aware reader, `resolve_artifact(cwd,
+    "plans", config_repo=root)`: until the data has moved to the store repo, a
+    workspace's plans still sit in a legacy `<root>/workspaces/*` store, which
+    `find` alone cannot see. A resolver that no longer offers it (its legacy
+    branch removed) is asked `find(cwd, "plans")` instead. Only a store source
+    answers: `in-workspace`, `none` and `failed` return None, so `scan_plans`
+    keeps reading `<cwd>/plans`; the reason is logged at debug. The resolver
+    walks from `cwd` up to its repo toplevel, so a subfolder of a store-backed
+    repo resolves to that repo's store. A store on a UNC/network share is
+    refused (D21).
+
+    `cacheable` is True only for an answer that holds until the stores change:
+    a store (`store-repo`, `legacy`, or `found`) or the resolver's own `none`.
+    A `failed` answer (an unreadable store repo, a transient fault), an
+    `in-workspace` one and an unloadable resolver are not cacheable, so the
+    next scan asks again.
+    261016_WORKSPACE_STORE_REPO_REMOTE_IDENTITY_AND_PYTHON_GUARDS Phase 7
+    """
+    module = _load_resolver(root)
+    if module is None:
+        return None, False
+    resolve = getattr(module, "resolve_artifact", None)
+    if callable(resolve):
+        art = resolve(cwd, "plans", os.path.expanduser(root))
+        if art.source not in ("store-repo", "legacy") or art.store is None:
+            log.debug("Overview store resolver: %s is not store-backed "
+                      "(source=%s, store repo=%s): %s", cwd, art.source,
+                      getattr(art, "store_repo", "?"), art.reason or "no reason given")
+            return None, art.source == "none"
+        store = Path(art.store)
+    else:
+        status, found = module.find(cwd, "plans")
+        if status != "found" or found is None:
+            log.debug("Overview store resolver: %s is not store-backed "
+                      "(find: %s)", cwd, status)
+            return None, status == "none"
+        store = Path(found)
+    store_str = str(store)
+    if _skip_cwd(store_str) or _resolves_to_unc(os.path.realpath(store_str)):
+        log.debug("Overview store resolver: skipping UNC store dir %s", store)
+        return None, True
+    return store, True
 
 
 def _get_store_dir(cwd: str) -> Path | None:
     """Return the store directory for a workspace cwd, or None if not store-backed.
 
     Two paths:
-    - Override (_playbook_root_override set): use cached WORKSPACE map built
-      from that root. TTL check and cache write run under _store_map_lock;
-      the build itself runs outside the lock (two concurrent builds from the
-      same directory are value-equivalent, as with _plan_memo_lock).
-    - No override: parse cwd's own __store__.md directly (no map/cache needed).
+    - Override (_playbook_root_override set): the resolver loaded from that
+      root answers (`_resolve_store_dir`), cached per normalized cwd, each
+      answer for _STORE_MAP_TTL from the moment it was written. Only a store
+      answer or the resolver's own "no store" is kept; a `failed` one is asked
+      again by the next scan. The cache read and write run under
+      _store_map_lock; the resolver call itself runs
+      outside it (two concurrent calls for the same cwd are value-equivalent,
+      as with _plan_memo_lock).
+    - No override: parse cwd's own __store__.md directly (no resolver needed).
     261015_PA_STORE_BACKED_WORKSPACE_PLANS Phase 2
     """
     try:
-        if _playbook_root_override:
-            from . import data
-            norm_cwd = data._normalize_path(str(Path(cwd).expanduser()))
-            with _store_map_lock:
-                at, store_map, cached_root = _store_map_cache
-                need = (store_map is None
-                        or cached_root != _playbook_root_override
-                        or time.monotonic() - at >= _STORE_MAP_TTL)
-                if not need:
-                    return store_map.get(norm_cwd)
-            # Build outside the lock (file I/O must not block all readers).
-            try:
-                root = Path(_playbook_root_override).expanduser().resolve()
-            except (ValueError, OSError):
-                return None
-            new_map = _build_store_map(root)
-            with _store_map_lock:
-                _store_map_cache[:] = [time.monotonic(), new_map, _playbook_root_override]
-            return new_map.get(norm_cwd)
-        return _parse_store_dir_from_cwd(cwd)
+        root = _playbook_root_override
+        if not root:
+            return _parse_store_dir_from_cwd(cwd)
+        from . import data
+        norm_cwd = data._normalize_path(str(Path(cwd).expanduser()))
+        with _store_map_lock:
+            cached_root, answers = _store_map_cache
+            hit = answers.get(norm_cwd) if cached_root == root else None
+            if hit is not None and time.monotonic() - hit[0] < _STORE_MAP_TTL:
+                return hit[1]
+        # Resolve outside the lock (file I/O must not block all readers).
+        answer, cacheable = _resolve_store_dir(cwd, root)
+        if not cacheable:
+            return answer
+        with _store_map_lock:
+            now = time.monotonic()
+            if _store_map_cache[0] != root:
+                _store_map_cache[:] = [root, {}]
+            answers = _store_map_cache[1]
+            if len(answers) >= _STORE_MAP_MAX and norm_cwd not in answers:
+                for key in [k for k, (at, _s) in answers.items()
+                            if now - at >= _STORE_MAP_TTL]:
+                    del answers[key]
+                if len(answers) >= _STORE_MAP_MAX:
+                    answers.clear()
+            answers[norm_cwd] = (now, answer)
+        return answer
     except Exception:
         return None
 
@@ -419,7 +541,8 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
     Robust reads (D21): cwds that are UNC or not absolute are skipped, and so
     is a cwd whose `plans` folder resolves (a junction or symlink) to a UNC
     target. Nothing more is read once `deadline_s` has passed; the deadline is
-    checked before each cwd and before each file, and the first file of the
+    checked before each cwd, right after its store-resolver call returns (a
+    cold call can be slow) and before each file, and the first file of the
     first cwd is always read, as in `web._acp_exists_flags`. A single stalled
     call cannot be interrupted, so the bound is one stalled call, not zero.
     The `realpath` check itself is such a call: it opens the path, so a
@@ -431,6 +554,11 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
     included) is skipped, and so is a file swapped between the `lstat` and
     the open (`_read_plan_file`); files over `PLAN_MAX_BYTES` are skipped, and
     the read itself is capped too; one unreadable file skips that file only.
+
+    Workspaces that resolve to one store (a subfolder, a second checkout or a
+    worktree of the same repo) list that store's plans once, under the first of
+    them in `workspaces` (the rail's order); the later ones are skipped.
+    A scan that stops at its deadline logs that at info.
 
     Parsed files are memoised per path on `(mtime_ns, size)` (D22), so a
     repeat scan of unchanged files costs one `stat` each. Paths not seen by a
@@ -448,12 +576,15 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
     deadline = time.monotonic() + deadline_s
     out: list[dict] = []
     seen: set[str] = set()
+    store_plan_dirs: set[str] = set()
     complete = True
+    stopped_at = 0
     for index, (cwd, name) in enumerate(workspaces):
         if not complete:
             break
         if index and time.monotonic() >= deadline:
             complete = False
+            stopped_at = index
             break
         if _skip_cwd(cwd):
             continue
@@ -463,23 +594,38 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
         store_dir = None
         if index == 0 or time.monotonic() < deadline:
             store_dir = _get_store_dir(cwd)
-        if store_dir is not None and (store_dir / "plans").is_dir():
+        if index and time.monotonic() >= deadline:
+            # The resolver call (one cold call can take tens of milliseconds)
+            # crossed the deadline: read nothing of this workspace either.
+            complete = False
+            stopped_at = index
+            break
+        redirected = store_dir is not None and (store_dir / "plans").is_dir()
+        if redirected:
             plans_dir = store_dir / "plans"
             git_cwd = str(store_dir)   # plan commits live in the store repo
         else:
             plans_dir = Path(cwd) / "plans"
             git_cwd = cwd
         try:
-            if _resolves_to_unc(os.path.realpath(str(plans_dir))):
+            real_plans = os.path.realpath(str(plans_dir))
+            if _resolves_to_unc(real_plans):
                 continue
             if not plans_dir.is_dir():
                 continue
+            if redirected:
+                # Several workspaces can resolve to one store: list it once.
+                store_key = os.path.normcase(real_plans)
+                if store_key in store_plan_dirs:
+                    continue
+                store_plan_dirs.add(store_key)
             files = sorted(plans_dir.glob("*.md"))
         except (OSError, ValueError):
             continue
         for file_index, path in enumerate(files):
             if (index or file_index) and time.monotonic() >= deadline:
                 complete = False
+                stopped_at = index
                 break
             if path.name.upper() in _PLAN_SKIP_NAMES:
                 continue
@@ -533,6 +679,10 @@ def scan_plans(workspaces, deadline_s: float = 2.0, now: float | None = None) ->
         with _plan_memo_lock:
             for key in [k for k in _plan_memo if k not in seen]:
                 del _plan_memo[key]
+    else:
+        log.info("Overview: plan scan stopped at its %.1f s deadline in workspace "
+                 "%d of %d; later workspaces and files were not read",
+                 deadline_s, stopped_at + 1, len(workspaces))
     out.sort(key=lambda p: p["_activity"], reverse=True)
     out.sort(key=lambda p: 0 if p["state"] == "In Progress" else 1)
     for plan in out:

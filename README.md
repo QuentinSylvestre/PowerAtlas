@@ -341,6 +341,25 @@ remote_bind_address = ""  # "" = loopback only (the default; a version bump neve
                           # not 0.0.0.0 — to also listen there. Needs a fixed port above and a
                           # restart. Read the "Remote access" section before enabling it.
 
+playbook_root = ""  # "" = off (the default). Absolute path to the agent-playbook config repo. When set,
+                    # the Overview's plans list loads the playbook's store resolver from
+                    # <playbook_root>/shared/skills/qdream/scripts/store-resolver.py and asks it where
+                    # each workspace's plans live: the workspace's store (found by its git remote, so a
+                    # second checkout or a subfolder of a repo reaches the same store), or a legacy
+                    # <playbook_root>/workspaces/* store until the playbook has moved its data. A folder
+                    # with no store reads <folder>/plans. Several folders that resolve to one store (a
+                    # subfolder, a second checkout) list its plans once, under the first of them in the
+                    # rail's order. A store counts as holding plans when any .md file sits under its
+                    # plans/, plans/done/ included, so a store with only archived plans still replaces
+                    # <folder>/plans and the Overview then lists nothing for that folder. If the module
+                    # is missing or fails to load, no workspace redirects and a debug line says why.
+                    # The module is checked at most every 30 s and loaded again when its file changes
+                    # (the playbook updated the resolver), with no restart; a changed file that fails
+                    # to load keeps the last good module. A workspace's answer is kept for 90 s, except
+                    # a failed lookup, which is asked again on the next scan.
+                    # With "", only workspaces that a Kiro session wired
+                    # (.kiro/steering/__store__.md) redirect to their store. The path is read at startup.
+
 # ACP session limits. Both are read once at startup, so a change needs a restart; the settings
 # panel says so rather than pretending a live effect.
 acp_max_sessions = 8  # 1-16. Concurrent kiro-cli ACP sessions. Each costs ~3 processes and ~161 MB
