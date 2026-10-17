@@ -25155,6 +25155,51 @@ check("clearTranscript sets transcriptLive to false", (tpl) => {
     "clearTranscript must call setTranscriptLive(false) as its last step (SC3)");
 });
 
+// ---------------------------------------------------------------------------
+// Phase 2, SC4: Queue-status restore on reconnect
+// ---------------------------------------------------------------------------
+
+check("session frame with queued:true shows waiting steer status", (tpl) => {
+  const { page, live } = connected(tpl);
+  const status = page.el("acpSteerStatus");
+  // Baseline: the initial session frame in connected() has no queued flag,
+  // so the status should be hidden (empty).
+  assertEqual(status.hidden, true, "steer status should start hidden after initial session frame");
+  // Re-deliver a session frame with queued:true, simulating a reconnect to a
+  // session that was queued behind another session's turn.
+  page.deliver({
+    type: "session", sessionId: live,
+    payload: {
+      sessionId: live, cwd: "/work", created: false,
+      turnActive: false, contextPercent: null, queued: true,
+    },
+  });
+  assertEqual(status.hidden, false,
+    "SC4: steer status must be visible when session frame carries queued:true");
+  assert(status.textContent.includes("another session"),
+    `SC4: steer status must mention "another session", got: ${status.textContent}`);
+  assert(status.textContent.includes("turn to finish"),
+    `SC4: steer status must mention "turn to finish", got: ${status.textContent}`);
+});
+
+check("dashHandle session frame with queued:true shows waiting steer status", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  // Baseline: steer status should start hidden.
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, true,
+    "SC4: dash steer status should start hidden");
+  // Deliver a session frame with queued:true through dashHandle.
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "/work", turnActive: false, queued: true },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, false,
+    "SC4: dash steer status must be visible when session frame carries queued:true");
+  assert(p.sandbox.dashSteerStatusEl.textContent.includes("another session"),
+    `SC4: dash steer status must mention "another session", got: ${p.sandbox.dashSteerStatusEl.textContent}`);
+  assert(p.sandbox.dashSteerStatusEl.textContent.includes("turn to finish"),
+    `SC4: dash steer status must mention "turn to finish", got: ${p.sandbox.dashSteerStatusEl.textContent}`);
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

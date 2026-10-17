@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 {% block content %}
 <div class="topbar">
   {# The logo, in the same corner and the same order as on `/`, so the two
@@ -5091,6 +5091,11 @@
       // any live status for it will arrive fresh over its own `steer_status`
       // frames, not by carrying this one over.
       setSteerStatus('');
+      // SC4: restore the waiting indicator if this session was queued when we
+      // subscribed. Live queue_status frames keep it current afterward.
+      if (payload.queued) {
+        setSteerStatus('Waiting for another session\u2019s turn to finish\u2026');
+      }
       // Same reasoning for the tab title: a previous session's `focus_update`
       // must not persist onto whichever session this page just adopted. A
       // `history` replay right after this (if the adopted session has one)

@@ -9173,6 +9173,7 @@ def _handle_subscribe(conn, session_id):
         "created": False,
         "turnActive": session_id in _supervisor.inflight,
         "contextPercent": meta.get("contextPercent"),
+        "queued": bool(meta.get("queued_behind")),
     }, session_id))
     history = _supervisor.history.get(session_id)
     if history is None:
@@ -9442,6 +9443,7 @@ async def _handle_new(conn, payload):
         "turnActive": session_id in _supervisor.inflight if meta else False,
         "contextPercent": meta.get("contextPercent") if meta else None,
     }, session_id))
+    # Omits "queued": new sessions cannot be queued_behind at creation time.
     # Phase 8 live-verification fix: SC-1's replay-buffer mechanism (see
     # new_session()'s "SC-1 replay isolation" block) commits any early
     # frames -- e.g. KAS's immediate post-create fetch_cloud_config tool

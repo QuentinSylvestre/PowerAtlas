@@ -5363,6 +5363,10 @@ function dashHandle(frame){
     // to both the normal reattach path and the payload.created branch above,
     // which falls through into this same case body.
     setDashSteerStatus('');
+    // SC4: restore the waiting indicator on reconnect.
+    if (payload.queued) {
+      setDashSteerStatus('Waiting for another session\u2019s turn to finish\u2026');
+    }
     dashSetComposerNote('');
     dashRefreshComposerControls();
     dashUpdateCloseButton();

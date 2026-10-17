@@ -3442,6 +3442,30 @@ class TestAcpReplayOnSubscribe:
         assert any("unknown_session" in r.getMessage() for r in caplog.records)
 
 
+class TestHandleSubscribeQueuedState:
+    """_handle_subscribe includes 'queued' in the session frame."""
+
+    def test_session_frame_has_queued_true_when_queued_behind_set(self, acp_session):
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.sessions[sid]["queued_behind"] = "some_other_session"
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        session_frame = next(f for f in frames if f["type"] == "session")
+        assert session_frame["payload"]["queued"] is True
+
+    def test_session_frame_has_queued_false_when_no_queued_behind(self, acp_session):
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.sessions[sid].pop("queued_behind", None)
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        session_frame = next(f for f in frames if f["type"] == "session")
+        assert session_frame["payload"]["queued"] is False
+
+
 class TestAcpUnsubscribe:
     """The dashboard's Overview sends ``unsubscribe`` so the session it leaves
     stops counting as watched, which would otherwise suppress its
