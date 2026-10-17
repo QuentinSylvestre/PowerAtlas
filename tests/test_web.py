@@ -48102,3 +48102,139 @@ class TestCrashRestart:
         _main._detect_and_log_crash(log_mock)
 
         log_mock.warning.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestWorkflowHistory
+#
+# 261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION Phase 5
+# Tests for _get_workflow_runs_v3 (unit) and GET /api/workflow-history (HTTP).
+# All session IDs and workflow IDs are synthetic placeholders -- no real
+# home-directory paths or IDs from disk.
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowHistory:
+    """Unit and HTTP tests for Phase 5: workflow history from disk."""
+
+    def _make_session_dir(self, tmp_path, session_id, lines):
+        """Build tmp_path/.kiro/sessions/wf-hash/<session_id>/messages.jsonl."""
+        hash_dir = tmp_path / ".kiro" / "sessions" / "wf-hash"
+        sess_dir = hash_dir / session_id
+        sess_dir.mkdir(parents=True)
+        jsonl = sess_dir / "messages.jsonl"
+        jsonl.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n",
+            encoding="utf-8",
+        )
+        return tmp_path
+
+    # -- Test A: sub_agent_start + sub_agent_complete -> 1 run with 1 step -----
+
+    def test_a_single_run_with_one_step(self, tmp_path):
+        """A sub_agent_start/complete pair with a workflowId returns 1 run."""
+        import pathlib as _pl
+        import re
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess-wf-placeholder-1"
+        lines = [
+            {
+                "id": "m1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {
+                    "type": "sub_agent_start",
+                    "subSessionId": "sess-wf-step-placeholder-1",
+                    "role": "run-both/step-a",
+                    "task": "Do the thing",
+                    "workflowId": "wf-placeholder-run-1",
+                    "startedAt": "2026-01-01T00:00:00Z",
+                },
+            },
+            {
+                "id": "m2",
+                "timestamp": "2026-01-01T00:01:00Z",
+                "payload": {
+                    "type": "sub_agent_complete",
+                    "subSessionId": "sess-wf-step-placeholder-1",
+                    "status": "success",
+                    "completedAt": "2026-01-01T00:01:00Z",
+                },
+            },
+        ]
+        self._make_session_dir(tmp_path, session_id, lines)
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._get_workflow_runs_v3(session_id)
+
+        assert len(result) == 1
+        run = result[0]
+        assert run["workflowId"] == "wf-placeholder-run-1"
+        assert len(run["steps"]) == 1
+        step = run["steps"][0]
+        assert step["subSessionId"] == "sess-wf-step-placeholder-1"
+        assert step["role"] == "run-both/step-a"
+        assert step["task"] == "Do the thing"
+        assert step["status"] == "success"
+        assert step["startedAt"] == "2026-01-01T00:00:00Z"
+        assert step["completedAt"] == "2026-01-01T00:01:00Z"
+
+    # -- Test B: no workflow records -> returns [] ----------------------------
+
+    def test_b_empty_session_returns_no_runs(self, tmp_path):
+        """A session with no sub_agent_start/workflowId records returns []."""
+        import pathlib as _pl
+        import re
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess-wf-placeholder-2"
+        lines = [
+            {
+                "id": "m1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {
+                    "type": "user",
+                    "content": "hello",
+                },
+            },
+            {
+                # sub_agent_start without workflowId -- not a workflow step
+                "id": "m2",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "payload": {
+                    "type": "sub_agent_start",
+                    "subSessionId": "sess-plain-subagent-placeholder",
+                    "role": "some-role",
+                },
+            },
+        ]
+        self._make_session_dir(tmp_path, session_id, lines)
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._get_workflow_runs_v3(session_id)
+
+        assert result == []
+
+    # -- Test C: bad session id -> HTTP 400 -----------------------------------
+
+    def test_c_bad_session_id_returns_400(self, client):
+        """GET /api/workflow-history with an invalid sid returns 400."""
+        resp = client.get("/api/workflow-history?sid=../../../../etc/passwd")
+        assert resp.status_code == 400
+
+    # -- Test D: no auth cookie -> HTTP 403 -----------------------------------
+
+    def test_d_no_auth_returns_403(self, anonymous_client):
+        """GET /api/workflow-history without pa_local cookie returns 403."""
+        resp = anonymous_client.get(
+            "/api/workflow-history?sid=sess-wf-placeholder-1"
+        )
+        assert resp.status_code == 403

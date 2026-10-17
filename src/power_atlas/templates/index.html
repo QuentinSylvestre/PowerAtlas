@@ -3611,6 +3611,86 @@ initWorkflowsDom({
   openSubagentFn: function (sid) { dashOpenSubagent(sid); },
   isDashboard: true,
 });
+// Phase 5: fetch workflow history from disk when the dashboard panel is first
+// opened.  Mirrors acp.html's equivalent block; `_dashAttachedSid` is the
+// dashboard equivalent of acp.html's `sessionId`.
+(function () {
+  var pastRuns = document.getElementById('dashWorkflowsPastRuns');
+  var toggle   = document.getElementById('dashWorkflowsToggle');
+  var panel    = document.getElementById('dashWorkflowsPanel');
+  if (!toggle || !pastRuns || !panel) return;
+  toggle.addEventListener('click', function () {
+    // panel.hidden has already been toggled by initWorkflowsDom's own
+    // listener (registered first).  Load history only when the panel is
+    // now visible and the past-runs container is still empty.
+    if (panel.hidden) return;
+    if (pastRuns.childNodes.length) return;
+    var sid = _dashAttachedSid;
+    if (!sid) return;
+    var loading = document.createElement('span');
+    loading.textContent = 'Loading\u2026';
+    pastRuns.appendChild(loading);
+    fetch('/api/workflow-history?sid=' + encodeURIComponent(sid))
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        while (pastRuns.firstChild) pastRuns.removeChild(pastRuns.firstChild);
+        dashRenderWorkflowsPastRuns(data.runs || [], pastRuns);
+      })
+      .catch(function () {
+        while (pastRuns.firstChild) pastRuns.removeChild(pastRuns.firstChild);
+        var errMsg = document.createElement('span');
+        errMsg.textContent = 'Could not load workflow history.';
+        pastRuns.appendChild(errMsg);
+      });
+  });
+}());
+
+function dashRenderWorkflowsPastRuns(runs, container) {
+  // Dashboard mirror of acp.html's renderWorkflowsPastRuns.
+  // Renders completed past runs newest-first as collapsible <details> elements.
+  // Past-run step rows are view-only: no click handler, cursor: default.
+  // No innerHTML anywhere.
+  if (!runs || runs.length === 0) {
+    var emptyEl = document.createElement('span');
+    emptyEl.textContent = 'No workflow runs in this session.';
+    container.appendChild(emptyEl);
+    return;
+  }
+  var reversed = runs.slice().reverse();
+  for (var i = 0; i < reversed.length; i++) {
+    var run = reversed[i];
+    var steps = run.steps || [];
+    var details = document.createElement('details');
+    if (i === 0) details.open = true;
+    var summary = document.createElement('summary');
+    var labelText = run.workflowId || ('Run ' + (runs.length - i));
+    var summaryText = document.createElement('span');
+    summaryText.textContent =
+      labelText + ' \u2014 ' + steps.length + ' step' + (steps.length === 1 ? '' : 's');
+    summary.appendChild(summaryText);
+    details.appendChild(summary);
+    for (var j = 0; j < steps.length; j++) {
+      var step = steps[j];
+      var row = document.createElement('div');
+      row.className = 'wf-step-row wf-step-row--past';
+      row.style.cursor = 'default';
+      var roleSpan = document.createElement('span');
+      roleSpan.className = 'wf-step-role';
+      roleSpan.textContent = step.role || step.subSessionId || '';
+      var statusSpan = document.createElement('span');
+      statusSpan.className = 'wf-step-status';
+      statusSpan.textContent = step.status || '';
+      row.appendChild(roleSpan);
+      row.appendChild(statusSpan);
+      details.appendChild(row);
+    }
+    container.appendChild(details);
+  }
+}
+
 dashPromptInput.addEventListener('keydown', function(e){
   // Slash intercept: open the command palette when `/` is pressed into an
   // empty box (no modifier keys, not during an active turn) -- mirrors

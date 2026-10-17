@@ -3296,6 +3296,125 @@ def _get_tool_diffs_v3(session_id: str) -> "dict[str, dict]":
     return result
 
 
+def _get_workflow_runs_v3(session_id: str) -> "list[dict]":
+    """Extract workflow run history from a v3 session's messages.jsonl.
+
+    Returns a list of workflow runs ordered oldest-first.  Each run is a dict:
+        {
+            "workflowId": "wf_...",
+            "steps": [
+                {
+                    "subSessionId": "sess_...",
+                    "role": "...",
+                    "task": "...",
+                    "status": "success|failed|unknown",
+                    "startedAt": <ISO-8601 string or None>,
+                    "completedAt": <ISO-8601 string or None>,
+                },
+                ...
+            ],
+        }
+
+    Inlined in acp.py per the isolation boundary constraint — no import from
+    data_kiro_v3.py.  Follows the _get_tool_diffs_v3 pattern exactly.
+
+    Pre-probe O2: field shapes unconfirmed from local data; using documented
+    expected shapes from 261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION
+    Phase 5 spec.  The parser is resilient to missing fields on all sub_agent_*
+    records — any absent key defaults gracefully so real shape deviations are
+    handled silently rather than raising.
+    """
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return []
+
+    def _scan() -> "list[dict]":
+        sessions_root = Path.home() / ".kiro" / "sessions"
+        jsonl_path = None
+        try:
+            for hash_dir in sessions_root.iterdir():
+                if not hash_dir.is_dir() or hash_dir.name == "cli":
+                    continue
+                candidate = hash_dir / session_id / "messages.jsonl"
+                if candidate.is_file():
+                    jsonl_path = candidate
+                    break
+        except Exception:
+            return []
+        if jsonl_path is None:
+            return []
+
+        # runs_map: workflowId -> {"workflowId": str, "steps": list[dict]}
+        # Insertion order preserved (Python 3.7+ dict guarantee).
+        runs_map: "dict[str, dict]" = {}
+        # sub_session_index: subSessionId -> (workflowId, step_index) for
+        # fast lookup when matching sub_agent_complete records.
+        sub_session_index: "dict[str, tuple[str, int]]" = {}
+
+        try:
+            for raw_line in jsonl_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    msg = json.loads(raw_line)
+                except ValueError:
+                    continue
+                payload = msg.get("payload") or {}
+                ptype = payload.get("type")
+
+                if ptype == "sub_agent_start":
+                    wf_id = payload.get("workflowId") or ""
+                    if not wf_id:
+                        # Not a workflow step — skip (plain sub-agents have no
+                        # workflowId; only workflow node launches carry it).
+                        continue
+                    sub_sid = payload.get("subSessionId") or ""
+                    run = runs_map.setdefault(
+                        wf_id, {"workflowId": wf_id, "steps": []}
+                    )
+                    step: "dict" = {
+                        "subSessionId": sub_sid,
+                        "role": payload.get("role") or "",
+                        "task": payload.get("task") or "",
+                        "status": "unknown",
+                        "startedAt": payload.get("startedAt") or None,
+                        "completedAt": None,
+                    }
+                    step_idx = len(run["steps"])
+                    run["steps"].append(step)
+                    if sub_sid:
+                        sub_session_index[sub_sid] = (wf_id, step_idx)
+
+                elif ptype == "sub_agent_complete":
+                    sub_sid = payload.get("subSessionId") or ""
+                    location = sub_session_index.get(sub_sid)
+                    if location is None:
+                        continue
+                    wf_id, step_idx = location
+                    run = runs_map.get(wf_id)
+                    if run is None:
+                        continue
+                    step = run["steps"][step_idx]
+                    raw_status = payload.get("status") or ""
+                    step["status"] = (
+                        raw_status if raw_status in ("success", "failed")
+                        else "unknown"
+                    )
+                    step["completedAt"] = payload.get("completedAt") or None
+
+        except Exception:
+            return []
+
+        return list(runs_map.values())
+
+    try:
+        return _scan()
+    except Exception:
+        return []
+
+
 def _stored_session_cwd_v3(session_id: str) -> str:
     """Return workspacePaths[0] from a v3 session.json, or '' on any error.
 

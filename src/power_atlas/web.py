@@ -4655,6 +4655,32 @@ async def toggle_quota_auto_schedule():
     return {"enabled": enabled}
 
 
+# --- Workflow history ----------------------------------------------------
+#
+# 261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION Phase 5 (SC4, SC5).
+# Reads the kiro-cli session's messages.jsonl for the given session ID and
+# returns a list of workflow runs ordered oldest-first.  The blocking I/O is
+# off-loaded to a thread via asyncio.to_thread (same pattern as the
+# _get_tool_diffs_v3 callers).
+# Protected by LoopbackCredentialGate ASGI middleware — this path is not in
+# _local_gate_exempt(), so it requires the pa_local cookie.
+
+@app.get("/api/workflow-history")
+async def api_workflow_history(request: Request) -> Response:
+    """Workflow runs for a session: `{"runs": [...]}`.
+
+    Query parameter ``sid`` must be a valid v3 session id.  Returns 400 for
+    an invalid id and 200 with an empty ``runs`` list when no workflow records
+    are found.
+    """
+    from . import acp as _acp
+    sid = request.query_params.get("sid", "")
+    if not _acp._valid_session_id(sid):
+        return Response("invalid session id", status_code=400)
+    runs = await asyncio.to_thread(_acp._get_workflow_runs_v3, sid)
+    return JSONResponse({"runs": runs})
+
+
 # --- The dashboard Overview's live tiles ----------------------------------
 #
 # 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE (SC-4, SC-5). Polled about

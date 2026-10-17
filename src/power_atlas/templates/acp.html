@@ -729,6 +729,88 @@
     openSubagentFn: function (sid) { openSubagent(sid); },
     isDashboard: false,
   });
+  // Phase 5: fetch workflow history from disk when the panel is first opened.
+  // `sessionId` is declared further down (genuinely page-specific) and is
+  // accessible here via the scope chain at call time.
+  (function () {
+    var pastRuns = document.getElementById('acpWorkflowsPastRuns');
+    var toggle   = document.getElementById('acpWorkflowsToggle');
+    var panel    = document.getElementById('acpWorkflowsPanel');
+    if (!toggle || !pastRuns || !panel) return;
+    toggle.addEventListener('click', function () {
+      // panel.hidden has already been toggled by initWorkflowsDom's own
+      // listener (registered first).  Load history only when the panel is
+      // now visible and the past-runs container is still empty.
+      if (panel.hidden) return;
+      if (pastRuns.childNodes.length) return;
+      var sid = sessionId;
+      if (!sid) return;
+      var loading = document.createElement('span');
+      loading.textContent = 'Loading\u2026';
+      pastRuns.appendChild(loading);
+      fetch('/api/workflow-history?sid=' + encodeURIComponent(sid))
+        .then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        })
+        .then(function (data) {
+          while (pastRuns.firstChild) pastRuns.removeChild(pastRuns.firstChild);
+          renderWorkflowsPastRuns(data.runs || [], pastRuns);
+        })
+        .catch(function () {
+          while (pastRuns.firstChild) pastRuns.removeChild(pastRuns.firstChild);
+          var errMsg = document.createElement('span');
+          errMsg.textContent = 'Could not load workflow history.';
+          pastRuns.appendChild(errMsg);
+        });
+    });
+  }());
+
+  function renderWorkflowsPastRuns(runs, container) {
+    // Render completed past runs from the /api/workflow-history response.
+    // Runs are displayed newest-first (reversed from oldest-first API order).
+    // Each run is a collapsible <details>/<summary> element.
+    // Past-run step rows are view-only: no click handler, cursor: default.
+    // No innerHTML anywhere (acp_page.test.mjs prohibition).
+    if (!runs || runs.length === 0) {
+      var emptyEl = document.createElement('span');
+      emptyEl.textContent = 'No workflow runs in this session.';
+      container.appendChild(emptyEl);
+      return;
+    }
+    var reversed = runs.slice().reverse();
+    for (var i = 0; i < reversed.length; i++) {
+      var run = reversed[i];
+      var steps = run.steps || [];
+      var details = document.createElement('details');
+      // Most recent run (first after reversal) starts open.
+      if (i === 0) details.open = true;
+      var summary = document.createElement('summary');
+      var labelText = run.workflowId || ('Run ' + (runs.length - i));
+      var summaryText = document.createElement('span');
+      summaryText.textContent =
+        labelText + ' \u2014 ' + steps.length + ' step' + (steps.length === 1 ? '' : 's');
+      summary.appendChild(summaryText);
+      details.appendChild(summary);
+      for (var j = 0; j < steps.length; j++) {
+        var step = steps[j];
+        var row = document.createElement('div');
+        row.className = 'wf-step-row wf-step-row--past';
+        row.style.cursor = 'default';
+        var roleSpan = document.createElement('span');
+        roleSpan.className = 'wf-step-role';
+        roleSpan.textContent = step.role || step.subSessionId || '';
+        var statusSpan = document.createElement('span');
+        statusSpan.className = 'wf-step-status';
+        statusSpan.textContent = step.status || '';
+        row.appendChild(roleSpan);
+        row.appendChild(statusSpan);
+        details.appendChild(row);
+      }
+      container.appendChild(details);
+    }
+  }
+
   // send stays declared here (it is genuinely page-specific: the live WS
   // wrapper) rather than moving to transcript-renderer.js like the DOM refs
   // above -- but a function there (addPermissionRequest, mdColour) calls it
