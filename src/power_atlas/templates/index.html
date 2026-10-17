@@ -5614,6 +5614,16 @@ function dashHandle(frame){
     setSessionMcpServers(payload && payload.servers);
     return;
   }
+  if (type === 'visualization') {
+    // Visualization iframe card — mirrors /acp's handler (SC5).
+    // Broadcast-only (not in replay buffer), so viz cards appear only while
+    // live-subscribed, never on page reload — consistent with acp.html.
+    // addVisualizationCard is defined in transcript-renderer.js and loaded by
+    // both acp.html and index.html.
+    if (!payload.url) return;
+    addVisualizationCard(payload.url, payload.title || 'Visualization');
+    return;
+  }
   if (type === 'commands_execute_result') {
     // The command result — see composer-chrome.js's
     // handleCommandsExecuteResult() for the full comment (compact exclusion,

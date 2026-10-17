@@ -14664,6 +14664,9 @@ const DASH_HANDLE_NAMES = [
   // the explicit-socket-close call these teardown sites, and the new-session
   // creation branch, now also make.
   "subagents", "dashCloseSubagentView", "dashRemoveAllCrewPanels", "dashCloseSubWs",
+  // SC5 (261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE Phase 3) -- guards
+  // against the visualization case silently moving out of dashHandle.
+  "visualization",
 ];
 // SC8 (sub-agent/crew read-only panel, dashboard/ACP feature-parity plan
 // Phase 5) -- a duplicated, not extracted, feature (index.html-only, not
@@ -15509,6 +15512,13 @@ function loadDashPicker(opts = {}) {
     // what dashHandle passed it.
     addStepMessage: function () {
       (sandbox._stepMessageCalls = sandbox._stepMessageCalls || []).push([...arguments]);
+    },
+    // transcript-renderer.js's visualization card (SC5,
+    // 261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE Phase 3); the real one
+    // is checked in the /acp sandbox. Records every call so dashHandle tests
+    // can assert on calls (or absence of calls for the missing-url guard).
+    addVisualizationCard: function (url, title) {
+      (sandbox._vizCalls = sandbox._vizCalls || []).push({ url, title });
     },
     dashUpdateCloseButton: () => {},
     // dashHandle's generic `error` case tail (index.html, outside both
@@ -25227,6 +25237,44 @@ check("dashHandle session frame with queued:false leaves dash steer status hidde
   });
   assertEqual(p.sandbox.dashSteerStatusEl.hidden, true,
     "SC4: dash steer status must stay hidden when session frame carries queued:false");
+});
+
+check("dashHandle visualization frame calls addVisualizationCard", () => {
+  // SC5 (261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE Phase 3):
+  // a visualization frame with url and title must call addVisualizationCard.
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "visualization", sessionId: "sess-1",
+    payload: { url: "https://localhost/test.html", title: "Test Viz" },
+  });
+  const calls = p.sandbox._vizCalls || [];
+  assertEqual(calls.length, 1,
+    `SC5: addVisualizationCard must be called once for a valid visualization frame, got ${calls.length}`);
+  assertEqual(calls[0].url, "https://localhost/test.html",
+    `SC5: addVisualizationCard url must match payload.url, got: ${calls[0].url}`);
+  assertEqual(calls[0].title, "Test Viz",
+    `SC5: addVisualizationCard title must match payload.title, got: ${calls[0].title}`);
+});
+
+check("dashHandle visualization frame with no url does not call addVisualizationCard", () => {
+  // SC5 guard: a visualization frame with missing url must return early without
+  // calling addVisualizationCard.
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "visualization", sessionId: "sess-1",
+    payload: { title: "Test Viz" },  // url intentionally absent
+  });
+  const calls = p.sandbox._vizCalls || [];
+  assertEqual(calls.length, 0,
+    `SC5: addVisualizationCard must NOT be called when payload.url is missing, got ${calls.length} calls`);
+  // Also verify null url is guarded.
+  p.sandbox.dashHandle({
+    type: "visualization", sessionId: "sess-1",
+    payload: { url: null, title: "Test Viz" },
+  });
+  const calls2 = p.sandbox._vizCalls || [];
+  assertEqual(calls2.length, 0,
+    `SC5: addVisualizationCard must NOT be called when payload.url is null, got ${calls2.length} calls`);
 });
 
 let failed = 0;
