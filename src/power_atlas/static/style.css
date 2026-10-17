@@ -2064,6 +2064,7 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 #acpWorkflowsPanel[hidden], #dashWorkflowsPanel[hidden] { display: none; }
 .wf-step-row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: var(--radius-sm); }
 .wf-step-row:hover { background: rgba(128,128,128,0.1); }
+.wf-step-row:focus-visible { outline: 2px solid var(--focus-ring, #3b82f6); outline-offset: 1px; }
 .wf-step-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; }
 .wf-step-dot-working { background: #3b82f6; }
 .wf-step-dot-waiting { background: #f59e0b; }

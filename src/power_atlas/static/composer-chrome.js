@@ -947,8 +947,16 @@ function setWorkflowsLiveRun(entries, isDashboard) {
     // Click to open sub-agent panel.
     if (openFn && entry.sessionId) {
       (function (sid) {
+        row.setAttribute('role', 'button');
+        row.setAttribute('tabindex', '0');
         row.style.cursor = 'pointer';
         row.addEventListener('click', function () { openFn(sid); });
+        row.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            openFn(sid);
+          }
+        });
       }(entry.sessionId));
     }
 
@@ -958,14 +966,21 @@ function setWorkflowsLiveRun(entries, isDashboard) {
   if (toggle) toggle.hidden = false;
 }
 
-/** Clear the live-run container and hide the toggle button.
- *  Called when a `subagents` frame has no entries or workflowLive is false. */
+/** Clear the live-run container, close the panel, and hide the toggle button.
+ *  Called when a `subagents` frame has no entries or workflowLive is false.
+ *  The panel is also hidden: leaving it open with no rows and no toggle to
+ *  close it would strand the panel until the next workflow starts. */
 function clearWorkflowsLiveRun(isDashboard) {
   var container = isDashboard ? _dashWfLiveRunContainer : _wfLiveRunContainer;
   var toggle    = isDashboard ? _dashWfToggleBtn        : _wfToggleBtn;
+  var panel     = isDashboard ? _dashWfPanelEl          : _wfPanelEl;
 
   if (container) container.textContent = '';
-  if (toggle) toggle.hidden = true;
+  if (panel) panel.hidden = true;
+  if (toggle) {
+    toggle.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+  }
 }
 
 /** A `commands_execute_result` frame: render the command's ack (if any) as a

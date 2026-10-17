@@ -7136,6 +7136,46 @@ check("no innerHTML used in the Workflows panel (DOM stand-in guard)", (tpl) => 
   assertEqual(nameEl.textContent, "<b>name</b>", "step name rendered as text, not markup");
 });
 
+check("clearWorkflowsLiveRun closes the panel so it cannot be stranded open", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // Populate with a live frame then manually open the panel.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "s1",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  const toggle = page.el("acpWorkflowsToggle");
+  const panel  = page.el("acpWorkflowsPanel");
+  toggle.dispatch("click");
+  assert(!panel.hidden, "panel must be open before the clear");
+  // Deliver a non-live frame to trigger clearWorkflowsLiveRun.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "s1",
+      status: "terminated", action: "", done: true, error: "", startedAt: now },
+  ]));
+  assert(panel.hidden, "panel must be closed after clearWorkflowsLiveRun");
+  assertEqual(toggle.getAttribute("aria-expanded"), "false",
+              "aria-expanded must reset to false when panel is closed by clear");
+  assert(toggle.hidden, "toggle must be hidden after clear");
+});
+
+check("Enter and Space keys on a live step row open the sub-agent panel", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "s1",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  const rows = page.el("acpWorkflowsLiveRun").querySelectorAll(".wf-step-row");
+  assertEqual(rows.length, 1, "one step row");
+  assertEqual(rows[0].getAttribute("role"), "button", "row must have role=button");
+  assertEqual(rows[0].getAttribute("tabindex"), "0", "row must have tabindex=0");
+  // Enter opens the sub-agent panel.
+  rows[0].dispatch("keydown", { key: "Enter", bubbles: true, preventDefault: () => {} });
+  assertEqual(page.el("acpSubPanel").hidden, false,
+              "Enter key on step row must open sub-agent panel");
+});
+
 
 
 check("setCrew with toolCallId anchors panel after tool call row", (tpl) => {
