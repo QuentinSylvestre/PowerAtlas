@@ -221,6 +221,11 @@
     <button class="acp-btn acp-log-toggle" id="acpLogToggle" type="button"
             aria-expanded="false" aria-controls="acpLog">Debug log<span
             class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
+    <!-- Workflows panel toggle — revealed only when a workflow run starts.
+         Phase 4: panel shell with live run; Phase 5 adds past-run history. -->
+    <button class="acp-btn" id="acpWorkflowsToggle" type="button"
+            aria-expanded="false" aria-controls="acpWorkflowsPanel"
+            hidden>Workflows</button>
   </div>
   <div class="acp-transcript-wrap" id="acpTranscriptWrap">
     <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
@@ -231,6 +236,13 @@
       <button class="acp-btn acp-prompt-nav-btn" id="acpPromptDown" type="button"
               aria-label="Next prompt or scroll to bottom">↓</button>
     </div>
+  </div>
+  <!-- Workflows right-side panel (Phase 4). The toggle button (#acpWorkflowsToggle
+       in the toolbar above) is hidden until a workflow run starts; clicking it
+       toggles this panel. Phase 5 populates #acpWorkflowsPastRuns from disk. -->
+  <div class="wf-panel" id="acpWorkflowsPanel" hidden>
+    <div id="acpWorkflowsLiveRun"></div>
+    <div id="acpWorkflowsPastRuns"></div>
   </div>
   <!-- A sub-agent's own conversation, shown in place of the transcript+composer
        while one is selected on the agent bar below. Read-only by design (the
@@ -704,6 +716,18 @@
     getSessionId: function () { return sessionId; },
     send: send,
     onPromptChanged: function () { autoGrowPrompt(); refreshComposerControls(); },
+  });
+  // Workflows panel shell (Phase 4): pass element refs and the openSubagent
+  // function so step-row clicks open the sub-agent panel. `openSubagent` is
+  // declared further down; the closure captures the name, which is resolved
+  // at call time after the hoisted function declaration has run.
+  initWorkflowsDom({
+    liveRunContainer: document.getElementById('acpWorkflowsLiveRun'),
+    pastRunsContainer: document.getElementById('acpWorkflowsPastRuns'),
+    toggleBtn: document.getElementById('acpWorkflowsToggle'),
+    panelEl: document.getElementById('acpWorkflowsPanel'),
+    openSubagentFn: function (sid) { openSubagent(sid); },
+    isDashboard: false,
   });
   // send stays declared here (it is genuinely page-specific: the live WS
   // wrapper) rather than moving to transcript-renderer.js like the DOM refs
@@ -5486,6 +5510,12 @@
       // right after every `subscribe`/`session` reply that has a crew to
       // report, which is this page's only source for it after a reload.
       setCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive);
+      // Phase 4: update the Workflows live-run panel from the same frame.
+      if (payload.workflowLive === true) {
+        setWorkflowsLiveRun(payload.subagents || [], false);
+      } else {
+        clearWorkflowsLiveRun(false);
+      }
       return;
     }
     if (type === 'commands') {

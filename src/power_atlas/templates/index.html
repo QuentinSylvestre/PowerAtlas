@@ -323,6 +323,12 @@
       <button class="acp-btn acp-log-toggle" id="dashLogToggle" type="button"
               aria-expanded="false" aria-controls="dashLog">Debug log<span
               class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
+      <!-- Workflows panel toggle — revealed only when a workflow run starts.
+           Phase 4: panel shell with live run; Phase 5 adds past-run history.
+           Mirrors #acpWorkflowsToggle in acp.html. -->
+      <button class="acp-btn" id="dashWorkflowsToggle" type="button"
+              aria-expanded="false" aria-controls="dashWorkflowsPanel"
+              hidden>Workflows</button>
       <!-- WS reconnect-on-drop (SC7, dashboard/ACP feature-parity plan Phase
            6) -- mirrors acp.html's own #acpReconnect/#acpReload
            (acp.html:163-164). Both hidden until dashConnect()'s onclose
@@ -420,6 +426,13 @@
           </svg>
         </button>
       </div>
+    </div>
+    <!-- Workflows right-side panel (Phase 4). Mirrors #acpWorkflowsPanel in
+         acp.html. Toggle button (#dashWorkflowsToggle) is in the sub-toolbar
+         above; it starts hidden and is revealed when a workflow run starts. -->
+    <div class="wf-panel" id="dashWorkflowsPanel" hidden>
+      <div id="dashWorkflowsLiveRun"></div>
+      <div id="dashWorkflowsPastRuns"></div>
     </div>
     <!-- A sub-agent's own conversation, shown in place of the transcript+
          composer while one is selected on the crew panel above (SC8,
@@ -3587,6 +3600,17 @@ initCommandPaletteDom({
   // visible/enabled state in sync -- is the equivalent here.
   onPromptChanged: dashRefreshComposerControls,
 });
+// Workflows panel shell (Phase 4): mirrors acp.html's own initWorkflowsDom()
+// call. `dashOpenSubagent` is declared further down; the function reference
+// resolves at call time (hoisted function declaration).
+initWorkflowsDom({
+  liveRunContainer: document.getElementById('dashWorkflowsLiveRun'),
+  pastRunsContainer: document.getElementById('dashWorkflowsPastRuns'),
+  toggleBtn: document.getElementById('dashWorkflowsToggle'),
+  panelEl: document.getElementById('dashWorkflowsPanel'),
+  openSubagentFn: function (sid) { dashOpenSubagent(sid); },
+  isDashboard: true,
+});
 dashPromptInput.addEventListener('keydown', function(e){
   // Slash intercept: open the command palette when `/` is pressed into an
   // empty box (no modifier keys, not during an active turn) -- mirrors
@@ -5700,6 +5724,12 @@ function dashHandle(frame){
     // which is this page's only source for it after a reconnect. Mirrors
     // acp.html's own `subagents` handling (acp.html:5038-5045).
     dashSetCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive);
+    // Phase 4: update the Workflows live-run panel from the same frame.
+    if (payload.workflowLive === true) {
+      setWorkflowsLiveRun(payload.subagents || [], true);
+    } else {
+      clearWorkflowsLiveRun(true);
+    }
     return;
   }
   if (type === 'commands') {

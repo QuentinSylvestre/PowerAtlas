@@ -2057,6 +2057,21 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .acp-step-message-error { border-left-color: #ef4444; }
 .acp-step-message-info { border-left-color: var(--border); }
 
+/* Workflows panel (Phase 4) — right-side panel showing live/past workflow runs.
+   Positioned below the toolbar, above the composer, styled as a sidebar column.
+   Hidden until a run starts (toggled via #acpWorkflowsToggle / #dashWorkflowsToggle). */
+#acpWorkflowsPanel, #dashWorkflowsPanel { border-left: 2px solid var(--border); padding: 8px; overflow-y: auto; font-size: 12.5px; }
+#acpWorkflowsPanel[hidden], #dashWorkflowsPanel[hidden] { display: none; }
+.wf-step-row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: var(--radius-sm); }
+.wf-step-row:hover { background: rgba(128,128,128,0.1); }
+.wf-step-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; }
+.wf-step-dot-working { background: #3b82f6; }
+.wf-step-dot-waiting { background: #f59e0b; }
+.wf-step-dot-terminated, .wf-step-dot-done { background: var(--text-dim); }
+.wf-step-dot-failed { background: #ef4444; }
+.wf-step-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.wf-step-elapsed { flex-shrink: 0; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
 .acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; position: relative; }
 .acp-composer-row { display: flex; gap: 8px; align-items: stretch; position: relative; }
 /* Highlight-overlay wrapper -- takes the flex:1 slot formerly held by .acp-prompt */

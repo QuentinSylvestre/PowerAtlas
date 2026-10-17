@@ -42,6 +42,13 @@
 // shared infrastructure the debug log panel and, from Phase 3 on, the
 // send-mode picker use on both pages). Every other name above was absent
 // from both templates before this file existed.
+//
+// Phase 4 additions (Workflows panel shell): _wfLiveRunContainer,
+// _wfPastRunsContainer, _wfToggleBtn, _wfPanelEl, _wfOpenSubagentFn,
+// _dashWfLiveRunContainer, _dashWfPastRunsContainer, _dashWfToggleBtn,
+// _dashWfPanelEl, _dashWfOpenSubagentFn, initWorkflowsDom,
+// setWorkflowsLiveRun, clearWorkflowsLiveRun — grepped against both
+// acp.html and index.html; no collision. `_wf`-prefixed to minimise risk.
 
 // ---- context-window usage indicator ----------------------------------------
 
@@ -813,6 +820,152 @@ function _renderMcpIndicator() {
     }
     listEl.appendChild(li);
   });
+}
+
+// ---- Workflows panel shell (Phase 4) ---------------------------------------
+//
+// A right-side panel showing the live workflow run's step rows, accessible
+// from the session toolbar toggle button. Phase 5 will populate the past-runs
+// container from disk; Phase 4 only creates the containers and wires the
+// live-run rows from incoming `subagents` frames.
+//
+// Two sets of module-level vars: one for /acp (_wf* prefix) and one for the
+// dashboard (_dashWf* prefix). Each page calls initWorkflowsDom() once with
+// its own element refs; the `isDashboard` flag routes to the right set.
+
+var _wfLiveRunContainer = null;
+var _wfPastRunsContainer = null;
+var _wfToggleBtn = null;
+var _wfPanelEl = null;
+var _wfOpenSubagentFn = null;
+
+var _dashWfLiveRunContainer = null;
+var _dashWfPastRunsContainer = null;
+var _dashWfToggleBtn = null;
+var _dashWfPanelEl = null;
+var _dashWfOpenSubagentFn = null;
+
+/** Called once by each loading page's inline script with its own element refs.
+ *
+ *  refs shape:
+ *    liveRunContainer  — #acpWorkflowsLiveRun / #dashWorkflowsLiveRun
+ *    pastRunsContainer — #acpWorkflowsPastRuns / #dashWorkflowsPastRuns
+ *    toggleBtn         — #acpWorkflowsToggle / #dashWorkflowsToggle
+ *    panelEl           — #acpWorkflowsPanel / #dashWorkflowsPanel
+ *    openSubagentFn    — function(sessionId) that opens the sub-agent panel
+ *    isDashboard       — boolean: true for index.html, false for acp.html
+ *
+ *  The toggle button starts hidden (revealed only when a workflow run starts).
+ *  Clicking it toggles panelEl.hidden and updates aria-expanded. */
+function initWorkflowsDom(refs) {
+  var live = refs.liveRunContainer;
+  var past = refs.pastRunsContainer;
+  var toggle = refs.toggleBtn;
+  var panel = refs.panelEl;
+  var openFn = typeof refs.openSubagentFn === 'function' ? refs.openSubagentFn : null;
+
+  if (refs.isDashboard) {
+    _dashWfLiveRunContainer = live;
+    _dashWfPastRunsContainer = past;
+    _dashWfToggleBtn = toggle;
+    _dashWfPanelEl = panel;
+    _dashWfOpenSubagentFn = openFn;
+  } else {
+    _wfLiveRunContainer = live;
+    _wfPastRunsContainer = past;
+    _wfToggleBtn = toggle;
+    _wfPanelEl = panel;
+    _wfOpenSubagentFn = openFn;
+  }
+
+  if (!toggle || !panel) return;
+
+  // Set initial state explicitly so getAttribute('aria-expanded') is available
+  // immediately (the test harness only parses `hidden` from markup, not
+  // aria-* attributes; the button must start at a known state regardless).
+  toggle.setAttribute('aria-expanded', 'false');
+
+  toggle.addEventListener('click', function () {
+    var open = panel.hidden;
+    panel.hidden = !open;
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+}
+
+/** Populate the live-run container from a `subagents` frame with workflowLive:true.
+ *
+ *  Each entry becomes a `div.wf-step-row` with a status dot, step name, and
+ *  elapsed time. Clicking a row calls openSubagentFn(entry.sessionId).
+ *  The toggle button is revealed when entries is non-empty.
+ *  No innerHTML anywhere. */
+function setWorkflowsLiveRun(entries, isDashboard) {
+  var container = isDashboard ? _dashWfLiveRunContainer : _wfLiveRunContainer;
+  var toggle    = isDashboard ? _dashWfToggleBtn        : _wfToggleBtn;
+  var openFn    = isDashboard ? _dashWfOpenSubagentFn   : _wfOpenSubagentFn;
+
+  if (!container) return;
+
+  // Clear without innerHTML.
+  container.textContent = '';
+
+  if (!entries || !entries.length) {
+    if (toggle) toggle.hidden = true;
+    return;
+  }
+
+  var now = Date.now() / 1000;
+  for (var i = 0; i < entries.length; i++) {
+    var entry = entries[i];
+    var row = document.createElement('div');
+    row.className = 'wf-step-row';
+
+    // Status dot.
+    var dot = document.createElement('span');
+    dot.className = 'wf-step-dot wf-step-dot-' + (entry.status || 'waiting');
+    dot.setAttribute('aria-hidden', 'true');
+    row.appendChild(dot);
+
+    // Step name: sessionName or role, fallback to empty.
+    var nameEl = document.createElement('span');
+    nameEl.className = 'wf-step-name';
+    nameEl.textContent = entry.sessionName || entry.role || '';
+    row.appendChild(nameEl);
+
+    // Elapsed time.
+    var elapsedEl = document.createElement('span');
+    elapsedEl.className = 'wf-step-elapsed';
+    var started = typeof entry.startedAt === 'number' ? entry.startedAt : null;
+    if (started !== null) {
+      var ended = typeof entry.stoppedAt === 'number' ? entry.stoppedAt : now;
+      var secs = Math.round(ended - started);
+      elapsedEl.textContent = secs < 60
+        ? secs + 's'
+        : Math.floor(secs / 60) + 'm' + (secs % 60) + 's';
+    }
+    row.appendChild(elapsedEl);
+
+    // Click to open sub-agent panel.
+    if (openFn && entry.sessionId) {
+      (function (sid) {
+        row.style.cursor = 'pointer';
+        row.addEventListener('click', function () { openFn(sid); });
+      }(entry.sessionId));
+    }
+
+    container.appendChild(row);
+  }
+
+  if (toggle) toggle.hidden = false;
+}
+
+/** Clear the live-run container and hide the toggle button.
+ *  Called when a `subagents` frame has no entries or workflowLive is false. */
+function clearWorkflowsLiveRun(isDashboard) {
+  var container = isDashboard ? _dashWfLiveRunContainer : _wfLiveRunContainer;
+  var toggle    = isDashboard ? _dashWfToggleBtn        : _wfToggleBtn;
+
+  if (container) container.textContent = '';
+  if (toggle) toggle.hidden = true;
 }
 
 /** A `commands_execute_result` frame: render the command's ack (if any) as a

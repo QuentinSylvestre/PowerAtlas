@@ -7021,7 +7021,122 @@ check("role span shows role text when entry.role is non-empty", (tpl) => {
               "role span should show the role text");
 });
 
-// ---- Phase 4: per-toolCallId inline crew panel tests ----
+// ---- 261016 Phase 4: Workflows panel shell ----
+//
+// SC4 (live run section) and SC6 (click live step → opens sub-agent panel).
+
+check("workflows toggle is hidden until a workflowLive subagents frame arrives", (tpl) => {
+  const { page, live } = connected(tpl);
+  assert(page.el("acpWorkflowsToggle").hidden, "toggle must start hidden");
+  // A non-live frame (no workflowLive) must not reveal the toggle.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "stage-1",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assert(page.el("acpWorkflowsToggle").hidden, "toggle still hidden after non-live frame");
+  // Now deliver a workflowLive frame.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-2", role: "step-b", task: "", sessionName: "stage-2",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "", true));
+  assert(!page.el("acpWorkflowsToggle").hidden, "toggle revealed after workflowLive frame");
+});
+
+check("clicking the workflows toggle shows and hides the panel; aria-expanded tracks state", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "stage-1",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  const toggle = page.el("acpWorkflowsToggle");
+  const panel  = page.el("acpWorkflowsPanel");
+  assert(panel.hidden, "panel starts hidden");
+  assertEqual(toggle.getAttribute("aria-expanded"), "false", "aria-expanded starts false");
+  // First click — open.
+  toggle.dispatch("click");
+  assert(!panel.hidden, "panel opens on first click");
+  assertEqual(toggle.getAttribute("aria-expanded"), "true", "aria-expanded updates to true");
+  // Second click — close.
+  toggle.dispatch("click");
+  assert(panel.hidden, "panel closes on second click");
+  assertEqual(toggle.getAttribute("aria-expanded"), "false", "aria-expanded returns to false");
+});
+
+check("a workflowLive subagents frame populates #acpWorkflowsLiveRun with step rows", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "stage-A",
+      status: "working", action: "", done: false, error: "", startedAt: now - 5 },
+    { sessionId: "sub-2", role: "step-b", task: "", sessionName: "",
+      status: "waiting", action: "", done: false, error: "", startedAt: now - 2 },
+  ], "", true));
+  const rows = page.el("acpWorkflowsLiveRun").querySelectorAll(".wf-step-row");
+  assertEqual(rows.length, 2, "one step row per entry");
+  assertEqual(rows[0].querySelector(".wf-step-name").textContent, "stage-A",
+              "sessionName used as step name when present");
+  assertEqual(rows[1].querySelector(".wf-step-name").textContent, "step-b",
+              "role used as step name when sessionName is empty");
+  // Elapsed time span must exist.
+  const elapsed = rows[0].querySelector(".wf-step-elapsed");
+  assert(elapsed !== null, "elapsed span must be present");
+  assert(elapsed.textContent.length > 0, "elapsed text must be non-empty when startedAt is given");
+});
+
+check("clicking a live step row in the Workflows panel opens the sub-agent panel", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "stage-1",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  const rows = page.el("acpWorkflowsLiveRun").querySelectorAll(".wf-step-row");
+  assertEqual(rows.length, 1);
+  rows[0].dispatch("click");
+  // The sub-agent panel should have opened (same openSubagent path as crew rows).
+  assertEqual(page.el("acpSubPanel").hidden, false,
+              "clicking a live step row must open the sub-agent panel");
+  // And a subscribe must have gone out for the step's sessionId.
+  page.openAt(1);
+  const subs = page.socketAt(1).sent.filter((f) => f.type === "subscribe");
+  assertEqual(subs.length, 1, "expected one subscribe on the step socket");
+  assertEqual(subs[0].sessionId, "sub-1", "subscribe targets the step's sessionId");
+});
+
+check("a non-live subagents frame (workflowLive falsy) hides the toggle and clears live rows", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // First populate with a live frame.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  assert(!page.el("acpWorkflowsToggle").hidden, "toggle revealed by live frame");
+  // Now deliver a non-live frame (workflowLive absent).
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "",
+      status: "terminated", action: "", done: true, error: "", startedAt: now },
+  ]));
+  assert(page.el("acpWorkflowsToggle").hidden, "toggle hidden after non-live frame");
+  assertEqual(page.el("acpWorkflowsLiveRun").querySelectorAll(".wf-step-row").length, 0,
+              "live run container cleared by non-live frame");
+});
+
+check("no innerHTML used in the Workflows panel (DOM stand-in guard)", (tpl) => {
+  // If any path writes innerHTML the DOM stand-in throws immediately. Simply
+  // delivering the frame is the check: the stand-in throws on any innerHTML write.
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "step/<script>", task: "", sessionName: "<b>name</b>",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "", true));
+  const nameEl = page.el("acpWorkflowsLiveRun").querySelector(".wf-step-name");
+  assertEqual(nameEl.textContent, "<b>name</b>", "step name rendered as text, not markup");
+});
+
+
 
 check("setCrew with toolCallId anchors panel after tool call row", (tpl) => {
   const { page, live } = connected(tpl);
