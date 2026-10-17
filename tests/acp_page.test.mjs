@@ -25390,6 +25390,12 @@ check("SC3 Test C: root-level entry (no '/' in role) renders without a group hea
     "SC3: no group-label row for a root-level entry (no '/' in role)");
   const rows = panels[0].querySelectorAll(".acp-crew-row");
   assertEqual(rows.length, 1, "SC3: the root-level entry renders as a direct crew row");
+  // N4 fix: no-slash role must be unchanged by roleForLabel abbreviation (regex must not match)
+  const roleSpan = rows[0].querySelector(".acp-crew-role");
+  if (roleSpan) {
+    assertEqual(roleSpan.textContent, "orchestrator",
+      "SC3: no-slash role must be shown unchanged (roleForLabel regex must not strip it)");
+  }
 });
 
 check("SC3 Test D: aggregate badge and expand state", (tpl) => {
