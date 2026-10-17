@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 {% block content %}
 <div class="topbar">
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
@@ -5182,6 +5182,9 @@ function dashCloseIfAbandoned(){
 window.addEventListener('pagehide', dashCloseIfAbandoned);
 
 function dashHandle(frame){
+  // Message shown when queued behind another session's turn — shared between
+  // the live queue_status handler and the SC4 session-frame restore.
+  var QUEUE_WAITING_MSG = 'Waiting for another session\u2019s turn to finish\u2026';
   var type = frame && frame.type;
   var sid = frame && frame.sessionId;
   var payload = (frame && frame.payload) || {};
@@ -5365,7 +5368,7 @@ function dashHandle(frame){
     setDashSteerStatus('');
     // SC4: restore the waiting indicator on reconnect.
     if (payload.queued) {
-      setDashSteerStatus('Waiting for another session\u2019s turn to finish\u2026');
+      setDashSteerStatus(QUEUE_WAITING_MSG);
     }
     dashSetComposerNote('');
     dashRefreshComposerControls();
@@ -5721,7 +5724,7 @@ function dashHandle(frame){
     // `queue_status` case; shares the steer-status line.
     if (!_dashReplaying) {
       setDashSteerStatus(payload && payload.waiting
-        ? 'Waiting for another session’s turn to finish…' : '');
+        ? QUEUE_WAITING_MSG : '');
     }
     return;
   }
@@ -12318,3 +12321,5 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 </script>
 {% endblock %}
+
+

@@ -805,6 +805,10 @@
   var turnActive = false;
   // Text queued for auto-send when the current turn ends (Queue button).
   // Cleared by releaseSession() to prevent firing against a new session.
+  // Steer-status message shown when this session is queued behind another
+  // session's turn. Shared between the live queue_status handler and the
+  // session-frame SC4 restore on reconnect.
+  var QUEUE_WAITING_MSG = 'Waiting for another session\u2019s turn to finish\u2026';
   var queuedPrompt = null;
   var queuedPromptSession = null;  // sessionId at queue time, for identity guard
   // Text held in-flight for a steer request — restored to textarea on error.
@@ -5094,7 +5098,7 @@
       // SC4: restore the waiting indicator if this session was queued when we
       // subscribed. Live queue_status frames keep it current afterward.
       if (payload.queued) {
-        setSteerStatus('Waiting for another session\u2019s turn to finish\u2026');
+        setSteerStatus(QUEUE_WAITING_MSG);
       }
       // Same reasoning for the tab title: a previous session's `focus_update`
       // must not persist onto whichever session this page just adopted. A
@@ -5200,7 +5204,7 @@
       // never compete). Live-only, like `steer_status`.
       if (!replaying) {
         setSteerStatus(payload && payload.waiting
-          ? 'Waiting for another session’s turn to finish…' : '');
+          ? QUEUE_WAITING_MSG : '');
       }
       return;
     }
@@ -6568,3 +6572,4 @@
 })();
 </script>
 {% endblock %}
+
