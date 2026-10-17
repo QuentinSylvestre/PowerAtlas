@@ -248,14 +248,24 @@ if (payload.queued) {
 - `tests/acp_page.test.mjs`: add tests that fire a `session` frame payload `{turnActive: false, queued: true}` through `acp.html`'s frame handler and assert the steer-status element shows the "Waiting…" string. Add a parallel test through `index.html`'s `dashHandle()`.
 
 **Exit criteria**:
-- [ ] `_handle_subscribe` in `acp.py` emits `"queued": True` in the `session` frame when `meta["queued_behind"]` is set (SC4)
-- [ ] `_handle_subscribe` emits `"queued": False` when `meta["queued_behind"]` is absent or `None` (SC4)
-- [ ] `_handle_new` in `acp.py` has a comment noting that it omits `"queued"` because new sessions cannot be `queued_behind` (documentation only; no code change in `_handle_new`) (SC4)
-- [ ] `acp.html` session frame handler shows "Waiting…" steer-status text when `payload.queued` is `true` (SC4)
-- [ ] `index.html` `dashHandle()` session frame arm shows "Waiting…" `setDashSteerStatus` text when `payload.queued` is `true` (SC4)
-- [ ] New tests in `test_web.py` pass: `pytest tests/test_web.py --timeout=300` exits 0
-- [ ] New tests in `acp_page.test.mjs` pass: `node tests/acp_page.test.mjs` exits 0
-- [ ] `_set_queued_behind` and the live `queue_status` broadcast path are unmodified
+- [x] `_handle_subscribe` in `acp.py` emits `"queued": True` in the `session` frame when `meta["queued_behind"]` is set (SC4)
+- [x] `_handle_subscribe` emits `"queued": False` when `meta["queued_behind"]` is absent or `None` (SC4)
+- [x] `_handle_new` in `acp.py` has a comment noting that it omits `"queued"` because new sessions cannot be `queued_behind` (documentation only; no code change in `_handle_new`) (SC4)
+- [x] `acp.html` session frame handler shows "Waiting…" steer-status text when `payload.queued` is `true` (SC4)
+- [x] `index.html` `dashHandle()` session frame arm shows "Waiting…" `setDashSteerStatus` text when `payload.queued` is `true` (SC4)
+- [x] New tests in `test_web.py` pass: `pytest tests/test_web.py --timeout=300` exits 0
+- [x] New tests in `acp_page.test.mjs` pass: `node tests/acp_page.test.mjs` exits 0
+- [x] `_set_queued_behind` and the live `queue_status` broadcast path are unmodified
+
+#### Implementation (2026-10-16, code: 638994b)
+Added `"queued": bool(meta.get("queued_behind"))` to the session frame in `_handle_subscribe` in `acp.py` (SC4). Added comment to `_handle_new` noting it omits `"queued"` because new sessions cannot be queued_behind. Added SC4 block in `acp.html`'s session frame handler: after `setSteerStatus('')`, restores "Waiting for another session's turn to finish…" when `payload.queued` is true. Added matching SC4 block in `index.html`'s `dashHandle()` session arm: after `setDashSteerStatus('')`, restores the same text when `payload.queued` is true. Added `TestHandleSubscribeQueuedState` class in `test_web.py` with 2 tests (queued_behind set → queued True; absent → queued False). Added 2 JS tests in `acp_page.test.mjs` (session frame with queued:true shows waiting steer status; dashHandle session frame with queued:true shows waiting steer status). All 3518 pytest + 1127 JS tests pass.
+
+#### Implementation (2026-10-16, code: 638994b)
+Added `"queued": bool(meta.get("queued_behind"))` to the session frame dict in `_handle_subscribe` in `acp.py`. Added comment to `_handle_new` noting the key is intentionally omitted for new sessions. Added `if (payload.queued) { setSteerStatus('Waiting…') }` block in `acp.html`'s session frame handler after the `setSteerStatus('')` clear. Added equivalent block in `index.html`'s `dashHandle()` session arm after `setDashSteerStatus('')`. Added `TestHandleSubscribeQueuedState` (2 pytest tests) and 2 JS tests (queued:true path) to the test suites.
+
+Auto-fix (cycle 1 Finding 1): Added 2 more JS tests for `queued:false` path (commit 2669630). Cycle-2 review: Green (no findings).
+
+QA (Step 5b): Restart approved. PowerAtlas restarted (PID 37556). Template content scan confirms `payload.queued` check and "turn to finish" text in served template. All tests pass (3518 pytest + 1129 JS). No JS errors. Live end-to-end scenario (two sessions, one queued) not automated — requires real kiro-cli sessions.
 
 ### Phase 3: Dashboard visualization frame handler [QA]
 
@@ -323,7 +333,7 @@ No documentation updates needed. All five changes are internal implementation co
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Three session-switch state fixes | Complete | code: 69e916d |
-| 2 | Queue-status restore on reconnect | Not started | |
+| 2 | Queue-status restore on reconnect | Complete | code: 638994b |
 | 3 | Dashboard visualization frame handler | Not started | |
 
 ## 9) Implementation Divergences from Plan
@@ -337,6 +347,19 @@ _Reserved — filled during implementation._
 2. **Late `steer_sent` from old session after rail-click switch.** A `steer_sent` frame (broadcast via `_emit`) for the old session can arrive at the client after `selectSession()` clears `_steerPending`, during the narrow window before the server processes the new `subscribe` and detaches the socket from the old session's subscriber set. The steer_sent handler's `addMessage('steer', steerText)` call is unconditional, so the old steer's band would appear in the new session's just-cleared transcript. The probability is low (requires the steer's `await` to complete before the subscribe reaches the server), and the consequence is cosmetic (a dimmed band). This plan fixes steer_ack but not steer_sent; SC1 is scoped to steer_ack. A follow-up should add a `if (!_steerPending && promptInput.value.trim() !== steerText) return;` guard or adopt acp.html's full top-level `sessionId` frame filter. Source: Cycle 2 review, Reliability engineer + End-user advocate.
 
 ## Review Log
+
+### 2026-10-16 — Implementation Review (after Phase 2, persona: Senior engineer, Reliability engineer, End-user advocate, Maintainability reviewer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low). 2 auto-fixed.
+QA: PASS (JS template verified; Python logic verified by pytest; full end-to-end requires live queued sessions).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | JS tests cover only `queued:true` explicitly; no `queued:false` test initially. | Fixed — added 2 `queued:false` tests (commit 2669630). |
+| 2 | Low | CRLF artifact in git show for acp.html line 1 (identical byte content). | No action required — cosmetic diff noise. |
+
+Cycle-2 review: Green (no new findings). Fix commit 2669630 reviewed and approved.
 
 ### 2026-10-16 — Implementation Review (after Phase 1, persona: Senior engineer, Reliability engineer, End-user advocate, Maintainability reviewer)
 
