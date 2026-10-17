@@ -470,23 +470,28 @@ Per-phase QA: BLOCKED (Python + JS changes; restart permission granted; deferred
 6. **`index.html` `#dashSubPanel`**: Mirror changes from steps 3–5 using the dashboard's equivalents (`dashSubComposerContainer`, etc.).
 
 **Exit criteria**:
-- [ ] `_handle_prompt` early branch: a session in `_workflow_child_meta` routes to the dedicated step-prompt path; the existing subagent guard still refuses sessions in `subagent_sessions` only (not in `_workflow_child_meta`)
-- [ ] `_supervisor.prompt()` resolution verified for step sessions (read the function; record any deviation in divergences)
-- [ ] `initSubAgentComposerDom` and `setSubAgentComposerEnabled` exported from `composer-chrome.js`; no global name collision
-- [ ] Sub-agent panel shows composer when opened for a live workflow step (`_liveWorkflowChildSids` contains the sessionId)
-- [ ] Sub-agent panel hides composer (with "Step completed." notice) for completed workflow steps; hidden for non-workflow sub-agents
-- [ ] `_liveWorkflowChildSids` cleared on session switch and on `workflowLive === false` frames
-- [ ] Sending from the composer uses `{prompt: text}` payload key (not `message`); verifies send() signature for sessionId routing
-- [ ] Send failure (WS not OPEN) leaves input populated and shows error note; success clears input
-- [ ] `step_message` frames matching `subViewSid` render an amber card in `#acpSubPanel` (and `#dashSubPanel`)
-- [ ] Clicking an option on the step question card immediately hides/disables the card; reply routes via existing parent-session mechanism
-- [ ] No `innerHTML` used anywhere in the new sub-panel additions
-- [ ] `tests/test_web.py`: step-prompt tests — (a) session in `_workflow_child_meta` routes to dedicated step-prompt path (not refused); (b) session in `subagent_sessions` only still gets `read_only_session` refusal
-- [ ] `tests/acp_page.test.mjs`: composer enable/disable tests; `step_message` card rendering test
-- [ ] Python restart required for `acp.py` change
-- [ ] `pytest tests/test_web.py --timeout=300` passes
-- [ ] `node tests/acp_page.test.mjs` passes
-- [ ] `docs/KNOWLEDGE.md` `_handle_prompt` section updated: note guard relaxation for `_workflow_child_meta` sessions; note `step_message` frames now surface in the sub-agent panel
+- [x] `_handle_prompt` early branch: a session in `_workflow_child_meta` routes to the dedicated step-prompt path; the existing subagent guard still refuses sessions in `subagent_sessions` only (not in `_workflow_child_meta`)
+- [x] `_supervisor.prompt()` resolution verified for step sessions (read the function; record any deviation in divergences) — Deviation: `_supervisor.prompt()` checks `self.sessions` which excludes step sessions. Used `_supervisor._request("session/prompt", ...)` directly with `REQUEST_TIMEOUT_SECONDS` instead.
+- [x] `initSubAgentComposerDom` and `setSubAgentComposerEnabled` exported from `composer-chrome.js`; no global name collision
+- [x] Sub-agent panel shows composer when opened for a live workflow step (`_liveWorkflowChildSids` contains the sessionId)
+- [x] Sub-agent panel hides composer (with "Step completed." notice) for completed workflow steps; hidden for non-workflow sub-agents
+- [x] `_liveWorkflowChildSids` cleared on session switch and on `workflowLive === false` frames
+- [x] Sending from the composer uses `{prompt: text}` payload key (not `message`); verifies send() signature for sessionId routing — send(type, payload, sid) confirmed; uses `send('prompt', {prompt: text}, stepSid)`
+- [x] Send failure (WS not OPEN) leaves input populated and shows error note; success clears input
+- [x] `step_message` frames matching `subViewSid` render an amber card in `#acpSubPanel` (and `#dashSubPanel`) — requires `stepSessionId` field added to `step_message` frame payload by server
+- [x] Clicking an option on the step question card immediately hides/disables the card; reply routes via existing parent-session mechanism — Note: step_message frames carry no options (warning messages only); the card is informational only with no option buttons. No options to wire.
+- [x] No `innerHTML` used anywhere in the new sub-panel additions
+- [x] `tests/test_web.py`: step-prompt tests — (a) session in `_workflow_child_meta` routes to dedicated step-prompt path (not refused); (b) session in `subagent_sessions` only still gets `read_only_session` refusal
+- [x] `tests/acp_page.test.mjs`: composer enable/disable tests; `step_message` card rendering test
+- [x] Python restart required for `acp.py` change
+- [x] `pytest tests/test_web.py --timeout=300` passes (3528 passed)
+- [x] `node tests/acp_page.test.mjs` passes (1152 passed)
+- [x] `docs/KNOWLEDGE.md` `_handle_prompt` section updated: note guard relaxation for `_workflow_child_meta` sessions; note `step_message` frames now surface in the sub-agent panel
+
+Implementation (2026-10-16, code: 545df46)
+`_handle_prompt` in `acp.py`: dedicated early branch for `_workflow_child_meta` sessions before the `subagent_sessions` read-only guard; routes via `_supervisor._request("session/prompt", ...)` directly (bypasses `sessions` membership check); subscription gate allows prompts from parent or step subscriber only. `_emit_step_message` extended with `step_id` parameter; `_on_session_notify` updated. `initSubAgentComposerDom` + `setSubAgentComposerEnabled` in `composer-chrome.js`; composer HTML added to `#acpSubPanel` and `#dashSubPanel` in both templates. `_liveWorkflowChildSids` set tracks live workflow child SIDs; cleared on session switch and `workflowLive === false`. `step_message` handler renders amber `.acp-step-question-card` in sub-panel when `payload.stepSessionId === subViewSid`. Dashboard mirrors all changes. Tests: `TestAcpWorkflowStepDirectPrompt` (4 tests incl. subscription gate + exception path), 5 JS tests.
+
+Per-phase QA: BLOCKED (Python restart needed; deferred to Step 9b — restart permission granted for this task).
 
 ---
 
@@ -546,7 +551,7 @@ A risk whose Mitigation is anything other than "addressed within this plan" for 
 | 3 | Crew panel tree structure | Complete | JS/CSS only; code: a85816c |
 | 4 | Workflows panel shell | Complete | JS/CSS only; code: 973e182 |
 | 5 | Workflow history from disk | Complete | Python restart needed after; code: eaf9034 |
-| 6 | Sub-agent composer and direct step prompt | Not started | Python restart needed after |
+| 6 | Sub-agent composer and direct step prompt | Complete | Python restart needed after; code: 545df46 |
 
 Mark tasks that can run in parallel with `[P]`:
 - Tasks sharing the same `[P]` marker within a phase may be executed concurrently
@@ -586,9 +591,24 @@ Mark tasks that can run in parallel with `[P]`:
 
 12. **Phase 5 review: Test A step-type filter blind spot.** Add a fixture with a `node_start` with `type: "root"` to make the `node_type == "step"` guard testable. Source: Phase 5 review cycle 2, N3.
 
+13. **Phase 6 review: subscription gate test uses implicit environment assumption.** `test_not_subscribed_when_conn_is_on_an_unrelated_session` detects its target via the implicit `_loop is None` path. Harden by adding `patch.object(_Supervisor, "_request")` mock (like the first test in the class). Source: Phase 6 review cycle 2, F1 fragility.
+
 ---
 
 ## Review Log
+
+### 2026-10-16 — Implementation Review (after Phase 6, personas: Senior engineer, Security auditor, Reliability engineer, End-user advocate)
+
+Implementation health: Green.
+4 personas, full effort. 2 cycles. 5 findings (0 High, 1 Medium, 4 Low). All resolved or accepted.
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | Medium | Subscription gate (`conn.session_id not in (session_id, parent_id)`) had no mutation-catching test; removing it left existing tests green. | Fixed — `test_not_subscribed_when_conn_is_on_an_unrelated_session` added (a1c6465). |
+| 2 | Low | `_request` exception path (`except Exception → internal_error`) untested. | Fixed — `test_request_exception_sends_internal_error_frame` added (a1c6465). |
+| 3 | Low | `index.html` comment said "`dashSend` resolves" — no `dashSend` function exists. | Fixed — updated to "`send` resolves at call time" (a1c6465). |
+| 4 | Low | `composer-chrome.js` JSDoc also said "`dashSend`" — not updated with the `index.html` fix. | Fixed — updated to "On both pages the ref wraps the plain `send` function" (545df46). |
+| 5 | Low | Subscription gate test uses implicit `_loop is None` environment assumption instead of explicit `_request` mock. | Orchestrator: proposed-accept — test works correctly; adding explicit mock is a hardening item (Follow-up #13). |
 
 ### 2026-10-16 — Implementation Review (after Phase 5, personas: Senior engineer, Security auditor, Reliability engineer, End-user advocate)
 
