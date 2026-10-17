@@ -3623,7 +3623,7 @@ initWorkflowsDom({
   isDashboard: true,
 });
 // Phase 6: wire the dashboard sub-agent panel composer (mirrors acp.html).
-// `dashSend` resolves at call time via the hoisted function declaration.
+// `send` resolves at call time via the hoisted function declaration.
 initSubAgentComposerDom({
   input:     document.getElementById('dashSubComposerInput'),
   sendBtn:   document.getElementById('dashSubComposerSend'),

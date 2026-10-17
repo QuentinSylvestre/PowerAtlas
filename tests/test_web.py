@@ -12319,6 +12319,55 @@ class TestAcpWorkflowStepDirectPrompt:
         assert frames[0]["payload"]["code"] == "read_only_session", \
             "non-workflow sub-agent session must still be refused read_only_session"
 
+    def test_not_subscribed_when_conn_is_on_an_unrelated_session(
+            self, acp_store):
+        """A connection subscribed to a session that is neither the step
+        session nor its parent must receive ``not_subscribed``."""
+        acp_mod, _ = acp_store
+        parent_sid = _live_session(acp_mod, sid="wf-parent-03")
+        step_sid = "sess-wf-step-03"
+        acp_mod._supervisor.subagent_sessions[step_sid] = {"parent": parent_sid}
+        acp_mod._supervisor._workflow_child_meta[step_sid] = {
+            "parent": parent_sid, "workflowId": "wf_placeholder_run_3",
+        }
+        # Subscribe the connection to a third, unrelated session.
+        unrelated_sid = _live_session(acp_mod, sid="wf-unrelated-03")
+        conn = self._make_conn(acp_mod, unrelated_sid)
+
+        asyncio.run(acp_mod._handle_prompt(conn, step_sid, {"prompt": "probe"}))
+
+        frames = _queued(conn)
+        assert frames, "expected at least one frame"
+        assert frames[0]["payload"]["code"] == "not_subscribed", \
+            "conn on unrelated session must be refused not_subscribed"
+
+    def test_request_exception_sends_internal_error_frame(
+            self, acp_store):
+        """When ``_supervisor._request`` raises, the conn must receive an
+        ``internal_error`` frame rather than an unhandled exception."""
+        acp_mod, _ = acp_store
+        parent_sid = _live_session(acp_mod, sid="wf-parent-04")
+        step_sid = "sess-wf-step-04"
+        acp_mod._supervisor.subagent_sessions[step_sid] = {"parent": parent_sid}
+        acp_mod._supervisor._workflow_child_meta[step_sid] = {
+            "parent": parent_sid, "workflowId": "wf_placeholder_run_4",
+        }
+        conn = self._make_conn(acp_mod, parent_sid)
+
+        async def exploding_request(
+                self, method, params,
+                timeout=acp_mod.REQUEST_TIMEOUT_SECONDS):
+            raise RuntimeError("agent dead")
+
+        with patch.object(acp_mod._Supervisor, "_request", exploding_request):
+            asyncio.run(acp_mod._handle_prompt(
+                conn, step_sid, {"prompt": "boom"}))
+
+        frames = _queued(conn)
+        assert frames, "expected at least one frame"
+        assert frames[0]["payload"]["code"] == "internal_error", \
+            "_request exception must produce an internal_error frame"
+
 
 class TestAcpSubagentCleanup:
 
