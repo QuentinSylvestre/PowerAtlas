@@ -1044,8 +1044,7 @@ var _dashSubComposerTargetSid = null;
 /** Wire DOM refs and event listeners for the sub-agent composer on one page.
  *
  *  `refs.sendFn` is the page's WebSocket send function: `send(type, payload,
- *  sid)`. On /acp the ref is the plain `send` function; on index.html it is
- *  `dashSend`.
+ *  sid)`. On both pages the ref wraps the plain `send` function.
  *
  *  The panel uses the main WS (subscribed to the parent session), passing the
  *  step sessionId explicitly as the third argument, so the server's
