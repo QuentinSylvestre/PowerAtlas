@@ -2042,6 +2042,7 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 /* Phase 3: crew panel tree structure */
 .acp-crew-group { cursor:pointer; user-select:none; padding:4px 8px; font-weight:500; display:flex; align-items:center; gap:6px; }
 .acp-crew-group:hover { background:rgba(128,128,128,0.1); }
+.acp-crew-group:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 .acp-crew-group-children { }
 .acp-crew-group-children[hidden] { display:none; }
 .acp-crew-group-children .acp-crew-row { padding-left:24px; }

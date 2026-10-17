@@ -25351,6 +25351,31 @@ check("SC3 Test B: clicking group-label row toggles expand/collapse", (tpl) => {
     "SC3: after second click, children container must be hidden");
 });
 
+check("SC3 Test B2: keyboard Enter/Space on group row toggles expand/collapse", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // All-done group starts collapsed.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-kb", role: "kb-group/step-x", task: "", sessionName: "step-x",
+      status: "terminated", action: "", done: true, error: "", startedAt: now - 10, stoppedAt: now - 1 },
+  ]));
+  const panels = page.all("acpTranscript", ".acp-crew-panel");
+  const group = panels[0].querySelector(".acp-crew-group");
+  const children = panels[0].querySelector(".acp-crew-group-children");
+  assert(group !== null, "group row must exist");
+  assert(children.hidden === true, "starts collapsed (all-done)");
+
+  // Press Enter: should expand
+  group.dispatch("keydown", { key: "Enter", bubbles: true, preventDefault: () => {} });
+  assert(children.hidden === false, "Enter expands group");
+  assertEqual(group.getAttribute("aria-expanded"), "true", "aria-expanded updated by Enter");
+
+  // Press Space: should collapse
+  group.dispatch("keydown", { key: " ", bubbles: true, preventDefault: () => {} });
+  assert(children.hidden === true, "Space collapses group");
+  assertEqual(group.getAttribute("aria-expanded"), "false", "aria-expanded updated by Space");
+});
+
 check("SC3 Test C: root-level entry (no '/' in role) renders without a group header", (tpl) => {
   const { page, live } = connected(tpl);
   const now = Date.now() / 1000;
