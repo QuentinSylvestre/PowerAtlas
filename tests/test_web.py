@@ -3563,7 +3563,9 @@ class TestVizRecording:
             })
 
         meta = acp_mod._supervisor.sessions[sid]
-        assert len(meta["visualizations"]) <= 20
+        # == 20: the cap is exactly 20, not "at most 20" — tighter assertion
+        # catches a regression that reduces the cap below 20.
+        assert len(meta["visualizations"]) == 20
 
 
 class TestAcpUnsubscribe:

@@ -7756,10 +7756,12 @@ def _handle_emit_visualization(args: dict) -> dict:
     filename = p.name
     url_path = f"/api/viz/{session_id}/{filename}"
 
-    # Broadcast-only: call _registry.broadcast directly, NOT _emit().
-    # _emit() would record the frame into _History (the replay buffer),
-    # but visualization frames are live-only — the file may change between
-    # agent turns.  This mirrors the tool_output broadcast-only pattern.
+    # Broadcast-only from _History's perspective: call _registry.broadcast
+    # directly, NOT _emit().  _emit() would record the frame into _History
+    # (the replay buffer), and visualization frames skip that path because the
+    # file may change between agent turns.  Instead, Phase 1 records the URL
+    # in meta["visualizations"] for replay on reconnect via _handle_subscribe.
+    # This mirrors the tool_output broadcast-only pattern.
     frame = acp.envelope("visualization", {
         "url": url_path,
         "title": title,
