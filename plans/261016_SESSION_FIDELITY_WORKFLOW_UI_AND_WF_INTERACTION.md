@@ -593,9 +593,47 @@ Mark tasks that can run in parallel with `[P]`:
 
 13. **Phase 6 review: subscription gate test uses implicit environment assumption.** `test_not_subscribed_when_conn_is_on_an_unrelated_session` detects its target via the implicit `_loop is None` path. Harden by adding `patch.object(_Supervisor, "_request")` mock (like the first test in the class). Source: Phase 6 review cycle 2, F1 fragility.
 
+14. **Step 9: `wf-panel` CSS class unstyled.** Add `.wf-panel { overflow-y: auto; max-height: 400px; ... }` to `style.css`. Source: Step 9 Senior engineer, F2.
+
+15. **Step 9: past-run history inaccessible after live run ends.** `clearWorkflowsLiveRun` hides the toggle, making past-run content in DOM unreachable. Fix: keep toggle visible when `#acpWorkflowsPastRuns` is non-empty. Source: Step 9 Senior engineer, F3.
+
+16. **Step 9: stale "No workflow runs" blocks refresh on second run.** The `pastRuns.childNodes.length` fetch gate prevents re-fetch. Fix: clear `pastRunsContainer` inside `clearWorkflowsLiveRun`. Source: Step 9 Senior engineer, F4.
+
+17. **Step 9: no JS test for `renderWorkflowsPastRuns`.** Add a test asserting `run.name` and `step.agentName` appear in the rendered output. Source: Step 9 Architect, F3.
+
 ---
 
 ## Review Log
+
+### 2026-10-16 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor, Reliability engineer, End-user advocate, Architect.
+18 findings across 6 phases (0 High, 4 Medium, 14 Low). All resolved or accepted with follow-up notes.
+QA verification: Pending — Step 9b exhaustive QA (Playwright) in progress. Python phases require restart (granted).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Reload fidelity | pass | Deferred to 9b | Python restart needed |
+| 2: Dashboard viz handler | pass (sibling plan) | Deferred to 9b | Handled by sibling plan |
+| 3: Crew panel tree | pass | Deferred to 9b | JS/CSS only |
+| 4: Workflows panel shell | pass | Deferred to 9b | JS/CSS only |
+| 5: Workflow history from disk | pass | Deferred to 9b | Python restart needed |
+| 6: Sub-agent composer | pass | Deferred to 9b | Python restart needed |
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | Medium | KNOWLEDGE.md `_get_workflow_runs_v3` described wrong parser (sub_agent_start approach). | Fixed — updated to notification-record description (06d98dc). |
+| 2 | Medium | Past-run step rows blank: JS read `step.role\|\|step.subSessionId` but API returns `{nodeId, agentName}`. | Fixed — changed to `step.agentName\|\|step.nodeId` in both templates (06d98dc). |
+| 3 | Medium | Run label used `run.workflowId` ignoring `run.name` from `workflowName\|\|runLabel`. | Fixed — changed to `run.name\|\|run.workflowId\|\|…` (06d98dc). |
+| 4 | Medium | `step_message` amber card had no `role="alert"` — screen readers don't announce it. | Fixed — added `role="alert"` in both templates (06d98dc). |
+| 5 | Low | `wf-panel` CSS class unstyled in both templates. | Orchestrator: proposed-accept — follow-up item #14. |
+| 6 | Low | Past-run history inaccessible after live run ends (toggle hidden by clearWorkflowsLiveRun). | Orchestrator: proposed-accept — SC5 design limitation, follow-up item #15. |
+| 7 | Low | Stale "No workflow runs" after first empty fetch blocks refresh on second run. | Orchestrator: proposed-accept — follow-up item #16. |
+| 8 | Low | No JS test for renderWorkflowsPastRuns — field-name bugs had no test. | Orchestrator: proposed-accept — follow-up item #17. |
+| 9–18 | Low | (Phase-specific Lows from Step 5/9 per-phase reviews — all resolved or accepted per phase logs) | See phase review log entries above. |
 
 ### 2026-10-16 — Implementation Review (after Phase 6, personas: Senior engineer, Security auditor, Reliability engineer, End-user advocate)
 
