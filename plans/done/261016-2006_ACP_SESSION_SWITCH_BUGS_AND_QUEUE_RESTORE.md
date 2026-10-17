@@ -2,6 +2,7 @@
 
 > **Date**: 2026-10-16
 > **Status**: Complete
+> **Last Updated**: 2026-10-16 20:06
 > **Scope**: Fix three session-switch state bugs in acp.html; restore queue-waiting message on reconnect; add visualization handler to the dashboard
 > **Memory relied on**: none
 > **Estimated effort**: ~4–6 hours
