@@ -250,18 +250,23 @@ Per-phase review deferred to Step 9: phase is entirely handled by sibling plan w
    - Chevron and indentation styles for child rows
 
 **Exit criteria**:
-- [ ] A `subagents` payload with `role: "run-both/step-a"` renders a group-label row labeled "run-both" in `acp.html`'s crew panel
-- [ ] Group-label row click collapses and re-expands child step rows
-- [ ] Group badge shows correct aggregate status ("has failures" / running / waiting / N done) — failed groups start expanded
-- [ ] Group-label rows have `role="button"`, `tabindex="0"`, `aria-expanded`, and Enter/Space keydown handlers
-- [ ] Entries with no `/` in `role` render at root level (no group header)
-- [ ] Groups with any running/waiting step start expanded; all-done groups start collapsed
-- [ ] `index.html` crew panel produces identical tree structure
-- [ ] No `innerHTML` used in any tree rendering path
-- [ ] `style.css` includes `.acp-crew-group-children[hidden] { display: none; }`
-- [ ] `tests/acp_page.test.mjs`: new tests for grouped crew rendering and click-toggle
-- [ ] `node tests/acp_page.test.mjs` passes
-- [ ] `docs/KNOWLEDGE.md` crew panel section updated: flat-list description replaced with tree-structure description (group-label rows, role-path grouping)
+- [x] A `subagents` payload with `role: "run-both/step-a"` renders a group-label row labeled "run-both" in `acp.html`'s crew panel
+- [x] Group-label row click collapses and re-expands child step rows
+- [x] Group badge shows correct aggregate status ("has failures" / running / waiting / N done) — failed groups start expanded
+- [x] Group-label rows have `role="button"`, `tabindex="0"`, `aria-expanded`, and Enter/Space keydown handlers
+- [x] Entries with no `/` in `role` render at root level (no group header)
+- [x] Groups with any running/waiting step start expanded; all-done groups start collapsed
+- [x] `index.html` crew panel produces identical tree structure
+- [x] No `innerHTML` used in any tree rendering path
+- [x] `style.css` includes `.acp-crew-group-children[hidden] { display: none; }`
+- [x] `tests/acp_page.test.mjs`: new tests for grouped crew rendering and click-toggle
+- [x] `node tests/acp_page.test.mjs` passes
+- [x] `docs/KNOWLEDGE.md` crew panel section updated: flat-list description replaced with tree-structure description (group-label rows, role-path grouping)
+
+Implementation (2026-10-16, code: a85816c)
+`renderCrewPanel` in `acp.html` and `dashRenderCrewPanel` in `index.html`: replaced flat list with a tree renderer. Entries grouped by first `role` path segment (`split('/')` first segment). Entries with no `/` render at root level (before named groups). Group-label rows (`div.acp-crew-group`) carry `role="button"`, `tabindex="0"`, `aria-expanded`, chevron (▶/▼), aggregate badge, and toggle listeners (click + Enter/Space). Children wrapped in `div.acp-crew-group-children` toggled via `hidden` attribute. Focus save/restore (`dataset.focusKey`, `_crewFocusKey`) prevents keyboard-focus loss on every 1s re-render. Prototype-safe `groupMap = Object.create(null)`. `_makeCrewRow`/`_dashMakeCrewRow` helpers extracted. Child row `aria-label` and visible role span show abbreviated role (part after last `/`). CSS: `.acp-crew-group`, `.acp-crew-group:hover`, `.acp-crew-group:focus-visible`, `.acp-crew-group-children[hidden] { display:none; }`, indent, chevron, badge. Tests: SC3 Tests A–F + SC3 Test B2 (keyboard). One existing test updated for new DOM order. `docs/KNOWLEDGE.md` updated with tree-structure description.
+
+Per-phase QA: SKIP — JS/CSS only; unit tests pass (1139/1139). Live crew panel tree verification deferred to Step 9b per user decision.
 
 ---
 
@@ -528,7 +533,7 @@ A risk whose Mitigation is anything other than "addressed within this plan" for 
 |---|---|---|---|
 | 1 | Reload fidelity | Complete | Python restart needed after; code: 2f937dc |
 | 2 | Dashboard viz handler | Complete | Handled by sibling plan (fb6ebf8) |
-| 3 | Crew panel tree structure | Not started | JS/CSS only; hard reload |
+| 3 | Crew panel tree structure | Complete | JS/CSS only; code: a85816c |
 | 4 | Workflows panel shell | Not started | JS/CSS only; hard reload |
 | 5 | Workflow history from disk | Not started | Python restart needed after |
 | 6 | Sub-agent composer and direct step prompt | Not started | Python restart needed after |
@@ -557,9 +562,31 @@ Mark tasks that can run in parallel with `[P]`:
 
 5. **Phase 1 review: NOTE comment sync obligation.** `test_viz_size_cap_limits_recorded_entries_to_20` has an inline comment noting its cap logic must be kept in sync with `web.py`. This creates a manual obligation. Consider extracting the cap constant to a named value. Source: Phase 1 review cycle 2, Reliability engineer, accepted by user.
 
+6. **Phase 3 review: crew focus restore untestable by CI.** The `_crewFocusKey` save/restore in `renderCrewPanel` is correct by inspection but cannot be tested by the DOM stand-in (no `document.activeElement`). Cover with a browser smoke test during Step 9b. Source: Phase 3 review cycle 2, N1.
+
+7. **Phase 3 review: focusKey non-unique for sessionId-less entries.** `'step:' + (entry.sessionId || '')` produces `'step:'` for every entry with no sessionId. Theoretical — production uses UUIDs. Source: Phase 3 review cycle 2, N2.
+
+8. **Phase 3 review: querySelector injection risk in focus restore.** `[data-focus-key="..."]` attribute selector could fail if `entry.role` or `entry.sessionId` contains `"`. Theoretical — current format is alphanumeric. Source: Phase 3 review cycle 2, N3.
+
 ---
 
 ## Review Log
+
+### 2026-10-16 — Implementation Review (after Phase 3, personas: Senior engineer, End-user advocate, Reliability engineer, Maintainability reviewer)
+
+Implementation health: Green.
+4 personas, full effort. 2 cycles. 8 findings (1 High, 4 Medium, 3 Low). All resolved or accepted.
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | High | Focused DOM node destroyed every second by 1s re-render timer — keyboard focus lost on each update. | Fixed — focus save/restore via `dataset.focusKey` + `_crewFocusKey` applied before/after rebuild (5344781). |
+| 2 | Medium | `groupMap = {}` crashes on role names matching Object prototype properties (e.g. `"constructor"`). | Fixed — changed to `Object.create(null)` in both templates (5344781). |
+| 3 | Medium | `.acp-crew-group` (keyboard-focusable div) had no `:focus-visible` rule; inconsistent with step rows. | Fixed — added `.acp-crew-group:focus-visible { outline }` to style.css (2402a43). |
+| 4 | Medium | Keydown (Enter/Space) handler had zero test coverage (4 personas corroborated). | Fixed — SC3 Test B2 added, using harness `dispatch()` API (2402a43). |
+| 5 | Low | Badge states "has failures" and "waiting" untested. | Fixed — SC3 Tests E and F added (5344781). |
+| 6 | Low | Child row `aria-label` included redundant group prefix (e.g. "run-both/step-a" vs "step-a"). | Fixed — `roleForLabel = entry.role.replace(/^.*\//, '')` in both helpers (5344781). |
+| 7 | Low | SC3 Test C didn't assert role span text after abbreviation fix — regression from Fix 6 invisible. | Fixed — added role span assertion to SC3 Test C (a85816c). |
+| 8 | Low | "keep in sync" comments added by reviewer (inappropriate but correct changes included in commit). | User: accepted — reviewer-applied comments are accurate and harmless. |
 
 ### 2026-10-16 — Implementation Review (after Phase 1, personas: Senior engineer, Reliability engineer, Security auditor, End-user advocate)
 
