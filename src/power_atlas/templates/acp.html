@@ -1908,57 +1908,144 @@
       slot.panel.removeChild(slot.panel.lastChild);
     }
 
-    // Append new lean rows
-    for (var i = 0; i < slot.entries.length; i++) {
-      (function(entry) {
-        var state = subagentState(entry);  // 'working' | 'waiting' | 'done' | 'error'
-        var dotClass = state === 'working' ? 'status-thinking'
-                     : state === 'waiting' ? 'status-waiting'
-                     : state === 'error'   ? 'status-errored'
-                     : 'status-idle';
-        var label = crewLabel(entry);
-        var stateText = state === 'error' ? 'errored' : state === 'done' ? doneText(entry)
-          : state === 'waiting' ? (entry.action || 'waiting') : (entry.action || 'working');
+    // --- Tree rendering (Phase 3) ---
 
-        var row = document.createElement('button');
-        row.type = 'button';
-        row.className = 'acp-crew-row acp-crew-row-' + state;
-        row.setAttribute('aria-label',
-          label + (entry.role ? ', ' + entry.role : '') + ', ' + stateText);
+    // Group entries by first role path segment. null key = root level.
+    var groupMap = {};      // groupName -> [entry] (ordered)
+    var groupOrder = [];    // insertion order for group names
+    slot.entries.forEach(function(entry) {
+      var rolePath = entry.role || '';
+      var slashIdx = rolePath.indexOf('/');
+      var groupName = slashIdx >= 0 ? rolePath.slice(0, slashIdx) : null;
+      if (groupName !== null && !groupMap[groupName]) {
+        groupMap[groupName] = [];
+        groupOrder.push(groupName);
+      }
+      if (groupName === null) {
+        slot.panel.appendChild(_makeCrewRow(entry));
+      } else {
+        groupMap[groupName].push(entry);
+      }
+    });
 
-        var dot = document.createElement('span');
-        dot.className = 'session-status ' + dotClass;
-        dot.setAttribute('aria-hidden', 'true');
+    // Render groups.
+    groupOrder.forEach(function(groupName) {
+      var groupEntries = groupMap[groupName];
+      var states = groupEntries.map(subagentState);
+      var hasFailed  = states.indexOf('error')   !== -1;
+      var hasWorking = states.indexOf('working') !== -1;
+      var hasWaiting = states.indexOf('waiting') !== -1;
+      var startExpanded = hasFailed || hasWorking || hasWaiting;
 
-        var nameSpan = document.createElement('span');
-        nameSpan.className = 'acp-crew-label';
-        nameSpan.textContent = label;
+      // Badge text
+      var badgeText;
+      if (hasFailed)       { badgeText = 'has failures'; }
+      else if (hasWorking) { badgeText = 'running'; }
+      else if (hasWaiting) { badgeText = 'waiting'; }
+      else                 { badgeText = groupEntries.length + ' done'; }
 
-        var roleSpan = document.createElement('span');
-        roleSpan.className = 'acp-crew-role';
-        roleSpan.textContent = entry.role || '';
+      // Group label row
+      var groupRow = document.createElement('div');
+      groupRow.className = 'acp-crew-group';
+      groupRow.setAttribute('role', 'button');
+      groupRow.setAttribute('tabindex', '0');
+      groupRow.setAttribute('aria-expanded', startExpanded ? 'true' : 'false');
 
-        var actionSpan = document.createElement('span');
-        actionSpan.className = 'acp-crew-action';
-        actionSpan.textContent = state === 'working' && !entry.action
-          ? 'working\u2026' : stateText;
+      var chevron = document.createElement('span');
+      chevron.className = 'acp-crew-chevron';
+      chevron.setAttribute('aria-hidden', 'true');
+      chevron.textContent = startExpanded ? '\u25BC' : '\u25B6';
 
-        var elapsedSpan = document.createElement('span');
-        elapsedSpan.className = 'acp-crew-elapsed';
-        var start = entry.startedAt;
-        var stop = entry.stoppedAt;
-        elapsedSpan.textContent = stop > 0
-          ? elapsedText(start, stop) : elapsedText(start);
+      groupRow.appendChild(chevron);
 
-        row.appendChild(dot);
-        row.appendChild(nameSpan);
-        if (entry.role) row.appendChild(roleSpan);
-        row.appendChild(actionSpan);
-        row.appendChild(elapsedSpan);
-        row.addEventListener('click', function() { openSubagent(entry.sessionId); });
-        slot.panel.appendChild(row);
-      })(slot.entries[i]);
-    }
+      var groupNameSpan = document.createElement('span');
+      groupNameSpan.className = 'acp-crew-group-name';
+      groupNameSpan.textContent = groupName;
+      groupRow.appendChild(groupNameSpan);
+
+      var badge = document.createElement('span');
+      badge.className = 'acp-crew-badge';
+      badge.textContent = badgeText;
+      groupRow.appendChild(badge);
+
+      // Children container
+      var childrenContainer = document.createElement('div');
+      childrenContainer.className = 'acp-crew-group-children';
+      if (!startExpanded) { childrenContainer.hidden = true; }
+
+      groupEntries.forEach(function(e) {
+        childrenContainer.appendChild(_makeCrewRow(e));
+      });
+
+      // Toggle on click or Enter/Space
+      (function(gr, cc, ch) {
+        function _toggleGroup() {
+          var expanded = gr.getAttribute('aria-expanded') === 'true';
+          expanded = !expanded;
+          gr.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+          ch.textContent = expanded ? '\u25BC' : '\u25B6';
+          cc.hidden = !expanded;
+        }
+        gr.addEventListener('click', _toggleGroup);
+        gr.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _toggleGroup(); }
+        });
+      })(groupRow, childrenContainer, chevron);
+
+      slot.panel.appendChild(groupRow);
+      slot.panel.appendChild(childrenContainer);
+    });
+  }
+
+  // Build a single crew-row button element.
+  // Extracted from renderCrewPanel to be reusable by tree rendering (Phase 3).
+  function _makeCrewRow(entry) {
+    var state = subagentState(entry);  // 'working' | 'waiting' | 'done' | 'error'
+    var dotClass = state === 'working' ? 'status-thinking'
+                 : state === 'waiting' ? 'status-waiting'
+                 : state === 'error'   ? 'status-errored'
+                 : 'status-idle';
+    var label = crewLabel(entry);
+    var stateText = state === 'error' ? 'errored' : state === 'done' ? doneText(entry)
+      : state === 'waiting' ? (entry.action || 'waiting') : (entry.action || 'working');
+
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'acp-crew-row acp-crew-row-' + state;
+    row.setAttribute('aria-label',
+      label + (entry.role ? ', ' + entry.role : '') + ', ' + stateText);
+
+    var dot = document.createElement('span');
+    dot.className = 'session-status ' + dotClass;
+    dot.setAttribute('aria-hidden', 'true');
+
+    var nameSpan = document.createElement('span');
+    nameSpan.className = 'acp-crew-label';
+    nameSpan.textContent = label;
+
+    var roleSpan = document.createElement('span');
+    roleSpan.className = 'acp-crew-role';
+    roleSpan.textContent = entry.role || '';
+
+    var actionSpan = document.createElement('span');
+    actionSpan.className = 'acp-crew-action';
+    actionSpan.textContent = state === 'working' && !entry.action
+      ? 'working\u2026' : stateText;
+
+    var elapsedSpan = document.createElement('span');
+    elapsedSpan.className = 'acp-crew-elapsed';
+    var start = entry.startedAt;
+    var stop = entry.stoppedAt;
+    elapsedSpan.textContent = stop > 0
+      ? elapsedText(start, stop) : elapsedText(start);
+
+    row.appendChild(dot);
+    row.appendChild(nameSpan);
+    if (entry.role) row.appendChild(roleSpan);
+    row.appendChild(actionSpan);
+    row.appendChild(elapsedSpan);
+    row.addEventListener('click', function() { openSubagent(entry.sessionId); });
+    return row;
   }
 
   // One of 'working' / 'waiting' / 'done' / 'error', shared by the crew panel

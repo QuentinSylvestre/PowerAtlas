@@ -2039,6 +2039,14 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
 .acp-crew-row-error   .acp-crew-action { color:#ef4444; }  /* matches status-errored dot */
 .acp-crew-row-waiting .acp-crew-action { color:#f59e0b; }  /* matches status-waiting dot */
 .acp-crew-elapsed { font-variant-numeric:tabular-nums; color:var(--text-dim); white-space:nowrap; flex-shrink:0; }
+/* Phase 3: crew panel tree structure */
+.acp-crew-group { cursor:pointer; user-select:none; padding:4px 8px; font-weight:500; display:flex; align-items:center; gap:6px; }
+.acp-crew-group:hover { background:rgba(128,128,128,0.1); }
+.acp-crew-group-children { }
+.acp-crew-group-children[hidden] { display:none; }
+.acp-crew-group-children .acp-crew-row { padding-left:24px; }
+.acp-crew-chevron { font-size:0.7em; min-width:1em; }
+.acp-crew-badge { font-size:0.8em; opacity:0.7; margin-left:auto; }
 
 /* A workflow step's warning or error message (`step_message`, 261012 D12):
    a system row with the step's name, then its text. Text only. */

@@ -6727,22 +6727,25 @@ check("workflow crew rows: running, waiting and failed render sensibly", (tpl) =
   const cls = (row) => String(row.querySelector(".session-status").className)
     .split(/\s+/);
   const text = (row, sel) => row.querySelector(sel).textContent;
-  assertEqual(text(rows[0], ".acp-crew-label"), "wf-coder");
-  assertEqual(text(rows[0], ".acp-crew-role"), "run-both/step-a",
+  // Phase 3 tree rendering: root-level entries (no '/' in role) render first,
+  // then grouped entries. step-three has no '/', so it's rows[0];
+  // run-both/step-a and run-both/step-b are in the group, so rows[1] and rows[2].
+  assertEqual(text(rows[0], ".acp-crew-action"), "errored");
+  assert(cls(rows[0]).includes("status-errored"), "failed step shows the error dot");
+  assertEqual(text(rows[1], ".acp-crew-label"), "wf-coder");
+  assertEqual(text(rows[1], ".acp-crew-role"), "run-both/step-a",
               "the step's place in the workflow is the role column");
-  assertEqual(text(rows[0], ".acp-crew-action"), "running");
-  assert(cls(rows[0]).includes("status-thinking"), "running step shows the working dot");
-  assertEqual(text(rows[1], ".acp-crew-action"), "waiting",
+  assertEqual(text(rows[1], ".acp-crew-action"), "running");
+  assert(cls(rows[1]).includes("status-thinking"), "running step shows the working dot");
+  assertEqual(text(rows[2], ".acp-crew-action"), "waiting",
               "a paused step must say it is waiting, not just 'working'");
   // D15 (261012): a waiting step gets the waiting dot, not the working one.
-  assert(cls(rows[1]).includes("status-waiting"), "waiting step shows the waiting dot");
-  assert(!cls(rows[1]).includes("status-thinking"), "waiting step is not shown working");
-  assert(rows[1].className.includes("acp-crew-row-waiting"), "waiting row class");
-  assert(!rows[1].className.includes("acp-crew-row-error") &&
-         !rows[1].className.includes("acp-crew-row-done"),
+  assert(cls(rows[2]).includes("status-waiting"), "waiting step shows the waiting dot");
+  assert(!cls(rows[2]).includes("status-thinking"), "waiting step is not shown working");
+  assert(rows[2].className.includes("acp-crew-row-waiting"), "waiting row class");
+  assert(!rows[2].className.includes("acp-crew-row-error") &&
+         !rows[2].className.includes("acp-crew-row-done"),
          "a waiting step is not shown as finished");
-  assertEqual(text(rows[2], ".acp-crew-action"), "errored");
-  assert(cls(rows[2]).includes("status-errored"), "failed step shows the error dot");
   assert(String(page.one("acpTranscript", ".acp-crew-header").textContent)
          .startsWith("Orchestrating"), "the crew is not all done while a step waits");
 });
@@ -25289,6 +25292,123 @@ check("dashHandle visualization frame without title uses Visualization fallback"
     `SC5: addVisualizationCard must be called once for a valid url-only frame, got ${calls.length}`);
   assertEqual(calls[0].title, "Visualization",
     `SC5: addVisualizationCard title must be 'Visualization' when payload.title is absent, got: ${calls[0].title}`);
+});
+
+// --- Phase 3: crew panel tree structure ---
+
+check("SC3 Test A: grouped crew entries render a group-label row", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-a", role: "run-both/step-a", task: "", sessionName: "step-a",
+      status: "working", action: "", done: false, error: "", startedAt: now - 2 },
+    { sessionId: "sub-b", role: "run-both/step-b", task: "", sessionName: "step-b",
+      status: "working", action: "", done: false, error: "", startedAt: now - 1 },
+  ]));
+  const panels = page.all("acpTranscript", ".acp-crew-panel");
+  assertEqual(panels.length, 1, "crew panel should appear");
+  const groups = panels[0].querySelectorAll(".acp-crew-group");
+  assertEqual(groups.length, 1, "SC3: one group-label row should appear for 'run-both'");
+  // The group row's text node should contain the group name.
+  assert(groups[0].textContent.indexOf("run-both") !== -1,
+    "SC3: group-label row text must contain 'run-both'");
+  // Both child step rows should exist in the children container.
+  const containers = panels[0].querySelectorAll(".acp-crew-group-children");
+  assertEqual(containers.length, 1, "SC3: one children container");
+  const childRows = containers[0].querySelectorAll(".acp-crew-row");
+  assertEqual(childRows.length, 2, "SC3: two child rows inside the group");
+});
+
+check("SC3 Test B: clicking group-label row toggles expand/collapse", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // All-done group starts collapsed.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-c", role: "done-group/step-c", task: "", sessionName: "step-c",
+      status: "terminated", action: "", done: true, error: "", startedAt: now - 10, stoppedAt: now - 1 },
+  ]));
+  const panels = page.all("acpTranscript", ".acp-crew-panel");
+  const group = panels[0].querySelector(".acp-crew-group");
+  assert(group !== null, "group label row must exist");
+  const container = panels[0].querySelector(".acp-crew-group-children");
+  assert(container !== null, "children container must exist");
+  // All-done: starts collapsed.
+  assertEqual(group.getAttribute("aria-expanded"), "false",
+    "SC3: all-done group must start collapsed (aria-expanded=false)");
+  assertEqual(container.hidden, true,
+    "SC3: all-done group children container must start hidden");
+  // Click to expand.
+  group.dispatch("click");
+  assertEqual(group.getAttribute("aria-expanded"), "true",
+    "SC3: after click, aria-expanded must be 'true'");
+  assertEqual(container.hidden, false,
+    "SC3: after click, children container must be visible");
+  // Click again to collapse.
+  group.dispatch("click");
+  assertEqual(group.getAttribute("aria-expanded"), "false",
+    "SC3: after second click, aria-expanded must be 'false'");
+  assertEqual(container.hidden, true,
+    "SC3: after second click, children container must be hidden");
+});
+
+check("SC3 Test C: root-level entry (no '/' in role) renders without a group header", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-d", role: "orchestrator", task: "", sessionName: "main",
+      status: "working", action: "planning", done: false, error: "", startedAt: now - 5 },
+  ]));
+  const panels = page.all("acpTranscript", ".acp-crew-panel");
+  assertEqual(panels.length, 1, "crew panel should appear");
+  const groups = panels[0].querySelectorAll(".acp-crew-group");
+  assertEqual(groups.length, 0,
+    "SC3: no group-label row for a root-level entry (no '/' in role)");
+  const rows = panels[0].querySelectorAll(".acp-crew-row");
+  assertEqual(rows.length, 1, "SC3: the root-level entry renders as a direct crew row");
+});
+
+check("SC3 Test D: aggregate badge and expand state", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // All-done group: badge "N done", starts collapsed.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-e1", role: "batch/e1", task: "", sessionName: "e1",
+      status: "terminated", action: "", done: true, error: "", startedAt: now - 20, stoppedAt: now - 1 },
+    { sessionId: "sub-e2", role: "batch/e2", task: "", sessionName: "e2",
+      status: "terminated", action: "", done: true, error: "", startedAt: now - 20, stoppedAt: now - 2 },
+  ], "tcid-batch-done"));
+  const panels = page.all("acpTranscript", ".acp-crew-panel");
+  const badge1 = panels[0].querySelector(".acp-crew-badge");
+  assert(badge1 !== null, "badge must be present for group");
+  assertEqual(badge1.textContent, "2 done",
+    "SC3: all-done group badge text must be 'N done'");
+  const group1 = panels[0].querySelector(".acp-crew-group");
+  assertEqual(group1.getAttribute("aria-expanded"), "false",
+    "SC3: all-done group must start collapsed");
+  const container1 = panels[0].querySelector(".acp-crew-group-children");
+  assertEqual(container1.hidden, true,
+    "SC3: all-done group children must start hidden");
+
+  // Group with a working step: badge "running", starts expanded.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-f1", role: "live/f1", task: "", sessionName: "f1",
+      status: "working", action: "reading", done: false, error: "", startedAt: now - 5 },
+    { sessionId: "sub-f2", role: "live/f2", task: "", sessionName: "f2",
+      status: "terminated", action: "", done: true, error: "", startedAt: now - 10, stoppedAt: now - 3 },
+  ], "tcid-batch-live"));
+  const panels2 = page.all("acpTranscript", ".acp-crew-panel");
+  // The second delivery creates a new panel (different toolCallId).
+  const livePanel = panels2[panels2.length - 1];
+  const badge2 = livePanel.querySelector(".acp-crew-badge");
+  assert(badge2 !== null, "badge must be present for live group");
+  assertEqual(badge2.textContent, "running",
+    "SC3: group with working step badge text must be 'running'");
+  const group2 = livePanel.querySelector(".acp-crew-group");
+  assertEqual(group2.getAttribute("aria-expanded"), "true",
+    "SC3: group with working step must start expanded");
+  const container2 = livePanel.querySelector(".acp-crew-group-children");
+  assertEqual(container2.hidden, false,
+    "SC3: group with working step children must start visible");
 });
 
 let failed = 0;
