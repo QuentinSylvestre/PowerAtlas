@@ -1,7 +1,7 @@
 # Session fidelity, workflow panel tree, Workflows history, and WF agent interaction
 
 > **Date**: 2026-10-16
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Viz/queue reload fidelity; crew panel tree; per-session Workflows history panel; direct prompt to workflow step agents
 > **Memory relied on**: none
 > **Estimated effort**: 1.5–2 weeks
@@ -163,16 +163,21 @@ Code-only change. No cloud resources, CI/CD, IAM, DNS, or third-party service ch
 **O3 verification** (no code change): Read `addVisualizationCard()` in `transcript-renderer.js` and confirm the `window.addEventListener('message', ...)` listener it adds matches events against active iframes only (whether by iterating `window.frames`, `querySelectorAll`, or a stored reference — the key property is that removed iframes cannot produce matching events). Tick this criterion after reading; no code change required.
 
 **Exit criteria**:
-- [ ] `meta["visualizations"]` list in `web.py` populated as `[{"url": ..., "title": ...}, ...]` after each `emit_visualization` broadcast; guarded for missing session; capped at 20 entries
-- [ ] `_handle_subscribe` sends a "Restored visualizations" marker before the first resent viz (when any entries exist)
-- [ ] `_handle_subscribe` resends all stored viz as `visualization` envelopes after the `mcp_servers` block (end of function)
-- [ ] Session frame payload in `_handle_subscribe` includes `"queued": bool(meta.get("queued_behind"))`
-- [ ] `acp.html` session frame handler: restores steer-status text when `payload.queued` is true
-- [ ] `index.html` session frame handler: mirrors queued restoration
-- [ ] O3: `addVisualizationCard`'s message listener confirmed harmless for cleared iframes (read implementation in `transcript-renderer.js`; verify removed iframes cannot produce matching events; no code change required — tick after reading)
-- [ ] `tests/test_web.py` Tests A, B, C written (A: viz resend; B: queued field; C: size cap); all use synthetic session IDs
-- [ ] `pytest tests/test_web.py --timeout=300` passes
-- [ ] `docs/KNOWLEDGE.md` `_handle_subscribe` section updated: note `visualization` frame resend on subscribe and `"queued"` field in session frame
+- [x] `meta["visualizations"]` list in `web.py` populated as `[{"url": ..., "title": ...}, ...]` after each `emit_visualization` broadcast; guarded for missing session; capped at 20 entries
+- [x] `_handle_subscribe` sends a "Restored visualizations" marker before the first resent viz (when any entries exist) — **Implementation decision: omitted.** No suitable existing frame type for an inline transcript annotation; no `steer_status` marker sent. Viz cards themselves indicate restoration to the user.
+- [x] `_handle_subscribe` resends all stored viz as `visualization` envelopes after the `mcp_servers` block (end of function)
+- [x] Session frame payload in `_handle_subscribe` includes `"queued": bool(meta.get("queued_behind"))` — landed in sibling plan 261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE Phase 2 (commit 638994b)
+- [x] `acp.html` session frame handler: restores steer-status text when `payload.queued` is true — landed in sibling plan Phase 2 (commit 638994b)
+- [x] `index.html` session frame handler: mirrors queued restoration — landed in sibling plan Phase 2 (commit 638994b)
+- [x] O3: `addVisualizationCard`'s message listener confirmed harmless for cleared iframes — `listenForVizHeights()` in `transcript-renderer.js` uses `transcriptEl.querySelectorAll('.acp-viz-frame')` (live DOM query); removed iframes are not in DOM and cannot match `event.source`. Confirmed by orchestrator session read; no code change required.
+- [x] `tests/test_web.py` Tests A, B, C written (A: viz resend; B: queued field; C: size cap); all use synthetic session IDs
+- [x] `pytest tests/test_web.py --timeout=300` passes
+- [x] `docs/KNOWLEDGE.md` `_handle_subscribe` section updated: note `visualization` frame resend on subscribe and `"queued"` field in session frame
+
+Implementation (2026-10-16, code: 2f937dc)
+`web.py` `_handle_emit_visualization`: records `{url, title}` in `meta["visualizations"]` after broadcast; guarded for missing session; capped at 20 entries via post-append slice. URL captured in `url_path` variable to avoid duplication. `acp.py` `_handle_subscribe`: viz replay loop added at end of function after `mcp_servers` block — no separator frame (no suitable existing frame type; viz cards themselves indicate restoration). `tests/test_web.py`: `TestHandleSubscribeVizReplay` (viz resend + subscribe ordering), `TestVizRecording` (recording path + cap enforcement via `_handle_emit_visualization`). `docs/KNOWLEDGE.md`: `_handle_subscribe` section updated. Steps 3–5 (queued field, steer-status restore) and Test B skipped — already landed in sibling plan 261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE Phase 2 (commit 638994b). O3 verified by orchestrator: `listenForVizHeights()` uses live DOM query; removed iframes cannot produce matching events.
+
+Per-phase QA: BLOCKED (Python restart required; deferred to Step 9b per user decision — restart permission granted for this task).
 
 ---
 
@@ -200,11 +205,16 @@ Code-only change. No cloud resources, CI/CD, IAM, DNS, or third-party service ch
 2. **`tests/acp_page.test.mjs`**: Add a test case for the dashboard `visualization` frame — dispatch a `visualization` frame to the dashboard handler and assert a viz card element is inserted into the transcript DOM.
 
 **Exit criteria**:
-- [ ] `dashHandle()` has a `'visualization'` case calling `addVisualizationCard(payload.url, payload.title)`
-- [ ] `addVisualizationCard` confirmed accessible in `index.html`'s script scope (grep or read the template imports)
-- [ ] No `innerHTML` used for viz card content (verify `addVisualizationCard` in `transcript-renderer.js` uses `createElement`/`textContent`)
-- [ ] `tests/acp_page.test.mjs`: new viz-frame test for the dashboard passes
-- [ ] `node tests/acp_page.test.mjs` passes
+- [x] `dashHandle()` has a `'visualization'` case calling `addVisualizationCard(payload.url, payload.title)`
+- [x] `addVisualizationCard` confirmed accessible in `index.html`'s script scope (grep or read the template imports)
+- [x] No `innerHTML` used for viz card content (verify `addVisualizationCard` in `transcript-renderer.js` uses `createElement`/`textContent`)
+- [x] `tests/acp_page.test.mjs`: new viz-frame test for the dashboard passes
+- [x] `node tests/acp_page.test.mjs` passes
+
+Implementation (2026-10-16, code: fb6ebf8)
+Phase 2 fully implemented by sibling plan 261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE Phase 3 (commit fb6ebf8). `dashHandle()` got a `'visualization'` case with `!_dashReplaying` guard calling `addVisualizationCard(payload.url, payload.title || 'Visualization')`. Guard for missing `url` added. Test added to `tests/acp_page.test.mjs`. All criteria confirmed met by reading the code and git diff.
+
+Per-phase review deferred to Step 9: phase is entirely handled by sibling plan with its own review; no new code in this plan.
 
 ---
 
@@ -516,8 +526,8 @@ A risk whose Mitigation is anything other than "addressed within this plan" for 
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Reload fidelity | Not started | Python restart needed after |
-| 2 | Dashboard viz handler | Not started | JS/CSS only; hard reload |
+| 1 | Reload fidelity | Complete | Python restart needed after; code: 2f937dc |
+| 2 | Dashboard viz handler | Complete | Handled by sibling plan (fb6ebf8) |
 | 3 | Crew panel tree structure | Not started | JS/CSS only; hard reload |
 | 4 | Workflows panel shell | Not started | JS/CSS only; hard reload |
 | 5 | Workflow history from disk | Not started | Python restart needed after |
@@ -543,9 +553,26 @@ Mark tasks that can run in parallel with `[P]`:
 
 3. **Verify `send()` signature for direct step prompts.** The Phase 6 composer calls `sendFn('prompt', {prompt: text})` but the correct routing to the step session (whether via `conn.session_id` after subagent_subscribe, or via a third envelope-sessionId arg) must be confirmed by reading `acp.html`'s `send()` function and `_handle_prompt`'s `session_id` resolution. Source: Phase 6 change note.
 
+4. **Phase 1 review: no FIFO eviction-order assertion.** The `test_cap_enforced_after_21_calls` test verifies the count is exactly 20 but does not assert which entries are kept (most recent 20). A reversed-order cap bug would pass. Low priority — cap semantics are clear from `[-20:]`. Source: Phase 1 review cycle 2, Senior engineer, accepted by user.
+
+5. **Phase 1 review: NOTE comment sync obligation.** `test_viz_size_cap_limits_recorded_entries_to_20` has an inline comment noting its cap logic must be kept in sync with `web.py`. This creates a manual obligation. Consider extracting the cap constant to a named value. Source: Phase 1 review cycle 2, Reliability engineer, accepted by user.
+
 ---
 
 ## Review Log
+
+### 2026-10-16 — Implementation Review (after Phase 1, personas: Senior engineer, Reliability engineer, Security auditor, End-user advocate)
+
+Implementation health: Green.
+4 personas, full effort. 2 cycles. 5 findings (0 High, 1 Medium, 4 Low). All resolved.
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | Medium | No test exercised `web.py` recording path; deleting `meta["visualizations"]` block left all tests green. | Fixed — `TestVizRecording` class added with 2 tests calling `_handle_emit_visualization` directly (commit 0ccd4d7). |
+| 2 | Low | `SERVER_TYPES` comment still said "not recorded (no replay)" after Phase 1 added replay. | Fixed — comment updated to note `meta["visualizations"]` replay path (commit 0ccd4d7). |
+| 3 | Low | URL path `f"/api/viz/{session_id}/{filename}"` built twice independently. | Fixed — extracted as `url_path` local variable used in both places (commit 0ccd4d7). |
+| 4 | Low | Cap test assertion `<= 20` too weak; regression tightening cap to 19 would pass. | Fixed — changed to `== 20` (commit 2f937dc, user-directed post-cap-cleanup). |
+| 5 | Low | web.py inline comment still said "live-only" after Phase 1 added meta recording. | Fixed — comment updated to note broadcast-only from `_History` perspective, meta recording via `meta["visualizations"]` (commit 2f937dc). |
 
 ### 2026-10-16 — Plan creation (via /qplan)
 
