@@ -3466,6 +3466,56 @@ class TestHandleSubscribeQueuedState:
         assert session_frame["payload"]["queued"] is False
 
 
+class TestHandleSubscribeVizReplay:
+    """_handle_subscribe resends stored visualization frames after history."""
+
+    def test_viz_frames_resent_after_history_on_subscribe(self, acp_session):
+        """After broadcasting a viz to a session, subscribing replays it after
+        the history frame."""
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.sessions[sid]["visualizations"] = [
+            {"url": "/api/viz/sess-placeholder-x/chart.html", "title": "My Chart"}
+        ]
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        viz_frames = [f for f in frames if f["type"] == "visualization"]
+        assert len(viz_frames) == 1
+        assert viz_frames[0]["payload"]["url"] == "/api/viz/sess-placeholder-x/chart.html"
+        assert viz_frames[0]["payload"]["title"] == "My Chart"
+        # Viz frames must come after the history frame.
+        type_seq = [f["type"] for f in frames]
+        hist_idx = type_seq.index("history")
+        viz_idx = type_seq.index("visualization")
+        assert viz_idx > hist_idx
+
+    def test_viz_size_cap_limits_recorded_entries_to_20(self, acp_session):
+        """The web.py recording cap limits meta['visualizations'] to 20 entries;
+        subscribe resends all recorded entries (up to 20).
+
+        The cap is enforced in web.py using meta["visualizations"][-20:] on each
+        append.  This test simulates 25 recordings using the same cap logic to
+        verify that only 20 entries survive, then subscribes to confirm the
+        subscriber receives exactly 20 viz frames.
+        """
+        acp_mod, sid = acp_session
+        meta = acp_mod._supervisor.sessions[sid]
+        # Simulate 25 recordings using the same cap logic as web.py.
+        for i in range(25):
+            meta.setdefault("visualizations", []).append(
+                {"url": f"/api/viz/sess-placeholder-cap/v{i}.html", "title": f"V{i}"}
+            )
+            meta["visualizations"] = meta["visualizations"][-20:]
+        assert len(meta["visualizations"]) == 20, "cap must trim to 20"
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        viz_frames = [f for f in frames if f["type"] == "visualization"]
+        assert len(viz_frames) == 20
+
+
 class TestAcpUnsubscribe:
     """The dashboard's Overview sends ``unsubscribe`` so the session it leaves
     stops counting as watched, which would otherwise suppress its

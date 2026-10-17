@@ -7765,6 +7765,16 @@ def _handle_emit_visualization(args: dict) -> dict:
     }, session_id)
     acp._registry.broadcast(session_id, frame)
 
+    # Record for replay on reconnect (SC1 — Phase 1).
+    meta = acp._supervisor.sessions.get(session_id)
+    if meta is not None:
+        meta.setdefault("visualizations", []).append({
+            "url": f"/api/viz/{session_id}/{filename}",
+            "title": title,
+        })
+        # Cap at 20 entries to avoid unbounded growth in long sessions.
+        meta["visualizations"] = meta["visualizations"][-20:]
+
     return {"content": [{"type": "text", "text": f"Visualization emitted: {filename}"}]}
 
 

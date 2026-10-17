@@ -9220,6 +9220,16 @@ def _handle_subscribe(conn, session_id):
     mcp_servers = meta.get("mcpServers")  # See also: commands/skills resend above — same SC-1 broadcast-only race window; must appear in both _handle_subscribe and _handle_new.
     if mcp_servers is not None:
         conn.send(envelope("mcp_servers", {"servers": mcp_servers}, session_id))
+    # SC1: replay stored viz frames so cards reappear on reconnect.
+    # Broadcast-only frames normally skip _emit(); we re-send them here
+    # explicitly, appended after the history replay so they land at the
+    # end of the transcript.  No separator frame — there is no appropriate
+    # existing frame type for an inline transcript annotation; the viz
+    # cards themselves serve as indicators of restoration.
+    for viz in meta.get("visualizations", []):
+        conn.send(envelope("visualization", {
+            "url": viz["url"], "title": viz["title"]
+        }, session_id))
 
 
 async def _handle_load(conn, session_id):
