@@ -337,7 +337,11 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: In `TestResume`, when a test asserts what happens after a run ends (`gave_up`, `no_activity`, `error`), parametrize it over `self.config.auto_schedule` and tick once more after the verdict. The re-arming happens on the next `_auto_schedule_new`, not inside `_watch`.
 **Source**: `plans/done/261015-2330_KIRO_CLI_AUTO_RESUME_AFTER_DAILY_USAGE_LIMIT.md` § Completion Summary (Independent review); `tests/test_web.py::TestResume::test_a_kiro_resume_gives_up_after_the_last_attempt_and_stays_given_up` | **Verified**: 2026-10-16 (session, mutation run)
 
+### Per-session server state that must survive reconnect/reload belongs in `_handle_subscribe`'s session frame, not only in live broadcasts
 
+**Why**: `meta["queued_behind"]` was broadcast via live `queue_status` frames only. A client that connected or reconnected after the broadcast missed it, leaving the steer-status blank with no indication the session was queued. The fix: add `"queued": bool(meta.get("queued_behind"))` to the session frame `_handle_subscribe` sends — which fires on every subscribe. Live broadcasts stay for real-time updates; the session frame is the reconnect snapshot.
+**How to apply**: When adding per-session state to `acp.py`, ask: does a reconnecting client need this state on first subscribe? If yes, add a field to the session frame dict in `_handle_subscribe` alongside `turnActive`, `contextPercent`, `cwd`, `created`. Name it with `bool(...)` to match the serialization convention. Handle the new field in both `acp.html` and `index.html`'s `type === 'session'` frame handler (gated on the field's presence), mirroring parity between the two pages.
+**Source**: `261016_ACP_SESSION_SWITCH_BUGS_AND_QUEUE_RESTORE § Phase 2`, SC4, `src/power_atlas/acp.py` `_handle_subscribe` | **Verified**: 2026-10-16 (session)
 
 
 
@@ -595,6 +599,7 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 - "`commands_execute` must whitelist every item type the palette can dispatch" — declined 2026-08-14
 - "A new `acp.py` frame type must be added to `SERVER_TYPES` atomically with its `_emit` call" — declined 2026-08-14
 - "`.acp-icon-btn`'s `display: inline-flex` overrides `[hidden]` — add a `[hidden]` escape rule for each icon button" — declined 2026-08-18
+- "`acp_page.test.mjs` tests for IIFE-scoped behavior must use observable outcomes, never direct variable reads" — declined 2026-10-16
 
 - "Two-phase cache design prevents O(n) stat scan on every `_cwd_to_sessions()` call" — declined 2026-08-18
 - "Sub-agent autofix commits can silently wipe test files — verify test count after every sub-agent code commit" — declined 2026-08-18
