@@ -5335,6 +5335,9 @@ function dashCloseIfAbandoned(){
   _dashSent = false;
   _dashTurnActive = false;
   _dashPendingSend = null;
+  // Phase 5: clear Workflows past-run history so the next session fetches fresh.
+  var _wfPR = document.getElementById('dashWorkflowsPastRuns');
+  if (_wfPR) { while (_wfPR.firstChild) _wfPR.removeChild(_wfPR.firstChild); }
   // Paired with _dashPendingSend above, for consistency (Fix 6, Phase 4
   // review) -- both reviewers confirmed no correctness/cross-session-mis-
   // send risk from leaving this unset here (it is bounded and self-

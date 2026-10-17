@@ -3353,6 +3353,8 @@ def _get_workflow_runs_v3(session_id: str) -> "list[dict]":
                     inner = json.loads(content_str)
                 except (ValueError, TypeError):
                     continue
+                if not isinstance(inner, dict):
+                    continue  # guard: non-dict JSON (array, string, etc.) → skip
                 method = inner.get("method") or ""
                 wf_id = inner.get("workflowId") or ""
                 if not wf_id or not method.startswith("_kiro/workflow/"):
