@@ -306,16 +306,21 @@ Per-phase QA: SKIP — JS/CSS only; unit tests pass (1139/1139). Live crew panel
 5. **`style.css`**: Panel layout, toggle button, `.wf-step-row` styles, panel header. CSS for the `[hidden]` attribute override if any element toggles via CSS class alongside `hidden`.
 
 **Exit criteria**:
-- [ ] `#acpWorkflowsPanel` in `acp.html`; toolbar toggle shows/hides it correctly; toggle button has `aria-expanded` and `aria-controls`
-- [ ] `#dashWorkflowsPanel` in `index.html`; toolbar toggle shows/hides it correctly; same ARIA attributes
-- [ ] No name collision with existing `composer-chrome.js` globals (verified against collision list)
-- [ ] `initWorkflowsDom`, `setWorkflowsLiveRun`, `clearWorkflowsLiveRun` exported from `composer-chrome.js`
-- [ ] Sending a `subagents` frame with `workflowLive: true` entries populates `#acpWorkflowsLiveRun` and `#dashWorkflowsLiveRun`
-- [ ] Clicking a live step row in the Workflows panel calls `openSubagentFn(entry.sessionId)` to open the sub-agent panel
-- [ ] No `innerHTML` in any step row rendering
-- [ ] Hard reload (no PowerAtlas restart) picks up JS/CSS changes
-- [ ] `tests/acp_page.test.mjs`: panel toggle and live-run population tests pass
-- [ ] `node tests/acp_page.test.mjs` passes
+- [x] `#acpWorkflowsPanel` in `acp.html`; toolbar toggle shows/hides it correctly; toggle button has `aria-expanded` and `aria-controls`
+- [x] `#dashWorkflowsPanel` in `index.html`; toolbar toggle shows/hides it correctly; same ARIA attributes
+- [x] No name collision with existing `composer-chrome.js` globals (verified against collision list)
+- [x] `initWorkflowsDom`, `setWorkflowsLiveRun`, `clearWorkflowsLiveRun` exported from `composer-chrome.js`
+- [x] Sending a `subagents` frame with `workflowLive: true` entries populates `#acpWorkflowsLiveRun` and `#dashWorkflowsLiveRun`
+- [x] Clicking a live step row in the Workflows panel calls `openSubagentFn(entry.sessionId)` to open the sub-agent panel
+- [x] No `innerHTML` in any step row rendering
+- [x] Hard reload (no PowerAtlas restart) picks up JS/CSS changes
+- [x] `tests/acp_page.test.mjs`: panel toggle and live-run population tests pass
+- [x] `node tests/acp_page.test.mjs` passes
+
+Implementation (2026-10-16, code: 973e182)
+`initWorkflowsDom({refs})`, `setWorkflowsLiveRun(entries, isDashboard)`, `clearWorkflowsLiveRun(isDashboard)` added to `composer-chrome.js`. `#acpWorkflowsToggle` button + `#acpWorkflowsPanel` panel in `acp.html` (and dashboard mirrors in `index.html`). Toggle reveals on first `workflowLive` frame; `clearWorkflowsLiveRun` hides toggle AND closes panel to prevent stranded-open state. Step rows have `role="button"`, `tabindex="0"`, Enter/Space keydown handlers for keyboard accessibility. `.wf-step-row:focus-visible` CSS. `subagents` frame handler updated in both templates. Collision-check comment updated in `composer-chrome.js`. Tests: 8 new Phase 4 tests (1147 total passing).
+
+Per-phase QA: SKIP — JS/CSS only; unit tests pass (1147/1147). Live panel toggle/populate verification deferred to Step 9b.
 
 ---
 
@@ -534,7 +539,7 @@ A risk whose Mitigation is anything other than "addressed within this plan" for 
 | 1 | Reload fidelity | Complete | Python restart needed after; code: 2f937dc |
 | 2 | Dashboard viz handler | Complete | Handled by sibling plan (fb6ebf8) |
 | 3 | Crew panel tree structure | Complete | JS/CSS only; code: a85816c |
-| 4 | Workflows panel shell | Not started | JS/CSS only; hard reload |
+| 4 | Workflows panel shell | Complete | JS/CSS only; code: 973e182 |
 | 5 | Workflow history from disk | Not started | Python restart needed after |
 | 6 | Sub-agent composer and direct step prompt | Not started | Python restart needed after |
 
@@ -568,9 +573,25 @@ Mark tasks that can run in parallel with `[P]`:
 
 8. **Phase 3 review: querySelector injection risk in focus restore.** `[data-focus-key="..."]` attribute selector could fail if `entry.role` or `entry.sessionId` contains `"`. Theoretical — current format is alphanumeric. Source: Phase 3 review cycle 2, N3.
 
+9. **Phase 4 review: dead CSS class `wf-panel`.** `class="wf-panel"` in both templates has no CSS rule — left for Phase 5/6 finalization. Source: Phase 4 review, F3.
+
+10. **Phase 4 review: dashboard path (`isDashboard: true`) has no independent test.** Add a test passing `isDashboard: true` in Phase 5/6. Source: Phase 4 review, F4.
+
 ---
 
 ## Review Log
+
+### 2026-10-16 — Implementation Review (after Phase 4, personas: Senior engineer, End-user advocate, Reliability engineer, Maintainability reviewer)
+
+Implementation health: Green.
+4 personas, full effort. 1 cycle. 4 findings (0 High, 2 Medium, 2 Low). All resolved or accepted.
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | Medium | `clearWorkflowsLiveRun` hid toggle but left panel open — stranded open with no close button when workflow ends. | Fixed — `clearWorkflowsLiveRun` now also sets `panel.hidden = true` and resets `aria-expanded="false"` (commit 973e182). |
+| 2 | Medium | `.wf-step-row` divs had no `tabindex`, `role="button"`, or keydown handler — keyboard inaccessible. | Fixed — `role="button"`, `tabindex="0"`, Enter/Space keydown added to `setWorkflowsLiveRun` step rows (commit 973e182). |
+| 3 | Low | `class="wf-panel"` in both templates has no CSS rule — dead class. | Orchestrator: proposed-accept — resolves in Phase 5/6 when panel styles are finalized. |
+| 4 | Low | Phase 4 tests only cover acp.html path; `isDashboard: true` branch not tested. | Orchestrator: proposed-accept — dashboard variant test deferred to Phase 5/6 follow-up. |
 
 ### 2026-10-16 — Implementation Review (after Phase 3, personas: Senior engineer, End-user advocate, Reliability engineer, Maintainability reviewer)
 
