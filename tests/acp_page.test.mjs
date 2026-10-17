@@ -6733,8 +6733,8 @@ check("workflow crew rows: running, waiting and failed render sensibly", (tpl) =
   assertEqual(text(rows[0], ".acp-crew-action"), "errored");
   assert(cls(rows[0]).includes("status-errored"), "failed step shows the error dot");
   assertEqual(text(rows[1], ".acp-crew-label"), "wf-coder");
-  assertEqual(text(rows[1], ".acp-crew-role"), "run-both/step-a",
-              "the step's place in the workflow is the role column");
+  assertEqual(text(rows[1], ".acp-crew-role"), "step-a",
+              "the step's place in the workflow is the role column (abbreviated, without group prefix)");
   assertEqual(text(rows[1], ".acp-crew-action"), "running");
   assert(cls(rows[1]).includes("status-thinking"), "running step shows the working dot");
   assertEqual(text(rows[2], ".acp-crew-action"), "waiting",
@@ -25409,6 +25409,56 @@ check("SC3 Test D: aggregate badge and expand state", (tpl) => {
   const container2 = livePanel.querySelector(".acp-crew-group-children");
   assertEqual(container2.hidden, false,
     "SC3: group with working step children must start visible");
+});
+
+check("SC3 Test E: group with a failed entry shows 'has failures' badge and starts expanded", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-g1", role: "fails/g1", task: "", sessionName: "g1",
+      status: "terminated", action: "", done: true, error: "crashed",
+      startedAt: now - 10, stoppedAt: now - 1 },
+    { sessionId: "sub-g2", role: "fails/g2", task: "", sessionName: "g2",
+      status: "terminated", action: "", done: true, error: "",
+      startedAt: now - 10, stoppedAt: now - 2 },
+  ], "tcid-sc3e-fails"));
+  const panels = page.all("acpTranscript", ".acp-crew-panel");
+  assertEqual(panels.length, 1, "SC3 E: one crew panel");
+  const badge = panels[0].querySelector(".acp-crew-badge");
+  assert(badge !== null, "SC3 E: badge must be present for group with failure");
+  assertEqual(badge.textContent, "has failures",
+    "SC3 E: group with a failed entry must show 'has failures' badge");
+  const group = panels[0].querySelector(".acp-crew-group");
+  assertEqual(group.getAttribute("aria-expanded"), "true",
+    "SC3 E: group with a failed entry must start expanded");
+  const container = panels[0].querySelector(".acp-crew-group-children");
+  assertEqual(container.hidden, false,
+    "SC3 E: group with a failed entry children must start visible");
+});
+
+check("SC3 Test F: group with all-waiting entries shows 'waiting' badge and starts expanded", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-h1", role: "waits/h1", task: "", sessionName: "h1",
+      status: "waiting", action: "waiting for input", done: false, error: "",
+      startedAt: now - 5 },
+    { sessionId: "sub-h2", role: "waits/h2", task: "", sessionName: "h2",
+      status: "waiting", action: "", done: false, error: "",
+      startedAt: now - 3 },
+  ], "tcid-sc3f-waits"));
+  const panels = page.all("acpTranscript", ".acp-crew-panel");
+  assertEqual(panels.length, 1, "SC3 F: one crew panel");
+  const badge = panels[0].querySelector(".acp-crew-badge");
+  assert(badge !== null, "SC3 F: badge must be present for all-waiting group");
+  assertEqual(badge.textContent, "waiting",
+    "SC3 F: group with all-waiting entries must show 'waiting' badge");
+  const group = panels[0].querySelector(".acp-crew-group");
+  assertEqual(group.getAttribute("aria-expanded"), "true",
+    "SC3 F: group with all-waiting entries must start expanded");
+  const container = panels[0].querySelector(".acp-crew-group-children");
+  assertEqual(container.hidden, false,
+    "SC3 F: group with all-waiting entries children must start visible");
 });
 
 let failed = 0;
