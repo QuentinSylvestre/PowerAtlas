@@ -25277,6 +25277,20 @@ check("dashHandle visualization frame with no url does not call addVisualization
     `SC5: addVisualizationCard must NOT be called when payload.url is null, got ${calls2.length} calls`);
 });
 
+check("dashHandle visualization frame without title uses Visualization fallback", () => {
+  // SC5: a visualization frame with url but no title must pass 'Visualization' as the title.
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "visualization", sessionId: "sess-1",
+    payload: { url: "https://localhost/test.html" },  // title intentionally absent
+  });
+  const calls = p.sandbox._vizCalls || [];
+  assertEqual(calls.length, 1,
+    `SC5: addVisualizationCard must be called once for a valid url-only frame, got ${calls.length}`);
+  assertEqual(calls[0].title, "Visualization",
+    `SC5: addVisualizationCard title must be 'Visualization' when payload.title is absent, got: ${calls[0].title}`);
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
