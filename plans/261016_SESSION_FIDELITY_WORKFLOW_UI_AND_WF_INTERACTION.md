@@ -1,7 +1,7 @@
 # Session fidelity, workflow panel tree, Workflows history, and WF agent interaction
 
 > **Date**: 2026-10-16
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Viz/queue reload fidelity; crew panel tree; per-session Workflows history panel; direct prompt to workflow step agents
 > **Memory relied on**: none
 > **Estimated effort**: 1.5–2 weeks
@@ -610,7 +610,10 @@ Mark tasks that can run in parallel with `[P]`:
 Overall implementation health: Green.
 Personas: Senior engineer, Security auditor, Reliability engineer, End-user advocate, Architect.
 18 findings across 6 phases (0 High, 4 Medium, 14 Low). All resolved or accepted with follow-up notes.
-QA verification: Pending — Step 9b exhaustive QA (Playwright) in progress. Python phases require restart (granted).
+QA verification: PASS (automated) / BLOCKED (4 surfaces need live workflow).
+**QA results (9b)**: 9/10 automated probes PASS, 1 SKIP (session ID eval), 4 BLOCKED.
+  PASS: session create, workflows toggle hidden, crew tree CSS, viz functions, sub-agent composer DOM, panel DOM elements, /api/workflow-history 400/403 security, step_message role=alert code present.
+  BLOCKED: SC1 viz reload, SC3 crew tree live, SC6 click-to-sub-panel, SC7/SC8 sub-agent composer (require live workflow — manual verification recommended before release).
 
 #### Test execution summary
 
