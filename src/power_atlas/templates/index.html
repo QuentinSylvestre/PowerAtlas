@@ -2661,6 +2661,8 @@ function dashShowOverview(){
     send('unsubscribe');
   }
   _dashAttachedSid = null;
+  // Phase 5: clear Workflows past runs so the next session loads fresh.
+  (function(){ var el = document.getElementById('dashWorkflowsPastRuns'); if (el) while (el.firstChild) el.removeChild(el.firstChild); }());
   dashUpdateCloseButton();
   _dashUserClosedSid = null;
   _dashCloseLeftSid = leftSid;

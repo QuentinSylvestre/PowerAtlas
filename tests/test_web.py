@@ -48129,10 +48129,10 @@ class TestWorkflowHistory:
         )
         return tmp_path
 
-    # -- Test A: sub_agent_start + sub_agent_complete -> 1 run with 1 step -----
+    # -- Test A: node_start + node_complete + run_complete -> 1 run, 1 step -----
 
     def test_a_single_run_with_one_step(self, tmp_path):
-        """A sub_agent_start/complete pair with a workflowId returns 1 run."""
+        """node_start/complete/run_complete notifications return 1 run with 1 step."""
         import pathlib as _pl
         import re
         from unittest.mock import patch
@@ -48144,22 +48144,50 @@ class TestWorkflowHistory:
                 "id": "m1",
                 "timestamp": "2026-01-01T00:00:00Z",
                 "payload": {
-                    "type": "sub_agent_start",
-                    "subSessionId": "sess-wf-step-placeholder-1",
-                    "role": "run-both/step-a",
-                    "task": "Do the thing",
-                    "workflowId": "wf-placeholder-run-1",
-                    "startedAt": "2026-01-01T00:00:00Z",
+                    "type": "user",
+                    "content": json.dumps({
+                        "method": "_kiro/workflow/node_start",
+                        "workflowId": "wf-placeholder-run-1",
+                        "nodeId": "step-placeholder-1",
+                        "type": "step",
+                        "agentName": "wf-placeholder-agent",
+                        "parentSessionId": "sess-wf-placeholder-1",
+                    }),
                 },
             },
             {
                 "id": "m2",
                 "timestamp": "2026-01-01T00:01:00Z",
                 "payload": {
-                    "type": "sub_agent_complete",
-                    "subSessionId": "sess-wf-step-placeholder-1",
-                    "status": "success",
-                    "completedAt": "2026-01-01T00:01:00Z",
+                    "type": "user",
+                    "content": json.dumps({
+                        "method": "_kiro/workflow/node_complete",
+                        "workflowId": "wf-placeholder-run-1",
+                        "nodeId": "step-placeholder-1",
+                        "status": "completed",
+                        "capturedOutput": "placeholder output",
+                        "parentSessionId": "sess-wf-placeholder-1",
+                    }),
+                },
+            },
+            {
+                "id": "m3",
+                "timestamp": "2026-01-01T00:02:00Z",
+                "payload": {
+                    "type": "user",
+                    "content": json.dumps({
+                        "method": "_kiro/workflow/run_complete",
+                        "workflowId": "wf-placeholder-run-1",
+                        "status": "completed",
+                        "finalState": {
+                            "workflowName": "placeholder-workflow",
+                            "runLabel": "placeholder-label",
+                            "root": {
+                                "startedAt": "2026-01-01T00:00:00Z",
+                                "endedAt": "2026-01-01T00:02:00Z",
+                            },
+                        },
+                    }),
                 },
             },
         ]
@@ -48174,19 +48202,21 @@ class TestWorkflowHistory:
         assert len(result) == 1
         run = result[0]
         assert run["workflowId"] == "wf-placeholder-run-1"
+        assert run["name"] == "placeholder-workflow"
+        assert run["status"] == "completed"
+        assert run["startedAt"] == "2026-01-01T00:00:00Z"
+        assert run["endedAt"] == "2026-01-01T00:02:00Z"
         assert len(run["steps"]) == 1
         step = run["steps"][0]
-        assert step["subSessionId"] == "sess-wf-step-placeholder-1"
-        assert step["role"] == "run-both/step-a"
-        assert step["task"] == "Do the thing"
-        assert step["status"] == "success"
-        assert step["startedAt"] == "2026-01-01T00:00:00Z"
-        assert step["completedAt"] == "2026-01-01T00:01:00Z"
+        assert step["nodeId"] == "step-placeholder-1"
+        assert step["agentName"] == "wf-placeholder-agent"
+        assert step["status"] == "completed"
+        assert step["capturedOutput"] == "placeholder output"
 
-    # -- Test B: no workflow records -> returns [] ----------------------------
+    # -- Test B: no workflow notification records -> returns [] ----------------------------
 
     def test_b_empty_session_returns_no_runs(self, tmp_path):
-        """A session with no sub_agent_start/workflowId records returns []."""
+        """A session with no _kiro/workflow/* notification records returns []."""
         import pathlib as _pl
         import re
         from unittest.mock import patch
@@ -48203,13 +48233,12 @@ class TestWorkflowHistory:
                 },
             },
             {
-                # sub_agent_start without workflowId -- not a workflow step
+                # user record with JSON content but a non-workflow method
                 "id": "m2",
                 "timestamp": "2026-01-01T00:00:01Z",
                 "payload": {
-                    "type": "sub_agent_start",
-                    "subSessionId": "sess-plain-subagent-placeholder",
-                    "role": "some-role",
+                    "type": "user",
+                    "content": json.dumps({"method": "_kiro/other/notification"}),
                 },
             },
         ]

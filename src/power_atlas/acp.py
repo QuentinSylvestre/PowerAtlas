@@ -3299,30 +3299,16 @@ def _get_tool_diffs_v3(session_id: str) -> "dict[str, dict]":
 def _get_workflow_runs_v3(session_id: str) -> "list[dict]":
     """Extract workflow run history from a v3 session's messages.jsonl.
 
-    Returns a list of workflow runs ordered oldest-first.  Each run is a dict:
-        {
-            "workflowId": "wf_...",
-            "steps": [
-                {
-                    "subSessionId": "sess_...",
-                    "role": "...",
-                    "task": "...",
-                    "status": "success|failed|unknown",
-                    "startedAt": <ISO-8601 string or None>,
-                    "completedAt": <ISO-8601 string or None>,
-                },
-                ...
-            ],
-        }
+    Parses _kiro/workflow/node_start, node_complete, and run_complete
+    notification records (user-type messages with JSON content).
 
-    Inlined in acp.py per the isolation boundary constraint — no import from
-    data_kiro_v3.py.  Follows the _get_tool_diffs_v3 pattern exactly.
+    Pre-probe O2 (2026-10-16): field shapes confirmed from real local data:
+    - node_start carries workflowId, nodeId, type, agentName
+    - node_complete carries workflowId, nodeId, status, capturedOutput
+    - run_complete carries workflowId, status, finalState.workflowName
 
-    Pre-probe O2: field shapes unconfirmed from local data; using documented
-    expected shapes from 261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION
-    Phase 5 spec.  The parser is resilient to missing fields on all sub_agent_*
-    records — any absent key defaults gracefully so real shape deviations are
-    handled silently rather than raising.
+    Returns list of runs ordered oldest-first, each:
+    {workflowId, name, status, startedAt, endedAt, steps: [{nodeId, agentName, status, capturedOutput}]}
     """
     if not _SESSION_ID_RE.fullmatch(session_id):
         return []
@@ -3343,12 +3329,8 @@ def _get_workflow_runs_v3(session_id: str) -> "list[dict]":
         if jsonl_path is None:
             return []
 
-        # runs_map: workflowId -> {"workflowId": str, "steps": list[dict]}
-        # Insertion order preserved (Python 3.7+ dict guarantee).
-        runs_map: "dict[str, dict]" = {}
-        # sub_session_index: subSessionId -> (workflowId, step_index) for
-        # fast lookup when matching sub_agent_complete records.
-        sub_session_index: "dict[str, tuple[str, int]]" = {}
+        runs: "dict[str, dict]" = {}  # workflowId -> run dict
+        run_order: "list[str]" = []   # insertion order for oldest-first
 
         try:
             for raw_line in jsonl_path.read_text(
@@ -3362,52 +3344,66 @@ def _get_workflow_runs_v3(session_id: str) -> "list[dict]":
                 except ValueError:
                     continue
                 payload = msg.get("payload") or {}
-                ptype = payload.get("type")
+                if payload.get("type") != "user":
+                    continue
+                content_str = payload.get("content") or ""
+                if "_kiro/workflow/" not in content_str:
+                    continue
+                try:
+                    inner = json.loads(content_str)
+                except (ValueError, TypeError):
+                    continue
+                method = inner.get("method") or ""
+                wf_id = inner.get("workflowId") or ""
+                if not wf_id or not method.startswith("_kiro/workflow/"):
+                    continue
 
-                if ptype == "sub_agent_start":
-                    wf_id = payload.get("workflowId") or ""
-                    if not wf_id:
-                        # Not a workflow step — skip (plain sub-agents have no
-                        # workflowId; only workflow node launches carry it).
-                        continue
-                    sub_sid = payload.get("subSessionId") or ""
-                    run = runs_map.setdefault(
-                        wf_id, {"workflowId": wf_id, "steps": []}
-                    )
-                    step: "dict" = {
-                        "subSessionId": sub_sid,
-                        "role": payload.get("role") or "",
-                        "task": payload.get("task") or "",
+                if wf_id not in runs:
+                    runs[wf_id] = {
+                        "workflowId": wf_id,
+                        "name": "",
                         "status": "unknown",
-                        "startedAt": payload.get("startedAt") or None,
-                        "completedAt": None,
+                        "startedAt": None,
+                        "endedAt": None,
+                        "steps": [],
                     }
-                    step_idx = len(run["steps"])
-                    run["steps"].append(step)
-                    if sub_sid:
-                        sub_session_index[sub_sid] = (wf_id, step_idx)
+                    run_order.append(wf_id)
+                run = runs[wf_id]
 
-                elif ptype == "sub_agent_complete":
-                    sub_sid = payload.get("subSessionId") or ""
-                    location = sub_session_index.get(sub_sid)
-                    if location is None:
-                        continue
-                    wf_id, step_idx = location
-                    run = runs_map.get(wf_id)
-                    if run is None:
-                        continue
-                    step = run["steps"][step_idx]
-                    raw_status = payload.get("status") or ""
-                    step["status"] = (
-                        raw_status if raw_status in ("success", "failed")
-                        else "unknown"
+                if method == "_kiro/workflow/node_start":
+                    node_type = inner.get("type") or ""
+                    if node_type == "step":
+                        run["steps"].append({
+                            "nodeId": inner.get("nodeId") or "",
+                            "agentName": inner.get("agentName") or "",
+                            "status": "running",
+                            "capturedOutput": None,
+                        })
+                elif method == "_kiro/workflow/node_complete":
+                    node_id = inner.get("nodeId") or ""
+                    status = inner.get("status") or "unknown"
+                    output = inner.get("capturedOutput")
+                    for step in run["steps"]:
+                        if step["nodeId"] == node_id:
+                            step["status"] = status
+                            step["capturedOutput"] = output
+                            break
+                elif method == "_kiro/workflow/run_complete":
+                    run["status"] = inner.get("status") or "unknown"
+                    final = inner.get("finalState") or {}
+                    run["name"] = (
+                        final.get("workflowName")
+                        or final.get("runLabel")
+                        or wf_id
                     )
-                    step["completedAt"] = payload.get("completedAt") or None
+                    root = final.get("root") or {}
+                    run["startedAt"] = root.get("startedAt")
+                    run["endedAt"] = root.get("endedAt")
 
         except Exception:
             return []
 
-        return list(runs_map.values())
+        return [runs[wf_id] for wf_id in run_order]
 
     try:
         return _scan()
