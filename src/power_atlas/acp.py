@@ -3499,7 +3499,7 @@ def _restore_visualizations_from_disk(session_id: str, meta: dict) -> None:
     meta["visualizations"] = meta["visualizations"][-20:]  # cap at 20
 
 
-
+def _stored_session_cwd_v3(session_id: str) -> str:
     """Return workspacePaths[0] from a v3 session.json, or '' on any error.
 
     Validates session_id against _SESSION_ID_RE before any path construction
