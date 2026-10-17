@@ -3009,6 +3009,7 @@ function addVisualizationCard(url, title) {
   card.className = 'acp-msg acp-viz-card';
   card.setAttribute('data-viz-url', url);
   var details = document.createElement('details');
+  details.open = true;  // viz cards start expanded — the user just asked for this
   var summary = document.createElement('summary');
   summary.textContent = title;
   var frame = document.createElement('iframe');
