@@ -3517,6 +3517,73 @@ class TestHandleSubscribeVizReplay:
         viz_frames = [f for f in frames if f["type"] == "visualization"]
         assert len(viz_frames) == 20
 
+    def test_disk_restoration_populates_when_meta_empty(self, acp_session, tmp_path):
+        """_restore_visualizations_from_disk reconstructs meta['visualizations']
+        from messages.jsonl tool_result records after a PA restart cleared
+        in-memory state.  _handle_subscribe calls it when meta is empty, so
+        cards reappear without the agent re-emitting them."""
+        import json as _j
+        import unittest.mock as _m
+        acp_mod, sid = acp_session
+
+        # Build fake kiro sessions tree: tmp_path/.kiro/sessions/<hash>/<sid>/messages.jsonl
+        sess_dir = tmp_path / ".kiro" / "sessions" / "aaaa1234567890ab" / sid
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "messages.jsonl").write_text(
+            _j.dumps({
+                "id": "r1", "timestamp": "2026-01-01T00:00:00.000Z",
+                "payload": {
+                    "type": "tool_result", "toolUseId": "t1",
+                    "content": "Visualization emitted: my-chart-out.html",
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        meta = {}
+        with _m.patch("pathlib.Path.home", return_value=tmp_path):
+            acp_mod._restore_visualizations_from_disk(sid, meta)
+
+        assert len(meta.get("visualizations", [])) == 1
+        assert meta["visualizations"][0]["url"] == f"/api/viz/{sid}/my-chart-out.html"
+        assert meta["visualizations"][0]["title"]  # non-empty title
+
+    def test_subscribe_triggers_disk_restoration_when_meta_empty(
+        self, acp_session, tmp_path
+    ):
+        """_handle_subscribe resends viz frames reconstructed from disk when
+        meta['visualizations'] is absent (simulates a PA restart scenario)."""
+        import json as _j
+        import unittest.mock as _m
+        acp_mod, sid = acp_session
+
+        sess_dir = tmp_path / ".kiro" / "sessions" / "bbbb1234567890ab" / sid
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "messages.jsonl").write_text(
+            _j.dumps({
+                "id": "r2", "timestamp": "2026-01-01T00:00:00.000Z",
+                "payload": {
+                    "type": "tool_result", "toolUseId": "t2",
+                    "content": "Visualization emitted: dashboard-out.html",
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        assert not acp_mod._supervisor.sessions[sid].get("visualizations")
+        with _m.patch("pathlib.Path.home", return_value=tmp_path):
+            acp_mod._handle_subscribe(conn, sid)
+
+        frames = _queued(conn)
+        viz_frames = [f for f in frames if f["type"] == "visualization"]
+        assert len(viz_frames) == 1
+        assert f"/api/viz/{sid}/dashboard-out.html" in viz_frames[0]["payload"]["url"]
+        # Must arrive after history
+        types = [f["type"] for f in frames]
+        assert types.index("visualization") > types.index("history")
+
 
 class TestVizRecording:
     """_handle_emit_visualization records frames into meta['visualizations'].

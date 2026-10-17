@@ -3424,7 +3424,82 @@ def _get_workflow_runs_v3(session_id: str) -> "list[dict]":
         return []
 
 
-def _stored_session_cwd_v3(session_id: str) -> str:
+def _restore_visualizations_from_disk(session_id: str, meta: dict) -> None:
+    """Reconstruct ``meta['visualizations']`` from the kiro-cli session file.
+
+    Scans ``messages.jsonl`` for ``tool_result`` records whose content
+    matches ``"Visualization emitted: <filename>"``, then builds a
+    ``/api/viz/{session_id}/{filename}`` URL for each.  Called by
+    ``_handle_subscribe`` when ``meta['visualizations']`` is empty (e.g.
+    after a PA restart cleared the in-memory meta).
+
+    Phase 1 / SC1: 261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION
+    """
+    import re as _re
+
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return
+
+    sessions_root = Path.home() / ".kiro" / "sessions"
+    jsonl_path = None
+    try:
+        for hash_dir in sessions_root.iterdir():
+            if not hash_dir.is_dir() or hash_dir.name == "cli":
+                continue
+            candidate = hash_dir / session_id / "messages.jsonl"
+            if candidate.is_file():
+                jsonl_path = candidate
+                break
+    except Exception:
+        return
+    if jsonl_path is None:
+        return
+
+    vizs: "list[dict]" = []
+    try:
+        for raw_line in jsonl_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            if "Visualization emitted:" not in raw_line:
+                continue
+            try:
+                msg = json.loads(raw_line)
+            except ValueError:
+                continue
+            payload = msg.get("payload") or {}
+            if payload.get("type") != "tool_result":
+                continue
+            content = str(payload.get("content") or "")
+            m = _re.search(r"Visualization emitted:\s*(\S+\.html)", content)
+            if not m:
+                continue
+            filename = m.group(1)
+            url = f"/api/viz/{session_id}/{filename}"
+            # Skip if already present (avoids duplicates from repeated emits)
+            if any(v["url"] == url for v in vizs):
+                continue
+            title = (filename
+                     .removesuffix("-out.html")
+                     .removesuffix(".html")
+                     .replace("-", " ")
+                     .replace("_", " ")
+                     .strip()
+                     or filename)
+            vizs.append({"url": url, "title": title})
+    except Exception:
+        return
+
+    if not vizs:
+        return
+    existing = meta.setdefault("visualizations", [])
+    existing_urls = {v["url"] for v in existing}
+    for viz in vizs:
+        if viz["url"] not in existing_urls:
+            existing.append(viz)
+    meta["visualizations"] = meta["visualizations"][-20:]  # cap at 20
+
+
+
     """Return workspacePaths[0] from a v3 session.json, or '' on any error.
 
     Validates session_id against _SESSION_ID_RE before any path construction
@@ -9359,11 +9434,11 @@ def _handle_subscribe(conn, session_id):
     if mcp_servers is not None:
         conn.send(envelope("mcp_servers", {"servers": mcp_servers}, session_id))
     # SC1: replay stored viz frames so cards reappear on reconnect.
-    # Broadcast-only frames normally skip _emit(); we re-send them here
-    # explicitly, appended after the history replay so they land at the
-    # end of the transcript.  No separator frame — there is no appropriate
-    # existing frame type for an inline transcript annotation; the viz
-    # cards themselves serve as indicators of restoration.
+    # If meta["visualizations"] is empty (e.g. after a PA restart), try to
+    # reconstruct from the kiro-cli session's messages.jsonl by scanning for
+    # tool_result records with "Visualization emitted: <filename>" content.
+    if not meta.get("visualizations"):
+        _restore_visualizations_from_disk(session_id, meta)
     for viz in meta.get("visualizations", []):
         conn.send(envelope("visualization", {
             "url": viz["url"], "title": viz["title"]
