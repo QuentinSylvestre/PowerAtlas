@@ -219,11 +219,6 @@ SERVER_TYPES = frozenset({
     # and `agent_error` are genuinely new: neither a live session-title update
     # nor an agent-originated inline error frame existed for v2 to reuse.
     "steer_status", "title", "agent_error",
-    # kiro-cli runs one turn at a time per agent process, so a prompt sent while
-    # another session is mid-turn is accepted but held. `queue_status` carries
-    # `{waiting: bool}` for that wait (`session_info_update` kind "queued").
-    # Broadcast-only, like `steer_status`: a transient level, never replayed.
-    "queue_status",
     # v3-only (SC-9, plan Phase 6): a genuine inbound `session/request_permission`
     # *request* (has an id, blocks the turn) translated into a frame the client
     # can render as an interactive multiple-choice question. See
@@ -1260,14 +1255,6 @@ MAX_SESSIONS = 8
 # Both are rebound by `apply_config`/rebindable by tests.
 ACP_IDLE_TTL_SECONDS = 1800.0
 SWEEP_INTERVAL_SECONDS = 60.0
-# How long the agent may run with no session at all before the sweeper stops
-# it. Close is local only (``session/delete`` deletes from disk, see
-# ``close_session``), so kiro-cli keeps every closed session loaded for as long
-# as its process lives; stopping an empty agent is the only thing that releases
-# them. The next ``new_session``/``load_session`` spawns a fresh one, exactly as
-# on the first use after startup. Checked once per sweep tick, so the effective
-# delay is this plus up to ``SWEEP_INTERVAL_SECONDS``. Rebindable by tests.
-AGENT_IDLE_RECYCLE_SECONDS = 900.0
 WATCHDOG_INTERVAL_SECONDS = 5.0
 _WATCHDOG_MAX_ERRORS = 3  # consecutive exceptions before the watchdog cancels itself
 
@@ -3182,8 +3169,8 @@ def _session_limit_message() -> str:
     a 5-process / 531.6 MiB baseline, i.e. 3.0 processes and 161.1 MiB each.
     The ~178 MB it replaces was an earlier eight-session run.
     """
-    return (f"At most {MAX_SESSIONS} sessions at once (~3 processes and "
-            "~161 MB each). Close one from the session list to free a slot — "
+    return (f"At most {MAX_SESSIONS} sessions at once (one kiro-cli process tree "
+            "each; exact cost TBD, measured in Phase 4). Close one from the session list to free a slot — "
             "open it and press Close; one tab reaches them all. Restarting "
             "PowerAtlas releases every session, and sessions left idle are "
             "reclaimed on their own.")
@@ -3797,9 +3784,11 @@ class _Supervisor:
         self._reader: threading.Thread | None = None
         self._write_lock = threading.Lock()
         self._start_lock: asyncio.Lock | None = None
-        # Monotonic time the agent was first seen alive with nothing using it;
-        # `None` while anything is. Read and reset only by `_maybe_recycle_idle`.
-        self._idle_since: float | None = None
+        # Per-supervisor lifecycle task handles (Phase 2: per-session sweep and watchdog).
+        # Started by _start_lifecycle_tasks() after registration; cancelled by
+        # cancel_lifecycle_tasks() when the session closes or the process dies.
+        self._sweep_task_handle: asyncio.Task | None = None
+        self._watchdog_task_handle: asyncio.Task | None = None
         # One open grant per user-started MCP sign-in: token -> deadline
         # (monotonic). Added by `_handle_mcp_signin`, which alone removes its
         # own token when the sign-in ends, so concurrent sign-ins cannot close
@@ -4218,33 +4207,6 @@ class _Supervisor:
         proc, job = self._detach("The agent was shut down.")
         self._dispose(proc, job, "shutdown")
 
-    def _maybe_recycle_idle(self, now: float) -> bool:
-        """Stop an agent that has had no session for ``AGENT_IDLE_RECYCLE_SECONDS``.
-
-        "Nothing using it" is: no session, no reservation (a ``new_session``
-        between its reserve and its first await), no request in flight, no
-        sub-agent session. Any of those resets the clock, so a recycle can
-        only land on an agent the next ``new_session`` would have found idle.
-        Quiet on purpose: ``_discard`` sends no ``agent_died`` frame, and the
-        reader thread's later death callback is ignored for a process that
-        is no longer ``_proc``. Returns whether it recycled.
-        """
-        if (not self.alive() or self.sessions or _reserved
-                or self._pending or self.subagent_sessions):
-            self._idle_since = None
-            return False
-        if self._idle_since is None:
-            self._idle_since = now
-            return False
-        idle = now - self._idle_since
-        if idle < AGENT_IDLE_RECYCLE_SECONDS:
-            return False
-        self._idle_since = None
-        log.info("ACP: stopping idle agent (no sessions for %.0fs); the next "
-                 "session starts a fresh one", idle)
-        self._discard("Recycled: no sessions.")
-        return True
-
     def _discard(self, reason: str) -> None:
         """Unbind the current process and kill it off the event loop.
 
@@ -4270,6 +4232,7 @@ class _Supervisor:
         of the ``new_session`` that took it, and zeroing the counter here would
         let those releases drive it negative.
         """
+        self.cancel_lifecycle_tasks()
         proc, self._proc = self._proc, None
         job, self._job = self._job, None
         self._ready = False
@@ -4830,25 +4793,6 @@ class _Supervisor:
                             "cancelled (%s): %s", entry.get("kiro_id"), why, exc)
             return
         await self._answer_permission_cancelled(entry.get("kiro_id"), why)
-
-    def _set_queued_behind(self, session_id: str, behind: str | None) -> None:
-        """Record (or clear) that kiro-cli is holding this session's prompt
-        behind another session's turn, and tell the pages when that changes.
-
-        ``meta["queued_behind"]`` is the other session's id. The pages read the
-        ``queue_status`` frame to show that the prompt is waiting its turn.
-        """
-        meta = self.sessions.get(session_id)
-        if meta is None:
-            return
-        if meta.get("queued_behind") == behind:
-            return
-        if behind is None:
-            meta.pop("queued_behind", None)
-        else:
-            meta["queued_behind"] = behind
-        _registry.broadcast(session_id, envelope(
-            "queue_status", {"waiting": behind is not None}, session_id))
 
     def touch_used(self, session_id) -> None:
         """Record that a *person* used this session. Resets the sweeper clock.
@@ -6984,12 +6928,6 @@ class _Supervisor:
         if method == SUBAGENT_LIST_METHOD:
             self._on_subagent_list(params)
             return
-        if (kind in ("agent_message_chunk", "agent_thought_chunk", "tool_call")
-                and isinstance(session_id, str)
-                and (self.sessions.get(session_id) or {}).get("queued_behind")):
-            # Real output for a held prompt: it is running now, whether or not
-            # kiro-cli sent a `turn_start` first.
-            self._set_queued_behind(session_id, None)
         if kind in ("agent_message_chunk", "user_message_chunk"):
             _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
             if not isinstance(_kiro_meta, dict):
@@ -7255,21 +7193,8 @@ class _Supervisor:
                         "content": _as_text(_kiro_meta.get("content"))[:MAX_STEER_CHARS],
                     }, session_id))
                 return
-            if _info_kind == "queued":
-                # Not a turn yet: kiro-cli accepted the prompt but is running
-                # another session's turn (`activeSessionId`) and runs this one
-                # when that ends. No first-party client renders this (the TUI
-                # drives one session; KiroCrew has no handler), so the wait was
-                # invisible; `queue_status` shows it on the pages.
-                _behind = _kiro_meta.get("activeSessionId")
-                if isinstance(session_id, str) and isinstance(_behind, str) and _behind:
-                    self._set_queued_behind(session_id, _behind)
-                return
             if _info_kind == "turn_start":
-                # The queued prompt is now actually running.
-                if isinstance(session_id, str):
-                    self._set_queued_behind(session_id, None)
-                # Fall through to the INFO log: this kind was always logged.
+                pass  # Fall through to the INFO log: this kind was always logged.
             if _info_kind == "focus_update":
                 _title = _as_text(_kiro_meta.get("title"))[:MAX_TITLE_CHARS]
                 if _title and isinstance(session_id, str):
@@ -8542,6 +8467,65 @@ class _Supervisor:
                         "stopping watchdog; crash detection inactive")
                     return
 
+    # -- Per-supervisor lifecycle tasks (Phase 2) ----------------------------------
+
+    def _start_lifecycle_tasks(self) -> None:
+        """Start per-supervisor sweep and watchdog tasks.
+
+        Called once, after the session is registered in _supervisors. The sweep
+        task runs _sweep_once_local() every SWEEP_INTERVAL_SECONDS; the watchdog
+        task runs _watchdog_loop(). Both are cancelled by cancel_lifecycle_tasks()
+        when the session closes or the process dies (_detach path).
+        """
+        self._sweep_task_handle = asyncio.create_task(
+            self._sweep_once_local(), name="acp-sweep-local")
+        self._watchdog_task_handle = asyncio.create_task(
+            self._watchdog_loop(), name="acp-watchdog")
+
+    def cancel_lifecycle_tasks(self) -> None:
+        """Cancel per-supervisor sweep and watchdog tasks on close or crash.
+
+        Called from _detach() so both the normal-close path (close_session →
+        _discard → _detach) and the crash path (_on_agent_death → _detach) are
+        covered. Idempotent: safe to call when tasks were never started or are
+        already cancelled.
+        """
+        for handle in (self._sweep_task_handle, self._watchdog_task_handle):
+            if handle is not None:
+                handle.cancel()
+        self._sweep_task_handle = None
+        self._watchdog_task_handle = None
+
+    async def _sweep_once_local(self) -> None:
+        """Periodic idle-TTL sweep for this supervisor's single session.
+
+        Runs every SWEEP_INTERVAL_SECONDS. Self-cancels when the session is
+        already closed; cancelled externally by cancel_lifecycle_tasks() on the
+        normal-close and crash paths.
+        """
+        while True:
+            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+            if not self.sessions:
+                return  # session already closed; task will be cancelled shortly
+            now = time.monotonic()
+            session_id = next(iter(self.sessions))
+            meta = self.sessions[session_id]
+            if _sweepable(session_id, meta, now,
+                          has_active_workflow=self.has_active_workflow(session_id),
+                          awaits_person=session_id in self.sessions_awaiting_person(),
+                          supervisor=self):
+                self.closing.add(session_id)
+                try:
+                    idle = now - meta.get("last_used", now)
+                    log.info("ACP sweeper: releasing session %s, idle %.0fs",
+                             session_id, idle)
+                    await self.close_session(session_id)
+                except Exception:
+                    log.exception("ACP sweeper: close_session failed for %s",
+                                  session_id)
+                    self.closing.discard(session_id)
+                return
+
 
 # Module-level supervisor pool (replaces _supervisor singleton)
 _supervisors: dict[str, "_Supervisor"] = {}  # session_id -> supervisor
@@ -9408,7 +9392,6 @@ def _handle_subscribe(conn, session_id):
         "created": False,
         "turnActive": session_id in sup.inflight,
         "contextPercent": meta.get("contextPercent"),
-        "queued": bool(meta.get("queued_behind")),
     }, session_id))
     history = sup.history.get(session_id)
     if history is None:
@@ -9527,6 +9510,7 @@ async def _handle_load(conn, session_id):
     _supervisors[session_id] = sup
     sup._session_id = session_id
     _reserved -= 1
+    sup._start_lifecycle_tasks()
     failure = None
     try:
         try:
@@ -9672,6 +9656,7 @@ async def _handle_new(conn, payload):
     _supervisors[session_id] = sup
     sup._session_id = session_id
     _reserved -= 1
+    sup._start_lifecycle_tasks()
     record = sup.sessions.get(session_id)
     if permission_mode and isinstance(record, dict):
         record["permission_mode"] = permission_mode
@@ -9710,7 +9695,6 @@ async def _handle_new(conn, payload):
         "turnActive": session_id in sup.inflight if meta else False,
         "contextPercent": meta.get("contextPercent") if meta else None,
     }, session_id))
-    # Omits "queued": new sessions cannot be queued_behind at creation time.
     # Phase 8 live-verification fix: SC-1's replay-buffer mechanism (see
     # new_session()'s "SC-1 replay isolation" block) commits any early
     # frames -- e.g. KAS's immediate post-create fetch_cloud_config tool
@@ -9943,8 +9927,6 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
         # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
         _swept_permissions = _pop_pending_permissions(
             session_id, keep_live_steps=True)
-        # A turn that ends while still held (cancelled, errored) is no longer waiting.
-        sup._set_queued_behind(session_id, None)
         # Everything between the sweep and the `cancelled` answers sits in its
         # own `try`, so the answers are written even when a step here raises
         # (`_emit`, `_flush_bubble` and `_notify` all can). Skipping them
@@ -10141,14 +10123,6 @@ async def _handle_steer(conn, session_id, payload):
             "No turn is running -- steer is only available during an active turn.",
             session_id))
         log.warning("ACP steer refused: [%s] session=%s", "no_turn_in_progress", session_id)
-        return
-    if (sup.sessions.get(session_id) or {}).get("queued_behind"):
-        conn.send(error_frame(
-            "turn_queued",
-            "This prompt is waiting for another session's turn to finish -- "
-            "steer is available once it starts.",
-            session_id))
-        log.warning("ACP steer refused: [%s] session=%s", "turn_queued", session_id)
         return
     raw = payload.get("message")
     if not isinstance(raw, (str, type(None))):
@@ -10801,33 +10775,6 @@ def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty
 # -- the idle sweeper ------------------------------------------------------
 
 
-# session id -> consecutive failed close attempts. Exists so a session the
-# agent will never release logs one traceback rather than one a minute for the
-# application's lifetime: measured against kiro-cli with
-# ``_kiro.dev/session/terminate`` removed, one stuck session failed 23 times in
-# 120 s at a 5 s interval, each with a full traceback, into a log this path does
-# not rotate.
-#
-# **Bounded by construction, and it has to be**: replacing unbounded log growth
-# with unbounded memory growth would be no fix at all. `_sweep_once` drops every
-# key that is no longer a live session before it does anything else, so the dict
-# can only ever hold ids drawn from `_supervisor.sessions` — at most
-# MAX_SESSIONS (<= 16) entries. That covers every way a session leaves without
-# its close ever succeeding: swept by another path, closed by a user, or dropped
-# wholesale by `_detach` when the agent dies.
-_sweep_failures: dict[str, int] = {}
-
-# Sessions the sweeper has logged as kept because they wait on a person, so the
-# INFO line is written once per hold rather than once per tick. Pruned by
-# `_sweep_once` to sessions that are still live and still waiting, so it is
-# bounded like `_sweep_failures`.
-_sweep_held_logged: set[str] = set()
-
-# Consecutive sweeper ticks on which `sessions_awaiting_person` raised, so a
-# persistent fault logs one traceback and then one short line a tick.
-_sweep_awaiting_failures = 0
-
-
 def _sweepable(session_id: str, meta: dict, now: float, *,
                has_active_workflow: bool, awaits_person: bool,
                supervisor=None) -> bool:
@@ -10890,17 +10837,14 @@ def _sweepable(session_id: str, meta: dict, now: float, *,
 
 
 async def _sweep_once() -> None:
-    """One pass over the live sessions. Reclaims what nobody is using.
+    """Global sweep: workflow-row reap, SC-1 orphan-buffer cleanup, and presence backstop.
 
-    What sweeping actually recovers is measured, and it is less than the word
-    implies: on kiro-cli v3, all sessions share one process tree, and the close is
-    local only (kiro-cli keeps the session loaded) — no per-session processes are freed.
-    It does **not** kill a tool subprocess the agent left running — measured
-    2026-08-01, a ``pwsh.exe``/``PING.EXE`` pair outlived terminate by the whole
-    observation window. Such an orphan can only arise after a turn ended or was
-    cancelled, since condition 4 keeps a session with a live turn off this path
-    entirely, and it is reaped when PowerAtlas exits and its job object closes.
-    Recorded here so the sweeper's claim is not read as more than it is.
+    Idle-TTL reclaim is handled by per-supervisor _sweep_once_local() tasks
+    (Phase 2). This global pass runs only:
+    1. _workflow_reap() per supervisor — staleness-bounds on workflow step rows.
+    2. SC-1 orphan-buffer cleanup — pending_early_frames entries for sessions
+       that never completed new_session().
+    3. _publish_live_all() backstop — self-heals any missed presence publish.
     """
     now = time.monotonic()
     # Backstop for `_publish_live`. Every mutation of `sessions` calls it, but
@@ -10919,112 +10863,6 @@ async def _sweep_once() -> None:
             _sw_s._workflow_reap()
         except Exception:
             log.exception("ACP sweeper: reaping stale workflow rows failed")
-    # Forget the failure counts of sessions that are no longer here, whatever
-    # took them — this is what keeps `_sweep_failures` bounded by the live
-    # session count rather than growing for the application's lifetime.
-    for gone in tuple(_sweep_failures):
-        if not any(gone in s.sessions for s in _supervisors.values()):
-            del _sweep_failures[gone]
-    # `close_session` mutates `sessions`, and a live iterator over a dict that
-    # changes size raises RuntimeError.
-    global _sweep_awaiting_failures
-    fallback = False
-    try:
-        awaiting: set[str] = set()
-        for _sw_s in list(_supervisors.values()):
-            awaiting.update(_sw_s.sessions_awaiting_person())
-        _sweep_awaiting_failures = 0
-    except Exception:
-        _sweep_awaiting_failures += 1
-        if _sweep_awaiting_failures == 1:
-            log.exception("ACP sweeper: reading the open requests failed; "
-                          "holding every session")
-        else:
-            log.warning("ACP sweeper: reading the open requests failed again "
-                        "(%d consecutive; traceback logged on the first); "
-                        "holding every session", _sweep_awaiting_failures)
-        awaiting = set()
-        for _sw_s in list(_supervisors.values()):
-            awaiting.update(_sw_s.sessions)
-        fallback = True
-    _all_sessions: set[str] = set()
-    for _sw_s in list(_supervisors.values()):
-        _all_sessions.update(_sw_s.sessions)
-    for held in tuple(_sweep_held_logged):
-        if held not in awaiting or held not in _all_sessions:
-            _sweep_held_logged.discard(held)
-    for _sw_sup in list(_supervisors.values()):
-        for session_id, meta in tuple(_sw_sup.sessions.items()):
-          is_awaiting = session_id in awaiting
-          if not _sweepable(session_id, meta, now,
-                            has_active_workflow=_sw_sup.has_active_workflow(session_id),
-                            awaits_person=is_awaiting,
-                            supervisor=_sw_sup):
-              if (is_awaiting and not fallback and session_id not in _sweep_held_logged
-                      and _sweepable(session_id, meta, now,
-                                     has_active_workflow=_sw_sup.has_active_workflow(session_id),
-                                     awaits_person=False,
-                                     supervisor=_sw_sup)):
-                  # Once per hold, not once per tick.
-                  _sweep_held_logged.add(session_id)
-                  log.info("ACP sweeper: keeping idle session %s: it has an open "
-                           "approval or question", session_id)
-              continue
-          # Claimed in the synchronous prefix, before the first await, exactly as
-          # `_handle_close` does. Without it `close_session` leaves the session
-          # in `sessions` and out of `closing` for the whole terminate
-          # round-trip, so a prompt arriving in that window passes every guard
-          # and starts a turn on a session being released — the window
-          # `_handle_prompt`'s `close_in_progress` refusal exists to close.
-          _sw_sup.closing.add(session_id)
-          try:
-              idle = now - meta.get("last_used", now)
-              log.info("ACP sweeper: releasing session %s, idle %.0fs",
-                       session_id, idle)
-              # Deliberately not shielded — and not because a shield would hold
-              # this task. It would not: cancelling the sweeper cancels the
-              # shield's *outer* future and `CancelledError` raises here at once
-              # (~0.1 ms measured), so the teardown budget is met either way.
-              # What a shield would actually buy is an orphan. The inner
-              # `close_session` would keep running with nothing awaiting it,
-              # issuing a terminate round-trip against an agent that
-              # `acp.shutdown()` is killing in the same breath, on a loop that is
-              # about to close — a stray task racing the job-object kill and
-              # logging into a torn-down world. Letting the cancel reach the
-              # close is what keeps teardown to one sequence.
-              #
-              # No separate subscriber-notification step follows: `close_session`
-              # already broadcasts `session_closed` and detaches every subscriber
-              # itself (D5, plan Phase 1) -- reproducing that here would tell each
-              # socket twice.
-              await _sw_sup.close_session(session_id)
-              # This session is released; nothing is owed to the next failure.
-              _sweep_failures.pop(session_id, None)
-          except Exception:
-              # WARNING and carry on, never a dead task: if a kiro-cli build
-              # drops the private terminate method, the sweeper degrades to
-              # memory growth rather than taking itself out on the first tick.
-              #
-              # The traceback is worth its size exactly once per session. A
-              # session that cannot be released fails again on every tick, and at
-              # SWEEP_INTERVAL_SECONDS that is one multi-line traceback a minute,
-              # per stuck session, forever. So: the whole thing the first time,
-              # and one countable line after it, which is what a reader needs to
-              # tell "still stuck" from "stuck again for a new reason".
-              failures = _sweep_failures[session_id] = (
-                  _sweep_failures.get(session_id, 0) + 1)
-              if failures == 1:
-                  log.warning("ACP sweeper: releasing session %s failed",
-                              session_id, exc_info=True)
-              else:
-                  log.warning(
-                      "ACP sweeper: releasing session %s failed again "
-                      "(%d consecutive; traceback logged on the first)",
-                      session_id, failures)
-              continue
-          finally:
-              _sw_sup.closing.discard(session_id)
-
     # SC-1 orphan-buffer sweep: a _pending_early_frames entry for a
     # session_id that never completes new_session() (RPC failure, or the
     # id belonged to a different in-flight reservation that never
