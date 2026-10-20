@@ -903,7 +903,7 @@ None.
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Core migration — routing, spawn, handlers [QA] | Complete | commits 88efd8a, d760bac |
-| 2 | Dead code removal and per-supervisor sweep [QA] | Not started | |
+| 2 | Dead code removal and per-supervisor sweep [QA] | Complete | commit ff417f6 |
 | 3 | Test fixture refactor | Not started | |
 | 4 | Documentation ripple and memory measurement [QA] | Not started | |
 
