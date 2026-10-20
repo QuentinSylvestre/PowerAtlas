@@ -902,7 +902,7 @@ None.
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Core migration — routing, spawn, handlers [QA] | Not started | |
+| 1 | Core migration — routing, spawn, handlers [QA] | Complete | commits 88efd8a, d760bac |
 | 2 | Dead code removal and per-supervisor sweep [QA] | Not started | |
 | 3 | Test fixture refactor | Not started | |
 | 4 | Documentation ripple and memory measurement [QA] | Not started | |
@@ -929,6 +929,32 @@ None.
 | `memory/MEMORY.md` | Propose update: workflow step `_supervisor._request` → `_find_supervisor` (~lines 596–599) — user approval required | 4 |
 
 ## 9) Implementation Divergences from Plan
+
+### Phase 1 — Implementation (2026-10-20, code: 88efd8a, fix: d760bac)
+
+**Scope**: `src/power_atlas/acp.py`, `src/power_atlas/presence.py`, `src/power_atlas/web.py`
+
+**Delivered per plan**: `_supervisor` singleton removed; `_supervisors: dict[str, _Supervisor]` + `_reserved: int` added; `_find_supervisor()`, `_deregister_supervisor()`, `_publish_live_all()`, module-level `at_capacity()` added; all `_handle_*` functions route through `_find_supervisor()`; `_handle_new`/`_handle_load` create per-session supervisors with registration-before-early-return; `presence.py` D32 guard generalised to `frozenset` of all ACP pids; `web.py` helpers iterate `_supervisors` dict; sibling-copy optimization removed.
+
+**Divergences**:
+- `load_session()` sibling-copy lines removed as planned; confirmed no equivalent in `new_session()` path.
+- `at_capacity()` moved to module level; `_find_permission_entry()` (a related helper) also moved to module level as a natural consequence.
+- The `_sweep_once()` inner `for session_id, meta` loop used 2-space relative indentation (6 vs. 8 expected) — fixed in d760bac.
+
+**Review findings** (Cycle 1 — full effort — Green):
+- M1: `_handle_new`/`_handle_load` missing `sup._discard()` on `new_session()`/`load_session()` failure — orphan process until kiro-cli idle timeout. **Fixed** (d760bac): added `sup._discard("session creation/load failed")` to all four exception handlers.
+- L1: Redundant `_publish_live_all()` calls on close (4×, harmless). Deferred.
+- L2: Stale docstring refs to `_supervisor.*` at acp.py lines 8683, 8685, 8808. Deferred to Phase 4 doc ripple.
+- L3: 2-space indentation in `_sweep_once()` inner loop. **Fixed** (d760bac).
+
+**Live QA**: PASS (2026-10-20, PA restarted per pre-approved grant):
+- EC-1 ✅ PA loads; `/api/acp/sessions` responds
+- EC-2 ✅ Session B ("session B reply test") responded immediately without waiting for Session A's turn to finish; no serialization observed
+- EC-3 ✅ `_supervisors` dict confirmed; `_supervisor` singleton removed; `_reserved` int = 0
+- EC-4 ✅ `presence._acp_live` is a dict
+- SC-1 ✅ 0 "queued" messages in orchestrator.log (last 200 lines) during the parallel test
+- EC-6 ✅ Create-close-create cycle: both sessions closed (0/8), new session (`sess_bba968ed`) created without capacity refusal
+- Process kill ✅ kiro-cli count: 8 with 2 sessions → 6 with 0 sessions (delta of 2, matches sessions created and closed)
 
 ## Follow-up Work (Deferred)
 
