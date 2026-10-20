@@ -3356,29 +3356,23 @@ def _workflow_overlay_status(verdict: str, workflow_state: str | None) -> str:
     return verdict
 
 
-def _workflow_states(supervisor, held) -> dict[str, str]:
-    """`{session id: "working" | "waiting"}` for the held sessions with a live
-    workflow: ONE snapshot per request, **taken on the event loop**.
-
-    The supervisor's state is loop-owned and unlocked, so a request takes this
-    where it takes `held` and hands the dict to the `asyncio.to_thread` worker
-    as an argument; the worker never calls the supervisor. A session a person
-    must answer (an approval, a question or a step question) is left out: its
-    status is `waiting` (`_awaiting_person_ids`), and a running workflow must
-    not turn that into `working` (`_Supervisor.sessions_awaiting_person`; a
-    failure of that read drops every overlay). A failure reading ONE session's workflow state drops
-    only that session's overlay: it fails open to the parent's own status, and
-    is logged once with a traceback, then as a short repeat line
-    (`_workflow_state_fault`).
-    261008_ACP_SETTINGS_ALIGNMENT_AND_WORKFLOW_SUPPORT Phase 3
+def _workflow_states(sups_or_sup, held) -> dict[str, str]:
+    """`{session id: "working" | "waiting"}` for held sessions with a live
+    workflow. Accepts a dict of ``_Supervisor`` objects or a single one (compat).
     """
-    if supervisor is None or not held:
+    if isinstance(sups_or_sup, dict):
+        sups = list(sups_or_sup.values())
+    elif sups_or_sup is not None:
+        sups = [sups_or_sup]
+    else:
+        sups = []
+    if not sups or not held:
         return {}
     try:
-        pending = supervisor.sessions_awaiting_person()
+        pending: set[str] = set()
+        for _s in sups:
+            pending.update(_s.sessions_awaiting_person())
     except Exception:
-        # Without it a permission-pending session could not be told apart, so
-        # no overlay at all is the safe side.
         _workflow_state_fault(_WORKFLOW_PENDING_FAULT)
         return {}
     _workflow_state_recovered(_WORKFLOW_PENDING_FAULT)
@@ -3386,52 +3380,53 @@ def _workflow_states(supervisor, held) -> dict[str, str]:
     for sid in held:
         if sid in pending:
             continue
-        # Per session: one poisoned session loses only its own overlay.
-        try:
-            state = supervisor.workflow_state(sid)
-        except Exception:
-            _workflow_state_fault(sid)
-            continue
-        _workflow_state_recovered(sid)
-        if state:
-            out[sid] = state
+        for _s in sups:
+            if sid not in _s.sessions:
+                continue
+            try:
+                state = _s.workflow_state(sid)
+            except Exception:
+                _workflow_state_fault(sid)
+                break
+            _workflow_state_recovered(sid)
+            if state:
+                out[sid] = state
+            break
     return out
 
 
-def _inflight_ids(supervisor, held) -> frozenset[str] | None:
-    """The held sessions with a prompt in flight: ONE snapshot per request,
-    **taken on the event loop** beside `_workflow_states`.
-
-    `None` when there is no supervisor reading (no supervisor, or the read
-    failed): the status call sites then keep the legacy "working" for a session
-    the classifier cannot read (`_resolved_session_status`). An empty frozenset
-    is a real answer: nothing in flight.
-    """
-    if supervisor is None:
+def _inflight_ids(sups_or_sup, held) -> frozenset[str] | None:
+    """The held sessions with a prompt in flight. Accepts a dict of supervisors."""
+    if isinstance(sups_or_sup, dict):
+        sups = list(sups_or_sup.values())
+    elif sups_or_sup is not None:
+        sups = [sups_or_sup]
+    else:
         return None
     try:
-        return frozenset(sid for sid in held if sid in supervisor.inflight)
+        inflight: set[str] = set()
+        for _s in sups:
+            inflight.update(sid for sid in held if sid in _s.inflight)
+        return frozenset(inflight)
     except Exception:
         log.debug("ACP listing: could not read in-flight prompts", exc_info=True)
         return None
 
 
-def _awaiting_person_ids(supervisor, held) -> frozenset[str] | None:
-    """The held sessions a person must answer (a pending approval, agent
-    question or workflow step question): ONE snapshot per request, **taken on
-    the event loop** beside `_workflow_states`, from
-    `_Supervisor.sessions_awaiting_person`.
-
-    `None` when there is no supervisor reading (no supervisor, or the read
-    failed): no session is overridden, so a failure fails open to each
-    session's own status (`_person_override_status`). A failure is logged
-    with a traceback once, then as a short repeat line (`_workflow_state_fault`).
+def _awaiting_person_ids(sups_or_sup, held) -> frozenset[str] | None:
+    """The held sessions a person must answer. Accepts a dict of supervisors.
     261012_ACP_NEEDS_ATTENTION_QUESTIONS_AND_WORKFLOW_STEP_MESSAGES Phase 5 step 5
     """
-    if supervisor is None:
+    if isinstance(sups_or_sup, dict):
+        sups = list(sups_or_sup.values())
+    elif sups_or_sup is not None:
+        sups = [sups_or_sup]
+    else:
         return None
     try:
-        awaiting = supervisor.sessions_awaiting_person()
+        awaiting: set[str] = set()
+        for _s in sups:
+            awaiting.update(_s.sessions_awaiting_person())
         out = frozenset(sid for sid in held if sid in awaiting)
     except Exception:
         _workflow_state_fault(_AWAITING_PERSON_FAULT)
@@ -4355,16 +4350,16 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     process took in the meantime is exactly the wrong failure to cache.
     """
     response.headers["Cache-Control"] = "no-store"
-    supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
-    held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
+    _sups = getattr(acp, "_supervisors", {}) if acp is not None else {}
+    held = frozenset(sid for _s in _sups.values() for sid in _s.sessions)
     capacity = {
-        "held": ((len(held) + supervisor._reserved) if supervisor is not None else 0),
+        "held": len(held) + (getattr(acp, "_reserved", 0) if acp is not None else 0),
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
     # Taken here, on the loop, with `held`: the worker only receives the dict.
-    workflow_states = _workflow_states(supervisor, held)
-    inflight = _inflight_ids(supervisor, held)
-    awaiting = _awaiting_person_ids(supervisor, held)
+    workflow_states = _workflow_states(_sups, held)
+    inflight = _inflight_ids(_sups, held)
+    awaiting = _awaiting_person_ids(_sups, held)
     if mode == "recent":
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
@@ -4424,19 +4419,19 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
     second reader of the same store, not a wider one.
     """
     response.headers["Cache-Control"] = "no-store"
-    supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
-    held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
+    _sups = getattr(acp, "_supervisors", {}) if acp is not None else {}
+    held = frozenset(sid for _s in _sups.values() for sid in _s.sessions)
     capacity = {
-        "held": ((len(held) + supervisor._reserved) if supervisor is not None else 0),
+        "held": len(held) + (getattr(acp, "_reserved", 0) if acp is not None else 0),
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
     available = frozenset(data.available_providers())
     providers = frozenset({provider}) & available if provider else available
     sort = project_sort if project_sort in ("recent", "alpha") else "recent"
     # Taken here, on the loop, with `held`: the worker only receives the dict.
-    workflow_states = _workflow_states(supervisor, held)
-    inflight = _inflight_ids(supervisor, held)
-    awaiting = _awaiting_person_ids(supervisor, held)
+    workflow_states = _workflow_states(_sups, held)
+    inflight = _inflight_ids(_sups, held)
+    awaiting = _awaiting_person_ids(_sups, held)
     if mode == "recent":
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
@@ -4765,13 +4760,13 @@ async def api_dashboard_overview_live(response: Response,
     response.headers["Cache-Control"] = "no-store"
     if filter_ not in overview.LIVE_FILTERS:
         filter_ = "all"
-    sup = getattr(acp, "_supervisor", None) if acp is not None else None
+    _sups = getattr(acp, "_supervisors", {}) if acp is not None else {}
     held = {sid: (m.get("cwd", "") if isinstance(m, dict) else "")
-            for sid, m in (sup.sessions.items() if sup is not None else [])}
+            for _s in _sups.values() for sid, m in _s.sessions.items()}
     # Taken here, on the loop, with `held`: the worker only receives the dict.
-    workflow_states = _workflow_states(sup, held)
-    inflight = _inflight_ids(sup, held)
-    awaiting = _awaiting_person_ids(sup, held)
+    workflow_states = _workflow_states(_sups, held)
+    inflight = _inflight_ids(_sups, held)
+    awaiting = _awaiting_person_ids(_sups, held)
     return await asyncio.to_thread(
         _overview_live, held, filter_, workflow_states, inflight, awaiting=awaiting)
 
@@ -4853,11 +4848,13 @@ async def api_dashboard_attention(response: Response):
     (`_workflow_state_fault`): the dashboard polls every 5 s.
     """
     response.headers["Cache-Control"] = "no-store"
-    sup = getattr(acp, "_supervisor", None) if acp is not None else None
-    if sup is None:
+    _sups = getattr(acp, "_supervisors", {}) if acp is not None else {}
+    if not _sups:
         return {"items": [], "count": 0}
     try:
-        items = sup.attention_snapshot()
+        items: list[dict] = []
+        for _s in _sups.values():
+            items.extend(_s.attention_snapshot())
     except Exception:
         _workflow_state_fault(_ATTENTION_FAULT)
         return {"items": [], "count": 0}
@@ -4941,10 +4938,10 @@ async def api_acp_workspaces(response: Response):
     and the same pair the listing route reports.
     """
     response.headers["Cache-Control"] = "no-store"
-    supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
-    held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
+    _sups = getattr(acp, "_supervisors", {}) if acp is not None else {}
+    held = frozenset(sid for _s in _sups.values() for sid in _s.sessions)
     capacity = {
-        "held": ((len(held) + supervisor._reserved) if supervisor is not None else 0),
+        "held": len(held) + (getattr(acp, "_reserved", 0) if acp is not None else 0),
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
     return await asyncio.to_thread(_acp_workspaces, capacity)
@@ -5192,9 +5189,8 @@ async def api_acp_delete_sessions(request: Request):
         failed_total: list[dict] = []
         while all_ids:
             batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
-            sv3 = getattr(acp, "_supervisor", None)
-            held = (frozenset(acp._supervisor.sessions)  # event-loop snapshot (D9)
-                    | frozenset(sv3.sessions if sv3 is not None else ()))
+            _sups_d = getattr(acp, "_supervisors", {})
+            held = frozenset(sid for _s in _sups_d.values() for sid in _s.sessions)
             result = await asyncio.to_thread(_acp_delete_many, batch, held)
             deleted_total.extend(result["deleted"])
             failed_total.extend(result["failed"])
@@ -5245,9 +5241,8 @@ async def api_acp_delete_sessions(request: Request):
     # Cross-engine held-set union (Step 9 final review fix, High): the
     # per-session-ID path never got the same union the workspace-cwd path
     # above already has — see that comment for the full rationale.
-    sv3 = getattr(acp, "_supervisor", None)
-    held = (frozenset(acp._supervisor.sessions)
-            | frozenset(sv3.sessions if sv3 is not None else ()))
+    _sups_d = getattr(acp, "_supervisors", {})
+    held = frozenset(sid for _s in _sups_d.values() for sid in _s.sessions)
     result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
     return JSONResponse({
         "deleted": result["deleted"],
@@ -7101,11 +7096,11 @@ async def api_session_availability(response: Response, sid: str = "", cwd: str =
         return JSONResponse({"error": "invalid session id"}, status_code=400)
 
     # Supervisor state is loop-owned: read here, on the loop, not in the worker.
-    supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
-    held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
-    workflow_states = _workflow_states(supervisor, held & {sid})
-    inflight = _inflight_ids(supervisor, held & {sid})
-    awaiting = _awaiting_person_ids(supervisor, held & {sid})
+    _sups = getattr(acp, "_supervisors", {}) if acp is not None else {}
+    held = frozenset(s2 for _s in _sups.values() for s2 in _s.sessions)
+    workflow_states = _workflow_states(_sups, held & {sid})
+    inflight = _inflight_ids(_sups, held & {sid})
+    awaiting = _awaiting_person_ids(_sups, held & {sid})
 
     def _compute() -> tuple[str, str]:
         availability = _acp_availability([sid], held)
@@ -7706,7 +7701,8 @@ def _viz_session_for(session_id: str, p: Path) -> tuple[str, str] | dict:
     can share a folder (every "agent's own folder" session does), and then the
     caller has to say which; the message tells it how.
     """
-    sessions = acp._supervisor.sessions
+    _sups_v = getattr(acp, "_supervisors", {})
+    sessions = {sid: meta for _s in _sups_v.values() for sid, meta in _s.sessions.items()}
     if session_id and session_id in sessions:
         cwd = sessions[session_id].get("cwd", "")
         if not cwd:
@@ -7795,7 +7791,8 @@ def _handle_emit_visualization(args: dict) -> dict:
     acp._registry.broadcast(session_id, frame)
 
     # Record for replay on reconnect (SC1 — Phase 1).
-    meta = acp._supervisor.sessions.get(session_id)
+    _vs_m = acp._find_supervisor(session_id) if hasattr(acp, "_find_supervisor") else None
+    meta = _vs_m.sessions.get(session_id) if _vs_m is not None else None
     if meta is not None:
         meta.setdefault("visualizations", []).append({
             "url": url_path,
@@ -8033,7 +8030,9 @@ async def viz_file(session_id: str, filename: str):
     if not acp:
         return _not_found
 
-    session = acp._supervisor.sessions.get(session_id)
+    session = (acp._find_supervisor(session_id).sessions.get(session_id)
+               if hasattr(acp, "_find_supervisor") and acp._find_supervisor(session_id) is not None
+               else None)
     cwd = (session.get("cwd", "") if session is not None else "")
     if not cwd:
         return _not_found

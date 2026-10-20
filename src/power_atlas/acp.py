@@ -1425,7 +1425,7 @@ def set_sessions_changed_hook(hook) -> None:
     """
     global sessions_changed_hook
     sessions_changed_hook = hook
-    _supervisor._publish_live()
+    _publish_live_all()
 
 
 # Called with `(event, session_id, cwd, detail, watched)` when something happens
@@ -1674,7 +1674,8 @@ def _notify(event: str, session_id: str, detail: str = "") -> None:
     if hook is None:
         return
     try:
-        meta = _supervisor.sessions.get(session_id) or {}
+        _s = _find_supervisor(session_id)
+        meta = (_s.sessions.get(session_id) if _s is not None else None) or {}
         hook(event, session_id, meta.get("cwd", ""), detail,
              bool(_registry.subscribers.get(session_id)))
     except Exception:
@@ -3037,7 +3038,9 @@ class _Registry:
         conn.session_id = session_id
         self.subscribers.setdefault(session_id, set()).add(conn)
         # A tab opening on a session is a person using it.
-        _supervisor.touch_used(session_id)
+        _s = _find_supervisor(session_id)
+        if _s is not None:
+            _s.touch_used(session_id)
 
     def detach(self, conn: _Connection) -> None:
         sid = conn.session_id
@@ -3054,7 +3057,9 @@ class _Registry:
         # way out is what makes the TTL mean "unattended for this long" rather
         # than "attached this long ago": a session watched for an hour and then
         # abandoned would otherwise be swept on the very next tick.
-        _supervisor.touch_used(sid)
+        _s = _find_supervisor(sid)
+        if _s is not None:
+            _s.touch_used(sid)
 
     def broadcast(self, session_id: str, frame: dict) -> None:
         """Queue a frame on every socket attached to a session."""
@@ -3826,10 +3831,9 @@ class _Supervisor:
         # no longer has the session, and reach the page as a failure to close
         # something that is already closed.
         self.closing: set[str] = set()
-        # Sessions promised but not yet recorded — see `new_session`. Counted
-        # against MAX_SESSIONS alongside `sessions`, because the creation of one
-        # spans two awaits and the cap has to hold across them.
-        self._reserved = 0
+        # The session id this supervisor was registered for (set in
+        # _handle_new / _handle_load at registration time).
+        self._session_id: str | None = None
         # Buffered (commands, skills) from _kiro.dev/commands/available notifications
         # that arrived during a session/new round-trip before sessions[session_id] was
         # set. Cleared in new_session()'s finally block on every exit path.
@@ -4225,7 +4229,7 @@ class _Supervisor:
         reader thread's later death callback is ignored for a process that
         is no longer ``_proc``. Returns whether it recycled.
         """
-        if (not self.alive() or self.sessions or self._reserved
+        if (not self.alive() or self.sessions or _reserved
                 or self._pending or self.subagent_sessions):
             self._idle_since = None
             return False
@@ -4306,7 +4310,7 @@ class _Supervisor:
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
         # unbounded until the cap.
-        _bubbles.clear()
+        _bubbles.pop(self._session_id, None)
         for fut in tuple(self._pending.values()):
             if not fut.done():
                 fut.set_exception(AgentDied(reason))
@@ -4337,6 +4341,8 @@ class _Supervisor:
                 log.exception("ACP: could not release the viewers of workflow "
                               "step %s", _wf_child)
         self._workflow_child_meta.clear()
+        if self._session_id is not None:
+            _deregister_supervisor(self._session_id)
         return proc, job
 
     @classmethod
@@ -6587,16 +6593,6 @@ class _Supervisor:
 
     # -- sessions ----------------------------------------------------------
 
-    def at_capacity(self) -> bool:
-        """Whether another session would exceed ``MAX_SESSIONS``.
-
-        The cap's one home, so the two frame handlers can consult it *before*
-        spending anything on a session that is refused either way — a
-        filesystem resolve of a path the client chose, a lock read, an agent
-        round-trip. Reservations count alongside recorded sessions, because
-        creating one spans two awaits and the cap has to hold across them.
-        """
-        return len(self.sessions) + self._reserved >= MAX_SESSIONS
 
     def _flush_pending_commands(self, session_id: str) -> None:
         """Flush buffered commands/available data into a newly registered session.
@@ -6947,7 +6943,7 @@ class _Supervisor:
             return
         # SC-1: a notification for a session_id not yet registered in
         # self.sessions can arrive while a new_session()/load_session() call
-        # is in flight (self._reserved > 0) — KAS's async delivery can beat
+        # is in flight (_reserved > 0) — KAS's async delivery can beat
         # the RPC result that registers the session. Buffer the raw frame
         # instead of falling through (where it would be silently dropped by
         # record()'s existing no-op-on-unregistered-session idiom) so
@@ -6955,7 +6951,7 @@ class _Supervisor:
         # Capped and swept — see the "SC-1 mechanism" / "SC-1 orphan-buffer
         # sweep" Design Decisions rows.
         if (isinstance(session_id, str) and session_id not in self.sessions
-                and self._reserved > 0):
+                and _reserved > 0):
             buf = self._pending_early_frames.setdefault(session_id, [])
             self._pending_early_frames_at.setdefault(session_id, time.monotonic())
             if len(buf) >= _MAX_PENDING_EARLY_FRAMES:
@@ -7331,7 +7327,7 @@ class _Supervisor:
                     _meta["skills"] = skills
                     _registry.broadcast(_sid, envelope("commands", {"commands": commands}, _sid))
                     _registry.broadcast(_sid, envelope("skills", {"skills": skills}, _sid))
-            elif len(self.sessions) == 0 and self._reserved > 0:
+            elif len(self.sessions) == 0 and _reserved > 0:
                 if self._pending_commands is not None:
                     log.debug("ACP commands_available: replacing buffered pending commands")
                 self._pending_commands = (commands, skills)
@@ -8215,10 +8211,9 @@ class _Supervisor:
         (or passing None) reproduces the pre-Phase-3 default of "kiro_default"
         unchanged (plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md Phase 3).
         """
-        if self.at_capacity():
-            raise SessionLimit(_session_limit_message())
         session_id = None  # F6: init before try so log.info never raises UnboundLocalError
-        self._reserved += 1
+        global _reserved
+        _reserved += 1
         try:
             await self.ensure_started()
             # The cli.json read inside is a small synchronous file read, kept
@@ -8273,7 +8268,7 @@ class _Supervisor:
                                 "%s, skipping", session_id, exc_info=True)
             await self._apply_default_effort(session_id, result)
         finally:
-            self._reserved -= 1
+            _reserved -= 1
             if self._pending_commands is not None:
                 self._pending_commands = None
         log.info("ACP session created: %s (cwd %s, mode %s); %d live",
@@ -8296,9 +8291,8 @@ class _Supervisor:
         unchanged by 260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34, which
         refuses a Default *create* but never a reload.
         """
-        if self.at_capacity():
-            raise SessionLimit(_session_limit_message())
-        self._reserved += 1
+        global _reserved
+        _reserved += 1
         reserved = True
         try:
             await self.ensure_started()
@@ -8307,11 +8301,6 @@ class _Supervisor:
                 return {"sessionId": session_id, "cwd": live.get("cwd", cwd)}
             self.sessions[session_id] = _new_session_record(cwd)
             self._publish_live()
-            for _sib_id, _existing_meta in self.sessions.items():
-                if _sib_id != session_id and _existing_meta.get("commands") is not None:
-                    self.sessions[session_id]["commands"] = _existing_meta["commands"]
-                    self.sessions[session_id]["skills"] = _existing_meta.get("skills") or []
-                    break
             self.history[session_id] = _History()
             # SC-1 (review fix): discard, do not replay, any pre-existing
             # _pending_early_frames entry for this session_id at the same
@@ -8334,7 +8323,7 @@ class _Supervisor:
             # filesystem I/O (iterdir + file reads + time.sleep(0.2)).
             self._diff_backfill[session_id] = await asyncio.to_thread(
                 _get_tool_diffs_v3, session_id)
-            self._reserved -= 1
+            _reserved -= 1
             reserved = False
             try:
                 # The `modeId` sent here is the derived agent while it is in
@@ -8407,7 +8396,7 @@ class _Supervisor:
                 raise
         finally:
             if reserved:
-                self._reserved -= 1
+                _reserved -= 1
         history = self.history.get(session_id)
         log.info("ACP session loaded: %s (cwd %s, %d event(s) replayed); %d live",
                  session_id, cwd, 0 if history is None else len(history),
@@ -8445,6 +8434,10 @@ class _Supervisor:
             for _entry in _closing_permissions:
                 await self._answer_pending_cancelled(
                     _entry, "the session was closed")
+        # Per-session: kill the kiro-cli process now that the session is released.
+        if self._session_id is not None:
+            _deregister_supervisor(self._session_id)
+        self._discard("Session closed.")
 
     def _release_session_locally(self, session_id: str) -> None:
         """The synchronous part of `close_session`: drop every local trace."""
@@ -8499,45 +8492,8 @@ class _Supervisor:
         log.info("ACP session closed: %s; %d live", session_id, len(self.sessions))
 
     def _publish_live(self) -> None:
-        """Tell whoever is listening which sessions this agent holds.
-
-        Publishes ``self.agent_pid()`` — the real spawned kiro-cli process's
-        pid, or ``None`` before one has started, or again after it has been
-        detached (``_detach`` clears ``_proc`` back to ``None`` on crash or
-        close) — closing D32 for v3
-        (``plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md`` Phase 1). With exactly
-        one supervisor and one hook post-cutover, this pid unambiguously
-        names the current agent, so the historical false-liveness concern
-        (scoped to the pre-cutover dual-supervisor union, where a single
-        shared pid slot could not safely name either side) no longer
-        applies.
-
-        Additional staleness guard (Phase 1 review finding 3, same plan):
-        ``agent_pid()`` deliberately does not gate on ``poll()`` (see its own
-        docstring), so between an agent crash and the async ``_detach()``
-        handoff that clears ``_proc``, it can still return the dead
-        process's pid. This call site is the one consumer for which that
-        matters — a recycled pid published here could let presence.py's D32
-        guard over-suppress an unrelated, genuinely-foreign ``kiro-cli-v3``
-        session that happens to land on the same OS pid. We re-check
-        ``self._proc.poll()`` here, at the publish call site, rather than
-        inside ``agent_pid()`` itself, so ``agent_pid()``'s existing
-        contract for its original consumer (safe either way) stays
-        undisturbed.
-        """
-        hook = sessions_changed_hook
-        if hook is None:
-            return
-        try:
-            pid = self.agent_pid()
-            if pid is not None and self._proc is not None and self._proc.poll() is not None:
-                # Our process has already exited but _detach() hasn't cleared
-                # _proc yet -- don't publish a pid the OS may already be free to
-                # recycle onto an unrelated process.
-                pid = None
-            hook(frozenset(self.sessions), pid)
-        except Exception:
-            log.exception("ACP: publishing the live session set failed")
+        """Delegate to the module-level _publish_live_all()."""
+        _publish_live_all()
 
     async def _watchdog_loop(self) -> None:
         """Detect a dead kiro-cli.exe before the reader thread sees EOF.
@@ -8587,19 +8543,64 @@ class _Supervisor:
                     return
 
 
-_supervisor = _Supervisor()
+# Module-level supervisor pool (replaces _supervisor singleton)
+_supervisors: dict[str, "_Supervisor"] = {}  # session_id -> supervisor
+_reserved: int = 0  # sessions in-flight between reserve and registration
+
+
+def at_capacity() -> bool:
+    """Whether starting another session would exceed MAX_SESSIONS."""
+    return len(_supervisors) + _reserved >= MAX_SESSIONS
+
+
+def _find_supervisor(session_id: str) -> "_Supervisor | None":
+    """Route session_id to its supervisor. Checks regular sessions first,
+    then scans workflow children across all supervisors (O(MAX_SESSIONS))."""
+    sup = _supervisors.get(session_id)
+    if sup is not None:
+        return sup
+    for s in _supervisors.values():
+        if (session_id in s.subagent_sessions
+                or session_id in s._workflow_child_meta):
+            return s
+    return None
+
+
+def _find_permission_entry(request_id):
+    """Find the (supervisor, entry) pair for a pending permission/question request."""
+    for s in list(_supervisors.values()):
+        entry = s._pending_permission.get(request_id)
+        if entry is not None:
+            return s, entry
+    return None, None
+
+
+def _deregister_supervisor(session_id: str) -> None:
+    """Remove a supervisor from the routing dict and publish updated presence."""
+    _supervisors.pop(session_id, None)
+    _publish_live_all()
+
+
+def _publish_live_all() -> None:
+    """Publish the current {session_id: pid} mapping across all supervisors."""
+    hook = sessions_changed_hook
+    if hook is None:
+        return
+    mapping: dict[str, int] = {}
+    for sid, s in list(_supervisors.items()):
+        p = s.agent_pid()
+        if p is not None and s._proc is not None and s._proc.poll() is None:
+            mapping[sid] = p
+    hook(mapping)
+
+
 
 
 def _emit(session_id: str, frame: dict) -> None:
-    """Record a frame in a session's history and fan it out to its sockets.
-
-    Recording first is what makes a replay complete: a socket attaching between
-    the two halves would otherwise miss the frame in both directions — too late
-    for the fan-out, too early for the buffer. Nothing can actually attach
-    there, because both halves are synchronous, but the order costs nothing and
-    does not depend on that staying true.
-    """
-    _supervisor.record(session_id, frame)
+    """Record a frame in a session's history and fan it out to its sockets."""
+    sup = _find_supervisor(session_id)
+    if sup is not None:
+        sup.record(session_id, frame)
     _registry.broadcast(session_id, frame)
 def _first_text(entry: dict, keys: tuple) -> str:
     """The first non-empty string among ``entry``'s candidate key names.
@@ -8632,7 +8633,8 @@ def _workflow_live_flag(session_id: str, crew: dict,
             fan_out_id is None or entry.get("fan_out_id", fan_out_id) == fan_out_id)
             for entry in tuple(crew.values())):
         return False
-    return _supervisor.workflow_run_live(session_id)
+    _s = _find_supervisor(session_id)
+    return _s.workflow_run_live(session_id) if _s is not None else False
 
 
 def _subagents_payload(crew: dict, fan_out_id: str | None = None) -> list:
@@ -8688,10 +8690,12 @@ def _emit_subagents_frame(parent_id: str, crews: dict | None = None,
     ``_active_fan_out_wave`` is the synthesized equivalent — see
     ``_Supervisor._on_agent_subtask_open``.
     """
-    if crews is None:
-        crews = _supervisor.crews
-    if crew_spawn_toolcallids is None:
-        crew_spawn_toolcallids = _supervisor.crew_spawn_toolcallids
+    if crews is None or crew_spawn_toolcallids is None:
+        _s = _find_supervisor(parent_id)
+        if crews is None:
+            crews = _s.crews if _s is not None else {}
+        if crew_spawn_toolcallids is None:
+            crew_spawn_toolcallids = _s.crew_spawn_toolcallids if _s is not None else {}
     crew = crews.get(parent_id)
     if not crew:
         return
@@ -8788,7 +8792,8 @@ def _note_context(session_id: str, percent: float | None) -> None:
     Kept on the session's own metadata instead, from where ``subscribe`` reads
     it back onto every reconnecting socket.
     """
-    meta = _supervisor.sessions.get(session_id)
+    _s = _find_supervisor(session_id)
+    meta = _s.sessions.get(session_id) if _s is not None else None
     if meta is None:
         return
     meta["contextPercent"] = percent
@@ -8810,7 +8815,8 @@ def _note_context_v3(session_id: str, percent: float | None) -> None:
     already broadcasts, rather than adding a third code path for the same
     ``acpContext``/``acpContextFill``/``acpContextLabel`` UI.
     """
-    meta = _supervisor.sessions.get(session_id)
+    _s = _find_supervisor(session_id)
+    meta = _s.sessions.get(session_id) if _s is not None else None
     if meta is None:
         return
     meta["contextPercent"] = percent
@@ -8819,8 +8825,10 @@ def _note_context_v3(session_id: str, percent: float | None) -> None:
 
 
 def shutdown() -> None:
-    """Tear the agent down. Called from ``web.py``'s ``lifespan`` cleanup."""
-    _supervisor.shutdown()
+    """Tear all per-session agents down. Called from ``web.py``'s ``lifespan`` cleanup."""
+    for sup in list(_supervisors.values()):
+        sup.shutdown()
+    _supervisors.clear()
 
 
 async def serve_socket(ws: WebSocket) -> None:
@@ -9020,10 +9028,12 @@ def _handle_subagent_subscribe(conn: _Connection, session_id: str,
     global directly (plan 260908_ACP_V3_PRODUCTION_HARDENING, Phase 4, SC-4)
     — the same pattern ``_emit_subagents_frame`` uses.
     """
-    if crews is None:
-        crews = _supervisor.crews
-    if subagent_history is None:
-        subagent_history = _supervisor.subagent_history
+    if crews is None or subagent_history is None:
+        _s = _find_supervisor(session_id)
+        if crews is None:
+            crews = _s.crews if _s is not None else {}
+        if subagent_history is None:
+            subagent_history = _s.subagent_history if _s is not None else {}
     now = time.monotonic()
     since = None if conn.replayed_at is None else now - conn.replayed_at
     if since is not None and since < SUBSCRIBE_MIN_INTERVAL_SECONDS:
@@ -9331,25 +9341,37 @@ def _handle_unsubscribe(conn):
 def _handle_subscribe(conn, session_id):
     """Attach this socket to an existing session and replay its buffer.
 
-    Checks ``_supervisor.sessions`` and uses ``_supervisor._diff_backfill``
-    for the history replay. Must remain sync (no await): the atomicity of
-    "attach, then queue the replay" depends on nothing suspending in between.
+    Uses per-session supervisor routing via ``_find_supervisor``.
+    Must remain sync (no await): the atomicity of "attach, then queue the
+    replay" depends on nothing suspending in between.
     """
     if not session_id:
         conn.send(error_frame(
             "bad_envelope", "'subscribe' needs a sessionId."))
         log.warning("ACP subscribe refused: [bad_envelope] no sessionId")
         return
-    sub_meta = _supervisor.subagent_sessions.get(session_id)
+    sup = _find_supervisor(session_id)
+    if sup is None:
+        if session_id in _registry.loading:
+            _defer_until_loaded(conn, session_id)
+            return
+        conn.send(error_frame(
+            "unknown_session",
+            "This server has no such live v3 session. It may belong to an "
+            "earlier PowerAtlas process \u2014 create a new one.", session_id))
+        log.warning("ACP subscribe refused: [unknown_session] session=%s",
+                    session_id)
+        return
+    sub_meta = sup.subagent_sessions.get(session_id)
     if sub_meta is not None:
         _handle_subagent_subscribe(conn, session_id, sub_meta,
-                                    crews=_supervisor.crews,
-                                    subagent_history=_supervisor.subagent_history)
+                                    crews=sup.crews,
+                                    subagent_history=sup.subagent_history)
         return
     if session_id in _registry.loading:
         _defer_until_loaded(conn, session_id)
         return
-    meta = _supervisor.sessions.get(session_id)
+    meta = sup.sessions.get(session_id)
     if meta is None:
         conn.send(error_frame(
             "unknown_session",
@@ -9358,7 +9380,7 @@ def _handle_subscribe(conn, session_id):
         log.warning("ACP subscribe refused: [unknown_session] session=%s",
                     session_id)
         return
-    if session_id in _supervisor.closing:
+    if session_id in sup.closing:
         conn.send(error_frame(
             "close_in_progress",
             "This session is being released. Wait a moment and load it "
@@ -9384,11 +9406,11 @@ def _handle_subscribe(conn, session_id):
         "sessionId": session_id,
         "cwd": meta.get("cwd", ""),
         "created": False,
-        "turnActive": session_id in _supervisor.inflight,
+        "turnActive": session_id in sup.inflight,
         "contextPercent": meta.get("contextPercent"),
         "queued": bool(meta.get("queued_behind")),
     }, session_id))
-    history = _supervisor.history.get(session_id)
+    history = sup.history.get(session_id)
     if history is None:
         return
     if history.truncated:
@@ -9397,7 +9419,7 @@ def _handle_subscribe(conn, session_id):
                        "follows is the tail of the conversation.",
         }, session_id))
     events = _with_backfilled_bodies(
-        history.events(), session_id, _supervisor._diff_backfill.get(session_id))
+        history.events(), session_id, sup._diff_backfill.get(session_id))
     conn.send(envelope("history", {"events": events}, session_id))
     # Review fix (Phase 4 review pass, finding #3): live-crew-snapshot-on-
     # reconnect gate. Without this, a browser reload or WS reconnect during
@@ -9407,10 +9429,10 @@ def _handle_subscribe(conn, session_id):
     # frames are deliberately not recorded into history (see
     # _emit_subagents_frame's own docstring), so a reconnect's only source
     # for "which sub-agents does this session have" is rebuilding it here.
-    crew = _supervisor.crews.get(session_id)
-    if crew and (session_id in _supervisor.inflight or
+    crew = sup.crews.get(session_id)
+    if crew and (session_id in sup.inflight or
                  any(not e["done"] for e in crew.values())):
-        fan_out_id = _supervisor._active_fan_out_wave.get(
+        fan_out_id = sup._active_fan_out_wave.get(
             session_id, _NO_ANCHOR_TOOLCALLID)
         conn.send(envelope(
             "subagents",
@@ -9448,9 +9470,7 @@ def _handle_subscribe(conn, session_id):
 async def _handle_load(conn, session_id):
     """Adopt a session from the kiro store and replay it.
 
-    Uses ``_supervisor`` and ``_stored_session_cwd_v3``. No lock-hint check:
-    v3 writes no lock file with a pid the way an earlier protocol generation
-    did, so there is nothing to check one against.
+    Uses per-session ``_Supervisor`` and ``_stored_session_cwd_v3``.
     """
     if not _valid_session_id(session_id):
         conn.send(error_frame(
@@ -9460,16 +9480,17 @@ async def _handle_load(conn, session_id):
             "underscores and hyphens, and nothing else."))
         log.warning("ACP load refused: [bad_session_id] %.200r", session_id)
         return
-    if session_id in _supervisor.subagent_sessions:
+    _existing_sup = _find_supervisor(session_id)
+    if _existing_sup is not None and session_id in _existing_sup.subagent_sessions:
         _handle_subagent_subscribe(
-            conn, session_id, _supervisor.subagent_sessions[session_id],
-            crews=_supervisor.crews,
-            subagent_history=_supervisor.subagent_history)
+            conn, session_id, _existing_sup.subagent_sessions[session_id],
+            crews=_existing_sup.crews,
+            subagent_history=_existing_sup.subagent_history)
         return
     if session_id in _registry.loading:
         _defer_until_loaded(conn, session_id)
         return
-    if session_id in _supervisor.closing:
+    if _existing_sup is not None and session_id in _existing_sup.closing:
         conn.send(error_frame(
             "close_in_progress",
             "This session is being released. Wait a moment and load it "
@@ -9477,7 +9498,7 @@ async def _handle_load(conn, session_id):
         log.warning("ACP load refused: [close_in_progress] session=%s",
                     session_id)
         return
-    if session_id in _supervisor.sessions:
+    if _existing_sup is not None and session_id in _existing_sup.sessions:
         _handle_subscribe(conn, session_id)
         return
     now = time.monotonic()
@@ -9491,7 +9512,7 @@ async def _handle_load(conn, session_id):
         log.warning("ACP load throttled: socket=%s session=%s, %.3fs since the "
                     "last load", conn.cid, session_id, since)
         return
-    if _supervisor.at_capacity():
+    if at_capacity():
         conn.send(error_frame(
             SessionLimit.code, _session_limit_message(), session_id))
         log.warning("ACP load refused: [%s] session=%s at the session cap",
@@ -9499,6 +9520,13 @@ async def _handle_load(conn, session_id):
         return
     conn.loaded_at = now
     _registry.loading[session_id] = []
+    # Create a per-session supervisor for this load.
+    global _reserved
+    _reserved += 1
+    sup = _Supervisor()
+    _supervisors[session_id] = sup
+    sup._session_id = session_id
+    _reserved -= 1
     failure = None
     try:
         try:
@@ -9509,10 +9537,11 @@ async def _handle_load(conn, session_id):
                 _registry.detach(stale)
             conn.send(_load_pending_frame(session_id))
             cwd = await asyncio.to_thread(_stored_session_cwd_v3, session_id)
-            await _supervisor.load_session(session_id, cwd)
+            await sup.load_session(session_id, cwd)
             _flush_bubble(session_id, emit_fn=_emit)
         except AcpError as exc:
             failure = _load_failure(exc, None)
+            _deregister_supervisor(session_id)
             log.warning("ACP session/load refused: [%s] session=%s %s%s",
                         failure[0], session_id, failure[1],
                         "" if failure[1] == str(exc) else " (agent: %s)" % exc)
@@ -9520,6 +9549,7 @@ async def _handle_load(conn, session_id):
             log.exception("ACP session/load failed: session=%s", session_id)
             failure = ("internal_error",
                        "Loading the session failed; see orchestrator.log.")
+            _deregister_supervisor(session_id)
     finally:
         waiters = _registry.loading.pop(session_id, [])
     _deliver_load(conn, waiters, session_id, failure,
@@ -9610,36 +9640,46 @@ async def _handle_new(conn, payload):
             return
         bound_mode = DERIVED_AGENT_NAME
         permission_mode = verdict["mode"]
-    if _supervisor.at_capacity():
+    if at_capacity():
         conn.send(error_frame(SessionLimit.code, _session_limit_message()))
         log.warning("ACP session/new refused: [%s] at the session cap",
                     SessionLimit.code)
         return
     conn.send(envelope("meta", {"pending": "new"}))
+    global _reserved
+    _reserved += 1
+    sup = _Supervisor()
     try:
         cwd = await asyncio.to_thread(_resolve_session_cwd, raw_cwd)
-        info = await _supervisor.new_session(cwd, mode=bound_mode)
+        info = await sup.new_session(cwd, mode=bound_mode)
     except AcpError as exc:
+        _reserved -= 1
         log.warning("ACP session/new refused: [%s] %s", exc.code, exc)
         conn.send(error_frame(exc.code, str(exc)))
         return
     except Exception:
+        _reserved -= 1
         log.exception("ACP session/new failed")
         conn.send(error_frame(
             "internal_error",
             "Creating the session failed; see orchestrator.log."))
         return
     session_id = info["sessionId"]
-    record = _supervisor.sessions.get(session_id)
+    _supervisors[session_id] = sup
+    sup._session_id = session_id
+    _reserved -= 1
+    record = sup.sessions.get(session_id)
     if permission_mode and isinstance(record, dict):
         record["permission_mode"] = permission_mode
     if conn not in _registry.connections:
         log.info("ACP session %s created after its socket went away", session_id)
+        _deregister_supervisor(session_id)
+        sup._discard("Socket disconnected before session was delivered.")
         return
     _registry.attach(conn, session_id)
     # Fetched once, before the `session` envelope, and reused below for the
     # commands/skills resend: same SC-1 buffer-window gap, same meta lookup.
-    meta = _supervisor.sessions.get(session_id)
+    meta = sup.sessions.get(session_id)
     conn.send(envelope("session", {
         "sessionId": session_id,
         "cwd": info["cwd"],
@@ -9663,7 +9703,7 @@ async def _handle_new(conn, payload):
         # freshly created session is essentially never inflight and rarely
         # has a contextPercent yet, so both are almost always None/False in
         # practice; this closes the narrow race, not the normal case.
-        "turnActive": session_id in _supervisor.inflight if meta else False,
+        "turnActive": session_id in sup.inflight if meta else False,
         "contextPercent": meta.get("contextPercent") if meta else None,
     }, session_id))
     # Omits "queued": new sessions cannot be queued_behind at creation time.
@@ -9678,11 +9718,11 @@ async def _handle_new(conn, payload):
     # tool_call_update, rendering as a title-less generic "tool call".
     # A reload already worked correctly via _handle_subscribe's own
     # history replay below -- mirror that here so create matches subscribe.
-    history = _supervisor.history.get(session_id)
+    history = sup.history.get(session_id)
     if history is not None:
         events = _with_backfilled_bodies(
             history.events(), session_id,
-            _supervisor._diff_backfill.get(session_id))
+            sup._diff_backfill.get(session_id))
         conn.send(envelope("history", {"events": events}, session_id))
     # Same gap, same fix shape, for the slash-command/skill catalogue: an
     # available_commands_update landing in the SC-1 buffer window is
@@ -9778,8 +9818,9 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
     # The existing subagent_sessions guard below still covers non-workflow
     # sub-agents, which remain read-only.
     # Phase 6, SC7/SC8: 261016_SESSION_FIDELITY_WORKFLOW_UI_AND_WF_INTERACTION.
-    if session_id in _supervisor._workflow_child_meta:
-        child_meta = _supervisor._workflow_child_meta[session_id]
+    _h_prompt_sup = _find_supervisor(session_id)
+    if _h_prompt_sup is not None and session_id in _h_prompt_sup._workflow_child_meta:
+        child_meta = _h_prompt_sup._workflow_child_meta[session_id]
         parent_id = child_meta.get("parent") or ""
         # Allow a connection subscribed to the step session itself, or to its
         # parent. The auto path (conn is None) is also permitted, though
@@ -9794,7 +9835,7 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
         blocks: list[dict] = [{"type": "text", "text": text}]
         blocks.extend(images or ())
         try:
-            await _supervisor._request(
+            await _h_prompt_sup._request(
                 "session/prompt",
                 {"sessionId": session_id, "prompt": blocks},
                 timeout=REQUEST_TIMEOUT_SECONDS,
@@ -9806,32 +9847,33 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
                     "internal_error",
                     "The step prompt failed; see orchestrator.log.", session_id))
         return
-    if session_id in _supervisor.subagent_sessions:
+    if _h_prompt_sup is not None and session_id in _h_prompt_sup.subagent_sessions:
         refuse("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE)
         return
-    if session_id not in _supervisor.sessions:
+    if _h_prompt_sup is None or session_id not in _h_prompt_sup.sessions:
         refuse("unknown_session",
                "This server has no such live v3 session. It may belong to an "
                "earlier PowerAtlas process -- create a new one.")
         return
+    sup = _h_prompt_sup
     if not auto and conn.session_id != session_id:
         refuse("not_subscribed", "Subscribe to this session before prompting it.")
         return
-    if session_id in _supervisor.closing:
+    if session_id in sup.closing:
         refuse("close_in_progress",
                "This session is being closed. Create a new one to carry on.")
         return
-    if session_id in _supervisor.inflight:
+    if session_id in sup.inflight:
         refuse("turn_in_progress",
                "This session is still answering the previous prompt.")
         return
-    _supervisor.inflight.add(session_id)
-    _supervisor.clear_stop(session_id)
+    sup.inflight.add(session_id)
+    sup.clear_stop(session_id)
     _evict_crew_children(session_id, keep_history=False, broadcast_empty=True)
     # Workflow children whose rows went at an earlier turn end (history kept
     # then for click-to-view) are released now; a row still shown keeps its own.
-    _supervisor._workflow_free_orphans(session_id)
-    _supervisor.crew_spawn_toolcallids.pop(session_id, None)
+    sup._workflow_free_orphans(session_id)
+    sup.crew_spawn_toolcallids.pop(session_id, None)
     # Review fix (Phase 4 review pass, finding #1): reset the fan-out-wave
     # tracker for a new turn too -- not strictly required for correctness
     # (an empty crew after the eviction above means the next subtask open
@@ -9842,14 +9884,14 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
     # wave (`_on_workflow_node_start`), and `_subagents_payload` would filter
     # it out once the wave id changed.
     # Kept as well while a step waits on a person, fresh or not (D25).
-    if (not _supervisor.has_active_workflow(session_id)
-            and not _supervisor._workflow_holds_step(session_id)):
-        _supervisor._active_fan_out_wave.pop(session_id, None)
+    if (not sup.has_active_workflow(session_id)
+            and not sup._workflow_holds_step(session_id)):
+        sup._active_fan_out_wave.pop(session_id, None)
     log.info("ACP turn start: session=%s (%d chars, %d image(s))",
              session_id, len(text), len(images))
-    if text.strip() == "/compact" and session_id not in _supervisor._compacting:
-        _supervisor._compacting.add(session_id)
-        _supervisor._compaction_started_at[session_id] = time.monotonic()
+    if text.strip() == "/compact" and session_id not in sup._compacting:
+        sup._compacting.add(session_id)
+        sup._compaction_started_at[session_id] = time.monotonic()
         _emit(
             session_id,
             envelope("compaction", {"status": "started", "error": "", "summary": ""},
@@ -9861,7 +9903,7 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
     stop_reason = "interrupted"
     started = time.time()
     try:
-        result = await _supervisor.prompt(session_id, spoken, images)
+        result = await sup.prompt(session_id, spoken, images)
         stop_reason = result.get("stopReason") or "end_turn"
         if stop_reason == "end_turn" and await _truncated_turn(session_id, started):
             stop_reason = "max_tokens"
@@ -9876,10 +9918,10 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
             "The prompt failed; see orchestrator.log.", session_id))
         stop_reason = "error"
     finally:
-        _supervisor.inflight.discard(session_id)
-        for _tcid in [k for k, v in _supervisor.crew_spawn_anchors.items()
+        sup.inflight.discard(session_id)
+        for _tcid in [k for k, v in sup.crew_spawn_anchors.items()
                       if v == session_id]:
-            _supervisor.crew_spawn_anchors.pop(_tcid, None)
+            sup.crew_spawn_anchors.pop(_tcid, None)
         # SC-9 cleanup trigger (Design Decisions row of that name): a pending
         # permission request only ever exists mid-turn, and explicit
         # close_session is normally refused while a turn is inflight — so
@@ -9898,7 +9940,7 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
         _swept_permissions = _pop_pending_permissions(
             session_id, keep_live_steps=True)
         # A turn that ends while still held (cancelled, errored) is no longer waiting.
-        _supervisor._set_queued_behind(session_id, None)
+        sup._set_queued_behind(session_id, None)
         # Everything between the sweep and the `cancelled` answers sits in its
         # own `try`, so the answers are written even when a step here raises
         # (`_emit`, `_flush_bubble` and `_notify` all can). Skipping them
@@ -9914,9 +9956,9 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
             # for them: the staleness bound is the exit for a child that
             # really did die, and a child already past it is no longer "live"
             # here, so it is finalised by this sweep like any other entry.
-            _wf_live = _supervisor._workflow_live(session_id)
-            _wf_tracked = _supervisor._workflow_children.get(session_id, {})
-            _finishing_crew = _supervisor.crews.get(session_id)
+            _wf_live = sup._workflow_live(session_id)
+            _wf_tracked = sup._workflow_children.get(session_id, {})
+            _finishing_crew = sup.crews.get(session_id)
             if _finishing_crew:
                 _crew_changed = False
                 for _child_id, _entry in _finishing_crew.items():
@@ -9925,9 +9967,9 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
                     # A step with an open approval or question is waiting on a
                     # person: not closed here, as the reap leaves it (D25).
                     if (_child_id in _wf_tracked
-                            and _supervisor._workflow_step_awaits_person(
+                            and sup._workflow_step_awaits_person(
                                 session_id, _child_id)):
-                        _supervisor._log_held_step(session_id, _child_id,
+                        sup._log_held_step(session_id, _child_id,
                                                    "turn-end sweep")
                         continue
                     if not _entry["done"]:
@@ -9939,22 +9981,22 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
                                      time.monotonic() - _wf_tracked[_child_id][1])
                             # Same no-verdict close as the reap, so the row
                             # stays revivable if its eviction below is skipped.
-                            _supervisor._workflow_mark_reaped(_entry)
+                            sup._workflow_mark_reaped(_entry)
                         _entry["done"] = True
                         if _entry.get("stoppedAt") is None:
                             _entry["stoppedAt"] = time.time()
                         _crew_changed = True
                 if _crew_changed:
-                    _emit_subagents_frame(session_id, _supervisor.crews,
-                                          _supervisor._active_fan_out_wave)
+                    _emit_subagents_frame(session_id, sup.crews,
+                                          sup._active_fan_out_wave)
             _evict_crew_children(session_id, keep_history=True, broadcast_empty=False)
             _finished_crew_toolcallid = _crew_toolcallid(session_id)
-            _had_crew = session_id in _supervisor.crews or bool(_finished_crew_toolcallid)
-            _supervisor.crew_spawn_toolcallids.pop(session_id, None)
+            _had_crew = session_id in sup.crews or bool(_finished_crew_toolcallid)
+            sup.crew_spawn_toolcallids.pop(session_id, None)
             # See the turn-start pop: live and held workflow entries are tagged with it.
-            if not _wf_live and not _supervisor._workflow_holds_step(session_id):
-                _supervisor._active_fan_out_wave.pop(session_id, None)
-            if _had_crew and session_id not in _supervisor.crews:
+            if not _wf_live and not sup._workflow_holds_step(session_id):
+                sup._active_fan_out_wave.pop(session_id, None)
+            if _had_crew and session_id not in sup.crews:
                 _registry.broadcast(session_id, envelope(
                     "subagents",
                     {"subagents": [], "toolCallId": _finished_crew_toolcallid},
@@ -9985,11 +10027,11 @@ async def _handle_prompt(conn, session_id, payload, auto=False):
             # rather than raising out of this `finally`.
             # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K2).
             for _swept in _swept_permissions:
-                await _supervisor._answer_pending_cancelled(
+                await sup._answer_pending_cancelled(
                     _swept, "turn ended with the request unanswered")
     if (stop_reason == "max_tokens" and not auto and AUTO_CONTINUE_TRUNCATED
-            and session_id in _supervisor.sessions
-            and session_id not in _supervisor.closing):
+            and session_id in sup.sessions
+            and session_id not in sup.closing):
         log.info("ACP: turn of %s ended at the output limit; sending one "
                  "follow-up", session_id)
         await _handle_prompt(None, session_id,
@@ -10020,15 +10062,17 @@ def _pop_pending_permissions(session_id: str, *,
     """
     dropped = []
     popped = []
-    tracked = _supervisor._workflow_children.get(session_id, {})
-    for opaque_id in [k for k, v in _supervisor._pending_permission.items()
+    _pop_sup = _find_supervisor(session_id)
+    tracked = _pop_sup._workflow_children.get(session_id, {}) if _pop_sup is not None else {}
+    for opaque_id in [k for k, v in (_pop_sup._pending_permission.items() if _pop_sup is not None else ())
                       if v.get("session_id") == session_id
                       and not (keep_live_steps
                                and v.get("workflow_child") in tracked)]:
-        entry = _supervisor._pending_permission.pop(opaque_id, None)
+        entry = _pop_sup._pending_permission.pop(opaque_id, None) if _pop_sup is not None else None
         if entry is None:
             continue
-        _supervisor._workflow_unhold(entry)
+        if _pop_sup is not None:
+            _pop_sup._workflow_unhold(entry)
         dropped.append(entry)
         popped.append(opaque_id)
     # Announced only after every entry is popped and collected, and each
@@ -10055,7 +10099,8 @@ def _pop_pending_permissions(session_id: str, *,
             child_id = entry.get("workflow_child")
             if isinstance(child_id, str) and child_id not in noted:
                 noted.add(child_id)
-                _supervisor._workflow_note_step_denied(session_id, child_id)
+                if _pop_sup is not None:
+                    _pop_sup._workflow_note_step_denied(session_id, child_id)
     return dropped
 
 
@@ -10065,12 +10110,13 @@ async def _handle_steer(conn, session_id, payload):
         conn.send(error_frame("bad_envelope", "'steer' needs a sessionId."))
         log.warning("ACP steer refused: [%s] session=%s", "bad_envelope", session_id)
         return
-    if session_id in _supervisor.subagent_sessions:
+    sup = _find_supervisor(session_id)
+    if sup is not None and session_id in sup.subagent_sessions:
         conn.send(error_frame(
             "read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
         log.warning("ACP steer refused: [%s] session=%s", "read_only_session", session_id)
         return
-    if session_id not in _supervisor.sessions:
+    if sup is None or session_id not in sup.sessions:
         conn.send(error_frame(
             "unknown_session", "This server has no such live v3 session.", session_id))
         log.warning("ACP steer refused: [%s] session=%s", "unknown_session", session_id)
@@ -10080,19 +10126,19 @@ async def _handle_steer(conn, session_id, payload):
             "not_subscribed", "Subscribe to this session first.", session_id))
         log.warning("ACP steer refused: [%s] session=%s", "not_subscribed", session_id)
         return
-    if session_id in _supervisor.closing:
+    if session_id in sup.closing:
         conn.send(error_frame(
             "close_in_progress", "Session is being released.", session_id))
         log.warning("ACP steer refused: [%s] session=%s", "close_in_progress", session_id)
         return
-    if session_id not in _supervisor.inflight:
+    if session_id not in sup.inflight:
         conn.send(error_frame(
             "no_turn_in_progress",
             "No turn is running -- steer is only available during an active turn.",
             session_id))
         log.warning("ACP steer refused: [%s] session=%s", "no_turn_in_progress", session_id)
         return
-    if (_supervisor.sessions.get(session_id) or {}).get("queued_behind"):
+    if (sup.sessions.get(session_id) or {}).get("queued_behind"):
         conn.send(error_frame(
             "turn_queued",
             "This prompt is waiting for another session's turn to finish -- "
@@ -10119,7 +10165,7 @@ async def _handle_steer(conn, session_id, payload):
         log.warning("ACP steer refused: [%s] session=%s", "bad_payload", session_id)
         return
     try:
-        result = await _supervisor.steer(session_id, text)
+        result = await sup.steer(session_id, text)
         queued = bool(result.get("queued", True))
         conn.send(envelope("steer_ack", {"queued": queued}, session_id))
         if queued:
@@ -10151,7 +10197,8 @@ async def _handle_mcp_signin(conn, session_id, payload):
     if conn.session_id != session_id:
         conn.send(error_frame("not_subscribed", "Subscribe to this session first.", session_id))
         return
-    meta = _supervisor.sessions.get(session_id)
+    sup = _find_supervisor(session_id)
+    meta = sup.sessions.get(session_id) if sup is not None else None
     if meta is None:
         conn.send(error_frame("unknown_session", "This session is not live.", session_id))
         return
@@ -10165,10 +10212,10 @@ async def _handle_mcp_signin(conn, session_id, payload):
         conn.send(error_frame("bad_payload", f"No MCP server named {name!r} in this session.", session_id))
         return
     grant = object()
-    _supervisor._mcp_open_grants[grant] = time.monotonic() + MCP_SIGNIN_OPEN_SECONDS
+    sup._mcp_open_grants[grant] = time.monotonic() + MCP_SIGNIN_OPEN_SECONDS
     log.info("ACP: MCP sign-in started for %r (session %s)", name, session_id)
     try:
-        await _supervisor._request(
+        await sup._request(
             "_kiro/mcp/resetServer",
             {"sessionId": session_id, "serverName": name, "startOAuth": True},
             timeout=MCP_SIGNIN_WINDOW_SECONDS)
@@ -10177,7 +10224,7 @@ async def _handle_mcp_signin(conn, session_id, payload):
         conn.send(error_frame(
             "mcp_signin_failed", f"Sign-in for {name} did not complete: {exc}", session_id))
     finally:
-        _supervisor._mcp_open_grants.pop(grant, None)
+        sup._mcp_open_grants.pop(grant, None)
 
 
 async def _handle_permission_response(conn, session_id, payload):
@@ -10212,7 +10259,7 @@ async def _handle_permission_response(conn, session_id, payload):
             "bad_payload", "'permission_response' needs a requestId.", session_id))
         return
     # (a) Unknown or already-answered request — no side effects.
-    entry = _supervisor._pending_permission.get(request_id)
+    _perm_sup, entry = _find_permission_entry(request_id)
     if entry is None:
         conn.send(error_frame(
             "unknown_request", "No pending permission request with that id.",
@@ -10240,8 +10287,8 @@ async def _handle_permission_response(conn, session_id, payload):
             "invalid_option", "Not a valid optionId for this request.", session_id))
         return
     # (d) Pop BEFORE writing the reply — see the docstring above.
-    _supervisor._pending_permission.pop(request_id, None)
-    _supervisor._workflow_unhold(entry)
+    _perm_sup._pending_permission.pop(request_id, None)
+    _perm_sup._workflow_unhold(entry)
     # SC-9 stale-replay / cross-tab fix (Design Decisions row of that name):
     # broadcast (and record) a `permission_resolved` frame the moment the
     # pending entry is gone, before attempting the agent-side write below —
@@ -10261,7 +10308,7 @@ async def _handle_permission_response(conn, session_id, payload):
                          if opt["optionId"] == option_id), "")
     if (isinstance(entry.get("workflow_child"), str)
             and isinstance(_chosen_kind, str) and _chosen_kind.startswith("reject")):
-        _supervisor._workflow_note_step_denied(
+        _perm_sup._workflow_note_step_denied(
             entry["session_id"], entry["workflow_child"])
     # (e) The ACP spec's RequestPermissionResponse: `outcome` wraps the choice.
     # Allow and deny both travel as `selected`; which one it is lives in the
@@ -10281,7 +10328,7 @@ async def _handle_permission_response(conn, session_id, payload):
     # a one-off reject.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K7).
     try:
-        await asyncio.to_thread(_supervisor._write, {
+        await asyncio.to_thread(_perm_sup._write, {
             "jsonrpc": "2.0",
             # kiro-cli's own id, never the opaque one the page echoed.
             # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 7 (K1).
@@ -10301,7 +10348,7 @@ async def _handle_permission_response(conn, session_id, payload):
         # otherwise still alive -- would otherwise leave this request's
         # session permanently unanswerable with no proactive teardown. Do
         # not leave KAS waiting on an unanswered request.
-        _supervisor._discard(
+        _perm_sup._discard(
             "Permission response delivery failed: could not write reply")
 
 
@@ -10343,7 +10390,7 @@ async def _handle_question_response(conn, session_id, payload):
         conn.send(frame)
 
     # (a) Unknown or already-answered request — no side effects.
-    entry = _supervisor._pending_permission.get(request_id)
+    _q_sup, entry = _find_permission_entry(request_id)
     if entry is None:
         refuse("unknown_request", "No pending question with that id.")
         return
@@ -10384,13 +10431,13 @@ async def _handle_question_response(conn, session_id, payload):
                    "characters.")
             return
     # (d) Pop BEFORE writing the reply.
-    _supervisor._pending_permission.pop(request_id, None)
-    _supervisor._workflow_unhold(entry)
+    _q_sup._pending_permission.pop(request_id, None)
+    _q_sup._workflow_unhold(entry)
     _emit(entry["session_id"], envelope(
         "permission_resolved", {"requestId": request_id}, entry["session_id"]))
     # (e) kiro-cli's own id, never the opaque one the page echoed.
     try:
-        await asyncio.to_thread(_supervisor._write, {
+        await asyncio.to_thread(_q_sup._write, {
             "jsonrpc": "2.0",
             "id": entry["kiro_id"],
             "result": {"action": "answered", "answer": answer},
@@ -10401,7 +10448,7 @@ async def _handle_question_response(conn, session_id, payload):
         refuse("internal_error", "Could not deliver the answer.")
         # The agent channel is broken: tear it down, as a failed approval
         # reply does, rather than leave the agent waiting on this request.
-        _supervisor._discard(
+        _q_sup._discard(
             "Question response delivery failed: could not write reply")
 
 
@@ -10411,13 +10458,14 @@ async def _handle_cancel(conn, session_id):
         conn.send(error_frame("bad_envelope", "'cancel' needs a sessionId."))
         log.warning("ACP cancel refused: [bad_envelope] no sessionId")
         return
-    if session_id in _supervisor.subagent_sessions:
+    sup = _find_supervisor(session_id)
+    if sup is not None and session_id in sup.subagent_sessions:
         conn.send(error_frame(
             "read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
         log.warning("ACP cancel refused: [read_only_session] session=%s",
                     session_id)
         return
-    if session_id not in _supervisor.sessions:
+    if sup is None or session_id not in sup.sessions:
         conn.send(error_frame(
             "unknown_session",
             "This server has no such live v3 session. It may belong to an "
@@ -10430,20 +10478,20 @@ async def _handle_cancel(conn, session_id):
             "Subscribe to this session before cancelling its turn.", session_id))
         log.warning("ACP cancel refused: [not_subscribed] session=%s", session_id)
         return
-    if session_id not in _supervisor.inflight:
+    if session_id not in sup.inflight:
         # No turn to interrupt, but a request routed from a workflow step
         # outlives the turn (the run goes on after the prompt returns), so Stop
         # still cancels the session's pending requests. Both pages show Stop
         # while an unsettled permission card is pending, so a person reaches
         # this path. The workflow rows are left alone, as before.
         for entry in _pop_pending_permissions(session_id):
-            await _supervisor._answer_pending_cancelled(
+            await sup._answer_pending_cancelled(
                 entry, "the user stopped the session")
         log.info("ACP cancel: session=%s is not running a turn", session_id)
         return
     log.info("ACP cancel requested: session=%s", session_id)
     try:
-        recorded = await _supervisor.cancel(session_id)
+        recorded = await sup.cancel(session_id)
     except AcpError as exc:
         log.warning("ACP session/cancel refused: [%s] %s", exc.code, exc)
         conn.send(error_frame(exc.code, str(exc), session_id))
@@ -10468,7 +10516,7 @@ async def _handle_cancel(conn, session_id):
     # No denial notice here: the Stop notice below and the one 'stopped' frame
     # cover a routed request cancelled with the turn.
     for entry in _pop_pending_permissions(session_id, notify_denial=False):
-        await _supervisor._answer_pending_cancelled(
+        await sup._answer_pending_cancelled(
             entry, "the user stopped the turn")
     # Stop ends the workflow in PowerAtlas's view (user decision 2026-10-09
     # after live QA: a workflow stalls after Stop, no later step starts and no
@@ -10478,11 +10526,11 @@ async def _handle_cancel(conn, session_id):
     # degrades gracefully on kiro-cli 2.31.0 (returns -32603).
     # A run recorded in the gap between two steps has no tracked child, so
     # `stopped` is empty: the header still needs the frame that says it is over.
-    had_runs = _supervisor._workflow_has_runs(session_id)
-    stopped = _supervisor._workflow_stop_children(session_id)
+    had_runs = sup._workflow_has_runs(session_id)
+    stopped = sup._workflow_stop_children(session_id)
     if stopped or had_runs:
         try:
-            await _supervisor._request(
+            await sup._request(
                 "_kiro.dev/commands/execute",
                 {"sessionId": session_id,
                  "command": {"command": "workflow-cancel", "args": {}}},
@@ -10493,13 +10541,13 @@ async def _handle_cancel(conn, session_id):
         except Exception:
             log.exception("workflow-cancel request failed unexpectedly")
     changed = bool(stopped) or had_runs
-    crew = _supervisor.crews.get(session_id)
+    crew = sup.crews.get(session_id)
     if crew:
         changed = _mark_crew_done(crew, time.time()) or changed
     if changed:
         try:
-            _emit_subagents_frame(session_id, _supervisor.crews,
-                                  _supervisor._active_fan_out_wave)
+            _emit_subagents_frame(session_id, sup.crews,
+                                  sup._active_fan_out_wave)
         except Exception:
             log.exception("ACP cancel cascade: failed to emit subagents frame")
     if stopped:
@@ -10528,7 +10576,8 @@ async def _handle_close(conn, session_id):
         conn.send(error_frame("bad_envelope", "'close' needs a sessionId."))
         log.warning("ACP close refused: [bad_envelope] no sessionId")
         return
-    if session_id in _supervisor.subagent_sessions:
+    sup = _find_supervisor(session_id)
+    if sup is not None and session_id in sup.subagent_sessions:
         refuse("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE)
         return
     if session_id in _registry.loading:
@@ -10539,22 +10588,22 @@ async def _handle_close(conn, session_id):
     if conn.session_id != session_id:
         refuse("not_subscribed", "Subscribe to this session before closing it.")
         return
-    if session_id not in _supervisor.sessions:
+    if sup is None or session_id not in sup.sessions:
         refuse("nothing_to_close",
                "This server has no such live v3 session -- there is nothing to "
                "close.")
         return
-    if session_id in _supervisor.inflight:
+    if session_id in sup.inflight:
         refuse("turn_in_progress",
                "This session is still answering. Stop the turn first, then "
                "close it.")
         return
-    if session_id in _supervisor.closing:
+    if session_id in sup.closing:
         refuse("close_in_progress", "This session is already being closed.")
         return
-    _supervisor.closing.add(session_id)
+    sup.closing.add(session_id)
     try:
-        await _supervisor.close_session(session_id)
+        await sup.close_session(session_id)
     except AcpError as exc:
         log.warning("ACP session/close refused: [%s] session=%s %s",
                     exc.code, session_id, exc)
@@ -10567,7 +10616,7 @@ async def _handle_close(conn, session_id):
             "Closing the session failed; see orchestrator.log.", session_id))
         return
     finally:
-        _supervisor.closing.discard(session_id)
+        sup.closing.discard(session_id)
     # close_session already broadcasts session_closed and detaches sockets.
 
 
@@ -10577,11 +10626,12 @@ async def _handle_commands_options(conn, session_id, payload):
         conn.send(error_frame("bad_envelope", "'commands_options' needs a sessionId."))
         log.warning("ACP commands_options refused: [bad_envelope] no sessionId")
         return
-    if session_id in _supervisor.subagent_sessions:
+    sup = _find_supervisor(session_id)
+    if sup is not None and session_id in sup.subagent_sessions:
         conn.send(error_frame("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
         log.warning("ACP commands_options refused: [read_only_session] session=%s", session_id)
         return
-    if _supervisor.sessions.get(session_id) is None:
+    if sup is None or sup.sessions.get(session_id) is None:
         conn.send(error_frame("unknown_session", "No such live v3 session.", session_id))
         log.warning("ACP commands_options refused: [unknown_session] session=%s", session_id)
         return
@@ -10590,14 +10640,14 @@ async def _handle_commands_options(conn, session_id, payload):
             "Subscribe to this session first.", session_id))
         log.warning("ACP commands_options refused: [not_subscribed] session=%s", session_id)
         return
-    if session_id in _supervisor.closing:
+    if session_id in sup.closing:
         conn.send(error_frame("close_in_progress",
             "Session is being released; try again after it closes.", session_id))
         log.warning("ACP commands_options refused: [close_in_progress] session=%s", session_id)
         return
     partial = str(payload.get("partial") or "")[:MAX_COMMAND_PARTIAL_CHARS]
     try:
-        options = await _supervisor.commands_options(session_id, partial)
+        options = await sup.commands_options(session_id, partial)
     except AcpError as exc:
         conn.send(error_frame(exc.code, str(exc), session_id))
         log.warning("ACP commands_options error: session=%s: %s", session_id, exc)
@@ -10616,11 +10666,12 @@ async def _handle_commands_execute(conn, session_id, payload):
         conn.send(error_frame("bad_envelope", "'commands_execute' needs a sessionId."))
         log.warning("ACP commands_execute refused: [bad_envelope] no sessionId")
         return
-    if session_id in _supervisor.subagent_sessions:
+    sup = _find_supervisor(session_id)
+    if sup is not None and session_id in sup.subagent_sessions:
         conn.send(error_frame("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
         log.warning("ACP commands_execute refused: [read_only_session] session=%s", session_id)
         return
-    meta = _supervisor.sessions.get(session_id)
+    meta = sup.sessions.get(session_id) if sup is not None else None
     if meta is None:
         conn.send(error_frame("unknown_session", "No such live v3 session.", session_id))
         log.warning("ACP commands_execute refused: [unknown_session] session=%s", session_id)
@@ -10630,12 +10681,12 @@ async def _handle_commands_execute(conn, session_id, payload):
             "Subscribe to this session first.", session_id))
         log.warning("ACP commands_execute refused: [not_subscribed] session=%s", session_id)
         return
-    if session_id in _supervisor.closing:
+    if session_id in sup.closing:
         conn.send(error_frame("close_in_progress",
             "Session is being released; try again after it closes.", session_id))
         log.warning("ACP commands_execute refused: [close_in_progress] session=%s", session_id)
         return
-    if session_id in _supervisor.inflight:
+    if session_id in sup.inflight:
         conn.send(error_frame("turn_in_progress",
             "A turn is already running; wait for it to finish before sending a command.",
             session_id))
@@ -10660,12 +10711,12 @@ async def _handle_commands_execute(conn, session_id, payload):
         log.warning("ACP commands_execute refused: [bad_payload] unknown command %r "
                     "session=%s", name, session_id)
         return
-    _supervisor.touch_used(session_id)
+    sup.touch_used(session_id)
     log.info("ACP commands_execute: session=%s name=%r", session_id, name)
-    _supervisor.inflight.add(session_id)
-    _supervisor.clear_stop(session_id)
+    sup.inflight.add(session_id)
+    sup.clear_stop(session_id)
     try:
-        result = await _supervisor.commands_execute(session_id, name)
+        result = await sup.commands_execute(session_id, name)
     except AcpError as exc:
         conn.send(error_frame(exc.code, str(exc), session_id))
         log.warning("ACP commands_execute error: session=%s: %s", session_id, exc)
@@ -10676,7 +10727,7 @@ async def _handle_commands_execute(conn, session_id, payload):
             "An unexpected error occurred executing the command.", session_id))
         return
     finally:
-        _supervisor.inflight.discard(session_id)
+        sup.inflight.discard(session_id)
     conn.send(envelope("commands_execute_result",
         {"name": name, "status": "accepted", "result": result or {}}, session_id))
 
@@ -10694,12 +10745,16 @@ def _crew_toolcallid(parent_id):
     ``_kiro.dev/subagent/list_update`` notification to populate it from), so
     it would always return the no-anchor sentinel here.
     """
-    return _supervisor._active_fan_out_wave.get(parent_id, _NO_ANCHOR_TOOLCALLID)
+    _s = _find_supervisor(parent_id)
+    return _s._active_fan_out_wave.get(parent_id, _NO_ANCHOR_TOOLCALLID) if _s is not None else _NO_ANCHOR_TOOLCALLID
 
 
 def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty: bool) -> None:
     """Pop done crew entries for a session from all relevant crew stores."""
-    crew = _supervisor.crews.get(session_id)
+    _sup = _find_supervisor(session_id)
+    if _sup is None:
+        return
+    crew = _sup.crews.get(session_id)
     if not crew:
         return
     # `session/prompt` returns ~2 s before a workflow ends (measured), so the
@@ -10708,20 +10763,20 @@ def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty
     # steps (and its header count drops) at the first turn boundary. Once no
     # child is live they go as any done row does. The per-session cap
     # (`_evict_finished_subagents`) still applies.
-    _keep_workflow_rows = _supervisor.has_active_workflow(session_id)
+    _keep_workflow_rows = _sup.has_active_workflow(session_id)
     # A step with an open approval or question is never evicted: dropping it
     # would cancel its request through `_workflow_drop_child` (D25).
     for _child_id in [cid for cid, e in crew.items()
                       if e["done"] and not (_keep_workflow_rows and e.get("workflow"))
-                      and not _supervisor._workflow_step_awaits_person(session_id, cid)]:
+                      and not _sup._workflow_step_awaits_person(session_id, cid)]:
         crew.pop(_child_id, None)
         # The row is gone, so a late workflow frame could not finalise it:
         # stop tracking the child too.
-        _supervisor._workflow_drop_child(session_id, _child_id)
+        _sup._workflow_drop_child(session_id, _child_id)
         if not keep_history:
-            _supervisor.subagent_sessions.pop(_child_id, None)
-            _supervisor.subagent_history.pop(_child_id, None)
-            if _supervisor._workflow_child_meta.pop(_child_id, None) is not None:
+            _sup.subagent_sessions.pop(_child_id, None)
+            _sup.subagent_history.pop(_child_id, None)
+            if _sup._workflow_child_meta.pop(_child_id, None) is not None:
                 # Same note as `_workflow_free_orphans` gives; legacy sub-agent
                 # rows are freed silently, as before.
                 _frame = _workflow_released_frame(_child_id)
@@ -10730,13 +10785,13 @@ def _evict_crew_children(session_id: str, *, keep_history: bool, broadcast_empty
                     _registry.detach(_target)
         _bubbles.pop(_child_id, None)
     if not crew:
-        _supervisor.crews.pop(session_id, None)
+        _sup.crews.pop(session_id, None)
         if broadcast_empty:
             _registry.broadcast(session_id, envelope(
                 "subagents", {"subagents": []}, session_id))
     elif broadcast_empty:
-        _emit_subagents_frame(session_id, _supervisor.crews,
-                              _supervisor._active_fan_out_wave)
+        _emit_subagents_frame(session_id, _sup.crews,
+                              _sup._active_fan_out_wave)
 
 
 # -- the idle sweeper ------------------------------------------------------
@@ -10770,7 +10825,8 @@ _sweep_awaiting_failures = 0
 
 
 def _sweepable(session_id: str, meta: dict, now: float, *,
-               has_active_workflow: bool, awaits_person: bool) -> bool:
+               has_active_workflow: bool, awaits_person: bool,
+               supervisor=None) -> bool:
     """Whether one session may be reclaimed on this tick.
 
     Eight conditions, and each one is a separate way this has already gone wrong
@@ -10800,16 +10856,17 @@ def _sweepable(session_id: str, meta: dict, now: float, *,
        while kiro-cli keeps running. The staleness bounds on the children
        (600 s running, 6 h waiting) keep this from becoming a permanent pin.
     """
-    if session_id not in _supervisor.sessions:
+    _sw_s = supervisor
+    if _sw_s is None or session_id not in _sw_s.sessions:
         return False
     last_used = meta.get("last_used")
     if last_used is None or now - last_used <= ACP_IDLE_TTL_SECONDS:
         return False
     if _registry.subscribers.get(session_id):
         return False
-    if session_id in _supervisor.inflight:
+    if session_id in _sw_s.inflight:
         return False
-    if session_id in _supervisor.closing:
+    if session_id in _sw_s.closing:
         return False
     if session_id in _registry.loading:
         return False
@@ -10849,31 +10906,31 @@ async def _sweep_once() -> None:
     # bug this mechanism exists to fix. Republishing on the tick makes any such
     # miss self-heal within one sweep interval instead of never. Costs one
     # frozenset of a dict that is at most MAX_SESSIONS long.
-    _supervisor._publish_live()
+    _publish_live_all()
     # The only writer the sweeper tick adds for workflows: rows of steps that
     # have gone silent past their bound stop claiming to be working. Guarded
     # so a fault here cannot take the sweeper task out.
-    try:
-        _supervisor._workflow_reap()
-    except Exception:
-        log.exception("ACP sweeper: reaping stale workflow rows failed")
+    for _sw_s in list(_supervisors.values()):
+        try:
+            _sw_s._workflow_reap()
+        except Exception:
+            log.exception("ACP sweeper: reaping stale workflow rows failed")
     # Forget the failure counts of sessions that are no longer here, whatever
     # took them — this is what keeps `_sweep_failures` bounded by the live
     # session count rather than growing for the application's lifetime.
     for gone in tuple(_sweep_failures):
-        if gone not in _supervisor.sessions:
+        if not any(gone in s.sessions for s in _supervisors.values()):
             del _sweep_failures[gone]
     # `close_session` mutates `sessions`, and a live iterator over a dict that
     # changes size raises RuntimeError.
     global _sweep_awaiting_failures
     fallback = False
     try:
-        awaiting = _supervisor.sessions_awaiting_person()
+        awaiting: set[str] = set()
+        for _sw_s in list(_supervisors.values()):
+            awaiting.update(_sw_s.sessions_awaiting_person())
         _sweep_awaiting_failures = 0
     except Exception:
-        # Fail closed: hold every session this tick rather than close one a
-        # person may still have to answer. One traceback, then one short line
-        # a tick, as `_sweep_failures` does.
         _sweep_awaiting_failures += 1
         if _sweep_awaiting_failures == 1:
             log.exception("ACP sweeper: reading the open requests failed; "
@@ -10882,20 +10939,28 @@ async def _sweep_once() -> None:
             log.warning("ACP sweeper: reading the open requests failed again "
                         "(%d consecutive; traceback logged on the first); "
                         "holding every session", _sweep_awaiting_failures)
-        awaiting = frozenset(_supervisor.sessions)
+        awaiting = set()
+        for _sw_s in list(_supervisors.values()):
+            awaiting.update(_sw_s.sessions)
         fallback = True
+    _all_sessions: set[str] = set()
+    for _sw_s in list(_supervisors.values()):
+        _all_sessions.update(_sw_s.sessions)
     for held in tuple(_sweep_held_logged):
-        if held not in awaiting or held not in _supervisor.sessions:
+        if held not in awaiting or held not in _all_sessions:
             _sweep_held_logged.discard(held)
-    for session_id, meta in tuple(_supervisor.sessions.items()):
+    for _sw_sup in list(_supervisors.values()):
+      for session_id, meta in tuple(_sw_sup.sessions.items()):
         is_awaiting = session_id in awaiting
         if not _sweepable(session_id, meta, now,
-                          has_active_workflow=_supervisor.has_active_workflow(session_id),
-                          awaits_person=is_awaiting):
+                          has_active_workflow=_sw_sup.has_active_workflow(session_id),
+                          awaits_person=is_awaiting,
+                          supervisor=_sw_sup):
             if (is_awaiting and not fallback and session_id not in _sweep_held_logged
                     and _sweepable(session_id, meta, now,
-                                   has_active_workflow=_supervisor.has_active_workflow(session_id),
-                                   awaits_person=False)):
+                                   has_active_workflow=_sw_sup.has_active_workflow(session_id),
+                                   awaits_person=False,
+                                   supervisor=_sw_sup)):
                 # Once per hold, not once per tick.
                 _sweep_held_logged.add(session_id)
                 log.info("ACP sweeper: keeping idle session %s: it has an open "
@@ -10907,7 +10972,7 @@ async def _sweep_once() -> None:
         # round-trip, so a prompt arriving in that window passes every guard
         # and starts a turn on a session being released — the window
         # `_handle_prompt`'s `close_in_progress` refusal exists to close.
-        _supervisor.closing.add(session_id)
+        _sw_sup.closing.add(session_id)
         try:
             idle = now - meta.get("last_used", now)
             log.info("ACP sweeper: releasing session %s, idle %.0fs",
@@ -10928,7 +10993,7 @@ async def _sweep_once() -> None:
             # already broadcasts `session_closed` and detaches every subscriber
             # itself (D5, plan Phase 1) -- reproducing that here would tell each
             # socket twice.
-            await _supervisor.close_session(session_id)
+            await _sw_sup.close_session(session_id)
             # This session is released; nothing is owed to the next failure.
             _sweep_failures.pop(session_id, None)
         except Exception:
@@ -10954,7 +11019,7 @@ async def _sweep_once() -> None:
                     session_id, failures)
             continue
         finally:
-            _supervisor.closing.discard(session_id)
+            _sw_sup.closing.discard(session_id)
 
     # SC-1 orphan-buffer sweep: a _pending_early_frames entry for a
     # session_id that never completes new_session() (RPC failure, or the
@@ -10963,18 +11028,19 @@ async def _sweep_once() -> None:
     # new_session()'s own cleanup only fires for the session it is itself
     # creating. Reuses the sweeper's existing idle threshold rather than a
     # new timer (see the "SC-1 orphan-buffer sweep" Design Decisions row).
-    for _pending_sid, _buffered_at in tuple(
-            _supervisor._pending_early_frames_at.items()):
-        if _pending_sid in _supervisor.sessions:
-            continue
-        if now - _buffered_at <= ACP_IDLE_TTL_SECONDS:
-            continue
-        log.warning(
-            "ACP sweeper: dropping orphaned pending-early-frame "
-            "buffer for %s (idle %.0fs, session never registered)",
-            _pending_sid, now - _buffered_at)
-        _supervisor._pending_early_frames.pop(_pending_sid, None)
-        _supervisor._pending_early_frames_at.pop(_pending_sid, None)
+    for _sw_s in list(_supervisors.values()):
+        for _pending_sid, _buffered_at in tuple(
+                _sw_s._pending_early_frames_at.items()):
+            if _pending_sid in _sw_s.sessions:
+                continue
+            if now - _buffered_at <= ACP_IDLE_TTL_SECONDS:
+                continue
+            log.warning(
+                "ACP sweeper: dropping orphaned pending-early-frame "
+                "buffer for %s (idle %.0fs, session never registered)",
+                _pending_sid, now - _buffered_at)
+            _sw_s._pending_early_frames.pop(_pending_sid, None)
+            _sw_s._pending_early_frames_at.pop(_pending_sid, None)
 
 
 async def _sweep_loop() -> None:
@@ -10990,16 +11056,11 @@ async def _sweep_loop() -> None:
     """
     while True:
         await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
-        # Before the zero-session guard below: an empty agent is exactly the
-        # case that guard skips. Costs one attribute check when no agent runs.
-        try:
-            _supervisor._maybe_recycle_idle(time.monotonic())
-        except Exception:
-            log.warning("ACP sweeper: idle-agent check failed", exc_info=True)
         # SC-1 buffer: an orphaned _pending_early_frames entry must still
         # wake the sweeper even when sessions is otherwise empty (see
         # _sweep_once's "SC-1 orphan-buffer sweep" block).
-        if not _supervisor.sessions and not _supervisor._pending_early_frames:
+        if not any(s.sessions or s._pending_early_frames
+                   for s in _supervisors.values()):
             continue
         try:
             await _sweep_once()
@@ -11022,12 +11083,15 @@ def start_sweeper() -> asyncio.Task:
 
 
 def start_watchdog() -> asyncio.Task:
-    """Start the crash-detection watchdog. Called from ``web.py``'s ``lifespan``.
-
-    Returns the asyncio.Task so the caller can cancel and await it.
+    """Placeholder: per-supervisor watchdogs will be started per-session in Phase 2.
+    Returns a cancellable no-op task so the lifespan can cancel it cleanly.
     """
-    return asyncio.create_task(
-        _supervisor._watchdog_loop(), name="acp-watchdog")
+    async def _placeholder():
+        try:
+            await asyncio.sleep(float("inf"))
+        except asyncio.CancelledError:
+            pass
+    return asyncio.create_task(_placeholder(), name="acp-watchdog-placeholder")
 
 
 def apply_config(config) -> None:

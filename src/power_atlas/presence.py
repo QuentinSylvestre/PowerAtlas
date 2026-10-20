@@ -206,32 +206,23 @@ def _filetime_to_epoch(value) -> float | None:
 # `None`, no record is ever suppressed, and this file behaves exactly as it did
 # before — a wrong "live" dot, which is today's accepted D32 residual, rather
 # than a session wrongly hidden from the dashboard.
-_acp_live: tuple[frozenset, int | None] = (frozenset(), None)
+_acp_live: dict[str, int] = {}
 
 
-def publish_acp_sessions(session_ids, agent_pid) -> None:
-    """Publish what the ACP supervisor holds. Called from the event loop only.
+def publish_acp_sessions(mapping: dict) -> None:
+    """Publish the ACP per-session pid mapping. Called from the event loop only.
 
-    Rebinding a module global is atomic under the GIL, so no lock is needed and
-    none is taken: a worker thread mid-scan holds a reference to the previous
-    tuple and finishes against a consistent view of it.
-
-    Copied into a `frozenset` rather than stored as given. The caller's argument
-    is derived from loop-owned state, and storing a live view would hand worker
-    threads the very object D9 exists to keep away from them.
+    Accepts a dict[str, int] mapping session_id -> pid from _publish_live_all().
+    Rebinding a module global is atomic under the GIL; no lock needed.
     """
     global _acp_live
-    try:
-        ids = frozenset(session_ids or ())
-    except TypeError:
-        ids = frozenset()
-    _acp_live = (ids, agent_pid if isinstance(agent_pid, int) else None)
+    _acp_live = dict(mapping) if isinstance(mapping, dict) else {}
 
 
 def acp_holds(session_id) -> bool:
     """Whether PowerAtlas's own ACP supervisor holds `session_id`, as last published. False when nothing
     has been published, so a resume is then launched rather than refused."""
-    return isinstance(session_id, str) and session_id in _acp_live[0]
+    return isinstance(session_id, str) and session_id in _acp_live
 
 
 _CLAUDE_SESSION_DIR = Path.home() / ".claude" / "sessions"
@@ -744,7 +735,9 @@ def _scan() -> Snapshot:
     # One read for the whole pass. Re-reading per record would let a mid-scan
     # publish show one snapshot for one session and a newer one for the next,
     # which is the inconsistency the immutable snapshot exists to prevent.
-    acp_sids, acp_pid = _acp_live
+    _live = _acp_live  # local snapshot for thread safety
+    acp_sids = frozenset(_live)
+    acp_pids = frozenset(_live.values())
     for rec in records:
         provider, pid, sid, started = rec.provider, rec.pid, rec.sid, rec.started
         cwd, status, reason = rec.cwd, rec.status, rec.reason
@@ -800,8 +793,7 @@ def _scan() -> Snapshot:
             # checked for forward-compatibility; post-cutover there is exactly
             # one kiro provider ("kiro-cli-v3") and `_Supervisor._publish_live()`
             # publishes `self.agent_pid()` unambiguously for every session.
-            if (provider in _KIRO_PROVIDERS and acp_pid is not None
-                    and pid == acp_pid and sid not in acp_sids):
+            if (provider in _KIRO_PROVIDERS and pid in acp_pids and sid not in acp_sids):
                 continue
             key = (provider, sid)
             live_sids.add(key)
