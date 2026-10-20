@@ -9542,6 +9542,7 @@ async def _handle_load(conn, session_id):
         except AcpError as exc:
             failure = _load_failure(exc, None)
             _deregister_supervisor(session_id)
+            sup._discard("session load failed")
             log.warning("ACP session/load refused: [%s] session=%s %s%s",
                         failure[0], session_id, failure[1],
                         "" if failure[1] == str(exc) else " (agent: %s)" % exc)
@@ -9550,6 +9551,7 @@ async def _handle_load(conn, session_id):
             failure = ("internal_error",
                        "Loading the session failed; see orchestrator.log.")
             _deregister_supervisor(session_id)
+            sup._discard("session load failed")
     finally:
         waiters = _registry.loading.pop(session_id, [])
     _deliver_load(conn, waiters, session_id, failure,
@@ -9654,11 +9656,13 @@ async def _handle_new(conn, payload):
         info = await sup.new_session(cwd, mode=bound_mode)
     except AcpError as exc:
         _reserved -= 1
+        sup._discard("session creation failed")
         log.warning("ACP session/new refused: [%s] %s", exc.code, exc)
         conn.send(error_frame(exc.code, str(exc)))
         return
     except Exception:
         _reserved -= 1
+        sup._discard("session creation failed")
         log.exception("ACP session/new failed")
         conn.send(error_frame(
             "internal_error",
@@ -10950,76 +10954,76 @@ async def _sweep_once() -> None:
         if held not in awaiting or held not in _all_sessions:
             _sweep_held_logged.discard(held)
     for _sw_sup in list(_supervisors.values()):
-      for session_id, meta in tuple(_sw_sup.sessions.items()):
-        is_awaiting = session_id in awaiting
-        if not _sweepable(session_id, meta, now,
-                          has_active_workflow=_sw_sup.has_active_workflow(session_id),
-                          awaits_person=is_awaiting,
-                          supervisor=_sw_sup):
-            if (is_awaiting and not fallback and session_id not in _sweep_held_logged
-                    and _sweepable(session_id, meta, now,
-                                   has_active_workflow=_sw_sup.has_active_workflow(session_id),
-                                   awaits_person=False,
-                                   supervisor=_sw_sup)):
-                # Once per hold, not once per tick.
-                _sweep_held_logged.add(session_id)
-                log.info("ACP sweeper: keeping idle session %s: it has an open "
-                         "approval or question", session_id)
-            continue
-        # Claimed in the synchronous prefix, before the first await, exactly as
-        # `_handle_close` does. Without it `close_session` leaves the session
-        # in `sessions` and out of `closing` for the whole terminate
-        # round-trip, so a prompt arriving in that window passes every guard
-        # and starts a turn on a session being released — the window
-        # `_handle_prompt`'s `close_in_progress` refusal exists to close.
-        _sw_sup.closing.add(session_id)
-        try:
-            idle = now - meta.get("last_used", now)
-            log.info("ACP sweeper: releasing session %s, idle %.0fs",
-                     session_id, idle)
-            # Deliberately not shielded — and not because a shield would hold
-            # this task. It would not: cancelling the sweeper cancels the
-            # shield's *outer* future and `CancelledError` raises here at once
-            # (~0.1 ms measured), so the teardown budget is met either way.
-            # What a shield would actually buy is an orphan. The inner
-            # `close_session` would keep running with nothing awaiting it,
-            # issuing a terminate round-trip against an agent that
-            # `acp.shutdown()` is killing in the same breath, on a loop that is
-            # about to close — a stray task racing the job-object kill and
-            # logging into a torn-down world. Letting the cancel reach the
-            # close is what keeps teardown to one sequence.
-            #
-            # No separate subscriber-notification step follows: `close_session`
-            # already broadcasts `session_closed` and detaches every subscriber
-            # itself (D5, plan Phase 1) -- reproducing that here would tell each
-            # socket twice.
-            await _sw_sup.close_session(session_id)
-            # This session is released; nothing is owed to the next failure.
-            _sweep_failures.pop(session_id, None)
-        except Exception:
-            # WARNING and carry on, never a dead task: if a kiro-cli build
-            # drops the private terminate method, the sweeper degrades to
-            # memory growth rather than taking itself out on the first tick.
-            #
-            # The traceback is worth its size exactly once per session. A
-            # session that cannot be released fails again on every tick, and at
-            # SWEEP_INTERVAL_SECONDS that is one multi-line traceback a minute,
-            # per stuck session, forever. So: the whole thing the first time,
-            # and one countable line after it, which is what a reader needs to
-            # tell "still stuck" from "stuck again for a new reason".
-            failures = _sweep_failures[session_id] = (
-                _sweep_failures.get(session_id, 0) + 1)
-            if failures == 1:
-                log.warning("ACP sweeper: releasing session %s failed",
-                            session_id, exc_info=True)
-            else:
-                log.warning(
-                    "ACP sweeper: releasing session %s failed again "
-                    "(%d consecutive; traceback logged on the first)",
-                    session_id, failures)
-            continue
-        finally:
-            _sw_sup.closing.discard(session_id)
+        for session_id, meta in tuple(_sw_sup.sessions.items()):
+          is_awaiting = session_id in awaiting
+          if not _sweepable(session_id, meta, now,
+                            has_active_workflow=_sw_sup.has_active_workflow(session_id),
+                            awaits_person=is_awaiting,
+                            supervisor=_sw_sup):
+              if (is_awaiting and not fallback and session_id not in _sweep_held_logged
+                      and _sweepable(session_id, meta, now,
+                                     has_active_workflow=_sw_sup.has_active_workflow(session_id),
+                                     awaits_person=False,
+                                     supervisor=_sw_sup)):
+                  # Once per hold, not once per tick.
+                  _sweep_held_logged.add(session_id)
+                  log.info("ACP sweeper: keeping idle session %s: it has an open "
+                           "approval or question", session_id)
+              continue
+          # Claimed in the synchronous prefix, before the first await, exactly as
+          # `_handle_close` does. Without it `close_session` leaves the session
+          # in `sessions` and out of `closing` for the whole terminate
+          # round-trip, so a prompt arriving in that window passes every guard
+          # and starts a turn on a session being released — the window
+          # `_handle_prompt`'s `close_in_progress` refusal exists to close.
+          _sw_sup.closing.add(session_id)
+          try:
+              idle = now - meta.get("last_used", now)
+              log.info("ACP sweeper: releasing session %s, idle %.0fs",
+                       session_id, idle)
+              # Deliberately not shielded — and not because a shield would hold
+              # this task. It would not: cancelling the sweeper cancels the
+              # shield's *outer* future and `CancelledError` raises here at once
+              # (~0.1 ms measured), so the teardown budget is met either way.
+              # What a shield would actually buy is an orphan. The inner
+              # `close_session` would keep running with nothing awaiting it,
+              # issuing a terminate round-trip against an agent that
+              # `acp.shutdown()` is killing in the same breath, on a loop that is
+              # about to close — a stray task racing the job-object kill and
+              # logging into a torn-down world. Letting the cancel reach the
+              # close is what keeps teardown to one sequence.
+              #
+              # No separate subscriber-notification step follows: `close_session`
+              # already broadcasts `session_closed` and detaches every subscriber
+              # itself (D5, plan Phase 1) -- reproducing that here would tell each
+              # socket twice.
+              await _sw_sup.close_session(session_id)
+              # This session is released; nothing is owed to the next failure.
+              _sweep_failures.pop(session_id, None)
+          except Exception:
+              # WARNING and carry on, never a dead task: if a kiro-cli build
+              # drops the private terminate method, the sweeper degrades to
+              # memory growth rather than taking itself out on the first tick.
+              #
+              # The traceback is worth its size exactly once per session. A
+              # session that cannot be released fails again on every tick, and at
+              # SWEEP_INTERVAL_SECONDS that is one multi-line traceback a minute,
+              # per stuck session, forever. So: the whole thing the first time,
+              # and one countable line after it, which is what a reader needs to
+              # tell "still stuck" from "stuck again for a new reason".
+              failures = _sweep_failures[session_id] = (
+                  _sweep_failures.get(session_id, 0) + 1)
+              if failures == 1:
+                  log.warning("ACP sweeper: releasing session %s failed",
+                              session_id, exc_info=True)
+              else:
+                  log.warning(
+                      "ACP sweeper: releasing session %s failed again "
+                      "(%d consecutive; traceback logged on the first)",
+                      session_id, failures)
+              continue
+          finally:
+              _sw_sup.closing.discard(session_id)
 
     # SC-1 orphan-buffer sweep: a _pending_early_frames entry for a
     # session_id that never completes new_session() (RPC failure, or the
