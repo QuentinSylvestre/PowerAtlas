@@ -1298,6 +1298,62 @@ def test_presence_unavailable_returns_empty():
     assert snap.is_live("claude-code", "/w", "id") is False
 
 
+def test_d32_guard_suppresses_orphan_when_pid_is_held_by_acp(monkeypatch):
+    """M3: D32 guard — a kiro-cli-v3 sidecar record whose pid is in _acp_live
+    but whose session_id is NOT in _acp_live is suppressed by _scan().
+    A record whose pid is NOT in _acp_live is NOT suppressed.
+
+    The guard lives in the sidecar-records pass of _scan() (presence.py,
+    `if provider in _KIRO_PROVIDERS and pid in acp_pids and sid not in acp_sids`).
+    This test drives _scan() with a fake kiro-cli process in the first pass
+    (so provider_pids[pid] is populated) and injects fake kiro-cli-v3 sidecar
+    records to exercise the guard directly.
+    """
+    import tempfile
+    from pathlib import Path
+    from power_atlas import presence
+    from power_atlas.presence import _Sidecar
+
+    # Two ACP sessions held by pids 100 and 200.
+    monkeypatch.setattr(presence, "_acp_live", {"sess_a": 100, "sess_b": 200})
+
+    # First pass: kiro-cli process pid=100 (our ACP agent, no --resume-id).
+    # A second process pid=300 (unrelated terminal kiro-cli).
+    acp_proc = _FakeProc("kiro-cli", ["kiro-cli", "acp", "--agent-engine", "v3"],
+                          cwd="C:\\work", pid=100, create_time=1_000_000.0)
+    other_proc = _FakeProc("kiro-cli", ["kiro-cli", "chat"],
+                            cwd="C:\\other", pid=300, create_time=1_000_000.0)
+
+    # Sidecar records for the second pass.
+    # sess_orphan: pid=100 (our ACP), but NOT in _acp_live → D32 guard fires.
+    # sess_external: pid=300 (NOT our ACP) → D32 guard does NOT fire.
+    orphan_record = _Sidecar(
+        "kiro-cli-v3", 100, "sess_orphan", 999_999.0,
+        "C:\\work", "", "", "", "")
+    external_record = _Sidecar(
+        "kiro-cli-v3", 300, "sess_external", 1_000_001.0,
+        "C:\\other", "", "", "", "")
+
+    missing = Path(tempfile.gettempdir()) / "_pa_no_such_d32_test_dir"
+    presence._sidecar_cache.clear()
+    with patch.object(presence, "_AVAILABLE", True), \
+         patch.object(presence.psutil, "process_iter",
+                      return_value=[acp_proc, other_proc]), \
+         patch.object(presence, "_CLAUDE_SESSION_DIR", missing), \
+         patch.object(presence, "_sidecar_records",
+                      return_value=[orphan_record, external_record]):
+        snap = presence._scan()
+
+    # D32 guard: sess_orphan is suppressed (pid 100 in acp_pids, not in acp_sids).
+    assert snap.is_live("kiro-cli-v3", "C:\\work", "sess_orphan") is False, (
+        "D32 guard should suppress a kiro-cli sidecar whose pid is held by "
+        "the ACP agent but whose session_id is not in _acp_live")
+
+    # Process with pid=300 (not in acp_pids) is NOT suppressed.
+    assert snap.is_live("kiro-cli-v3", "C:\\other", "sess_external") is True, (
+        "D32 guard must not suppress a sidecar whose pid is not in _acp_live")
+
+
 class TestPidFor:
     """`Snapshot.pid_for`: the pid a validated Claude sidecar names, which `resume` types into.
 

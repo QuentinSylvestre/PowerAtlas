@@ -13000,7 +13000,7 @@ class TestAcpStopFallback:
 class TestMultiSessionPerSessionModel:
     """New tests verifying the per-session supervisor model (Phase 3 additions)."""
 
-    def test_two_parallel_sessions_do_not_block_each_other(self, acp_store):
+    def test_two_sessions_have_independent_inflight_state(self, acp_store):
         """Two sessions in separate supervisors have independent state.
         Neither session carries a queued_behind key (dead code removed in Phase 2).
         """
@@ -13032,6 +13032,23 @@ class TestMultiSessionPerSessionModel:
         found = acp_mod._find_supervisor(child_sid)
         assert found is parent_sup, (
             "_find_supervisor should return the parent supervisor for a known child")
+
+    def test_find_supervisor_routes_subagent_session(self, acp_store):
+        """L5: _find_supervisor(child_sid) returns the parent supervisor when
+        child_sid is registered in parent.subagent_sessions."""
+        acp_mod, _ = acp_store
+        parent_sid = _live_session(acp_mod, sid="parent-sub")
+        child_sid = "sub-agent-001"
+        parent_sup = acp_mod._supervisors[parent_sid]
+        # Register child via subagent_sessions (the sub-agent session dict)
+        parent_sup.subagent_sessions[child_sid] = {
+            "parent": parent_sid, "role": "test-agent", "task": "do something",
+        }
+        # _find_supervisor should route child through the subagent_sessions path
+        found = acp_mod._find_supervisor(child_sid)
+        assert found is parent_sup, (
+            "_find_supervisor should return the parent supervisor for a "
+            "session registered in subagent_sessions")
 
     def test_d32_guard_with_multiple_pids(self, monkeypatch):
         """D32 guard: when multiple ACP sessions are live, presence correctly
@@ -18739,7 +18756,10 @@ class TestAcpLifespanWiring:
             except asyncio.CancelledError:
                 raise
 
+        watchdog_calls = []
+
         def start_watchdog():
+            watchdog_calls.append(1)
             return asyncio.ensure_future(never())
 
         fake = types.SimpleNamespace(start_sweeper=start_sweeper,
@@ -18759,6 +18779,11 @@ class TestAcpLifespanWiring:
 
         assert order == ["sweeper started", "serving", "sweeper cancelled",
                          "sweeper finished", "shutdown, sweeper done=True"]
+        # M4: start_watchdog must NOT be called from lifespan (per Phase 2
+        # exit criterion — per-supervisor watchdog tasks are started by
+        # _start_lifecycle_tasks(), not the lifespan hook).
+        assert watchdog_calls == [], (
+            "start_watchdog() must not be called from lifespan startup")
 
     def test_an_acp_import_failure_still_yields_a_running_app(self):
         """`web.py` degrades an ACP import failure to "/acp disabled". An

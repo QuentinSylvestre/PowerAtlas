@@ -8343,6 +8343,10 @@ class _Supervisor:
         """
         if session_id not in self.sessions:
             raise AgentRejected("That session no longer exists on this agent.")
+        # M2: mark closing immediately so a concurrent _handle_load for the
+        # same session_id (arriving during the pending-permission awaits below)
+        # sees the guard and refuses rather than overwriting this supervisor.
+        self.closing.add(session_id)
         # A request still pending here (a workflow step's, routed to this
         # parent: the parent's own turn is over while the step waits) can no
         # longer be answered by anyone. Announced to the viewers now, while
@@ -8361,7 +8365,8 @@ class _Supervisor:
                     _entry, "the session was closed")
         # Per-session: kill the kiro-cli process now that the session is released.
         if self._session_id is not None:
-            _deregister_supervisor(self._session_id)
+            # L1: _deregister_supervisor removed; _detach() via _discard() is the sole caller.
+            pass
         self._discard("Session closed.")
 
     def _release_session_locally(self, session_id: str) -> None:
@@ -8507,34 +8512,40 @@ class _Supervisor:
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
             if not self.sessions:
                 return  # session already closed; task will be cancelled shortly
-            now = time.monotonic()
-            session_id = next(iter(self.sessions))
-            meta = self.sessions[session_id]
-            _awaits_person = session_id in self.sessions_awaiting_person()
-            _has_workflow = self.has_active_workflow(session_id)
-            if _sweepable(session_id, meta, now,
-                          has_active_workflow=_has_workflow,
-                          awaits_person=_awaits_person,
-                          supervisor=self):
-                self.closing.add(session_id)
-                try:
-                    idle = now - meta.get("last_used", now)
-                    log.info("ACP sweeper: releasing session %s, idle %.0fs",
-                             session_id, idle)
-                    await self.close_session(session_id)
-                except Exception:
-                    log.exception("ACP sweeper: close_session failed for %s",
-                                  session_id)
-                    self.closing.discard(session_id)
-                return
-            # Log when we keep an idle session because a person must answer.
-            last_used = meta.get("last_used")
-            if last_used is not None:
-                idle = now - last_used
-                if idle > ACP_IDLE_TTL_SECONDS and (_awaits_person or _has_workflow):
-                    log.info("ACP sweeper: keeping idle session %s "
-                             "(awaits_person=%s, active_workflow=%s)",
-                             session_id, _awaits_person, _has_workflow)
+            try:
+                now = time.monotonic()
+                session_id = next(iter(self.sessions))
+                meta = self.sessions[session_id]
+                _awaits_person = session_id in self.sessions_awaiting_person()
+                _has_workflow = self.has_active_workflow(session_id)
+                if _sweepable(session_id, meta, now,
+                              has_active_workflow=_has_workflow,
+                              awaits_person=_awaits_person,
+                              supervisor=self):
+                    self.closing.add(session_id)
+                    try:
+                        idle = now - meta.get("last_used", now)
+                        log.info("ACP sweeper: releasing session %s, idle %.0fs",
+                                 session_id, idle)
+                        await self.close_session(session_id)
+                    except Exception:
+                        log.exception("ACP sweeper: close_session failed for %s",
+                                      session_id)
+                        self.closing.discard(session_id)
+                    return
+                # Log when we keep an idle session because a person must answer.
+                last_used = meta.get("last_used")
+                if last_used is not None:
+                    idle = now - last_used
+                    if idle > ACP_IDLE_TTL_SECONDS and (_awaits_person or _has_workflow):
+                        log.info("ACP sweeper: keeping idle session %s "
+                                 "(awaits_person=%s, active_workflow=%s)",
+                                 session_id, _awaits_person, _has_workflow)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("ACP sweeper: unexpected error in sweep loop for %s",
+                              self._session_id)
 
 
 # Module-level supervisor pool (replaces _supervisor singleton)
@@ -8587,7 +8598,7 @@ def _publish_live_all() -> None:
     hook = sessions_changed_hook
     if hook is None:
         return
-    mapping: dict[str, int | None] = {}
+    mapping: dict[str, int | None] = {}  # None when pid not yet known
     for sid, s in list(_supervisors.items()):
         if not s.sessions:
             # No active sessions (pre-creation or post-close): skip so a
@@ -9536,7 +9547,8 @@ async def _handle_load(conn, session_id):
     _supervisors[session_id] = sup
     sup._session_id = session_id
     _reserved -= 1
-    sup._start_lifecycle_tasks()
+    # L3: _start_lifecycle_tasks() is called after load_session() succeeds,
+    # not here, mirroring _handle_new's ordering.
     failure = None
     try:
         try:
@@ -9549,9 +9561,10 @@ async def _handle_load(conn, session_id):
             cwd = await asyncio.to_thread(_stored_session_cwd_v3, session_id)
             await sup.load_session(session_id, cwd)
             _flush_bubble(session_id, emit_fn=_emit)
+            sup._start_lifecycle_tasks()  # L3: after load_session() succeeds
         except AcpError as exc:
             failure = _load_failure(exc, None)
-            _deregister_supervisor(session_id)
+            # L1: _deregister_supervisor removed; _detach() via _discard() is sole caller.
             sup._discard("session load failed")
             log.warning("ACP session/load refused: [%s] session=%s %s%s",
                         failure[0], session_id, failure[1],
@@ -9560,8 +9573,13 @@ async def _handle_load(conn, session_id):
             log.exception("ACP session/load failed: session=%s", session_id)
             failure = ("internal_error",
                        "Loading the session failed; see orchestrator.log.")
-            _deregister_supervisor(session_id)
+            # L1: _deregister_supervisor removed; _detach() via _discard() is sole caller.
             sup._discard("session load failed")
+        except BaseException:
+            # M1: CancelledError (BaseException) escapes the two except clauses above.
+            # Clean up the registered supervisor so it is not left orphaned.
+            sup._discard("session load cancelled")
+            raise
     finally:
         waiters = _registry.loading.pop(session_id, [])
     _deliver_load(conn, waiters, session_id, failure,
@@ -9658,37 +9676,42 @@ async def _handle_new(conn, payload):
                     SessionLimit.code)
         return
     conn.send(envelope("meta", {"pending": "new"}))
-    global _reserved
-    _reserved += 1
     sup = _Supervisor()
+    session_created = False  # flag for M1 finally guard
     try:
         cwd = await asyncio.to_thread(_resolve_session_cwd, raw_cwd)
         info = await sup.new_session(cwd, mode=bound_mode)
+        session_created = True
     except AcpError as exc:
-        _reserved -= 1
         sup._discard("session creation failed")
         log.warning("ACP session/new refused: [%s] %s", exc.code, exc)
         conn.send(error_frame(exc.code, str(exc)))
         return
     except Exception:
-        _reserved -= 1
         sup._discard("session creation failed")
         log.exception("ACP session/new failed")
         conn.send(error_frame(
             "internal_error",
             "Creating the session failed; see orchestrator.log."))
         return
+    finally:
+        # M1: guard against CancelledError (BaseException) orphaning a supervisor
+        # that never reached registration in _supervisors. Fires on every exit
+        # path including success, so gate on session_created and sup._session_id.
+        # _discard() is idempotent so double-calling on the explicit-except paths
+        # is safe.
+        if not session_created and not sup._session_id:
+            sup._discard("session creation failed or cancelled")
     session_id = info["sessionId"]
     _supervisors[session_id] = sup
     sup._session_id = session_id
-    _reserved -= 1
     sup._start_lifecycle_tasks()
     record = sup.sessions.get(session_id)
     if permission_mode and isinstance(record, dict):
         record["permission_mode"] = permission_mode
     if conn not in _registry.connections:
         log.info("ACP session %s created after its socket went away", session_id)
-        _deregister_supervisor(session_id)
+        # L1: _deregister_supervisor removed; _detach() via _discard() is the sole caller.
         sup._discard("Socket disconnected before session was delivered.")
         return
     _registry.attach(conn, session_id)

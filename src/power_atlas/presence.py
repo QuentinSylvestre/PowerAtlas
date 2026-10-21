@@ -212,7 +212,7 @@ _acp_live: dict[str, int] = {}
 def publish_acp_sessions(mapping: dict) -> None:
     """Publish the ACP per-session pid mapping. Called from the event loop only.
 
-    Accepts a dict[str, int] mapping session_id -> pid from _publish_live_all().
+    Accepts a dict[str, int | None] mapping session_id -> pid from _publish_live_all().
     Rebinding a module global is atomic under the GIL; no lock needed.
     """
     global _acp_live
@@ -737,7 +737,11 @@ def _scan() -> Snapshot:
     # which is the inconsistency the immutable snapshot exists to prevent.
     _live = _acp_live  # local snapshot for thread safety
     acp_sids = frozenset(_live)
-    acp_pids = frozenset(_live.values())
+    # L2: exclude None values so a session whose kiro-cli process has not
+    # yet started does not enter acp_pids as None — which would make
+    # `pid in acp_pids` always False (no real pid equals None).
+    # The sid-based guard (acp_sids) still covers those sessions correctly.
+    acp_pids = frozenset(p for p in _live.values() if p is not None)
     for rec in records:
         provider, pid, sid, started = rec.provider, rec.pid, rec.sid, rec.started
         cwd, status, reason = rec.cwd, rec.status, rec.reason
