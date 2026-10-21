@@ -14536,7 +14536,18 @@ class TestAcpWorkflowNotifications:
                 try:
                     _awaits_person = session_id in sup.sessions_awaiting_person()
                 except Exception:
-                    continue  # broken supervisor: skip like the old _sweep_once did
+                    # Fail closed: keep the session and log the failure
+                    _sweep_fail_count = getattr(sup, "_sweep_fail_count", 0) + 1
+                    sup._sweep_fail_count = _sweep_fail_count
+                    if _sweep_fail_count == 1:
+                        _acp_log.warning("ACP sweeper: reading the open requests failed for %s",
+                                         session_id, exc_info=True)
+                    else:
+                        _acp_log.warning("ACP sweeper: reading the open requests failed for %s "
+                                         "(%d consecutive)", session_id, _sweep_fail_count)
+                    continue  # keep the session (fail-closed)
+                else:
+                    sup._sweep_fail_count = 0  # reset on success
                 _has_workflow = sup.has_active_workflow(session_id)
                 if acp_mod._sweepable(
                         session_id, meta, now,
@@ -16199,13 +16210,14 @@ class TestAcpWorkflowNotifications:
     def test_workflow_flag_is_false_when_no_row_of_the_frame_is_a_workflow_row(self, wf):
         acp_mod, sv = wf
         _live_session(acp_mod, self.P2)
+        sv2 = acp_mod._supervisors[self.P2]
         watcher = self._watch(acp_mod)
         watcher2 = self._watch(acp_mod, self.P2)
         self._run_start(acp_mod)                              # this session's run is live
         sv.crews[self.P] = {"legacy-1": self._legacy_entry(order=0)}
         sv2.crews[self.P2] = {"legacy-2": self._legacy_entry(order=0)}
         acp_mod._emit_subagents_frame(self.P, sv.crews, sv._active_fan_out_wave)
-        acp_mod._emit_subagents_frame(self.P2, sv.crews, sv._active_fan_out_wave)
+        acp_mod._emit_subagents_frame(self.P2, sv2.crews, sv2._active_fan_out_wave)
         assert self._live_flags(watcher) == [False]            # a finished legacy panel
         assert self._live_flags(watcher2) == [False]
         assert sv.workflow_run_live(self.P) is True            # the run itself is unchanged
@@ -17365,13 +17377,13 @@ class TestAcpWorkflowNotifications:
         acp_mod, sv = wf
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._step_says(acp_mod, "warning", "Which colour?")
-        sv._reserved = 1
+        acp_mod._reserved = 1
         try:
             _notify(acp_mod, "session/update", {"sessionId": "child-c7", "update": {
                 "sessionUpdate": "tool_call", "toolCallId": "t-9", "title": "Write",
                 "kind": "edit", "status": "pending"}})
         finally:
-            sv._reserved = 0
+            acp_mod._reserved = 0
         assert sv._workflow_children[self.P]["child-c7"][0] == "running"
         assert sv.crews[self.P]["child-c7"]["status"] == "working"
         assert sv._workflow_step_questions == {}
@@ -26641,34 +26653,27 @@ class TestAcpCrewSpawnerToolCallId:
         assert acp_mod._supervisors[sid].crew_spawn_toolcallids.get(sid) == ""
 
     def test_second_list_update_does_not_overwrite_anchor_toolcallid(self, acp_store):
-        """Anchor-path then single-inflight: guard preserves the anchor toolCallId.
-
-        Exercises the mutation-detecting scenario:
-        1. Two sessions in inflight + anchor → first _on_subagent_list sets via anchor path.
-        2. Second session removed from inflight → single-inflight path would overwrite with ''.
-        3. Guard prevents overwrite; original anchor toolCallId is preserved.
-        """
+        """In the per-session model each supervisor has exactly one session.
+        Both list updates fire the single-inflight path (not the anchor path),
+        so crew_spawn_toolcallids gets _NO_ANCHOR_TOOLCALLID from both calls.
+        The guard preventing overwrite in multi-inflight scenarios is dead code
+        in the per-session model but must not break the single-inflight path."""
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
-        sid2 = _live_session(acp_mod, sid="other-session-2")
-        # Register anchor tcid-1 → sid
+        # Register anchor tcid-1 → sid (not consumed in single-inflight path)
         acp_mod._supervisors[sid].crew_spawn_anchors["tcid-1"] = sid
-        # Two sessions in-flight so anchor path fires (not single-inflight)
         acp_mod._supervisors[sid].inflight.add(sid)
-        acp_mod._supervisors[sid2].inflight.add(sid2)
-        # First call: anchor path sets crew_spawn_toolcallids[sid] = "tcid-1"
+        # Single-inflight path: sets _NO_ANCHOR_TOOLCALLID (not the anchor)
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
             {"sessionId": "sub-d", "role": "worker", "status": {"type": "working"}},
         ]})
-        assert acp_mod._supervisors[sid].crew_spawn_toolcallids.get(sid) == "tcid-1"
-        # Remove the second session → now single-inflight; that path would set ""
-        acp_mod._supervisors[sid2].inflight.discard(sid2)
-        # Second call: single-inflight path fires, but guard prevents overwrite
+        assert acp_mod._supervisors[sid].crew_spawn_toolcallids.get(sid) == acp_mod._NO_ANCHOR_TOOLCALLID
+        # Second call: single-inflight path fires again, guard prevents overwrite
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
-            {"sessionId": "sub-d", "role": "worker", "status": {"type": "working"}},
+            {"sessionId": "sub-e", "role": "worker", "status": {"type": "working"}},
         ]})
-        # Guard preserved the anchor value
-        assert acp_mod._supervisors[sid].crew_spawn_toolcallids.get(sid) == "tcid-1"
+        # Still _NO_ANCHOR_TOOLCALLID (guard preserves first assignment)
+        assert acp_mod._supervisors[sid].crew_spawn_toolcallids.get(sid) == acp_mod._NO_ANCHOR_TOOLCALLID
 
     def test_turn_end_cleanup_pops_toolcallid(self, acp_store):
         """Turn-end finally pop removes a toolCallId seeded mid-turn.
@@ -38663,7 +38668,7 @@ class TestAcpMcpStatusNotification:
         try:
             # Simulate a session/new in-flight: reserve a slot so SC-1 buffers
             # notifications that arrive before sessions[sid] is committed.
-            sv3._reserved = 1
+            acp_mod._reserved = 1
             sv3._on_notification(self._mcp_status_msg(sid, servers))
 
             # Not yet in sessions — notification must have been buffered.
@@ -38680,7 +38685,7 @@ class TestAcpMcpStatusNotification:
 
             assert sv3.sessions[sid].get("mcpServers") == self._proj(servers)
         finally:
-            sv3._reserved = 0
+            acp_mod._reserved = 0
             self._cleanup_registry(acp_mod)
 
     # ------------------------------------------------------------------
@@ -41261,7 +41266,7 @@ class TestOverviewLive:
         from power_atlas import overview, web as web_mod
         sid = "sess_" + _ov_uuid(1)
         sup = types.SimpleNamespace(sessions={sid: {"cwd": str(tmp_path / "agent-home")}})
-        monkeypatch.setattr(web_mod, "acp", types.SimpleNamespace(_supervisor=sup))
+        monkeypatch.setattr(web_mod, "acp", types.SimpleNamespace(_supervisors={sid: sup}))
         monkeypatch.setattr(overview, "_transcript_path", lambda *a: None)
         monkeypatch.setattr(web_mod, "get_semantic_status", lambda *a: None)
         with patch("power_atlas.web.load_config", return_value=self._config()):
