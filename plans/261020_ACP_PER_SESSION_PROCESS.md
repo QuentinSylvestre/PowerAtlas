@@ -903,7 +903,7 @@ None.
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 1 | Core migration — routing, spawn, handlers [QA] | Complete | commits 88efd8a, d760bac |
-| 2 | Dead code removal and per-supervisor sweep [QA] | Complete | commit ff417f6 |
+| 2 | Dead code removal and per-supervisor sweep [QA] | Complete | commits ff417f6, 65a2f96 |
 | 3 | Test fixture refactor | Not started | |
 | 4 | Documentation ripple and memory measurement [QA] | Not started | |
 
@@ -928,9 +928,25 @@ None.
 | `memory/MEMORY.md` | Propose update: D9 boundary note `_supervisor.sessions` (~line 471) — user approval required | 4 |
 | `memory/MEMORY.md` | Propose update: workflow step `_supervisor._request` → `_find_supervisor` (~lines 596–599) — user approval required | 4 |
 
-## 9) Implementation Divergences from Plan
+### Phase 2 — Implementation (2026-10-20, code: ff417f6, fix: 65a2f96)
 
-### Phase 1 — Implementation (2026-10-20, code: 88efd8a, fix: d760bac)
+**Scope**: `src/power_atlas/acp.py`, `src/power_atlas/web.py`
+
+**Delivered per plan**: `_maybe_recycle_idle`, `AGENT_IDLE_RECYCLE_SECONDS`, `_idle_since` removed; `_set_queued_behind`, `queued_behind` meta writes (6 sites), `_info_kind == "queued"` branch, `queue_status` frame and `SERVER_TYPES` entry, `turn_queued` steer guard all removed; `_sweep_failures`/`_sweep_held_logged`/`_sweep_awaiting_failures` module-level dicts removed; `_sweep_once()` slimmed to workflow-reap + SC-1 orphan + presence backstop; `_start_lifecycle_tasks()`, `cancel_lifecycle_tasks()`, `_sweep_once_local()` added to `_Supervisor`; wired into `_handle_new`/`_handle_load` and `_detach()`; `start_watchdog()` removed from `web.py` lifespan.
+
+**Review findings** (full effort — Green):
+- L1: `start_watchdog()` dead code remained in `acp.py`. **Fixed** (65a2f96).
+- L2: Per-supervisor sweep has no close-failure retry. Accepted as design — watchdog covers process death; retry not warranted.
+
+**Live QA**: PASS (run by coder inside workflow session):
+- EC-1 ✅ PA started cleanly
+- EC-2 ✅ Session created, prompt responded
+- EC-3 ✅ Session closed cleanly ("0 live")
+- EC-4 ✅ Process tree killed ("12 process(es) killed")
+- EC-5 ✅ Capacity freed (held:0 after close)
+- EC-6 ✅ All 5 dead-code greps return zero hits
+
+## 9) Implementation Divergences from Plan
 
 **Scope**: `src/power_atlas/acp.py`, `src/power_atlas/presence.py`, `src/power_atlas/web.py`
 
