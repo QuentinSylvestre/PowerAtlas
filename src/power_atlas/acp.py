@@ -10924,18 +10924,6 @@ def start_sweeper() -> asyncio.Task:
     return asyncio.create_task(_sweep_loop())
 
 
-def start_watchdog() -> asyncio.Task:
-    """Placeholder: per-supervisor watchdogs will be started per-session in Phase 2.
-    Returns a cancellable no-op task so the lifespan can cancel it cleanly.
-    """
-    async def _placeholder():
-        try:
-            await asyncio.sleep(float("inf"))
-        except asyncio.CancelledError:
-            pass
-    return asyncio.create_task(_placeholder(), name="acp-watchdog-placeholder")
-
-
 def apply_config(config) -> None:
     """Rebind this module's tunables from configuration. **Startup only.**
 
