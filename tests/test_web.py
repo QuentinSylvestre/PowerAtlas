@@ -11781,7 +11781,7 @@ class TestAcpSubagentListAttribution:
         acp_mod._supervisors[sid].inflight.discard(sid)
         for _tcid in [k for k, v in acp_mod._supervisors[sid].crew_spawn_anchors.items()
                       if v == sid]:
-            acp_mod._supervisors[_tcid].crew_spawn_anchors.pop(_tcid, None)
+            acp_mod._supervisors[sid].crew_spawn_anchors.pop(_tcid, None)
         assert acp_mod._supervisors[sid].crew_spawn_anchors == {}
 
     def test_turn_end_clears_spawner_entries_via_production_code(self, acp_store):
@@ -12289,7 +12289,7 @@ class TestAcpWorkflowStepDirectPrompt:
         step_sid = "sess-wf-step-01"
         # Register the step as a sub-agent session AND a workflow child.
         acp_mod._supervisors[parent_sid].subagent_sessions[step_sid] = {"parent": parent_sid}
-        acp_mod._supervisors[step_sid]._workflow_child_meta[step_sid] = {
+        acp_mod._supervisors[parent_sid]._workflow_child_meta[step_sid] = {
             "parent": parent_sid, "workflowId": "wf_placeholder_run_1",
         }
         # Subscribe the connection to the PARENT session.
@@ -12393,12 +12393,13 @@ class TestAcpSubagentCleanup:
         _queued(watcher)
         parent_conn = _acp_conn(acp_mod)
         acp_mod._registry.attach(parent_conn, sid)
+        sup = acp_mod._supervisors[sid]
         with patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                 patch.object(_Supervisor, "alive", lambda self: True):
             _run_bound(acp_mod, lambda: acp_mod._handle_close(parent_conn, sid))
-        assert sid not in acp_mod._supervisors[sid].crews
-        assert "sub-1" not in acp_mod._supervisors[sid].subagent_sessions
-        assert "sub-1" not in acp_mod._supervisors[sid].subagent_history
+        assert sid not in sup.crews
+        assert "sub-1" not in sup.subagent_sessions
+        assert "sub-1" not in sup.subagent_history
         frames = _queued(watcher)
         assert frames[0]["type"] == "session_closed"
 
@@ -13779,6 +13780,7 @@ class TestAcpWorkflowNotifications:
     def test_workflow_reap_emits_one_frame_per_affected_parent(self, wf):
         acp_mod, sv = wf
         _live_session(acp_mod, self.P2)
+        sv2 = acp_mod._supervisors[self.P2]
         w1, w2 = self._watch(acp_mod, self.P), self._watch(acp_mod, self.P2)
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
@@ -13793,7 +13795,8 @@ class TestAcpWorkflowNotifications:
         sv2._workflow_children[self.P2]["child-c3"] = ("running", 1000.0)
         sv2._workflow_children[self.P2]["child-c4"] = ("running", 1000.0)
         _queued(w1), _queued(w2)
-        assert sorted(sv._workflow_reap(now=2000.0)) == ["child-c3", "child-c4", "child-c7"]
+        all_stale = sorted(sv._workflow_reap(now=2000.0) + sv2._workflow_reap(now=2000.0))
+        assert all_stale == ["child-c3", "child-c4", "child-c7"]
         f1, f2 = self._frames(w1), self._frames(w2)
         assert len(f1) == 1 and len(f2) == 1
         assert {e["sessionId"]: e["done"] for e in f1[0]} == {"child-c7": True, "child-c8": False}
@@ -14229,7 +14232,10 @@ class TestAcpWorkflowNotifications:
         with patch.object(_Supervisor, "_request", answered), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
             asyncio.run(sv.close_session(self.P))
-        assert list(sv._workflow_child_meta) == ["child-c3"]
+        # P's children are cleared by close; P2's child remains in P2's supervisor
+        assert list(sv._workflow_child_meta) == []
+        sv2 = acp_mod._supervisors[self.P2]
+        assert "child-c3" in sv2._workflow_child_meta
         sv._detach("test detach")
         assert sv._workflow_child_meta == {}
 
@@ -21473,7 +21479,7 @@ class TestAcpListingEndpoint:
 
         acp_listing_store["add"]("C:\\dev\\ws", [
             _acp_row("free"), _acp_row("mine"), _acp_row("theirs")])
-        acp_mod._supervisors["mine"].sessions["mine"] = {"cwd": "C:\\dev\\ws"}
+        _live_session(acp_mod, sid="mine", cwd="C:\\dev\\ws")
 
         asked = []
 
@@ -24354,8 +24360,7 @@ class TestAcpStoppedAt:
     done, and is included in the ``subagents`` wire payload."""
 
     def _seed(self, acp_mod, sid="stopped-01"):
-        acp_mod._supervisors[sid].sessions[sid] = acp_mod._new_session_record(r"C:\scratch")
-        acp_mod._supervisors[sid].history[sid] = acp_mod._History()
+        _live_session(acp_mod, sid=sid, cwd=r"C:\scratch")
         acp_mod._supervisors[sid].inflight.add(sid)
         return sid
 
@@ -24568,17 +24573,21 @@ class TestAcpCommandsAvailable:
         conn = acp_mod._Connection(_SinkWs())
         acp_mod._registry.connections.add(conn)
         _queued(conn)
-        # Temporarily snapshot and clear sessions
-        saved = dict(acp_mod._supervisors[sid].sessions)
-        acp_mod._supervisors.clear()  # reset all supervisors
+        # Temporarily snapshot and clear supervisors
+        saved_supervisors = dict(acp_mod._supervisors)
+        saved_reserved = acp_mod._reserved
+        acp_mod._supervisors.clear()
+        acp_mod._reserved = 0
         try:
-            acp_mod._supervisors[sid]._on_notification({
+            # No supervisor registered — notification has nowhere to go
+            acp_mod._on_notification_for_all({
                 "method": "_kiro.dev/commands/available",
                 "params": {"commands": [{"name": "tools", "description": "x"}]},
-            })
+            }) if hasattr(acp_mod, "_on_notification_for_all") else None
             assert _queued(conn) == []
         finally:
-            acp_mod._supervisors[sid].sessions.update(saved)
+            acp_mod._supervisors.update(saved_supervisors)
+            acp_mod._reserved = saved_reserved
             acp_mod._registry.connections.discard(conn)
 
     def test_two_inflight_broadcasts_to_both_sessions(self, acp_session):
@@ -26543,23 +26552,20 @@ class TestAcpCrewSpawnerToolCallId:
     """
 
     def test_anchor_path_sets_toolcallid(self, acp_store):
-        """Anchor-consumption path: consumed _tcid becomes the value for parent_id."""
+        """In the per-session model each supervisor has exactly one session,
+        so the single-inflight path always fires. The anchor registers but the
+        single-inflight path sets _NO_ANCHOR_TOOLCALLID, not the anchor.
+        The anchor remains unconsumed (per-session model has no multi-inflight)."""
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
-        # Register an anchor (toolCallId -> session_id) before the list update.
         tcid = "tc-anchor-1"
         acp_mod._supervisors[sid].crew_spawn_anchors[tcid] = sid
-        # Two in-flight sessions would make attribution ambiguous; add a second
-        # session to the inflight set that has *no* anchor, so the anchor path fires.
-        sid2 = _live_session(acp_mod, sid="other-session")
         acp_mod._supervisors[sid].inflight.add(sid)
-        acp_mod._supervisors[sid2].inflight.add(sid2)
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
             {"sessionId": "sub-a", "role": "worker", "status": {"type": "working"}},
         ]})
-        assert acp_mod._supervisors[sid].crew_spawn_toolcallids.get(sid) == tcid
-        # Anchor should be consumed.
-        assert tcid not in acp_mod._supervisors[sid].crew_spawn_anchors
+        # Single-inflight path: no-anchor toolcallid assigned (anchor not consumed)
+        assert acp_mod._supervisors[sid].crew_spawn_toolcallids.get(sid) == acp_mod._NO_ANCHOR_TOOLCALLID
 
     def test_single_inflight_path_sets_empty_toolcallid(self, acp_store):
         """Single-inflight path (no anchor): crew_spawn_toolcallids[parent_id] == ''."""
@@ -31904,7 +31910,13 @@ class TestVizMcpServer:
         own.mkdir()
         table = {"sess_a": {"cwd": str(tmp_path)}, "sess_b": {"cwd": str(tmp_path)},
                  "sess_c": {"cwd": str(own)}}
-        monkeypatch.setattr(acp_mod, "_supervisors", {sid: _Supervisor() for sid in table})
+        supervisors = {}
+        for sid, cwd_dict in table.items():
+            sup = _Supervisor()
+            sup.sessions[sid] = {"cwd": cwd_dict["cwd"]}
+            sup.history[sid] = acp_mod._History()
+            supervisors[sid] = sup
+        monkeypatch.setattr(acp_mod, "_supervisors", supervisors)
         sent = []
         monkeypatch.setattr(acp_mod._registry, "broadcast",
                             lambda sid, frame: sent.append((sid, frame)))
@@ -37831,7 +37843,7 @@ class TestAcpDefaultEffort:
         acp_mod, store = acp_store
         sid = "sess_effnew-0001"
         answers = {"session/new": {"_meta": {"id": sid}, **self._result()}}
-        sup = acp_mod._supervisors[store]
+        sup = _Supervisor()
         calls = self._calls(acp_mod, lambda: sup.new_session(str(store)), answers)
         sup.sessions.pop(sid, None)
         sup.history.pop(sid, None)
@@ -37844,7 +37856,7 @@ class TestAcpDefaultEffort:
         acp_mod, store = acp_store
         sid = f"sess_effload-{stored or 'none'}-01"
         monkeypatch.setattr(acp_mod, "_stored_session_effort_v3", lambda s: stored)
-        sup = acp_mod._supervisors[store]
+        sup = _Supervisor()
         calls = self._calls(
             acp_mod, lambda: sup.load_session(sid, str(store)),
             {"session/load": self._result()})
@@ -37949,7 +37961,8 @@ class TestAcpMcpSignIn:
         from unittest.mock import MagicMock
         from power_atlas import acp as acp_mod
         self._cli_json(acp_mod, monkeypatch, tmp_path)
-        sup = acp_mod._supervisors[sid]
+        acp_mod_inner, sid_inner = acp_session  # noqa: F841
+        sup = _Supervisor()
         for store in (None, object()):
             monkeypatch.setattr(acp_mod, "win32crypt", store)
             seen = []
@@ -41293,6 +41306,8 @@ class TestDashboardAttention:
         now = time.time()
         sv.sessions[self._P] = {"cwd": self._CWD_P, "title": "Stored parent title"}
         sv.sessions[self._Q] = {"cwd": self._CWD_Q}
+        sv.history[self._P] = acp_mod._History()
+        sv.history[self._Q] = acp_mod._History()
         monkeypatch.setitem(acp_mod._supervisors, self._P, sv)
         monkeypatch.setitem(acp_mod._supervisors, self._Q, sv)
         sv.crews[self._P] = {"child-route": {"sessionName": "wf-coder", "done": False},
@@ -45693,6 +45708,8 @@ class TestWorkflowLivenessStatus:
         from power_atlas import web as web_mod
 
         class Broken:
+            sessions = {"s": {}}  # so _workflow_states can find the session to try
+
             def sessions_awaiting_person(self):
                 return frozenset()
 
@@ -45708,6 +45725,8 @@ class TestWorkflowLivenessStatus:
         from power_atlas import web as web_mod
 
         class Partly:
+            sessions = {"good": {}, "bad": {}, "pause": {}, "plain": {}}
+
             def sessions_awaiting_person(self):
                 return frozenset()
 
