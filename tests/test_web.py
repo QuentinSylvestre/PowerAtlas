@@ -14533,7 +14533,10 @@ class TestAcpWorkflowNotifications:
                     continue
                 session_id = next(iter(sup.sessions))
                 meta = sup.sessions[session_id]
-                _awaits_person = session_id in sup.sessions_awaiting_person()
+                try:
+                    _awaits_person = session_id in sup.sessions_awaiting_person()
+                except Exception:
+                    continue  # broken supervisor: skip like the old _sweep_once did
                 _has_workflow = sup.has_active_workflow(session_id)
                 if acp_mod._sweepable(
                         session_id, meta, now,
@@ -15449,17 +15452,19 @@ class TestAcpWorkflowNotifications:
     def test_workflow_stop_touches_only_the_cancelled_parents_children(self, wf):
         acp_mod, sv = wf
         _live_session(acp_mod, self.P2)
+        sv2 = acp_mod._supervisors[self.P2]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
                    nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
                    sessionId="child-c3")
         other = self._watch(acp_mod, self.P2)
         self._cancel(acp_mod)                                        # cancels P only
-        assert list(sv._workflow_children) == [self.P2]
-        assert list(sv._workflow_node_index) == [(self.P2, "wf-q2m", "step-one")]
+        assert list(sv._workflow_children) == []   # P's children cancelled
+        assert list(sv2._workflow_children) == [self.P2]  # P2's children intact
+        assert list(sv2._workflow_node_index) == [(self.P2, "wf-q2m", "step-one")]
         row = sv2.crews[self.P2]["child-c3"]
         assert (row["done"], row["status"], row["action"]) == (False, "working", "running")
-        assert sv.workflow_state(self.P2) == "working"
+        assert sv2.workflow_state(self.P2) == "working"
         assert _queued(other) == []                                  # no frame, no notice
 
     def test_workflow_stop_without_workflow_children_changes_nothing_and_says_nothing(self, wf):
@@ -15638,12 +15643,13 @@ class TestAcpWorkflowNotifications:
     def test_workflow_run_of_another_parent_is_not_this_parents(self, wf):
         acp_mod, sv = wf
         _live_session(acp_mod, self.P2)
+        sv2 = acp_mod._supervisors[self.P2]
         self._send(acp_mod, "run_start", parentSessionId=self.P2, workflowId="wf-q2m")
-        assert sv.workflow_run_live(self.P2) is True
+        assert sv2.workflow_run_live(self.P2) is True
         assert sv.workflow_run_live(self.P) is False
         # P's run_complete for the same workflow id does not end P2's run.
         self._send(acp_mod, "run_complete", workflowId="wf-q2m", status="completed")
-        assert list(sv._workflow_runs) == [(self.P2, "wf-q2m")]
+        assert list(sv2._workflow_runs) == [(self.P2, "wf-q2m")]
 
     @pytest.mark.parametrize("workflow_id", [_OMITTED, None, "", "   ", 123, ["wf-k7x"]],
                              ids=["omitted", "none", "empty", "blank", "int", "list"])
@@ -22836,11 +22842,11 @@ class TestAcpDeleteEndpoint:
         and only one of them is reversible."""
         from power_atlas import acp as acp_mod
         paths = acp_store_dir("sess-held")
-        acp_mod._supervisors["sess-held"].sessions["sess-held"] = {"cwd": "C:\\dev\\ws"}
+        _live_session(acp_mod, sid="sess-held", cwd="C:\\dev\\ws")
         try:
             body = self._post(client, ["sess-held"]).json()
         finally:
-            acp_mod._supervisors["sess-held"].sessions.pop("sess-held", None)
+            acp_mod._supervisors.pop("sess-held", None)
 
         assert body["deleted"] == []
         assert body["failed"][0]["code"] == "held"
@@ -24085,7 +24091,7 @@ class TestAcpSteer:
             outbound = _queued(conn)
             assert outbound[0]["payload"]["code"] == "read_only_session"
         finally:
-            acp_mod._supervisors[child_id].subagent_sessions.pop(child_id, None)
+            acp_mod._supervisors[sid].subagent_sessions.pop(child_id, None)
             acp_mod._registry.connections.discard(conn)
 
     def test_steer_refused_when_no_turn_in_progress(self, acp_session):
@@ -41510,6 +41516,10 @@ class TestDashboardAttention:
         now = time.time()
         sv.sessions.update({self._P: {"cwd": self._CWD_P}, self._Q: {"cwd": self._CWD_Q},
                             "sess_nofolder": {"cwd": ""}})
+        from power_atlas import acp as acp_mod_ref
+        for sid in sv.sessions:
+            sv.history[sid] = acp_mod_ref._History()
+            monkeypatch.setitem(acp_mod_ref._supervisors, sid, sv)
         for i, sid in enumerate((self._P, self._Q, "sess_nofolder")):
             sv._pending_permission[f"op{i}"] = {"session_id": sid, "options": [], "kiro_id": i,
                                                  "text": "t", "created": now - 10 + i}
