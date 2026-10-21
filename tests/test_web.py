@@ -7825,7 +7825,7 @@ class TestAcpSessionClose:
                 patch.object(_Supervisor, "alive", lambda self: True):
             _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
         assert [f["type"] for f in _queued(conn)] == ["session_closed"]
-        assert sid not in acp_mod._supervisors[sid].sessions
+        assert sid not in acp_mod._supervisors
 
     def test_close_during_a_turn_is_refused(self, acp_session):
         """The outstanding `session/prompt` would sit on a session the agent no
@@ -8519,7 +8519,7 @@ class TestAcpSessionRecordHoldsNoDeadState:
 
         with patch.object(_Supervisor, "ensure_started", _no_spawn), \
                 patch.object(_Supervisor, "_request", answers):
-            info = asyncio.run(acp_mod._supervisors[store].new_session(str(store)))
+            info = asyncio.run(_Supervisor().new_session(str(store)))
         assert info["sessionId"] == "73a40df3-2f1c-4e6a-9c11-0b7e6a2d5f88"
         assert acp_mod._valid_session_id(info["sessionId"])
 
@@ -11530,8 +11530,9 @@ class TestAcpActivityStamp:
                 {"sessionId": "already-closed",
                  "update": {"sessionUpdate": "agent_message_chunk",
                             "content": {"type": "text", "text": "late"}}})
-        acp_mod._supervisors[sid].touch_used("already-closed")
-        assert "already-closed" not in acp_mod._supervisors[sid].sessions
+        # In the per-session model, no supervisor is created for "already-closed";
+        # verify nothing was recreated.
+        assert "already-closed" not in acp_mod._supervisors
 
     def test_attaching_and_detaching_a_socket_counts_as_use(self, acp_store):
         acp_mod, _ = acp_store
@@ -11893,7 +11894,7 @@ class TestAcpSubagentListParsing:
     def test_a_non_list_subagents_field_is_ignored_rather_than_raising(
             self, acp_store):
         acp_mod, _ = acp_store
-        self._seed(acp_mod)
+        sid = self._seed(acp_mod)
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": "nope"})
         assert acp_mod._supervisors[sid].crews == {}
 
@@ -12637,6 +12638,7 @@ class TestAcpPromptWait:
         reason: the wall-clock arm formats `{timeout:.0f}` into its message and
         a sentinel would blow up there."""
         acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
 
         def fake_write(self, obj):
             pass
@@ -13816,8 +13818,8 @@ class TestAcpWorkflowNotifications:
         the entry stays and one INFO line says why. With nothing open (the
         control) the same session is swept."""
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
+        sv = acp_mod._supervisors[self.P]
         try:
             self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
             if held == "approval":
@@ -13861,8 +13863,8 @@ class TestAcpWorkflowNotifications:
         with nothing open is still kept, the traceback is logged once over two
         ticks, and no "keeping idle session" line claims an open request."""
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
+        sv = acp_mod._supervisors[self.P]
         sv.sessions[self.P]["last_used"] = (
             time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
 
@@ -13898,8 +13900,8 @@ class TestAcpWorkflowNotifications:
         set, so a later hold logs again; a session no longer held leaves it
         even while its entry is still there."""
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
+        sv = acp_mod._supervisors[self.P]
         entry = {"session_id": self.P, "kind": "approval", "options": [],
                  "kiro_id": 71, "text": "Run shell: dir", "created": time.time()}
 
@@ -14457,8 +14459,8 @@ class TestAcpWorkflowNotifications:
     def test_workflow_sweep_once_keeps_a_parent_with_a_live_child_until_it_goes_stale(
             self, acp_fast):
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
+        sv = acp_mod._supervisors[self.P]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         sv.sessions[self.P]["last_used"] = (
             time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
@@ -14495,8 +14497,8 @@ class TestAcpWorkflowNotifications:
         `inflight`. Final review finding C2. Expected from the brief: the
         completion that empties the parent's tracked set counts as one use."""
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
+        sv = acp_mod._supervisors[self.P]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         old = self._age_past_ttl(acp_mod, self.P)
         if route == "node_complete":
@@ -14511,8 +14513,8 @@ class TestAcpWorkflowNotifications:
     def test_workflow_completion_with_a_sibling_still_running_does_not_touch_the_parent(
             self, acp_fast):
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
+        sv = acp_mod._supervisors[self.P]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
         old = self._age_past_ttl(acp_mod, self.P)
@@ -14525,8 +14527,8 @@ class TestAcpWorkflowNotifications:
     def test_workflow_run_complete_of_another_run_does_not_touch_the_parent(
             self, acp_fast):
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
+        sv = acp_mod._supervisors[self.P]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._start(acp_mod, "wf-q2m", "step-one", child="child-c8")
         old = self._age_past_ttl(acp_mod, self.P)
@@ -14540,8 +14542,8 @@ class TestAcpWorkflowNotifications:
         completion of an unknown node and a run_complete of an unknown run all
         leave the clock alone."""
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
+        sv = acp_mod._supervisors[self.P]
         old = self._age_past_ttl(acp_mod, self.P)
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
@@ -14554,8 +14556,8 @@ class TestAcpWorkflowNotifications:
     def test_workflow_stale_only_parent_is_still_swept_without_a_completion(
             self, acp_fast):
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
+        sv = acp_mod._supervisors[self.P]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._age_past_ttl(acp_mod, self.P)
         sv._workflow_children[self.P]["child-c7"] = ("running", time.monotonic() - 601)
@@ -17952,7 +17954,7 @@ class TestAcpIdleSweeper:
         written = []
         self._sweep(acp_mod, written)
         assert written == []
-        assert sid not in acp_mod._supervisors[sid].sessions
+        assert sid not in acp_mod._supervisors
         assert sid not in acp_mod._supervisors[sid].history
 
     def test_a_session_inside_the_ttl_is_left_alone(self, acp_fast):
@@ -18072,7 +18074,7 @@ class TestAcpIdleSweeper:
             _run_bound(acp_mod, lambda: acp_mod._sweep_once())
 
         assert seen == ["close_in_progress"]
-        assert sid not in acp_mod._supervisors[sid].sessions
+        assert sid not in acp_mod._supervisors
 
     def test_a_load_during_the_terminate_round_trip_is_refused(self, acp_fast):
         """C2-32. Unreachable before the sweeper existed: a close needed a
@@ -18145,7 +18147,7 @@ class TestAcpIdleSweeper:
         assert attached == [None]
         assert stamps == [stamped]
         assert _queued(conn) == []
-        assert sid not in acp_mod._supervisors[sid].sessions
+        assert sid not in acp_mod._supervisors
 
     def test_a_swept_session_tells_any_watcher_it_is_gone(self, acp_fast):
         """`close_session`'s notification half, reproduced rather than reached
@@ -18270,7 +18272,7 @@ class TestAcpIdleSweeper:
 
         written = []
         self._sweep(acp_mod, written)
-        assert sid not in acp_mod._supervisors[sid].sessions
+        assert sid not in acp_mod._supervisors
         assert sid not in acp_mod._sweep_failures
 
         # The same id comes back — a load of the session from the agent's store
