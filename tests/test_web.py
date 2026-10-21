@@ -3427,28 +3427,7 @@ class TestAcpReplayOnSubscribe:
         assert any("unknown_session" in r.getMessage() for r in caplog.records)
 
 
-class TestHandleSubscribeQueuedState:
-    """_handle_subscribe includes 'queued' in the session frame."""
-
-    def test_session_frame_has_queued_true_when_queued_behind_set(self, acp_session):
-        acp_mod, sid = acp_session
-        acp_mod._supervisors[sid].sessions[sid]["queued_behind"] = "some_other_session"
-        conn = acp_mod._Connection(_SinkWs())
-        acp_mod._registry.connections.add(conn)
-        acp_mod._handle_subscribe(conn, sid)
-        frames = _queued(conn)
-        session_frame = next(f for f in frames if f["type"] == "session")
-        assert session_frame["payload"]["queued"] is True
-
-    def test_session_frame_has_queued_false_when_no_queued_behind(self, acp_session):
-        acp_mod, sid = acp_session
-        acp_mod._supervisors[sid].sessions[sid].pop("queued_behind", None)
-        conn = acp_mod._Connection(_SinkWs())
-        acp_mod._registry.connections.add(conn)
-        acp_mod._handle_subscribe(conn, sid)
-        frames = _queued(conn)
-        session_frame = next(f for f in frames if f["type"] == "session")
-        assert session_frame["payload"]["queued"] is False
+# TestHandleSubscribeQueuedState: queued_behind removed in Phase 2
 
 
 class TestHandleSubscribeVizReplay:
@@ -3830,7 +3809,7 @@ class TestAcpUnrecognizedNotificationLogLevel:
         sv3 = _Supervisor()
         sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
         sv3.history[sid] = acp_mod._History()
-        monkeypatch.setattr(acp_mod, "_supervisor", sv3)
+        monkeypatch.setitem(acp_mod._supervisors, "_sv_test_", sv3)
 
         with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
             sv3._on_notification({
@@ -6474,7 +6453,7 @@ class TestAcpSessionLoad:
         sid = "load-me-0007"
         self._stored(store, sid, store)
         for i in range(acp_mod.MAX_SESSIONS):
-            acp_mod._supervisors["filler%d" % i].sessions["filler%d" % i] = {"cwd": ""}
+            _live_session(acp_mod, sid="filler%d" % i)
         wire = []
         conn = _acp_conn(acp_mod)
         with patch.object(_Supervisor, "_request",
@@ -7220,7 +7199,7 @@ class TestAcpLoadFailureAttribution:
         sid = "load-attr-002"
         _stored_session(store, sid)
         for i in range(acp_mod.MAX_SESSIONS):
-            acp_mod._supervisors["filler%d" % i].sessions["filler%d" % i] = {"cwd": ""}
+            _live_session(acp_mod, sid="filler%d" % i)
         conn = _acp_conn(acp_mod)
         with patch.object(_Supervisor, "ensure_started", _no_spawn):
             asyncio.run(acp_mod._handle_load(conn, sid))
@@ -7313,7 +7292,7 @@ class TestAcpSessionCapMessage:
 
     def _fill(self, acp_mod):
         for i in range(acp_mod.MAX_SESSIONS):
-            acp_mod._supervisors["filler%d" % i].sessions["filler%d" % i] = {"cwd": ""}
+            _live_session(acp_mod, sid="filler%d" % i)
 
     def _only_error(self, acp_mod, conn):
         """The refusal, and the assertion that it is the *whole* answer.
@@ -7963,7 +7942,7 @@ class TestAcpSessionClose:
         socket and memory exhaustion at ~161 MB a session."""
         acp_mod, sid = acp_session
         for i in range(acp_mod.MAX_SESSIONS - 1):
-            acp_mod._supervisors["filler%d" % i].sessions["filler%d" % i] = {"cwd": ""}
+            _live_session(acp_mod, sid="filler%d" % i)
         conn = self._conn(acp_mod, sid)
         try:
             assert (len(acp_mod._supervisors[sid].sessions)
@@ -7976,7 +7955,7 @@ class TestAcpSessionClose:
             assert len(acp_mod._supervisors[sid].sessions) < acp_mod.MAX_SESSIONS
         finally:
             for i in range(acp_mod.MAX_SESSIONS - 1):
-                acp_mod._supervisors["filler%d" % i].sessions.pop("filler%d" % i, None)
+                acp_mod._supervisors.pop("filler%d" % i, None)
 
     # `test_the_page_clears_the_session_and_the_url` used to sit here. It split
     # the template on `type === 'session_closed'` and asserted that three
@@ -8242,7 +8221,7 @@ class TestAcpNewDoesNotBlockTheLoop:
         indefinitely with no session ever created."""
         acp_mod, _store = acp_store
         for i in range(acp_mod.MAX_SESSIONS):
-            acp_mod._supervisors["filler%d" % i].sessions["filler%d" % i] = {"cwd": ""}
+            _live_session(acp_mod, sid="filler%d" % i)
         conn = self._conn(acp_mod)
         resolves = []
 
@@ -11512,8 +11491,9 @@ class TestAcpActivityStamp:
 
         with patch.object(_Supervisor, "ensure_started", _no_spawn), \
                 patch.object(_Supervisor, "_request", answers):
-            asyncio.run(acp_mod._supervisors[sid].new_session(str(store)))
-        meta = acp_mod._supervisors["never-prompted-1"].sessions["never-prompted-1"]
+            _sup_new = _Supervisor()
+            asyncio.run(_sup_new.new_session(str(store)))
+        meta = _sup_new.sessions["never-prompted-1"]
         assert isinstance(meta["last_used"], float)
 
     def test_a_loaded_session_carries_its_use_stamp(self, acp_store):
@@ -11524,8 +11504,9 @@ class TestAcpActivityStamp:
 
         with patch.object(_Supervisor, "ensure_started", _no_spawn), \
                 patch.object(_Supervisor, "_request", answers):
-            asyncio.run(acp_mod._supervisors[sid].load_session("loaded-1", str(store)))
-        meta = acp_mod._supervisors["loaded-1"].sessions["loaded-1"]
+            _sup_load = _Supervisor()
+            asyncio.run(_sup_load.load_session("loaded-1", str(store)))
+        meta = _sup_load.sessions["loaded-1"]
         assert isinstance(meta["last_used"], float)
 
     def test_the_metadata_method_does_not_count_as_use(self, acp_store):
@@ -13788,8 +13769,8 @@ class TestAcpWorkflowNotifications:
                    sessionId="child-c4")
         sv._workflow_children[self.P]["child-c7"] = ("running", 1000.0)
         sv._workflow_children[self.P]["child-c8"] = ("running", 1900.0)   # fresh
-        sv._workflow_children[self.P2]["child-c3"] = ("running", 1000.0)
-        sv._workflow_children[self.P2]["child-c4"] = ("running", 1000.0)
+        sv2._workflow_children[self.P2]["child-c3"] = ("running", 1000.0)
+        sv2._workflow_children[self.P2]["child-c4"] = ("running", 1000.0)
         _queued(w1), _queued(w2)
         assert sorted(sv._workflow_reap(now=2000.0)) == ["child-c3", "child-c4", "child-c7"]
         f1, f2 = self._frames(w1), self._frames(w2)
@@ -13799,9 +13780,10 @@ class TestAcpWorkflowNotifications:
 
     def test_workflow_sweep_once_reaps_rows_and_still_closes_an_idle_parent(self, acp_fast):
         acp_mod, _ = acp_fast
-        sv = acp_mod._supervisors[self.P]
         _live_session(acp_mod, self.P)
         _live_session(acp_mod, self.P2)
+        sv = acp_mod._supervisors[self.P]
+        sv2 = acp_mod._supervisors[self.P2]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
                    nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
@@ -13809,7 +13791,7 @@ class TestAcpWorkflowNotifications:
         for parent, child in ((self.P, "child-c7"), (self.P2, "child-c3")):
             sv._workflow_children[parent][child] = ("running", time.monotonic() - 700)
         # Only P2 is idle past the TTL; P was used just now.
-        sv.sessions[self.P2]["last_used"] = (
+        sv2.sessions[self.P2]["last_used"] = (
             time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
         with patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
@@ -13820,7 +13802,7 @@ class TestAcpWorkflowNotifications:
         assert (row["done"], row["action"], row["error"]) == (True, "no longer reporting", "")
         assert "child-c7" in sv._workflow_children[self.P]
         # P2: its only child is stale, so it is no longer a reason to keep it.
-        assert self.P2 not in sv.sessions
+        assert self.P2 not in acp_mod._supervisors
         assert self.P2 not in sv._workflow_children
 
     @pytest.mark.parametrize("held", ["approval", "question", "step_question", None])
@@ -14080,7 +14062,7 @@ class TestAcpWorkflowNotifications:
         del sv.crews[self.P]["child-c7"]["done"]          # poison the first parent
         with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
             assert sv._workflow_reap(now=2000.0) == ["child-c3"]
-            assert sv.crews[self.P2]["child-c3"]["done"] is True
+            assert sv2.crews[self.P2]["child-c3"]["done"] is True
             assert sv._workflow_reap(now=2100.0) == []
             assert sv._workflow_reap(now=2200.0) == []
         warns = [r for r in caplog.records if "workflow reap failed" in r.getMessage()]
@@ -15400,7 +15382,7 @@ class TestAcpWorkflowNotifications:
         self._cancel(acp_mod)                                        # cancels P only
         assert list(sv._workflow_children) == [self.P2]
         assert list(sv._workflow_node_index) == [(self.P2, "wf-q2m", "step-one")]
-        row = sv.crews[self.P2]["child-c3"]
+        row = sv2.crews[self.P2]["child-c3"]
         assert (row["done"], row["status"], row["action"]) == (False, "working", "running")
         assert sv.workflow_state(self.P2) == "working"
         assert _queued(other) == []                                  # no frame, no notice
@@ -16140,7 +16122,7 @@ class TestAcpWorkflowNotifications:
         watcher2 = self._watch(acp_mod, self.P2)
         self._run_start(acp_mod)                              # this session's run is live
         sv.crews[self.P] = {"legacy-1": self._legacy_entry(order=0)}
-        sv.crews[self.P2] = {"legacy-2": self._legacy_entry(order=0)}
+        sv2.crews[self.P2] = {"legacy-2": self._legacy_entry(order=0)}
         acp_mod._emit_subagents_frame(self.P, sv.crews, sv._active_fan_out_wave)
         acp_mod._emit_subagents_frame(self.P2, sv.crews, sv._active_fan_out_wave)
         assert self._live_flags(watcher) == [False]            # a finished legacy panel
@@ -16456,8 +16438,9 @@ class TestAcpWorkflowNotifications:
 
     def _question(self, acp_mod, conn, request_id=91, session_id=None,
                   question="Where should we start?", options=None):
-        acp_mod._supervisors[sv]._on_agent_request(_user_input_msg(
-            request_id, session_id or self.P, question,
+        _parent_sid = session_id or self.P
+        acp_mod._supervisors[_parent_sid]._on_agent_request(_user_input_msg(
+            request_id, _parent_sid, question,
             self.QOPTS if options is None else options))
         frames = self._pending_frames(conn, "question_request")
         assert len(frames) == 1, frames
@@ -18379,7 +18362,7 @@ class TestAcpIdleSweeper:
         sv3 = _Supervisor()
         sv3._pending_early_frames["sess_orphan-test-0001"] = [{"type": "chunk"}]
         sv3._pending_early_frames_at["sess_orphan-test-0001"] = time.monotonic()
-        monkeypatch.setattr(acp_mod, "_supervisor", sv3)
+        monkeypatch.setitem(acp_mod._supervisors, "_sv_test_", sv3)
         passes = []
 
         async def record():
@@ -21512,13 +21495,13 @@ class TestAcpListingEndpoint:
         """What the rail renders as `N/8 sessions open`."""
         from power_atlas import acp as acp_mod
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
-        acp_mod._supervisors["a"].sessions["a"] = {"cwd": "C:\\dev\\ws"}
-        acp_mod._supervisors["b"].sessions["b"] = {"cwd": "C:\\dev\\ws"}
+        _live_session(acp_mod, sid="a", cwd=r"C:\dev\ws")
+        _live_session(acp_mod, sid="b", cwd=r"C:\dev\ws")
         try:
             body = client.get(self._PATH).json()
         finally:
-            acp_mod._supervisors["a"].sessions.pop("a", None)
-            acp_mod._supervisors["b"].sessions.pop("b", None)
+            acp_mod._supervisors.pop("a", None)
+            acp_mod._supervisors.pop("b", None)
         assert body["capacity"] == {"held": 2, "max": acp_mod.MAX_SESSIONS}
 
     def test_capacity_counts_a_creation_still_in_flight(self, client,
@@ -21535,12 +21518,12 @@ class TestAcpListingEndpoint:
         """
         from power_atlas import acp as acp_mod
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
-        acp_mod._supervisors["a"].sessions["a"] = {"cwd": "C:\\dev\\ws"}
+        _live_session(acp_mod, sid="a", cwd=r"C:\dev\ws")
         acp_mod._reserved += 1
         try:
             body = client.get(self._PATH).json()
         finally:
-            acp_mod._supervisors["a"].sessions.pop("a", None)
+            acp_mod._supervisors.pop("a", None)
             acp_mod._reserved -= 1
         assert body["capacity"]["held"] == 2
 
@@ -23443,7 +23426,7 @@ class TestAcpDeleteEndpointForV3Ids:
         which did the same for the since-deleted `_supervisor_v3`)."""
         from power_atlas import acp as acp_mod
         sup = _Supervisor()
-        monkeypatch.setattr(acp_mod, "_supervisor", sup)
+        monkeypatch.setitem(acp_mod._supervisors, "_sv_test_", sup)
         return sup
 
     def test_deleting_a_closed_v3_session_removes_it_from_disk(
@@ -23553,7 +23536,7 @@ class TestApiAcpDeleteSessionsEndpointMixedWorkspace:
         of false positives, now that both id shapes share one supervisor."""
         from power_atlas import acp as acp_mod
         sup = _Supervisor()
-        monkeypatch.setattr(acp_mod, "_supervisor", sup)
+        monkeypatch.setitem(acp_mod._supervisors, "_sv_test_", sup)
 
         target_cwd = "C:\\dev\\mixed-regression-2"
         v3_sid = "sess_v3-alone-0001"
@@ -23734,7 +23717,7 @@ class TestAcpWorkspacesEndpoint:
         try:
             body = client.get(self._PATH).json()
         finally:
-            acp_mod._supervisors["a"].sessions.pop("a", None)
+            acp_mod._supervisors.pop("a", None)
         assert body["capacity"] == {"held": 1, "max": acp_mod.MAX_SESSIONS}
 
     def test_it_is_on_the_remote_surface_and_deletion_is_not(self):
@@ -27491,8 +27474,14 @@ class TestSupervisor:
 
         hook_calls = []
 
-        def hook(session_ids, pid):
-            hook_calls.append((frozenset(session_ids), pid))
+        def hook(mapping):
+            # mapping is {session_id: pid}, convert to old format for assertions
+            if not mapping:
+                hook_calls.append((frozenset(), None))
+            else:
+                for sid, pid in mapping.items():
+                    hook_calls.append((frozenset(mapping.keys()), pid))
+                    break  # one entry
 
         sid = 'sess_v3-0000-0000-0000-000000000001'
 
@@ -27532,8 +27521,14 @@ class TestSupervisor:
 
         hook_calls = []
 
-        def hook(session_ids, pid):
-            hook_calls.append((frozenset(session_ids), pid))
+        def hook(mapping):
+            # mapping is {session_id: pid}, convert to old format for assertions
+            if not mapping:
+                hook_calls.append((frozenset(), None))
+            else:
+                for sid, pid in mapping.items():
+                    hook_calls.append((frozenset(mapping.keys()), pid))
+                    break  # one entry
 
         sid = 'sess_v3-0000-0000-0000-000000000002'
 
@@ -27562,16 +27557,11 @@ class TestSupervisor:
     def _sv3(self, monkeypatch):
         """A real _Supervisor instance for direct use in tests.
 
-        In the per-session model there is no module-level ``_supervisor``
-        singleton.  Tests that need routing through ``_supervisors`` register
-        sv3 themselves (or use ``_live_session``); tests that drive sv3
-        directly — the majority of ``TestSupervisor`` — can use it as-is.
+        Tests that need module-level routing (e.g., calling _handle_subscribe,
+        _handle_cancel, etc.) must register sv3 in acp_mod._supervisors[sid]
+        after adding sessions. Tests that drive sv3 directly need no registration.
         """
-        from power_atlas import acp as acp_mod
         sv3 = _Supervisor()
-        # Register in _supervisors so _publish_live_all() finds it if called.
-        # monkeypatch.setitem restores the original dict state at teardown.
-        monkeypatch.setitem(acp_mod._supervisors, "_sv3_test_slot_", sv3)
         return sv3
 
     def _conn_v3(self, acp_mod, sid=None, local=False):
@@ -27790,6 +27780,7 @@ class TestSupervisor:
         sid = "sess_sub00000-0000-0000-0000-000000000001"
         sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
 
         conn = self._conn_v3(acp_mod)
         try:
@@ -27820,6 +27811,7 @@ class TestSupervisor:
         sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0,
                               "commands": commands, "skills": skills}
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
 
         conn = self._conn_v3(acp_mod)
         try:
@@ -27914,6 +27906,7 @@ class TestSupervisor:
         sid = "sess_cancel000-0000-0000-0000-00000000001"
         sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
 
         written = []
@@ -27934,6 +27927,7 @@ class TestSupervisor:
         sid = "sess_cancel000-0000-0000-0000-00000000002"
         sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         conn = self._conn_v3(acp_mod, sid)
 
@@ -28507,67 +28501,6 @@ class TestSupervisor:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_session_info_update_queued_marks_session_and_broadcasts_waiting(self, monkeypatch):
-        """``kind: "queued"`` (kiro-cli holding this prompt behind another
-        session's turn) records ``queued_behind`` and broadcasts
-        ``queue_status{waiting: true}``; ``turn_start`` clears it and
-        broadcasts ``waiting: false``. A repeat of the same state is silent."""
-        from power_atlas import acp as acp_mod
-        sv3, sid = self._sv3_with_session(monkeypatch)
-        conn = self._conn_v3(acp_mod, sid)
-        try:
-            queued = {"kind": "queued", "activeSessionId": "sess-other"}
-            sv3._on_notification(self._session_info_msg(sid, queued))
-            sv3._on_notification(self._session_info_msg(sid, queued))
-            assert sv3.sessions[sid]["queued_behind"] == "sess-other"
-            sv3._on_notification(self._session_info_msg(sid, {"kind": "turn_start"}))
-            assert "queued_behind" not in sv3.sessions[sid]
-
-            events = _queued(conn)
-            assert [e["type"] for e in events] == ["queue_status"] * 2
-            assert [e["payload"]["waiting"] for e in events] == [True, False]
-            assert "queue_status" in acp_mod.SERVER_TYPES
-            assert sv3.history[sid].events() == []
-        finally:
-            self._cleanup_registry(acp_mod)
-
-    def test_queued_session_is_cleared_by_first_agent_output(self, monkeypatch):
-        """A held prompt that starts without a ``turn_start`` still stops
-        reading as waiting once real output arrives."""
-        from power_atlas import acp as acp_mod
-        sv3, sid = self._sv3_with_session(monkeypatch)
-        conn = self._conn_v3(acp_mod, sid)
-        try:
-            sv3._on_notification(self._session_info_msg(
-                sid, {"kind": "queued", "activeSessionId": "sess-other"}))
-            sv3._on_notification({"jsonrpc": "2.0", "method": "session/update", "params": {
-                "sessionId": sid, "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {"type": "text", "text": "hi"}}}})
-            assert "queued_behind" not in sv3.sessions[sid]
-            waiting = [e["payload"]["waiting"] for e in _queued(conn)
-                       if e["type"] == "queue_status"]
-            assert waiting == [True, False]
-        finally:
-            self._cleanup_registry(acp_mod)
-
-    def test_steer_refused_while_prompt_is_queued_behind_another_session(self, acp_session):
-        """A steer for a held prompt has nothing to inject into, so it is
-        refused with ``turn_queued`` instead of being sent to kiro-cli."""
-        acp_mod, sid = acp_session
-        conn = acp_mod._Connection(_SinkWs())
-        acp_mod._registry.connections.add(conn)
-        conn.session_id = sid
-        acp_mod._supervisors[sid].inflight.add(sid)
-        acp_mod._supervisors[sid].sessions[sid]["queued_behind"] = "sess-other"
-        _queued(conn)
-        try:
-            asyncio.run(acp_mod._handle_steer(conn, sid, {"message": "hurry"}))
-            assert _queued(conn)[0]["payload"]["code"] == "turn_queued"
-        finally:
-            acp_mod._supervisors[sid].inflight.discard(sid)
-            acp_mod._registry.connections.discard(conn)
-
     def test_session_info_update_steering_content_truncated_at_max_steer_chars(
             self, monkeypatch):
         """steer_status.content is agent-controlled text echoed back from the
@@ -28923,6 +28856,7 @@ class TestSupervisor:
         sid = "sess_livecrew0000-0000-0000-0000-00000000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         conn = self._conn_v3(acp_mod, sid)
         try:
@@ -28965,6 +28899,7 @@ class TestSupervisor:
         agent_subtask_id = "subtask-done-1"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         conn = self._conn_v3(acp_mod, sid)
         try:
@@ -29030,6 +28965,7 @@ class TestSupervisor:
         agent_subtask_id = "subtask-stream-1"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         try:
             sv3._on_notification(
@@ -29074,6 +29010,7 @@ class TestSupervisor:
         sid = "sess_spawneranchor0-0000-0000-0000-0000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         msg = {
             "method": "session/update",
@@ -29147,6 +29084,7 @@ class TestSupervisor:
         agent_subtask_id = "subtask-route-1"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         try:
             sv3._on_notification(
@@ -29190,6 +29128,7 @@ class TestSupervisor:
         sid = "sess_twowaves0000-0000-0000-0000-000000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         conn = self._conn_v3(acp_mod, sid)
         try:
@@ -29253,6 +29192,7 @@ class TestSupervisor:
         sid = "sess_overlapwaves0-0000-0000-0000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         try:
             # Batch 1, entry A1: opens, starts wave 1.
@@ -29304,6 +29244,7 @@ class TestSupervisor:
         agent_subtask_id = "subtask-correlate-1"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         try:
             sv3._on_notification(self._agent_subtask_open_msg(
@@ -29340,6 +29281,7 @@ class TestSupervisor:
         agent_subtask_id = "subtask-reconnect-1"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         try:
             sv3._on_notification(
@@ -29422,6 +29364,7 @@ class TestSupervisor:
         agent_subtask_id = "subtask-preferraw-1"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         try:
             sv3._on_notification(
@@ -29482,6 +29425,7 @@ class TestSupervisor:
         agent_subtask_id = "subtask-preferraw-nobubble-1"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.inflight.add(sid)
         try:
             sv3._on_notification(
@@ -29511,6 +29455,7 @@ class TestSupervisor:
         sid = "sess_unregisteredchunk-0000-0000-0001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         chunk_msg = {
             "method": "session/update",
             "params": {
@@ -29617,6 +29562,7 @@ class TestSupervisor:
         sid = "sess_permrequest0-0000-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         options = [
             {"optionId": "opt-0", "name": "Requirements", "kind": "allow_once"},
@@ -29669,6 +29615,7 @@ class TestSupervisor:
         sid = "sess_permclamp00-0000-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         seen = []
         previous = acp_mod.notify_hook
@@ -29704,6 +29651,7 @@ class TestSupervisor:
         sid = "sess_permconsent-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         try:
             sv3._on_agent_request(self._permission_request_msg(
@@ -29742,6 +29690,7 @@ class TestSupervisor:
         sid = "sess_permnocons-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         try:
             sv3._on_agent_request(self._permission_request_msg(
@@ -29990,6 +29939,7 @@ class TestSupervisor:
         sid = "sess_permruleelig-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch", bound)
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid, local=True)
         try:
             sv3._on_agent_request(self._permission_request_msg(
@@ -30048,6 +29998,7 @@ class TestSupervisor:
         sv3.sessions[sid] = acp_mod._new_session_record(
             "C:\\scratch", "poweratlas-acp")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid, local=True)
         consent = {"capability": "fs_write",
                    "resource": ".kiro/steering/probe.md",
@@ -30076,6 +30027,7 @@ class TestSupervisor:
         sid = "sess_permremote-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch", "poweratlas-acp")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         local = self._conn_v3(acp_mod, sid, local=True)
         remote = self._conn_v3(acp_mod, sid)
         fields = {"ruleEligible", "ruleRow", "ruleRowLabel", "ruleRoot"}
@@ -30114,6 +30066,7 @@ class TestSupervisor:
         sid = "sess_permbadmet-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         try:
             for request_id, meta in ((13, ["not", "a", "dict"]),
@@ -30166,6 +30119,7 @@ class TestSupervisor:
         sid = "sess_permnosock-0000-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\dev\\myrepo")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         seen = []
         previous = acp_mod.notify_hook
         try:
@@ -30185,6 +30139,7 @@ class TestSupervisor:
         sid = "sess_permboom00-0000-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         previous = acp_mod.notify_hook
         try:
@@ -30210,6 +30165,7 @@ class TestSupervisor:
         sid = "sess_dispedhook-0000-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\dev\\myrepo")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         seen = []
         previous = acp_mod.notify_hook
         try:
@@ -30302,6 +30258,7 @@ class TestSupervisor:
         sid = "sess_permbadid00-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         spawned = []
         monkeypatch.setattr(acp_mod, "_spawn_task", spawned.append)
         msg = self._permission_request_msg(
@@ -30372,6 +30329,7 @@ class TestSupervisor:
         sid = "sess_permresp0000-0000-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
         sv3._pending_permission[7] = {"session_id": sid, "options": options, "kiro_id": 7}
@@ -30417,6 +30375,7 @@ class TestSupervisor:
         sid = "sess_permdeny0000-0000-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         # The three options kiro-cli KAS 2.23.1 offered on every prompt live.
         options = [
@@ -30466,8 +30425,10 @@ class TestSupervisor:
         sid_b = "sess_permwrong_b0-0000-0000-0000-01"
         sv3.sessions[sid_a] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid_a] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid_a, sv3)
         sv3.sessions[sid_b] = acp_mod._new_session_record("C:\\scratch2")
         sv3.history[sid_b] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid_b, sv3)
         # conn is subscribed to B but the frame claims to be answering A's
         # request, which is the pending entry's real owner.
         conn = self._conn_v3(acp_mod, sid_b)
@@ -30525,6 +30486,7 @@ class TestSupervisor:
         sid = "sess_permdouble0-0000-0000-0000-0001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         options = [
             {"optionId": "opt-0", "name": "A", "kind": "allow_once"},
@@ -30585,6 +30547,7 @@ class TestSupervisor:
         sid = "sess_permconcurrent0-0000-0000-0001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         options = [
             {"optionId": "opt-0", "name": "A", "kind": "allow_once"},
@@ -30660,6 +30623,7 @@ class TestSupervisor:
         sid = "sess_permwritefail0-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
         sv3._pending_permission[13] = {"session_id": sid, "options": options, "kiro_id": 13}
@@ -30743,8 +30707,10 @@ class TestSupervisor:
         other_sid = "sess_permturnend_other0-0000-0001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         sv3.sessions[other_sid] = acp_mod._new_session_record("C:\\scratch2")
         sv3.history[other_sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, other_sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
 
         sv3._pending_permission["p1"] = {"session_id": sid, "options": [], "kiro_id": "p1"}
@@ -30807,6 +30773,7 @@ class TestSupervisor:
         def register():
             sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
             sv3.history[sid] = acp_mod._History()
+            monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
 
         def card_id(conn):
             return [f for f in _queued(conn)
@@ -30861,6 +30828,7 @@ class TestSupervisor:
         for s in (sid, other):
             sv3.sessions[s] = acp_mod._new_session_record("C:\\scratch")
             sv3.history[s] = acp_mod._History()
+            monkeypatch.setitem(acp_mod._supervisors, s, sv3)
         sv3.inflight.add(sid)
         conn = self._conn_v3(acp_mod, sid)
         sv3._pending_permission["op-1"] = {
@@ -30968,6 +30936,7 @@ class TestSupervisor:
         sid = "sess_permsweepra-0000-0000-0000-000001"
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
+        monkeypatch.setitem(acp_mod._supervisors, sid, sv3)
         conn = self._conn_v3(acp_mod, sid)
         sv3._pending_permission["op-1"] = {
             "session_id": sid, "options": [], "kiro_id": 51}
@@ -37659,74 +37628,8 @@ class TestAcpCloseSessionNoWireDelete:
             assert sid not in sup.sessions
 
 
-class TestAcpIdleAgentRecycle:
-    """The sweeper stops an agent that has had no session for
-    ``AGENT_IDLE_RECYCLE_SECONDS``. Close is local only, so kiro-cli keeps
-    every closed session loaded until its process ends; this is what releases
-    them. Anything still using the agent must reset the clock."""
+# TestAcpIdleAgentRecycle removed: _maybe_recycle_idle removed in Phase 2
 
-    def _setup(self, acp_mod, monkeypatch):
-        sup = acp_mod._supervisors[sid]
-        discards = []
-        monkeypatch.setattr(_Supervisor, "alive", lambda self: True)
-        monkeypatch.setattr(_Supervisor, "_discard",
-                            lambda self, reason: discards.append(reason))
-        monkeypatch.setattr(acp_mod, "AGENT_IDLE_RECYCLE_SECONDS", 100.0)
-        monkeypatch.setattr(sup, "_idle_since", None)
-        return sup, discards
-
-    def test_recycles_after_threshold_with_nothing_live(self, acp_store, monkeypatch):
-        acp_mod, _ = acp_store
-        sup, discards = self._setup(acp_mod, monkeypatch)
-        assert sup._maybe_recycle_idle(1000.0) is False   # starts the clock
-        assert sup._maybe_recycle_idle(1099.0) is False   # under threshold
-        assert sup._maybe_recycle_idle(1100.0) is True
-        assert len(discards) == 1
-        assert sup._idle_since is None
-
-    def test_anything_in_use_resets_the_clock(self, acp_store, monkeypatch):
-        acp_mod, _ = acp_store
-        sup, discards = self._setup(acp_mod, monkeypatch)
-        for attr, busy in (("_reserved", 1), ("_pending", {1: object()}),
-                           ("subagent_sessions", {"c": {}})):
-            idle = type(getattr(sup, attr))()
-            sup._maybe_recycle_idle(0.0)
-            monkeypatch.setattr(sup, attr, busy)
-            assert sup._maybe_recycle_idle(500.0) is False, attr
-            assert sup._idle_since is None, attr
-            monkeypatch.setattr(sup, attr, idle)
-        sid = _live_session(acp_mod)
-        try:
-            sup._maybe_recycle_idle(0.0)
-            assert sup._maybe_recycle_idle(500.0) is False
-        finally:
-            sup.sessions.pop(sid, None)
-            sup.history.pop(sid, None)
-        assert discards == []
-
-    def test_not_alive_is_left_alone(self, acp_store, monkeypatch):
-        acp_mod, _ = acp_store
-        sup, discards = self._setup(acp_mod, monkeypatch)
-        monkeypatch.setattr(_Supervisor, "alive", lambda self: False)
-        sup._maybe_recycle_idle(0.0)
-        assert sup._maybe_recycle_idle(500.0) is False
-        assert discards == []
-
-    def test_sweep_loop_checks_even_with_zero_sessions(self, acp_fast, monkeypatch):
-        """The loop skips ``_sweep_once`` when no session exists — the exact
-        state recycling is for — so the check must run before that guard."""
-        acp_mod, _ = acp_fast
-        seen = []
-
-        def fake_check(self, now):
-            seen.append(now)
-            raise asyncio.CancelledError
-
-        monkeypatch.setattr(_Supervisor, "_maybe_recycle_idle", fake_check)
-        assert not acp_mod._supervisors[store].sessions
-        with pytest.raises(asyncio.CancelledError):
-            asyncio.run(asyncio.wait_for(acp_mod._sweep_loop(), 5))
-        assert len(seen) == 1
 
 
 _needs_dpapi = pytest.mark.skipif(
@@ -37845,7 +37748,7 @@ class TestAcpMcpSignIn:
 
     def _setup(self, acp_mod, monkeypatch, tmp_path):
         sv3 = _Supervisor()
-        monkeypatch.setattr(acp_mod, "_supervisor", sv3)
+        monkeypatch.setitem(acp_mod._supervisors, "_sv_test_", sv3)
         monkeypatch.setattr(acp_mod, "_secrets", acp_mod._SecretStore(tmp_path / "s.bin"))
         written = []
         monkeypatch.setattr(_Supervisor, "_write", lambda self, m: written.append(m))
@@ -38383,7 +38286,7 @@ class TestAcpMcpStatusNotification:
     def _sv3(self, monkeypatch):
         from power_atlas import acp as acp_mod
         sv3 = _Supervisor()
-        monkeypatch.setattr(acp_mod, "_supervisor", sv3)
+        monkeypatch.setitem(acp_mod._supervisors, "_sv_test_", sv3)
         return sv3
 
     def _sv3_with_session(self, monkeypatch):
@@ -41261,18 +41164,20 @@ class TestDashboardAttention:
 
     @staticmethod
     def _sv(monkeypatch):
-        from power_atlas import acp as acp_mod
+        """A _Supervisor instance; _world registers it in _supervisors."""
         sv = _Supervisor()
-        monkeypatch.setattr(acp_mod, "_supervisor", sv)
         return sv
 
     def _world(self, monkeypatch):
         """Two held sessions: P (a stored title, a workflow step that asked and
         a routed approval) and Q (no stored title, an agent question)."""
+        from power_atlas import acp as acp_mod
         sv = self._sv(monkeypatch)
         now = time.time()
         sv.sessions[self._P] = {"cwd": self._CWD_P, "title": "Stored parent title"}
         sv.sessions[self._Q] = {"cwd": self._CWD_Q}
+        monkeypatch.setitem(acp_mod._supervisors, self._P, sv)
+        monkeypatch.setitem(acp_mod._supervisors, self._Q, sv)
         sv.crews[self._P] = {"child-route": {"sessionName": "wf-coder", "done": False},
                              "child-ask": {"sessionName": "asker", "done": False}}
         sv._workflow_children[self._P] = {"child-route": ("running", time.monotonic()),
