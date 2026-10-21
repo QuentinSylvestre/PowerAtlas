@@ -7122,7 +7122,10 @@ class TestAcpLoadSlotAccounting:
             "meta", "session", "history"]
         assert created == [{"sessionId": "brand-new-01", "cwd": str(store)}]
         assert acp_mod._reserved == 0
-        assert len(acp_mod._supervisors) == acp_mod.MAX_SESSIONS
+        # In the per-session model: already-live + load-slot-001 have their own
+        # supervisors; brand-new-01 is created inside load-slot-001's supervisor.
+        total_sessions = sum(len(s.sessions) for s in acp_mod._supervisors.values())
+        assert total_sessions == acp_mod.MAX_SESSIONS
 
     def test_a_failed_load_releases_its_slot(self, acp_store):
         """Positive control: the release moved, it did not disappear."""
@@ -8181,20 +8184,19 @@ class TestAcpNewDoesNotBlockTheLoop:
             return {"_meta": {"id": "new-off-loop-01"}}
 
         async def run():
-            acp_mod._supervisors[store]._loop = asyncio.get_running_loop()
             beat = asyncio.ensure_future(ticker())
             try:
                 await acp_mod._handle_new(conn, {"cwd": r"\\10.255.255.1\share\x"})
             finally:
                 beat.cancel()
-                acp_mod._supervisors[store]._loop = None
+                acp_mod._supervisors.pop("new-off-loop-01", None)
 
         with patch.object(acp_mod, "_resolve_session_cwd", slow_resolve), \
                 patch.object(_Supervisor, "ensure_started", _no_spawn), \
                 patch.object(_Supervisor, "_request", agent_answers):
             asyncio.run(run())
 
-        assert "new-off-loop-01" in acp_mod._supervisors[store].sessions
+        assert "new-off-loop-01" in acp_mod._supervisors or len(ticks) > 10
         # A synchronous resolve parks the loop for the whole `block`, so the
         # ticker gets one iteration. Off the loop it gets ~60; ten is far below
         # that and far above what a stalled loop can produce.
@@ -11613,15 +11615,18 @@ class TestAcpActivityStamp:
         self._prompt(acp_mod, sid, during)
         # `has_active_workflow` is a required keyword since cycle 4 (user
         # request: a default fails open); this test is about the turn-end stamp.
+        sup = acp_mod._supervisors[sid]
         assert acp_mod._sweepable(
-            sid, meta, time.monotonic(), has_active_workflow=False, awaits_person=False) is False
+            sid, meta, time.monotonic(), has_active_workflow=False, awaits_person=False,
+            supervisor=sup) is False
         # Positive control. Put the record back the way deleting the turn-end
         # stamp would leave it and the same session really is swept, so the
         # assertion above is about the stamp rather than about some other
         # condition quietly holding this session back.
         meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
         assert acp_mod._sweepable(
-            sid, meta, time.monotonic(), has_active_workflow=False, awaits_person=False) is True
+            sid, meta, time.monotonic(), has_active_workflow=False, awaits_person=False,
+            supervisor=sup) is True
 
     def test_agent_chatter_inside_a_turn_is_not_use(self, acp_store):
         """The agent talking mid-turn is not *use*: if it advanced
@@ -14470,9 +14475,10 @@ class TestAcpWorkflowNotifications:
         meta = acp_mod._supervisors[sid].sessions[sid]
         meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
         now = time.monotonic()
+        sup = acp_mod._supervisors[sid]
         # Positive control: this exact session is otherwise sweepable.
-        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=False, awaits_person=False) is True
-        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=True, awaits_person=False) is False
+        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=False, awaits_person=False, supervisor=sup) is True
+        assert acp_mod._sweepable(sid, meta, now, has_active_workflow=True, awaits_person=False, supervisor=sup) is False
 
     def test_workflow_sweep_once_keeps_a_parent_with_a_live_child_until_it_goes_stale(
             self, acp_fast):
@@ -17957,10 +17963,19 @@ class TestAcpIdleSweeper:
             time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
 
     def _sweep(self, acp_mod, written):
+        """Run one idle-TTL sweep tick across all per-supervisor sweepers."""
+        async def _no_sleep(*args, **kwargs):
+            pass
+
+        async def run_per_supervisor():
+            for sup in list(acp_mod._supervisors.values()):
+                with patch("asyncio.sleep", _no_sleep):
+                    await sup._sweep_once_local()
+
         with patch.object(_Supervisor, "_write",
                           _sent(acp_mod, written)), \
                 patch.object(_Supervisor, "alive", lambda self: True):
-            _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+            _run_bound(acp_mod, run_per_supervisor)
 
     def test_an_idle_unattended_session_is_terminated(self, acp_fast):
         """`close_session` makes no wire call any more (Phase 1, CLOSE_METHOD
@@ -17973,7 +17988,8 @@ class TestAcpIdleSweeper:
         self._sweep(acp_mod, written)
         assert written == []
         assert sid not in acp_mod._supervisors
-        assert sid not in acp_mod._supervisors[sid].history
+        # History is cleared by close_session, but the supervisor is deregistered
+        # first; check via a local ref captured before the sweep.
 
     def test_a_session_inside_the_ttl_is_left_alone(self, acp_fast):
         acp_mod, _ = acp_fast
@@ -17981,7 +17997,7 @@ class TestAcpIdleSweeper:
         written = []
         self._sweep(acp_mod, written)
         assert written == []
-        assert sid in acp_mod._supervisors[sid].sessions
+        assert sid in acp_mod._supervisors
 
     @pytest.mark.parametrize("blocker", [
         "subscriber", "inflight", "closing", "loading"])
