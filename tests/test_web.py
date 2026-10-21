@@ -14529,6 +14529,13 @@ class TestAcpWorkflowNotifications:
 
         async def run_tick():
             now = time.monotonic()
+            # Step 1: reap stale workflow rows (mirrors global _sweep_once)
+            for sup_r in list(acp_mod._supervisors.values()):
+                try:
+                    sup_r._workflow_reap()
+                except Exception:
+                    pass
+            # Step 2: idle TTL reclaim
             for sup in list(acp_mod._supervisors.values()):
                 if not sup.sessions:
                     continue
@@ -15278,13 +15285,18 @@ class TestAcpWorkflowNotifications:
             assert "child-c9" in sv._workflow_child_meta
             assert refused("child-c9", 75) == 1
             # Parent record and step meta disagree (tracked under both, so only
-            # the disagreement can refuse it).
+            # the disagreement can refuse it). In the per-session model
+            # _start_p2_step registers child-c3's meta on P2's supervisor, not
+            # sv's, so set sv's _workflow_child_meta directly here with a
+            # parent (P2) that disagrees with what subagent_sessions will say.
+            sv._workflow_child_meta["child-c3"] = {
+                "parent": self.P2, "workflowId": "wf-q2m", "started": 0.0}
             sv._workflow_set(self.P, "child-c3", "running")
             sv.subagent_sessions["child-c3"] = {"parent": self.P}
             assert refused("child-c3", 76) == 1
             # Parent no longer a registered session.
             sv.subagent_sessions["child-c3"] = {"parent": self.P2}
-            sv.sessions.pop(self.P2)
+            acp_mod._supervisors.pop(self.P2, None)  # deregister P2 as parent
             assert refused("child-c3", 77) == 1
         for coro in spawned:
             coro.close()
@@ -15867,7 +15879,8 @@ class TestAcpWorkflowNotifications:
         with patch.object(_Supervisor, "_request", answered), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
             asyncio.run(sv.close_session(self.P))
-        assert list(sv._workflow_runs) == [(self.P2, "wf-q2m")]
+        sv2 = acp_mod._supervisors.get(self.P2)
+        assert sv2 is not None and list(sv2._workflow_runs) == [(self.P2, "wf-q2m")]
         assert sv.workflow_run_live(self.P) is False
         sv._detach("test detach")
         assert sv._workflow_runs == {}
@@ -15971,7 +15984,9 @@ class TestAcpWorkflowNotifications:
         self._gap(acp_mod, sv)
         self._send(acp_mod, "run_start", parentSessionId=self.P2, workflowId="wf-q2m")
         self._send(acp_mod, "run_complete", workflowId="wf-other", status="completed")
-        assert list(sv._workflow_runs) == [(self.P2, "wf-q2m")]
+        assert list(sv._workflow_runs) == []
+        sv2 = acp_mod._supervisors.get(self.P2)
+        assert sv2 is not None and list(sv2._workflow_runs) == [(self.P2, "wf-q2m")]
 
     def test_workflow_run_cleared_by_an_unmatched_run_complete_records_itself_again(
             self, wf):
@@ -16191,12 +16206,14 @@ class TestAcpWorkflowNotifications:
         self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed")
         self._send(acp_mod, "run_complete", parentSessionId=self.P2, workflowId="wf-q2m",
                    status="completed")
-        assert set(sv._workflow_ended) == {self.P, self.P2}
+        assert set(sv._workflow_ended) == {self.P}
+        sv2 = acp_mod._supervisors.get(self.P2)
+        assert sv2 is not None and set(sv2._workflow_ended) == {self.P2}
         # P's ended id does not block P2's run of the same id.
         self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-k7x",
                    nodeId="step-one", type="step", nodePath=["wf-k7x", "step-one"],
                    sessionId="child-c3", agentName="wf-writer")
-        assert list(sv._workflow_runs) == [(self.P2, "wf-k7x")]
+        assert list(sv2._workflow_runs) == [(self.P2, "wf-k7x")]
 
         async def answered(self_, method, params, timeout=None):
             return {}
@@ -16204,7 +16221,9 @@ class TestAcpWorkflowNotifications:
         with patch.object(_Supervisor, "_request", answered), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
             asyncio.run(sv.close_session(self.P))
-        assert set(sv._workflow_ended) == {self.P2}
+        # In the per-session model P2's ended set lives on sv2, not sv.
+        # close_session(P) clears P's own entry; sv._workflow_ended is now empty.
+        assert sv._workflow_ended == {}
         sv._detach("test detach")
         assert sv._workflow_ended == {}
 
@@ -17486,14 +17505,15 @@ class TestAcpWorkflowNotifications:
     def test_close_and_detach_remove_the_step_question(self, wf):
         acp_mod, sv = wf
         _live_session(acp_mod, self.P2)
+        sv2 = acp_mod._supervisors[self.P2]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._step_says(acp_mod, "warning", "Which colour?")
-        # Another parent's step question survives this parent's close.
-        sv._workflow_step_questions["child-o1"] = {
+        # Another parent's step question (on sv2) survives this parent's close.
+        sv2._workflow_step_questions["child-o1"] = {
             "parent": self.P2, "text": "x", "created": 1.0, "label": "workflow step"}
         with patch.object(_Supervisor, "_write", _sent(acp_mod, [])):
             asyncio.run(sv.close_session(self.P))
-        assert list(sv._workflow_step_questions) == ["child-o1"]
+        assert list(sv2._workflow_step_questions) == ["child-o1"]  # in sv2, not sv
         sv._detach("test detach")
         assert sv._workflow_step_questions == {}
 
@@ -17772,17 +17792,19 @@ class TestAcpWorkflowNotifications:
     def test_remembered_warning_goes_with_the_step_and_the_parent(self, wf):
         acp_mod, sv = wf
         _live_session(acp_mod, self.P2)
+        sv2 = acp_mod._supervisors[self.P2]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._step_says(acp_mod, "warning", "Which colour?")
         self._complete(acp_mod, "wf-k7x", "step-one")
         assert sv._workflow_step_last_warning == {}
         self._start(acp_mod, "wf-k7x", "step-two", child="child-c8")
         self._step_says(acp_mod, "warning", "Size?", step="child-c8")
-        sv._workflow_step_last_warning["child-o1"] = {
+        # P2's last warning is on sv2, not sv
+        sv2._workflow_step_last_warning["child-o1"] = {
             "parent": self.P2, "text": "x", "created": 1.0, "label": "workflow step"}
         with patch.object(_Supervisor, "_write", _sent(acp_mod, [])):
             asyncio.run(sv.close_session(self.P))
-        assert list(sv._workflow_step_last_warning) == ["child-o1"]
+        assert list(sv2._workflow_step_last_warning) == ["child-o1"]  # in sv2
         sv._detach("test detach")
         assert sv._workflow_step_last_warning == {}
 
@@ -18043,6 +18065,13 @@ class TestAcpIdleSweeper:
 
         async def run_tick():
             now = time.monotonic()
+            # Step 1: reap stale workflow rows (mirrors global _sweep_once)
+            for sup_r in list(acp_mod._supervisors.values()):
+                try:
+                    sup_r._workflow_reap()
+                except Exception:
+                    pass
+            # Step 2: idle TTL reclaim
             for sup in list(acp_mod._supervisors.values()):
                 if not sup.sessions:
                     continue
@@ -26747,16 +26776,19 @@ class TestAcpCrewSpawnerToolCallId:
         """close_session removes the crew_spawn_toolcallids entry for the session."""
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
-        acp_mod._supervisors[sid].crew_spawn_toolcallids[sid] = "some-id"
+        sup = acp_mod._supervisors[sid]
+        sup.crew_spawn_toolcallids[sid] = "some-id"
 
         async def fake_request(self_, method, params, timeout=None):
             return {}
 
         with patch.object(_Supervisor, "_request", fake_request), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
-            asyncio.run(acp_mod._supervisors[sid].close_session(sid))
+            asyncio.run(sup.close_session(sid))
 
-        assert sid not in acp_mod._supervisors[sid].crew_spawn_toolcallids
+        # close_session deregisters the supervisor from _supervisors; access
+        # the supervisor directly rather than through _supervisors[sid].
+        assert sid not in sup.crew_spawn_toolcallids
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="win32api/win32job spawn path")
@@ -38738,20 +38770,25 @@ class TestAcpMcpStatusNotification:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_new_resends_mcp_servers_when_set(self, monkeypatch):
+    def test_handle_new_resends_mcp_servers_when_set(self, acp_store, monkeypatch):
         """_handle_new sends an `mcp_servers` frame when meta['mcpServers'] is set.
 
         Exercises the production path via asyncio.run(_handle_new(...)) with
         mocked new_session and _derived_mode_in_effect.
+
+        Note: _handle_new creates its OWN _Supervisor() instance; the class-level
+        patch is required so the new supervisor's new_session populates sessions[sid]
+        with mcpServers. A per-instance patch on sv3 would be ignored.
+        acp_store is required for a clean _supervisors dict (otherwise accumulated
+        state from prior tests can trigger the at_capacity() guard).
         """
-        from power_atlas import acp as acp_mod
         import asyncio
         from unittest.mock import AsyncMock, patch
 
-        sv3, sid = self._sv3_with_session(monkeypatch)
+        acp_mod, _ = acp_store
+        sid = "sess_mcp00000-0000-0000-0000-000000000001"
         servers = [{"name": "github", "status": "failed", "failedAuthorization": True,
                     "authorizationUrl": "https://github.com/oauth"}]
-        sv3.sessions[sid]["mcpServers"] = servers
 
         # conn must be in _registry.connections (not attached — _handle_new attaches it)
         conn = acp_mod._Connection(_SinkWs())
@@ -38759,14 +38796,18 @@ class TestAcpMcpStatusNotification:
         _queued(conn)  # drain
 
         async def run_handle_new():
-            # In effect: a Default create is refused otherwise
-            # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-34).
+            async def fake_new_session(self, cwd, mode=None):
+                # Populate sessions so _handle_new finds mcpServers on meta.
+                self.sessions[sid] = {"cwd": cwd, "created": 0.0,
+                                      "mcpServers": servers}
+                self.history[sid] = acp_mod._History()
+                return {"sessionId": sid, "cwd": cwd}
+
             with patch.object(acp_mod, "_derived_mode_in_effect",
                               AsyncMock(return_value=_gate_in_effect())), \
                  patch.object(acp_mod, "_resolve_session_cwd",
                               return_value="C:\\scratch"), \
-                 patch.object(sv3, "new_session",
-                              AsyncMock(return_value={"sessionId": sid, "cwd": "C:\\scratch"})):
+                 patch.object(_Supervisor, "new_session", fake_new_session):
                 await acp_mod._handle_new(conn, {"cwd": "C:\\scratch"})
 
         try:
@@ -41686,6 +41727,7 @@ class TestDashboardAttention:
         """Review fix 2: the override's read and the feed's snapshot log the
         first failure with a traceback, then at most a short line a minute, and a good read
         resets the count."""
+        from power_atlas import acp as acp_mod
         from power_atlas import web as web_mod
         monkeypatch.setattr(web_mod, "_workflow_state_failures", {})
         sv = self._sv(monkeypatch)
@@ -46107,8 +46149,12 @@ class TestWorkflowLivenessStatus:
         self._classify_as(monkeypatch, {held_sid: SemanticStatus.WAITING})
         self._children(monkeypatch, **{held_sid: ("running", 5.0)})
         threads = []
-        real = (list(acp_mod._supervisors.values()) or [_Supervisor()])[0].workflow_state
-        monkeypatch.setattr(list(acp_mod._supervisors.values())[0] if acp_mod._supervisors else _Supervisor(), "workflow_state",
+        # Use _supervisors[held_sid] directly: list(values())[0] would pick
+        # the wrong supervisor when other sessions from sibling tests are
+        # also registered in the module-level _supervisors dict.
+        sv = acp_mod._supervisors[held_sid]
+        real = sv.workflow_state
+        monkeypatch.setattr(sv, "workflow_state",
                             lambda sid, now=None: threads.append(threading.current_thread().name)
                             or real(sid, now))
         assert self._status(client) == "working"
