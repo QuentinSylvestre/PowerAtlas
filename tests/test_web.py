@@ -12415,10 +12415,11 @@ class TestAcpSubagentCleanup:
         async def answered(self_, method, params, timeout=None):
             return {}
 
+        sup = acp_mod._supervisors[sid]
         with patch.object(_Supervisor, "_request", answered), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
             asyncio.run(acp_mod._supervisors[sid].close_session(sid))
-        assert acp_mod._supervisors[sid].crew_spawn_anchors == {}
+        assert sup.crew_spawn_anchors == {}
 
     def test_detach_clears_spawner_anchors(self, acp_session):
         """_detach clears crew_spawn_anchors along with all other per-session
@@ -12426,11 +12427,12 @@ class TestAcpSubagentCleanup:
         """
         acp_mod, sid = acp_session
         acp_mod._supervisors[sid].crew_spawn_anchors["tc-detach"] = sid
+        sup = acp_mod._supervisors[sid]
         try:
             acp_mod._supervisors[sid]._detach("test detach")
         except Exception:
             pass  # _detach may fail pending futures; that's fine
-        assert acp_mod._supervisors[sid].crew_spawn_anchors == {}
+        assert sup.crew_spawn_anchors == {}
 
 
 class TestAcpSubagentEviction:
@@ -14531,10 +14533,12 @@ class TestAcpWorkflowNotifications:
                     continue
                 session_id = next(iter(sup.sessions))
                 meta = sup.sessions[session_id]
+                _awaits_person = session_id in sup.sessions_awaiting_person()
+                _has_workflow = sup.has_active_workflow(session_id)
                 if acp_mod._sweepable(
                         session_id, meta, now,
-                        has_active_workflow=sup.has_active_workflow(session_id),
-                        awaits_person=session_id in sup.sessions_awaiting_person(),
+                        has_active_workflow=_has_workflow,
+                        awaits_person=_awaits_person,
                         supervisor=sup):
                     sup.closing.add(session_id)
                     try:
@@ -14544,6 +14548,14 @@ class TestAcpWorkflowNotifications:
                         _acp_log.exception("ACP sweeper: close_session failed for %s",
                                            session_id)
                         sup.closing.discard(session_id)
+                else:
+                    last_used = meta.get("last_used")
+                    if last_used is not None:
+                        idle = now - last_used
+                        if idle > acp_mod.ACP_IDLE_TTL_SECONDS and (_awaits_person or _has_workflow):
+                            _acp_log.info("ACP sweeper: keeping idle session %s "
+                                          "(awaits_person=%s, active_workflow=%s)",
+                                          session_id, _awaits_person, _has_workflow)
 
         with patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
@@ -18014,10 +18026,12 @@ class TestAcpIdleSweeper:
                     continue
                 session_id = next(iter(sup.sessions))
                 meta = sup.sessions[session_id]
+                _awaits = session_id in sup.sessions_awaiting_person()
+                _wf = sup.has_active_workflow(session_id)
                 if acp_mod._sweepable(
                         session_id, meta, now,
-                        has_active_workflow=sup.has_active_workflow(session_id),
-                        awaits_person=session_id in sup.sessions_awaiting_person(),
+                        has_active_workflow=_wf,
+                        awaits_person=_awaits,
                         supervisor=sup):
                     sup.closing.add(session_id)
                     try:
@@ -18029,6 +18043,13 @@ class TestAcpIdleSweeper:
                         _acp_log.exception("ACP sweeper: close_session failed for %s",
                                            session_id)
                         sup.closing.discard(session_id)
+                else:
+                    last_used = meta.get("last_used")
+                    if last_used is not None and now - last_used > acp_mod.ACP_IDLE_TTL_SECONDS:
+                        if _awaits or _wf:
+                            _acp_log.info("ACP sweeper: keeping idle session %s "
+                                          "(awaits_person=%s, active_workflow=%s)",
+                                          session_id, _awaits, _wf)
 
         with patch.object(_Supervisor, "_write",
                           _sent(acp_mod, written)), \
@@ -37908,7 +37929,8 @@ class TestAcpMcpSignIn:
 
     def _setup(self, acp_mod, monkeypatch, tmp_path):
         sv3 = _Supervisor()
-        monkeypatch.setitem(acp_mod._supervisors, "_sv_test_", sv3)
+        monkeypatch.setitem(acp_mod._supervisors, self.SID, sv3)
+        sv3._session_id = self.SID
         monkeypatch.setattr(acp_mod, "_secrets", acp_mod._SecretStore(tmp_path / "s.bin"))
         written = []
         monkeypatch.setattr(_Supervisor, "_write", lambda self, m: written.append(m))

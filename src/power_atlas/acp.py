@@ -8510,9 +8510,11 @@ class _Supervisor:
             now = time.monotonic()
             session_id = next(iter(self.sessions))
             meta = self.sessions[session_id]
+            _awaits_person = session_id in self.sessions_awaiting_person()
+            _has_workflow = self.has_active_workflow(session_id)
             if _sweepable(session_id, meta, now,
-                          has_active_workflow=self.has_active_workflow(session_id),
-                          awaits_person=session_id in self.sessions_awaiting_person(),
+                          has_active_workflow=_has_workflow,
+                          awaits_person=_awaits_person,
                           supervisor=self):
                 self.closing.add(session_id)
                 try:
@@ -8525,6 +8527,14 @@ class _Supervisor:
                                   session_id)
                     self.closing.discard(session_id)
                 return
+            # Log when we keep an idle session because a person must answer.
+            last_used = meta.get("last_used")
+            if last_used is not None:
+                idle = now - last_used
+                if idle > ACP_IDLE_TTL_SECONDS and (_awaits_person or _has_workflow):
+                    log.info("ACP sweeper: keeping idle session %s "
+                             "(awaits_person=%s, active_workflow=%s)",
+                             session_id, _awaits_person, _has_workflow)
 
 
 # Module-level supervisor pool (replaces _supervisor singleton)

@@ -4852,7 +4852,7 @@ async def api_dashboard_attention(response: Response):
         return {"items": [], "count": 0}
     try:
         items: list[dict] = []
-        for _s in _sups.values():
+        for _s in dict.fromkeys(_sups.values()):  # deduplicate when tests reuse a supervisor
             items.extend(_s.attention_snapshot())
     except Exception:
         _workflow_state_fault(_ATTENTION_FAULT)
