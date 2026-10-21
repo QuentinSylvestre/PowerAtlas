@@ -21794,6 +21794,8 @@ class TestAcpListingEndpoint:
         monkeypatch.setattr(presence_mod, "get_snapshot",
                              lambda: presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake")}))
         live = _LoopBoundSessions({"sess_held-1": {"cwd": "C:\\dev\\ws"}})
+        for sid in live:
+            _live_session(acp_mod, sid=sid, cwd=live[sid].get("cwd", ""))
         monkeypatch.setattr(acp_mod, "_supervisors", {sid: acp_mod._supervisors[sid] for sid in live})
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("sess_held-1"), _acp_row("sess_locked-1"),
                                          _acp_row("sess_free-1")])
@@ -25665,7 +25667,7 @@ class TestAcpCommandsOptionsHandler:
             frames = _queued(conn)
             assert frames[0]["payload"]["code"] == "read_only_session"
         finally:
-            acp_mod._supervisors[child_id].subagent_sessions.pop(child_id, None)
+            acp_mod._supervisors[sid].subagent_sessions.pop(child_id, None)
             acp_mod._registry.connections.discard(conn)
 
     def test_not_subscribed_returns_not_subscribed(self, acp_session):
@@ -25826,7 +25828,7 @@ class TestAcpCommandsExecuteHandler:
             frames = _queued(conn)
             assert frames[0]["payload"]["code"] == "read_only_session"
         finally:
-            acp_mod._supervisors[child_id].subagent_sessions.pop(child_id, None)
+            acp_mod._supervisors[sid].subagent_sessions.pop(child_id, None)
             acp_mod._registry.connections.discard(conn)
 
     def test_not_subscribed_returns_not_subscribed(self, acp_session):
@@ -41673,6 +41675,11 @@ class TestDashboardAttention:
         real_snap = sv.attention_snapshot
         monkeypatch.setattr(sv, "attention_snapshot",
                             lambda: boom() and [] if state["broken"] else real_snap())
+        # Register sv so the route's attention snapshot also calls it
+        sv.sessions["test-attn-fail"] = {"cwd": "C:\\"}
+        sv.history["test-attn-fail"] = acp_mod._History()
+        sv._session_id = "test-attn-fail"
+        monkeypatch.setitem(acp_mod._supervisors, "test-attn-fail", sv)
         with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
             for _ in range(3):
                 assert web_mod._awaiting_person_ids(sv, {"s"}) is None
