@@ -11423,10 +11423,12 @@ def _notify(acp_mod, session_id_or_method, method_or_params=None, params=None):
         # Legacy form: _notify(acp_mod, method, params)
         method = session_id_or_method
         params = method_or_params
-        session_id = (params or {}).get("sessionId")
+        session_id = (params or {}).get("sessionId") if isinstance(params, dict) else None
     else:
         session_id = session_id_or_method
         method = method_or_params
+    if not isinstance(session_id, str):
+        session_id = None
     sup = acp_mod._supervisors.get(session_id) if session_id else None
     if sup is not None:
         sup._on_notification({"method": method, "params": params})
@@ -12053,8 +12055,8 @@ class TestAcpSubagentActivity:
         of an older wave goes out under that older wave's id (D16), and each
         frame still excludes the other wave's row."""
         acp_mod, _ = acp_store
-        sup = acp_mod._supervisors[sid]
         sid = _live_session(acp_mod)
+        sup = acp_mod._supervisors[sid]
         # A v2 anchor that differs from both waves, so an implementation that
         # still reads `crew_spawn_toolcallids` cannot pass by accident.
         sup.crew_spawn_toolcallids[sid] = "v2-spawn-tc"
@@ -12337,7 +12339,7 @@ class TestAcpWorkflowStepDirectPrompt:
         parent_sid = _live_session(acp_mod, sid="wf-parent-03")
         step_sid = "sess-wf-step-03"
         acp_mod._supervisors[parent_sid].subagent_sessions[step_sid] = {"parent": parent_sid}
-        acp_mod._supervisors[step_sid]._workflow_child_meta[step_sid] = {
+        acp_mod._supervisors[parent_sid]._workflow_child_meta[step_sid] = {
             "parent": parent_sid, "workflowId": "wf_placeholder_run_3",
         }
         # Subscribe the connection to a third, unrelated session.
@@ -14395,6 +14397,7 @@ class TestAcpWorkflowNotifications:
     def test_workflow_close_session_clears_only_its_own_state(self, wf):
         acp_mod, sv = wf
         _live_session(acp_mod, self.P2)
+        sv2 = acp_mod._supervisors[self.P2]
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
                    nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
@@ -14406,9 +14409,11 @@ class TestAcpWorkflowNotifications:
         with patch.object(_Supervisor, "_request", answered), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
             asyncio.run(sv.close_session(self.P))
-        assert list(sv._workflow_children) == [self.P2]
-        assert list(sv._workflow_node_index) == [(self.P2, "wf-q2m", "step-one")]
-        assert self.P not in sv._crew_order_next and self.P2 in sv._crew_order_next
+        # P's children cleared; P2's data is in sv2, not sv
+        assert list(sv._workflow_children) == []  # P's children cleared
+        assert list(sv2._workflow_children) == [self.P2]  # P2's in sv2
+        assert list(sv2._workflow_node_index) == [(self.P2, "wf-q2m", "step-one")]
+        assert self.P2 in sv2._crew_order_next
 
     def test_workflow_detach_clears_everything_with_its_real_signature(self, wf):
         acp_mod, sv = wf
@@ -21504,7 +21509,8 @@ class TestAcpListingEndpoint:
 
         acp_listing_store["add"]("C:\\dev\\ws", [
             _acp_row("free"), _acp_row("mine"), _acp_row("theirs")])
-        _live_session(acp_mod, sid="mine", cwd="C:\\dev\\ws")
+        if "mine" not in acp_mod._supervisors:
+            _live_session(acp_mod, sid="mine", cwd="C:\\dev\\ws")
 
         asked = []
 
