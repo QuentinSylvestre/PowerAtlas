@@ -362,8 +362,9 @@ playbook_root = ""  # "" = off (the default). Absolute path to the agent-playboo
 
 # ACP session limits. Both are read once at startup, so a change needs a restart; the settings
 # panel says so rather than pretending a live effect.
-acp_max_sessions = 8  # 1-16. Concurrent kiro-cli ACP sessions. Each costs ~3 processes and ~161 MB
-                      # (measured on kiro-cli 2.16.0), so 8 is roughly 1.5 GB at the cap.
+acp_max_sessions = 8  # 1-16. Concurrent kiro-cli ACP sessions. Each session runs its own
+                      # kiro-cli process tree; measured WorkingSet64 cost ~555-670 MB per session
+                      # (kiro-cli 2.31.1, 2026-10-21), so 8 sessions add ~4.5-5 GB above baseline.
 acp_idle_ttl_seconds = 1800  # 300-86400. A session with no attached tab, no running turn and no
                              # in-flight load is terminated after this long idle, on a 60 s sweep.
                              # Its transcript stays on disk, so it can be resumed later.
@@ -438,8 +439,7 @@ accepted as before.
 
 Reached by opening `/acp` directly.
 
-`/acp` drives kiro-cli over ACP: one supervised `kiro-cli acp --agent-engine v3` process holds every
-session PowerAtlas opens. The left rail lists workspaces with their sessions — ten workspaces and three sessions each by
+`/acp` drives kiro-cli over ACP: each session PowerAtlas opens runs in its own dedicated `kiro-cli acp` process. The left rail lists workspaces with their sessions — ten workspaces and three sessions each by
 default, each axis paging independently — and marks every visible row *available* or *held by PowerAtlas*.
 Selecting a row resumes that session and replays its history; sessions
 whose workspace directory no longer exists are marked so, since they cannot be resumed usefully.

@@ -80,7 +80,7 @@ Recipe for live QA of /acp and the dashboard against the running instance. It wo
   Check it only in overview mode, and wait for the tile first:
   `wait_for_function("id => !!_dashOvTileEls[id]", arg=sid)`.
 - **Protocol questions** (what kiro-cli advertises, or what a method does to disk): run a
-  second `kiro-cli acp --agent-engine v3`, or drive `power_atlas.acp._supervisor` from a
+  second `kiro-cli acp --agent-engine v3`, or drive `power_atlas.acp._supervisors[sid]` (or `power_atlas.acp._find_supervisor(sid)`) from a
   separate Python process. Never probe through the running instance. The token request is
   answered in-process by `_fulfill_token`, so the token never needs to be printed.
 - **Cleanup is manual.** Close is local-only, so a test session stays on disk under

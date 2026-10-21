@@ -3164,13 +3164,13 @@ def _session_limit_message() -> str:
     remedy and quotes the measured figure, so it is worth re-reading whenever
     the set of controls changes.
 
-    The per-session figure is the final-QA measurement at the shipped default
-    of eight concurrent sessions: 24 processes and 1288.6 MiB over eight above
-    a 5-process / 531.6 MiB baseline, i.e. 3.0 processes and 161.1 MiB each.
-    The ~178 MB it replaces was an earlier eight-session run.
+    The per-session figure is measured 2026-10-21 on kiro-cli 2.31.1 (per-session
+    process model): WorkingSet64 incremental ~555–670 MB per session (5 processes:
+    kiro-cli.exe, bun.exe, node.exe, plus stdio MCP server cmd.exe/conhost.exe).
+    First session pays ~672 MB; subsequent sessions ~555–563 MB each.
     """
     return (f"At most {MAX_SESSIONS} sessions at once (one kiro-cli process tree "
-            "each; exact cost TBD, measured in Phase 4). Close one from the session list to free a slot — "
+            "each; measured WorkingSet64 cost ~555–670 MB per session on kiro-cli 2.31.1). Close one from the session list to free a slot — "
             "open it and press Close; one tab reaches them all. Restarting "
             "PowerAtlas releases every session, and sessions left idle are "
             "reclaimed on their own.")
