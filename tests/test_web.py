@@ -12038,7 +12038,7 @@ class TestAcpSubagentActivity:
     @staticmethod
     def _seed_wave_row(acp_mod, parent, child, fan_out_id):
         """A wave-tagged crew row shaped like `_on_agent_subtask_open`'s."""
-        crew = acp_mod._supervisors[sid].crews.setdefault(parent, {})
+        crew = acp_mod._supervisors[parent].crews.setdefault(parent, {})
         crew[child] = {
             "role": "worker", "task": "t", "sessionName": "",
             "status": "pending", "action": "", "done": False, "error": "",
@@ -12361,7 +12361,7 @@ class TestAcpWorkflowStepDirectPrompt:
         parent_sid = _live_session(acp_mod, sid="wf-parent-04")
         step_sid = "sess-wf-step-04"
         acp_mod._supervisors[parent_sid].subagent_sessions[step_sid] = {"parent": parent_sid}
-        acp_mod._supervisors[step_sid]._workflow_child_meta[step_sid] = {
+        acp_mod._supervisors[parent_sid]._workflow_child_meta[step_sid] = {
             "parent": parent_sid, "workflowId": "wf_placeholder_run_4",
         }
         conn = self._make_conn(acp_mod, parent_sid)
@@ -14823,11 +14823,11 @@ class TestAcpWorkflowNotifications:
         self._start(acp_mod, "wf-k7x", "step-one", child="child-c7")
         self._start_p2_step(acp_mod)
         # Both parents have a running step; only P's step is asking.
-        assert web_mod._workflow_states(sv, [self.P, self.P2]) == {
+        assert web_mod._workflow_states(acp_mod._supervisors, [self.P, self.P2]) == {
             self.P: "working", self.P2: "working"}
         sv._on_agent_request(self._ask("child-c7", 71))
         assert sv.sessions_awaiting_person() == frozenset({self.P})
-        assert web_mod._workflow_states(sv, [self.P, self.P2]) == {self.P2: "working"}
+        assert web_mod._workflow_states(acp_mod._supervisors, [self.P, self.P2]) == {self.P2: "working"}
 
     def test_workflow_permission_request_stop_cancels_the_routed_request(self, wf):
         acp_mod, sv = wf
@@ -21812,9 +21812,11 @@ class TestAcpListingEndpoint:
         monkeypatch.setattr(presence_mod, "get_snapshot",
                              lambda: presence_mod.Snapshot(set(), {("kiro-cli-v3", "/fake")}))
         live = _LoopBoundSessions({"sess_held-1": {"cwd": "C:\\dev\\ws"}})
-        for sid in live:
-            _live_session(acp_mod, sid=sid, cwd=live[sid].get("cwd", ""))
-        monkeypatch.setattr(acp_mod, "_supervisors", {sid: acp_mod._supervisors[sid] for sid in live})
+        sup = _Supervisor()
+        sup.sessions = live  # use tracking dict as sessions
+        sup._session_id = "sess_held-1"
+        sup.history["sess_held-1"] = acp_mod._History()
+        monkeypatch.setattr(acp_mod, "_supervisors", {"sess_held-1": sup})
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("sess_held-1"), _acp_row("sess_locked-1"),
                                          _acp_row("sess_free-1")])
         body = client.get(self._PATH).json()
@@ -41608,11 +41610,14 @@ class TestDashboardAttention:
     def _held_world(self, monkeypatch, acp_listing_store, verdicts):
         from power_atlas import presence as presence_mod
         from power_atlas import web as web_mod
+        from power_atlas import acp as acp_mod
         sv = self._sv(monkeypatch)
         cwd = "C:\\dev\\ws"
         acp_listing_store["add"](cwd, [_acp_row(s, cwd=cwd) for s in verdicts])
         for s in verdicts:
             sv.sessions[s] = {"cwd": cwd}
+            sv.history[s] = acp_mod._History()
+            monkeypatch.setitem(acp_mod._supervisors, s, sv)
         monkeypatch.setattr(web_mod, "get_semantic_status",
                             lambda sid, provider, c: verdicts[sid])
         monkeypatch.setattr(presence_mod, "get_snapshot",
@@ -49113,62 +49118,36 @@ class TestWorkflowHistory:
     # -- Test A: node_start + node_complete + run_complete -> 1 run, 1 step -----
 
     def test_a_single_run_with_one_step(self, tmp_path):
-        """node_start/complete/run_complete notifications return 1 run with 1 step."""
+        """sub_agent_start/complete records return 1 run with 1 step."""
         import pathlib as _pl
         import re
         from unittest.mock import patch
         from power_atlas import acp as acp_mod
 
         session_id = "sess-wf-placeholder-1"
+        exec_id = "exec-placeholder-run-1"
+        sub_id = "sub-placeholder-step-1"
         lines = [
             {
                 "id": "m1",
                 "timestamp": "2026-01-01T00:00:00Z",
                 "payload": {
-                    "type": "user",
-                    "content": json.dumps({
-                        "method": "_kiro/workflow/node_start",
-                        "workflowId": "wf-placeholder-run-1",
-                        "nodeId": "step-placeholder-1",
-                        "type": "step",
-                        "agentName": "wf-placeholder-agent",
-                        "parentSessionId": "sess-wf-placeholder-1",
-                    }),
+                    "type": "sub_agent_start",
+                    "parentExecutionId": exec_id,
+                    "subSessionId": sub_id,
+                    "subAgentName": "wf-placeholder-agent",
+                    "explanation": "Executing stage 'placeholder-step' in pipeline",
                 },
             },
             {
                 "id": "m2",
                 "timestamp": "2026-01-01T00:01:00Z",
                 "payload": {
-                    "type": "user",
-                    "content": json.dumps({
-                        "method": "_kiro/workflow/node_complete",
-                        "workflowId": "wf-placeholder-run-1",
-                        "nodeId": "step-placeholder-1",
-                        "status": "completed",
-                        "capturedOutput": "placeholder output",
-                        "parentSessionId": "sess-wf-placeholder-1",
-                    }),
-                },
-            },
-            {
-                "id": "m3",
-                "timestamp": "2026-01-01T00:02:00Z",
-                "payload": {
-                    "type": "user",
-                    "content": json.dumps({
-                        "method": "_kiro/workflow/run_complete",
-                        "workflowId": "wf-placeholder-run-1",
-                        "status": "completed",
-                        "finalState": {
-                            "workflowName": "placeholder-workflow",
-                            "runLabel": "placeholder-label",
-                            "root": {
-                                "startedAt": "2026-01-01T00:00:00Z",
-                                "endedAt": "2026-01-01T00:02:00Z",
-                            },
-                        },
-                    }),
+                    "type": "sub_agent_complete",
+                    "parentExecutionId": exec_id,
+                    "subSessionId": sub_id,
+                    "status": "completed",
+                    "capturedOutput": "placeholder output",
                 },
             },
         ]
@@ -49182,14 +49161,11 @@ class TestWorkflowHistory:
 
         assert len(result) == 1
         run = result[0]
-        assert run["workflowId"] == "wf-placeholder-run-1"
-        assert run["name"] == "placeholder-workflow"
-        assert run["status"] == "completed"
-        assert run["startedAt"] == "2026-01-01T00:00:00Z"
-        assert run["endedAt"] == "2026-01-01T00:02:00Z"
+        assert run["workflowId"] == exec_id
+        assert "placeholder-step" in run["name"]  # derived from explanation
         assert len(run["steps"]) == 1
         step = run["steps"][0]
-        assert step["nodeId"] == "step-placeholder-1"
+        assert step["nodeId"] == sub_id
         assert step["agentName"] == "wf-placeholder-agent"
         assert step["status"] == "completed"
         assert step["capturedOutput"] == "placeholder output"
