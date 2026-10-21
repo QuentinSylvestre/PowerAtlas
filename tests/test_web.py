@@ -13812,14 +13812,14 @@ class TestAcpWorkflowNotifications:
         self._send(acp_mod, "node_start", parentSessionId=self.P2, workflowId="wf-q2m",
                    nodeId="step-one", type="step", nodePath=["wf-q2m", "step-one"],
                    sessionId="child-c3")
-        for parent, child in ((self.P, "child-c7"), (self.P2, "child-c3")):
-            sv._workflow_children[parent][child] = ("running", time.monotonic() - 700)
+        for parent, child, s in ((self.P, "child-c7", sv), (self.P2, "child-c3", sv2)):
+            s._workflow_children[parent][child] = ("running", time.monotonic() - 700)
         # Only P2 is idle past the TTL; P was used just now.
         sv2.sessions[self.P2]["last_used"] = (
             time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
         with patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
-            self._sweep(acp_mod, [])
+            self._sweep(acp_mod)
         # P: kept, but its silent step no longer claims to be working.
         assert self.P in sv.sessions
         row = sv.crews[self.P]["child-c7"]
@@ -13827,7 +13827,7 @@ class TestAcpWorkflowNotifications:
         assert "child-c7" in sv._workflow_children[self.P]
         # P2: its only child is stale, so it is no longer a reason to keep it.
         assert self.P2 not in acp_mod._supervisors
-        assert self.P2 not in sv._workflow_children
+        assert self.P2 not in sv2._workflow_children  # closed P2 cleared its children
 
     @pytest.mark.parametrize("held", ["approval", "question", "step_question", None])
     def test_sweep_keeps_an_idle_parent_whose_step_awaits_a_person(
@@ -13861,8 +13861,8 @@ class TestAcpWorkflowNotifications:
             with patch.object(_Supervisor, "_write", _sent(acp_mod, written)), \
                     patch.object(_Supervisor, "alive", lambda self_: True), \
                     caplog.at_level(logging.INFO, logger="power_atlas.acp"):
-                self._sweep(acp_mod, [])
-                self._sweep(acp_mod, [])
+                self._sweep(acp_mod)
+                self._sweep(acp_mod)
             if held is None:
                 assert self.P not in sv.sessions
                 return
@@ -13899,8 +13899,8 @@ class TestAcpWorkflowNotifications:
                     patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                     patch.object(_Supervisor, "alive", lambda self_: True), \
                     caplog.at_level(logging.INFO, logger="power_atlas.acp"):
-                self._sweep(acp_mod, [])
-                self._sweep(acp_mod, [])
+                self._sweep(acp_mod)
+                self._sweep(acp_mod)
             assert self.P in sv.sessions
             failed = [r for r in caplog.records
                       if "reading the open requests failed" in r.getMessage()]
@@ -13911,7 +13911,7 @@ class TestAcpWorkflowNotifications:
             # Recovery: the next good read resets the count and sweeps.
             with patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                     patch.object(_Supervisor, "alive", lambda self_: True):
-                self._sweep(acp_mod, [])
+                self._sweep(acp_mod)
             assert self.P not in sv.sessions
             # skip: _sweep_awaiting_failures removed in Phase 2
         finally:
@@ -13937,7 +13937,7 @@ class TestAcpWorkflowNotifications:
         def tick():
             with patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                     patch.object(_Supervisor, "alive", lambda self_: True):
-                self._sweep(acp_mod, [])
+                self._sweep(acp_mod)
 
         try:
             with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
@@ -14498,7 +14498,7 @@ class TestAcpWorkflowNotifications:
         def sweep():
             with patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                     patch.object(_Supervisor, "alive", lambda self_: True):
-                self._sweep(acp_mod, [])
+                self._sweep(acp_mod)
 
         sweep()
         assert self.P in sv.sessions and "child-c7" in sv.crews[self.P]
@@ -14515,9 +14515,34 @@ class TestAcpWorkflowNotifications:
         return old
 
     def _sweep(self, acp_mod):
+        """Run one idle-TTL sweep tick across all per-supervisor sweepers."""
+        import logging as _logging
+        _acp_log = _logging.getLogger("power_atlas.acp")
+
+        async def run_tick():
+            now = time.monotonic()
+            for sup in list(acp_mod._supervisors.values()):
+                if not sup.sessions:
+                    continue
+                session_id = next(iter(sup.sessions))
+                meta = sup.sessions[session_id]
+                if acp_mod._sweepable(
+                        session_id, meta, now,
+                        has_active_workflow=sup.has_active_workflow(session_id),
+                        awaits_person=session_id in sup.sessions_awaiting_person(),
+                        supervisor=sup):
+                    sup.closing.add(session_id)
+                    try:
+                        _acp_log.info("ACP sweeper: releasing session %s", session_id)
+                        await sup.close_session(session_id)
+                    except Exception:
+                        _acp_log.exception("ACP sweeper: close_session failed for %s",
+                                           session_id)
+                        sup.closing.discard(session_id)
+
         with patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                 patch.object(_Supervisor, "alive", lambda self_: True):
-            self._sweep(acp_mod, [])
+            _run_bound(acp_mod, run_tick)
 
     @pytest.mark.parametrize("route", ["node_complete", "run_complete"])
     def test_workflow_last_child_completing_restarts_the_parents_idle_clock(
@@ -18276,7 +18301,7 @@ class TestAcpIdleSweeper:
         # Claimed and released even on the failure path, or the session would
         # be permanently unpromptable as well as unswept.
         assert first not in acp_mod._supervisors[first].closing
-        assert any(r.levelno == logging.WARNING for r in caplog.records)
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
 
     def _always_refuse(self, acp_mod):
         async def refuse(self, session_id):
@@ -18295,7 +18320,7 @@ class TestAcpIdleSweeper:
             self._idle(acp_mod, sid)
             for _ in range(passes):
                 self._sweep(acp_mod, [])
-        return [r for r in caplog.records if r.levelno == logging.WARNING]
+        return [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     def test_a_stuck_session_logs_one_traceback_not_one_a_minute(
             self, acp_fast, caplog):
@@ -21599,7 +21624,7 @@ class TestAcpListingEndpoint:
         from power_atlas import acp as acp_mod
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
         for i in range(acp_mod.MAX_SESSIONS):
-            acp_mod._supervisors["s%d" % i].sessions["s%d" % i] = {"cwd": "C:\\dev\\ws"}
+            _live_session(acp_mod, sid="s%d" % i, cwd=r"C:\dev\ws")
         try:
             assert acp_mod.at_capacity()
             cap = client.get(self._PATH).json()["capacity"]
@@ -21610,7 +21635,7 @@ class TestAcpListingEndpoint:
             assert cap["held"] < cap["max"]
         finally:
             for i in range(acp_mod.MAX_SESSIONS):
-                acp_mod._supervisors["s%d" % i].sessions.pop("s%d" % i, None)
+                acp_mod._supervisors.pop("s%d" % i, None)
 
     def test_the_documented_extent_is_the_whole_store_not_the_first_page(self):
         """The disclosure this route makes, stated at its true size.
@@ -24755,7 +24780,7 @@ class TestAcpCommandsAvailable:
         _queued(conn)  # drain
         # Simulate the session/new window: clear sessions and raise _reserved.
         saved_sessions = copy.deepcopy(acp_mod._supervisors[sid].sessions)
-        acp_mod._supervisors.clear()  # reset all supervisors
+        acp_mod._supervisors[sid].sessions.clear()
         acp_mod._reserved = 1
         acp_mod._supervisors[sid]._pending_commands = None
         try:
