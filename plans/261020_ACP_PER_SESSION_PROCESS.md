@@ -1038,5 +1038,26 @@ None.
 | 29 | `wf` fixture yields `acp_mod._supervisor` directly | Medium | Fixed: Phase 3 specifies `wf` fixture migration |
 | 30 | `_find_supervisor` loop variable shadowed `sup` | Low | Fixed: renamed loop variable to `s` |
 
+### Step 9 Holistic Review — 2026-10-21 — Full effort (4 personas, all applicable)
+
+**Reviewers**: Senior engineer, Concurrency/reliability, Test engineer, Security
+
+**Health after Step 9 + fixes**: Green (commit c1a550a — 4,276 tests pass)
+
+| # | Finding | Sev | Resolution |
+|---|---|---|---|
+| S1 | Double `_reserved` increment: `_handle_new` + `new_session()` both increment, halving effective cap to 4/8 | High | Fixed (c1a550a): removed `_reserved` pair from `_handle_new`; `new_session()` is sole manager |
+| S2 | `CancelledError` leaks `_reserved` permanently — no `BaseException`/`finally` guard | Medium | Fixed (c1a550a): `try/finally` wraps create block in both `_handle_new` and `_handle_load` |
+| S3 | Close-then-reload race: `close_session()` removes from sessions before await, `closing` never set | Medium | Fixed (c1a550a): `self.closing.add(session_id)` at top of `close_session()` before any mutation |
+| S4 | D32 guard test vacuous — only tests frozenset constructor, never calls `presence._scan()` | Medium | Fixed (c1a550a): real test in `test_data.py` that calls guard logic; mutation fails the test |
+| S5 | `start_watchdog` lifespan fake accepts calls silently — Phase 2 "NOT called" claim unverifiable | Medium | Fixed (c1a550a): call counter added; assertion `watchdog_calls == 0` |
+| S6 | Double `_deregister_supervisor` / redundant `_publish_live_all` on 3 exit paths | Low | Fixed (c1a550a): removed explicit calls from callers; `_detach()` is sole site |
+| S7 | `None` pids enter D32 `acp_pids` frozenset during spawn window | Low | Fixed (c1a550a): `None` filtered in `_publish_live_all()` at source |
+| S8 | `_acp_live` type annotation `dict[str, int]` misleads — can hold `None` values | Low | Fixed (c1a550a): annotation updated to `dict[str, int \| None]` (pre-filter); aligned `publish_acp_sessions` |
+| S9 | `_start_lifecycle_tasks()` called before `load_session()` in `_handle_load` | Low | Fixed (c1a550a): moved to after `load_session()` succeeds |
+| S10 | `_sweep_once_local()` loop body unguarded — unexpected exception kills idle-TTL permanently | Low | Fixed (c1a550a): loop body wrapped in `try/except Exception: log.exception(...)` |
+| S11 | `_find_supervisor` subagent_sessions path untested | Low | Fixed (c1a550a): test added for `subagent_sessions` lookup branch |
+| S12 | Test name overpromises (`do_not_block_each_other` verifies state isolation, not turn scheduling) | Low | Fixed (c1a550a): renamed to `test_two_sessions_have_independent_inflight_state` |
+
 ## Harness Improvement Opportunities
 
