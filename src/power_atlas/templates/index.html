@@ -100,7 +100,7 @@
        panel`'s plain `flex: 1` *is* "remaining". -->
   <div class="dash-panel-resize" id="dashLeftResize" role="separator"
        aria-orientation="vertical" aria-label="Launchers panel width"
-       tabindex="0" aria-valuenow="280" aria-valuemin="130" aria-valuemax="340"></div>
+       tabindex="0" aria-valuenow="130" aria-valuemin="130" aria-valuemax="340"></div>
   <!-- The workspaces rail (dashboard/ACP-merge Phase 4): a client-side port
        of /acp's own `.acp-rail` (see that file's rail section, roughly
        lines 2542-4501), fed by /api/dashboard/sessions instead of
@@ -660,7 +660,7 @@ function _buildWorkspaceQs(){var qs='provider='+encodeURIComponent(window._activ
 // despite the name.
 var DASH_LEFT_W_KEY = 'pa_dash_left_w';
 var DASH_CENTER_W_KEY = 'pa_dash_center_w';
-var DASH_LEFT_W_MIN = 130, DASH_LEFT_W_MAX = 340, DASH_LEFT_W_DEFAULT = 280;
+var DASH_LEFT_W_MIN = 130, DASH_LEFT_W_MAX = 340, DASH_LEFT_W_DEFAULT = 130;
 // No default constant for the center pane -- its default is "half of
 // whatever is left", computed once at boot from the container's actual
 // width rather than hard-coded, so it is still correct on a window this
@@ -698,7 +698,7 @@ function dashCenterDefaultWidth(){
   var total = dashPanelsWidth();
   if (!total) return DASH_CENTER_W_MIN;
   var remaining = total - dashLeftWidthNow() - (DASH_PANEL_HANDLE_W * 2);
-  return Math.max(DASH_CENTER_W_MIN, Math.min(DASH_LEFT_W_DEFAULT * 2, remaining - DASH_RIGHT_W_MIN));
+  return Math.max(DASH_CENTER_W_MIN, Math.min(560, remaining - DASH_RIGHT_W_MIN));
 }
 
 function dashSetLeftWidth(px, persist){

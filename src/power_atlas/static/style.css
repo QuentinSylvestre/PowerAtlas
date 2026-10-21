@@ -324,7 +324,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
    the rest split evenly), so a page that never runs JS renders unchanged.
    `.right-panel` keeps its bare `flex: 1` below and gets no variable of its
    own -- it *is* "whatever the other two did not claim". */
-.left-panel { flex: 0 0 var(--dash-left-w, 280px); min-width: 0; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
+.left-panel { flex: 0 0 var(--dash-left-w, 130px); min-width: 0; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
 .left-panel::-webkit-scrollbar { width: 6px; }
 .left-panel::-webkit-scrollbar-track { background: transparent; }
 .left-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
