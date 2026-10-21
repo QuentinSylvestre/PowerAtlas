@@ -8566,15 +8566,22 @@ def _deregister_supervisor(session_id: str) -> None:
 
 
 def _publish_live_all() -> None:
-    """Publish the current {session_id: pid} mapping across all supervisors."""
+    """Publish the current {session_id: pid|None} mapping across all supervisors.
+
+    All held sessions are included. pid is None for sessions where the kiro-cli
+    process has not started yet or has already exited; presence.py's acp_holds()
+    uses key-presence not pid truthy-ness to decide whether a session is held.
+    """
     hook = sessions_changed_hook
     if hook is None:
         return
-    mapping: dict[str, int] = {}
+    mapping: dict[str, int | None] = {}
     for sid, s in list(_supervisors.items()):
         p = s.agent_pid()
-        if p is not None and s._proc is not None and s._proc.poll() is None:
-            mapping[sid] = p
+        # Guard stale pid: if process has exited but _detach hasn't cleared it yet
+        if p is not None and s._proc is not None and s._proc.poll() is not None:
+            p = None
+        mapping[sid] = p
     hook(mapping)
 
 

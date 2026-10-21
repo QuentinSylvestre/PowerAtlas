@@ -3861,7 +3861,10 @@ class TestAcpToolCallVisibility:
         return conn
 
     def _notify(self, acp_mod, sid, update):
-        acp_mod._supervisors[sid]._on_notification({
+        sup = acp_mod._supervisors.get(sid)
+        if sup is None:
+            return
+        sup._on_notification({
             "method": "session/update",
             "params": {"sessionId": sid, "update": update},
         })
@@ -4420,7 +4423,10 @@ class TestAcpToolCallTiming:
         return conn
 
     def _notify(self, acp_mod, sid, update):
-        acp_mod._supervisors[sid]._on_notification({
+        sup = acp_mod._supervisors.get(sid)
+        if sup is None:
+            return
+        sup._on_notification({
             "method": "session/update",
             "params": {"sessionId": sid, "update": update},
         })
@@ -4914,7 +4920,10 @@ class TestAcpMarkdownRendering:
                 "title": "shell", "kind": "execute", "status": "pending"}
 
     def _notify(self, acp_mod, sid, update):
-        acp_mod._supervisors[sid]._on_notification({
+        sup = acp_mod._supervisors.get(sid)
+        if sup is None:
+            return
+        sup._on_notification({
             "method": "session/update",
             "params": {"sessionId": sid, "update": update},
         })
@@ -5247,8 +5256,8 @@ class TestAcpMarkdownRendering:
         previous = acp_mod.sessions_changed_hook
         try:
             acp_mod.set_sessions_changed_hook(
-                lambda ids, pid: published.append((ids, pid)))
-            assert published and sid in published[-1][0], (
+                lambda mapping: published.append(frozenset(mapping.keys())))
+            assert published and sid in published[-1], (
                 "installing the hook did not publish the current set, so a "
                 "consumer holds its no-answer default until something changes")
             with patch.object(_Supervisor, "_request", answered), \
@@ -5256,7 +5265,7 @@ class TestAcpMarkdownRendering:
                 asyncio.run(acp_mod._supervisors[sid].close_session(sid))
         finally:
             acp_mod.sessions_changed_hook = previous
-        assert sid not in published[-1][0], (
+        assert sid not in published[-1], (
             "the session was closed and nothing was published, so presence "
             "keeps reporting its orphaned lock live for the agent's lifetime")
 
@@ -5277,18 +5286,19 @@ class TestAcpMarkdownRendering:
             raise acp_mod.AgentRejected("nope")
 
         previous = acp_mod.sessions_changed_hook
+        _sup = _Supervisor()
+        _sup._session_id = "rollback-0001"
+        acp_mod._supervisors["rollback-0001"] = _sup
         try:
-            acp_mod.sessions_changed_hook = lambda ids, pid: published.append(ids)
+            acp_mod.sessions_changed_hook = lambda mapping: published.append(frozenset(mapping.keys()))
             with patch.object(_Supervisor, "ensure_started", _no_spawn), \
                     patch.object(_Supervisor, "_request", refuses), \
                     pytest.raises(acp_mod.AgentRejected):
-                _sup = _Supervisor()
                 asyncio.run(_sup.load_session(
                     "rollback-0001", str(store)))
         finally:
             acp_mod.sessions_changed_hook = previous
-            acp_mod._supervisors["rollback-0001"].sessions.pop("rollback-0001", None)
-            acp_mod._supervisors["rollback-0001"].history.pop("rollback-0001", None)
+            acp_mod._supervisors.pop("rollback-0001", None)
         assert published, "a failed load published nothing at all"
         assert "rollback-0001" not in published[-1], (
             "the rolled-back session is still in the published set, so the "
@@ -5302,7 +5312,7 @@ class TestAcpMarkdownRendering:
         async def answered(self_, method, params, timeout=None):
             return {}
 
-        def boom(ids, pid):
+        def boom(mapping):
             raise RuntimeError("the consumer is broken")
 
         previous = acp_mod.sessions_changed_hook
@@ -5323,14 +5333,17 @@ class TestAcpMarkdownRendering:
         published = []
         previous = acp_mod.sessions_changed_hook
         try:
-            acp_mod.sessions_changed_hook = lambda ids, pid: published.append(ids)
+            acp_mod.sessions_changed_hook = lambda mapping: published.append(frozenset(mapping.keys()))
             # Mutate behind the mechanism's back, exactly as a missed call site
             # would, then run one tick.
-            acp_mod._supervisors["sneaked-in"].sessions["sneaked-in"] = {"cwd": "C:\\x"}
+            sneaked_sup = _Supervisor()
+            sneaked_sup._session_id = "sneaked-in"
+            acp_mod._supervisors["sneaked-in"] = sneaked_sup
+            sneaked_sup.sessions["sneaked-in"] = {"cwd": "C:\\x"}
             asyncio.run(acp_mod._sweep_once())
         finally:
             acp_mod.sessions_changed_hook = previous
-            acp_mod._supervisors["sneaked-in"].sessions.pop("sneaked-in", None)
+            acp_mod._supervisors.pop("sneaked-in", None)
         assert published, "the sweeper tick published nothing"
         assert "sneaked-in" in published[0], (
             "the backstop did not republish, so a missed call site stays wrong "
@@ -6432,8 +6445,7 @@ class TestAcpSessionLoad:
         acp_mod, store = acp_store
         sid = "load-me-0008"
         self._stored(store, sid, store)
-        acp_mod._supervisors["other"].sessions["other"] = {"cwd": ""}
-        acp_mod._supervisors["other"].history["other"] = acp_mod._History()
+        _live_session(acp_mod, sid="other", cwd="")
         conn = _acp_conn(acp_mod)
         acp_mod._handle_subscribe(conn, "other")
         _queued(conn)
@@ -6515,8 +6527,8 @@ class TestAcpNewSessionParams:
                 patch.object(_Supervisor, "ensure_started", _no_spawn):
             _sup = _Supervisor()
             asyncio.run(_sup.new_session(str(store)))
-        acp_mod._supervisors["new-params-0001"].sessions.pop("new-params-0001", None)
-        acp_mod._supervisors["new-params-0001"].history.pop("new-params-0001", None)
+        _sup.sessions.pop("new-params-0001", None)
+        _sup.history.pop("new-params-0001", None)
 
         assert calls[0] == (
             "session/new",
@@ -6583,8 +6595,8 @@ class TestSessionSettingsOnTheWire:
                 patch.object(_Supervisor, "ensure_started", _no_spawn):
             _sup = _Supervisor()
             asyncio.run(_sup.new_session(str(store)))
-        acp_mod._supervisors[sid].sessions.pop(sid, None)
-        acp_mod._supervisors[sid].history.pop(sid, None)
+        _sup.sessions.pop(sid, None)
+        _sup.history.pop(sid, None)
         return calls
 
     def _load(self, acp_mod, store, acp_store_dir_v3, monkeypatch, sid):
@@ -7088,8 +7100,7 @@ class TestAcpLoadSlotAccounting:
         monkeypatch.setattr(acp_mod, "MAX_SESSIONS", 3)
         sid = "load-slot-001"
         _stored_session(store, sid)
-        acp_mod._supervisors["already-live"].sessions["already-live"] = {"cwd": ""}
-        acp_mod._supervisors["already-live"].history["already-live"] = acp_mod._History()
+        _live_session(acp_mod, sid="already-live", cwd="")
         created = []
 
         async def fake_request(self, method, params, timeout=None):
@@ -7310,14 +7321,11 @@ class TestAcpSessionCapMessage:
         assert payload["code"] == "too_many_sessions"
         text = payload["message"].lower()
         assert "close" in text
-        # The figure this message quotes, pinned to the measurement rather than
-        # to whatever it said last. Re-measured in the plan's final QA against
-        # kiro-cli 2.16.0 at the cap that now ships: eight sessions cost 24
-        # processes and 1288.6 MiB above a 5-process / 531.6 MiB baseline —
-        # 3.0 processes and 161.1 MiB marginal per session. The ~178 MB it
-        # replaces was an earlier eight-session run; the ~254 MB before that
-        # was a two-session reading of 2.14.x.
-        assert "161 mb" in text, payload["message"]
+        # Phase 2 removed the "161 MB" per-session cost figure from the message
+        # (the per-session model makes the old v2 measurement irrelevant;
+        # Phase 4 will measure v3 per-session cost and update the message).
+        # The message now says "one kiro-cli process tree each; exact cost TBD".
+        assert "kiro-cli" in text, payload["message"]
         assert "178" not in text, payload["message"]
         assert "254" not in text, payload["message"]
         assert "306" not in text, payload["message"]
@@ -7627,8 +7635,7 @@ class TestAcpCancel:
         cannot see — and the boundary that turn emits goes to the session's
         watchers, which do not include the socket that asked."""
         acp_mod, sid = acp_session
-        acp_mod._supervisors["other"].sessions["other"] = {"cwd": ""}
-        acp_mod._supervisors["other"].history["other"] = acp_mod._History()
+        _live_session(acp_mod, sid="other", cwd="")
         conn = self._conn(acp_mod, "other")
         acp_mod._supervisors[sid].inflight.add(sid)
         _queued(conn)
@@ -7642,8 +7649,7 @@ class TestAcpCancel:
             assert [f["payload"]["code"] for f in _queued(conn)] == ["not_subscribed"]
             assert sid in acp_mod._supervisors[sid].inflight
         finally:
-            acp_mod._supervisors["other"].sessions.pop("other", None)
-            acp_mod._supervisors["other"].history.pop("other", None)
+            acp_mod._supervisors.pop("other", None)
 
     def test_an_agent_failure_reaches_the_page_typed(self, acp_session):
         acp_mod, sid = acp_session
@@ -7711,14 +7717,15 @@ class TestAcpSessionClose:
         behind is up to HISTORY_MAX_BYTES resident for the app's lifetime."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
+        sup = acp_mod._supervisors[sid]
         for i in range(50):
             acp_mod._emit(sid, acp_mod.envelope(
                 "chunk", {"role": "agent", "text": "e%d" % i}, sid))
-        assert len(acp_mod._supervisors[sid].history[sid]) == 50
+        assert len(sup.history[sid]) == 50
         with patch.object(_Supervisor, "_write", _sent(acp_mod, [])), \
                 patch.object(_Supervisor, "alive", lambda self: True):
             _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
-        assert sid not in acp_mod._supervisors[sid].history
+        assert sid not in sup.history
 
     # Note: this class used to also carry
     # `test_a_failed_close_keeps_the_session`, pinning that a wire refusal
@@ -7794,8 +7801,7 @@ class TestAcpSessionClose:
         socket racing itself, and it let one tab release what another is
         holding."""
         acp_mod, sid = acp_session
-        acp_mod._supervisors["other"].sessions["other"] = {"cwd": ""}
-        acp_mod._supervisors["other"].history["other"] = acp_mod._History()
+        _live_session(acp_mod, sid="other", cwd="")
         conn = self._conn(acp_mod, "other")
         _queued(conn)
         written = []
@@ -7812,8 +7818,7 @@ class TestAcpSessionClose:
             assert sid in acp_mod._supervisors
             assert conn.session_id == "other"
         finally:
-            acp_mod._supervisors["other"].sessions.pop("other", None)
-            acp_mod._supervisors["other"].history.pop("other", None)
+            acp_mod._supervisors.pop("other", None)
 
     def test_a_subscribed_socket_still_closes(self, acp_session):
         """Positive control for the guard above: the page's own socket is
@@ -7945,14 +7950,13 @@ class TestAcpSessionClose:
             _live_session(acp_mod, sid="filler%d" % i)
         conn = self._conn(acp_mod, sid)
         try:
-            assert (len(acp_mod._supervisors[sid].sessions)
-                    >= acp_mod.MAX_SESSIONS)
+            assert len(acp_mod._supervisors) >= acp_mod.MAX_SESSIONS
             with patch.object(_Supervisor, "_write",
                               _sent(acp_mod, [])), \
                     patch.object(_Supervisor, "alive",
                                  lambda self: True):
                 _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
-            assert len(acp_mod._supervisors[sid].sessions) < acp_mod.MAX_SESSIONS
+            assert len(acp_mod._supervisors) < acp_mod.MAX_SESSIONS
         finally:
             for i in range(acp_mod.MAX_SESSIONS - 1):
                 acp_mod._supervisors.pop("filler%d" % i, None)
@@ -7991,7 +7995,10 @@ class TestAcpContextWindow:
         return conn
 
     def _notify(self, acp_mod, sid, percent):
-        acp_mod._supervisors[sid]._on_notification({
+        sup = acp_mod._supervisors.get(sid)
+        if sup is None:
+            return
+        sup._on_notification({
             "method": acp_mod.METADATA_METHOD,
             "params": {"sessionId": sid,
                        acp_mod.CONTEXT_PERCENT_KEY: percent,
@@ -8281,6 +8288,7 @@ class TestAcpPromptDuringAnInFlightClose:
         claimed = asyncio.Event()
         release = asyncio.Event()
         real_close = _Supervisor.close_session
+        sup = acp_mod._supervisors[sid]
 
         async def slow_close(self, session_id):
             claimed.set()
@@ -8290,7 +8298,7 @@ class TestAcpPromptDuringAnInFlightClose:
         async def both():
             closing = asyncio.ensure_future(acp_mod._handle_close(conn, sid))
             await claimed.wait()
-            assert sid in acp_mod._supervisors[sid].closing
+            assert sid in sup.closing
             # The prompt would return immediately if it were accepted, so a
             # regression here fails rather than hanging.
             await acp_mod._handle_prompt(conn, sid, {"prompt": "one more thing"})
@@ -8306,9 +8314,9 @@ class TestAcpPromptDuringAnInFlightClose:
                  for f in _queued(conn) if f["type"] == "error"]
         assert codes == ["close_in_progress"], codes
         # And no turn was left behind on a session that no longer exists.
-        assert sid not in acp_mod._supervisors[sid].inflight
+        assert sid not in sup.inflight
         assert sid not in acp_mod._supervisors
-        assert acp_mod._supervisors[sid]._pending == {}
+        assert sup._pending == {}
 
     def test_a_prompt_outside_the_close_window_still_runs(self, acp_session):
         """Positive control: the guard reads ``closing``, not "there was a
@@ -8428,16 +8436,17 @@ class TestAcpSessionRecordHoldsNoDeadState:
             return {"_meta": {"id": "published-0001"}}
 
         previous = acp_mod.sessions_changed_hook
+        _sup = _Supervisor()
+        _sup._session_id = "published-0001"
+        acp_mod._supervisors["published-0001"] = _sup
         try:
-            acp_mod.sessions_changed_hook = lambda ids, pid: published.append(ids)
+            acp_mod.sessions_changed_hook = lambda mapping: published.append(frozenset(mapping.keys()))
             with patch.object(_Supervisor, "ensure_started", _no_spawn), \
                     patch.object(_Supervisor, "_request", created):
-                _sup = _Supervisor()
                 asyncio.run(_sup.new_session(str(store)))
         finally:
             acp_mod.sessions_changed_hook = previous
-            acp_mod._supervisors["published-0001"].sessions.pop("published-0001", None)
-            acp_mod._supervisors["published-0001"].history.pop("published-0001", None)
+            acp_mod._supervisors.pop("published-0001", None)
         assert published, "creating a session published nothing"
         assert "published-0001" in published[-1], (
             "the new session was not in the published set, so presence would "
@@ -8460,9 +8469,9 @@ class TestAcpSessionRecordHoldsNoDeadState:
         # `mode` is the modeId PowerAtlas bound, which the prompt card's
         # "always allow" eligibility reads
         # (260924_ACP_PERMISSION_MODES_YOLO_AUTO_MANUAL D-31).
-        assert set(acp_mod._supervisors["records-0001"].sessions["records-0001"]) == {
+        assert set(_sup.sessions["records-0001"]) == {
             "cwd", "created", "last_used", "mode"}
-        assert acp_mod._supervisors["records-0001"].sessions["records-0001"]["mode"] == "kiro_default"
+        assert _sup.sessions["records-0001"]["mode"] == "kiro_default"
 
     def test_a_loaded_session_records_only_what_is_read(self, acp_store):
         acp_mod, store = acp_store
@@ -8476,9 +8485,9 @@ class TestAcpSessionRecordHoldsNoDeadState:
             asyncio.run(_sup.load_session("records-0002", str(store)))
         # D-31: the modeId the reload sent (the module-wide gate answers "in
         # effect", so the derived agent).
-        assert set(acp_mod._supervisors["records-0002"].sessions["records-0002"]) == {
+        assert set(_sup.sessions["records-0002"]) == {
             "cwd", "created", "last_used", "mode"}
-        assert acp_mod._supervisors["records-0002"].sessions["records-0002"]["mode"] == \
+        assert _sup.sessions["records-0002"]["mode"] == \
             acp_mod.DERIVED_AGENT_NAME
 
     def test_the_supervisor_keeps_no_agent_info(self):
@@ -8555,8 +8564,8 @@ class TestAcpTaskModeSelection:
                 _sup = _Supervisor()
                 asyncio.run(_sup.new_session(str(store), mode="spec"))
         finally:
-            acp_mod._supervisors["taskmode-0001"].sessions.pop("taskmode-0001", None)
-            acp_mod._supervisors["taskmode-0001"].history.pop("taskmode-0001", None)
+            _sup.sessions.pop("taskmode-0001", None)
+            _sup.history.pop("taskmode-0001", None)
         assert seen["params"]["_meta"]["kiro"]["modeId"] == "spec"
 
     def test_new_session_omitting_mode_still_sends_kiro_default(self, acp_store):
@@ -8575,8 +8584,8 @@ class TestAcpTaskModeSelection:
                 _sup = _Supervisor()
                 asyncio.run(_sup.new_session(str(store)))
         finally:
-            acp_mod._supervisors["taskmode-0002"].sessions.pop("taskmode-0002", None)
-            acp_mod._supervisors["taskmode-0002"].history.pop("taskmode-0002", None)
+            _sup.sessions.pop("taskmode-0002", None)
+            _sup.history.pop("taskmode-0002", None)
         assert seen["params"]["_meta"]["kiro"]["modeId"] == "kiro_default"
 
     def test_new_session_explicit_none_mode_also_sends_kiro_default(self, acp_store):
@@ -8595,8 +8604,8 @@ class TestAcpTaskModeSelection:
                 _sup = _Supervisor()
                 asyncio.run(_sup.new_session(str(store), mode=None))
         finally:
-            acp_mod._supervisors["taskmode-0003"].sessions.pop("taskmode-0003", None)
-            acp_mod._supervisors["taskmode-0003"].history.pop("taskmode-0003", None)
+            _sup.sessions.pop("taskmode-0003", None)
+            _sup.history.pop("taskmode-0003", None)
         assert seen["params"]["_meta"]["kiro"]["modeId"] == "kiro_default"
 
     @pytest.mark.parametrize("mode", [
@@ -11397,6 +11406,7 @@ def _live_session(acp_mod, sid=None, *, cwd=r"C:\scratch") -> str:
     sup.sessions[sid] = acp_mod._new_session_record(cwd, "kiro_default")
     sup.history[sid] = acp_mod._History()
     acp_mod._supervisors[sid] = sup
+    sup._session_id = sid  # mirrors _handle_new/_handle_load registration
     return sid
 
 
