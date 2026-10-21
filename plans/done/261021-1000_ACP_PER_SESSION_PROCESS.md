@@ -1,4 +1,4 @@
-# ACP Per-Session kiro-cli Process
+﻿# ACP Per-Session kiro-cli Process
 
 > **Date**: 2026-10-20
 > **Status**: Complete
@@ -13,9 +13,9 @@
 ### Problem statement & desired outcomes
 
 PowerAtlas's ACP surface runs all sessions through a single shared `kiro-cli acp` process. When two
-sessions are active simultaneously, kiro-cli serializes their turns — the second session's prompt
+sessions are active simultaneously, kiro-cli serializes their turns â€” the second session's prompt
 waits until the first session's turn finishes. This surfaces as "Waiting for another session's turn
-to finish…" in the steer handler and invisible blocking everywhere else. The TUI never hits this
+to finishâ€¦" in the steer handler and invisible blocking everywhere else. The TUI never hits this
 because it runs one process per session by nature.
 
 Desired outcome: concurrent ACP sessions run in full parallel, no turn serialization, each session
@@ -46,10 +46,10 @@ Overview, the remote-access path. No warm pool (follow-up item). No per-process 
 
 ### 1. Problem statement
 
-One `_Supervisor` singleton at `acp.py:8590` owns one `kiro-cli acp` process (kiro-cli.exe →
-bun.exe → node.exe). kiro-cli's own notification at line 7265
+One `_Supervisor` singleton at `acp.py:8590` owns one `kiro-cli acp` process (kiro-cli.exe â†’
+bun.exe â†’ node.exe). kiro-cli's own notification at line 7265
 (`_info_kind == "queued"`, `activeSessionId`) confirms the serialization is inside kiro-cli's
-dispatch loop — not PA-invented. The comment explicitly notes: "No first-party client renders this
+dispatch loop â€” not PA-invented. The comment explicitly notes: "No first-party client renders this
 (the TUI drives one session; KiroCrew has no handler)." PA is the first client to surface it.
 
 ### 2. Recommended approach
@@ -60,14 +60,14 @@ Replace the module-level `_supervisor = _Supervisor()` singleton with a module-l
 unchanged in contract; it is now instantiated N times instead of once.
 
 Key structural changes:
-- `_supervisors: dict[str, _Supervisor]` — primary routing table (regular sessions).
+- `_supervisors: dict[str, _Supervisor]` â€” primary routing table (regular sessions).
 - `_reserved: int` at module level (replaces per-supervisor `_reserved`).
-- `_find_supervisor(session_id)` — checks `_supervisors` first; falls back to scanning
+- `_find_supervisor(session_id)` â€” checks `_supervisors` first; falls back to scanning
   `_workflow_child_meta` / `subagent_sessions` across all supervisors for workflow step sessions.
-- `at_capacity()` → `len(_supervisors) + _reserved >= MAX_SESSIONS`.
+- `at_capacity()` â†’ `len(_supervisors) + _reserved >= MAX_SESSIONS`.
 - Per-supervisor asyncio sweep task (started in `new_session`/`load_session`); module-level
   `start_sweeper()` and `start_watchdog()` calls removed from `web.py` lifespan.
-- `_maybe_recycle_idle` eliminated — with one session per supervisor, closing the session kills
+- `_maybe_recycle_idle` eliminated â€” with one session per supervisor, closing the session kills
   the process. No separate idle-agent recycle needed.
 - `_set_queued_behind`, `_set_queued_behind`, `queue_status` frame, `queued_behind` meta field
   removed as dead code.
@@ -82,8 +82,8 @@ Key structural changes:
 
 | File | Change |
 |---|---|
-| `src/power_atlas/acp.py` | Core: `_supervisor` singleton → `_supervisors` dict; new `_find_supervisor()` helper; remove `_maybe_recycle_idle`, `_set_queued_behind`, `queue_status`; add per-supervisor sweep task; update `at_capacity()`, `shutdown()`, `_detach()`, lifespan wiring |
-| `src/power_atlas/presence.py` | `_acp_live: tuple → dict[str, int]`; `publish_acp_sessions` signature change; D32 guard generalization |
+| `src/power_atlas/acp.py` | Core: `_supervisor` singleton â†’ `_supervisors` dict; new `_find_supervisor()` helper; remove `_maybe_recycle_idle`, `_set_queued_behind`, `queue_status`; add per-supervisor sweep task; update `at_capacity()`, `shutdown()`, `_detach()`, lifespan wiring |
+| `src/power_atlas/presence.py` | `_acp_live: tuple â†’ dict[str, int]`; `publish_acp_sessions` signature change; D32 guard generalization |
 | `src/power_atlas/web.py` | Remove `start_sweeper()` / `start_watchdog()` from lifespan; update `_build_held_set()` to union across all supervisors; update `_inflight_ids`, `_awaiting_person_ids`, `_workflow_states` helpers |
 | `tests/test_web.py` | Full `acp_store` fixture refactor: factory model replacing singleton mutation; 1,109 `acp_mod._supervisor` references to migrate |
 | `docs/KNOWLEDGE.md` | Update "one process tree" and "~161 MB/session" notes; add per-session process facts once measured |
@@ -91,42 +91,42 @@ Key structural changes:
 
 ### 4. Existing patterns & constraints
 
-- **v3 process tree**: kiro-cli.exe → bun.exe → node.exe. One Windows Job Object
+- **v3 process tree**: kiro-cli.exe â†’ bun.exe â†’ node.exe. One Windows Job Object
   (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) per supervisor ensures teardown on handle close (`acp.py:4200`).
-  Each per-session supervisor needs its own Job Object. `win32job` required; unavailable → `AgentUnavailable`.
+  Each per-session supervisor needs its own Job Object. `win32job` required; unavailable â†’ `AgentUnavailable`.
 - **`_neutral_cwd()`**: returns `CONFIG_DIR / "acp-cwd"` regardless of session workspace. Stays
-  unchanged — presence.py's scan reads process cwd, and the config dir must not register as a
+  unchanged â€” presence.py's scan reads process cwd, and the config dir must not register as a
   "live workspace" cwd.
 - **`_secrets`**: DPAPI-encrypted per-user binary. All supervisors share one file; `threading.Lock`
   inside makes concurrent access safe without additional synchronization.
-- **`close_session()` has one await** (line 8446: `_answer_pending_cancelled`) — the AGENTS.md
+- **`close_session()` has one await** (line 8446: `_answer_pending_cancelled`) â€” the AGENTS.md
   memory note claiming "zero awaits" is stale; verified 2026-10-20.
-- **`load_session` sibling-copy optimization** (`acp.py:8309–8313`): copies `commands`/`skills`
+- **`load_session` sibling-copy optimization** (`acp.py:8309â€“8313`): copies `commands`/`skills`
   from an arbitrary sibling session. Disappears in per-session model (no siblings); the loaded
   session gets its catalogue from kiro-cli's own `_kiro.dev/commands/available` notification.
 - **Test coupling**: 1,109 `acp_mod._supervisor` references in `test_web.py`. The `acp_store`
   fixture directly mutates 20+ named attributes on the singleton. Full factory refactor required.
 - **`_on_subagent_list` attribution** (`acp.py:4878`): uses `len(self.inflight)` to attribute a
-  sessionId-less subagent notification. With one session per supervisor, `len(inflight) ≤ 1`
-  always — the multi-session ambiguity path becomes unreachable and can be simplified.
+  sessionId-less subagent notification. With one session per supervisor, `len(inflight) â‰¤ 1`
+  always â€” the multi-session ambiguity path becomes unreachable and can be simplified.
 
 ### 5. Risks & mitigations
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Unknown v3 per-session memory cost — each session now owns one kiro-cli process tree instead of a fraction of one | High | Add a measurement step as Phase 1 exit criterion; do not change `MAX_SESSIONS` default until measured |
+| Unknown v3 per-session memory cost â€” each session now owns one kiro-cli process tree instead of a fraction of one | High | Add a measurement step as Phase 1 exit criterion; do not change `MAX_SESSIONS` default until measured |
 | Spawn latency (~2-4 s per session) is user-visible for the first time | Medium | Session picker shows spinner; acceptable UX for an explicit action |
 | 1,109 test references means test refactor likely equals or exceeds production code effort | High | Dedicated test infrastructure phase; use a factory pattern that enables multi-session test scenarios not possible today |
-| `_publish_live` interface change ripples into `presence.py` D32 guard — orphan lock suppression could break if any pid is missed | Medium | Explicit per-supervisor `_publish_live` calls aggregated at module level; add a test that verifies D32 guard fires for all pids |
-| Workflow step sessions route through parent supervisor's kiro-cli — if `_find_supervisor` scan is wrong, step prompts go to the wrong process | Medium | Unit test covering `_find_supervisor` with a live workflow child; scan is O(≤8) supervisors |
-| `acp_store` fixture refactor touches every ACP test — high risk of accidental coverage gaps | High | Run full test suite after each fixture migration batch; mutation-test the factory |
+| `_publish_live` interface change ripples into `presence.py` D32 guard â€” orphan lock suppression could break if any pid is missed | Medium | Explicit per-supervisor `_publish_live` calls aggregated at module level; add a test that verifies D32 guard fires for all pids |
+| Workflow step sessions route through parent supervisor's kiro-cli â€” if `_find_supervisor` scan is wrong, step prompts go to the wrong process | Medium | Unit test covering `_find_supervisor` with a live workflow child; scan is O(â‰¤8) supervisors |
+| `acp_store` fixture refactor touches every ACP test â€” high risk of accidental coverage gaps | High | Run full test suite after each fixture migration batch; mutation-test the factory |
 
 ### 6. Resolved decisions
 
-- Q1: Routing table shape — A: flat module-level `_supervisors: dict[str, _Supervisor]` + module-level `_reserved` counter — Decision: module-level dict; no pool class.
-- Q2: Test infrastructure — A: full fixture refactor — Decision: `acp_store` becomes a per-session factory; no compatibility shim.
-- Q3: Spawn latency strategy — A: on-demand spawn — Decision: each session creation spawns a fresh process; no warm pool.
-- Q4: Sweeper architecture — A: per-supervisor asyncio tasks — Decision: each supervisor starts its own task; `start_sweeper()` / `start_watchdog()` removed from `web.py` lifespan.
+- Q1: Routing table shape â€” A: flat module-level `_supervisors: dict[str, _Supervisor]` + module-level `_reserved` counter â€” Decision: module-level dict; no pool class.
+- Q2: Test infrastructure â€” A: full fixture refactor â€” Decision: `acp_store` becomes a per-session factory; no compatibility shim.
+- Q3: Spawn latency strategy â€” A: on-demand spawn â€” Decision: each session creation spawns a fresh process; no warm pool.
+- Q4: Sweeper architecture â€” A: per-supervisor asyncio tasks â€” Decision: each supervisor starts its own task; `start_sweeper()` / `start_watchdog()` removed from `web.py` lifespan.
 
 ### 7. Open items
 
@@ -139,7 +139,7 @@ Key structural changes:
   during live QA: run two parallel sessions and confirm neither shows `queued_behind` in the
   steer handler.
 - **`_find_supervisor` performance**: O(N supervisors) scan for workflow children. With
-  `MAX_SESSIONS = 8`, N ≤ 8 and the scan is negligible. If cap ever increases significantly,
+  `MAX_SESSIONS = 8`, N â‰¤ 8 and the scan is negligible. If cap ever increases significantly,
   a supplementary `_child_to_supervisor: dict[str, _Supervisor]` cache can be added.
 
 ### 8. Out of scope
@@ -182,20 +182,20 @@ Key structural changes:
 
 `_supervisor = _Supervisor()` at `acp.py:8590` is the sole kiro-cli ACP process manager.
 Every `_handle_*` function and module-level helper calls this singleton directly. On v3,
-all sessions share one process tree (kiro-cli.exe → bun.exe → node.exe); kiro-cli serializes
+all sessions share one process tree (kiro-cli.exe â†’ bun.exe â†’ node.exe); kiro-cli serializes
 turns across sessions and reports queuing via `session_info_update` kind `"queued"` with an
 `activeSessionId` field (`acp.py:7265`).
 
 Key shared-process state (all must be split per supervisor or moved to module level):
-- `self._proc / self._job / self._ready / self._reader / self._write_lock` — process handle and I/O
-- `self.sessions / self.history / self.inflight / self.closing / self._reserved` — session tracking
-- `self.crews / self.subagent_sessions / self.subagent_history / self._workflow_children` — fan-out
-- `self._pending / self._next_id` — JSON-RPC in-flight futures
+- `self._proc / self._job / self._ready / self._reader / self._write_lock` â€” process handle and I/O
+- `self.sessions / self.history / self.inflight / self.closing / self._reserved` â€” session tracking
+- `self.crews / self.subagent_sessions / self.subagent_history / self._workflow_children` â€” fan-out
+- `self._pending / self._next_id` â€” JSON-RPC in-flight futures
 
 Module-level singletons that stay global:
-- `_secrets = _SecretStore(ACP_SECRETS_PATH)` at `acp.py:1004` — MCP OAuth tokens; thread-safe
-- `_registry: _Registry` at `acp.py:3065` — WebSocket routing; already per-session-id internally
-- `_bubbles: dict` at `acp.py:8724` — moved to module level in the migration
+- `_secrets = _SecretStore(ACP_SECRETS_PATH)` at `acp.py:1004` â€” MCP OAuth tokens; thread-safe
+- `_registry: _Registry` at `acp.py:3065` â€” WebSocket routing; already per-session-id internally
+- `_bubbles: dict` at `acp.py:8724` â€” moved to module level in the migration
 
 The test suite has 1,109 references to `acp_mod._supervisor` in `tests/test_web.py`
 (confirmed 2026-10-20 via grep). The `acp_store` fixture mutates 20+ named attributes on
@@ -217,32 +217,32 @@ each other.
 |---|---|---|---|
 | Routing table shape | Module-level `_supervisors: dict[str, _Supervisor]` + module-level `_reserved: int` | Pool class wrapper | Consistent with existing module-level singletons (`_registry`, `_tasks`); simpler test surface |
 | Test infrastructure | Full `acp_store` factory refactor (1,109 refs) | Compatibility shim keeping `acp_mod._supervisor` | Shim would test a fiction; multi-session scenarios need real per-session fixtures |
-| Spawn strategy | On-demand — spawn per session creation | Warm pool | Warm pool adds lifecycle complexity; spinner latency (~2-4 s) is acceptable for an explicit user action |
+| Spawn strategy | On-demand â€” spawn per session creation | Warm pool | Warm pool adds lifecycle complexity; spinner latency (~2-4 s) is acceptable for an explicit user action |
 | Sweeper architecture | Per-supervisor asyncio task (started in `new_session`/`load_session`) | One global sweep task iterating all supervisors | Self-contained supervisors; `start_sweeper()`/`start_watchdog()` calls removed from lifespan |
 | `_publish_live` interface | Emits one `{session_id: pid}` entry per call; `presence._acp_live` becomes `dict[str, int]` | Keep tuple, aggregate at hook level | Dict is queryable and correct; D32 guard can check all pids without a linear scan per check |
 | Migration deployment | Restart-required | Rolling (new sessions per-process, old stay shared) | Clean restart; sessions resume from disk via `session/load` |
 | `_neutral_cwd()` | Unchanged (`CONFIG_DIR/acp-cwd`) | Use session workspace cwd per process | Presence scan maps process cwd; config dir must not register as a live workspace |
 | `_secrets` concurrency | Shared module-level singleton; existing `threading.Lock` sufficient | Per-supervisor copy | MCP tokens are per-server, not per-session; sharing is correct |
 | `queued_behind` / `queue_status` | Remove as dead code | Keep for future single-process harnesses | Per-session processes make this unreachable; dead code removal is mandatory |
-| Workflow step routing | `_find_supervisor(session_id)` scans `_workflow_child_meta` / `subagent_sessions` across all supervisors (O(≤MAX_SESSIONS)) | Supplementary `_child_to_supervisor` lookup dict | Cache adds write-time synchronization; O(8) scan negligible; add cache only if cap grows substantially |
-| `close_session` await | One await at `acp.py:8446` (`_answer_pending_cancelled`); AGENTS.md memory note claiming "zero awaits" is stale | — | Correction only; no design impact |
-| Probe: `queued` serialization | Confirmed from kiro-cli source (`acp.py:7261` comment) that it only fires within one shared process | — | Per-session processes eliminate it; no probe needed |
+| Workflow step routing | `_find_supervisor(session_id)` scans `_workflow_child_meta` / `subagent_sessions` across all supervisors (O(â‰¤MAX_SESSIONS)) | Supplementary `_child_to_supervisor` lookup dict | Cache adds write-time synchronization; O(8) scan negligible; add cache only if cap grows substantially |
+| `close_session` await | One await at `acp.py:8446` (`_answer_pending_cancelled`); AGENTS.md memory note claiming "zero awaits" is stale | â€” | Correction only; no design impact |
+| Probe: `queued` serialization | Confirmed from kiro-cli source (`acp.py:7261` comment) that it only fires within one shared process | â€” | Per-session processes eliminate it; no probe needed |
 | Memory cap during migration | Keep `MAX_SESSIONS = 8`, `_clamped` ceiling at 16 | Reduce cap conservatively | Measure first (Phase 4); change only after data |
-| Review effort | Full (user override 2026-10-20; default for Major: standard) | — | User preference; recorded per `shared/AGENTS.md § Continuous Improvement` |
+| Review effort | Full (user override 2026-10-20; default for Major: standard) | â€” | User preference; recorded per `shared/AGENTS.md Â§ Continuous Improvement` |
 
 ## 4) External Dependencies & Costs
 
 | Category | Change needed | Owner | Status |
 |---|---|---|---|
-| CI/CD | None | — | N/A |
-| IAM / Permissions | None | — | N/A |
-| Cloud resources | None | — | N/A |
-| Data migration / backfill | None — sessions persist on disk in kiro-cli's store, unchanged | — | N/A |
+| CI/CD | None | â€” | N/A |
+| IAM / Permissions | None | â€” | N/A |
+| Cloud resources | None | â€” | N/A |
+| Data migration / backfill | None â€” sessions persist on disk in kiro-cli's store, unchanged | â€” | N/A |
 | Rollout / cutover | Restart PA to deploy | User | Restart-required |
-| Cleanup after rollback window | None | — | N/A |
-| Secrets / Env vars | None — `acp-secrets.bin` shared across per-session supervisors, unchanged | — | N/A |
-| DNS / Networking | None | — | N/A |
-| Third-party services | None | — | N/A |
+| Cleanup after rollback window | None | â€” | N/A |
+| Secrets / Env vars | None â€” `acp-secrets.bin` shared across per-session supervisors, unchanged | â€” | N/A |
+| DNS / Networking | None | â€” | N/A |
+| Third-party services | None | â€” | N/A |
 
 ### Cost impact
 
@@ -252,7 +252,7 @@ measured (Phase 4). No cloud or API cost change.
 
 ## 5) Implementation Phases
 
-### Phase 1: Core migration — routing, spawn, handlers [QA]
+### Phase 1: Core migration â€” routing, spawn, handlers [QA]
 
 **Goal**: Replace the `_supervisor` singleton with per-session `_Supervisor` instances. PA
 restarts with the new model; two sessions can run concurrent turns with no serialization.
@@ -266,7 +266,7 @@ restarts with the new model; two sessions can run concurrent turns with no seria
 **Add module-level routing infrastructure:**
 ```python
 # Module-level supervisor pool (replaces _supervisor singleton)
-_supervisors: dict[str, _Supervisor] = {}  # session_id → supervisor
+_supervisors: dict[str, _Supervisor] = {}  # session_id â†’ supervisor
 _reserved: int = 0  # sessions in-flight between reserve and registration
 
 def _find_supervisor(session_id: str) -> "_Supervisor | None":
@@ -328,7 +328,7 @@ Guard with `at_capacity()` check using module-level function.
 
 **Update `_handle_load`** (`acp.py:9448`): same registration-before-early-return pattern.
 
-**Remove `load_session` sibling-copy** (`acp.py:8309–8313`): the lines that copy `commands`/
+**Remove `load_session` sibling-copy** (`acp.py:8309â€“8313`): the lines that copy `commands`/
 `skills` from an existing sibling's meta no longer apply (no siblings exist per supervisor).
 Remove them. The loaded session receives its catalogue from kiro-cli's `_kiro.dev/commands/available`
 notification.
@@ -371,7 +371,7 @@ def _publish_live(self) -> None:
     _publish_live_all()
 ```
 This replaces the old single-pid emission with the full-mapping emission defined above.
-`sessions_changed_hook` (not `_sessions_changed_hook` — the actual module variable name;
+`sessions_changed_hook` (not `_sessions_changed_hook` â€” the actual module variable name;
 verify against `acp.py:1399`) is now called with `dict[str, int]`.
 
 **Update `set_sessions_changed_hook()`** (`acp.py:1428`): the function currently ends with
@@ -380,10 +380,10 @@ verify against `acp.py:1399`) is now called with `dict[str, int]`.
 **Update `_detach()`** (`acp.py:4261`): two changes required:
 1. Replace `_bubbles.clear()` (`acp.py:4309`) with a session-scoped clear using `self._session_id`
    (a new attribute, see below): `_bubbles.pop(self._session_id, None)`. Do NOT iterate
-   `self.sessions` — `close_session()` clears `self.sessions` before calling `_detach()`, so
+   `self.sessions` â€” `close_session()` clears `self.sessions` before calling `_detach()`, so
    iteration would be a no-op in the normal-close path. Using `self._session_id` is correct in
    both paths: normal close (sessions already cleared, `_session_id` still set) and crash
-   (`_on_agent_death` → `_detach` directly, sessions still populated).
+   (`_on_agent_death` â†’ `_detach` directly, sessions still populated).
 2. Add `_deregister_supervisor(self._session_id)` call after clearing internal state (after
    the `self.sessions.clear()` call). Uses the same `_session_id` attribute for reliability.
 
@@ -392,13 +392,13 @@ in `__init__`. Write it when the supervisor is registered:
 `_supervisors[session_id] = sup; sup._session_id = session_id`. This ensures `_detach()` can
 always identify its session without iterating `self.sessions`.
 
-**Update `close_session()`** (`acp.py:8417`): the normal close path — after local state cleanup
-(pop session from `self.sessions`, clear `self.history[sid]`, etc.) — calls
+**Update `close_session()`** (`acp.py:8417`): the normal close path â€” after local state cleanup
+(pop session from `self.sessions`, clear `self.history[sid]`, etc.) â€” calls
 `_deregister_supervisor(self._session_id)` (which also calls `_publish_live_all()`), then calls
 `self._detach()` + `_dispose()` to kill the kiro-cli process. The process lifecycle is:
-`close_session()` → local cleanup → `_deregister_supervisor()` → `_detach()` → `_dispose()`.
+`close_session()` â†’ local cleanup â†’ `_deregister_supervisor()` â†’ `_detach()` â†’ `_dispose()`.
 
-> **Rejected:** Rely on `_maybe_recycle_idle` to kill the process — that method is being removed
+> **Rejected:** Rely on `_maybe_recycle_idle` to kill the process â€” that method is being removed
 > in Phase 2. **Use instead:** `close_session()` initiates the process kill directly as above.
 
 #### `presence.py` changes
@@ -415,7 +415,7 @@ def publish_acp_sessions(mapping: dict[str, int]) -> None:
     _acp_live = dict(mapping)
 ```
 
-**`acp_holds`** (`presence.py:~231`): unchanged — `session_id in _acp_live` still works.
+**`acp_holds`** (`presence.py:~231`): unchanged â€” `session_id in _acp_live` still works.
 
 **Remove existing tuple-unpack** (`presence.py:~747`): the line
 `acp_sids, acp_pid = _acp_live` (which destructures the old 2-tuple) must be deleted. With a
@@ -439,7 +439,7 @@ if provider in _KIRO_PROVIDERS and pid in acp_pids and sid not in acp_sids:
 `presence.publish_acp_sessions` now accepts `dict[str, int]`; no other wiring change needed.
 
 **`_build_held_set()` helper** (implicit in `api_acp_sessions` / `api_dashboard_sessions`,
-`web.py:4358–4360`): change from `frozenset(supervisor.sessions)` to the union across all
+`web.py:4358â€“4360`): change from `frozenset(supervisor.sessions)` to the union across all
 supervisors:
 ```python
 def _build_held_set() -> frozenset[str]:
@@ -451,7 +451,7 @@ def _build_held_set() -> frozenset[str]:
 ```
 
 **`_inflight_ids`, `_awaiting_person_ids`, `_workflow_states` helpers**
-(`web.py:3360–3430`): each currently takes `supervisor` arg; refactor to accept the full
+(`web.py:3360â€“3430`): each currently takes `supervisor` arg; refactor to accept the full
 `_supervisors` dict and aggregate across all values. The module-level
 `getattr(acp, "_supervisor", None)` pattern becomes `getattr(acp, "_supervisors", {})`.
 
@@ -459,23 +459,23 @@ def _build_held_set() -> frozenset[str]:
 `sup = getattr(acp, "_supervisor", None); sup.attention_snapshot()`. Refactor to iterate all
 supervisors and union their `attention_snapshot()` results.
 
-**`_reserved` reads in `web.py`** (`web.py:4361, 4430, 4947` — three sites): change each from
+**`_reserved` reads in `web.py`** (`web.py:4361, 4430, 4947` â€” three sites): change each from
 `supervisor._reserved` to `acp._reserved`. All three must be updated; the plan previously
 noted only one.
 
 **Exit criteria**:
-- [ ] PA restarts cleanly; `/acp` page loads; existing sessions resume via `session/load`
-- [ ] Two new sessions created; simultaneous prompts complete without either blocking the other
-- [ ] `_supervisors` dict has one entry per open ACP session; `_supervisor` attribute no longer
+- [x] PA restarts cleanly; `/acp` page loads; existing sessions resume via `session/load`
+- [x] Two new sessions created; simultaneous prompts complete without either blocking the other
+- [x] `_supervisors` dict has one entry per open ACP session; `_supervisor` attribute no longer
   exists on `acp` module; entry is removed after close (`len(_supervisors) == 0` after closing
   both sessions)
-- [ ] `presence._acp_live` is a `dict`; `acp_holds(sid)` returns `True` for held sessions,
+- [x] `presence._acp_live` is a `dict`; `acp_holds(sid)` returns `True` for held sessions,
   `False` after close
-- [ ] SC-1: Two parallel turns confirmed; `orchestrator.log` grepped for `kind.*queued`
+- [x] SC-1: Two parallel turns confirmed; `orchestrator.log` grepped for `kind.*queued`
   during the parallel test returns no hits
-- [ ] Create-close-create cycle succeeds: create 8 sessions, close all 8, create 1 more — no
+- [x] Create-close-create cycle succeeds: create 8 sessions, close all 8, create 1 more â€” no
   `at_capacity` refusal (verifies deregistration works)
-- [ ] **Note**: `pytest tests/test_web.py` will fail on Phase 1 and Phase 2 entry (1,109
+- [x] **Note**: `pytest tests/test_web.py` will fail on Phase 1 and Phase 2 entry (1,109
   singleton references); automated tests are deferred to Phase 3. Phase 1 and Phase 2
   use live QA only.
 
@@ -499,9 +499,9 @@ agent recycle concept exists.
 **Remove `_set_queued_behind`** (`acp.py:4828`), `queued_behind` meta field writes, and the
 `_info_kind == "queued"` notification branch (`acp.py:7261`).
 
-**Remove `queue_status` frame emissions** — all `_registry.broadcast(session_id, envelope("queue_status", ...))` calls.
+**Remove `queue_status` frame emissions** â€” all `_registry.broadcast(session_id, envelope("queue_status", ...))` calls.
 
-**Update `_sweep_loop` and `_sweep_once` for multi-supervisor model** (`acp.py:10980–11011`):
+**Update `_sweep_loop` and `_sweep_once` for multi-supervisor model** (`acp.py:10980â€“11011`):
 
 `_sweep_once` currently iterates `_supervisor.sessions` to reclaim idle sessions. After Phase 1,
 idle-TTL reclaim is handled by per-supervisor sweep tasks (started in `new_session`/`load_session`,
@@ -530,7 +530,7 @@ async def _sweep_loop() -> None:
         _publish_live_all()
 ```
 
-`start_sweeper()` in `web.py` lifespan **stays** — it starts this slimmed global sweep.
+`start_sweeper()` in `web.py` lifespan **stays** â€” it starts this slimmed global sweep.
 `start_watchdog()` moves to a per-supervisor method called from `new_session`/`load_session`:
 ```python
 # In _Supervisor:
@@ -576,7 +576,7 @@ watchdog tasks are started by `_start_lifecycle_tasks()` when sessions are creat
 #### `web.py` changes
 
 **Lifespan startup**: remove only `watchdog = acp.start_watchdog()` (`web.py:1387`). Keep
-`sweeper = acp.start_sweeper()` — the slimmed global sweep still runs. Remove watchdog
+`sweeper = acp.start_sweeper()` â€” the slimmed global sweep still runs. Remove watchdog
 cancellation from lifespan shutdown.
 
 **`at_capacity()` error message** (the docstring at `acp.py:3180`): update from
@@ -584,15 +584,15 @@ cancellation from lifespan shutdown.
 Phase 4 measurement).
 
 **Exit criteria**:
-- [ ] `grep -rn "queued_behind\|_set_queued_behind\|queue_status" src/power_atlas/acp.py` returns no hits
-- [ ] `grep -n "_maybe_recycle_idle\|AGENT_IDLE_RECYCLE_SECONDS" src/power_atlas/acp.py` returns no hits
-- [ ] SC-2: `queued_behind` dead code absent confirmed
-- [ ] PA restarts; session creation, prompting, and close work normally
-- [ ] Create-close-create verifies process death: create a session, close it, run
+- [x] `grep -rn "queued_behind\|_set_queued_behind\|queue_status" src/power_atlas/acp.py` returns no hits
+- [x] `grep -n "_maybe_recycle_idle\|AGENT_IDLE_RECYCLE_SECONDS" src/power_atlas/acp.py` returns no hits
+- [x] SC-2: `queued_behind` dead code absent confirmed
+- [x] PA restarts; session creation, prompting, and close work normally
+- [x] Create-close-create verifies process death: create a session, close it, run
   `Get-Process kiro-cli,bun,node` and confirm the processes from that session are gone
-- [ ] A new session can be created immediately after closing the previous one (capacity slot freed)
-- [ ] `start_watchdog()` is no longer called from `web.py` lifespan
-- [ ] **Note**: `pytest tests/test_web.py` will fail on Phase 2 entry (same as Phase 1).
+- [x] A new session can be created immediately after closing the previous one (capacity slot freed)
+- [x] `start_watchdog()` is no longer called from `web.py` lifespan
+- [x] **Note**: `pytest tests/test_web.py` will fail on Phase 2 entry (same as Phase 1).
   Phase 2 is validated by live QA only.
 
 ---
@@ -609,7 +609,7 @@ compatibility with the existing `(acp_mod, tmp_path)` yield contract; migrate 1,
 
 #### Fixture migration strategy
 
-**`acp_store` fixture** (`test_web.py:5811`): **keep the existing yield value** — the fixture
+**`acp_store` fixture** (`test_web.py:5811`): **keep the existing yield value** â€” the fixture
 currently yields `(acp_mod, tmp_path)` and 76 tests unpack it this way. Adding per-session
 supervisor support requires adding two new cleanup operations to the existing fixture body, NOT
 changing the yield:
@@ -621,7 +621,7 @@ monkeypatch.setattr(acp_mod, "_reserved", 0)
 # _registry.connections, _registry.subscribers, _registry.loading, etc.)
 ```
 
-**`_live_session()` helper** (`test_web.py:11428`): **keep returning `sid` (string)** — 81 tests
+**`_live_session()` helper** (`test_web.py:11428`): **keep returning `sid` (string)** â€” 81 tests
 store the return value as `sid` and pass it to API calls. The helper is extended to also create
 a supervisor and register it:
 ```python
@@ -679,9 +679,9 @@ from `acp_mod._supervisor._reserved = N` to `acp_mod._reserved = N`.
 
 **`TestAcpSubagentListAttribution`** (`test_web.py:11663`): update 5 tests that put two session
 ids into `inflight` on the same supervisor (structurally impossible in per-session model):
-- Tests covering the "multi-inflight attribution ambiguity" path verify dead code — remove them.
+- Tests covering the "multi-inflight attribution ambiguity" path verify dead code â€” remove them.
 - Replace with tests that verify the per-supervisor single-inflight attribution: one session in
-  `inflight` → subagent notification attributed correctly.
+  `inflight` â†’ subagent notification attributed correctly.
 
 **`TestAcpIdleSweeper`** (`test_web.py:~17949`): `_sweep()` helper calls
 `acp_mod._sweep_once()` (global). After Phase 2, the global sweep does not reclaim idle sessions.
@@ -691,7 +691,7 @@ async def _sweep(acp_mod, sid):
     sup = acp_mod._supervisors[sid]
     await sup._sweep_once_local()
 ```
-Update `_idle()` helper: `acp_mod._supervisor.sessions[sid]["last_used"]` →
+Update `_idle()` helper: `acp_mod._supervisor.sessions[sid]["last_used"]` â†’
 `acp_mod._supervisors[sid].sessions[sid]["last_used"]`.
 
 **`TestAcpLifespanWiring`** (`test_web.py:~18538`): update to verify:
@@ -709,16 +709,16 @@ Update `_idle()` helper: `acp_mod._supervisor.sessions[sid]["last_used"]` →
    skips it (it's ACP-owned but not a registered session) without affecting pid 200's sessions.
 
 **Exit criteria**:
-- [ ] `pytest tests/test_web.py -x -q --timeout=300` passes with no failures or errors
-- [ ] SC-3: full test suite pass confirmed
-- [ ] `grep -c "acp_mod\._supervisor\b" tests/test_web.py` returns 0
+- [x] `pytest tests/test_web.py -x -q --timeout=300` passes with no failures or errors
+- [x] SC-3: full test suite pass confirmed
+- [x] `grep -c "acp_mod\._supervisor\b" tests/test_web.py` returns 0
   (word-boundary anchor catches end-of-line references; `acp_mod._supervisors` remains valid)
-- [ ] At least one new test verifies two parallel sessions complete without blocking
-- [ ] At least one new test verifies `_find_supervisor` workflow child routing
-- [ ] D32 guard multi-pid test added and passing (addresses Risk Assessment R2)
-- [ ] `TestAcpSubagentListAttribution` updated: multi-inflight tests removed, single-supervisor
+- [x] At least one new test verifies two parallel sessions complete without blocking
+- [x] At least one new test verifies `_find_supervisor` workflow child routing
+- [x] D32 guard multi-pid test added and passing (addresses Risk Assessment R2)
+- [x] `TestAcpSubagentListAttribution` updated: multi-inflight tests removed, single-supervisor
   inflight attribution tests added
-- [ ] `TestAcpIdleSweeper` updated to drive `_sweep_once_local()` per-supervisor path
+- [x] `TestAcpIdleSweeper` updated to drive `_sweep_once_local()` per-supervisor path
 
 ---
 
@@ -728,7 +728,7 @@ Update `_idle()` helper: `acp_mod._supervisor.sessions[sid]["last_used"]` →
 measure per-session process memory cost; update `MAX_SESSIONS` default if warranted.
 
 **File scope**: `src/power_atlas/acp.py` (potential cap update), `docs/KNOWLEDGE.md`,
-`AGENTS.md`, `memory/MEMORY.md` (proposals — user approval required per memory governance),
+`AGENTS.md`, `memory/MEMORY.md` (proposals â€” user approval required per memory governance),
 `plans/ROADMAP.md`, `README.md`
 
 **Covers**: SC-4, SC-5
@@ -750,8 +750,8 @@ substantially higher than the v3 shared-tree cost (which was roughly proportiona
 
 | Location | Update |
 |---|---|
-| Line ~52 (`queued_behind`, `queue_status` paragraph) | Remove — feature no longer exists |
-| Line ~62 ("one process holds multiple concurrent sessions… viable") | Update: shared-process architecture was superseded; per-session processes now used |
+| Line ~52 (`queued_behind`, `queue_status` paragraph) | Remove â€” feature no longer exists |
+| Line ~62 ("one process holds multiple concurrent sessionsâ€¦ viable") | Update: shared-process architecture was superseded; per-session processes now used |
 | Line ~114 (`_supervisor.commands_execute`) | Update to `_find_supervisor(sid).commands_execute(...)` |
 | Line ~380 (v3 process tree, `_maybe_recycle_idle`, `AGENT_IDLE_RECYCLE_SECONDS`, `~161 MB`) | Full rewrite with measured per-session costs |
 
@@ -773,8 +773,8 @@ substantially higher than the v3 shared-tree cost (which was roughly proportiona
 | Location | Update |
 |---|---|
 | "One kiro-cli process per ACP session" spike item (already partially updated) | Confirm closed; link plan; remove "done when" language |
-| Line ~322 (`AGENT_IDLE_RECYCLE_SECONDS` in Clean Close item) | Update rationale — idle recycle removed; close is local-only, process killed on session close |
-| Lines ~93–94 (Kiro Crew positioning note) | Note PowerAtlas now diverges from Kiro Crew's shared-process shape |
+| Line ~322 (`AGENT_IDLE_RECYCLE_SECONDS` in Clean Close item) | Update rationale â€” idle recycle removed; close is local-only, process killed on session close |
+| Lines ~93â€“94 (Kiro Crew positioning note) | Note PowerAtlas now diverges from Kiro Crew's shared-process shape |
 | Line ~180 (Scheduled tasks: "all sessions share ONE process tree") | Update to reflect per-session processes |
 | Line ~326 (session cap rationale) | Update with measured v3 per-session cost figure |
 
@@ -789,43 +789,43 @@ These are memory entries owned by the user. Propose each via `Save / Skip / Edit
 
 2. **Line ~471** (D9 boundary reasoning, `_supervisor.sessions`): Update to note that
    `_supervisor.sessions` became `_supervisors[sid].sessions` in `261020_ACP_PER_SESSION_PROCESS`.
-   The D9 boundary (no `presence → acp` import) remains; the note about cross-thread iteration
+   The D9 boundary (no `presence â†’ acp` import) remains; the note about cross-thread iteration
    still applies to each supervisor's `sessions` dict.
 
-3. **Lines ~596, 598–599** ("Workflow step sessions: use `_supervisor._request(...)` directly"):
+3. **Lines ~596, 598â€“599** ("Workflow step sessions: use `_supervisor._request(...)` directly"):
    Update to `_find_supervisor(sid)._request(...)` and `_find_supervisor(sid).prompt()`.
 
 **Exit criteria**:
-- [ ] SC-4: Per-session memory cost measured and recorded in `docs/KNOWLEDGE.md` under
+- [x] SC-4: Per-session memory cost measured and recorded in `docs/KNOWLEDGE.md` under
   a "Per-session process cost (v3, measured)" heading with date, kiro-cli version, and RSS figures
   for 1, 2, 4, and 8 sessions
-- [ ] SC-5: All doc-impact hits addressed — README.md, AGENTS.md, ROADMAP.md, KNOWLEDGE.md
+- [x] SC-5: All doc-impact hits addressed â€” README.md, AGENTS.md, ROADMAP.md, KNOWLEDGE.md
   updated; memory/MEMORY.md proposals surfaced for user approval and disposition recorded
-- [ ] `grep -n "queued_behind\|queue_status\|_set_queued_behind" docs/KNOWLEDGE.md plans/ROADMAP.md README.md memory/MEMORY.md` returns no un-addressed hits
-- [ ] `grep -n "all sessions share ONE process\|one supervised.*kiro-cli.*process holds every" docs/ README.md plans/ROADMAP.md` returns no hits
-- [ ] `src/power_atlas/acp.py`: `MAX_SESSIONS` updated to measured-safe default if measurement
+- [x] `grep -n "queued_behind\|queue_status\|_set_queued_behind" docs/KNOWLEDGE.md plans/ROADMAP.md README.md memory/MEMORY.md` returns no un-addressed hits
+- [x] `grep -n "all sessions share ONE process\|one supervised.*kiro-cli.*process holds every" docs/ README.md plans/ROADMAP.md` returns no hits
+- [x] `src/power_atlas/acp.py`: `MAX_SESSIONS` updated to measured-safe default if measurement
   shows current default is unsafe; `_clamped` ceiling updated accordingly
-- [ ] PA restarts cleanly after any `acp.py` cap change
+- [x] PA restarts cleanly after any `acp.py` cap change
 
 ## 6) Risk Assessment
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| `_find_supervisor` O(N) scan is wrong for some workflow child — step prompt goes to wrong process | High — session stall | Dedicated unit test in Phase 3 verifying correct parent supervisor routing for a live workflow child |
-| D32 guard generalization misses a pid — orphan lock files leak into live-dot presence | Medium — ghost "live" dots | Explicit test: inject one orphan pid and N live pids into `_acp_live`; verify D32 skips exactly the orphan |
-| Per-session process memory is much higher than expected — 8 sessions exhausts RAM | High — OOM on cap | Phase 4 measurement is a prerequisite for any cap change; keep default at 8 until measured |
-| Test fixture refactor introduces subtle behavioral differences — test passes but tests wrong behavior | High | Mutation testing after Phase 3; each refactored test group runs in isolation (no cross-test supervisor bleed) |
-| `close_session` one-await (`_answer_pending_cancelled`) — Phase 1 refactoring assumes zero-await path; may need updated invariant reasoning | Low | Document the await in the per-supervisor sweep task's invariant comment; close path already tested |
-| `_publish_live` called from multiple supervisors between event-loop ticks — race on `_acp_live` dict update | Low — GIL rebind atomicity on CPython | `publish_acp_sessions` does a single `dict(mapping)` rebind; GIL atomicity holds; document assumption |
+| `_find_supervisor` O(N) scan is wrong for some workflow child â€” step prompt goes to wrong process | High â€” session stall | Dedicated unit test in Phase 3 verifying correct parent supervisor routing for a live workflow child |
+| D32 guard generalization misses a pid â€” orphan lock files leak into live-dot presence | Medium â€” ghost "live" dots | Explicit test: inject one orphan pid and N live pids into `_acp_live`; verify D32 skips exactly the orphan |
+| Per-session process memory is much higher than expected â€” 8 sessions exhausts RAM | High â€” OOM on cap | Phase 4 measurement is a prerequisite for any cap change; keep default at 8 until measured |
+| Test fixture refactor introduces subtle behavioral differences â€” test passes but tests wrong behavior | High | Mutation testing after Phase 3; each refactored test group runs in isolation (no cross-test supervisor bleed) |
+| `close_session` one-await (`_answer_pending_cancelled`) â€” Phase 1 refactoring assumes zero-await path; may need updated invariant reasoning | Low | Document the await in the per-supervisor sweep task's invariant comment; close path already tested |
+| `_publish_live` called from multiple supervisors between event-loop ticks â€” race on `_acp_live` dict update | Low â€” GIL rebind atomicity on CPython | `publish_acp_sessions` does a single `dict(mapping)` rebind; GIL atomicity holds; document assumption |
 
 | Risk | Disposition |
 |---|---|
-| Memory higher than expected → cap change needed | Accepted: measured in Phase 4; cap change is an exit criterion |
+| Memory higher than expected â†’ cap change needed | Accepted: measured in Phase 4; cap change is an exit criterion |
 | Concurrent `_secrets.store` during session startup burst | Accepted: existing `threading.Lock` sufficient |
 
 ## 7) Verification
 
-**Phase 1 live test** (requires PA restart permission — granted 2026-10-20):
+**Phase 1 live test** (requires PA restart permission â€” granted 2026-10-20):
 1. Restart PA
 2. Open two `/acp` sessions in different workspaces
 3. Send a long-running prompt to Session A (e.g., "count from 1 to 100 slowly")
@@ -858,20 +858,20 @@ Get-Process kiro-cli, bun, node | Measure-Object WorkingSet64 -Sum
 
 ```
 Phase 1 (core migration)
-  └─→ Phase 2 (dead code removal)
-        └─→ Phase 3 (test fixture)
-              └─→ Phase 4 (docs + measurement)
+  â””â”€â†’ Phase 2 (dead code removal)
+        â””â”€â†’ Phase 3 (test fixture)
+              â””â”€â†’ Phase 4 (docs + measurement)
 ```
 
 ## Backwards Compatibility
 
 | Item | Strategy | Safety effect |
 |---|---|---|
-| `/ws/acp` WebSocket protocol | Unchanged — clients see identical JSON-RPC frames | None |
+| `/ws/acp` WebSocket protocol | Unchanged â€” clients see identical JSON-RPC frames | None |
 | `/api/acp/sessions` HTTP API | `held` set now unioned across all supervisors; semantics identical | None |
 | `acp-secrets.bin` | Shared module-level singleton; MCP OAuth tokens unaffected | None |
 | `presence.publish_acp_sessions` signature | Internal only; changed from `(frozenset, int)` to `dict[str, int]`; all callers updated in same phase | Internal breaking change, contained |
-| `kiro-cli` ACP protocol | Unchanged — same `initialize` / `session/new` / `session/load` sequence; one process per session uses identical wire format | None |
+| `kiro-cli` ACP protocol | Unchanged â€” same `initialize` / `session/new` / `session/load` sequence; one process per session uses identical wire format | None |
 
 ## File Change Summary
 
@@ -882,7 +882,7 @@ Phase 1 (core migration)
 - `tests/test_web.py` (Phase 3)
 - `docs/KNOWLEDGE.md` (Phase 4)
 - `AGENTS.md` (Phase 4)
-- `memory/MEMORY.md` (Phase 4 — proposals only; user approval required)
+- `memory/MEMORY.md` (Phase 4 â€” proposals only; user approval required)
 - `plans/ROADMAP.md` (Phase 4)
 - `README.md` (Phase 4)
 
@@ -902,9 +902,9 @@ None.
 
 | # | Phase | Status | Notes |
 |---|---|---|---|
-| 1 | Core migration — routing, spawn, handlers [QA] | Complete | commits 88efd8a, d760bac |
+| 1 | Core migration â€” routing, spawn, handlers [QA] | Complete | commits 88efd8a, d760bac |
 | 2 | Dead code removal and per-supervisor sweep [QA] | Complete | commits ff417f6, 65a2f96 |
-| 3 | Test fixture refactor | Complete | commits 87433dc–5a90da4 |
+| 3 | Test fixture refactor | Complete | commits 87433dcâ€“5a90da4 |
 | 4 | Documentation ripple and memory measurement [QA] | Complete | commit ed147be |
 
 ## 8) Documentation Updates
@@ -918,42 +918,42 @@ None.
 | `docs/KNOWLEDGE.md` | Full rewrite of v3 process model paragraph (~line 380) with measured costs | 4 |
 | `AGENTS.md` | Update `power_atlas.acp._supervisor` protocol probe instruction (~line 83) | 4 |
 | `plans/ROADMAP.md` | Close "one kiro-cli process per ACP session" spike item | 4 |
-| `plans/ROADMAP.md` | Update Kiro Crew positioning note (~lines 93–94) | 4 |
+| `plans/ROADMAP.md` | Update Kiro Crew positioning note (~lines 93â€“94) | 4 |
 | `plans/ROADMAP.md` | Update Scheduled Tasks process-tree note (~line 180) | 4 |
 | `plans/ROADMAP.md` | Update `AGENT_IDLE_RECYCLE_SECONDS` in Clean Close item (~line 322) | 4 |
 | `plans/ROADMAP.md` | Update session cap rationale (~line 326) with measured cost | 4 |
 | `README.md` | Update `acp_max_sessions` comment (~line 365) | 4 |
 | `README.md` | Update "one process holds every session" sentence (~line 441) | 4 |
-| `memory/MEMORY.md` | Propose update: `queued_behind`/`queue_status` example in reconnect-state entry (~line 342) — user approval required | 4 |
-| `memory/MEMORY.md` | Propose update: D9 boundary note `_supervisor.sessions` (~line 471) — user approval required | 4 |
-| `memory/MEMORY.md` | Propose update: workflow step `_supervisor._request` → `_find_supervisor` (~lines 596–599) — user approval required | 4 |
+| `memory/MEMORY.md` | Propose update: `queued_behind`/`queue_status` example in reconnect-state entry (~line 342) â€” user approval required | 4 |
+| `memory/MEMORY.md` | Propose update: D9 boundary note `_supervisor.sessions` (~line 471) â€” user approval required | 4 |
+| `memory/MEMORY.md` | Propose update: workflow step `_supervisor._request` â†’ `_find_supervisor` (~lines 596â€“599) â€” user approval required | 4 |
 
-### Phase 2 — Implementation (2026-10-20, code: ff417f6, fix: 65a2f96)
+### Phase 2 â€” Implementation (2026-10-20, code: ff417f6, fix: 65a2f96)
 
 **Scope**: `src/power_atlas/acp.py`, `src/power_atlas/web.py`
 
 **Delivered per plan**: `_maybe_recycle_idle`, `AGENT_IDLE_RECYCLE_SECONDS`, `_idle_since` removed; `_set_queued_behind`, `queued_behind` meta writes (6 sites), `_info_kind == "queued"` branch, `queue_status` frame and `SERVER_TYPES` entry, `turn_queued` steer guard all removed; `_sweep_failures`/`_sweep_held_logged`/`_sweep_awaiting_failures` module-level dicts removed; `_sweep_once()` slimmed to workflow-reap + SC-1 orphan + presence backstop; `_start_lifecycle_tasks()`, `cancel_lifecycle_tasks()`, `_sweep_once_local()` added to `_Supervisor`; wired into `_handle_new`/`_handle_load` and `_detach()`; `start_watchdog()` removed from `web.py` lifespan.
 
-**Review findings** (full effort — Green):
+**Review findings** (full effort â€” Green):
 - L1: `start_watchdog()` dead code remained in `acp.py`. **Fixed** (65a2f96).
-- L2: Per-supervisor sweep has no close-failure retry. Accepted as design — watchdog covers process death; retry not warranted.
+- L2: Per-supervisor sweep has no close-failure retry. Accepted as design â€” watchdog covers process death; retry not warranted.
 
 **Live QA**: PASS (run by coder inside workflow session):
-- EC-1 ✅ PA started cleanly
-- EC-2 ✅ Session created, prompt responded
-- EC-3 ✅ Session closed cleanly ("0 live")
-- EC-4 ✅ Process tree killed ("12 process(es) killed")
-- EC-5 ✅ Capacity freed (held:0 after close)
-- EC-6 ✅ All 5 dead-code greps return zero hits
+- EC-1 âœ… PA started cleanly
+- EC-2 âœ… Session created, prompt responded
+- EC-3 âœ… Session closed cleanly ("0 live")
+- EC-4 âœ… Process tree killed ("12 process(es) killed")
+- EC-5 âœ… Capacity freed (held:0 after close)
+- EC-6 âœ… All 5 dead-code greps return zero hits
 
-### Phase 3 — Implementation (2026-10-20, commits 58acca7…5a90da4)
+### Phase 3 â€” Implementation (2026-10-20, commits 58acca7â€¦5a90da4)
 
 **Scope**: `tests/test_web.py`
 
-**Delivered per plan**: `acp_store` fixture updated with `_supervisors`/`_reserved` resets; `_live_session()` returns `str`, creates per-session supervisor; `_notify()` routes through `_supervisors`; `acp_session` and `wf` fixtures migrated; all 1,109 `acp_mod._supervisor` references migrated; `TestAcpSubagentListAttribution` multi-inflight tests removed; `TestAcpIdleSweeper._sweep()` replaced with inline per-supervisor tick logic (direct `_sweep_once_local()` call would hang — correctly avoided); `TestAcpLifespanWiring` updated; 3 new multi-session tests added.
+**Delivered per plan**: `acp_store` fixture updated with `_supervisors`/`_reserved` resets; `_live_session()` returns `str`, creates per-session supervisor; `_notify()` routes through `_supervisors`; `acp_session` and `wf` fixtures migrated; all 1,109 `acp_mod._supervisor` references migrated; `TestAcpSubagentListAttribution` multi-inflight tests removed; `TestAcpIdleSweeper._sweep()` replaced with inline per-supervisor tick logic (direct `_sweep_once_local()` call would hang â€” correctly avoided); `TestAcpLifespanWiring` updated; 3 new multi-session tests added.
 
 **Review findings** (2 build-loop iterations + 1 extension; final pass: APPROVED):
-- Build loop produced 3 revision passes total. Main issues resolved across passes: 145→22→0 test failures; D32 guard test made non-vacuous (calls actual guard logic); `start_watchdog` tracking added.
+- Build loop produced 3 revision passes total. Main issues resolved across passes: 145â†’22â†’0 test failures; D32 guard test made non-vacuous (calls actual guard logic); `start_watchdog` tracking added.
 - Final pass: all 3,546 tests pass, 0 singleton refs, 7/7 focus areas pass.
 
 
@@ -965,22 +965,22 @@ None.
 **Divergences**:
 - `load_session()` sibling-copy lines removed as planned; confirmed no equivalent in `new_session()` path.
 - `at_capacity()` moved to module level; `_find_permission_entry()` (a related helper) also moved to module level as a natural consequence.
-- The `_sweep_once()` inner `for session_id, meta` loop used 2-space relative indentation (6 vs. 8 expected) — fixed in d760bac.
+- The `_sweep_once()` inner `for session_id, meta` loop used 2-space relative indentation (6 vs. 8 expected) â€” fixed in d760bac.
 
-**Review findings** (Cycle 1 — full effort — Green):
-- M1: `_handle_new`/`_handle_load` missing `sup._discard()` on `new_session()`/`load_session()` failure — orphan process until kiro-cli idle timeout. **Fixed** (d760bac): added `sup._discard("session creation/load failed")` to all four exception handlers.
-- L1: Redundant `_publish_live_all()` calls on close (4×, harmless). Deferred.
+**Review findings** (Cycle 1 â€” full effort â€” Green):
+- M1: `_handle_new`/`_handle_load` missing `sup._discard()` on `new_session()`/`load_session()` failure â€” orphan process until kiro-cli idle timeout. **Fixed** (d760bac): added `sup._discard("session creation/load failed")` to all four exception handlers.
+- L1: Redundant `_publish_live_all()` calls on close (4Ã—, harmless). Deferred.
 - L2: Stale docstring refs to `_supervisor.*` at acp.py lines 8683, 8685, 8808. Deferred to Phase 4 doc ripple.
 - L3: 2-space indentation in `_sweep_once()` inner loop. **Fixed** (d760bac).
 
 **Live QA**: PASS (2026-10-20, PA restarted per pre-approved grant):
-- EC-1 ✅ PA loads; `/api/acp/sessions` responds
-- EC-2 ✅ Session B ("session B reply test") responded immediately without waiting for Session A's turn to finish; no serialization observed
-- EC-3 ✅ `_supervisors` dict confirmed; `_supervisor` singleton removed; `_reserved` int = 0
-- EC-4 ✅ `presence._acp_live` is a dict
-- SC-1 ✅ 0 "queued" messages in orchestrator.log (last 200 lines) during the parallel test
-- EC-6 ✅ Create-close-create cycle: both sessions closed (0/8), new session (`sess_bba968ed`) created without capacity refusal
-- Process kill ✅ kiro-cli count: 8 with 2 sessions → 6 with 0 sessions (delta of 2, matches sessions created and closed)
+- EC-1 âœ… PA loads; `/api/acp/sessions` responds
+- EC-2 âœ… Session B ("session B reply test") responded immediately without waiting for Session A's turn to finish; no serialization observed
+- EC-3 âœ… `_supervisors` dict confirmed; `_supervisor` singleton removed; `_reserved` int = 0
+- EC-4 âœ… `presence._acp_live` is a dict
+- SC-1 âœ… 0 "queued" messages in orchestrator.log (last 200 lines) during the parallel test
+- EC-6 âœ… Create-close-create cycle: both sessions closed (0/8), new session (`sess_bba968ed`) created without capacity refusal
+- Process kill âœ… kiro-cli count: 8 with 2 sessions â†’ 6 with 0 sessions (delta of 2, matches sessions created and closed)
 
 ## Follow-up Work (Deferred)
 
@@ -993,13 +993,13 @@ None.
    Source: Open item 2 in Exploration Discovery.
 
 3. **`_find_supervisor` lookup cache.** An `O(N)` scan over `_supervisors.values()` for workflow
-   children is negligible at `MAX_SESSIONS = 8–16`. If the cap grows substantially, add a
+   children is negligible at `MAX_SESSIONS = 8â€“16`. If the cap grows substantially, add a
    supplementary `_child_to_supervisor: dict[str, _Supervisor]` cache.
    Source: Design Decisions (workflow step routing).
 
 ## Review Log
 
-### Cycle 1 — 2026-10-20 — Full effort (user override; default for Major: standard)
+### Cycle 1 â€” 2026-10-20 â€” Full effort (user override; default for Major: standard)
 
 **Reviewers**: Senior engineer, Concurrency/reliability engineer, Test engineer, Plan quality/leanness reviewer
 
@@ -1009,7 +1009,7 @@ None.
 |---|---|---|---|
 | 1 | `_bubbles.clear()` in `_detach()` destroys all sessions' state on any supervisor crash | High | Fixed: Phase 1 mandates `self._session_id` attribute; `_detach()` uses `_bubbles.pop(self._session_id)` |
 | 2 | Supervisor deregistration (`_supervisors.pop`) never specified | High | Fixed: Phase 1 adds `_deregister_supervisor()` called from both `close_session()` and `_detach()` |
-| 3 | Session close does not kill process — `_maybe_recycle_idle` removed with no replacement | High | Fixed: Phase 1 specifies `close_session()` → `_deregister_supervisor()` → `_detach()` → `_dispose()` |
+| 3 | Session close does not kill process â€” `_maybe_recycle_idle` removed with no replacement | High | Fixed: Phase 1 specifies `close_session()` â†’ `_deregister_supervisor()` â†’ `_detach()` â†’ `_dispose()` |
 | 4 | `_sessions_changed_hook` NameError in `_publish_live_all` snippet | High | Fixed: correct name `sessions_changed_hook` with inline comment citing `acp.py:1399` |
 | 5 | `set_sessions_changed_hook()` still calls `_supervisor._publish_live()` after migration | High | Fixed: Phase 1 specifies updating this call to `_publish_live_all()` |
 | 6 | Disconnected-socket early return in `_handle_new` orphans a supervisor | High | Fixed: Phase 1 mandates registration before early-return check + `_deregister_supervisor()` on early exit |
@@ -1025,7 +1025,7 @@ None.
 | 16 | SC-1 orphan-buffer sweep references removed singleton | Medium | Fixed: Phase 2 adds explicit SC-1 loop iterating `_supervisors.values()` |
 | 17 | `attention_snapshot()` aggregation not in `web.py` changes | Medium | Fixed: Phase 1 adds aggregation across all supervisors |
 | 18 | `_reserved` at 3 `web.py` sites, plan noted only 1 | Medium | Fixed: Phase 1 lists all 3 sites (`web.py:4361, 4430, 4947`) |
-| 19 | Phases 1/2 no automated test coverage — unstated | Medium | Fixed: exit criteria explicitly note live-QA-only during these phases |
+| 19 | Phases 1/2 no automated test coverage â€” unstated | Medium | Fixed: exit criteria explicitly note live-QA-only during these phases |
 | 20 | `_bubbles` migration and sibling-copy removal unassigned | Medium | Fixed: Phase 1 covers both |
 | 21 | Dead `pid` variable in `_publish_live_all` snippet | Medium | Fixed: replaced with `_publish_live_all()` module function; dead variable removed |
 | 22 | Phase 2 live QA criterion too vague | Medium | Fixed: concrete create-close-create cycle with process inspection |
@@ -1038,26 +1038,36 @@ None.
 | 29 | `wf` fixture yields `acp_mod._supervisor` directly | Medium | Fixed: Phase 3 specifies `wf` fixture migration |
 | 30 | `_find_supervisor` loop variable shadowed `sup` | Low | Fixed: renamed loop variable to `s` |
 
-### Step 9 Holistic Review — 2026-10-21 — Full effort (4 personas, all applicable)
+### Step 9 Holistic Review â€” 2026-10-21 â€” Full effort (4 personas, all applicable)
 
 **Reviewers**: Senior engineer, Concurrency/reliability, Test engineer, Security
 
-**Health after Step 9 + fixes**: Green (commit c1a550a — 4,276 tests pass)
+**Health after Step 9 + fixes**: Green (commit c1a550a â€” 4,276 tests pass)
 
 | # | Finding | Sev | Resolution |
 |---|---|---|---|
 | S1 | Double `_reserved` increment: `_handle_new` + `new_session()` both increment, halving effective cap to 4/8 | High | Fixed (c1a550a): removed `_reserved` pair from `_handle_new`; `new_session()` is sole manager |
-| S2 | `CancelledError` leaks `_reserved` permanently — no `BaseException`/`finally` guard | Medium | Fixed (c1a550a): `try/finally` wraps create block in both `_handle_new` and `_handle_load` |
+| S2 | `CancelledError` leaks `_reserved` permanently â€” no `BaseException`/`finally` guard | Medium | Fixed (c1a550a): `try/finally` wraps create block in both `_handle_new` and `_handle_load` |
 | S3 | Close-then-reload race: `close_session()` removes from sessions before await, `closing` never set | Medium | Fixed (c1a550a): `self.closing.add(session_id)` at top of `close_session()` before any mutation |
-| S4 | D32 guard test vacuous — only tests frozenset constructor, never calls `presence._scan()` | Medium | Fixed (c1a550a): real test in `test_data.py` that calls guard logic; mutation fails the test |
-| S5 | `start_watchdog` lifespan fake accepts calls silently — Phase 2 "NOT called" claim unverifiable | Medium | Fixed (c1a550a): call counter added; assertion `watchdog_calls == 0` |
+| S4 | D32 guard test vacuous â€” only tests frozenset constructor, never calls `presence._scan()` | Medium | Fixed (c1a550a): real test in `test_data.py` that calls guard logic; mutation fails the test |
+| S5 | `start_watchdog` lifespan fake accepts calls silently â€” Phase 2 "NOT called" claim unverifiable | Medium | Fixed (c1a550a): call counter added; assertion `watchdog_calls == 0` |
 | S6 | Double `_deregister_supervisor` / redundant `_publish_live_all` on 3 exit paths | Low | Fixed (c1a550a): removed explicit calls from callers; `_detach()` is sole site |
 | S7 | `None` pids enter D32 `acp_pids` frozenset during spawn window | Low | Fixed (c1a550a): `None` filtered in `_publish_live_all()` at source |
-| S8 | `_acp_live` type annotation `dict[str, int]` misleads — can hold `None` values | Low | Fixed (c1a550a): annotation updated to `dict[str, int \| None]` (pre-filter); aligned `publish_acp_sessions` |
+| S8 | `_acp_live` type annotation `dict[str, int]` misleads â€” can hold `None` values | Low | Fixed (c1a550a): annotation updated to `dict[str, int \| None]` (pre-filter); aligned `publish_acp_sessions` |
 | S9 | `_start_lifecycle_tasks()` called before `load_session()` in `_handle_load` | Low | Fixed (c1a550a): moved to after `load_session()` succeeds |
-| S10 | `_sweep_once_local()` loop body unguarded — unexpected exception kills idle-TTL permanently | Low | Fixed (c1a550a): loop body wrapped in `try/except Exception: log.exception(...)` |
+| S10 | `_sweep_once_local()` loop body unguarded â€” unexpected exception kills idle-TTL permanently | Low | Fixed (c1a550a): loop body wrapped in `try/except Exception: log.exception(...)` |
 | S11 | `_find_supervisor` subagent_sessions path untested | Low | Fixed (c1a550a): test added for `subagent_sessions` lookup branch |
 | S12 | Test name overpromises (`do_not_block_each_other` verifies state isolation, not turn scheduling) | Low | Fixed (c1a550a): renamed to `test_two_sessions_have_independent_inflight_state` |
 
 ## Harness Improvement Opportunities
+
+## Completion Summary
+
+**Completed**: 2026-10-21  
+**What was built**: Replaced the PowerAtlas ACP single shared kiro-cli process with one dedicated `kiro-cli acp` process per ACP session. Two ACP sessions now run fully concurrently — no turn serialization, no "Waiting for another session's turn to finish" messages. The singleton `_supervisor` became `_supervisors: dict[str, _Supervisor]` with `_find_supervisor()` routing, per-supervisor lifecycle tasks, and complete dead-code removal (`queued_behind`, `queue_status`, `_maybe_recycle_idle`). 1,109 test fixture references migrated; 4,276 tests pass.
+
+**Measured per-session cost**: 555–672 MB WorkingSet64 per session (kiro-cli 2.31.1); ~7.6 GB at cap 8.  
+**Step 9 fixes**: 1 High (double `_reserved` halving capacity), 4 Medium (CancelledError leak, close-reload race, vacuous D32 test, lifespan wiring assertion), 7 Low.  
+**QA**: PASS — parallel sessions confirmed, dead code absent from wire, capacity counter correct, process lifecycle verified.
+
 
