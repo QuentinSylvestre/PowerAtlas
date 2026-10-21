@@ -24462,10 +24462,12 @@ class TestAcpCommandsAvailable:
         params = {"commands": commands_list}
         if prompts is not None:
             params["prompts"] = prompts
-        acp_mod._supervisors[sid]._on_notification({
-            "method": "_kiro.dev/commands/available",
-            "params": params,
-        })
+        # Broadcast to all active supervisors (commands_available has no sessionId)
+        for sup in list(acp_mod._supervisors.values()):
+            sup._on_notification({
+                "method": "_kiro.dev/commands/available",
+                "params": params,
+            })
 
     def test_single_inflight_stores_commands_and_broadcasts(self, acp_session):
         """With exactly 1 inflight session the catalogue is stored and a
@@ -24535,8 +24537,7 @@ class TestAcpCommandsAvailable:
         """Two sessions inflight: catalogue is shared, broadcast to all known sessions."""
         acp_mod, sid = acp_session
         other_sid = "sess-other-cmds"
-        acp_mod._supervisors[other_sid].sessions[other_sid] = {
-            "cwd": r"C:\other", "created": 0.0, "models": {}, "modes": {}}
+        _live_session(acp_mod, sid=other_sid, cwd=r"C:\other")
         conn = self._attached(acp_mod, sid)
         acp_mod._supervisors[sid].inflight.add(sid)
         acp_mod._supervisors[other_sid].inflight.add(other_sid)
@@ -24903,7 +24904,7 @@ class TestAcpCommandsAvailable:
         ``params.sessionId`` even when two sessions are registered."""
         acp_mod, sid = acp_session
         other_sid = "sess-other-update"
-        acp_mod._supervisors[other_sid].sessions[other_sid] = acp_mod._new_session_record(r"C:\other")
+        _live_session(acp_mod, sid=other_sid, cwd=r"C:\other")
         try:
             acp_mod._supervisors[sid]._on_notification({
                 "method": "_kiro.dev/session/update",
@@ -24997,14 +24998,12 @@ class TestAcpCommandsAvailable:
 
         # Simulate what load_session does for the seeding step
         new_sid = "new-loaded-sid"
-        acp_mod._supervisors[new_sid].sessions[new_sid] = acp_mod._new_session_record(
-            r"C:\workspace")
-        for sib_id, sib_meta in acp_mod._supervisors[source_sid].sessions.items():
-            if sib_id != new_sid and sib_meta.get("commands") is not None:
-                acp_mod._supervisors[new_sid].sessions[new_sid]["commands"] = sib_meta["commands"]
-                acp_mod._supervisors[new_sid].sessions[new_sid]["skills"] = (
-                    sib_meta.get("skills") or [])
-                break
+        _live_session(acp_mod, sid=new_sid)
+        # In per-session model, no sibling copy. Seed commands directly.
+        acp_mod._supervisors[new_sid].sessions[new_sid]["commands"] = [
+            {"name": "tools", "description": "list tools"}]
+        acp_mod._supervisors[new_sid].sessions[new_sid]["skills"] = [
+            {"name": "qtest", "description": "testing skill"}]
         acp_mod._supervisors[new_sid].history[new_sid] = acp_mod._History()
 
         assert acp_mod._supervisors[new_sid].sessions[new_sid].get("commands") == [
@@ -25025,8 +25024,7 @@ class TestAcpCommandsAvailable:
         # just the inflight one.
         acp_mod, sid = acp_session
         other_sid = "sess-other-broadcast"
-        acp_mod._supervisors[other_sid].sessions[other_sid] = {
-            "cwd": r"C:\other", "created": 0.0, "models": {}, "modes": {}}
+        _live_session(acp_mod, sid=other_sid, cwd=r"C:\other")
         conn_main = self._attached(acp_mod, sid)
         conn_other = _acp_conn(acp_mod)
         acp_mod._registry.connections.add(conn_other)
