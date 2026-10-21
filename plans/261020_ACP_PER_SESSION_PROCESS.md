@@ -946,7 +946,17 @@ None.
 - EC-5 ✅ Capacity freed (held:0 after close)
 - EC-6 ✅ All 5 dead-code greps return zero hits
 
-## 9) Implementation Divergences from Plan
+### Phase 3 — Implementation (2026-10-20, commits 58acca7…5a90da4)
+
+**Scope**: `tests/test_web.py`
+
+**Delivered per plan**: `acp_store` fixture updated with `_supervisors`/`_reserved` resets; `_live_session()` returns `str`, creates per-session supervisor; `_notify()` routes through `_supervisors`; `acp_session` and `wf` fixtures migrated; all 1,109 `acp_mod._supervisor` references migrated; `TestAcpSubagentListAttribution` multi-inflight tests removed; `TestAcpIdleSweeper._sweep()` replaced with inline per-supervisor tick logic (direct `_sweep_once_local()` call would hang — correctly avoided); `TestAcpLifespanWiring` updated; 3 new multi-session tests added.
+
+**Review findings** (2 build-loop iterations + 1 extension; final pass: APPROVED):
+- Build loop produced 3 revision passes total. Main issues resolved across passes: 145→22→0 test failures; D32 guard test made non-vacuous (calls actual guard logic); `start_watchdog` tracking added.
+- Final pass: all 3,546 tests pass, 0 singleton refs, 7/7 focus areas pass.
+
+
 
 **Scope**: `src/power_atlas/acp.py`, `src/power_atlas/presence.py`, `src/power_atlas/web.py`
 
