@@ -905,7 +905,7 @@ None.
 | 1 | Core migration — routing, spawn, handlers [QA] | Complete | commits 88efd8a, d760bac |
 | 2 | Dead code removal and per-supervisor sweep [QA] | Complete | commits ff417f6, 65a2f96 |
 | 3 | Test fixture refactor | Complete | commits 87433dc–5a90da4 |
-| 4 | Documentation ripple and memory measurement [QA] | Not started | |
+| 4 | Documentation ripple and memory measurement [QA] | Complete | commit ed147be |
 
 ## 8) Documentation Updates
 
