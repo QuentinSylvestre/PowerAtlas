@@ -2001,92 +2001,207 @@ button.dash-ov-plan-head:hover { background: var(--surface-hover); }
    textarea and the two buttons lay out exactly as before — an empty tray is
    `hidden`, and `gap` on a flex container ignores a hidden child, so a page
    nobody attaches anything on is pixel-identical to the one before this. */
-/* The sub-agent panel takes `.acp-transcript`'s flex slot while one is open
-   (acp.html toggles `hidden` on each, never both visible at once), so it needs
-   the same `flex: 1` to fill the space the transcript vacated. The transcript
-   element itself is reused via a shared `.acp-transcript` class on
-   `#acpSubTranscript` rather than duplicated here — same scroll box, same
-   `.acp-msg` rows, a read-only view built from the same parts. */
-.acp-subpanel { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
-.acp-subpanel-head { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-/* Never the thing that gives: the only way back to the main transcript must
-   stay fully readable whatever the role name or status message next to it
-   measures — an error message is agent-authored prose (`MAX_ERROR_DETAIL_CHARS`
-   in acp.py caps it at 512 characters, not at "fits this header"), and
-   without an explicit floor here a long one used to wrap this button's own
-   text across two lines rather than truncate itself. */
-.acp-subpanel-head .acp-btn { flex-shrink: 0; }
-.acp-subpanel-role { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 3ch; }
-.acp-subpanel-status { font-size: 12px; color: var(--text-muted); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-/* Mirrors the agent bar's own state colors (below) so the panel header and
-   the pill that opened it never disagree about whether a sub-agent is still
-   working, finished, or failed. */
-.acp-subpanel-status-error { color: #f87171; }
-.acp-subpanel-status-done { color: var(--text-dim); }
-/* A workflow step waiting on a person (D15, 261012): the rail's waiting colour. */
-.acp-subpanel-status-waiting { color: #f59e0b; }
+/* ---- Workflow runs: run card, run strip, run inspector (workflow-ui.js) ----
+   One visual language for delegated work on /acp and the dashboard: the run
+   card in the transcript (a kiro-cli workflow, or a plain sub-agent fan-out),
+   the strip above the composer while a run is live, and the inspector docked
+   beside the transcript (steps, a step's own conversation, history). State is
+   carried by shape as well as colour: check, spinner, pause, cross, dashed
+   ring. Built by static/workflow-ui.js with createElement only. */
+.acp-page, #sessions-panel { position: relative; container-type: inline-size; container-name: wfhost; }
+.wf-slot { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; margin: 2px 0; }
+.wf-slot:empty { display: none; }
 
-/* Crew panel — lean rows replacing the old card-button design */
-.acp-crew-panel  { display:flex; flex-direction:column; gap:2px; padding:6px 8px; margin:4px 0; border-left:2px solid var(--border); flex-shrink:0; }
-.acp-crew-header { font-size:11px; color:var(--text-dim); padding:0 2px 4px; text-transform:uppercase; letter-spacing:0.05em; }
-.acp-crew-row    { display:flex; align-items:center; gap:8px; padding:3px 2px; background:transparent; border:none; cursor:pointer; font-family:inherit; font-size:12px; text-align:left; width:100%; color:var(--text-muted); border-radius:var(--radius-sm); transition:color 0.1s; }
-.acp-crew-row:hover       { color:var(--text); }
-.acp-crew-row:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
-.acp-crew-label  { font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:45%; }
-.acp-crew-role   { color:var(--text-dim); white-space:nowrap; flex-shrink:0; font-size:11px; }
-.acp-crew-action { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.acp-crew-row-working .acp-crew-action { color:#3b82f6; }  /* matches status-thinking dot */
-.acp-crew-row-error   .acp-crew-action { color:#ef4444; }  /* matches status-errored dot */
-.acp-crew-row-waiting .acp-crew-action { color:#f59e0b; }  /* matches status-waiting dot */
-.acp-crew-elapsed { font-variant-numeric:tabular-nums; color:var(--text-dim); white-space:nowrap; flex-shrink:0; }
-/* Phase 3: crew panel tree structure */
-.acp-crew-group { cursor:pointer; user-select:none; padding:4px 8px; font-weight:500; display:flex; align-items:center; gap:6px; }
-.acp-crew-group:hover { background:rgba(128,128,128,0.1); }
-.acp-crew-group:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
-.acp-crew-group-children { }
-.acp-crew-group-children[hidden] { display:none; }
-.acp-crew-group-children .acp-crew-row { padding-left:24px; }
-.acp-crew-chevron { font-size:0.7em; min-width:1em; }
-.acp-crew-badge { font-size:0.8em; opacity:0.7; margin-left:auto; }
+.wf-card { border: 1px solid var(--card-border); border-radius: 10px; background: #12151d; overflow: hidden; flex-shrink: 0; }
+.wf-card-attn { border-color: rgba(245, 158, 11, 0.38); box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.06); }
+.wf-card-head { display: flex; align-items: center; gap: 10px; padding: 9px 10px 8px 12px; min-width: 0; }
+.wf-glyph { width: 22px; height: 22px; border-radius: 6px; background: var(--accent-dim); color: var(--accent); display: grid; place-items: center; flex-shrink: 0; }
+.wf-card-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex-shrink: 1; overflow: hidden; }
+.wf-card-name { font-weight: 650; font-size: 13.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wf-card-kind { font-size: 11.5px; color: var(--text-dim); flex-shrink: 0; }
+.wf-card-meta { margin-left: auto; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; }
+.wf-card-acts { display: flex; gap: 4px; flex-shrink: 0; }
+.wf-card-compact .wf-card-head { padding: 8px 10px; }
+.wf-card-compact .wf-card-name { font-size: 13px; }
 
-/* A workflow step's warning or error message (`step_message`, 261012 D12):
-   a system row with the step's name, then its text. Text only. */
-.acp-step-message { margin: 4px 14px; padding: 6px 10px; border-left: 3px solid var(--border); border-radius: var(--radius-sm); font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
-.acp-step-message-step { font-weight: 600; margin-right: 8px; color: var(--text-muted); }
-.acp-step-message-warning { border-left-color: #f59e0b; }
-.acp-step-message-error { border-left-color: #ef4444; }
-.acp-step-message-info { border-left-color: var(--border); }
+.wf-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650; border-radius: 999px; padding: 1px 8px; white-space: nowrap; flex-shrink: 0; line-height: 1.5; }
+.wf-pill-run { background: rgba(59, 130, 246, 0.14); color: #7aa7ff; }
+.wf-pill-need { background: rgba(245, 158, 11, 0.14); color: var(--amber); }
+.wf-pill-ok { background: rgba(74, 222, 128, 0.12); color: var(--success); }
+.wf-pill-fail { background: rgba(239, 68, 68, 0.14); color: #f87171; }
+.wf-pill-stop { background: var(--surface-hover); color: var(--text-muted); }
 
-/* Phase 6 sub-agent composer (SC7/SC8) — shown in the sub-agent panel when the
-   viewed step is a live workflow step session. Input + button in a flex row.
-   Status span shows error text or "Step completed." when the composer exits. */
-.acp-subcomposer { display: flex; align-items: center; gap: 6px; padding: 6px 10px; flex-shrink: 0; border-top: 1px solid var(--border); }
-.acp-subcomposer[hidden] { display: none; }
-.acp-subcomposer input { flex: 1; min-width: 0; background: var(--input-bg, var(--bg-2)); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 8px; font-size: 13px; color: var(--text); }
-.acp-subcomposer button { flex-shrink: 0; }
-.acp-subcomposer span { font-size: 12px; color: var(--text-muted); flex: 1; }
+.wf-icon-btn { width: 26px; height: 26px; padding: 0; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); display: grid; place-items: center; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
+.wf-icon-btn:hover { color: var(--accent); border-color: var(--accent); }
+.wf-icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.wf-icon-btn-danger { color: #f87171; }
+.wf-icon-btn-danger:hover { color: #f87171; border-color: #ef4444; }
+.wf-card-toggle svg, .wf-chev svg { transition: transform 0.15s; transform: rotate(-90deg); }
+.wf-card-toggle.wf-open svg, .wf-chev.wf-open svg { transform: none; }
 
-/* Phase 6 sub-panel step question card (SC7) — amber card shown in the sub-agent
-   panel when a step_message frame matches the viewed step session. Text-only. */
-.acp-step-question-card { margin: 4px 10px 0; padding: 6px 10px; border-left: 3px solid #f59e0b; border-radius: var(--radius-sm); background: rgba(245, 158, 11, 0.08); font-size: 12.5px; flex-shrink: 0; }
-.acp-step-question-card-error { border-left-color: #ef4444; background: rgba(239, 68, 68, 0.08); }
-.acp-step-question-text { color: var(--text); }
+.wf-seg, .wf-strip-seg { display: flex; gap: 3px; }
+.wf-seg { padding: 0 12px 10px; }
+.wf-seg i, .wf-strip-seg i { flex: 1; height: 4px; border-radius: 2px; background: var(--border); }
+.wf-strip-seg { width: 72px; flex-shrink: 0; gap: 2px; }
+.wf-strip-seg i { height: 3px; }
+.wf-seg-done { background: rgba(74, 222, 128, 0.65) !important; }
+.wf-seg-working { background: #3b82f6 !important; }
+.wf-seg-waiting { background: var(--amber) !important; }
+.wf-seg-error { background: #ef4444 !important; }
+.wf-seg-stale { background: var(--text-dim) !important; }
 
-/* Workflows panel (Phase 4) — right-side panel showing live/past workflow runs.
-   Positioned below the toolbar, above the composer, styled as a sidebar column.
-   Hidden until a run starts (toggled via #acpWorkflowsToggle / #dashWorkflowsToggle). */
-#acpWorkflowsPanel, #dashWorkflowsPanel { border-left: 2px solid var(--border); padding: 8px; overflow-y: auto; font-size: 12.5px; }
-#acpWorkflowsPanel[hidden], #dashWorkflowsPanel[hidden] { display: none; }
-.wf-step-row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: var(--radius-sm); }
-.wf-step-row:hover { background: rgba(128,128,128,0.1); }
-.wf-step-row:focus-visible { outline: 2px solid var(--focus-ring, #3b82f6); outline-offset: 1px; }
-.wf-step-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; }
-.wf-step-dot-working { background: #3b82f6; }
-.wf-step-dot-waiting { background: #f59e0b; }
-.wf-step-dot-terminated, .wf-step-dot-done { background: var(--text-dim); }
-.wf-step-dot-failed { background: #ef4444; }
-.wf-step-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.wf-step-elapsed { flex-shrink: 0; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.wf-steps { border-top: 1px solid var(--card-border); padding: 4px 0 6px; display: flex; flex-direction: column; }
+.wf-step { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 5px 12px; width: 100%; background: transparent; border: 0; border-radius: 0; color: var(--text); font: inherit; font-size: 12.5px; text-align: left; }
+button.wf-step { cursor: pointer; }
+button.wf-step:hover { background: var(--card-hover); }
+.wf-step:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-step-sel, button.wf-step-sel:hover { background: var(--surface-selected); }
+.wf-step-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.wf-step-name { font-weight: 600; white-space: nowrap; flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+.wf-step-role { font-size: 11px; color: var(--text-dim); white-space: nowrap; flex-shrink: 0; }
+.wf-step-act { color: var(--text-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.wf-step-working .wf-step-act { color: #7aa7ff; }
+.wf-step-waiting .wf-step-act { color: var(--amber); }
+.wf-step-error .wf-step-act { color: #f87171; }
+.wf-step-pending .wf-step-name, .wf-step-skipped .wf-step-name { color: var(--text-dim); font-weight: 500; }
+.wf-step-el { font-size: 11.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.wf-si { width: 16px; height: 16px; display: grid; place-items: center; flex-shrink: 0; }
+.wf-si .wf-i-bg { fill: currentColor; opacity: 0.17; }
+.wf-si-done { color: var(--success); }
+.wf-si-waiting { color: var(--amber); }
+.wf-si-error { color: #f87171; }
+.wf-si-stale, .wf-si-skipped { color: var(--text-muted); }
+.wf-si-pending { color: #3a4054; }
+.wf-spin { display: block; width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(59, 130, 246, 0.25); border-top-color: #3b82f6; animation: wf-spin 0.9s linear infinite; }
+.wf-spin-sm { width: 9px; height: 9px; border-width: 1.5px; }
+@keyframes wf-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .wf-spin { animation: none; border-right-color: #3b82f6; } }
+
+.wf-group { display: flex; flex-direction: column; }
+.wf-group-head { display: flex; align-items: center; gap: 8px; padding: 5px 12px; width: 100%; background: transparent; border: 0; color: var(--text); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.wf-group-head:hover { background: var(--card-hover); }
+.wf-group-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-chev { width: 18px; display: grid; place-items: center; color: var(--text-dim); flex-shrink: 0; }
+.wf-group-name { font-weight: 600; }
+.wf-tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; }
+.wf-group-sum { font-size: 12px; color: var(--text-muted); }
+.wf-group-body { margin-left: 21px; border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+.wf-group-body .wf-step, .wf-group-body .wf-group-head { padding-left: 14px; }
+
+.wf-ask { margin: 2px 12px 8px 40px; padding: 10px 12px; border: 1px solid rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.08); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
+.wf-group-body .wf-ask { margin-left: 28px; }
+.wf-ask-from { font-size: 10.5px; font-weight: 650; color: var(--amber); text-transform: uppercase; letter-spacing: 0.06em; }
+.wf-ask-q { color: var(--text); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.wf-ask-row { display: flex; gap: 6px; align-items: flex-end; }
+.wf-ask-input { flex: 1; min-width: 0; min-height: 32px; max-height: 120px; resize: vertical; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font: inherit; font-size: 12.5px; line-height: 1.45; }
+.wf-ask-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.wf-ask-hint { font-size: 11.5px; color: var(--text-muted); }
+.wf-ask-hint-warn { color: var(--amber); }
+.wf-btn { font: inherit; font-size: 12px; font-weight: 650; border-radius: 6px; padding: 6px 12px; cursor: pointer; flex-shrink: 0; }
+.wf-btn-amber { background: rgba(245, 158, 11, 0.16); border: 1px solid rgba(245, 158, 11, 0.4); color: var(--amber); }
+.wf-btn-amber:hover { background: rgba(245, 158, 11, 0.24); }
+.wf-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.wf-card-foot { border-top: 1px solid var(--card-border); padding: 8px 12px; display: flex; gap: 10px; align-items: baseline; font-size: 12px; min-width: 0; }
+.wf-foot-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
+.wf-foot-result { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* A step's warning or error in the transcript (`step_message`, 261012 D12):
+   the transcript's record of it; the run card is where it is answered. */
+.acp-step-message { display: flex; align-items: baseline; gap: 8px; margin: 2px 0; padding: 7px 12px; border: 1px solid var(--card-border); border-radius: 8px; background: var(--card-bg); font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
+.acp-step-message::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; transform: translateY(-1px); }
+.acp-step-message-step { font-weight: 650; color: var(--text-muted); flex-shrink: 0; }
+.acp-step-message-warning { border-color: rgba(245, 158, 11, 0.3); }
+.acp-step-message-warning::before { background: var(--amber); }
+.acp-step-message-warning .acp-step-message-step { color: var(--amber); }
+.acp-step-message-error { border-color: rgba(239, 68, 68, 0.3); }
+.acp-step-message-error::before { background: #ef4444; }
+.acp-step-message-error .acp-step-message-step { color: #f87171; }
+
+/* The strip above the composer while a run is live. */
+.wf-strip { flex-shrink: 0; }
+.wf-strip[hidden] { display: none; }
+.wf-strip-btn { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px 6px 10px; border: 1px solid var(--card-border); border-radius: 8px; background: #12151d; color: var(--text-muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; min-width: 0; }
+.wf-strip-btn:hover { border-color: var(--border); background: var(--card-hover); }
+.wf-strip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.wf-strip-name { color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.wf-strip-count { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wf-strip-open { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--text); white-space: nowrap; flex-shrink: 0; }
+.wf-kbd { font-family: inherit; font-size: 10.5px; color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+
+/* The toolbar's Runs button: shown from a session's first run on, so the
+   toolbar does not shift while a run comes and goes. */
+.wf-runs-btn { display: inline-flex; align-items: center; gap: 6px; }
+.wf-runs-btn[hidden] { display: none; }
+.wf-runs-btn svg { flex-shrink: 0; }
+.wf-runs-btn.wf-runs-btn-on { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+.wf-runs-badge { background: rgba(245, 158, 11, 0.16); color: var(--amber); border-radius: 999px; padding: 0 6px; font-size: 10.5px; font-weight: 700; }
+.wf-runs-badge[hidden] { display: none; }
+
+/* The inspector: docked beside the transcript where there is room, a sheet
+   over it where there is not. The host (.acp-page, #sessions-panel) is a
+   size container; `.wf-insp-open` on it makes room for the drawer. */
+.wf-insp { position: absolute; top: 0; right: 0; bottom: 0; width: 400px; z-index: 30; display: flex; flex-direction: column; min-height: 0; background: #11141c; border-left: 1px solid var(--border); box-shadow: -16px 0 32px rgba(0, 0, 0, 0.4); }
+.wf-insp[hidden] { display: none; }
+@container wfhost (min-width: 900px) {
+  .wf-insp-open > :not(.wf-insp) { margin-right: 412px; }
+  .wf-insp { box-shadow: none; }
+}
+@container wfhost (max-width: 899.98px) {
+  .wf-insp { width: auto; left: 0; border-left: 0; }
+}
+.wf-insp-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; min-width: 0; }
+.wf-insp-title { font-weight: 650; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.wf-insp-pill { display: flex; }
+.wf-insp-head .wf-icon-btn { margin-left: auto; border-color: transparent; background: transparent; }
+.wf-tabs { display: flex; gap: 2px; padding: 4px 10px 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.wf-tab { font: inherit; font-size: 12px; padding: 6px 10px 8px; color: var(--text-muted); background: transparent; border: 0; border-bottom: 2px solid transparent; cursor: pointer; }
+.wf-tab:hover { color: var(--text); }
+.wf-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-tab-on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.wf-tab-count { color: var(--text-dim); font-weight: 400; margin-left: 3px; }
+.wf-insp-steps, .wf-insp-history { flex: 1; min-height: 0; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+.wf-insp-steps[hidden], .wf-insp-history[hidden] { display: none; }
+.wf-empty { font-size: 12px; color: var(--text-dim); padding: 6px 2px; }
+.wf-empty-warn { color: var(--amber); }
+
+/* The step view: the page's sub-agent panel, inside the inspector. */
+.acp-subpanel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.acp-subpanel[hidden] { display: none; }
+.wf-stepview-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 4px; flex-shrink: 0; min-width: 0; }
+.wf-stepview-head .wf-icon-btn { width: 24px; height: 24px; border-color: transparent; background: transparent; }
+.wf-crumb { display: flex; align-items: baseline; gap: 6px; font-size: 12px; color: var(--text-muted); min-width: 0; overflow: hidden; white-space: nowrap; }
+.wf-crumb-sep { color: var(--text-dim); }
+.wf-crumb-name { color: var(--text); font-weight: 650; font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+.wf-stepview-pill { margin-left: auto; display: flex; flex-shrink: 0; }
+.wf-facts { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 12px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.wf-facts[hidden] { display: none; }
+.wf-fact { font-size: 11px; color: var(--text-muted); background: var(--surface); border: 1px solid var(--card-border); border-radius: 4px; padding: 1px 6px; font-variant-numeric: tabular-nums; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-stepview .acp-subpanel-transcript { border: 0; border-radius: 0; background: transparent; padding: 10px 12px; }
+.wf-stepview-ask { flex-shrink: 0; }
+.wf-stepview-ask[hidden] { display: none; }
+.wf-stepview-ask .wf-ask { margin: 0 12px 8px; }
+.wf-step-composer { border-top: 1px solid var(--border); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.wf-step-composer[hidden] { display: none; }
+.wf-step-composer-row { display: flex; gap: 6px; align-items: stretch; }
+.wf-step-input { flex: 1; min-width: 0; min-height: 40px; max-height: 140px; resize: vertical; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: var(--text); font: inherit; font-size: 12.5px; line-height: 1.45; }
+.wf-step-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.wf-step-input[hidden], .wf-step-composer .acp-icon-btn[hidden] { display: none; }
+.wf-step-note { font-size: 11px; color: var(--text-dim); }
+
+.wf-hist { display: flex; flex-direction: column; border: 1px solid var(--card-border); border-radius: 10px; overflow: hidden; background: #12151d; }
+.wf-hist-item + .wf-hist-item { border-top: 1px solid var(--card-border); }
+.wf-hist-head { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 12px; width: 100%; background: transparent; border: 0; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.wf-hist-head:hover { background: var(--card-hover); }
+.wf-hist-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-hist-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wf-hist-text b { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wf-hist-text span { font-size: 11.5px; color: var(--text-muted); }
+.wf-hist-when { font-size: 11.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.wf-hist-steps { padding: 0 0 8px 16px; background: var(--card-hover); }
+.wf-hist-steps .wf-step { padding-block: 3px; }
+.wf-hist-note { font-size: 11.5px; color: var(--text-dim); padding: 2px; }
 
 .acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; position: relative; }
 .acp-composer-row { display: flex; gap: 8px; align-items: stretch; position: relative; }

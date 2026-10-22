@@ -141,7 +141,7 @@
      tabindex="0" aria-valuenow="288" aria-valuemin="220"
      aria-valuemax="560"></div>
 
-<div class="acp-page">
+<div class="acp-page" id="acpPage">
   <div class="acp-toolbar">
     <!-- Opens the picker rather than creating anything. Every session created
          here is a permanent entry in the real kiro-cli store and under -a the
@@ -221,11 +221,19 @@
     <button class="acp-btn acp-log-toggle" id="acpLogToggle" type="button"
             aria-expanded="false" aria-controls="acpLog">Debug log<span
             class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
-    <!-- Workflows panel toggle — revealed only when a workflow run starts.
-         Phase 4: panel shell with live run; Phase 5 adds past-run history. -->
-    <button class="acp-btn" id="acpWorkflowsToggle" type="button"
-            aria-expanded="false" aria-controls="acpWorkflowsPanel"
-            hidden>Workflows</button>
+    <!-- Opens the run inspector (static/workflow-ui.js). Shown from the
+         session's first run or sub-agent fan-out on and kept for the rest of
+         it, so the toolbar does not shift while a run comes and goes. The
+         badge counts the steps waiting on the user. -->
+    <button class="acp-btn wf-runs-btn" id="acpRunsToggle" type="button"
+            aria-expanded="false" aria-controls="acpInsp" hidden
+            title="Run inspector (Ctrl+G)">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+        <circle cx="3.5" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="12.5" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="8" cy="12" r="2" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M5.5 4h5M4.6 5.7 7 10.2M11.4 5.7 9 10.2" stroke="currentColor" stroke-width="1.5"/>
+      </svg>Runs<span class="wf-runs-badge" id="acpRunsBadge" hidden></span></button>
   </div>
   <div class="acp-transcript-wrap" id="acpTranscriptWrap">
     <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
@@ -237,36 +245,78 @@
               aria-label="Next prompt or scroll to bottom">↓</button>
     </div>
   </div>
-  <!-- Workflows right-side panel (Phase 4). The toggle button (#acpWorkflowsToggle
-       in the toolbar above) is hidden until a workflow run starts; clicking it
-       toggles this panel. Phase 5 populates #acpWorkflowsPastRuns from disk. -->
-  <div class="wf-panel" id="acpWorkflowsPanel" hidden>
-    <div id="acpWorkflowsLiveRun"></div>
-    <div id="acpWorkflowsPastRuns"></div>
-  </div>
-  <!-- A sub-agent's own conversation, shown in place of the transcript+composer
-       while one is selected on the agent bar below. Read-only by design (the
-       roadmap's own note on this feature: "the correct interaction model is
-       to watch it, not to prompt it alongside the parent") — no composer here
-       at all, only a way back. Built with createElement + textContent like
-       every other pane on this page; empty in the markup. -->
-  <div class="acp-subpanel" id="acpSubPanel" hidden>
-    <div class="acp-subpanel-head">
-      <button class="acp-btn" id="acpSubBack" type="button">‹ Back to main</button>
-      <span class="acp-subpanel-role" id="acpSubRole"></span>
-      <span class="acp-subpanel-status" id="acpSubStatus"></span>
+  <!-- The run inspector (static/workflow-ui.js): docked beside the transcript
+       where there is room, a sheet over it where there is not. Steps lists
+       the session's runs; a step opens its own conversation in place (the
+       sub-agent panel below, `#acpSubPanel`), with a composer for a live
+       workflow step; History reads past runs from the session's file. Every
+       node inside is built with createElement + textContent. -->
+  <aside class="wf-insp" id="acpInsp" hidden aria-label="Run inspector">
+    <div class="wf-insp-head">
+      <span class="wf-glyph" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" focusable="false">
+          <circle cx="3.5" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="12.5" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="12" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M5.5 4h5M4.6 5.7 7 10.2M11.4 5.7 9 10.2" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+      </span>
+      <span class="wf-insp-title" id="acpInspTitle">Runs</span>
+      <span class="wf-insp-pill" id="acpInspPill"></span>
+      <button class="wf-icon-btn" id="acpInspClose" type="button"
+              aria-label="Close the run inspector (Esc)" title="Close (Esc)">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+          <path d="m4.5 4.5 7 7m0-7-7 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+      </button>
     </div>
-    <div class="acp-transcript acp-subpanel-transcript" id="acpSubTranscript"
-         role="log" aria-live="polite" aria-label="Sub-agent conversation"></div>
-    <!-- Phase 6 sub-agent composer: shown only for live workflow step sessions.
-         Wired via composer-chrome.js initSubAgentComposerDom(). No innerHTML. -->
-    <div id="acpSubComposerContainer" class="acp-subcomposer" hidden>
-      <input type="text" id="acpSubComposerInput"
-             placeholder="Message this step\u2026" aria-label="Message this step">
-      <button type="button" id="acpSubComposerSend">Send</button>
-      <span id="acpSubComposerStatus" hidden></span>
+    <div class="wf-tabs" role="tablist" aria-label="Run inspector views">
+      <button class="wf-tab wf-tab-on" id="acpInspTabSteps" type="button" role="tab"
+              aria-selected="true" aria-controls="acpInspSteps">Steps</button>
+      <button class="wf-tab" id="acpInspTabHistory" type="button" role="tab"
+              aria-selected="false" aria-controls="acpInspHistory">History<span
+              class="wf-tab-count" id="acpInspHistoryCount"></span></button>
     </div>
-  </div>
+    <div class="wf-insp-steps" id="acpInspSteps" role="tabpanel"></div>
+    <div class="wf-insp-history" id="acpInspHistory" role="tabpanel" hidden></div>
+    <!-- A step's or sub-agent's own conversation, on its own socket (see
+         `subWs`). A live workflow step takes a direct message; anything else
+         is read-only. -->
+    <div class="acp-subpanel wf-stepview" id="acpSubPanel" hidden>
+      <div class="wf-stepview-head">
+        <button class="wf-icon-btn" id="acpSubBack" type="button"
+                aria-label="Back to the steps" title="Back to the steps">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+            <path d="M10 4 6 8l4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <span class="wf-crumb" id="acpSubRole"></span>
+        <span class="wf-stepview-pill" id="acpSubStatus"></span>
+      </div>
+      <div class="wf-facts" id="acpSubFacts" hidden></div>
+      <div class="acp-transcript acp-subpanel-transcript" id="acpSubTranscript"
+           role="log" aria-live="polite" aria-label="Step conversation"></div>
+      <div class="wf-stepview-ask" id="acpSubAsk" hidden></div>
+      <div class="wf-step-composer" id="acpSubComposerContainer">
+        <div class="wf-step-composer-row">
+          <textarea class="wf-step-input" id="acpSubComposerInput" rows="2"
+                    spellcheck="false" aria-label="Message this step"
+                    placeholder="Message this step"></textarea>
+          <button class="acp-btn acp-icon-btn" id="acpSubComposerSend" type="button"
+                  aria-label="Send to this step">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+              <path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+        <span class="wf-step-note" id="acpSubComposerStatus"></span>
+      </div>
+    </div>
+  </aside>
+  <!-- A live run's progress, above the composer (static/workflow-ui.js). -->
+  <div class="wf-strip" id="acpRunStrip" hidden></div>
+  <div class="sr-only" id="acpWfLive" aria-live="polite"></div>
+  <div class="sr-only" id="acpWfAlert" aria-live="assertive"></div>
   <div class="acp-composer" id="acpComposer">
     <!-- Images staged for the next prompt, and the only place they are ever
          shown as pictures. The transcript gets `[Image 1]` instead: the bytes
@@ -495,6 +545,7 @@
 <script nonce="{{ csp_nonce }}" src="/static/prism.js"></script>
 <script nonce="{{ csp_nonce }}" src="/static/transcript-renderer.js"></script>
 <script nonce="{{ csp_nonce }}" src="/static/composer-chrome.js"></script>
+<script nonce="{{ csp_nonce }}" src="/static/workflow-ui.js"></script>
 
 <script nonce="{{ csp_nonce }}">
 // This page is served with a nonce-based Content-Security-Policy, so this tag
@@ -584,9 +635,6 @@
   var reloadBtn = document.getElementById('acpReload');
   var transcriptWrapEl = document.getElementById('acpTranscriptWrap');
   var subPanelEl = document.getElementById('acpSubPanel');
-  var subBackBtn = document.getElementById('acpSubBack');
-  var subRoleEl = document.getElementById('acpSubRole');
-  var subStatusEl = document.getElementById('acpSubStatus');
   var subTranscriptEl = document.getElementById('acpSubTranscript');
   var promptInput = document.getElementById('acpPrompt');
   // Prompt history (SC-5): CLI-style up/down recall. sentPrompts holds sent
@@ -725,109 +773,61 @@
     send: send,
     onPromptChanged: function () { autoGrowPrompt(); refreshComposerControls(); },
   });
-  // Workflows panel shell (Phase 4): pass element refs and the openSubagent
-  // function so step-row clicks open the sub-agent panel. `openSubagent` is
-  // declared further down; the closure captures the name, which is resolved
-  // at call time after the hoisted function declaration has run.
-  initWorkflowsDom({
-    liveRunContainer: document.getElementById('acpWorkflowsLiveRun'),
-    pastRunsContainer: document.getElementById('acpWorkflowsPastRuns'),
-    toggleBtn: document.getElementById('acpWorkflowsToggle'),
-    panelEl: document.getElementById('acpWorkflowsPanel'),
-    openSubagentFn: function (sid) { openSubagent(sid); },
-    isDashboard: false,
+  // The run card, run strip and run inspector (static/workflow-ui.js). The
+  // callbacks name functions and state declared further down; they are
+  // resolved when called, after this whole script has run.
+  var wfui = createWorkflowUI({
+    els: {
+      page: document.getElementById('acpPage'),
+      insp: document.getElementById('acpInsp'),
+      inspTitle: document.getElementById('acpInspTitle'),
+      inspPill: document.getElementById('acpInspPill'),
+      inspClose: document.getElementById('acpInspClose'),
+      tabSteps: document.getElementById('acpInspTabSteps'),
+      tabHistory: document.getElementById('acpInspTabHistory'),
+      historyCount: document.getElementById('acpInspHistoryCount'),
+      stepsView: document.getElementById('acpInspSteps'),
+      historyView: document.getElementById('acpInspHistory'),
+      stepView: document.getElementById('acpSubPanel'),
+      stepBack: document.getElementById('acpSubBack'),
+      stepCrumb: document.getElementById('acpSubRole'),
+      stepPill: document.getElementById('acpSubStatus'),
+      stepFacts: document.getElementById('acpSubFacts'),
+      stepAsk: document.getElementById('acpSubAsk'),
+      stepComposer: document.getElementById('acpSubComposerContainer'),
+      stepInput: document.getElementById('acpSubComposerInput'),
+      stepSend: document.getElementById('acpSubComposerSend'),
+      stepNote: document.getElementById('acpSubComposerStatus'),
+      runsBtn: document.getElementById('acpRunsToggle'),
+      runsBadge: document.getElementById('acpRunsBadge'),
+      strip: document.getElementById('acpRunStrip'),
+    },
+    getSessionId: function () { return sessionId; },
+    openStep: function (sid) { openStepView(sid); },
+    closeStep: function () { closeStepView(); },
+    // A reply to a step question goes to the parent, which passes it on
+    // (measured 2026-10-12: the paused run resumes in the same step).
+    sendReply: function (text) {
+      if (!sessionId) return false;
+      if (turnActive) return 'busy';
+      if (!send('prompt', { prompt: text }, sessionId)) return false;
+      recordSentPrompt(text);
+      railRefreshSoon();
+      return true;
+    },
+    // A direct message to a live workflow step: the step's own session id in
+    // the envelope, routed by `_handle_prompt`'s workflow-step branch.
+    sendStepPrompt: function (text, sid) { return send('prompt', { prompt: text }, sid); },
+    canStop: function () { return !stopBtn.hidden && !stopBtn.disabled; },
+    stopRun: function () { stopBtn.click(); },
+    announce: function (text, urgent) {
+      var region = document.getElementById(urgent ? 'acpWfAlert' : 'acpWfLive');
+      if (region) region.textContent = text;
+    },
   });
-  // Phase 6: wire the sub-agent panel composer. `send` is declared further
-  // down and resolved at call time via the closure.
-  initSubAgentComposerDom({
-    input:     document.getElementById('acpSubComposerInput'),
-    sendBtn:   document.getElementById('acpSubComposerSend'),
-    container: document.getElementById('acpSubComposerContainer'),
-    statusEl:  document.getElementById('acpSubComposerStatus'),
-    sendFn:    function (type, payload, sid) { return send(type, payload, sid); },
-    isDashboard: false,
-  });
-  // Phase 5: fetch workflow history from disk when the panel is first opened.
-  // `sessionId` is declared further down (genuinely page-specific) and is
-  // accessible here via the scope chain at call time.
-  (function () {
-    var pastRuns = document.getElementById('acpWorkflowsPastRuns');
-    var toggle   = document.getElementById('acpWorkflowsToggle');
-    var panel    = document.getElementById('acpWorkflowsPanel');
-    if (!toggle || !pastRuns || !panel) return;
-    toggle.addEventListener('click', function () {
-      // panel.hidden has already been toggled by initWorkflowsDom's own
-      // listener (registered first).  Load history only when the panel is
-      // now visible and the past-runs container is still empty.
-      if (panel.hidden) return;
-      if (pastRuns.childNodes.length) return;
-      var sid = sessionId;
-      if (!sid) return;
-      var loading = document.createElement('span');
-      loading.textContent = 'Loading\u2026';
-      pastRuns.appendChild(loading);
-      fetch('/api/workflow-history?sid=' + encodeURIComponent(sid))
-        .then(function (res) {
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.json();
-        })
-        .then(function (data) {
-          while (pastRuns.firstChild) pastRuns.removeChild(pastRuns.firstChild);
-          renderWorkflowsPastRuns(data.runs || [], pastRuns);
-        })
-        .catch(function () {
-          while (pastRuns.firstChild) pastRuns.removeChild(pastRuns.firstChild);
-          var errMsg = document.createElement('span');
-          errMsg.textContent = 'Could not load workflow history.';
-          pastRuns.appendChild(errMsg);
-        });
-    });
-  }());
-
-  function renderWorkflowsPastRuns(runs, container) {
-    // Render completed past runs from the /api/workflow-history response.
-    // Runs are displayed newest-first (reversed from oldest-first API order).
-    // Each run is a collapsible <details>/<summary> element.
-    // Past-run step rows are view-only: no click handler, cursor: default.
-    // No innerHTML anywhere (acp_page.test.mjs prohibition).
-    if (!runs || runs.length === 0) {
-      var emptyEl = document.createElement('span');
-      emptyEl.textContent = 'No workflow runs in this session.';
-      container.appendChild(emptyEl);
-      return;
-    }
-    var reversed = runs.slice().reverse();
-    for (var i = 0; i < reversed.length; i++) {
-      var run = reversed[i];
-      var steps = run.steps || [];
-      var details = document.createElement('details');
-      // Most recent run (first after reversal) starts open.
-      if (i === 0) details.open = true;
-      var summary = document.createElement('summary');
-      var labelText = run.name || run.workflowId || ('Run ' + (runs.length - i));
-      var summaryText = document.createElement('span');
-      summaryText.textContent =
-        labelText + ' \u2014 ' + steps.length + ' step' + (steps.length === 1 ? '' : 's');
-      summary.appendChild(summaryText);
-      details.appendChild(summary);
-      for (var j = 0; j < steps.length; j++) {
-        var step = steps[j];
-        var row = document.createElement('div');
-        row.className = 'wf-step-row wf-step-row--past';
-        row.style.cursor = 'default';
-        var roleSpan = document.createElement('span');
-        roleSpan.className = 'wf-step-role';
-        roleSpan.textContent = step.agentName || step.nodeId || '';
-        var statusSpan = document.createElement('span');
-        statusSpan.className = 'wf-step-status';
-        statusSpan.textContent = step.status || '';
-        row.appendChild(roleSpan);
-        row.appendChild(statusSpan);
-        details.appendChild(row);
-      }
-      container.appendChild(details);
-    }
-  }
+  // Capture phase, so Ctrl+G and the inspector's Escape win over the page's
+  // own Escape handlers (the picker, the menus) only when they act.
+  document.addEventListener('keydown', function (ev) { wfui.onKeyDown(ev); }, true);
 
   // send stays declared here (it is genuinely page-specific: the live WS
   // wrapper) rather than moving to transcript-renderer.js like the DOM refs
@@ -954,25 +954,14 @@
   // toolRows/_toolTimers/toolGroup/_toolGroupSeq moved to
   // /static/transcript-renderer.js (Phase 2 slice 3), alongside the rest of
   // tool-call rendering.
-  // ---- sub-agents (the crew panel in-transcript + the read-only sub-agent panel) ---------
+  // ---- sub-agents (run cards in the transcript, the step view in the inspector) ----
   //
-  // Per-fan-out crew state, keyed by spawner toolCallId (non-empty string)
-  // or a unique sequence counter for no-anchor fan-outs ('_na_N').
-  // {key: {entries: [], panel: null|Element, timer: null|int, allDone: false}}
-  var crews = {};
-  var _noAnchorSeq = 0; // counter for no-anchor fan-out keys
-  var _noAnchorKey = null; // stable key for the current no-anchor fan-out
-  // The sub-agent currently shown in `subPanelEl`, or null while looking at
-  // the main transcript. Distinct from `sessionId`: the *page* never stops
-  // holding the parent session while a sub-agent is open — only what is drawn
-  // changes — which is what lets a fan-out keep streaming into the main
-  // transcript behind the panel exactly as Claude Code's own agent bar does.
+  // The cards, the strip and the inspector are static/workflow-ui.js's
+  // (`wfui` above). This page keeps the step view's socket and rendering.
+  // The step or sub-agent currently shown in `subPanelEl`, or null. Distinct
+  // from `sessionId`: the *page* never stops holding the parent session while
+  // a step is open, and the transcript stays in view beside it.
   var subViewSid = null;
-  // Phase 6: the set of step session ids from the most recent `subagents`
-  // frame with `workflowLive === true`. Cleared when `workflowLive` becomes
-  // false (run ended) or when the session changes. Used by `openSubagent` to
-  // decide whether to enable the sub-panel composer.
-  var _liveWorkflowChildSids = new Set();
   // sessionCommands/sessionSkills/cmdDropdownEl/_cmdSelectedIndex, and the
   // slash-command palette they drive, moved to composer-chrome.js's
   // initCommandPaletteDom() (dashboard/ACP feature-parity plan, Phase 2) —
@@ -2000,391 +1989,48 @@
   // finished fan-out is still reviewable after the fact — clicking its row
   // opens the read-only sub-agent panel behind the main transcript.
 
-  function crewLabel(entry) {
-    if (!entry) return 'agent';
-    var sn = entry.sessionName || '';
-    if (sn) return sn;
-    var t = entry.task || '';
-    if (t) return t.length > 30 ? t.slice(0, 30).trim() + '\u2026' : t.trim();
-    return 'agent';
+  // The crew's entry point, kept by name: the `subagents` frame and the test
+  // hooks call it. `runs`/`questions` are the frame's workflow fields.
+  function setCrew(entries, toolCallId, workflowLive, runs, questions) {
+    wfui.setCrew(entries, toolCallId, workflowLive, runs, questions);
   }
 
-  // mirrors index.html's dashRenderCrewPanel() — keep in sync
-  function renderCrewPanel(slot) {
-    // slot: {entries, panel, allDone}
-    if (!slot || !slot.panel || !slot.panel.parentNode) return;
-    // Update or create the header element (first child)
-    var hdr = slot.panel.querySelector('.acp-crew-header');
-    if (!hdr) {
-      hdr = document.createElement('div');
-      hdr.className = 'acp-crew-header';
-      slot.panel.insertBefore(hdr, slot.panel.firstChild);
-    }
-    var n = slot.entries.length;
-    var noun = n === 1 ? ' agent)' : ' agents)';
-    // D15 (261012): "Paused" while a step waits on a person and none works.
-    // `workflowLive` (the `subagents` frame's field): a workflow run is still
-    // going on, so every row done is only the gap before the next step starts.
-    // Absent on older frames and on an emptying frame: reads as false.
-    var states = slot.entries.map(subagentState);
-    hdr.textContent = states.indexOf('waiting') !== -1 && states.indexOf('working') === -1
-      ? 'Paused (' + n + noun
-      : slot.allDone && !slot.workflowLive
-      ? 'Done (' + n + noun
-      : 'Orchestrating (' + n + noun;
+  function crewEntry(sid) { return wfui.entryFor(sid); }
 
-    // Save focused element before rebuild so keyboard focus is preserved (Finding 1).
-    var _crewFocusKey = null;
-    var _crewActive = document.activeElement;
-    if (_crewActive && slot.panel.contains(_crewActive)) {
-      _crewFocusKey = _crewActive.dataset.focusKey || null;
-    }
+  // Tear down every card and close the inspector (a session switch, a
+  // reconnect's `session` frame through clearTranscript()).
+  function removeAllCrewPanels() { wfui.reset(); }
 
-    // Remove old rows (keep header)
-    while (slot.panel.lastChild && slot.panel.lastChild.className !== 'acp-crew-header') {
-      slot.panel.removeChild(slot.panel.lastChild);
-    }
+  // Open a step or sub-agent's conversation in the inspector.
+  function openSubagent(sid) { wfui.showStep(sid); }
 
-    // --- Tree rendering (Phase 3) ---
-
-    // Group entries by first role path segment. null key = root level.
-    var groupMap = Object.create(null);  // groupName -> [entry] (ordered); null proto avoids built-in name collisions
-    var groupOrder = [];    // insertion order for group names
-    slot.entries.forEach(function(entry) {
-      var rolePath = entry.role || '';
-      var slashIdx = rolePath.indexOf('/');
-      var groupName = slashIdx >= 0 ? rolePath.slice(0, slashIdx) : null;
-      if (groupName !== null && !groupMap[groupName]) {
-        groupMap[groupName] = [];
-        groupOrder.push(groupName);
-      }
-      if (groupName === null) {
-        slot.panel.appendChild(_makeCrewRow(entry));
-      } else {
-        groupMap[groupName].push(entry);
-      }
-    });
-
-    // Render groups.
-    groupOrder.forEach(function(groupName) {
-      var groupEntries = groupMap[groupName];
-      var states = groupEntries.map(subagentState);
-      var hasFailed  = states.indexOf('error')   !== -1;
-      var hasWorking = states.indexOf('working') !== -1;
-      var hasWaiting = states.indexOf('waiting') !== -1;
-      var startExpanded = hasFailed || hasWorking || hasWaiting;
-
-      // Badge text
-      var badgeText;
-      if (hasFailed)       { badgeText = 'has failures'; }
-      else if (hasWorking) { badgeText = 'running'; }
-      else if (hasWaiting) { badgeText = 'waiting'; }
-      else                 { badgeText = groupEntries.length + ' done'; }
-
-      // Group label row
-      var groupRow = document.createElement('div');
-      groupRow.className = 'acp-crew-group';
-      groupRow.dataset.focusKey = 'group:' + groupName;
-      groupRow.setAttribute('role', 'button');
-      groupRow.setAttribute('tabindex', '0');
-      groupRow.setAttribute('aria-expanded', startExpanded ? 'true' : 'false');
-
-      var chevron = document.createElement('span');
-      chevron.className = 'acp-crew-chevron';
-      chevron.setAttribute('aria-hidden', 'true');
-      chevron.textContent = startExpanded ? '\u25BC' : '\u25B6';
-
-      groupRow.appendChild(chevron);
-
-      var groupNameSpan = document.createElement('span');
-      groupNameSpan.className = 'acp-crew-group-name';
-      groupNameSpan.textContent = groupName;
-      groupRow.appendChild(groupNameSpan);
-
-      var badge = document.createElement('span');
-      badge.className = 'acp-crew-badge';
-      badge.textContent = badgeText;
-      groupRow.appendChild(badge);
-
-      // Children container
-      var childrenContainer = document.createElement('div');
-      childrenContainer.className = 'acp-crew-group-children';
-      if (!startExpanded) { childrenContainer.hidden = true; }
-
-      groupEntries.forEach(function(e) {
-        childrenContainer.appendChild(_makeCrewRow(e));
-      });
-
-      // Toggle on click or Enter/Space
-      (function(gr, cc, ch) {
-        function _toggleGroup() {
-          var expanded = gr.getAttribute('aria-expanded') === 'true';
-          expanded = !expanded;
-          gr.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-          ch.textContent = expanded ? '\u25BC' : '\u25B6';
-          cc.hidden = !expanded;
-        }
-        gr.addEventListener('click', _toggleGroup);
-        gr.addEventListener('keydown', function(e) {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _toggleGroup(); }
-        });
-      })(groupRow, childrenContainer, chevron);
-
-      slot.panel.appendChild(groupRow);
-      slot.panel.appendChild(childrenContainer);
-    });
-
-    // Restore focus if a crew element had focus before the rebuild (Finding 1).
-    if (_crewFocusKey) {
-      var _focusTarget = slot.panel.querySelector('[data-focus-key="' + _crewFocusKey + '"]');
-      if (_focusTarget) _focusTarget.focus();
-    }
+  // Close the step view and the inspector.
+  function closeSubagentView() {
+    if (wfui.isOpen() || subViewSid) wfui.closeInspector();
   }
 
-  // Build a single crew-row button element.
-  // Extracted from renderCrewPanel; mirrors index.html's _dashMakeCrewRow() — keep in sync.
-  function _makeCrewRow(entry) {
-    var state = subagentState(entry);  // 'working' | 'waiting' | 'done' | 'error'
-    var dotClass = state === 'working' ? 'status-thinking'
-                 : state === 'waiting' ? 'status-waiting'
-                 : state === 'error'   ? 'status-errored'
-                 : 'status-idle';
-    var label = crewLabel(entry);
-    var stateText = state === 'error' ? 'errored' : state === 'done' ? doneText(entry)
-      : state === 'waiting' ? (entry.action || 'waiting') : (entry.action || 'working');
-    // Use only the part after the last '/' so grouped entries don't repeat the
-    // group name in the label (Finding 6).
-    var roleForLabel = entry.role ? entry.role.replace(/^.*\//, '') : '';
-
-    var row = document.createElement('button');
-    row.type = 'button';
-    row.className = 'acp-crew-row acp-crew-row-' + state;
-    row.dataset.focusKey = 'step:' + (entry.sessionId || '');
-    row.setAttribute('aria-label',
-      label + (roleForLabel ? ', ' + roleForLabel : '') + ', ' + stateText);
-
-    var dot = document.createElement('span');
-    dot.className = 'session-status ' + dotClass;
-    dot.setAttribute('aria-hidden', 'true');
-
-    var nameSpan = document.createElement('span');
-    nameSpan.className = 'acp-crew-label';
-    nameSpan.textContent = label;
-
-    var roleSpan = document.createElement('span');
-    roleSpan.className = 'acp-crew-role';
-    roleSpan.textContent = roleForLabel;
-
-    var actionSpan = document.createElement('span');
-    actionSpan.className = 'acp-crew-action';
-    actionSpan.textContent = state === 'working' && !entry.action
-      ? 'working\u2026' : stateText;
-
-    var elapsedSpan = document.createElement('span');
-    elapsedSpan.className = 'acp-crew-elapsed';
-    var start = entry.startedAt;
-    var stop = entry.stoppedAt;
-    elapsedSpan.textContent = stop > 0
-      ? elapsedText(start, stop) : elapsedText(start);
-
-    row.appendChild(dot);
-    row.appendChild(nameSpan);
-    if (entry.role) row.appendChild(roleSpan);
-    row.appendChild(actionSpan);
-    row.appendChild(elapsedSpan);
-    row.addEventListener('click', function() { openSubagent(entry.sessionId); });
-    return row;
-  }
-
-  // One of 'working' / 'waiting' / 'done' / 'error', shared by the crew panel
-  // and the sub-agent panel header. `null`/missing reads as 'working': a slot
-  // the panel already has a row for but the crew has no entry for yet is a
-  // sub-agent that has not finished, not one that has. 'waiting' is a workflow
-  // step that is not done and waits on a person (status 'waiting', D15).
-  // mirrors index.html's dashSubagentState() — keep in sync
-  function subagentState(entry) {
-    if (!entry) return 'working';
-    if (!entry.done) return entry.status === 'waiting' ? 'waiting' : 'working';
-    return entry.error ? 'error' : 'done';
-  }
-
-  // The text for a finished row. 'done' for every normal finish. A workflow
-  // step the server closed with no verdict (status 'stale', action 'no longer
-  // reporting') says so, because it may still be running: a plain 'done' would
-  // read as success. Keyed on status, not just on a non-empty action, since a
-  // finished sub-agent row can keep its last tool title in `action`.
-  // mirrors index.html's dashDoneText() — keep in sync
-  function doneText(entry) {
-    return entry.status === 'stale' && entry.action ? entry.action : 'done';
-  }
-
-  // ---- the sub-agent panel -------------------------------------------------
-
-  function stopSlotTimer(slot) {
-    if (slot.timer !== null) { clearInterval(slot.timer); slot.timer = null; }
-  }
-
-  function removeSingleCrewPanel(key) {
-    var slot = crews[key];
-    if (!slot) return;
-    stopSlotTimer(slot);
-    if (slot.panel && slot.panel.parentNode) slot.panel.remove();
-    slot.panel = null;
-    delete crews[key];
-    if (key === _noAnchorKey) _noAnchorKey = null; // allow a fresh no-anchor slot next time
-  }
-
-  // mirrors index.html's dashRemoveAllCrewPanels() — keep in sync
-  function removeAllCrewPanels() {
-    Object.keys(crews).forEach(function(k) { removeSingleCrewPanel(k); });
-    crews = {};
-    _noAnchorSeq = 0;
-    _noAnchorKey = null; // reset for the next session
-    // Phase 6: clear live step tracking when the session ends.
-    _liveWorkflowChildSids = new Set();
-  }
-
-  // mirrors index.html's dashSetCrew() — keep in sync
-  function setCrew(entries, toolCallId, workflowLive) {
-    var key = (toolCallId && toolCallId !== '') ? toolCallId : null;
-
-    // Early-return for empty entries BEFORE computing useKey.
-    // This must run first to avoid advancing _noAnchorSeq and ghosting
-    // _noAnchorKey when there is no active no-anchor slot to remove.
-    if (!entries.length) {
-      if (key && crews[key]) {
-        removeSingleCrewPanel(key);
-      } else if (!key && _noAnchorKey && crews[_noAnchorKey]) {
-        // Server signaling no-anchor crew is done: remove it
-        removeSingleCrewPanel(_noAnchorKey);
-      }
-      return;
-    }
-
-    // Non-empty entries: compute useKey.
-    // For no-anchor fan-outs (key === null), reuse the current slot if one
-    // exists; only create a new _na_ key if there's no active no-anchor slot.
-    var useKey;
-    if (key) {
-      useKey = key;
-    } else {
-      // No-anchor path: reuse the active no-anchor slot across updates.
-      if (_noAnchorKey && crews[_noAnchorKey]) {
-        useKey = _noAnchorKey;
-      } else {
-        useKey = '_na_' + (++_noAnchorSeq);
-        _noAnchorKey = useKey;
-      }
-    }
-
-    if (!crews[useKey]) {
-      crews[useKey] = {entries: [], panel: null, timer: null, allDone: false};
-    }
-    var s = crews[useKey];
-    s.entries = entries;
-    s.allDone = entries.every(function(e) { return e.done; });
-    s.workflowLive = workflowLive === true;
-
-    // The panel currently open may name a sub-agent this update no longer
-    // carries the same entry for — refresh its header from the latest
-    // `role`/`task`/`status` rather than leaving it showing the snapshot from
-    // whenever it was opened.
-    if (subViewSid) renderSubHead();
-
-    if (s.allDone) {
-      stopSlotTimer(s);
-    } else {
-      if (s.timer === null) {
-        s.timer = setInterval(function() {
-          if (s.panel && s.panel.parentNode) renderCrewPanel(s);
-          else stopSlotTimer(s);
-        }, 1000);
-      }
-    }
-
-    if (!s.panel || !s.panel.parentNode) {
-      var stick = stuckToBottom();
-      s.panel = document.createElement('div');
-      s.panel.className = 'acp-crew-panel';
-      // Anchor insertion: after the spawner tool call row if known.
-      // Walk up to find a direct child of transcriptEl (handles post-flushToolGroups
-      // case where the spawner row is inside a .acp-tool-group body).
-      var anchor = key ? toolRows['t:' + key] : null;
-      var row = anchor ? anchor.body.parentNode : null;
-      while (row && row.parentNode && row.parentNode !== transcriptEl) {
-        row = row.parentNode;
-      }
-      if (row && row.parentNode === transcriptEl) {
-        row.parentNode.insertBefore(s.panel, row.nextSibling);
-      } else {
-        transcriptEl.appendChild(s.panel);
-      }
-      if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-    }
-    renderCrewPanel(s);
-  }
-
-  function crewEntry(sid) {
-    var keys = Object.keys(crews);
-    for (var i = 0; i < keys.length; i++) {
-      var entries = crews[keys[i]].entries;
-      for (var j = 0; j < entries.length; j++) {
-        if (entries[j].sessionId === sid) return entries[j];
-      }
-    }
-    return null;
-  }
-
-  function renderSubHead() {
-    var entry = crewEntry(subViewSid);
-    subRoleEl.textContent = crewLabel(entry) || subViewSid;  // crewLabel always returns non-empty (sessionName → 30-char task → 'agent')
-    if (!entry) {
-      subStatusEl.className = 'acp-subpanel-status';
-      subStatusEl.textContent = '';
-      return;
-    }
-    var state = subagentState(entry);
-    subStatusEl.className = 'acp-subpanel-status acp-subpanel-status-' + state;
-    subStatusEl.textContent = state === 'error' ? 'errored: ' + entry.error
-      : state === 'done' ? doneText(entry)
-      : state === 'waiting' ? (entry.action || 'waiting') : (entry.action || 'working…');
-  }
-
-  // mirrors index.html's dashOpenSubagent() — keep in sync
-  function openSubagent(sid) {
+  // The step view's own state, driven by workflow-ui.js through `openStep`.
+  function openStepView(sid) {
     if (!sid) return;
     subViewSid = sid;
-    subPanelEl.hidden = false;
-    transcriptWrapEl.hidden = true;
-    composerEl.hidden = true;
     subTranscriptEl.textContent = '';
     subAgentBody = null;
     subToolRows = Object.create(null);
-    // Phase 6: clear any prior step question card.
-    var _prevCard = subPanelEl.querySelector('.acp-step-question-card');
-    if (_prevCard) _prevCard.parentNode.removeChild(_prevCard);
-    renderSubHead();
+    // Until the step's first frame arrives (handleSub removes it).
+    var loading = document.createElement('div');
+    loading.className = 'wf-step-loading';
+    loading.textContent = 'Loading this step\u2019s conversation\u2026';
+    subTranscriptEl.appendChild(loading);
     connectSubWs(sid);
-    // Phase 6: enable the composer only for live workflow step sessions.
-    setSubAgentComposerEnabled(_liveWorkflowChildSids.has(sid), sid, false);
   }
 
-  // mirrors index.html's dashCloseSubagentView() — keep in sync
-  function closeSubagentView() {
-    var wasOpen = !!subViewSid;
-    subViewSid = null;
-    subPanelEl.hidden = true;
-    transcriptWrapEl.hidden = false;
-    composerEl.hidden = false;
+  function closeStepView() {
     // The socket is left open rather than closed: MAX_CONNECTIONS (acp.py)
-    // budgets for a handful of sockets per viewer for exactly this shape — "a
-    // second one while comparing two conversations" is that module's own
-    // phrase for it — and reopening it on every click would pay a fresh
-    // handshake for what is often a few seconds of switching back and forth.
-    void wasOpen;
+    // budgets for a handful of sockets per viewer for exactly this shape, and
+    // reopening it on every click would pay a fresh handshake for what is
+    // often a few seconds of switching back and forth.
+    subViewSid = null;
   }
-
-  subBackBtn.addEventListener('click', closeSubagentView);
 
   function connectSubWs(sid) {
     if (subWs && subWs.readyState === WebSocket.OPEN) {
@@ -2497,6 +2143,8 @@
   function handleSub(frame) {
     var type = frame && frame.type;
     var payload = (frame && frame.payload) || {};
+    var loading = subTranscriptEl.querySelector('.wf-step-loading');
+    if (loading) loading.remove();
     if (type === 'session') {
       subTranscriptEl.textContent = '';
       subAgentBody = null;
@@ -5510,35 +5158,9 @@
       // shared renderer (textContent only).
       addStepMessage(payload && payload.step, payload && payload.severity,
                      payload && payload.message);
-      // Phase 6 (SC7): if the sub-agent panel is open for this step, also
-      // show an amber card there so the user sees the message in context.
-      // `stepSessionId` is set by acp.py's `_emit_step_message` when a step
-      // session id is known (live notify); replayed messages may omit it.
-      var _stepSid = payload && payload.stepSessionId;
-      if (_stepSid && subViewSid && _stepSid === subViewSid && !replaying) {
-        // Build the card in #acpSubPanel, above the composer.
-        var _subPanel = document.getElementById('acpSubPanel');
-        if (_subPanel) {
-          // Remove any prior card for the same step (only one at a time).
-          var _old = _subPanel.querySelector('.acp-step-question-card');
-          if (_old) _old.parentNode.removeChild(_old);
-          var _card = document.createElement('div');
-          _card.setAttribute('role', 'alert');
-          _card.className = 'acp-step-question-card acp-step-question-card-' +
-            (payload.severity || 'warning');
-          var _cardText = document.createElement('span');
-          _cardText.className = 'acp-step-question-text';
-          _cardText.textContent = typeof payload.message === 'string' ? payload.message : '';
-          _card.appendChild(_cardText);
-          // Insert above the composer container (last child), or append.
-          var _composerEl = document.getElementById('acpSubComposerContainer');
-          if (_composerEl) {
-            _subPanel.insertBefore(_card, _composerEl);
-          } else {
-            _subPanel.appendChild(_card);
-          }
-        }
-      }
+      // The question itself is answered from the run card and the step
+      // view (workflow-ui.js), which read the open question from the
+      // `subagents` frame's `questions`; this row is the transcript's record.
       return;
     }
     if (type === 'permission_request') {
@@ -5650,29 +5272,8 @@
       // keeps it out of the replay buffer) — it arrives live, and once more
       // right after every `subscribe`/`session` reply that has a crew to
       // report, which is this page's only source for it after a reload.
-      setCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive);
-      // Phase 4: update the Workflows live-run panel from the same frame.
-      // Phase 6: update _liveWorkflowChildSids and the sub-panel composer.
-      if (payload.workflowLive === true) {
-        setWorkflowsLiveRun(payload.subagents || [], false);
-        // Track which step sessions are live.
-        var _newLive = new Set();
-        (payload.subagents || []).forEach(function (e) {
-          if (e.sessionId) _newLive.add(e.sessionId);
-        });
-        // If the viewed step just left the live set, disable the composer.
-        if (subViewSid && _liveWorkflowChildSids.has(subViewSid) && !_newLive.has(subViewSid)) {
-          setSubAgentComposerEnabled(false, null, false);
-        }
-        _liveWorkflowChildSids = _newLive;
-      } else {
-        clearWorkflowsLiveRun(false);
-        // Run ended: clear the live set and disable the composer if open.
-        if (subViewSid && _liveWorkflowChildSids.has(subViewSid)) {
-          setSubAgentComposerEnabled(false, null, false);
-        }
-        _liveWorkflowChildSids = new Set();
-      }
+      setCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive,
+              payload.runs, payload.questions);
       return;
     }
     if (type === 'commands') {
@@ -6857,10 +6458,12 @@
   if (typeof window !== 'undefined') {
     window._testAddSystemMessage = addSystemMessage;
     // Test-only exports for acp_page.test.mjs Phase 4 crew panel checks.
-    window._testCrews = function() { return crews; };
     window._testCrewEntry = function(sid) { return crewEntry(sid); };
     // Exposed for BUG-1 verification: simulate the turn-end empty broadcast.
-    window._testSetCrew = function(entries, toolCallId, workflowLive) { setCrew(entries, toolCallId, workflowLive); };
+    window._testSetCrew = function(entries, toolCallId, workflowLive, runs, questions) {
+      setCrew(entries, toolCallId, workflowLive, runs, questions);
+    };
+    window._testWorkflowUI = wfui;
   }
 })();
 </script>

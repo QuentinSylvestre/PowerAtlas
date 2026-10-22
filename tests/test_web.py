@@ -5528,13 +5528,14 @@ class TestAcpContentSecurityPolicy:
         # Phase 1) — context indicator, sid/copy widget, debug log panel —
         # same reasoning as prism.js and transcript-renderer.js above.
         assert ('<script nonce="%s" src="/static/composer-chrome.js">' % nonce) in resp.text
+        assert ('<script nonce="%s" src="/static/workflow-ui.js">' % nonce) in resp.text
         # The shared <head> skip-link script: keeps the "Skip to content" link
         # hidden unless the user presses Tab.
         assert re.search(
             r'<script nonce="%s" src="/static/skip-link\.js\?v=[^"]*">' % nonce,
             resp.text)
         tags = re.findall(r"<script\b[^>]*>", resp.text)
-        assert len(tags) == 6, "a script tag was added without a nonce: %s" % tags
+        assert len(tags) == 7, "a script tag was added without a nonce: %s" % tags
         # Every tag, not only the three named above. The count makes adding a
         # script a deliberate act; this makes a nonce-less one a failing test
         # rather than a feature that quietly does nothing in the browser.
@@ -13088,7 +13089,7 @@ class TestAcpWorkflowNotifications:
     # workflow row listed across a turn boundary (cycle-4 fix A).
     ENTRY_KEYS = {"sessionId", "sessionName", "role", "task", "status", "done",
                   "error", "order", "action", "fan_out_id", "startedAt",
-                  "stoppedAt", "workflow"}
+                  "stoppedAt", "workflow", "workflowId", "nodeId"}
 
     @pytest.fixture
     def wf(self, acp_store):
@@ -13183,7 +13184,93 @@ class TestAcpWorkflowNotifications:
             "sessionId": "child-c7", "role": "step-one", "task": "wf-coder",
             "sessionName": "wf-coder", "status": "working", "action": "running",
             "done": False, "error": "", "startedAt": entry["startedAt"],
-            "stoppedAt": None}]
+            "stoppedAt": None, "workflowId": "wf-k7x", "nodeId": "step-one"}]
+
+    # -- run card record (`runs` and `questions` on the subagents frame) --------
+
+    @staticmethod
+    def _last_frame(conn):
+        frames = [f for f in _queued(conn) if f["type"] == "subagents"]
+        assert frames, "no subagents frame was emitted"
+        return frames[-1]["payload"]
+
+    def test_workflow_run_card_carries_name_tree_outputs_and_status(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._send(acp_mod, "run_start", workflowId="wf-k7x", workflowName="review-pr",
+                   nodeTree=[
+                       {"nodeId": "plan", "type": "step", "agentName": "wf-coder",
+                        "modelId": "claude-sonnet-4.6", "effortLevel": "high"},
+                       {"nodeId": "personas", "type": "parallel", "branches": [
+                           {"nodeId": "sec", "type": "step", "agentName": "wf-rev"},
+                           {"nodeId": "ux", "type": "step", "agentName": "wf-rev"}]}])
+        self._start(acp_mod, "wf-k7x", "plan", child="child-c7")
+        run = self._last_frame(watcher)["runs"]
+        assert len(run) == 1 and run[0]["name"] == "review-pr"
+        assert run[0]["status"] == "running" and run[0]["endedAt"] is None
+        assert [n["nodeId"] for n in run[0]["tree"]] == ["plan", "personas"]
+        assert run[0]["tree"][0]["modelId"] == "claude-sonnet-4.6"
+        assert [n["nodeId"] for n in run[0]["tree"][1]["children"]] == ["sec", "ux"]
+        self._complete(acp_mod, "wf-k7x", "plan")
+        assert self._last_frame(watcher)["runs"][0]["outputs"] == {"plan": "ok"}
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="completed",
+                   finalState={"capturedOutputs": {"plan": "ok", "sec": "fine"}})
+        run = self._last_frame(watcher)["runs"][0]
+        assert run["status"] == "completed" and isinstance(run["endedAt"], float)
+        assert run["outputs"] == {"plan": "ok", "sec": "fine"}
+
+    def test_workflow_run_card_status_follows_pause_failure_and_stop(self, wf):
+        acp_mod, sv = wf
+        self._send(acp_mod, "run_start", workflowId="wf-k7x", workflowName="w")
+        self._start(acp_mod, "wf-k7x", "plan", child="child-c7")
+        record = sv._workflow_run_info[self.P]["wf-k7x"]
+        self._send(acp_mod, "run_complete", workflowId="wf-k7x", status="paused")
+        assert record["status"] == "paused" and record["endedAt"] is None
+        sv._workflow_stop_children(self.P)
+        assert record["status"] == "stopped"
+        # A later expiry does not overwrite a verdict.
+        sv._workflow_run_status(self.P, "wf-k7x", "stale")
+        assert record["status"] == "stopped"
+        self._send(acp_mod, "run_start", workflowId="wf-r2", workflowName="w2")
+        self._start(acp_mod, "wf-r2", "a", child="child-d8")
+        self._send(acp_mod, "run_complete", workflowId="wf-r2", status="error: boom")
+        assert sv._workflow_run_info[self.P]["wf-r2"]["status"] == "failed"
+
+    def test_workflow_run_card_tree_is_cleaned_and_bounded(self, wf):
+        acp_mod, sv = wf
+        tree = acp_mod._workflow_tree(
+            [{"nodeId": "a‮b", "type": ["x"], "agentName": 5}, "junk", {"type": "step"}]
+            + [{"nodeId": f"n{i}"} for i in range(200)])
+        assert tree[0] == {"nodeId": "ab", "type": "step", "agentName": "",
+                           "modelId": "", "effortLevel": "", "children": []}
+        assert len(tree) == acp_mod._WORKFLOW_TREE_MAX_NODES
+        assert acp_mod._workflow_tree({"nodeId": "x"}) == []
+
+    def test_workflow_run_card_of_a_run_joined_mid_way_has_no_name(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._start(acp_mod, "wf-k7x", "plan", child="child-c7")
+        run = self._last_frame(watcher)["runs"][0]
+        assert (run["workflowId"], run["name"], run["tree"]) == ("wf-k7x", "", [])
+
+    def test_workflow_run_card_records_are_bounded_and_dropped_with_the_parent(self, wf):
+        acp_mod, sv = wf
+        for i in range(acp_mod._WORKFLOW_RUN_INFO_MAX + 3):
+            self._send(acp_mod, "run_start", workflowId=f"wf-{i}", workflowName="w")
+        runs = sv._workflow_run_info[self.P]
+        assert len(runs) == acp_mod._WORKFLOW_RUN_INFO_MAX and "wf-0" not in runs
+        sv._workflow_drop_parent(self.P)
+        assert self.P not in sv._workflow_run_info
+
+    def test_workflow_open_step_question_rides_on_the_frame(self, wf):
+        acp_mod, sv = wf
+        watcher = self._watch(acp_mod)
+        self._start(acp_mod, "wf-k7x", "ux", child="child-c7")
+        _notify(acp_mod, "_kiro/session/notify", {
+            "sessionId": self.P, "callerSessionId": "child-c7", "sender": "step",
+            "severity": "warning", "message": "Keep /login?",
+            "workflowId": "wf-k7x", "nodeId": "ux"})
+        assert self._last_frame(watcher)["questions"] == {"child-c7": "Keep /login?"}
 
     def test_workflow_node_start_first_variant_without_child_id_creates_nothing(self, wf):
         acp_mod, sv = wf
@@ -14025,7 +14112,8 @@ class TestAcpWorkflowNotifications:
         wire = acp_mod._subagents_payload(sv.crews[self.P], "")
         assert len(wire) == 1
         assert set(wire[0]) == {"sessionId", "role", "task", "sessionName", "status",
-                                "action", "done", "error", "startedAt", "stoppedAt"}
+                                "action", "done", "error", "startedAt", "stoppedAt",
+                                "workflowId", "nodeId"}
         assert (wire[0]["done"], wire[0]["error"], wire[0]["status"],
                 wire[0]["action"]) == (True, "", "stale", "no longer reporting")
 

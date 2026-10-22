@@ -734,6 +734,17 @@ _WORKFLOW_RUN_STALE_S = 1800
 # evicted first. They stop a late frame of an ended run from recording it again.
 _WORKFLOW_ENDED_MAX = 64
 
+# The run card's record of each run (`_workflow_run_info`): how many runs a
+# parent keeps (oldest evicted), how many nodes and how deep a step tree is
+# kept from `run_start`'s `nodeTree`, and how long a step's `capturedOutput`
+# and the workflow's name may be on the wire. The tree is agent-authored and
+# unchecked, so every one of these is a bound, not a measurement.
+_WORKFLOW_RUN_INFO_MAX = 8
+_WORKFLOW_TREE_MAX_NODES = 64
+_WORKFLOW_TREE_MAX_DEPTH = 6
+_WORKFLOW_OUTPUT_MAX_CHARS = 280
+_WORKFLOW_NAME_MAX_CHARS = 80
+
 # Absolute cap, in seconds since a child's `node_start`, on how long frames from
 # the child's OWN sessionId may keep refreshing its staleness clock
 # (`_workflow_touch`). Without it a child that keeps emitting housekeeping
@@ -1934,6 +1945,48 @@ def _clean_agent_text(value, limit: int) -> str:
         for ch in value
         if ch.isspace() or not unicodedata.category(ch).startswith("C"))
     return " ".join(kept.split())[:limit].strip()
+
+
+def _workflow_tree(node_tree) -> list:
+    """`run_start`'s ``nodeTree`` as the run card's plan: a list of
+    ``{"nodeId", "type", "agentName", "modelId", "effortLevel", "children"}``.
+
+    Measured: a top-level list of steps, a ``parallel`` node holding its steps
+    under ``branches``; `run_complete`'s ``finalState`` nests under
+    ``children``. Both keys (and ``steps``) are read. Agent-authored, so every
+    field is narrowed to text and cleaned, and the tree is bounded
+    (`_WORKFLOW_TREE_MAX_NODES` nodes, `_WORKFLOW_TREE_MAX_DEPTH` levels);
+    anything else is dropped. A non-list is ``[]``.
+    """
+    budget = [_WORKFLOW_TREE_MAX_NODES]
+
+    def walk(nodes, depth):
+        out = []
+        if not isinstance(nodes, list) or depth > _WORKFLOW_TREE_MAX_DEPTH:
+            return out
+        for node in nodes:
+            if budget[0] <= 0:
+                break
+            if not isinstance(node, dict):
+                continue
+            node_id = _clean_agent_text(node.get("nodeId"), MAX_ERROR_DETAIL_CHARS)
+            if not node_id:
+                continue
+            budget[0] -= 1
+            kids = []
+            for key in ("branches", "children", "steps"):
+                kids.extend(walk(node.get(key), depth + 1))
+            out.append({
+                "nodeId": node_id,
+                "type": _clean_agent_text(node.get("type"), 32) or "step",
+                "agentName": _clean_agent_text(node.get("agentName"), 120),
+                "modelId": _clean_agent_text(node.get("modelId"), 120),
+                "effortLevel": _clean_agent_text(node.get("effortLevel"), 32),
+                "children": kids,
+            })
+        return out
+
+    return walk(node_tree, 0)
 
 
 def _is_send_message_pause(reason) -> bool:
@@ -4028,6 +4081,16 @@ class _Supervisor:
         # Popped with the parent's runs in `_workflow_drop_parent`, cleared in
         # `_detach`.
         self._workflow_ended: dict[str, dict[str, None]] = {}
+        # parent -> {workflowId: run record}, oldest first, at most
+        # `_WORKFLOW_RUN_INFO_MAX` per parent. What the pages' run card shows
+        # beyond the rows: the workflow's name and step tree from `run_start`,
+        # each step's `capturedOutput` from `node_complete`, and the run's
+        # status (running, paused, completed, failed, stopped, stale). Unlike
+        # `_workflow_runs` it outlives the run's end, so a finished card keeps
+        # its name, plan and result. Written by `_workflow_run_record` and
+        # friends, read by `_workflow_runs_payload`. Popped in
+        # `_workflow_drop_parent`, cleared in `_detach`.
+        self._workflow_run_info: dict[str, dict[str, dict]] = {}
         # SC-9: pending `session/request_permission` requests awaiting the
         # user's answer. Keyed by an opaque id PowerAtlas mints per request
         # (the `requestId` pages see and echo back), not by the JSON-RPC
@@ -4288,6 +4351,7 @@ class _Supervisor:
         self._workflow_node_index.clear()
         self._workflow_runs.clear()
         self._workflow_ended.clear()
+        self._workflow_run_info.clear()
         self._crew_order_next.clear()
         self._workflow_reap_failures.clear()
         self._workflow_step_questions.clear()
@@ -5250,6 +5314,7 @@ class _Supervisor:
             self._workflow_step_last_warning.pop(child_id, None)
         self._workflow_clear_runs(parent_id)
         self._workflow_ended.pop(parent_id, None)
+        self._workflow_run_info.pop(parent_id, None)
         self._crew_order_next.pop(parent_id, None)
         self._crew_overflow_warned.discard(parent_id)
         self._workflow_reap_failures.pop(parent_id, None)
@@ -5292,6 +5357,81 @@ class _Supervisor:
         while len(ended) > _WORKFLOW_ENDED_MAX:
             ended.pop(next(iter(ended)))
 
+    def _workflow_run_record(self, parent_id: str, workflow_id: str) -> dict | None:
+        """The run card's record of one run, created on first sight.
+
+        A run joined mid-way (no `run_start` seen) gets a record with no name
+        and no tree; the pages then show only the steps that started. None for
+        an unusable id. Bounded per parent (`_WORKFLOW_RUN_INFO_MAX`, oldest
+        evicted). Loop-only (it writes).
+        """
+        if not isinstance(workflow_id, str) or not workflow_id.strip():
+            return None
+        runs = self._workflow_run_info.setdefault(parent_id, {})
+        record = runs.get(workflow_id)
+        if record is None:
+            record = runs[workflow_id] = {
+                "workflowId": workflow_id[:_WORKFLOW_NAME_MAX_CHARS], "name": "",
+                "tree": [], "status": "running", "startedAt": time.time(),
+                "endedAt": None, "outputs": {}}
+            while len(runs) > _WORKFLOW_RUN_INFO_MAX:
+                runs.pop(next(iter(runs)))
+        return record
+
+    def _workflow_run_status(self, parent_id: str, workflow_id: object,
+                             status: str) -> None:
+        """Set a run record's status; an end status also stamps ``endedAt``.
+
+        A record already ended (completed, failed, stopped) keeps its verdict
+        against a later ``stale``: an expiry after a Stop is not news.
+        """
+        record = (self._workflow_run_info.get(parent_id) or {}).get(_as_text(workflow_id))
+        if record is None:
+            return
+        if status == "stale" and record["status"] in ("completed", "failed", "stopped"):
+            return
+        record["status"] = status
+        if status in ("running", "paused"):
+            record["endedAt"] = None
+        elif record["endedAt"] is None:
+            record["endedAt"] = time.time()
+
+    def _workflow_note_output(self, parent_id: str, workflow_id: object,
+                              node_id: object, output: object) -> None:
+        """Keep a step's ``capturedOutput`` on its run's record, cleaned and
+        clipped (`_WORKFLOW_OUTPUT_MAX_CHARS`). An empty or non-string output,
+        or a run with no record, changes nothing. Loop-only (it writes)."""
+        record = (self._workflow_run_info.get(parent_id) or {}).get(_as_text(workflow_id))
+        node = _clean_agent_text(node_id, MAX_ERROR_DETAIL_CHARS)
+        text = _clean_agent_text(output, _WORKFLOW_OUTPUT_MAX_CHARS)
+        if record is None or not node or not text:
+            return
+        record["outputs"][node] = text
+        while len(record["outputs"]) > _WORKFLOW_TREE_MAX_NODES:
+            record["outputs"].pop(next(iter(record["outputs"])))
+
+    def _workflow_runs_payload(self, parent_id: str, crew: dict,
+                               fan_out_id: str | None) -> list:
+        """The ``runs`` list of a ``subagents`` frame: the record of every run
+        whose steps are among the frame's own rows (same ``fan_out_id`` filter
+        as `_subagents_payload`), oldest first. A pure read."""
+        wanted = {entry.get("workflowId") for entry in tuple(crew.values())
+                  if entry.get("workflow") and (
+                      fan_out_id is None or entry.get("fan_out_id", fan_out_id) == fan_out_id)}
+        return [dict(record, outputs=dict(record["outputs"]))
+                for wf_id, record in tuple((self._workflow_run_info.get(parent_id) or {}).items())
+                if wf_id in wanted]
+
+    def _workflow_questions_payload(self, crew: dict) -> dict:
+        """child id -> the open step question's text, for the frame's rows. A
+        pure read; the pages show it under its step with a reply box."""
+        out = {}
+        for child_id in tuple(crew):
+            record = self._workflow_step_questions.get(child_id)
+            if isinstance(record, dict) and isinstance(record.get("text"), str):
+                out[child_id] = record["text"]
+        return out
+
     def _workflow_has_runs(self, parent_id: str) -> bool:
         """True if any run is recorded for the parent, fresh or not. A pure read."""
         return any(k[0] == parent_id for k in tuple(self._workflow_runs))
@@ -5323,6 +5463,7 @@ class _Supervisor:
                 continue
             self._workflow_runs.pop((parent_id, workflow_id), None)
             self._workflow_mark_ended(parent_id, workflow_id)
+            self._workflow_run_status(parent_id, workflow_id, "stale")
             log.info("ACP workflow run %.80s of %s expired: unheard of for %.0fs",
                      workflow_id, parent_id, now - seen)
             if parent_id not in expired:
@@ -5921,6 +6062,10 @@ class _Supervisor:
         again.
         """
         self._workflow_clear_runs(parent_id, mark_ended=True)
+        # Every run card of the parent that is still going reads "Stopped".
+        for wf_id, record in tuple((self._workflow_run_info.get(parent_id) or {}).items()):
+            if record["status"] in ("running", "paused"):
+                self._workflow_run_status(parent_id, wf_id, "stopped")
         kids = tuple(self._workflow_children.get(parent_id, {}))
         if not kids:
             return []
@@ -6151,6 +6296,8 @@ class _Supervisor:
             self._on_workflow_node_start(parent_id, params)
         elif method == "_kiro/workflow/node_complete":
             terminal, _err = self._workflow_outcome(params.get("status"))
+            self._workflow_note_output(parent_id, params.get("workflowId"),
+                                       params.get("nodeId"), params.get("capturedOutput"))
             self._on_workflow_node_done(parent_id, params, terminal)
         elif method == "_kiro/workflow/node_paused":
             # A step waiting for the user, NOT a failure: keep it tracked.
@@ -6194,6 +6341,18 @@ class _Supervisor:
         # A real start proves this run is new, whatever an earlier run with the
         # same id left in the ended set.
         self._workflow_ended.get(parent_id, {}).pop(workflow_id, None)
+        # The run card's plan. A resumed run re-sends `run_start` (probe 3):
+        # the record keeps its start time and outputs, and only a non-empty
+        # name or tree replaces what it had.
+        record = self._workflow_run_record(parent_id, workflow_id)
+        if record is not None:
+            name = _clean_agent_text(params.get("workflowName"), _WORKFLOW_NAME_MAX_CHARS)
+            tree = _workflow_tree(params.get("nodeTree"))
+            if name:
+                record["name"] = name
+            if tree:
+                record["tree"] = tree
+            self._workflow_run_status(parent_id, workflow_id, "running")
         log.info("ACP workflow run_start: parent=%s workflowId=%.80s (%d run(s) recorded)",
                  parent_id, workflow_id,
                  sum(1 for k in self._workflow_runs if k[0] == parent_id))
@@ -6287,7 +6446,13 @@ class _Supervisor:
             # Internal, never on the wire: marks a workflow row so turn-boundary
             # eviction keeps it while the parent still has a live child.
             "workflow": True,
+            # On the wire: place the row in its run card's plan
+            # (`_workflow_run_info`), matched by workflowId and nodeId.
+            "workflowId": workflow_id,
+            # Cleaned as `_workflow_tree` cleans the plan's ids, so they match.
+            "nodeId": _clean_agent_text(node_id, MAX_ERROR_DETAIL_CHARS),
         }
+        self._workflow_run_record(parent_id, workflow_id)
         self.subagent_sessions[child_id] = {"parent": parent_id}
         if child_id not in self.subagent_history:
             self.subagent_history[child_id] = _History()
@@ -6376,6 +6541,16 @@ class _Supervisor:
         workflow_id = _as_text(params.get("workflowId"))
         status = params.get("status")
         paused = isinstance(status, str) and status.strip().lower() == "paused"
+        # The run card's verdict and any output the steps' own node_complete
+        # did not carry (`finalState.capturedOutputs`, measured).
+        final = params.get("finalState")
+        outputs = final.get("capturedOutputs") if isinstance(final, dict) else None
+        if isinstance(outputs, dict):
+            for node_id, text in tuple(outputs.items())[:_WORKFLOW_TREE_MAX_NODES]:
+                self._workflow_note_output(parent_id, workflow_id, node_id, text)
+        self._workflow_run_status(
+            parent_id, workflow_id, "paused" if paused
+            else "completed" if self._workflow_outcome(status)[0] == "done" else "failed")
         indexed = {
             child: wf for (p, wf, _node), child in self._workflow_node_index.items()
             if p == parent_id}
@@ -8680,10 +8855,34 @@ def _subagents_payload(crew: dict, fan_out_id: str | None = None) -> list:
             "error": entry["error"],
             "startedAt": entry.get("startedAt"),
             "stoppedAt": entry.get("stoppedAt"),
+            # A workflow step's place in its run card; "" for a sub-agent.
+            "workflowId": entry.get("workflowId", ""),
+            "nodeId": entry.get("nodeId", ""),
         }
         for child_id, entry in sorted(crew.items(), key=lambda kv: kv[1]["order"])
         if fan_out_id is None or entry.get("fan_out_id", fan_out_id) == fan_out_id
     ]
+
+
+def _subagents_frame_payload(parent_id: str, crew: dict, fan_out_id: str | None,
+                             toolcall_id: str | None) -> dict:
+    """The ``subagents`` frame's payload, shared by the live push and the
+    subscribe resend so the two cannot drift.
+
+    ``runs`` is the record of each workflow run whose steps are among the
+    rows (`_Supervisor._workflow_runs_payload`: name, step tree, outputs,
+    status), and ``questions`` maps a step's id to its open step question, so
+    the pages' run card can show the whole plan and answer in place. Both are
+    empty for a plain sub-agent fan-out and for a parent with no supervisor.
+    """
+    _s = _find_supervisor(parent_id)
+    return {
+        "subagents": _subagents_payload(crew, fan_out_id),
+        "toolCallId": toolcall_id,
+        "workflowLive": _workflow_live_flag(parent_id, crew, fan_out_id),
+        "runs": _s._workflow_runs_payload(parent_id, crew, fan_out_id) if _s is not None else [],
+        "questions": _s._workflow_questions_payload(crew) if _s is not None else {},
+    }
 
 
 def _emit_subagents_frame(parent_id: str, crews: dict | None = None,
@@ -8728,9 +8927,7 @@ def _emit_subagents_frame(parent_id: str, crews: dict | None = None,
     fan_out_id = crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)
     toolcall_id = fan_out_id
     _registry.broadcast(parent_id, envelope(
-        "subagents",
-        {"subagents": _subagents_payload(crew, fan_out_id), "toolCallId": toolcall_id,
-         "workflowLive": _workflow_live_flag(parent_id, crew, fan_out_id)},
+        "subagents", _subagents_frame_payload(parent_id, crew, fan_out_id, toolcall_id),
         parent_id))
 
 
@@ -9456,9 +9653,7 @@ def _handle_subscribe(conn, session_id):
             session_id, _NO_ANCHOR_TOOLCALLID)
         conn.send(envelope(
             "subagents",
-            {"subagents": _subagents_payload(crew, fan_out_id),
-             "toolCallId": fan_out_id,
-             "workflowLive": _workflow_live_flag(session_id, crew, fan_out_id)},
+            _subagents_frame_payload(session_id, crew, fan_out_id, fan_out_id),
             session_id))
     # Phase 8 live-verification fix: commands/skills are broadcast-only,
     # never recorded into history (same reasoning as the `subagents`

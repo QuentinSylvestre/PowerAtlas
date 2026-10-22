@@ -143,7 +143,7 @@ device on NetBird is unaffected: it still signs in once at `/remote-auth` with t
   dashboard for `/acp`. The panel carries the same live-session tools `/acp` does: slash-command and
   skill autocomplete, a context-window usage indicator, a tap-to-copy workspace/session-id widget, a
   debug/transport log panel, Queue and Steer send modes with a Stop button, paste-or-drag image
-  attachments, a read-only sub-agent/crew panel for fan-outs and workflow steps (a step that stops reporting reads "no longer reporting"), and automatic reconnect with exponential
+  attachments, run cards and the run inspector for workflows and sub-agent fan-outs (a step that stops reporting reads "no longer reporting"), and automatic reconnect with exponential
   backoff if the connection drops. `/acp` remains the only surface reachable from another device — the
   dashboard's panel is loopback-only, like the rest of the dashboard
 - A workspace header in the dashboard rail shows the folder's git branch beside its name, wherever the
@@ -576,7 +576,9 @@ Three things are worth knowing before leaving a long task running:
   `session/cancel` stops the ACP turn while leaving any shell subprocess the agent spawned running to
   completion. It is reaped only when PowerAtlas exits.
   So a cancelled build or long-running command keeps consuming CPU and memory that the per-session
-  figure above does not include. When a fan-out runs, an inline crew panel appears directly below the spawner tool call in the transcript, listing each sub-agent with its elapsed time (workflow steps from `run_workflow` appear as rows too, and a step that stops reporting reads "no longer reporting"); done entries freeze their timer at their actual stop time. Each fan-out produces its own panel. The panel updates live, mid-fan-out, populated as each sub-agent's own tool calls and streamed output arrive — not deferred to turn completion.
+  figure above does not include. When a workflow (`run_workflow`) or a sub-agent fan-out runs, a **run card** appears directly below the spawner tool call in the transcript. For a workflow it shows the workflow's name, a status (Running, Needs you, Paused, Completed, Failed, Stopped), a progress bar with one segment per planned step, "2 of 5 steps" and the elapsed time, and the whole plan: steps that have not started yet, parallel groups (foldable), each step's current activity and, once finished, its captured output. A step that stops reporting reads "No longer reporting. It may still be running.", never Done. A finished run folds to one line with its result; the chevron unfolds it. A plain sub-agent fan-out gets the same card without a plan or progress bar. Cards update live, mid-run. While a run is live, a **run strip** above the composer repeats its progress and how many steps need you.
+
+**The run inspector** opens beside the transcript from the card's panel button, the strip, the toolbar's **Runs** button (shown from a session's first run on, with a badge counting the steps waiting on you) or **Ctrl+G**. **Steps** lists the session's runs; clicking a step opens its own conversation in the inspector, with its model, effort and elapsed time, while the parent conversation stays in view. A live workflow step has a box to message it directly ("Goes to this step's own session"); a finished step and a plain sub-agent are read-only. **History** lists the session's past runs from its file on disk, newest first, with each step's result. **Esc** goes back from a step to the steps, then closes the inspector. In a narrow window or pane the inspector covers the transcript instead of sitting beside it.
 
 Creating a session writes `session.json` and `messages.jsonl` into a per-session `sess_<uuid>/`
 directory inside your kiro-cli session store. The workspace's `.lock` file lives one level up, shared
@@ -759,11 +761,13 @@ Yolo included, and the question also appears in the dashboard's *Needs attention
 any tab, or on reload) marks the card answered everywhere it is shown. **Stop** while a question is
 open ends the turn and the card goes inactive; the question is dropped.
 
-A workflow step can also ask you something. Its message shows on the step's row in the crew panel and
-as a row in the parent's transcript, the step reads waiting, the crew header reads "Paused" while no
-other step is running, and the
-question is listed in *Needs attention* and raises a desktop notification, "Question: [workflow step] ...", like an agent question when notifications are on. Answer it by sending the parent session a message; the parent
-passes it on to the step, and the step runs again. A step's warnings and errors appear in the
+A workflow step can also ask you something. The question opens under the step in its run card, with
+an answer box and **Reply** (the same box shows in the step's view in the run inspector). The card turns
+amber and reads "Needs you", the strip and the **Runs** badge count it, it shows as a row in the parent's
+transcript, and the question is listed in *Needs attention* and raises a desktop notification,
+"Question: [workflow step] ...", like an agent question when notifications are on. **Reply** sends the
+parent session your answer, naming the step; the parent passes it on and the step runs again. A reply
+is not sent while the agent is still answering a turn: the box keeps your text and says so. A step's warnings and errors appear in the
 transcript the same way, and still appear after a reload.
 
 **The context-usage bar, steering acknowledgement, and the session title** all show up as the UI

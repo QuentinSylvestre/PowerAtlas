@@ -91,6 +91,19 @@ function composerChromeSource() {
   }
   return COMPOSER_CHROME_SRC;
 }
+// The shared workflow UI (run card, run strip, run inspector) — loaded by
+// both pages via <script src> right after composer-chrome.js, so it runs in
+// the same sandbox in the same order: the inline scripts call its one global,
+// createWorkflowUI, at load.
+const WORKFLOW_UI_BUNDLE = path.join(
+  HERE, "..", "src", "power_atlas", "static", "workflow-ui.js");
+let WORKFLOW_UI_SRC = null;
+function workflowUiSource() {
+  if (WORKFLOW_UI_SRC === null) {
+    WORKFLOW_UI_SRC = fs.readFileSync(WORKFLOW_UI_BUNDLE, "utf8");
+  }
+  return WORKFLOW_UI_SRC;
+}
 
 // Prism as the page sees it, built once and shared by every check.
 //
@@ -1048,6 +1061,7 @@ function loadPage(templatePath, opts = {}) {
   // the inline <script>.
   vm.runInContext(composerChromeSource(), sandbox,
                   { filename: "composer-chrome.js" });
+  vm.runInContext(workflowUiSource(), sandbox, { filename: "workflow-ui.js" });
   vm.runInContext(scriptBody, sandbox, { filename: `${templatePath}#inline-script` });
 
   Object.assign(page, {
@@ -6244,23 +6258,6 @@ check("no crew panel appears until the session has a crew", (tpl) => {
               "a session with no crew should show no crew panel");
 });
 
-check("a subagents frame with running entries shows a crew panel in the transcript",
-  (tpl) => {
-    const { page, live } = connected(tpl);
-    const now = Date.now() / 1000;
-    page.deliver(subagentsFrame(live, [
-      { sessionId: "sub-1", role: "explorer", task: "", sessionName: "stage-1",
-        status: "working", action: "reading", done: false, error: "", startedAt: now - 5 },
-    ]));
-    const panels = page.all("acpTranscript", ".acp-crew-panel");
-    assertEqual(panels.length, 1, "a crew panel should appear in the transcript");
-    const entries = panels[0].querySelectorAll(".acp-crew-row");
-    assertEqual(entries.length, 1, "one row per sub-agent");
-    const nameText = entries[0].querySelector(".acp-crew-label").textContent;
-    assertEqual(nameText, "stage-1", "entry should show the sessionName as primary label");
-    const actionText = entries[0].querySelector(".acp-crew-action").textContent;
-    assertEqual(actionText, "reading", "entry should show the current action");
-  });
 
 check("crew panel entries are clickable and open the sub-agent panel", (tpl) => {
   const { page, live } = connected(tpl);
@@ -6316,22 +6313,6 @@ check("crew panel persists after turn ends — no auto-dismiss on turn end", (tp
               "panel should persist after turn end (SC4: no auto-dismiss)");
 });
 
-check("crew panel elapsed time ticks when the interval fires", (tpl) => {
-  const { page, live } = connected(tpl);
-  // startedAt 10 seconds ago
-  const startedAt = Date.now() / 1000 - 10;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
-      action: "", done: false, error: "", startedAt: startedAt },
-  ]));
-  const elapsed = page.one("acpTranscript", ".acp-crew-elapsed");
-  assert(elapsed !== null, "elapsed span should be present");
-  assert(elapsed.textContent.length > 0, "elapsed should show a non-empty time string");
-  // Fire the interval — should rebuild rows without error
-  page.intervals[page.intervals.length - 1].fn();
-  const elapsed2 = page.one("acpTranscript", ".acp-crew-elapsed");
-  assert(elapsed2 !== null, "elapsed span should still be present after tick");
-});
 
 check("crew panel is cleared when the transcript is cleared", (tpl) => {
   const { page, live } = connected(tpl);
@@ -6348,44 +6329,7 @@ check("crew panel is cleared when the transcript is cleared", (tpl) => {
               "crew panel should be gone after transcript clear");
 });
 
-check("tapping a crew entry opens a second, read-only socket for it", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "explorer", task: "look around",
-      sessionName: "", status: "working", action: "", done: false, error: "",
-      startedAt: Date.now() / 1000 },
-  ]));
-  page.all("acpTranscript", ".acp-crew-row")[0].dispatch("click");
-  assertEqual(page.el("acpTranscriptWrap").hidden, true,
-              "the transcript wrapper should hide while a sub-agent is open");
-  assertEqual(page.el("acpComposer").hidden, true,
-              "the composer should hide — a sub-agent's conversation is read-only");
-  assertEqual(page.el("acpSubPanel").hidden, false);
-  page.openAt(1);
-  const subs = page.socketAt(1).sent.filter((f) => f.type === "subscribe");
-  assertEqual(subs.length, 1, "expected exactly one subscribe on the sub-agent socket");
-  assertEqual(subs[0].sessionId, "sub-1");
-});
 
-check("the transcript wrapper is hidden (not just the inner transcript) when a sub-agent is open", (tpl) => {
-  // Regression: the cycle-1 fix introduced .acp-transcript-wrap. openSubagent()
-  // used to hide #acpTranscript but not the wrapper, so the wrapper still claimed
-  // flex space while the subpanel was open.
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  page.all("acpTranscript", ".acp-crew-row")[0].dispatch("click");
-  assertEqual(page.el("acpTranscriptWrap").hidden, true,
-              "the transcript wrapper still claims flex space while the subpanel " +
-              "is open — openSubagent must hide the wrapper, not just the inner transcript");
-  assertEqual(page.el("acpTranscript").hidden, false,
-              "the inner transcript should not be hidden directly (the wrapper hides it)");
-  page.click("acpSubBack");
-  assertEqual(page.el("acpTranscriptWrap").hidden, false,
-              "the transcript wrapper must be restored when closing the sub-agent view");
-});
 
 check("the sub-agent panel renders its own chunk and tool_call frames", (tpl) => {
   const { page, live } = connected(tpl);
@@ -6501,26 +6445,6 @@ check("reopening a sub-agent reuses the existing socket rather than a third one"
     assertEqual(subs.length, 2, "expected a second subscribe sent on the reused socket");
   });
 
-check("a live subagents update refreshes the crew panel while a sub-agent panel is open", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "",
-      status: "working", action: "reading", done: false, error: "", startedAt: now - 5 },
-  ], "tcid-update"));
-  page.all("acpTranscript", ".acp-crew-row")[0].dispatch("click");
-  page.openAt(1);
-  // On the MAIN socket (index 0) — `page.deliver()` alone would now target the
-  // sub-agent socket, since it always addresses whichever opened last.
-  // Use same toolCallId so the update lands in the same slot.
-  page.deliverTo(0, subagentsFrame(live, [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "",
-      status: "done", action: "", done: true, error: "", startedAt: now - 5 },
-  ], "tcid-update"));
-  assertEqual(page.el("acpSubPanel").hidden, false,
-              "the panel should stay open across a crew update");
-  assertEqual(page.el("acpSubStatus").textContent, "done");
-});
 
 check("a new session frame clears the crew panel and closes any open sub-agent panel",
   (tpl) => {
@@ -6547,60 +6471,9 @@ check("a new session frame clears the crew panel and closes any open sub-agent p
 
 // ---- crew panel header and lean row redesign (Phase 2) ----
 
-check("crew panel header shows 'Orchestrating (2 agents)' with 2 running entries", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "", sessionName: "stage-a",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-    { sessionId: "sub-2", role: "kiro_default", task: "", sessionName: "stage-b",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ]));
-  const hdr = page.one("acpTranscript", ".acp-crew-header");
-  assert(hdr !== null, "crew panel should have a header element");
-  assertEqual(hdr.textContent, "Orchestrating (2 agents)",
-              "header should say 'Orchestrating (2 agents)'");
-});
 
-check("crew panel header shows 'Orchestrating (1 agent)' (singular) with 1 running entry", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "", sessionName: "stage-a",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  const hdr = page.one("acpTranscript", ".acp-crew-header");
-  assert(hdr !== null, "crew panel should have a header element");
-  assertEqual(hdr.textContent, "Orchestrating (1 agent)",
-              "header should use singular 'agent' for exactly one entry");
-});
 
-check("crew panel header shows 'Done (2 agents)' when crewAllDone is true", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "", sessionName: "stage-a",
-      status: "terminated", action: "", done: true, error: "", startedAt: now - 5 },
-    { sessionId: "sub-2", role: "kiro_default", task: "", sessionName: "stage-b",
-      status: "terminated", action: "", done: true, error: "", startedAt: now - 5 },
-  ]));
-  const hdr = page.one("acpTranscript", ".acp-crew-header");
-  assert(hdr !== null, "crew panel should have a header element");
-  assertEqual(hdr.textContent, "Done (2 agents)",
-              "header should say 'Done (2 agents)' when all done");
-});
 
-check("crew panel header shows 'Done (1 agent)' (singular) when crewAllDone is true with 1 entry", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "", sessionName: "stage-a",
-      status: "terminated", action: "", done: true, error: "", startedAt: now - 5 },
-  ]));
-  const hdr = page.one("acpTranscript", ".acp-crew-header");
-  assert(hdr !== null, "crew panel should have a header element");
-  assertEqual(hdr.textContent, "Done (1 agent)",
-              "header should say 'Done (1 agent)' (singular) when all done with 1 entry");
-});
 
 // The gap between two workflow steps (docs/KNOWLEDGE.md, "Workflow liveness"):
 // every row is done while the run is still going. The server says so with
@@ -6612,94 +6485,12 @@ const GAP_ROWS = (now) => [
     done: true, error: "", startedAt: now - 5, stoppedAt: now - 1 },
 ];
 
-check("crew header stays 'Orchestrating' while workflowLive is true and every row is done", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, GAP_ROWS(Date.now() / 1000), "", true));
-  assertEqual(page.one("acpTranscript", ".acp-crew-header").textContent,
-              "Orchestrating (1 agent)", "the gap must not flash 'Done'");
-});
 
-check("crew header flips Done -> Orchestrating -> Done across workflowLive true/false/absent", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  const hdr = () => page.one("acpTranscript", ".acp-crew-header").textContent;
-  page.deliver(subagentsFrame(live, GAP_ROWS(now), "", false));
-  assertEqual(hdr(), "Done (1 agent)", "workflowLive false reads as today");
-  page.deliver(subagentsFrame(live, GAP_ROWS(now), "", true));
-  assertEqual(hdr(), "Orchestrating (1 agent)", "the next run starts: the header goes back");
-  page.deliver(subagentsFrame(live, GAP_ROWS(now), ""));
-  assertEqual(hdr(), "Done (1 agent)", "a legacy frame without the field must not keep it live");
-  page.deliver(subagentsFrame(live, GAP_ROWS(now), "", true));
-  page.deliver(subagentsFrame(live, GAP_ROWS(now), "", false));
-  assertEqual(hdr(), "Done (1 agent)", "run_complete: the closing frame flips it to Done");
-});
 
-check("crew header: only a boolean true counts as workflowLive", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  for (const bogus of ["true", 1, null, {}, "yes"]) {
-    page.deliver(subagentsFrame(live, GAP_ROWS(now), "", bogus));
-    assertEqual(page.one("acpTranscript", ".acp-crew-header").textContent,
-                "Done (1 agent)", "a non-boolean workflowLive (" + JSON.stringify(bogus) + ") is not live");
-  }
-});
 
-check("crew header: an errored row with workflowLive true still reads Orchestrating, row unchanged", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sess_00000000-0000-4000-8000-0000000000e2", role: "step-one",
-      task: "wf-coder", sessionName: "wf-coder", status: "failed", action: "",
-      done: true, error: "cancelled", startedAt: now - 5, stoppedAt: now - 1 },
-  ], "", true));
-  assertEqual(page.one("acpTranscript", ".acp-crew-header").textContent,
-              "Orchestrating (1 agent)");
-  const row = page.one("acpTranscript", ".acp-crew-row");
-  assertEqual(row.querySelector(".acp-crew-action").textContent, "errored",
-              "workflowLive changes the header only, never how a row renders");
-});
 
-check("crew row has status-thinking dot for working entry", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "", sessionName: "stage-a",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  const row = page.one("acpTranscript", ".acp-crew-row");
-  assert(row !== null, "crew panel should have a row");
-  const dot = row.querySelector(".session-status");
-  assert(dot !== null, "row should have a session-status dot");
-  assert(String(dot.className).split(/\s+/).includes("status-thinking"),
-         "working row dot should have status-thinking class, got: " + dot.className);
-});
 
-check("crew row has status-idle dot for done entry", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "", sessionName: "stage-a",
-      status: "terminated", action: "", done: true, error: "", startedAt: Date.now() / 1000 - 5 },
-  ]));
-  const row = page.one("acpTranscript", ".acp-crew-row");
-  assert(row !== null, "crew panel should have a row");
-  const dot = row.querySelector(".session-status");
-  assert(dot !== null, "row should have a session-status dot");
-  assert(String(dot.className).split(/\s+/).includes("status-idle"),
-         "done row dot should have status-idle class, got: " + dot.className);
-});
 
-check("crew row has status-errored dot for error entry", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "", sessionName: "stage-a",
-      status: "terminated", action: "", done: true, error: "tool failed", startedAt: Date.now() / 1000 - 5 },
-  ]));
-  const row = page.one("acpTranscript", ".acp-crew-row");
-  assert(row !== null, "crew panel should have a row");
-  const dot = row.querySelector(".session-status");
-  assert(dot !== null, "row should have a session-status dot");
-  assert(String(dot.className).split(/\s+/).includes("status-errored"),
-         "error row dot should have status-errored class, got: " + dot.className);
-});
 
 // Workflow steps (261008 Phase 2) arrive as ordinary crew entries whose
 // sessionId is a real child session id. The row reads `done`/`error` and, for
@@ -6708,47 +6499,6 @@ check("crew row has status-errored dot for error entry", (tpl) => {
 // D15 it shared the working dot), and a failed one (done + error text) is an
 // errored row. The entry shape is what `_on_workflow_node_start` and
 // `_on_workflow_node_done` write.
-check("workflow crew rows: running, waiting and failed render sensibly", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sess_00000000-0000-4000-8000-00000000000a", role: "run-both/step-a",
-      task: "wf-coder", sessionName: "wf-coder", status: "working", action: "running",
-      done: false, error: "", startedAt: now - 5, stoppedAt: null },
-    { sessionId: "sess_00000000-0000-4000-8000-00000000000b", role: "run-both/step-b",
-      task: "wf-coder", sessionName: "wf-coder", status: "waiting", action: "waiting",
-      done: false, error: "", startedAt: now - 5, stoppedAt: null },
-    { sessionId: "sess_00000000-0000-4000-8000-00000000000c", role: "step-three",
-      task: "wf-coder", sessionName: "wf-coder", status: "failed", action: "",
-      done: true, error: "cancelled", startedAt: now - 9, stoppedAt: now - 2 },
-  ]));
-  const rows = page.all("acpTranscript", ".acp-crew-row");
-  assertEqual(rows.length, 3, "one row per workflow step");
-  const cls = (row) => String(row.querySelector(".session-status").className)
-    .split(/\s+/);
-  const text = (row, sel) => row.querySelector(sel).textContent;
-  // Phase 3 tree rendering: root-level entries (no '/' in role) render first,
-  // then grouped entries. step-three has no '/', so it's rows[0];
-  // run-both/step-a and run-both/step-b are in the group, so rows[1] and rows[2].
-  assertEqual(text(rows[0], ".acp-crew-action"), "errored");
-  assert(cls(rows[0]).includes("status-errored"), "failed step shows the error dot");
-  assertEqual(text(rows[1], ".acp-crew-label"), "wf-coder");
-  assertEqual(text(rows[1], ".acp-crew-role"), "step-a",
-              "the step's place in the workflow is the role column (abbreviated, without group prefix)");
-  assertEqual(text(rows[1], ".acp-crew-action"), "running");
-  assert(cls(rows[1]).includes("status-thinking"), "running step shows the working dot");
-  assertEqual(text(rows[2], ".acp-crew-action"), "waiting",
-              "a paused step must say it is waiting, not just 'working'");
-  // D15 (261012): a waiting step gets the waiting dot, not the working one.
-  assert(cls(rows[2]).includes("status-waiting"), "waiting step shows the waiting dot");
-  assert(!cls(rows[2]).includes("status-thinking"), "waiting step is not shown working");
-  assert(rows[2].className.includes("acp-crew-row-waiting"), "waiting row class");
-  assert(!rows[2].className.includes("acp-crew-row-error") &&
-         !rows[2].className.includes("acp-crew-row-done"),
-         "a waiting step is not shown as finished");
-  assert(String(page.one("acpTranscript", ".acp-crew-header").textContent)
-         .startsWith("Orchestrating"), "the crew is not all done while a step waits");
-});
 
 // 261012 D15: "Paused (n)" when at least one row waits and none works. One
 // waiting row beside one done row is Paused; add a working row and it is
@@ -6759,39 +6509,7 @@ const WAIT_ROW = (now, extra = {}) => Object.assign({
   action: "Which colour?", done: false, error: "", startedAt: now - 5,
   stoppedAt: null }, extra);
 
-check("crew header reads 'Paused' with a waiting row and none working", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  const hdr = () => page.one("acpTranscript", ".acp-crew-header").textContent;
-  page.deliver(subagentsFrame(live, [WAIT_ROW(now), GAP_ROWS(now)[0]], "", true));
-  assertEqual(hdr(), "Paused (2 agents)", "waiting + done reads Paused");
-  page.deliver(subagentsFrame(live, [WAIT_ROW(now)], "", false));
-  assertEqual(hdr(), "Paused (1 agent)", "workflowLive does not matter for Paused");
-  page.deliver(subagentsFrame(live, [WAIT_ROW(now), WAIT_ROW(now, {
-    sessionId: "sess_00000000-0000-4000-8000-0000000000f2", status: "working",
-    action: "running" })], "", true));
-  assertEqual(hdr(), "Orchestrating (2 agents)", "one working row: Orchestrating");
-  // A finished row whose status still says waiting is done, not waiting.
-  page.deliver(subagentsFrame(live, [WAIT_ROW(now, { done: true, stoppedAt: now })], "", false));
-  assertEqual(hdr(), "Done (1 agent)", "a done row is never waiting");
-});
 
-check("a waiting crew row shows its message and the waiting dot; the sub-panel head says waiting", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [WAIT_ROW(now), WAIT_ROW(now, {
-    sessionId: "sess_00000000-0000-4000-8000-0000000000f3", action: "" })]));
-  const rows = page.all("acpTranscript", ".acp-crew-row");
-  assertEqual(rows[0].querySelector(".acp-crew-action").textContent, "Which colour?");
-  assertEqual(rows[1].querySelector(".acp-crew-action").textContent, "waiting",
-              "no action text falls back to 'waiting', not 'working'");
-  assert(String(rows[0].querySelector(".session-status").className).split(/\s+/)
-         .includes("status-waiting"), "the waiting dot");
-  rows[0].dispatch("click");
-  const head = page.el("acpSubStatus");
-  assertEqual(String(head.className), "acp-subpanel-status acp-subpanel-status-waiting");
-  assertEqual(head.textContent, "Which colour?");
-});
 
 check("a step_message frame renders a system row with the step and the message", (tpl) => {
   const { page, live } = connected(tpl);
@@ -6838,125 +6556,14 @@ const REAPED_ROWS = (now) => [
     done: true, error: "cancelled", startedAt: now - 9, stoppedAt: now - 2 },
 ];
 
-check("a reaped workflow row says 'no longer reporting'; normal finishes still say 'done'", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, REAPED_ROWS(Date.now() / 1000)));
-  const rows = page.all("acpTranscript", ".acp-crew-row");
-  assertEqual(rows.length, 4);
-  const act = (r) => r.querySelector(".acp-crew-action").textContent;
-  assertEqual(act(rows[0]), "no longer reporting");
-  assertEqual(act(rows[1]), "done");
-  assertEqual(act(rows[2]), "done", "a finished sub-agent keeps saying done whatever its last tool title was");
-  assertEqual(act(rows[3]), "errored");
-  assert(String(rows[0].getAttribute("aria-label")).endsWith("no longer reporting"),
-         "the accessible name must carry the same text");
-  // Dot styling is the finished one, not the working one.
-  assert(String(rows[0].querySelector(".session-status").className).includes("status-idle"));
-});
 
-check("the sub-agent panel header shows 'no longer reporting' for a reaped row and 'done' otherwise", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, REAPED_ROWS(Date.now() / 1000)));
-  const rows = page.all("acpTranscript", ".acp-crew-row");
-  rows[0].dispatch("click");
-  assertEqual(page.el("acpSubStatus").textContent, "no longer reporting");
-});
 
-check("dashboard: a reaped workflow row says 'no longer reporting'; normal finishes still say 'done'", () => {
-  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", REAPED_ROWS(Date.now() / 1000)));
-  const rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
-  assertEqual(rows.length, 4);
-  const act = (r) => r.querySelector(".acp-crew-action").textContent;
-  assertEqual([0, 1, 2, 3].map((i) => act(rows[i])).join("|"),
-              "no longer reporting|done|done|errored");
-  rows[0].dispatch("click");
-  assertEqual(p.el("dashSubStatus").textContent, "no longer reporting");
-});
 
-check("acp-crew-label shows entry.sessionName when present", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "do something long",
-      sessionName: "count_src", status: "working", action: "", done: false, error: "",
-      startedAt: Date.now() / 1000 },
-  ]));
-  const label = page.one("acpTranscript", ".acp-crew-label");
-  assert(label !== null, "row should have a .acp-crew-label element");
-  assertEqual(label.textContent, "count_src",
-              "label should show sessionName, not task");
-});
 
-check("acp-crew-label falls back to 30-char truncated task with ellipsis", (tpl) => {
-  const { page, live } = connected(tpl);
-  const longTask = "Count the number of source files in the repository";
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: longTask,
-      sessionName: "", status: "working", action: "", done: false, error: "",
-      startedAt: Date.now() / 1000 },
-  ]));
-  const label = page.one("acpTranscript", ".acp-crew-label");
-  assert(label !== null, "row should have a .acp-crew-label element");
-  const txt = label.textContent;
-  assert(txt.endsWith("\u2026"), "label should end with ellipsis when task > 30 chars");
-  // slice(0, 30) of the 50-char task, trimmed, then + ellipsis
-  assertEqual(txt, "Count the number of source fil\u2026",
-              "label should be first 30 chars of task + ellipsis");
-});
 
-check("acp-crew-label falls back to 'agent' when both sessionName and task are empty", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "", sessionName: "",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  const label = page.one("acpTranscript", ".acp-crew-label");
-  assert(label !== null, "row should have a .acp-crew-label element");
-  assertEqual(label.textContent, "agent",
-              "label should be 'agent' when sessionName and task are both empty");
-});
 
-check("acp-crew-action shows 'working\u2026' fallback when action is empty and state is working", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "do something", sessionName: "stage-1",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  const row = page.one("acpTranscript", ".acp-crew-row");
-  assert(row !== null, "crew panel should have a row");
-  const actionSpan = row.querySelector(".acp-crew-action");
-  assert(actionSpan !== null, "row should have a .acp-crew-action element");
-  assertEqual(actionSpan.textContent, "working\u2026",
-              "action should show 'working\u2026' fallback when action is empty and state is working");
-});
 
-check("acp-crew-action shows 'done' for a done:true row with no action field", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "do something", sessionName: "stage-1",
-      status: "terminated", done: true, error: "", startedAt: Date.now() / 1000 - 5 },
-  ]));
-  const row = page.one("acpTranscript", ".acp-crew-row");
-  assert(row !== null, "crew panel should have a row");
-  const actionSpan = row.querySelector(".acp-crew-action");
-  assert(actionSpan !== null, "row should have a .acp-crew-action element");
-  assertEqual(actionSpan.textContent, "done",
-              "action should show 'done' for a done:true row with no action field");
-});
 
-check("acp-crew-action shows 'errored' for an error:true row", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "do something", sessionName: "stage-1",
-      status: "terminated", done: true, error: "tool failed", startedAt: Date.now() / 1000 - 5 },
-  ]));
-  const row = page.one("acpTranscript", ".acp-crew-row");
-  assert(row !== null, "crew panel should have a row");
-  const actionSpan = row.querySelector(".acp-crew-action");
-  assert(actionSpan !== null, "row should have a .acp-crew-action element");
-  assertEqual(actionSpan.textContent, "errored",
-              "action should show 'errored' for an error:true row");
-});
 
 check("renderSubHead subRoleEl shows sessionName when present", (tpl) => {
   const { page, live } = connected(tpl);
@@ -7007,268 +6614,24 @@ check("role span is omitted when entry.role is empty", (tpl) => {
               "role span should be absent when entry.role is empty");
 });
 
-check("role span shows role text when entry.role is non-empty", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "kiro_default", task: "do work", sessionName: "stage-a",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  const crewPanel = page.one("acpTranscript", ".acp-crew-panel");
-  assert(crewPanel !== null, "crew panel should exist");
-  const roleSpan = crewPanel.querySelector(".acp-crew-role");
-  assert(roleSpan !== null, "role span should be present when entry.role is non-empty");
-  assertEqual(roleSpan.textContent, "kiro_default",
-              "role span should show the role text");
-});
 
 // ---- 261016 Phase 4: Workflows panel shell ----
 //
 // SC4 (live run section) and SC6 (click live step → opens sub-agent panel).
 
-check("workflows toggle is hidden until a workflowLive subagents frame arrives", (tpl) => {
-  const { page, live } = connected(tpl);
-  assert(page.el("acpWorkflowsToggle").hidden, "toggle must start hidden");
-  // A non-live frame (no workflowLive) must not reveal the toggle.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "stage-1",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  assert(page.el("acpWorkflowsToggle").hidden, "toggle still hidden after non-live frame");
-  // Now deliver a workflowLive frame.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-2", role: "step-b", task: "", sessionName: "stage-2",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], "", true));
-  assert(!page.el("acpWorkflowsToggle").hidden, "toggle revealed after workflowLive frame");
-});
 
-check("clicking the workflows toggle shows and hides the panel; aria-expanded tracks state", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "stage-1",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "", true));
-  const toggle = page.el("acpWorkflowsToggle");
-  const panel  = page.el("acpWorkflowsPanel");
-  assert(panel.hidden, "panel starts hidden");
-  assertEqual(toggle.getAttribute("aria-expanded"), "false", "aria-expanded starts false");
-  // First click — open.
-  toggle.dispatch("click");
-  assert(!panel.hidden, "panel opens on first click");
-  assertEqual(toggle.getAttribute("aria-expanded"), "true", "aria-expanded updates to true");
-  // Second click — close.
-  toggle.dispatch("click");
-  assert(panel.hidden, "panel closes on second click");
-  assertEqual(toggle.getAttribute("aria-expanded"), "false", "aria-expanded returns to false");
-});
 
-check("a workflowLive subagents frame populates #acpWorkflowsLiveRun with step rows", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "stage-A",
-      status: "working", action: "", done: false, error: "", startedAt: now - 5 },
-    { sessionId: "sub-2", role: "step-b", task: "", sessionName: "",
-      status: "waiting", action: "", done: false, error: "", startedAt: now - 2 },
-  ], "", true));
-  const rows = page.el("acpWorkflowsLiveRun").querySelectorAll(".wf-step-row");
-  assertEqual(rows.length, 2, "one step row per entry");
-  assertEqual(rows[0].querySelector(".wf-step-name").textContent, "stage-A",
-              "sessionName used as step name when present");
-  assertEqual(rows[1].querySelector(".wf-step-name").textContent, "step-b",
-              "role used as step name when sessionName is empty");
-  // Elapsed time span must exist.
-  const elapsed = rows[0].querySelector(".wf-step-elapsed");
-  assert(elapsed !== null, "elapsed span must be present");
-  assert(elapsed.textContent.length > 0, "elapsed text must be non-empty when startedAt is given");
-});
 
-check("clicking a live step row in the Workflows panel opens the sub-agent panel", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "stage-1",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "", true));
-  const rows = page.el("acpWorkflowsLiveRun").querySelectorAll(".wf-step-row");
-  assertEqual(rows.length, 1);
-  rows[0].dispatch("click");
-  // The sub-agent panel should have opened (same openSubagent path as crew rows).
-  assertEqual(page.el("acpSubPanel").hidden, false,
-              "clicking a live step row must open the sub-agent panel");
-  // And a subscribe must have gone out for the step's sessionId.
-  page.openAt(1);
-  const subs = page.socketAt(1).sent.filter((f) => f.type === "subscribe");
-  assertEqual(subs.length, 1, "expected one subscribe on the step socket");
-  assertEqual(subs[0].sessionId, "sub-1", "subscribe targets the step's sessionId");
-});
 
-check("a non-live subagents frame (workflowLive falsy) hides the toggle and clears live rows", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // First populate with a live frame.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "", true));
-  assert(!page.el("acpWorkflowsToggle").hidden, "toggle revealed by live frame");
-  // Now deliver a non-live frame (workflowLive absent).
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "",
-      status: "terminated", action: "", done: true, error: "", startedAt: now },
-  ]));
-  assert(page.el("acpWorkflowsToggle").hidden, "toggle hidden after non-live frame");
-  assertEqual(page.el("acpWorkflowsLiveRun").querySelectorAll(".wf-step-row").length, 0,
-              "live run container cleared by non-live frame");
-});
 
-check("no innerHTML used in the Workflows panel (DOM stand-in guard)", (tpl) => {
-  // If any path writes innerHTML the DOM stand-in throws immediately. Simply
-  // delivering the frame is the check: the stand-in throws on any innerHTML write.
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step/<script>", task: "", sessionName: "<b>name</b>",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "", true));
-  const nameEl = page.el("acpWorkflowsLiveRun").querySelector(".wf-step-name");
-  assertEqual(nameEl.textContent, "<b>name</b>", "step name rendered as text, not markup");
-});
 
-check("clearWorkflowsLiveRun closes the panel so it cannot be stranded open", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // Populate with a live frame then manually open the panel.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "s1",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "", true));
-  const toggle = page.el("acpWorkflowsToggle");
-  const panel  = page.el("acpWorkflowsPanel");
-  toggle.dispatch("click");
-  assert(!panel.hidden, "panel must be open before the clear");
-  // Deliver a non-live frame to trigger clearWorkflowsLiveRun.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "s1",
-      status: "terminated", action: "", done: true, error: "", startedAt: now },
-  ]));
-  assert(panel.hidden, "panel must be closed after clearWorkflowsLiveRun");
-  assertEqual(toggle.getAttribute("aria-expanded"), "false",
-              "aria-expanded must reset to false when panel is closed by clear");
-  assert(toggle.hidden, "toggle must be hidden after clear");
-});
 
-check("Enter and Space keys on a live step row open the sub-agent panel", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "step-a", task: "", sessionName: "s1",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "", true));
-  const rows = page.el("acpWorkflowsLiveRun").querySelectorAll(".wf-step-row");
-  assertEqual(rows.length, 1, "one step row");
-  assertEqual(rows[0].getAttribute("role"), "button", "row must have role=button");
-  assertEqual(rows[0].getAttribute("tabindex"), "0", "row must have tabindex=0");
-  // Enter opens the sub-agent panel.
-  rows[0].dispatch("keydown", { key: "Enter", bubbles: true, preventDefault: () => {} });
-  assertEqual(page.el("acpSubPanel").hidden, false,
-              "Enter key on step row must open sub-agent panel");
-});
 
 // ---- Phase 6: sub-agent composer (SC7/SC8) ----------------------------------
 
-check("sub-agent composer is visible when openSubagent is called with a live workflow step SID", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // Deliver a workflowLive:true subagents frame to populate _liveWorkflowChildSids.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "wf-step-1", role: "step-a", task: "", sessionName: "s1",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "", true));
-  // Open the sub-agent panel for the live step.
-  page.el("acpTranscript").querySelector(".acp-crew-row").dispatch("click");
-  const container = page.el("acpSubComposerContainer");
-  assert(!container.hidden,
-    "sub-agent composer container must be visible for a live workflow step");
-  const input = page.el("acpSubComposerInput");
-  assert(!input.hidden, "composer input must not be hidden");
-  const sendBtn = page.el("acpSubComposerSend");
-  assert(!sendBtn.hidden, "send button must not be hidden");
-});
 
-check("sub-agent composer is hidden when openSubagent is called for a non-live sub-agent", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // Deliver a subagents frame WITHOUT workflowLive:true.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "plain-sub-1", role: "explorer", task: "", sessionName: "s1",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ]));  // workflowLive absent → non-live
-  // Open the sub-agent panel via crew row click.
-  page.el("acpTranscript").querySelector(".acp-crew-row").dispatch("click");
-  const container = page.el("acpSubComposerContainer");
-  assert(container.hidden,
-    "sub-agent composer container must be hidden for a non-workflow sub-agent");
-});
 
-check("sub-agent composer is disabled when workflowLive becomes false while the panel is open", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // Start a live workflow.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "wf-step-2", role: "step-b", task: "", sessionName: "s2",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "", true));
-  page.el("acpTranscript").querySelector(".acp-crew-row").dispatch("click");
-  const container = page.el("acpSubComposerContainer");
-  assert(!container.hidden, "composer must be visible for live step");
-  // Now deliver a workflowLive:false frame to the MAIN socket (index 0).
-  // After openSubagent opens the sub-panel socket, page.deliver() would
-  // target the sub-socket — use deliverTo(0) to reach the main handler.
-  page.deliverTo(0, subagentsFrame(live, [], "", false));
-  // Container must remain visible (showing "Step completed." notice) since it had a target.
-  // The input and send button must be hidden; status must be visible.
-  const input   = page.el("acpSubComposerInput");
-  const sendBtn = page.el("acpSubComposerSend");
-  const status  = page.el("acpSubComposerStatus");
-  assert(input.hidden,   "input must be hidden after step completes");
-  assert(sendBtn.hidden, "send button must be hidden after step completes");
-  assert(!status.hidden, "status must be visible showing 'Step completed.'");
-  assertEqual(status.textContent, "Step completed.",
-    "status must say 'Step completed.' when the step ends while panel is open");
-});
 
-check("step_message frame matching subViewSid renders amber card in #acpSubPanel", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // Open the sub-agent panel for a live step.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "wf-step-3", role: "step-c", task: "", sessionName: "s3",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "", true));
-  page.el("acpTranscript").querySelector(".acp-crew-row").dispatch("click");
-  const subPanel = page.el("acpSubPanel");
-  // No card before the frame arrives.
-  assertEqual(subPanel.querySelectorAll(".acp-step-question-card").length, 0,
-    "no step question card before step_message arrives");
-  // Deliver a step_message to the MAIN socket (index 0), not the sub-agent socket.
-  page.deliverTo(0, {
-    type: "step_message",
-    sessionId: live,
-    payload: { step: "workflow step step-c", severity: "warning",
-               message: "Waiting for your input", stepSessionId: "wf-step-3" },
-  });
-  const cards = subPanel.querySelectorAll(".acp-step-question-card");
-  assertEqual(cards.length, 1, "one step question card must appear in #acpSubPanel");
-  const cardText = cards[0].querySelector(".acp-step-question-text");
-  assert(cardText !== null, "card must have a text element");
-  assertEqual(cardText.textContent, "Waiting for your input",
-    "card text must match the step_message message");
-  // Also verify the amber class is applied for warning severity.
-  assert(cards[0].className.includes("acp-step-question-card-warning"),
-    "warning severity must get the -warning class");
-});
 
 check("step_message with non-matching stepSessionId does not render sub-panel card", (tpl) => {
   const { page, live } = connected(tpl);
@@ -7292,111 +6655,10 @@ check("step_message with non-matching stepSessionId does not render sub-panel ca
 
 
 
-check("setCrew with toolCallId anchors panel after tool call row", (tpl) => {
-  const { page, live } = connected(tpl);
-  // First deliver a tool_call frame so toolRows has the entry
-  page.deliver({ type: "tool_call", sessionId: live,
-    payload: { toolCallId: "tcid-1", title: "orchestrate", kind: "execute",
-               status: "in_progress" } });
-  const toolRow = page.one("acpTranscript", ".acp-msg-tool");
-  assert(toolRow !== null, "tool call row should exist in the transcript");
-  // Now deliver the subagents frame with the same toolCallId
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-a", role: "worker", task: "", sessionName: "stage-a",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], "tcid-1"));
-  // crews['tcid-1'] should exist
-  assert(page.sandbox._testCrews() && page.sandbox._testCrews()["tcid-1"],
-         "crews['tcid-1'] should exist after subagents frame with toolCallId");
-  const panel = page.sandbox._testCrews()["tcid-1"].panel;
-  assert(panel !== null && panel !== undefined, "crew panel should be created");
-  // The panel should be inserted after the tool call row (as nextSibling of the row)
-  const transcriptKids = page.el("acpTranscript").childNodes;
-  const toolRowIdx = transcriptKids.indexOf(toolRow);
-  const panelIdx = transcriptKids.indexOf(panel);
-  assert(toolRowIdx >= 0, "tool call row should be a direct child of transcript");
-  assert(panelIdx >= 0, "crew panel should be a direct child of transcript");
-  assert(panelIdx === toolRowIdx + 1,
-         "crew panel should be inserted directly after the tool call row");
-});
 
-check("setCrew with empty toolCallId creates no-anchor panel appended to transcript", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-b", role: "worker", task: "", sessionName: "stage-b",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], ""));
-  const crewKeys = Object.keys(page.sandbox._testCrews());
-  assertEqual(crewKeys.length, 1, "exactly one crew slot should be created");
-  assert(crewKeys[0].startsWith("_na_"),
-         "no-anchor slot key should start with _na_");
-  // Panel should be last child of transcriptEl
-  const transcriptKids = page.el("acpTranscript").childNodes;
-  const panel = page.sandbox._testCrews()[crewKeys[0]].panel;
-  assert(panel !== null, "panel should be created");
-  assertEqual(transcriptKids[transcriptKids.length - 1], panel,
-              "no-anchor panel should be appended as last child of transcript");
-});
 
-check("setCrew with empty entries and no active no-anchor slot does not ghost _noAnchorKey", (tpl) => {
-  // Each check() call gets a fresh page via loadPage(), so _noAnchorSeq and
-  // _noAnchorKey both start at their initial values (0 / null) here.
-  const { page, live } = connected(tpl);
-  // Spurious server dismissal with no active no-anchor slot: this must NOT
-  // advance _noAnchorSeq or set _noAnchorKey to a ghost key.
-  page.deliver(subagentsFrame(live, [], ''));
-  // Now create a real no-anchor slot — should get _na_1, not _na_2.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub1", role: "worker", task: "", sessionName: "Agent 1",
-      status: "working", action: "", done: false, error: "",
-      startedAt: Date.now() / 1000 },
-  ], ''));
-  const crewsMap = page.sandbox._testCrews();
-  const keys = Object.keys(crewsMap);
-  assertEqual(keys.length, 1, "should have exactly one slot (_na_1 not _na_2)");
-  assertEqual(keys[0], "_na_1",
-              "_noAnchorSeq should not have been advanced by the spurious empty call");
-});
 
-check("two subagents frames with different toolCallIds produce two independent panels", (tpl) => {
-  const { page, live } = connected(tpl);
-  // Deliver two tool_call frames
-  page.deliver({ type: "tool_call", sessionId: live,
-    payload: { toolCallId: "a", title: "orchestrate-a", kind: "execute", status: "in_progress" } });
-  page.deliver({ type: "tool_call", sessionId: live,
-    payload: { toolCallId: "b", title: "orchestrate-b", kind: "execute", status: "in_progress" } });
-  // Deliver two subagents frames with different toolCallIds
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-a1", role: "worker", task: "", sessionName: "agent-a",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], "a"));
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-b1", role: "worker", task: "", sessionName: "agent-b",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], "b"));
-  assertEqual(Object.keys(page.sandbox._testCrews()).length, 2,
-              "two different toolCallIds should produce two independent crew slots");
-  assert(page.all("acpTranscript", ".acp-crew-panel").length === 2,
-         "two panels should appear in the transcript");
-});
 
-check("session frame clears all crew panels", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-c", role: "worker", task: "", sessionName: "agent-c",
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], "tcid-clear"));
-  assertEqual(Object.keys(page.sandbox._testCrews()).length, 1,
-              "one crew slot should exist before session frame");
-  // Deliver a session frame (triggers clearTranscript)
-  page.deliver({ type: "session", sessionId: "sess-new",
-    payload: { sessionId: "sess-new", cwd: "C:\\work\\new", created: true,
-               turnActive: false, contextPercent: null } });
-  assertEqual(Object.keys(page.sandbox._testCrews()).length, 0,
-              "all crew slots should be cleared after session frame");
-  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
-              "no acp-crew-panel elements should remain in the DOM");
-});
 
 check("crewEntry finds entries across multiple active crews", (tpl) => {
   const { page, live } = connected(tpl);
@@ -7421,45 +6683,7 @@ check("crewEntry finds entries across multiple active crews", (tpl) => {
          "crewEntry should return null for an unknown sessionId");
 });
 
-check("panels persist after meta turn:end", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // Deliver an all-done crew frame (the previously auto-dismissed case)
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-z", role: "worker", task: "", sessionName: "agent-z",
-      status: "terminated", action: "", done: true, error: "",
-      startedAt: now - 30, stoppedAt: now },
-  ], "tcid-persist2"));
-  // meta turn:end
-  page.deliver({ type: "meta", sessionId: live,
-                 payload: { turn: "end", stopReason: "end_turn" } });
-  // crews['tcid-persist2'] should still exist
-  assert(page.sandbox._testCrews() && page.sandbox._testCrews()["tcid-persist2"],
-         "crews['tcid-persist2'] should still exist after turn:end (SC4)");
-  const panel = page.sandbox._testCrews()["tcid-persist2"].panel;
-  assert(panel !== null && panel !== undefined && panel.parentNode !== null,
-         "crew panel should still be in the DOM after turn:end (SC4)");
-});
 
-check("two consecutive no-anchor subagents updates reuse the same slot", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // Deliver two no-anchor subagents frames for the same fan-out
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub1", role: "worker", task: "", sessionName: "agent-1",
-      status: "working", action: "", done: false, error: "", startedAt: now },
-  ], ""));
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub1", role: "worker", task: "", sessionName: "agent-1",
-      status: "terminated", action: "", done: true, error: "", startedAt: now, stoppedAt: now + 1 },
-  ], ""));
-  const crewsMap = page.sandbox._testCrews();
-  const keys = Object.keys(crewsMap);
-  assertEqual(keys.length, 1, "exactly one no-anchor slot after two updates");
-  assert(keys[0].startsWith("_na_"), "key has _na_ prefix");
-  const panels = page.all("acpTranscript", ".acp-crew-panel");
-  assertEqual(panels.length, 1, "exactly one crew panel in DOM");
-});
 
 check("anchor panel is a direct transcriptEl child even after flushToolGroups", (tpl) => {
   const { page, live } = connected(tpl);
@@ -10075,35 +9299,7 @@ check("clear unread on subscribe", (tpl) => {
 
 // ---- Phase 5: SC-7 crew timer tests -----------------------------------------
 
-check("elapsed text with stopped at freezes at done elapsed", (tpl) => {
-  // Verify that a done crew entry's elapsed span shows the frozen time
-  // (stoppedAt - startedAt) and does not keep incrementing with Date.now().
-  const { page, live } = connected(tpl);
-  const t = Date.now() / 1000 - 200;  // 200s ago
-  const stoppedAt = t + 65;            // done 65s after start => "1m 5s"
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "worker", task: "", status: "done",
-      action: "", done: true, error: "", startedAt: t, stoppedAt: stoppedAt },
-  ]));
-  const elapsed = page.one("acpTranscript", ".acp-crew-elapsed");
-  assert(elapsed !== null, "elapsed span should be present for done entry");
-  assertEqual(elapsed.textContent, "1m 5s",
-    "done entry elapsed should be frozen at stoppedAt - startedAt (1m 5s)");
-});
 
-check("elapsed text without stopped at uses live Date.now", (tpl) => {
-  // Verify that a working entry's elapsed span reflects the real elapsed time.
-  const { page, live } = connected(tpl);
-  const startedAt = Date.now() / 1000 - 10;  // 10 seconds ago
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working",
-      action: "", done: false, error: "", startedAt: startedAt },
-  ]));
-  const elapsed = page.one("acpTranscript", ".acp-crew-elapsed");
-  assert(elapsed !== null, "elapsed span should be present for working entry");
-  assertEqual(elapsed.textContent, "10s",
-    "working entry elapsed should reflect current elapsed time (10s)");
-});
 
 check("crew timer starts when crew has a non-done entry", (tpl) => {
   // setCrew([{done:false}]) must start a setInterval so the elapsed display ticks.
@@ -14945,9 +14141,9 @@ const DASH_HANDLE_NAMES = [
 // composer-chrome.js), mirroring acp.html's own crew panel + read-only
 // sub-agent panel, kept as two distinct pieces here too.
 const DASH_CREW_SUBAGENT_NAMES = [
-  "dashCrewLabel", "dashRenderCrewPanel", "dashSubagentState", "dashStopSlotTimer",
-  "dashRemoveSingleCrewPanel", "dashRemoveAllCrewPanels", "dashSetCrew",
-  "dashOpenSubagent", "dashCloseSubagentView", "dashConnectSubWs",
+  "createWorkflowUI", "dashRemoveAllCrewPanels", "dashSetCrew", "dashCrewEntry",
+  "dashOpenSubagent", "dashCloseSubagentView", "dashOpenStepView", "dashCloseStepView",
+  "dashConnectSubWs",
   "dashSubAppendChunk", "dashSubAddToolCall", "dashSubAddNote", "dashHandleSub",
   "window.removeAllCrewPanels", "window.closeSubagentView",
   // Phase 5 review fixes: dashCloseSubWs (Fix 8, the explicit-close helper
@@ -15120,9 +14316,9 @@ function dashPickerSource() {
   // written.
   // Object.create(null), not {} (Fix 4, Phase 5 review) -- keyed directly by
   // wire-controlled toolCallId.
-  const crewFrom = src.indexOf("var dashCrews = Object.create(null);");
-  if (crewFrom < 0) throw new Error("index.html no longer defines dashCrews");
-  if (crewFrom > handleFrom) throw new Error("dashCrews now follows dashCloseIfAbandoned");
+  const crewFrom = src.indexOf("var dashWfui = createWorkflowUI({");
+  if (crewFrom < 0) throw new Error("index.html no longer creates dashWfui");
+  if (crewFrom > handleFrom) throw new Error("dashWfui now follows dashCloseIfAbandoned");
 
   // Image-attach pipeline region (SC6, dashboard/ACP feature-parity plan
   // Phase 4): from IMAGE_LADDER's declaration through the end of
@@ -15344,6 +14540,21 @@ function loadDashPicker(opts = {}) {
   byId.set("dashSubRole", new El("span"));
   byId.set("dashSubStatus", new El("span"));
   byId.set("dashSubTranscript", new El("div"));
+  // The run inspector, strip and Runs button (static/workflow-ui.js, created
+  // in the crew region as `dashWfui`), in the markup's initial state.
+  for (const [id, tag, hidden] of [
+    ["dashInsp", "aside", true], ["dashInspTitle", "span"], ["dashInspPill", "span"],
+    ["dashInspClose", "button"], ["dashInspTabSteps", "button"], ["dashInspTabHistory", "button"],
+    ["dashInspHistoryCount", "span"], ["dashInspSteps", "div"], ["dashInspHistory", "div", true],
+    ["dashSubFacts", "div", true], ["dashSubAsk", "div", true],
+    ["dashSubComposerContainer", "div"], ["dashSubComposerInput", "textarea"],
+    ["dashSubComposerSend", "button"], ["dashSubComposerStatus", "span"],
+    ["dashRunsToggle", "button", true], ["dashRunsBadge", "span", true],
+    ["dashRunStrip", "div", true], ["dashWfLive", "div"], ["dashWfAlert", "div"],
+  ]) {
+    if (!byId.has(id)) byId.set(id, new El(tag));
+    if (hidden) byId.get(id).hidden = true;
+  }
   // openSessionTranscript()/dashRailForgetSession() (Fix 3, Step 9 review)
   // both look this up by id to clear/replace the transcript panel's content.
   byId.set("dashTranscript", new El("div"));
@@ -15563,6 +14774,8 @@ function loadDashPicker(opts = {}) {
         }
         return el;
       },
+      // The run card's icons (static/workflow-ui.js) are SVG.
+      createElementNS: (_ns, tag) => new El(tag),
       getElementById: (id) => byId.get(id) ?? null,
       // openSessionTranscript() (Fix 3, Step 9 review) calls
       // document.querySelectorAll('.acp-rail-row.viewing') to clear the
@@ -16055,6 +15268,7 @@ function loadDashPicker(opts = {}) {
   // inline script that calls initXxxDom() and defines dashHandle).
   vm.runInContext(composerChromeSource(), sandbox,
                    { filename: "composer-chrome.js" });
+  vm.runInContext(workflowUiSource(), sandbox, { filename: "workflow-ui.js" });
   for (const fn of ["hasPendingStepPermissionCard", "findPermissionRequestRow",
                     "markPermissionResolved", "insidePermissionRuleEditor"]) {
     vm.runInContext(rendererFunctionSource(fn), sandbox,
@@ -18335,22 +17549,6 @@ check("dashboard: crew panel — no panel appears until a subagents frame arrive
     "a session with no crew should show no crew panel");
 });
 
-check("dashboard: crew panel — a subagents frame with a running entry renders a row with label and action", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const now = Date.now() / 1000;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "stage-1",
-      status: "working", action: "reading", done: false, error: "", startedAt: now - 5 },
-  ]));
-  const panels = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel");
-  assertEqual(panels.length, 1, "a crew panel should appear in the transcript");
-  const rows = panels[0].querySelectorAll(".acp-crew-row");
-  assertEqual(rows.length, 1, "one row per sub-agent");
-  assertEqual(rows[0].querySelector(".acp-crew-label").textContent, "stage-1",
-    "entry should show the sessionName as primary label");
-  assertEqual(rows[0].querySelector(".acp-crew-action").textContent, "reading",
-    "entry should show the current action");
-});
 
 check("dashboard: crew panel — a row is clickable and opens the sub-agent panel", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
@@ -18364,25 +17562,6 @@ check("dashboard: crew panel — a row is clickable and opens the sub-agent pane
   assertEqual(p.el("dashSubPanel").hidden, false, "clicking a crew row should open the sub-agent panel");
 });
 
-check("dashboard: crew panel — a toolCallId of '__proto__' is stored as a literal key, not reassigning dashCrews's own prototype (Fix 4, Phase 5 review)", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], "__proto__"));
-  // dashCrews is keyed directly by the wire-controlled toolCallId
-  // (unrestricted by acp.py's frame format) -- on an ordinary object literal
-  // `dashCrews["__proto__"] = value` is intercepted by Object.prototype's
-  // own __proto__ accessor and reassigns the object's [[Prototype]] instead
-  // of storing a literal key. Object.create(null) has no such accessor in
-  // its chain, so the assignment behaves like any other key.
-  assert(Object.keys(p.sandbox.dashCrews).includes("__proto__"),
-    "the crew slot must be stored under the literal key '__proto__'");
-  assertEqual(typeof p.sandbox.dashCrews.hasOwnProperty, "undefined",
-    "dashCrews must be Object.create(null) -- inheriting Object.prototype methods here would mean " +
-    "the '__proto__' assignment above reassigned the object's own prototype instead of being stored");
-  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row").length, 1,
-    "the crew row must still render normally for a toolCallId of '__proto__'");
-});
 
 check("dashboard: crew panel — persists after all entries are done (no auto-dismiss)", () => {
   const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
@@ -18409,95 +17588,13 @@ check("dashboard: crew panel — persists after a main-channel meta turn:end (no
     "turn end must not dismiss the crew panel");
 });
 
-check("dashboard: crew panel — header text: 'Orchestrating (N agents)' singular/plural", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const now = Date.now() / 1000;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
-  ]));
-  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
-    "Orchestrating (1 agent)", "singular for one running entry");
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
-    { sessionId: "sub-2", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
-  ]));
-  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
-    "Orchestrating (2 agents)", "plural for two running entries");
-});
 
-check("dashboard: crew panel — header text: 'Done (N agents)' singular/plural when all entries are done", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const now = Date.now() / 1000;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now - 5, stoppedAt: now },
-  ]));
-  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
-    "Done (1 agent)", "singular when the sole entry is done");
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now - 5, stoppedAt: now },
-    { sessionId: "sub-2", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now - 5, stoppedAt: now },
-  ]));
-  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
-    "Done (2 agents)", "plural when both entries are done");
-});
 
-check("dashboard: crew header stays 'Orchestrating' while workflowLive is true and every row is done", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const now = Date.now() / 1000;
-  const rows = [
-    { sessionId: "sub-1", role: "step-one", task: "", status: "done", action: "", done: true, error: "", startedAt: now - 5, stoppedAt: now - 1 },
-  ];
-  const hdr = () => p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, "", true));
-  assertEqual(hdr(), "Orchestrating (1 agent)", "the gap must not flash 'Done'");
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, "", false));
-  assertEqual(hdr(), "Done (1 agent)", "the closing frame flips it to Done");
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, "", true));
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, ""));
-  assertEqual(hdr(), "Done (1 agent)", "a legacy frame without the field must not keep it live");
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", rows, "", "true"));
-  assertEqual(hdr(), "Done (1 agent)", "only a boolean true counts");
-});
 
 // 261012 D15, mirroring the /acp checks: a waiting row (open, status
 // 'waiting') gets the waiting dot and its message, and the header reads
 // "Paused (n)" while no row works.
-check("dashboard: crew header reads 'Paused' with a waiting row and none working", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const now = Date.now() / 1000;
-  const waiting = { sessionId: "sub-w", role: "ask-step", task: "", sessionName: "wf-asker",
-    status: "waiting", action: "Which colour?", done: false, error: "", startedAt: now - 5 };
-  const done = { sessionId: "sub-d", role: "step-one", task: "", status: "done", action: "",
-    done: true, error: "", startedAt: now - 9, stoppedAt: now - 6 };
-  const working = Object.assign({}, waiting, { sessionId: "sub-r", status: "working",
-    action: "running" });
-  const hdr = () => p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [waiting, done], "", true));
-  assertEqual(hdr(), "Paused (2 agents)", "waiting + done reads Paused");
-  const rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
-  assert(String(rows[0].querySelector(".session-status").className).split(/\s+/)
-    .includes("status-waiting"), "the waiting dot");
-  assert(rows[0].className.includes("acp-crew-row-waiting"), "the waiting row class");
-  assertEqual(rows[0].querySelector(".acp-crew-action").textContent, "Which colour?");
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [waiting, working], "", true));
-  assertEqual(hdr(), "Orchestrating (2 agents)", "one working row: Orchestrating");
-  assertEqual(p.sandbox.dashSubagentState(Object.assign({}, waiting, { action: "" })), "waiting");
-  assertEqual(p.sandbox.dashSubagentState(Object.assign({}, waiting, { done: true })), "done",
-    "a done row is never waiting");
-  assertEqual(p.sandbox.dashSubagentState(null), "working");
-});
 
-check("dashboard: the sub-panel head of a waiting row with no action says 'waiting'", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-w", role: "ask-step", task: "", sessionName: "wf-asker",
-      status: "waiting", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  const head = p.el("dashSubStatus");
-  assertEqual(String(head.className), "acp-subpanel-status acp-subpanel-status-waiting");
-  assertEqual(head.textContent, "waiting", "not 'working…'");
-});
 
 // Review fix (Phase 4): the dashboard's `history` replay goes through
 // renderTranscriptHistory -> renderTranscriptFrame, which dropped recorded
@@ -18579,81 +17676,10 @@ check("dashboard: a step_message frame reaches the shared step-message row", () 
     ["workflow step wf-asker", "warning", "Which colour?"]]));
 });
 
-check("dashboard: crew header: an errored row with workflowLive true reads Orchestrating, row unchanged", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const now = Date.now() / 1000;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "step-one", task: "", status: "failed", action: "", done: true, error: "cancelled", startedAt: now - 5, stoppedAt: now - 1 },
-  ], "", true));
-  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
-    "Orchestrating (1 agent)");
-  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-action").textContent, "errored",
-    "workflowLive changes the header only, never how a row renders");
-});
 
-check("dashboard: crew panel — label falls back from sessionName to truncated task to 'agent'", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  assertEqual(p.sandbox.dashCrewLabel({ sessionName: "stage-a", task: "do a thing" }), "stage-a");
-  assertEqual(p.sandbox.dashCrewLabel({ sessionName: "", task: "x".repeat(40) }),
-    "x".repeat(30).trim() + "…");
-  assertEqual(p.sandbox.dashCrewLabel({ sessionName: "", task: "" }), "agent");
-  assertEqual(p.sandbox.dashCrewLabel(null), "agent");
-});
 
-check("dashboard: crew panel — action text falls back to 'working…'/'done'/'errored'", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const now = Date.now() / 1000;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "a"));
-  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-action").textContent, "working…");
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-2", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now, stoppedAt: now },
-  ], "b"));
-  const doneAction = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-action")[1];
-  assertEqual(doneAction.textContent, "done");
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-3", role: "worker", task: "", status: "error", action: "", done: true, error: "boom", startedAt: now, stoppedAt: now },
-  ], "c"));
-  const errAction = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-action")[2];
-  assertEqual(errAction.textContent, "errored");
-});
 
-check("dashboard: crew panel — status dot class reflects working/done/error", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const now = Date.now() / 1000;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
-  ], "a"));
-  assert(p.sandbox.transcriptEl.querySelector(".acp-crew-row").className.includes("acp-crew-row-working"));
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-2", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now, stoppedAt: now },
-  ], "b"));
-  let rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
-  assert(rows[1].className.includes("acp-crew-row-done"));
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-3", role: "worker", task: "", status: "error", action: "", done: true, error: "boom", startedAt: now, stoppedAt: now },
-  ], "c"));
-  rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
-  assert(rows[2].className.includes("acp-crew-row-error"));
-});
 
-check("dashboard: crew panel — setCrew with a toolCallId anchors the panel immediately after the matching tool-call row", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const toolRow = new El("div");
-  p.sandbox.transcriptEl.appendChild(toolRow);
-  const toolBody = new El("div");
-  toolRow.appendChild(toolBody);
-  p.sandbox.toolRows["t:tc-1"] = { body: toolBody };
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], "tc-1"));
-  const kids = p.sandbox.transcriptEl.childNodes;
-  const panelIdx = kids.findIndex((n) => n.className === "acp-crew-panel");
-  const toolIdx = kids.indexOf(toolRow);
-  assert(panelIdx === toolIdx + 1,
-    "the crew panel must be inserted immediately after the anchoring tool-call row");
-});
 
 check("dashboard: crew panel — setCrew with no toolCallId appends a no-anchor panel to the transcript", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
@@ -18664,42 +17690,8 @@ check("dashboard: crew panel — setCrew with no toolCallId appends a no-anchor 
     "a no-anchor crew update should still produce a panel, appended to the transcript");
 });
 
-check("dashboard: crew panel — empty entries with no active no-anchor slot does not ghost _dashNoAnchorKey", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", []));
-  assertEqual(p.sandbox._dashNoAnchorKey, null,
-    "an empty-entries update with nothing active must not set _dashNoAnchorKey");
-  assertEqual(p.sandbox._dashNoAnchorSeq, 0,
-    "an empty-entries update with nothing active must not advance _dashNoAnchorSeq");
-});
 
-check("dashboard: crew panel — two subagents frames with different toolCallIds produce two independent panels", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-a", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], "a"));
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-b", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ], "b"));
-  assertEqual(Object.keys(p.sandbox.dashCrews).length, 2,
-    "two different toolCallIds should produce two independent crew slots");
-  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 2,
-    "two panels should appear in the transcript");
-});
 
-check("dashboard: crew panel — two consecutive no-anchor subagents updates reuse the same slot", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  const keysAfterFirst = Object.keys(p.sandbox.dashCrews);
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "reading", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  const keysAfterSecond = Object.keys(p.sandbox.dashCrews);
-  assertEqual(keysAfterSecond.length, 1, "a second no-anchor update should not create a second slot");
-  assertEqual(keysAfterSecond[0], keysAfterFirst[0], "the same _na_ key should be reused");
-});
 
 check("dashboard: crew panel — dashCrewEntry finds entries across multiple active crews", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
@@ -18713,18 +17705,6 @@ check("dashboard: crew panel — dashCrewEntry finds entries across multiple act
   assert(found && found.sessionId === "sub-y", "dashCrewEntry should find an entry in a non-first crew slot");
 });
 
-check("dashboard: crew panel — a malicious sessionName renders as literal text, never innerHTML", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const malicious = "<img src=x onerror=\"window._dash_crew_xss=true\">";
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: malicious,
-      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  const label = p.sandbox.transcriptEl.querySelector(".acp-crew-label");
-  assert(label.textContent.includes(malicious),
-    "the crew label must render an agent-controlled sessionName as literal text");
-  assert(!p.sandbox._dash_crew_xss, "the onerror handler must not fire -- crew row rendering must not use innerHTML");
-});
 
 // ---- crew-slot timer cleanup (a real, easy-to-miss bug class here) -----
 
@@ -18759,57 +17739,8 @@ check("dashboard: crew panel — the setInterval timer is cleared once all entri
   assertEqual(p.intervals.length, baseline, "the timer must be cleared once the slot's entries are all done");
 });
 
-check("dashboard: crew panel — the elapsed-time interval rebuilds rows without error when it fires", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1" });
-  const startedAt = Date.now() / 1000 - 10;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt },
-  ]));
-  const elapsed = p.sandbox.transcriptEl.querySelector(".acp-crew-elapsed");
-  assert(elapsed !== null && elapsed.textContent.length > 0, "elapsed span should show a non-empty time string");
-  p.intervals[p.intervals.length - 1].fn();
-  const elapsed2 = p.sandbox.transcriptEl.querySelector(".acp-crew-elapsed");
-  assert(elapsed2 !== null, "elapsed span should still be present after the tick");
-});
 
-check("dashboard: crew panel — session_closed clears crew timers (parity with acp.html's releaseSession)", () => {
-  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  const baseline = p.intervals.length;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  assert(p.intervals.length > baseline, "fixture: a timer should be registered for a running crew entry");
-  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
-  assertEqual(p.intervals.length, baseline, "session_closed must clear crew timers");
-  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0, "session_closed must clear crew state");
-});
 
-check("dashboard: crew panel — agent_died clears crew timers, crew state, and closes any open sub-agent panel", () => {
-  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  const baseline = p.intervals.length;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
-  assert(p.sandbox.dashSubWs !== null, "fixture: dashSubWs should be open");
-  assert(p.intervals.length > baseline, "fixture: a timer should be registered for a running crew entry");
-  p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1", payload: { exitCode: 1, message: "" } });
-  assertEqual(p.intervals.length, baseline, "agent_died must clear crew timers");
-  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0, "agent_died must clear crew state");
-  assertEqual(p.el("dashSubPanel").hidden, true, "agent_died must close any open sub-agent panel");
-  // Fix 8 (Phase 5 review): explicit socket close, not just a hidden panel --
-  // see the session_closed test's own comment above for why.
-  assertEqual(p.sandbox.dashSubWs, null,
-    "agent_died must explicitly close and null dashSubWs, not just hide the panel");
-  // Fix 1 (Phase 5 review): unlike the baseline agent_died test above (no
-  // sub-agent panel ever opened there), THIS session's panel WAS open when
-  // agent_died fired -- confirms the composer still ends up visible-and-
-  // disabled correctly in that case too, not just the no-panel case.
-  assertEqual(p.sandbox.dashComposerEl.hidden, false,
-    "the composer must still end up visible-and-disabled even though a sub-agent panel WAS open " +
-    "when agent_died fired");
-});
 
 check("dashboard: crew panel — a removed slot's stale timer tick does not throw or leak", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
@@ -18834,33 +17765,9 @@ check("dashboard: crew panel — window.removeAllCrewPanels/window.closeSubagent
     "window.closeSubagentView must be assigned to dashCloseSubagentView");
 });
 
-check("dashboard: crew panel — a history reload clears all crew panels and closes an open sub-agent panel", () => {
-  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
-  p.sandbox.dashHandle({ type: "history", sessionId: "sess-1", payload: { events: [] } });
-  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0,
-    "all crew slots should be cleared after a history reload (window.removeAllCrewPanels now live)");
-  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 0);
-  assertEqual(p.el("dashSubPanel").hidden, true,
-    "the sub-agent panel should close on a history reload (window.closeSubagentView now live)");
-});
 
 // ---- the read-only sub-agent panel --------------------------------------
 
-check("dashboard: sub-agent panel — opening hides the transcript wrapper and composer, shows the sub panel", () => {
-  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  assertEqual(p.el("dashTranscriptWrap").hidden, true, "the transcript wrapper should hide while a sub-agent is open");
-  assertEqual(p.sandbox.dashComposerEl.hidden, true, "the composer should hide -- a sub-agent's conversation is read-only");
-  assertEqual(p.el("dashSubPanel").hidden, false);
-});
 
 check("dashboard: sub-agent panel — opening a crew row's sub-agent sends exactly one subscribe on a fresh socket", () => {
   const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
@@ -18912,16 +17819,6 @@ check("dashboard: sub-agent panel — the back button restores the main transcri
     "the sub-agent socket must be left open, not closed, when returning to the main transcript");
 });
 
-check("dashboard: sub-agent panel — closing the panel does not un-hide the composer when no session is attached", () => {
-  const p = loadDashPicker({ viewingSid: "sess-1", dashAttachedSid: null });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  p.el("dashSubBack").dispatch("click");
-  assertEqual(p.sandbox.dashComposerEl.hidden, true,
-    "the composer must stay hidden -- there is no attached session for it to show for");
-});
 
 check("dashboard: sub-agent panel — reopening a sub-agent reuses the existing socket rather than opening a new one", () => {
   const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
@@ -19010,30 +17907,7 @@ check("dashboard: sub-agent panel — a `rendered` frame rebuilds the open bubbl
     "the markdown rebuild must replace the streamed plain text, not append to it");
 });
 
-check("dashboard: sub-agent panel — a live subagents update refreshes the header status while the panel is open", () => {
-  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  const now = Date.now() / 1000;
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "reading", done: false, error: "", startedAt: now - 5 },
-  ], "tc-update"));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  p.openSub(0);
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "done", action: "", done: true, error: "", startedAt: now - 5 },
-  ], "tc-update"));
-  assertEqual(p.el("dashSubPanel").hidden, false, "the panel should stay open across a crew update");
-  assertEqual(p.el("dashSubStatus").textContent, "done");
-});
 
-check("dashboard: sub-agent panel — dashRenderSubHead shows 'errored: <message>' for an errored entry", () => {
-  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "error", action: "", done: true, error: "boom", startedAt: Date.now() / 1000 },
-  ]));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  assertEqual(p.el("dashSubStatus").textContent, "errored: boom");
-  assert(p.el("dashSubStatus").className.includes("acp-subpanel-status-error"));
-});
 
 check("dashboard: sub-agent panel — dashOpenSubagent(null) is a no-op", () => {
   const p = loadDashPicker({ viewingSid: "sess-1" });
@@ -19062,69 +17936,8 @@ check("dashboard: sub-agent panel — session_closed closes any open sub-agent p
     "session_closed must explicitly close and null dashSubWs, not just hide the panel");
 });
 
-check("dashboard: sub-agent panel — creating a new session without closing the current one tears down an open sub-agent panel, crew state, and dashSubWs (Fix 2, Phase 5 review)", () => {
-  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
-  assert(p.sandbox.dashSubWs !== null, "fixture: dashSubWs should be open");
-  // The `session` frame shape dashPickerCreate/dashRailQuickCreate fire when
-  // the user creates a new session without first closing the one whose
-  // sub-agent panel is currently open (index.html's `payload.created` early
-  // branch, dashboard/ACP-new-session-picker plan Phase 4).
-  p.sandbox.dashHandle({
-    type: "session", sessionId: "sess-2",
-    payload: { created: true, cwd: "/ws2" },
-  });
-  assertEqual(p.el("dashSubPanel").hidden, true,
-    "new-session creation must close any open sub-agent panel from the previously-viewed session");
-  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0,
-    "new-session creation must clear crew state from the previously-viewed session");
-  assertEqual(p.sandbox.dashSubWs, null,
-    "new-session creation must explicitly close and null dashSubWs, not just hide the panel");
-});
 
-check("dashboard: a failed transcript load (openSessionTranscript's fetch .catch()) still tears down an open sub-agent panel, crew state, and dashSubWs (Fix 3, Step 9 review)", async () => {
-  const p = loadDashPicker({
-    dashAttachedSid: "sess-1", viewingSid: "sess-1", sessionTranscriptFails: true,
-  });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
-  assert(p.sandbox.dashSubWs !== null, "fixture: dashSubWs should be open");
-  const row = new El("div");
-  row.dataset = { sid: "sess-2", provider: "", cwd: "/ws2" };
-  p.sandbox.openSessionTranscript(row);
-  await settleStaging(); // let the rejected fetch's .catch() run
-  assertEqual(p.el("dashSubPanel").hidden, true,
-    "a failed transcript load must still close any open sub-agent panel from the previously-viewed session -- " +
-    "renderTranscriptHistory()/clearTranscript() (the chain that normally does this) is never reached on this path");
-  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0,
-    "a failed transcript load must still clear crew state from the previously-viewed session");
-  assertEqual(p.sandbox.dashSubWs, null,
-    "a failed transcript load must still explicitly close and null dashSubWs, not just hide the panel");
-});
 
-check("dashboard: deleting the currently-viewed session (dashRailForgetSession) tears down its open sub-agent panel, crew state, and dashSubWs (Fix 3, Step 9 review)", () => {
-  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
-  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
-  assert(p.sandbox.dashSubWs !== null, "fixture: dashSubWs should be open");
-  p.sandbox.dashRailForgetSession("sess-1");
-  assertEqual(p.el("dashSubPanel").hidden, true,
-    "deleting the viewed session must close any open sub-agent panel -- there is no new session's transcript " +
-    "render here to trigger the usual clearTranscript() teardown");
-  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0, "deleting the viewed session must clear crew state");
-  assertEqual(p.sandbox.dashSubWs, null,
-    "deleting the viewed session must explicitly close and null dashSubWs, not just hide the panel");
-});
 
 // ---- Overview panel mode and its return paths ------------------------------
 // 260924_DASHBOARD_OVERVIEW_LIVE_TAILS_PLANS_USAGE Phase 1 (D3, D14, D15, D18,
@@ -19260,15 +18073,6 @@ check("dashboard overview: opening a session clears a pending user-close flag", 
   assertEqual(p.sandbox._dashUserClosedSid, null);
 });
 
-check("dashboard overview: a socket drop (dashCloseSubagentView) in overview mode keeps the overview mode (D15)", async () => {
-  const p = loadDashPicker();
-  await dashOpenFixture(p);
-  p.sandbox.dashShowOverview();
-  p.el("dashTranscriptWrap").hidden = true; // as a sub-agent view would leave it
-  p.sandbox.dashCloseSubagentView(); // the onclose teardown
-  assertEqual(p.el("dashTranscriptWrap").hidden, false, "fixture: the teardown still owns the wrap's hidden");
-  assert(dashInOverview(p), "a socket drop must not reveal the pane behind the Overview");
-});
 
 check("dashboard overview: entering the Overview while attached sends unsubscribe on the open socket (D18)", async () => {
   const p = loadDashPicker();
@@ -19626,14 +18430,6 @@ async function dashSubViewFixture() {
   return p;
 }
 
-check("dashboard overview: Escape with the sub-agent view open closes that view and stays in the session (D19)", async () => {
-  const p = await dashSubViewFixture();
-  dashEscape(p);
-  assertEqual(p.el("dashSubPanel").hidden, true, "Escape must close the sub-agent view, as Back to main does");
-  assertEqual(p.el("dashTranscriptWrap").hidden, false, "the main transcript comes back");
-  assertEqual(p.sandbox._viewingSid, "sess-1", "the session stays open");
-  assert(!dashInOverview(p), "the first Escape does not leave the session");
-});
 
 check("dashboard overview: a second Escape after closing the sub-agent view returns to the Overview", async () => {
   const p = await dashSubViewFixture();
@@ -22304,27 +21100,6 @@ check("dashboard: an error frame with code close_in_progress for a session NOT c
   assertEqual(p.sandbox._dashLoadingSid, null, "_dashLoadingSid stays null -- nothing was in flight");
 });
 
-check("dashboard: reconnect — a drop tears down crew-panel timers immediately, not waiting for a reconnect that may never come (Fix 8, Step 9 review)", () => {
-  // Supersedes a pre-Fix-8 test with the opposite assertion ("a drop by
-  // itself must not tear down crew timers -- only a fresh session/history
-  // frame does") -- that was the bug: if reconnect never succeeds, or the
-  // user never retries, the timers ticked forever with nothing left to tick
-  // against. dashConnect()'s onclose now calls dashRemoveAllCrewPanels()
-  // directly, alongside the existing dashCloseSubagentView()/dashCloseSubWs()
-  // calls, so the timers are torn down on the drop itself.
-  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
-  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
-    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  assertEqual(p.intervals.length, 1, "fixture: a running crew slot should have started its elapsed-time timer");
-  p.sandbox.dashConnect();
-  p.openMain();
-  p.closeMain();
-  assertEqual(p.intervals.length, 0,
-    "a drop must tear down crew-panel timers immediately, even without a subsequent session/history frame " +
-    "-- an indefinitely failed reconnect must not leave them ticking forever");
-  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0, "the drop must also clear crew state, not just the timer");
-});
 
 check("dashboard: reconnect — the reconnect's own session/history frames remain a harmless no-op for crew-panel teardown once onclose already tore it down", () => {
   const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
@@ -25565,85 +24340,8 @@ check("dashHandle visualization frame without title uses Visualization fallback"
 
 // --- Phase 3: crew panel tree structure ---
 
-check("SC3 Test A: grouped crew entries render a group-label row", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-a", role: "run-both/step-a", task: "", sessionName: "step-a",
-      status: "working", action: "", done: false, error: "", startedAt: now - 2 },
-    { sessionId: "sub-b", role: "run-both/step-b", task: "", sessionName: "step-b",
-      status: "working", action: "", done: false, error: "", startedAt: now - 1 },
-  ]));
-  const panels = page.all("acpTranscript", ".acp-crew-panel");
-  assertEqual(panels.length, 1, "crew panel should appear");
-  const groups = panels[0].querySelectorAll(".acp-crew-group");
-  assertEqual(groups.length, 1, "SC3: one group-label row should appear for 'run-both'");
-  // The group row's text node should contain the group name.
-  assert(groups[0].textContent.indexOf("run-both") !== -1,
-    "SC3: group-label row text must contain 'run-both'");
-  // Both child step rows should exist in the children container.
-  const containers = panels[0].querySelectorAll(".acp-crew-group-children");
-  assertEqual(containers.length, 1, "SC3: one children container");
-  const childRows = containers[0].querySelectorAll(".acp-crew-row");
-  assertEqual(childRows.length, 2, "SC3: two child rows inside the group");
-});
 
-check("SC3 Test B: clicking group-label row toggles expand/collapse", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // All-done group starts collapsed.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-c", role: "done-group/step-c", task: "", sessionName: "step-c",
-      status: "terminated", action: "", done: true, error: "", startedAt: now - 10, stoppedAt: now - 1 },
-  ]));
-  const panels = page.all("acpTranscript", ".acp-crew-panel");
-  const group = panels[0].querySelector(".acp-crew-group");
-  assert(group !== null, "group label row must exist");
-  const container = panels[0].querySelector(".acp-crew-group-children");
-  assert(container !== null, "children container must exist");
-  // All-done: starts collapsed.
-  assertEqual(group.getAttribute("aria-expanded"), "false",
-    "SC3: all-done group must start collapsed (aria-expanded=false)");
-  assertEqual(container.hidden, true,
-    "SC3: all-done group children container must start hidden");
-  // Click to expand.
-  group.dispatch("click");
-  assertEqual(group.getAttribute("aria-expanded"), "true",
-    "SC3: after click, aria-expanded must be 'true'");
-  assertEqual(container.hidden, false,
-    "SC3: after click, children container must be visible");
-  // Click again to collapse.
-  group.dispatch("click");
-  assertEqual(group.getAttribute("aria-expanded"), "false",
-    "SC3: after second click, aria-expanded must be 'false'");
-  assertEqual(container.hidden, true,
-    "SC3: after second click, children container must be hidden");
-});
 
-check("SC3 Test B2: keyboard Enter/Space on group row toggles expand/collapse", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // All-done group starts collapsed.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-kb", role: "kb-group/step-x", task: "", sessionName: "step-x",
-      status: "terminated", action: "", done: true, error: "", startedAt: now - 10, stoppedAt: now - 1 },
-  ]));
-  const panels = page.all("acpTranscript", ".acp-crew-panel");
-  const group = panels[0].querySelector(".acp-crew-group");
-  const children = panels[0].querySelector(".acp-crew-group-children");
-  assert(group !== null, "group row must exist");
-  assert(children.hidden === true, "starts collapsed (all-done)");
-
-  // Press Enter: should expand
-  group.dispatch("keydown", { key: "Enter", bubbles: true, preventDefault: () => {} });
-  assert(children.hidden === false, "Enter expands group");
-  assertEqual(group.getAttribute("aria-expanded"), "true", "aria-expanded updated by Enter");
-
-  // Press Space: should collapse
-  group.dispatch("keydown", { key: " ", bubbles: true, preventDefault: () => {} });
-  assert(children.hidden === true, "Space collapses group");
-  assertEqual(group.getAttribute("aria-expanded"), "false", "aria-expanded updated by Space");
-});
 
 check("SC3 Test C: root-level entry (no '/' in role) renders without a group header", (tpl) => {
   const { page, live } = connected(tpl);
@@ -25667,102 +24365,399 @@ check("SC3 Test C: root-level entry (no '/' in role) renders without a group hea
   }
 });
 
-check("SC3 Test D: aggregate badge and expand state", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  // All-done group: badge "N done", starts collapsed.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-e1", role: "batch/e1", task: "", sessionName: "e1",
-      status: "terminated", action: "", done: true, error: "", startedAt: now - 20, stoppedAt: now - 1 },
-    { sessionId: "sub-e2", role: "batch/e2", task: "", sessionName: "e2",
-      status: "terminated", action: "", done: true, error: "", startedAt: now - 20, stoppedAt: now - 2 },
-  ], "tcid-batch-done"));
-  const panels = page.all("acpTranscript", ".acp-crew-panel");
-  const badge1 = panels[0].querySelector(".acp-crew-badge");
-  assert(badge1 !== null, "badge must be present for group");
-  assertEqual(badge1.textContent, "2 done",
-    "SC3: all-done group badge text must be 'N done'");
-  const group1 = panels[0].querySelector(".acp-crew-group");
-  assertEqual(group1.getAttribute("aria-expanded"), "false",
-    "SC3: all-done group must start collapsed");
-  const container1 = panels[0].querySelector(".acp-crew-group-children");
-  assertEqual(container1.hidden, true,
-    "SC3: all-done group children must start hidden");
 
-  // Group with a working step: badge "running", starts expanded.
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-f1", role: "live/f1", task: "", sessionName: "f1",
-      status: "working", action: "reading", done: false, error: "", startedAt: now - 5 },
-    { sessionId: "sub-f2", role: "live/f2", task: "", sessionName: "f2",
-      status: "terminated", action: "", done: true, error: "", startedAt: now - 10, stoppedAt: now - 3 },
-  ], "tcid-batch-live"));
-  const panels2 = page.all("acpTranscript", ".acp-crew-panel");
-  // The second delivery creates a new panel (different toolCallId).
-  const livePanel = panels2[panels2.length - 1];
-  const badge2 = livePanel.querySelector(".acp-crew-badge");
-  assert(badge2 !== null, "badge must be present for live group");
-  assertEqual(badge2.textContent, "running",
-    "SC3: group with working step badge text must be 'running'");
-  const group2 = livePanel.querySelector(".acp-crew-group");
-  assertEqual(group2.getAttribute("aria-expanded"), "true",
-    "SC3: group with working step must start expanded");
-  const container2 = livePanel.querySelector(".acp-crew-group-children");
-  assertEqual(container2.hidden, false,
-    "SC3: group with working step children must start visible");
+
+
+
+// ---- run card, run strip and run inspector (static/workflow-ui.js) --------
+//
+// One module draws both pages' workflow UI. These checks drive it through
+// each page's real `subagents` handling, with the frame fields acp.py's
+// `_subagents_frame_payload` sends: the rows, `runs` (name, step tree,
+// outputs, status) and `questions` (step id -> open step question).
+
+function wfRow(sid, nodeId, state, extra = {}) {
+  const now = Date.now() / 1000;
+  const done = state === "done" || state === "failed" || state === "stale";
+  return Object.assign({
+    sessionId: sid, role: nodeId, task: "wf-coder", sessionName: "wf-coder",
+    status: state === "failed" ? "failed" : state === "waiting" ? "waiting"
+      : state === "stale" ? "stale" : done ? "done" : "working",
+    action: state === "stale" ? "no longer reporting" : "running",
+    done, error: state === "failed" ? "boom" : "",
+    startedAt: now - 30, stoppedAt: done ? now - 5 : null,
+    workflowId: "wf-1", nodeId,
+  }, extra);
+}
+
+const WF_TREE = [
+  { nodeId: "plan", type: "step", agentName: "wf-planner", modelId: "claude-sonnet-4.6",
+    effortLevel: "high", children: [] },
+  { nodeId: "personas", type: "parallel", agentName: "", modelId: "", effortLevel: "", children: [
+    { nodeId: "sec", type: "step", agentName: "wf-rev", modelId: "", effortLevel: "", children: [] },
+    { nodeId: "ux", type: "step", agentName: "wf-rev", modelId: "", effortLevel: "", children: [] }] },
+  { nodeId: "synth", type: "step", agentName: "wf-writer", modelId: "", effortLevel: "", children: [] },
+];
+
+function wfPayload(rows, opts = {}) {
+  return {
+    subagents: rows, toolCallId: opts.toolCallId || "",
+    workflowLive: opts.live !== false,
+    runs: [{ workflowId: "wf-1", name: opts.name || "review-pr", tree: opts.tree || WF_TREE,
+             status: opts.status || "running", startedAt: Date.now() / 1000 - 60,
+             endedAt: opts.status && opts.status !== "running" ? Date.now() / 1000 : null,
+             outputs: opts.outputs || {} }],
+    questions: opts.questions || {},
+  };
+}
+
+function wfFrame(live, rows, opts) {
+  return { type: "subagents", sessionId: live, payload: wfPayload(rows, opts) };
+}
+
+function wfLiveRows() {
+  return [wfRow("c-plan", "plan", "done"),
+          wfRow("c-sec", "sec", "working", { role: "personas/sec", action: "Reading auth.py" }),
+          wfRow("c-ux", "ux", "waiting", { role: "personas/ux" })];
+}
+
+check("run card: a workflow frame draws one card with its name, status, progress and whole plan", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, wfLiveRows(), { outputs: { plan: "Planned 3 angles" } }));
+  const cards = page.all("acpTranscript", ".wf-card");
+  assertEqual(cards.length, 1, "one card per run");
+  assertEqual(cards[0].querySelector(".wf-card-name").textContent, "review-pr");
+  assertEqual(cards[0].querySelector(".wf-pill").textContent, "Needs you",
+              "a step waiting on the user outranks Running");
+  assertEqual(cards[0].querySelector(".wf-card-meta").textContent.split(" · ")[0], "1 of 4 steps",
+              "progress counts finished steps against the plan, not against the rows");
+  const segs = cards[0].querySelector(".wf-seg").childNodes.map((n) => n.className);
+  assertEqual(segs.join(","), "wf-seg-done,wf-seg-working,wf-seg-waiting,wf-seg-pending",
+              "one segment per planned step, in plan order");
+  const names = cards[0].querySelectorAll(".wf-step-name").map((n) => n.textContent);
+  assertEqual(names.join(","), "plan,sec,ux,synth");
+  const pending = cards[0].querySelectorAll(".wf-step-pending");
+  assertEqual(pending.length, 1, "a step that has not started is drawn from the plan");
+  assertEqual(pending[0].tagName, "DIV", "a step with no session is not a button");
+  assertEqual(cards[0].querySelector(".wf-step-done").querySelector(".wf-step-act").textContent,
+              "Planned 3 angles", "a finished step shows its captured output");
 });
 
-check("SC3 Test E: group with a failed entry shows 'has failures' badge and starts expanded", (tpl) => {
+check("run card: a parallel group is tagged, summarised, and folds on click", (tpl) => {
   const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-g1", role: "fails/g1", task: "", sessionName: "g1",
-      status: "terminated", action: "", done: true, error: "crashed",
-      startedAt: now - 10, stoppedAt: now - 1 },
-    { sessionId: "sub-g2", role: "fails/g2", task: "", sessionName: "g2",
-      status: "terminated", action: "", done: true, error: "",
-      startedAt: now - 10, stoppedAt: now - 2 },
-  ], "tcid-sc3e-fails"));
-  const panels = page.all("acpTranscript", ".acp-crew-panel");
-  assertEqual(panels.length, 1, "SC3 E: one crew panel");
-  const badge = panels[0].querySelector(".acp-crew-badge");
-  assert(badge !== null, "SC3 E: badge must be present for group with failure");
-  assertEqual(badge.textContent, "has failures",
-    "SC3 E: group with a failed entry must show 'has failures' badge");
-  const group = panels[0].querySelector(".acp-crew-group");
-  assertEqual(group.getAttribute("aria-expanded"), "true",
-    "SC3 E: group with a failed entry must start expanded");
-  const container = panels[0].querySelector(".acp-crew-group-children");
-  assertEqual(container.hidden, false,
-    "SC3 E: group with a failed entry children must start visible");
+  page.deliver(wfFrame(live, wfLiveRows()));
+  const head = page.one("acpTranscript", ".wf-group-head");
+  assert(head, "the parallel node is a group");
+  assertEqual(head.querySelector(".wf-group-name").textContent, "personas");
+  assertEqual(head.querySelector(".wf-tag").textContent, "parallel");
+  assertEqual(head.querySelector(".wf-group-sum").textContent, "Needs you");
+  assertEqual(head.getAttribute("aria-expanded"), "true", "a live group starts open");
+  head.dispatch("click");
+  const again = page.one("acpTranscript", ".wf-group-head");
+  assertEqual(again.getAttribute("aria-expanded"), "false");
+  assertEqual(page.all("acpTranscript", ".wf-group-body").length, 0, "a folded group hides its steps");
+  page.deliver(wfFrame(live, wfLiveRows()));
+  assertEqual(page.one("acpTranscript", ".wf-group-head").getAttribute("aria-expanded"), "false",
+              "the fold survives the next frame");
 });
 
-check("SC3 Test F: group with all-waiting entries shows 'waiting' badge and starts expanded", (tpl) => {
+check("run card: a step question gets an answer box, and Reply sends a parent prompt naming the step", (tpl) => {
   const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-h1", role: "waits/h1", task: "", sessionName: "h1",
-      status: "waiting", action: "waiting for input", done: false, error: "",
-      startedAt: now - 5 },
-    { sessionId: "sub-h2", role: "waits/h2", task: "", sessionName: "h2",
-      status: "waiting", action: "", done: false, error: "",
-      startedAt: now - 3 },
-  ], "tcid-sc3f-waits"));
-  const panels = page.all("acpTranscript", ".acp-crew-panel");
-  assertEqual(panels.length, 1, "SC3 F: one crew panel");
-  const badge = panels[0].querySelector(".acp-crew-badge");
-  assert(badge !== null, "SC3 F: badge must be present for all-waiting group");
-  assertEqual(badge.textContent, "waiting",
-    "SC3 F: group with all-waiting entries must show 'waiting' badge");
-  const group = panels[0].querySelector(".acp-crew-group");
-  assertEqual(group.getAttribute("aria-expanded"), "true",
-    "SC3 F: group with all-waiting entries must start expanded");
-  const container = panels[0].querySelector(".acp-crew-group-children");
-  assertEqual(container.hidden, false,
-    "SC3 F: group with all-waiting entries children must start visible");
+  page.deliver(wfFrame(live, wfLiveRows(), { questions: { "c-ux": "Keep /login?" } }));
+  const ask = page.one("acpTranscript", ".wf-ask");
+  assert(ask, "the waiting step has an answer box");
+  assertEqual(ask.querySelector(".wf-ask-q").textContent, "Keep /login?");
+  assertEqual(ask.querySelector(".wf-ask-from").textContent, "ux is asking");
+  assert(page.one("acpTranscript", ".wf-card-attn"), "the card is marked as needing the user");
+  ask.querySelector(".wf-ask-input").value = "301 it";
+  ask.querySelector(".wf-btn-amber").dispatch("click");
+  const sent = page.sentOf("prompt");
+  assertEqual(sent.length, 1);
+  assertEqual(sent[0].sessionId, live, "the reply goes to the parent, which passes it on");
+  assertEqual(sent[0].payload.prompt, 'Answer to the question from workflow step "ux": 301 it');
+  assertEqual(ask.querySelector(".wf-ask-input").value, "", "a sent reply clears its box");
+});
+
+check("run card: a reply while the agent is answering is kept and not sent", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.deliver(wfFrame(live, wfLiveRows(), { questions: { "c-ux": "Keep /login?" } }));
+  const ask = page.one("acpTranscript", ".wf-ask");
+  ask.querySelector(".wf-ask-input").value = "301 it";
+  ask.querySelector(".wf-btn-amber").dispatch("click");
+  assertEqual(page.sentOf("prompt").length, 0, "nothing goes out under a live turn");
+  assertEqual(ask.querySelector(".wf-ask-input").value, "301 it", "the typed answer stays");
+  assert(/still answering/.test(ask.querySelector(".wf-ask-hint").textContent), "the hint says why");
+});
+
+check("run card: typed answer text survives the frames that rebuild the card", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, wfLiveRows(), { questions: { "c-ux": "Keep /login?" } }));
+  page.one("acpTranscript", ".wf-ask-input").value = "half typed";
+  page.deliver(wfFrame(live, wfLiveRows(), { questions: { "c-ux": "Keep /login?" } }));
+  assertEqual(page.one("acpTranscript", ".wf-ask-input").value, "half typed");
+});
+
+check("run card: a completed run folds to one line with its result", (tpl) => {
+  const { page, live } = connected(tpl);
+  const rows = ["plan", "sec", "ux", "synth"].map((n) => wfRow("c-" + n, n, "done"));
+  page.deliver(wfFrame(live, rows, { live: false, status: "completed",
+                                     outputs: { synth: "3 findings" } }));
+  const card = page.one("acpTranscript", ".wf-card");
+  assertEqual(card.querySelector(".wf-pill").textContent, "Completed");
+  assertEqual(card.querySelectorAll(".wf-steps").length, 0, "a finished run starts folded");
+  assertEqual(card.querySelector(".wf-foot-result").textContent, "3 findings");
+  assertEqual(card.querySelector(".wf-card-meta").textContent.split(" · ")[0], "4 steps");
+  card.querySelector(".wf-card-toggle").dispatch("click");
+  assertEqual(page.all("acpTranscript", ".wf-steps").length, 1, "the toggle unfolds it");
+});
+
+check("run card: a failed run stays open and says which step failed; the rest read Skipped", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, [wfRow("c-plan", "plan", "done"),
+                              wfRow("c-sec", "sec", "failed", { role: "personas/sec" })],
+                       { live: false, status: "failed" }));
+  const card = page.one("acpTranscript", ".wf-card");
+  assertEqual(card.querySelector(".wf-pill").textContent, "Failed");
+  assertEqual(card.querySelector(".wf-step-error").querySelector(".wf-step-act").textContent, "boom");
+  assertEqual(card.querySelectorAll(".wf-step-skipped").length, 2, "unstarted steps of a failed run");
+});
+
+check("run card: a step that stopped reporting never reads as done", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, [wfRow("c-plan", "plan", "stale")]));
+  const row = page.one("acpTranscript", ".wf-step-stale");
+  assert(row, "a reaped row has its own state");
+  assert(/No longer reporting/.test(row.querySelector(".wf-step-act").textContent));
+  page.deliver(wfFrame(live, [wfRow("c-plan", "plan", "stale", { action: "stopped" })]));
+  assertEqual(page.one("acpTranscript", ".wf-step-stale").querySelector(".wf-step-act").textContent,
+              "Stopped");
+});
+
+check("run card: a plain sub-agent fan-out is a card with no plan and no progress bar", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "subagents", sessionId: live, payload: { toolCallId: "", subagents: [
+    { sessionId: "sub-1", role: "explorer", task: "look around", sessionName: "stage-1",
+      status: "working", action: "reading", done: false, error: "", startedAt: Date.now() / 1000 - 3 },
+    { sessionId: "sub-2", role: "", task: "", sessionName: "", status: "done",
+      action: "", done: true, error: "", startedAt: Date.now() / 1000 - 3, stoppedAt: Date.now() / 1000 },
+  ] } });
+  const card = page.one("acpTranscript", ".wf-card");
+  assertEqual(card.querySelector(".wf-card-name").textContent, "2 sub-agents");
+  assertEqual(card.querySelectorAll(".wf-seg").length, 0);
+  const names = card.querySelectorAll(".wf-step-name").map((n) => n.textContent);
+  assertEqual(names.join(","), "stage-1,agent", "label: sessionName, then task, then 'agent'");
+  assertEqual(card.querySelector(".wf-step-role").textContent, "explorer");
+  assertEqual(card.querySelector(".wf-step-act").textContent, "reading");
+});
+
+check("run card: agent text in a row is text, never markup", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, [wfRow("c-x", "<img src=x onerror=alert(1)>", "working")],
+                       { tree: [] }));
+  assertEqual(page.one("acpTranscript", ".wf-step-name").textContent, "<img src=x onerror=alert(1)>");
+});
+
+check("run card: a slot per spawner, anchored after its tool row; an empty frame removes it", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+                 payload: { toolCallId: "tc-1", title: "run_workflow", kind: "other", status: "in_progress" } });
+  page.deliver(wfFrame(live, wfLiveRows(), { toolCallId: "tc-1" }));
+  page.deliver(wfFrame(live, [wfRow("c-z", "plan", "working", { workflowId: "wf-2" })],
+                       { toolCallId: "tc-2" }));
+  assertEqual(page.all("acpTranscript", ".wf-slot").length, 2, "two spawners, two slots");
+  page.deliver({ type: "subagents", sessionId: live, payload: { subagents: [], toolCallId: "tc-2" } });
+  assertEqual(page.all("acpTranscript", ".wf-slot").length, 1, "an empty frame removes its slot");
+  page.deliver({ type: "subagents", sessionId: live, payload: { subagents: [], toolCallId: "" } });
+  assertEqual(page.all("acpTranscript", ".wf-slot").length, 1,
+              "an empty no-anchor frame with no no-anchor slot changes nothing");
+});
+
+check("run card: a toolCallId of '__proto__' is an ordinary slot key", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, wfLiveRows(), { toolCallId: "__proto__" }));
+  assertEqual(page.all("acpTranscript", ".wf-card").length, 1);
+});
+
+check("run card: a new session frame clears the cards and closes the inspector", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, wfLiveRows()));
+  page.all("acpTranscript", ".acp-crew-row")[0].dispatch("click");
+  assertEqual(page.el("acpInsp").hidden, false);
+  // To the main socket: the click opened the step's own socket after it.
+  page.deliverTo(0, { type: "session", sessionId: "sess-other", payload: { sessionId: "sess-other",
+    cwd: "/tmp", created: true, turnActive: false, contextPercent: null } });
+  assertEqual(page.all("acpTranscript", ".wf-card").length, 0);
+  assertEqual(page.el("acpInsp").hidden, true);
+  assertEqual(page.el("acpSubPanel").hidden, true);
+  assertEqual(page.el("acpRunsToggle").hidden, true, "a new session has no runs yet");
+});
+
+check("run strip: shows a live run with its needs-you count, and goes when the run ends", (tpl) => {
+  const { page, live } = connected(tpl);
+  assertEqual(page.el("acpRunStrip").hidden, true);
+  page.deliver(wfFrame(live, wfLiveRows(), { questions: { "c-ux": "Keep /login?" } }));
+  assertEqual(page.el("acpRunStrip").hidden, false);
+  assertEqual(page.one("acpRunStrip", ".wf-strip-name").textContent, "review-pr");
+  assertEqual(page.one("acpRunStrip", ".wf-pill-need").textContent, "1 needs you");
+  assertEqual(page.el("acpRunsBadge").textContent, "1");
+  const rows = ["plan", "sec", "ux", "synth"].map((n) => wfRow("c-" + n, n, "done"));
+  page.deliver(wfFrame(live, rows, { live: false, status: "completed" }));
+  assertEqual(page.el("acpRunStrip").hidden, true);
+  assertEqual(page.el("acpRunsToggle").hidden, false, "the Runs button stays for the session");
+  assertEqual(page.el("acpRunsBadge").hidden, true);
+});
+
+check("inspector: a step opens beside the transcript, on a second socket", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, wfLiveRows()));
+  page.all("acpTranscript", ".acp-crew-row")[1].dispatch("click");
+  assertEqual(page.el("acpInsp").hidden, false);
+  assertEqual(page.el("acpSubPanel").hidden, false);
+  assertEqual(page.el("acpInspSteps").hidden, true, "the step view replaces the step list");
+  assertEqual(page.el("acpTranscriptWrap").hidden, false, "the conversation stays in view");
+  assertEqual(page.el("acpComposer").hidden, false);
+  assertEqual(page.one("acpSubRole", ".wf-crumb-name").textContent, "sec");
+  assertEqual(page.one("acpSubRole", ".wf-crumb-part").textContent, "personas");
+  assertEqual(page.one("acpSubStatus", ".wf-pill").textContent, "Working");
+  assert(page.one("acpSubTranscript", ".wf-step-loading"), "a loading line until the step answers");
+  page.openAt(1);
+  const subs = page.socketAt(1).sent.filter((f) => f.type === "subscribe");
+  assertEqual(subs.length, 1);
+  assertEqual(subs[0].sessionId, "c-sec");
+  page.deliverTo(1, { type: "session", sessionId: "c-sec", payload: { sessionId: "c-sec" } });
+  assertEqual(page.all("acpSubTranscript", ".wf-step-loading").length, 0);
+});
+
+check("inspector: a live step takes a direct message to its own session", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, wfLiveRows()));
+  page.all("acpTranscript", ".acp-crew-row")[1].dispatch("click");
+  assertEqual(page.el("acpSubComposerInput").hidden, false);
+  assertEqual(page.el("acpSubComposerInput").getAttribute("placeholder"), "Message sec directly");
+  page.el("acpSubComposerInput").value = "check the cookie flags too";
+  page.click("acpSubComposerSend");
+  // The main socket carries it; the step's socket only watches.
+  const sent = page.socketAt(0).sent.filter((f) => f.type === "prompt");
+  assertEqual(sent.length, 1);
+  assertEqual(sent[0].sessionId, "c-sec", "the envelope names the step's session");
+  assertEqual(page.el("acpSubComposerInput").value, "");
+});
+
+check("inspector: a finished step or a sub-agent is read-only, and says so", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, wfLiveRows()));
+  page.all("acpTranscript", ".acp-crew-row")[0].dispatch("click");
+  assertEqual(page.el("acpSubComposerInput").hidden, true);
+  assertEqual(page.el("acpSubComposerStatus").textContent,
+              "This step finished. Its conversation is read-only.");
+  page.click("acpSubComposerSend");
+  assertEqual(page.socketAt(0).sent.filter((f) => f.type === "prompt").length, 0);
+});
+
+check("inspector: the step view's question box answers like the card's", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, wfLiveRows(), { questions: { "c-ux": "Keep /login?" } }));
+  page.all("acpTranscript", ".acp-crew-row")[2].dispatch("click");
+  assertEqual(page.el("acpSubAsk").hidden, false);
+  const ask = page.one("acpSubAsk", ".wf-ask");
+  ask.querySelector(".wf-ask-input").value = "yes";
+  ask.querySelector(".wf-btn-amber").dispatch("click");
+  assertEqual(page.socketAt(0).sent.filter((f) => f.type === "prompt")[0].sessionId, live);
+});
+
+check("inspector: Back returns to the steps, Close hides it, the Runs button reopens it", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(wfFrame(live, wfLiveRows()));
+  page.all("acpTranscript", ".acp-crew-row")[0].dispatch("click");
+  page.click("acpSubBack");
+  assertEqual(page.el("acpSubPanel").hidden, true);
+  assertEqual(page.el("acpInspSteps").hidden, false);
+  assertEqual(page.all("acpInspSteps", ".wf-card").length, 1, "the step list is the run's card");
+  page.click("acpInspClose");
+  assertEqual(page.el("acpInsp").hidden, true);
+  assertEqual(page.el("acpRunsToggle").getAttribute("aria-expanded"), "false");
+  page.click("acpRunsToggle");
+  assertEqual(page.el("acpInsp").hidden, false);
+  assertEqual(page.el("acpRunsToggle").getAttribute("aria-expanded"), "true");
+});
+
+check("inspector: Ctrl+G toggles it once a run has been seen", (tpl) => {
+  const { page, live } = connected(tpl);
+  const key = { key: "g", ctrlKey: true, preventDefault() {}, stopPropagation() {} };
+  page.fireDoc("keydown", key);
+  assertEqual(page.el("acpInsp").hidden, true, "nothing to show before a run");
+  page.deliver(wfFrame(live, wfLiveRows()));
+  page.fireDoc("keydown", key);
+  assertEqual(page.el("acpInsp").hidden, false);
+  page.fireDoc("keydown", key);
+  assertEqual(page.el("acpInsp").hidden, true);
+});
+
+check("inspector: History lists the session's past runs, newest first", async (tpl) => {
+  const runs = [
+    { name: "old", workflowId: "w0", status: "failed", steps: [{ nodeId: "a", status: "failed" }] },
+    { name: "new", workflowId: "w1", status: "completed",
+      steps: [{ nodeId: "b", status: "completed", capturedOutput: "fine" }] },
+  ];
+  const { page, live } = connected(tpl, {
+    answer: (url) => url.startsWith("/api/workflow-history") ? { body: { runs } } : null,
+  });
+  page.deliver(wfFrame(live, wfLiveRows()));
+  page.click("acpRunsToggle");
+  page.click("acpInspTabHistory");
+  await page.settle();
+  assert(page.fetches.some((f) => f.url === "/api/workflow-history?sid=" + live),
+         "the history is asked for this session");
+  const heads = page.all("acpInspHistory", ".wf-hist-head");
+  assertEqual(heads.map((h) => h.querySelector("b").textContent).join(","), "new,old");
+  assertEqual(page.one("acpInspHistory", ".wf-step-act").textContent, "fine",
+              "the newest run starts open, with its step outputs");
+  assertEqual(page.el("acpInspHistoryCount").textContent, "2");
+});
+
+check("dashboard: the run card, step view and teardown use the same module", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle({ type: "subagents", sessionId: "sess-1",
+                         payload: wfPayload(wfLiveRows(), { questions: { "c-ux": "Keep /login?" } }) });
+  const card = p.sandbox.transcriptEl.querySelector(".wf-card");
+  assert(card, "the dashboard draws the run card");
+  assertEqual(card.querySelector(".wf-card-name").textContent, "review-pr");
+  assertEqual(p.el("dashRunStrip").hidden, false);
+  assertEqual(p.el("dashRunsToggle").hidden, false);
+  const ask = card.querySelector(".wf-ask");
+  ask.querySelector(".wf-ask-input").value = "301 it";
+  ask.querySelector(".wf-btn-amber").dispatch("click");
+  const sent = p.sentOf("prompt");
+  assertEqual(sent.length, 1);
+  assertEqual(sent[0].sid, "sess-1");
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[1].dispatch("click");
+  assertEqual(p.el("dashInsp").hidden, false);
+  assertEqual(p.el("dashSubPanel").hidden, false);
+  assertEqual(p.el("dashTranscriptWrap").hidden, false, "the conversation stays in view");
+  assertEqual(p.sandbox.dashSubViewSid, "c-sec");
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  assertEqual(p.el("dashInsp").hidden, true);
+  assertEqual(p.el("dashSubPanel").hidden, true);
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".wf-card").length, 0);
+  assertEqual(p.sandbox.dashSubWs, null);
+});
+
+check("dashboard: Escape steps the inspector back, then closes it, before leaving the session", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle({ type: "subagents", sessionId: "sess-1", payload: wfPayload(wfLiveRows()) });
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.sandbox.dashWfui.stepBackOrClose();
+  assertEqual(p.el("dashSubPanel").hidden, true);
+  assertEqual(p.el("dashInsp").hidden, false, "the first step goes back to the steps");
+  p.sandbox.dashWfui.stepBackOrClose();
+  assertEqual(p.el("dashInsp").hidden, true);
 });
 
 let failed = 0;
-for (const { name, fn } of checks) {
+// ACP_PAGE_ONLY=<substring> runs only the checks whose name contains it.
+const only = process.env.ACP_PAGE_ONLY || "";
+const selected = only ? checks.filter((c) => c.name.includes(only)) : checks;
+for (const { name, fn } of selected) {
   try {
     // Awaited, so a check may be `async`: the rail's every behaviour is behind
     // a fetch, and a synchronous check would assert before the first `.then`.
@@ -25774,7 +24769,7 @@ for (const { name, fn } of checks) {
     console.log(`        ${String(err && err.message || err).split("\n").join("\n        ")}`);
   }
 }
-console.log(`\n${checks.length - failed} passed, ${failed} failed of ${checks.length}`);
+console.log(`\n${selected.length - failed} passed, ${failed} failed of ${selected.length}`);
 process.exit(failed ? 1 : 0);
 
 

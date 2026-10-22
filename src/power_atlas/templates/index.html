@@ -323,12 +323,17 @@
       <button class="acp-btn acp-log-toggle" id="dashLogToggle" type="button"
               aria-expanded="false" aria-controls="dashLog">Debug log<span
               class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
-      <!-- Workflows panel toggle — revealed only when a workflow run starts.
-           Phase 4: panel shell with live run; Phase 5 adds past-run history.
-           Mirrors #acpWorkflowsToggle in acp.html. -->
-      <button class="acp-btn" id="dashWorkflowsToggle" type="button"
-              aria-expanded="false" aria-controls="dashWorkflowsPanel"
-              hidden>Workflows</button>
+      <!-- Opens the run inspector (static/workflow-ui.js), as #acpRunsToggle
+           does on /acp: shown from the session's first run on. -->
+      <button class="acp-btn wf-runs-btn" id="dashRunsToggle" type="button"
+              aria-expanded="false" aria-controls="dashInsp" hidden
+              title="Run inspector (Ctrl+G)">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+          <circle cx="3.5" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="12.5" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="12" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M5.5 4h5M4.6 5.7 7 10.2M11.4 5.7 9 10.2" stroke="currentColor" stroke-width="1.5"/>
+        </svg>Runs<span class="wf-runs-badge" id="dashRunsBadge" hidden></span></button>
       <!-- WS reconnect-on-drop (SC7, dashboard/ACP feature-parity plan Phase
            6) -- mirrors acp.html's own #acpReconnect/#acpReload
            (acp.html:163-164). Both hidden until dashConnect()'s onclose
@@ -427,38 +432,73 @@
         </button>
       </div>
     </div>
-    <!-- Workflows right-side panel (Phase 4). Mirrors #acpWorkflowsPanel in
-         acp.html. Toggle button (#dashWorkflowsToggle) is in the sub-toolbar
-         above; it starts hidden and is revealed when a workflow run starts. -->
-    <div class="wf-panel" id="dashWorkflowsPanel" hidden>
-      <div id="dashWorkflowsLiveRun"></div>
-      <div id="dashWorkflowsPastRuns"></div>
-    </div>
-    <!-- A sub-agent's own conversation, shown in place of the transcript+
-         composer while one is selected on the crew panel above (SC8,
-         dashboard/ACP feature-parity plan Phase 5) -- mirrors acp.html's own
-         #acpSubPanel (acp.html:219-233) exactly, dash-prefixed. Read-only by
-         design -- no composer here at all, only a way back. Built with
-         createElement + textContent like every other pane on this page;
-         empty in the markup. -->
-    <div class="acp-subpanel" id="dashSubPanel" hidden>
-      <div class="acp-subpanel-head">
-        <button class="acp-btn" id="dashSubBack" type="button">‹ Back to main</button>
-        <span class="acp-subpanel-role" id="dashSubRole"></span>
-        <span class="acp-subpanel-status" id="dashSubStatus"></span>
+    <!-- The run inspector (static/workflow-ui.js), the same markup as /acp's
+         #acpInsp under this page's ids: steps, a step's own conversation
+         (#dashSubPanel, with a composer for a live workflow step) and
+         history. A sheet over the transcript when the panel is narrow. -->
+    <aside class="wf-insp" id="dashInsp" hidden aria-label="Run inspector">
+      <div class="wf-insp-head">
+        <span class="wf-glyph" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+          <circle cx="3.5" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="12.5" cy="4" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="12" r="2" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M5.5 4h5M4.6 5.7 7 10.2M11.4 5.7 9 10.2" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+        </span>
+        <span class="wf-insp-title" id="dashInspTitle">Runs</span>
+        <span class="wf-insp-pill" id="dashInspPill"></span>
+        <button class="wf-icon-btn" id="dashInspClose" type="button"
+                aria-label="Close the run inspector (Esc)" title="Close (Esc)">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+            <path d="m4.5 4.5 7 7m0-7-7 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+        </button>
       </div>
-      <div class="acp-transcript acp-subpanel-transcript" id="dashSubTranscript"
-           role="log" aria-live="polite" aria-label="Sub-agent conversation"></div>
-      <!-- Phase 6 sub-agent composer (mirrors acp.html #acpSubComposerContainer).
-           Shown only for live workflow step sessions. Wired via
-           composer-chrome.js initSubAgentComposerDom(). No innerHTML. -->
-      <div id="dashSubComposerContainer" class="acp-subcomposer" hidden>
-        <input type="text" id="dashSubComposerInput"
-               placeholder="Message this step\u2026" aria-label="Message this step">
-        <button type="button" id="dashSubComposerSend">Send</button>
-        <span id="dashSubComposerStatus" hidden></span>
+      <div class="wf-tabs" role="tablist" aria-label="Run inspector views">
+        <button class="wf-tab wf-tab-on" id="dashInspTabSteps" type="button" role="tab"
+                aria-selected="true" aria-controls="dashInspSteps">Steps</button>
+        <button class="wf-tab" id="dashInspTabHistory" type="button" role="tab"
+                aria-selected="false" aria-controls="dashInspHistory">History<span
+                class="wf-tab-count" id="dashInspHistoryCount"></span></button>
       </div>
-    </div>
+      <div class="wf-insp-steps" id="dashInspSteps" role="tabpanel"></div>
+      <div class="wf-insp-history" id="dashInspHistory" role="tabpanel" hidden></div>
+      <div class="acp-subpanel wf-stepview" id="dashSubPanel" hidden>
+        <div class="wf-stepview-head">
+          <button class="wf-icon-btn" id="dashSubBack" type="button"
+                  aria-label="Back to the steps" title="Back to the steps">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+              <path d="M10 4 6 8l4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <span class="wf-crumb" id="dashSubRole"></span>
+          <span class="wf-stepview-pill" id="dashSubStatus"></span>
+        </div>
+        <div class="wf-facts" id="dashSubFacts" hidden></div>
+        <div class="acp-transcript acp-subpanel-transcript" id="dashSubTranscript"
+             role="log" aria-live="polite" aria-label="Step conversation"></div>
+        <div class="wf-stepview-ask" id="dashSubAsk" hidden></div>
+        <div class="wf-step-composer" id="dashSubComposerContainer">
+          <div class="wf-step-composer-row">
+            <textarea class="wf-step-input" id="dashSubComposerInput" rows="2"
+                      spellcheck="false" aria-label="Message this step"
+                      placeholder="Message this step"></textarea>
+            <button class="acp-btn acp-icon-btn" id="dashSubComposerSend" type="button"
+                    aria-label="Send to this step">
+              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+                <path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <span class="wf-step-note" id="dashSubComposerStatus"></span>
+        </div>
+      </div>
+    </aside>
+    <!-- A live run's progress, above the composer (static/workflow-ui.js). -->
+    <div class="wf-strip" id="dashRunStrip" hidden></div>
+    <div class="sr-only" id="dashWfLive" aria-live="polite"></div>
+    <div class="sr-only" id="dashWfAlert" aria-live="assertive"></div>
     <div class="acp-composer" id="dashComposer" hidden>
       <!-- Images staged for the next prompt (SC6, dashboard/ACP
            feature-parity plan Phase 4) -- mirrors acp.html's own #acpTray
@@ -571,6 +611,7 @@
      markup consistent with acp.html's and future-proofs against index.html
      ever gaining a nonce-based CSP. -->
 <script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %} src="/static/composer-chrome.js"></script>
+<script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %} src="/static/workflow-ui.js"></script>
 
 <script>
 function markPortDirty() {
@@ -2670,8 +2711,6 @@ function dashShowOverview(){
     send('unsubscribe');
   }
   _dashAttachedSid = null;
-  // Phase 5: clear Workflows past runs so the next session loads fresh.
-  (function(){ var el = document.getElementById('dashWorkflowsPastRuns'); if (el) while (el.firstChild) el.removeChild(el.firstChild); }());
   dashUpdateCloseButton();
   _dashUserClosedSid = null;
   _dashCloseLeftSid = leftSid;
@@ -2758,9 +2797,9 @@ function dashEscapeMayLeave(target){
 document.addEventListener('keydown', function(e){
   if (e.key !== 'Escape') return;
   if (!dashEscapeMayLeave(e.target)) return;
-  var subPanel = document.getElementById('dashSubPanel');
-  if (subPanel && !subPanel.hidden) {
-    dashCloseSubagentView();
+  // The run inspector first: a step back to its steps, then closed.
+  if (dashWfui.isOpen()) {
+    dashWfui.stepBackOrClose();
     return;
   }
   dashShowOverview();
@@ -3320,9 +3359,6 @@ var dashSteerStatusEl = document.getElementById('dashSteerStatus');
 // refs above.
 var dashTranscriptWrapEl = document.getElementById('dashTranscriptWrap');
 var dashSubPanelEl = document.getElementById('dashSubPanel');
-var dashSubBackBtn = document.getElementById('dashSubBack');
-var dashSubRoleEl = document.getElementById('dashSubRole');
-var dashSubStatusEl = document.getElementById('dashSubStatus');
 var dashSubTranscriptEl = document.getElementById('dashSubTranscript');
 // Hidden unless attached to a live session, disabled under a live turn (the
 // server refuses a close then anyway, same as /acp's #acpClose) -- called
@@ -3611,106 +3647,6 @@ initCommandPaletteDom({
   // visible/enabled state in sync -- is the equivalent here.
   onPromptChanged: dashRefreshComposerControls,
 });
-// Workflows panel shell (Phase 4): mirrors acp.html's own initWorkflowsDom()
-// call. `dashOpenSubagent` is declared further down; the function reference
-// resolves at call time (hoisted function declaration).
-initWorkflowsDom({
-  liveRunContainer: document.getElementById('dashWorkflowsLiveRun'),
-  pastRunsContainer: document.getElementById('dashWorkflowsPastRuns'),
-  toggleBtn: document.getElementById('dashWorkflowsToggle'),
-  panelEl: document.getElementById('dashWorkflowsPanel'),
-  openSubagentFn: function (sid) { dashOpenSubagent(sid); },
-  isDashboard: true,
-});
-// Phase 6: wire the dashboard sub-agent panel composer (mirrors acp.html).
-// `send` resolves at call time via the hoisted function declaration.
-initSubAgentComposerDom({
-  input:     document.getElementById('dashSubComposerInput'),
-  sendBtn:   document.getElementById('dashSubComposerSend'),
-  container: document.getElementById('dashSubComposerContainer'),
-  statusEl:  document.getElementById('dashSubComposerStatus'),
-  sendFn:    function (type, payload, sid) { return send(type, payload, sid); },
-  isDashboard: true,
-});
-// Phase 5: fetch workflow history from disk when the dashboard panel is first
-// opened.  Mirrors acp.html's equivalent block; `_dashAttachedSid` is the
-// dashboard equivalent of acp.html's `sessionId`.
-(function () {
-  var pastRuns = document.getElementById('dashWorkflowsPastRuns');
-  var toggle   = document.getElementById('dashWorkflowsToggle');
-  var panel    = document.getElementById('dashWorkflowsPanel');
-  if (!toggle || !pastRuns || !panel) return;
-  toggle.addEventListener('click', function () {
-    // panel.hidden has already been toggled by initWorkflowsDom's own
-    // listener (registered first).  Load history only when the panel is
-    // now visible and the past-runs container is still empty.
-    if (panel.hidden) return;
-    if (pastRuns.childNodes.length) return;
-    var sid = _dashAttachedSid;
-    if (!sid) return;
-    var loading = document.createElement('span');
-    loading.textContent = 'Loading\u2026';
-    pastRuns.appendChild(loading);
-    fetch('/api/workflow-history?sid=' + encodeURIComponent(sid))
-      .then(function (res) {
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return res.json();
-      })
-      .then(function (data) {
-        while (pastRuns.firstChild) pastRuns.removeChild(pastRuns.firstChild);
-        dashRenderWorkflowsPastRuns(data.runs || [], pastRuns);
-      })
-      .catch(function () {
-        while (pastRuns.firstChild) pastRuns.removeChild(pastRuns.firstChild);
-        var errMsg = document.createElement('span');
-        errMsg.textContent = 'Could not load workflow history.';
-        pastRuns.appendChild(errMsg);
-      });
-  });
-}());
-
-function dashRenderWorkflowsPastRuns(runs, container) {
-  // Dashboard mirror of acp.html's renderWorkflowsPastRuns.
-  // Renders completed past runs newest-first as collapsible <details> elements.
-  // Past-run step rows are view-only: no click handler, cursor: default.
-  // No innerHTML anywhere.
-  if (!runs || runs.length === 0) {
-    var emptyEl = document.createElement('span');
-    emptyEl.textContent = 'No workflow runs in this session.';
-    container.appendChild(emptyEl);
-    return;
-  }
-  var reversed = runs.slice().reverse();
-  for (var i = 0; i < reversed.length; i++) {
-    var run = reversed[i];
-    var steps = run.steps || [];
-    var details = document.createElement('details');
-    if (i === 0) details.open = true;
-    var summary = document.createElement('summary');
-    var labelText = run.name || run.workflowId || ('Run ' + (runs.length - i));
-    var summaryText = document.createElement('span');
-    summaryText.textContent =
-      labelText + ' \u2014 ' + steps.length + ' step' + (steps.length === 1 ? '' : 's');
-    summary.appendChild(summaryText);
-    details.appendChild(summary);
-    for (var j = 0; j < steps.length; j++) {
-      var step = steps[j];
-      var row = document.createElement('div');
-      row.className = 'wf-step-row wf-step-row--past';
-      row.style.cursor = 'default';
-      var roleSpan = document.createElement('span');
-      roleSpan.className = 'wf-step-role';
-      roleSpan.textContent = step.agentName || step.nodeId || '';
-      var statusSpan = document.createElement('span');
-      statusSpan.className = 'wf-step-status';
-      statusSpan.textContent = step.status || '';
-      row.appendChild(roleSpan);
-      row.appendChild(statusSpan);
-      details.appendChild(row);
-    }
-    container.appendChild(details);
-  }
-}
 
 dashPromptInput.addEventListener('keydown', function(e){
   // Slash intercept: open the command palette when `/` is pressed into an
@@ -4600,352 +4536,69 @@ function dashSendPrompt(){
 // initTranscriptDom() call above already makes transcriptEl a true global on
 // this page the same way it is one on acp.html).
 
-// Per-fan-out crew state, keyed by spawner toolCallId (non-empty string) or
-// a unique sequence counter for no-anchor fan-outs ('_na_N'). Mirrors
-// acp.html's own crews/_noAnchorSeq/_noAnchorKey (acp.html:799-801).
-// {key: {entries: [], panel: null|Element, timer: null|int, allDone: false}}
-// Object.create(null), not {} (Fix 4, Phase 5 review) -- keyed directly by
-// wire-controlled toolCallId (payload.toolCallId, unrestricted by acp.py's
-// frame format), so a key of '__proto__' must not reach a real Object
-// prototype. Matches dashSubToolRows's own Object.create(null) two lines
-// below dashSubWs, for the same reason.
-var dashCrews = Object.create(null);
-var _dashNoAnchorSeq = 0; // counter for no-anchor fan-out keys
-var _dashNoAnchorKey = null; // stable key for the current no-anchor fan-out
+// The run card, run strip and run inspector (static/workflow-ui.js), the
+// same module /acp uses. The callbacks name functions and state declared
+// further down; they are resolved when called.
+var dashWfui = createWorkflowUI({
+  els: {
+    page: document.getElementById('sessions-panel'),
+    insp: document.getElementById('dashInsp'),
+    inspTitle: document.getElementById('dashInspTitle'),
+    inspPill: document.getElementById('dashInspPill'),
+    inspClose: document.getElementById('dashInspClose'),
+    tabSteps: document.getElementById('dashInspTabSteps'),
+    tabHistory: document.getElementById('dashInspTabHistory'),
+    historyCount: document.getElementById('dashInspHistoryCount'),
+    stepsView: document.getElementById('dashInspSteps'),
+    historyView: document.getElementById('dashInspHistory'),
+    stepView: document.getElementById('dashSubPanel'),
+    stepBack: document.getElementById('dashSubBack'),
+    stepCrumb: document.getElementById('dashSubRole'),
+    stepPill: document.getElementById('dashSubStatus'),
+    stepFacts: document.getElementById('dashSubFacts'),
+    stepAsk: document.getElementById('dashSubAsk'),
+    stepComposer: document.getElementById('dashSubComposerContainer'),
+    stepInput: document.getElementById('dashSubComposerInput'),
+    stepSend: document.getElementById('dashSubComposerSend'),
+    stepNote: document.getElementById('dashSubComposerStatus'),
+    runsBtn: document.getElementById('dashRunsToggle'),
+    runsBadge: document.getElementById('dashRunsBadge'),
+    strip: document.getElementById('dashRunStrip'),
+  },
+  getSessionId: function () { return _dashAttachedSid || _viewingSid; },
+  openStep: function (sid) { dashOpenStepView(sid); },
+  closeStep: function () { dashCloseStepView(); },
+  // A reply to a step question goes to the parent, which passes it on.
+  sendReply: function (text) {
+    if (!_dashAttachedSid) return false;
+    if (_dashTurnActive) return 'busy';
+    if (!send('prompt', { prompt: text }, _dashAttachedSid)) return false;
+    dashRecordSentPrompt(text);
+    return true;
+  },
+  sendStepPrompt: function (text, sid) { return send('prompt', { prompt: text }, sid); },
+  canStop: function () { return !dashStopBtn.hidden && !dashStopBtn.disabled; },
+  stopRun: function () { dashStopBtn.click(); },
+  announce: function (text, urgent) {
+    var region = document.getElementById(urgent ? 'dashWfAlert' : 'dashWfLive');
+    if (region) region.textContent = text;
+  },
+  // Only while a session is open; the page's own Escape handler (below)
+  // steps the inspector back, so the module leaves Escape alone here.
+  isActive: function () { return !!_viewingSid; },
+  handleEscape: false,
+});
+document.addEventListener('keydown', function (ev) { dashWfui.onKeyDown(ev); }, true);
 
-function dashCrewLabel(entry) {
-  if (!entry) return 'agent';
-  var sn = entry.sessionName || '';
-  if (sn) return sn;
-  var t = entry.task || '';
-  if (t) return t.length > 30 ? t.slice(0, 30).trim() + '…' : t.trim();
-  return 'agent';
+// The crew is static/workflow-ui.js's (`dashWfui`); these keep the names
+// the frame handler, the teardown sites and the tests call.
+function dashSetCrew(entries, toolCallId, workflowLive, runs, questions) {
+  dashWfui.setCrew(entries, toolCallId, workflowLive, runs, questions);
 }
 
-function dashRenderCrewPanel(slot) {
-  // slot: {entries, panel, allDone}
-  if (!slot || !slot.panel || !slot.panel.parentNode) return;
-  var hdr = slot.panel.querySelector('.acp-crew-header');
-  if (!hdr) {
-    hdr = document.createElement('div');
-    hdr.className = 'acp-crew-header';
-    slot.panel.insertBefore(hdr, slot.panel.firstChild);
-  }
-  var n = slot.entries.length;
-  var noun = n === 1 ? ' agent)' : ' agents)';
-  // D15 (261012): "Paused" while a step waits on a person and none works.
-  // workflowLive (the subagents frame's field): a workflow run is still going
-  // on, so every row done is only the gap before the next step starts. Absent
-  // on older frames and on an emptying frame: reads as false.
-  var states = slot.entries.map(dashSubagentState);
-  hdr.textContent = states.indexOf('waiting') !== -1 && states.indexOf('working') === -1
-    ? 'Paused (' + n + noun
-    : slot.allDone && !slot.workflowLive
-    ? 'Done (' + n + noun
-    : 'Orchestrating (' + n + noun;
+function dashRemoveAllCrewPanels() { dashWfui.reset(); }
 
-  // Save focused element before rebuild so keyboard focus is preserved (Finding 1).
-  var _crewFocusKey = null;
-  var _crewActive = document.activeElement;
-  if (_crewActive && slot.panel.contains(_crewActive)) {
-    _crewFocusKey = _crewActive.dataset.focusKey || null;
-  }
-
-  // Remove old rows (keep header)
-  while (slot.panel.lastChild && slot.panel.lastChild.className !== 'acp-crew-header') {
-    slot.panel.removeChild(slot.panel.lastChild);
-  }
-
-  // --- Tree rendering (Phase 3) ---
-
-  // Group entries by first role path segment. null key = root level.
-  var groupMap = Object.create(null);  // groupName -> [entry] (ordered); null proto avoids built-in name collisions
-  var groupOrder = [];    // insertion order for group names
-  slot.entries.forEach(function(entry) {
-    var rolePath = entry.role || '';
-    var slashIdx = rolePath.indexOf('/');
-    var groupName = slashIdx >= 0 ? rolePath.slice(0, slashIdx) : null;
-    if (groupName !== null && !groupMap[groupName]) {
-      groupMap[groupName] = [];
-      groupOrder.push(groupName);
-    }
-    if (groupName === null) {
-      slot.panel.appendChild(_dashMakeCrewRow(entry));
-    } else {
-      groupMap[groupName].push(entry);
-    }
-  });
-
-  // Render groups.
-  groupOrder.forEach(function(groupName) {
-    var groupEntries = groupMap[groupName];
-    var states = groupEntries.map(dashSubagentState);
-    var hasFailed  = states.indexOf('error')   !== -1;
-    var hasWorking = states.indexOf('working') !== -1;
-    var hasWaiting = states.indexOf('waiting') !== -1;
-    var startExpanded = hasFailed || hasWorking || hasWaiting;
-
-    // Badge text
-    var badgeText;
-    if (hasFailed)       { badgeText = 'has failures'; }
-    else if (hasWorking) { badgeText = 'running'; }
-    else if (hasWaiting) { badgeText = 'waiting'; }
-    else                 { badgeText = groupEntries.length + ' done'; }
-
-    // Group label row
-    var groupRow = document.createElement('div');
-    groupRow.className = 'acp-crew-group';
-    groupRow.dataset.focusKey = 'group:' + groupName;
-    groupRow.setAttribute('role', 'button');
-    groupRow.setAttribute('tabindex', '0');
-    groupRow.setAttribute('aria-expanded', startExpanded ? 'true' : 'false');
-
-    var chevron = document.createElement('span');
-    chevron.className = 'acp-crew-chevron';
-    chevron.setAttribute('aria-hidden', 'true');
-    chevron.textContent = startExpanded ? '\u25BC' : '\u25B6';
-
-    groupRow.appendChild(chevron);
-
-    var groupNameSpan = document.createElement('span');
-    groupNameSpan.className = 'acp-crew-group-name';
-    groupNameSpan.textContent = groupName;
-    groupRow.appendChild(groupNameSpan);
-
-    var badge = document.createElement('span');
-    badge.className = 'acp-crew-badge';
-    badge.textContent = badgeText;
-    groupRow.appendChild(badge);
-
-    // Children container
-    var childrenContainer = document.createElement('div');
-    childrenContainer.className = 'acp-crew-group-children';
-    if (!startExpanded) { childrenContainer.hidden = true; }
-
-    groupEntries.forEach(function(e) {
-      childrenContainer.appendChild(_dashMakeCrewRow(e));
-    });
-
-    // Toggle on click or Enter/Space
-    (function(gr, cc, ch) {
-      function _toggleGroup() {
-        var expanded = gr.getAttribute('aria-expanded') === 'true';
-        expanded = !expanded;
-        gr.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-        ch.textContent = expanded ? '\u25BC' : '\u25B6';
-        cc.hidden = !expanded;
-      }
-      gr.addEventListener('click', _toggleGroup);
-      gr.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _toggleGroup(); }
-      });
-    })(groupRow, childrenContainer, chevron);
-
-    slot.panel.appendChild(groupRow);
-    slot.panel.appendChild(childrenContainer);
-  });
-
-  // Restore focus if a crew element had focus before the rebuild (Finding 1).
-  if (_crewFocusKey) {
-    var _focusTarget = slot.panel.querySelector('[data-focus-key="' + _crewFocusKey + '"]');
-    if (_focusTarget) _focusTarget.focus();
-  }
-}
-
-// Build a single crew-row button element for the dashboard.
-// Mirrors acp.html's _makeCrewRow() — keep in sync.
-function _dashMakeCrewRow(entry) {
-  var state = dashSubagentState(entry);  // 'working' | 'waiting' | 'done' | 'error'
-  var dotClass = state === 'working' ? 'status-thinking'
-               : state === 'waiting' ? 'status-waiting'
-               : state === 'error'   ? 'status-errored'
-               : 'status-idle';
-  var label = dashCrewLabel(entry);
-  var stateText = state === 'error' ? 'errored' : state === 'done' ? dashDoneText(entry)
-    : state === 'waiting' ? (entry.action || 'waiting') : (entry.action || 'working');
-  // Use only the part after the last '/' so grouped entries don't repeat the
-  // group name in the label (Finding 6).
-  var roleForLabel = entry.role ? entry.role.replace(/^.*\//, '') : '';
-
-  var row = document.createElement('button');
-  row.type = 'button';
-  row.className = 'acp-crew-row acp-crew-row-' + state;
-  row.dataset.focusKey = 'step:' + (entry.sessionId || '');
-  row.setAttribute('aria-label',
-    label + (roleForLabel ? ', ' + roleForLabel : '') + ', ' + stateText);
-
-  var dot = document.createElement('span');
-  dot.className = 'session-status ' + dotClass;
-  dot.setAttribute('aria-hidden', 'true');
-
-  var nameSpan = document.createElement('span');
-  nameSpan.className = 'acp-crew-label';
-  nameSpan.textContent = label;
-
-  var roleSpan = document.createElement('span');
-  roleSpan.className = 'acp-crew-role';
-  roleSpan.textContent = roleForLabel;
-
-  var actionSpan = document.createElement('span');
-  actionSpan.className = 'acp-crew-action';
-  actionSpan.textContent = state === 'working' && !entry.action
-    ? 'working\u2026' : stateText;
-
-  var elapsedSpan = document.createElement('span');
-  elapsedSpan.className = 'acp-crew-elapsed';
-  var start = entry.startedAt;
-  var stop = entry.stoppedAt;
-  elapsedSpan.textContent = stop > 0
-    ? elapsedText(start, stop) : elapsedText(start);
-
-  row.appendChild(dot);
-  row.appendChild(nameSpan);
-  if (entry.role) row.appendChild(roleSpan);
-  row.appendChild(actionSpan);
-  row.appendChild(elapsedSpan);
-  row.addEventListener('click', function() { dashOpenSubagent(entry.sessionId); });
-  return row;
-}
-
-// One of 'working' / 'waiting' / 'done' / 'error', shared by the crew panel
-// and the sub-agent panel header. `null`/missing reads as 'working': a slot
-// the panel already has a row for but the crew has no entry for yet is a
-// sub-agent that has not finished, not one that has. 'waiting' is a workflow
-// step that is not done and waits on a person (status 'waiting', D15).
-// Mirrors acp.html's own subagentState.
-function dashSubagentState(entry) {
-  if (!entry) return 'working';
-  if (!entry.done) return entry.status === 'waiting' ? 'waiting' : 'working';
-  return entry.error ? 'error' : 'done';
-}
-
-// The text for a finished row: 'done' for every normal finish; a workflow step
-// the server closed with no verdict (status 'stale', action 'no longer
-// reporting') says so, since it may still be running. Mirrors acp.html's
-// doneText.
-function dashDoneText(entry) {
-  return entry.status === 'stale' && entry.action ? entry.action : 'done';
-}
-
-// Every code path that removes a crew slot (normal removal via
-// dashRemoveSingleCrewPanel, dashRemoveAllCrewPanels, a slot update that
-// finds all entries done) must clear that slot's setInterval -- a leaked
-// interval ticking against a removed DOM row is a real, easy-to-miss bug
-// class here. Mirrors acp.html's own stopSlotTimer (acp.html:1867-1869).
-function dashStopSlotTimer(slot) {
-  if (slot.timer !== null) { clearInterval(slot.timer); slot.timer = null; }
-}
-
-function dashRemoveSingleCrewPanel(key) {
-  var slot = dashCrews[key];
-  if (!slot) return;
-  dashStopSlotTimer(slot);
-  if (slot.panel && slot.panel.parentNode) slot.panel.remove();
-  slot.panel = null;
-  delete dashCrews[key];
-  if (key === _dashNoAnchorKey) _dashNoAnchorKey = null; // allow a fresh no-anchor slot next time
-}
-
-// Wired live onto window.removeAllCrewPanels below (SC8, Phase 5) -- the
-// guard already exists in transcript-renderer.js's clearTranscript()
-// (called from renderTranscriptHistory(), itself called from this page's
-// own openSessionTranscript()/dashHandle() `history` branch), and used to
-// no-op harmlessly on the dashboard because nothing assigned it. Mirrors
-// acp.html's own removeAllCrewPanels (acp.html:1881-1886).
-function dashRemoveAllCrewPanels() {
-  Object.keys(dashCrews).forEach(function(k) { dashRemoveSingleCrewPanel(k); });
-  dashCrews = Object.create(null); // Fix 4, Phase 5 review -- see the declaration above
-  _dashNoAnchorSeq = 0;
-  _dashNoAnchorKey = null; // reset for the next session
-  // Phase 6: clear live step tracking when the session ends.
-  _dashLiveWorkflowChildSids = new Set();
-}
-
-function dashSetCrew(entries, toolCallId, workflowLive) {
-  var key = (toolCallId && toolCallId !== '') ? toolCallId : null;
-
-  // Early-return for empty entries BEFORE computing useKey -- mirrors
-  // acp.html's own ordering exactly (acp.html:1891-1902), to avoid advancing
-  // _dashNoAnchorSeq and ghosting _dashNoAnchorKey when there is no active
-  // no-anchor slot to remove.
-  if (!entries.length) {
-    if (key && dashCrews[key]) {
-      dashRemoveSingleCrewPanel(key);
-    } else if (!key && _dashNoAnchorKey && dashCrews[_dashNoAnchorKey]) {
-      dashRemoveSingleCrewPanel(_dashNoAnchorKey);
-    }
-    return;
-  }
-
-  var useKey;
-  if (key) {
-    useKey = key;
-  } else {
-    if (_dashNoAnchorKey && dashCrews[_dashNoAnchorKey]) {
-      useKey = _dashNoAnchorKey;
-    } else {
-      useKey = '_na_' + (++_dashNoAnchorSeq);
-      _dashNoAnchorKey = useKey;
-    }
-  }
-
-  if (!dashCrews[useKey]) {
-    dashCrews[useKey] = {entries: [], panel: null, timer: null, allDone: false};
-  }
-  var s = dashCrews[useKey];
-  s.entries = entries;
-  s.allDone = entries.every(function(e) { return e.done; });
-  s.workflowLive = workflowLive === true;
-
-  // The panel currently open may name a sub-agent this update no longer
-  // carries the same entry for -- refresh its header from the latest
-  // role/task/status rather than leaving it showing the snapshot from
-  // whenever it was opened.
-  if (dashSubViewSid) dashRenderSubHead();
-
-  if (s.allDone) {
-    dashStopSlotTimer(s);
-  } else {
-    if (s.timer === null) {
-      s.timer = setInterval(function() {
-        if (s.panel && s.panel.parentNode) dashRenderCrewPanel(s);
-        else dashStopSlotTimer(s);
-      }, 1000);
-    }
-  }
-
-  if (!s.panel || !s.panel.parentNode) {
-    var stick = stuckToBottom();
-    s.panel = document.createElement('div');
-    s.panel.className = 'acp-crew-panel';
-    // Anchor insertion: after the spawner tool call row if known. Walk up to
-    // find a direct child of transcriptEl (handles the post-flushToolGroups
-    // case where the spawner row is inside a .acp-tool-group body).
-    var anchor = key ? toolRows['t:' + key] : null;
-    var row = anchor ? anchor.body.parentNode : null;
-    while (row && row.parentNode && row.parentNode !== transcriptEl) {
-      row = row.parentNode;
-    }
-    if (row && row.parentNode === transcriptEl) {
-      row.parentNode.insertBefore(s.panel, row.nextSibling);
-    } else {
-      transcriptEl.appendChild(s.panel);
-    }
-    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-  }
-  dashRenderCrewPanel(s);
-}
-
-function dashCrewEntry(sid) {
-  var keys = Object.keys(dashCrews);
-  for (var i = 0; i < keys.length; i++) {
-    var entries = dashCrews[keys[i]].entries;
-    for (var j = 0; j < entries.length; j++) {
-      if (entries[j].sessionId === sid) return entries[j];
-    }
-  }
-  return null;
-}
+function dashCrewEntry(sid) { return dashWfui.entryFor(sid); }
 
 // ---- the read-only sub-agent panel -----------------------------------------
 
@@ -4955,11 +4608,6 @@ function dashCrewEntry(sid) {
 // is open -- only what is drawn changes -- mirrors acp.html's own subViewSid
 // (acp.html:802-807).
 var dashSubViewSid = null;
-// Phase 6: the set of step session ids from the most recent dashboard
-// `subagents` frame with `workflowLive === true` (mirrors acp.html's
-// `_liveWorkflowChildSids`). Cleared when `workflowLive` becomes false or
-// when the session changes.
-var _dashLiveWorkflowChildSids = new Set();
 // A second, independent WebSocket, opened the first time a crew row is
 // clicked and left connected afterwards (switching rows re-subscribes it
 // rather than reopening it). Kept apart from _dashWs on purpose: acp.py's
@@ -5001,80 +4649,39 @@ var dashSubConnected = false;
 // at the start of every connection attempt, same lifecycle.
 var dashSubErrorShown = false;
 
-function dashRenderSubHead() {
-  var entry = dashCrewEntry(dashSubViewSid);
-  dashSubRoleEl.textContent = dashCrewLabel(entry) || dashSubViewSid;
-  if (!entry) {
-    dashSubStatusEl.className = 'acp-subpanel-status';
-    dashSubStatusEl.textContent = '';
-    return;
-  }
-  var state = dashSubagentState(entry);
-  dashSubStatusEl.className = 'acp-subpanel-status acp-subpanel-status-' + state;
-  dashSubStatusEl.textContent = state === 'error' ? 'errored: ' + entry.error
-    : state === 'done' ? dashDoneText(entry)
-    : state === 'waiting' ? (entry.action || 'waiting') : (entry.action || 'working…');
+// Open a step or sub-agent's conversation in the run inspector.
+function dashOpenSubagent(sid) { dashWfui.showStep(sid); }
+
+// Close the step view and the inspector. Called defensively from every
+// teardown site (onclose, session_closed, agent_died, a new session), so it
+// does nothing when neither is open.
+function dashCloseSubagentView() {
+  if (dashWfui.isOpen() || dashSubViewSid) dashWfui.closeInspector();
 }
 
-function dashOpenSubagent(sid) {
+// The step view's own state, driven by workflow-ui.js through `openStep`.
+// The transcript and the composer stay in view beside it.
+function dashOpenStepView(sid) {
   if (!sid) return;
   dashSubViewSid = sid;
-  dashSubPanelEl.hidden = false;
-  dashTranscriptWrapEl.hidden = true;
-  dashComposerEl.hidden = true;
   dashSubTranscriptEl.textContent = '';
   dashSubAgentBody = null;
   dashSubToolRows = Object.create(null);
-  // Phase 6: clear any prior step question card.
-  var _prevCard = dashSubPanelEl.querySelector('.acp-step-question-card');
-  if (_prevCard) _prevCard.parentNode.removeChild(_prevCard);
-  dashRenderSubHead();
+  // Until the step's first frame arrives (dashHandleSub removes it).
+  var loading = document.createElement('div');
+  loading.className = 'wf-step-loading';
+  loading.textContent = 'Loading this step\u2019s conversation\u2026';
+  dashSubTranscriptEl.appendChild(loading);
   dashConnectSubWs(sid);
-  // Phase 6: enable the composer only for live workflow step sessions.
-  setSubAgentComposerEnabled(_dashLiveWorkflowChildSids.has(sid), sid, true);
 }
 
-function dashCloseSubagentView() {
-  // Fix 1 (Phase 6 review): captured BEFORE the line below hides the panel.
-  // This function is called defensively from several teardown sites (onclose,
-  // session_closed, agent_died, new-session-creation) even when no sub-agent
-  // panel was ever open for the session in question -- in that case
-  // _dashAttachedSid being null (e.g. a lazy-attach still unconfirmed when
-  // the socket dropped) has nothing to do with a panel, and the unconditional
-  // composer-hide below regressed dashSendPrompt()'s lazy-attach flow: a drop
-  // mid-attach hid the whole composer container instead of leaving it
-  // visible-and-disabled under its "Starting the agent…" note. Callers that
-  // need a specific composer visibility regardless of the panel (agent_died,
-  // new-session-creation) already set it explicitly themselves right after
-  // calling this function, so gating this line on the panel having actually
-  // been open changes nothing for them.
-  var _dashPanelWasOpen = !dashSubPanelEl.hidden;
-  dashSubViewSid = null;
-  dashSubPanelEl.hidden = true;
-  dashTranscriptWrapEl.hidden = false;
-  // Restores the composer only if this page still has a live-attached
-  // session to show it for. acp.html's own closeSubagentView() (acp.html:
-  // 2004-2016) unconditionally un-hides #acpComposer because /acp always has
-  // an attached session the moment any panel exists; the dashboard's
-  // composer can legitimately be hidden (browsing a held-but-not-attached
-  // session's static transcript), so this toggles independently of
-  // dashRefreshComposerControls() (Phase 3, which only governs which button
-  // shows within an already-visible composer) on the same _dashAttachedSid
-  // signal every other reset in this file already uses for "is there a live
-  // session to show a composer for at all". Only touched when a panel was
-  // actually open (see the guard comment above) -- otherwise this function
-  // must not have an opinion on composer visibility at all.
-  if (_dashPanelWasOpen) {
-    dashComposerEl.hidden = !_dashAttachedSid;
-  }
-  dashRefreshComposerControls();
+function dashCloseStepView() {
   // The socket is left open rather than closed: MAX_CONNECTIONS (acp.py)
-  // budgets for a handful of sockets per viewer for exactly this shape --
-  // reopening it on every click would pay a fresh handshake for what is
-  // often a few seconds of switching back and forth. Mirrors acp.html's own
-  // closeSubagentView (acp.html:2004-2016).
+  // budgets for a handful of sockets per viewer for exactly this shape, and
+  // reopening it on every click would pay a fresh handshake. dashCloseSubWs()
+  // closes it where the session itself ends.
+  dashSubViewSid = null;
 }
-dashSubBackBtn.addEventListener('click', dashCloseSubagentView);
 
 // Explicitly closes dashSubWs and releases its MAX_CONNECTIONS slot right
 // away, instead of leaving it open until the page reloads (Fix 8, Phase 5
@@ -5149,6 +4756,8 @@ function dashConnectSubWs(sid) {
     // review).
     logLine('info', 'sub-agent socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
     if (socket === dashSubWs && !dashSubConnected && !dashSubErrorShown) {
+      var loading = dashSubTranscriptEl.querySelector('.wf-step-loading');
+      if (loading) loading.remove();
       dashSubAddNote('Could not connect to this sub-agent — try again.');
     }
   };
@@ -5254,6 +4863,8 @@ function dashHandleSub(frame) {
   // session is known) is connection-level, not session-specific, and always
   // passes through.
   if (frame && frame.sessionId && frame.sessionId !== dashSubViewSid) return;
+  var loading = dashSubTranscriptEl.querySelector('.wf-step-loading');
+  if (loading) loading.remove();
   if (type === 'session') {
     dashSubConnected = true;
     dashSubTranscriptEl.textContent = '';
@@ -5366,9 +4977,8 @@ function dashCloseIfAbandoned(){
   _dashSent = false;
   _dashTurnActive = false;
   _dashPendingSend = null;
-  // Phase 5: clear Workflows past-run history so the next session fetches fresh.
-  var _wfPR = document.getElementById('dashWorkflowsPastRuns');
-  if (_wfPR) { while (_wfPR.firstChild) _wfPR.removeChild(_wfPR.firstChild); }
+  // The run inspector's cards and history belonged to the session just left.
+  dashRemoveAllCrewPanels();
   // Paired with _dashPendingSend above, for consistency (Fix 6, Phase 4
   // review) -- both reviewers confirmed no correctness/cross-session-mis-
   // send risk from leaving this unset here (it is bounded and self-
@@ -5839,26 +5449,8 @@ function dashHandle(frame){
     // right after every subscribe/session reply that has a crew to report,
     // which is this page's only source for it after a reconnect. Mirrors
     // acp.html's own `subagents` handling (acp.html:5038-5045).
-    dashSetCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive);
-    // Phase 4: update the Workflows live-run panel from the same frame.
-    // Phase 6: update _dashLiveWorkflowChildSids and the sub-panel composer.
-    if (payload.workflowLive === true) {
-      setWorkflowsLiveRun(payload.subagents || [], true);
-      var _dashNewLive = new Set();
-      (payload.subagents || []).forEach(function (e) {
-        if (e.sessionId) _dashNewLive.add(e.sessionId);
-      });
-      if (dashSubViewSid && _dashLiveWorkflowChildSids.has(dashSubViewSid) && !_dashNewLive.has(dashSubViewSid)) {
-        setSubAgentComposerEnabled(false, null, true);
-      }
-      _dashLiveWorkflowChildSids = _dashNewLive;
-    } else {
-      clearWorkflowsLiveRun(true);
-      if (dashSubViewSid && _dashLiveWorkflowChildSids.has(dashSubViewSid)) {
-        setSubAgentComposerEnabled(false, null, true);
-      }
-      _dashLiveWorkflowChildSids = new Set();
-    }
+    dashSetCrew(payload.subagents || [], payload.toolCallId || '', payload.workflowLive,
+                payload.runs, payload.questions);
     return;
   }
   if (type === 'commands') {
@@ -6057,28 +5649,8 @@ function dashHandle(frame){
     // mirrors acp.html's step_message branch (shared renderer row).
     addStepMessage(payload && payload.step, payload && payload.severity,
                    payload && payload.message);
-    // Phase 6 (SC8): mirror acp.html's sub-panel card for the dashboard.
-    var _dStepSid = payload && payload.stepSessionId;
-    if (_dStepSid && dashSubViewSid && _dStepSid === dashSubViewSid && !_dashReplaying) {
-      if (dashSubPanelEl) {
-        var _dOld = dashSubPanelEl.querySelector('.acp-step-question-card');
-        if (_dOld) _dOld.parentNode.removeChild(_dOld);
-        var _dCard = document.createElement('div');
-        _dCard.setAttribute('role', 'alert');
-        _dCard.className = 'acp-step-question-card acp-step-question-card-' +
-          (payload.severity || 'warning');
-        var _dCardText = document.createElement('span');
-        _dCardText.className = 'acp-step-question-text';
-        _dCardText.textContent = typeof payload.message === 'string' ? payload.message : '';
-        _dCard.appendChild(_dCardText);
-        var _dComposerEl = document.getElementById('dashSubComposerContainer');
-        if (_dComposerEl) {
-          dashSubPanelEl.insertBefore(_dCard, _dComposerEl);
-        } else {
-          dashSubPanelEl.appendChild(_dCard);
-        }
-      }
-    }
+    // The question itself is answered from the run card and the step view
+    // (workflow-ui.js, from the `subagents` frame's `questions`).
     return;
   }
   if (type === 'permission_request') {
