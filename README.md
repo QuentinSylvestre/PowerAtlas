@@ -4,6 +4,27 @@ Desktop launcher and dashboard for kiro-cli, Claude Code, Codex, and Kiro IDE se
 
 Supports **Windows** and **Linux**.
 
+## Screenshots
+
+Everything below is synthetic demo data: ten workspaces, four providers, two terminal sessions, two
+agent sessions, two sessions stopped by a quota limit with an automatic resume scheduled, and one
+repository with uncommitted work.
+
+![The PowerAtlas dashboard: launchers, pinned and agent sessions, workspaces, quota, needs-attention and live sessions](docs/screenshots/dashboard.png)
+
+The agent page (`/acp`) is built for a phone, over a NetBird network (see *Remote access*). Left to
+right: the session list with two open sessions, a session running a workflow with its run card, one
+workflow step opened on its own, and a session waiting for an approval.
+
+![The /acp page on a phone: session list, a running workflow, a workflow step, and an approval question](docs/screenshots/acp-phone-overview.png)
+
+<p>
+  <img src="docs/screenshots/acp-phone-sessions.png" width="23%" alt="/acp session list on a phone">
+  <img src="docs/screenshots/acp-phone-workflow.png" width="23%" alt="A session running a workflow, with the run card">
+  <img src="docs/screenshots/acp-phone-workflow-step.png" width="23%" alt="A single workflow step opened on its own">
+  <img src="docs/screenshots/acp-phone-approval.png" width="23%" alt="An approval question waiting for an answer">
+</p>
+
 ## Installation
 
 PowerAtlas runs on a virtualenv inside the checkout, never on a global interpreter — the app and the
@@ -935,6 +956,11 @@ Install the dev extras into the same venv the app runs on:
 .venv-PowerAtlas/bin/python -m pip install -e ".[dev]"       # Linux
 .venv-PowerAtlas/bin/python -m pytest
 ```
+
+The images under `docs/screenshots/` are generated, not hand-made. `tools/readme_screenshots/run.sh`
+builds a fake home with invented sessions for all four providers, starts PowerAtlas against it with a
+stand-in `kiro-cli` agent, and captures the pages with Playwright. It is for a throwaway Linux machine or
+container only (it takes over `/home/demo` and port 4915); its header comments say what it needs.
 
 ## Assets
 
